@@ -226,6 +226,9 @@ def _backend_values(
         )
         if clean
     })[:50]
+    server = request.scope.get("server") or (None, None)
+    server_host = server[0] if isinstance(server, (tuple, list)) and len(server) > 0 else None
+    server_port = server[1] if isinstance(server, (tuple, list)) and len(server) > 1 else None
     return {
         "request_id": safe_request_id(getattr(request.state, "request_id", None)),
         "source": "BACKEND",
@@ -250,6 +253,9 @@ def _backend_values(
         "context_data": _safe_context({
             "route_name": getattr(request.scope.get("route"), "name", None),
             "query_fields": query_names,
+            "remote_port": request.client.port if request.client else None,
+            "local_ip_address": request.url.hostname or server_host,
+            "local_port": request.url.port or server_port,
         }),
     }
 

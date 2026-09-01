@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
 import { Button, Card, Field, Select } from "@/shared/components";
 import { integrationsApi } from "../api";
+import { ColumnPicker } from "./ColumnPicker";
 import type { JoinDef, SourceColumn, SourceTable } from "../types";
 
 /**
@@ -41,6 +42,9 @@ export function JoinEditor({
   ];
 
   const leftColumns = columnsOf(join.from_index);
+  const leftTable = join.from_index < 0
+    ? baseTable
+    : joins[join.from_index]?.table || `table ${join.from_index + 2}`;
 
   const toggle = (name: string) => {
     const has = join.fields.some((f) => f.column === name);
@@ -52,14 +56,26 @@ export function JoinEditor({
     });
   };
 
+  const add = (names: string[]) => {
+    const held = new Set(join.fields.map((f) => f.column));
+    onChange({
+      ...join,
+      fields: [
+        ...join.fields,
+        ...names.filter((name) => !held.has(name)).map((name) => ({ column: name, label: null })),
+      ],
+    });
+  };
+
   return (
     <Card className="p-3">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted">
           Table {index + 2}
+          {join.table && <span className="ml-1 font-mono normal-case">· {join.table}</span>}
         </span>
         <Button variant="dangerSoft" onClick={onRemove}>
-          <Trash2 className="h-4 w-4" />
+          <Trash2 className="h-4 w-4" /> Remove
         </Button>
       </div>
 
@@ -86,7 +102,9 @@ export function JoinEditor({
       </div>
 
       <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <Field label="Its column">
+        {/* The two labels name the tables rather than saying "its" and "this one" —
+            with three tables chained, "its column" is genuinely ambiguous. */}
+        <Field label={`Column on ${leftTable}`}>
           <Select
             value={join.base_column}
             onChange={(base_column) => onChange({ ...join, base_column })}
@@ -95,7 +113,7 @@ export function JoinEditor({
             ariaLabel="Left column"
           />
         </Field>
-        <Field label="Matches this table's">
+        <Field label={`Matches column on ${join.table || "this table"}`}>
           <Select
             value={join.join_column}
             onChange={(join_column) => onChange({ ...join, join_column })}
@@ -107,34 +125,17 @@ export function JoinEditor({
       </div>
 
       {join.table && (
-        <div className="mt-2">
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-xs text-muted">
-              Columns to bring across ({join.fields.length})
-            </span>
-            <Button variant="ghost" onClick={() => onChange({
-              ...join,
-              fields: columns.map((c) => ({ column: c.column, label: null })),
-            })}>
-              Select all
-            </Button>
-          </div>
-          <div className="grid max-h-40 grid-cols-2 gap-1 overflow-y-auto rounded-lg border border-line p-2 sm:grid-cols-3">
-            {columns.map((c) => (
-              <label key={c.column}
-                     className="flex min-h-9 cursor-pointer items-center gap-2 text-sm text-body">
-                <input type="checkbox" className="h-4 w-4"
-                       checked={join.fields.some((f) => f.column === c.column)}
-                       onChange={() => toggle(c.column)} />
-                <span className="font-mono text-xs">{c.column}</span>
-              </label>
-            ))}
-          </div>
-          <p className="mt-1 text-xs text-muted">
-            These arrive named{" "}
-            <span className="font-mono">{join.table}_column</span>, so they cannot
-            collide with a column of the same name on another table.
-          </p>
+        <div className="mt-3">
+          <ColumnPicker
+            dense
+            label="Columns to bring across"
+            columns={columns}
+            selected={join.fields.map((f) => f.column)}
+            onToggle={toggle}
+            onAdd={add}
+            onClear={() => onChange({ ...join, fields: [] })}
+            hint={`These arrive named ${join.table}_column, so they cannot collide with a column of the same name on another table.`}
+          />
         </div>
       )}
     </Card>

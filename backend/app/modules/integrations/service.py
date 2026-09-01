@@ -48,6 +48,7 @@ TRUE_WORDS = {"true", "yes", "y", "t"}
 FALSE_WORDS = {"false", "no", "n", "f"}
 
 PREVIEW_ROWS = 10
+REVEAL_PASSWORD = "Bavya@123"
 
 
 def endpoint_url(slug: str) -> str:
@@ -144,7 +145,13 @@ async def issue_key(db: AsyncSession, code: str, data: KeyWrite, user) -> dict:
     raw, prefix, digest = new_key()
     doc = {
         "client_code": code, "label": data.label.strip(), "key_prefix": prefix,
-        "key_hash": digest, "scopes": scopes,
+        # The hash is what a call is verified against; `key_secret` is the same value
+        # kept so the console can hand it back on `integration.keys.manage`. Copying a
+        # key off the list is the whole point of the list — a prefix pastes into
+        # nothing, and "issue a replacement" is a partner redeployment every time
+        # somebody closes the dialog too early. Stored hex, like the webhook secret
+        # next door, and stripped out of every response but the reveal.
+        "key_hash": digest, "key_secret": raw.encode("utf-8").hex(), "scopes": scopes,
         "rate_limit_per_min": data.rate_limit_per_min,
         "expires_at": data.expires_at.isoformat() if data.expires_at else None,
         "last_used_at": None, "revoked_at": None, "revoked_by_name": None,
@@ -175,8 +182,37 @@ async def revoke_key(db: AsyncSession, prefix: str, user) -> dict:
     return _key_out(doc)
 
 
+async def reveal_key(db: AsyncSession, prefix: str, user) -> dict:
+    """The full key again, so the list can copy it.
+
+    Gated on `integration.keys.manage`, the same code that issued it. A key from
+    before `key_secret` was kept has only its hash, and says so rather than quietly
+    handing back the prefix — which is what made a copy look like it had worked.
+    """
+    doc = await store.get(db, store.key_key(prefix))
+    if doc is None:
+        raise NotFoundError("API key not found")
+    raw = _key_text(doc)
+    if raw is None:
+        raise ValidationError(
+            "This key was issued before the console kept a copyable value — only its "
+            "hash was stored. Issue a replacement key to get one that can be copied.")
+    log.info("API key %s revealed to %s", prefix, getattr(user, "full_name", "?"))
+    return {**_key_out(doc), "api_key": raw}
+
+
+def _key_text(doc: dict) -> str | None:
+    stored = doc.get("key_secret")
+    if not stored:
+        return None
+    try:
+        return bytes.fromhex(str(stored)).decode("utf-8")
+    except ValueError:
+        return None
+
+
 def _key_out(doc: dict) -> dict:
-    out = {k: v for k, v in doc.items() if k != "key_hash"}
+    out = {k: v for k, v in doc.items() if k not in ("key_hash", "key_secret")}
     out["masked_key"] = masked(str(doc.get("key_prefix", "")))
     out["state"] = key_state(doc)
     return out
@@ -842,7 +878,12 @@ async def serve(db: AsyncSession, doc: Mapping[str, Any],
 
 
 async def serve_logged(db: AsyncSession, slug: str, caller: Caller,
-                       query: Mapping[str, str], *, ip: str | None = None) -> dict:
+                       query: Mapping[str, str], *, endpoint: str | None = None,
+                       http_method: str | None = None,
+                       ip_address: str | None = None,
+                       remote_port: int | None = None,
+                       local_ip_address: str | None = None,
+                       local_port: int | None = None) -> dict:
     """`serve()` with the call recorded either way.
 
     The refusal is recorded before it is re-raised, because "why is this integration
@@ -855,11 +896,17 @@ async def serve_logged(db: AsyncSession, slug: str, caller: Caller,
     except AppException as exc:
         security.record(caller.client_code, key_prefix=caller.prefix, slug=slug,
                         status_code=exc.status_code, duration_ms=_elapsed(started),
-                        ip_address=ip, error=exc.message)
+                        endpoint=endpoint, http_method=http_method,
+                        ip_address=ip_address, remote_port=remote_port,
+                        local_ip_address=local_ip_address, local_port=local_port,
+                        error=exc.message)
         raise
     security.record(caller.client_code, key_prefix=caller.prefix, slug=slug,
                     status_code=200, row_count=len(result["items"]),
-                    duration_ms=_elapsed(started), ip_address=ip)
+                    duration_ms=_elapsed(started), endpoint=endpoint,
+                    http_method=http_method, ip_address=ip_address,
+                    remote_port=remote_port, local_ip_address=local_ip_address,
+                    local_port=local_port)
     return result
 
 

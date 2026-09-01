@@ -5,7 +5,6 @@ from enum import Enum
 
 # `apis.` keys this feature writes into sys_settings. Same store as the console's
 # clients and keys, same category, so a stray row can never be read as a real setting.
-CONFIG_KEY = "apis.cams.config"
 EVENT_PREFIX = "apis.cams.evt."
 
 # `apis.cams.evt.` is 14 characters and `sys_settings.setting_key` is VARCHAR(100), so
@@ -25,11 +24,6 @@ MAX_STORED_PAYLOAD = 40_000
 
 # Page size B-CAMS asks for is 500; the ceiling is the console's own.
 DEFAULT_PAGE_SIZE = 500
-
-# The header carrying the HMAC of the raw request body.
-SIGNATURE_HEADER = "X-CAMS-Signature"
-SIGNATURE_ALGO = "sha256"
-
 
 class Tier(str, Enum):
     """`warehouse.tier` — Q1 of the ask.

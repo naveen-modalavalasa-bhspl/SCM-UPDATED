@@ -173,17 +173,26 @@ async def require_api_key(
 
     client = await store.get(db, store.client_key(str(doc.get("client_code", ""))))
     ip = request.client.host if request.client else None
+    port = request.client.port if request.client else None
+    server = request.scope.get("server") or (None, None)
+    server_host = server[0] if isinstance(server, (tuple, list)) and len(server) > 0 else None
+    server_port = server[1] if isinstance(server, (tuple, list)) and len(server) > 1 else None
+    local_ip = request.url.hostname or server_host
+    local_port = request.url.port or server_port
     slug = request.path_params.get("slug")
 
     state = key_state(doc)
     if state != KeyState.ACTIVE.value:
-        _refuse(doc, client, 401, f"API key is {state.lower()}", slug, ip)
+        _refuse(doc, client, 401, f"API key is {state.lower()}", slug, ip, port,
+                request.url.path, request.method, local_ip, local_port)
     if client is None or not client.get("is_active", True):
-        _refuse(doc, client, 401, "API client is disabled", slug, ip)
+        _refuse(doc, client, 401, "API client is disabled", slug, ip, port,
+                request.url.path, request.method, local_ip, local_port)
     try:
         check_rate(prefix, int(doc.get("rate_limit_per_min") or 0))
     except RateLimitError as exc:
-        _refuse(doc, client, exc.status_code, exc.message, slug, ip)
+        _refuse(doc, client, exc.status_code, exc.message, slug, ip, port,
+                request.url.path, request.method, local_ip, local_port)
 
     # One write per minute at most. Stamping every call would turn a read-only feed
     # into a write on the hot path, and a nightly sync pulling 400 pages would be 400
@@ -200,7 +209,9 @@ async def require_api_key(
 
 
 def _refuse(key: dict, client: dict | None, status_code: int, message: str,
-            slug: str | None, ip: str | None) -> None:
+            slug: str | None, ip: str | None, remote_port: int | None,
+            endpoint: str | None, http_method: str | None,
+            local_ip: str | None, local_port: int | None) -> None:
     """Log a refusal against the key it was made with, then raise it.
 
     Only refusals that resolved to a REAL key are logged. A flood of made-up keys has
@@ -209,7 +220,9 @@ def _refuse(key: dict, client: dict | None, status_code: int, message: str,
     key.
     """
     record(client.get("code") if client else None, key_prefix=key.get("key_prefix"),
-           slug=slug, status_code=status_code, error=message, ip_address=ip)
+           slug=slug, status_code=status_code, error=message, ip_address=ip,
+           remote_port=remote_port, endpoint=endpoint, http_method=http_method,
+           local_ip_address=local_ip, local_port=local_port)
     if status_code == 429:
         raise RateLimitError(message)
     raise AuthenticationError(message)

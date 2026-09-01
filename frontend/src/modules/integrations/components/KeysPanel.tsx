@@ -1,29 +1,61 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Copy, KeyRound, ShieldAlert } from "lucide-react";
+import { KeyRound, ShieldAlert } from "lucide-react";
 import {
-  Button, Card, EmptyState, ErrorBanner, Field, Input, ResponsiveList, StatusPill,
-  useToast, type Column,
+  Button, Card, ConfirmModal, EmptyState, ErrorBanner, Field, Input, ResponsiveList,
+  StatusPill, useToast, type Column,
 } from "@/shared/components";
+import { fmtDate, fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { integrationsApi } from "../api";
+import { CopyButton, CopyChip, SecretField } from "./Copyable";
 import type { ApiKey, IssuedKey, KeyWrite } from "../types";
-
-const when = (v?: string | null) => (v ? new Date(v).toLocaleString() : "—");
 
 const BLANK: KeyWrite = { label: "", scopes: [], rate_limit_per_min: 120, expires_at: null };
 
 /**
- * Keys for one application. The raw key exists in exactly one place for exactly one
- * moment — the response to the issue call — so it is held in component state and shown
- * in a dialog that has to be dismissed deliberately. Nothing re-fetches it, because
- * nothing can: the server kept a hash.
+ * Keys for one application. Issuing still shows the key in a dialog that has to be
+ * dismissed deliberately, and the list can hand it out again afterwards: `POST
+ * /keys/{prefix}/reveal` returns the whole value on `integration.keys.manage`, the
+ * same permission that issued it. So copying a row copies the KEY, never the prefix —
+ * a prefix pastes into nothing, and a press that said "Copied" while putting eight
+ * characters on the clipboard is a call the partner cannot make. Keys issued before
+ * the console kept a copyable value have only a hash behind them; the reveal says so
+ * rather than quietly falling back to the prefix.
+ *
+ * Revoking asks first (2026-09-01). It is the one press on this console that breaks a
+ * working integration on somebody else's machine, it took effect on a single click of
+ * a button sitting in the row, and there is no undo — a replacement key is a new key,
+ * which the partner has to be sent and has to deploy.
  */
 export function KeysPanel({ clientCode }: { clientCode: string }) {
   const toast = useToast();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<KeyWrite | null>(null);
   const [issued, setIssued] = useState<IssuedKey | null>(null);
+  const [issuedKeys, setIssuedKeys] = useState<Record<string, string>>({});
+  const [revoking, setRevoking] = useState<ApiKey | null>(null);
+  // Keys already fetched, and the fetches in flight — a hover and the press that
+  // follows it must not become two reveals of the same key.
+  const cache = useRef<Record<string, string>>({});
+  const inFlight = useRef<Record<string, Promise<string>>>({});
+
+  const fullKey = useCallback(async (prefix: string): Promise<string> => {
+    const held = issuedKeys[prefix] ?? cache.current[prefix];
+    if (held) return held;
+    if (!inFlight.current[prefix]) {
+      inFlight.current[prefix] = integrationsApi
+        .revealKey(prefix)
+        .then((key) => {
+          cache.current[prefix] = key.api_key;
+          return key.api_key;
+        })
+        .finally(() => {
+          delete inFlight.current[prefix];
+        });
+    }
+    return inFlight.current[prefix];
+  }, [issuedKeys]);
 
   const keys = useQuery({
     queryKey: ["apis", "keys", clientCode],
@@ -42,6 +74,7 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
       queryClient.invalidateQueries({ queryKey: ["apis"] });
       setDraft(null);
       setIssued(key);
+      setIssuedKeys((held) => ({ ...held, [key.key_prefix]: key.api_key }));
     },
   });
 
@@ -49,14 +82,10 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
     mutationFn: (prefix: string) => integrationsApi.revokeKey(prefix),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["apis"] });
+      setRevoking(null);
       toast.success("Key revoked. Any call using it now fails.");
     },
   });
-
-  const copy = async (text: string) => {
-    await navigator.clipboard.writeText(text);
-    toast.success("Copied to clipboard");
-  };
 
   const toggleScope = (slug: string) => {
     if (!draft) return;
@@ -72,10 +101,19 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
     {
       key: "label",
       header: "Key",
+      // The row shows the key masked and copies it whole — the mask is so the screen
+      // can be shared, not a limit on what the press hands over.
       render: (row) => (
-        <div>
+        <div className="min-w-0">
           <div className="font-semibold text-ink">{row.label}</div>
-          <div className="font-mono text-xs text-muted">{row.masked_key}</div>
+          <CopyChip
+            value={issuedKeys[row.key_prefix] ?? ""}
+            resolve={() => fullKey(row.key_prefix)}
+            display={row.masked_key}
+            tag="key"
+            copiedMessage="Full API key copied"
+            title="Copies the full API key — everything behind the dots, ready to paste into X-API-Key."
+          />
         </div>
       ),
     },
@@ -85,19 +123,40 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
       render: (row) => (
         <span className="text-sm text-body">
           {row.scopes.length
-            ? `${row.scopes.length} endpoint${row.scopes.length === 1 ? "" : "s"}`
-            : "every endpoint"}
+            ? `${row.scopes.length} of this application's APIs`
+            : "every API of this application"}
         </span>
+      ),
+    },
+    {
+      key: "limits",
+      header: "Limits",
+      hideOnNarrow: true,
+      // Both numbers that decide whether a call is refused, together. The expiry was
+      // recorded at issue time and then shown nowhere, so a key that stopped working
+      // overnight looked like a server fault.
+      render: (row) => (
+        <div className="text-sm">
+          <div className="text-ink">
+            {row.rate_limit_per_min ? `${row.rate_limit_per_min}/min` : "no rate cap"}
+          </div>
+          <div className="text-xs text-muted">
+            {row.expires_at ? `expires ${fmtDate(row.expires_at)}` : "no expiry"}
+          </div>
+        </div>
       ),
     },
     {
       key: "used",
       header: "Last used",
-      hideOnNarrow: true,
       render: (row) => (
         <div className="text-sm">
-          <div className="text-ink">{when(row.last_used_at)}</div>
-          <div className="text-xs text-muted">{row.rate_limit_per_min}/min cap</div>
+          <div className="text-ink">
+            {row.last_used_at ? fmtRelative(row.last_used_at) : "Never"}
+          </div>
+          {row.last_used_at && (
+            <div className="text-xs text-muted">{fmtDateTime(row.last_used_at)}</div>
+          )}
         </div>
       ),
     },
@@ -107,7 +166,7 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
       header: "",
       render: (row) =>
         row.state === "ACTIVE" ? (
-          <Button variant="dangerSoft" onClick={() => revoke.mutate(row.key_prefix)}>
+          <Button variant="dangerSoft" onClick={() => setRevoking(row)}>
             Revoke
           </Button>
         ) : null,
@@ -116,10 +175,12 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-muted">
-          A key is shown once, at the moment it is issued. Lost keys are replaced, never
-          recovered.
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
+        <p className="max-w-2xl text-sm text-muted">
+          A key is the password this application calls with — it goes in the{" "}
+          <code className="text-ink">X-API-Key</code> header of every request. The row
+          shows it masked so the screen can be shared; copying a row copies the whole
+          key.
         </p>
         <Button onClick={() => setDraft({ ...BLANK })}>
           <KeyRound className="h-4 w-4" /> Issue key
@@ -138,7 +199,12 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
         empty={
           <EmptyState
             title="No key issued yet"
-            hint="Issue one and hand it to the application's owner. It goes in the X-API-Key header."
+            hint="Until one exists nothing can call this application's APIs. Issue a key and hand it to the owner — it goes in the X-API-Key header."
+            action={
+              <Button onClick={() => setDraft({ ...BLANK })}>
+                <KeyRound className="h-4 w-4" /> Issue key
+              </Button>
+            }
           />
         }
         renderCard={(row) => (
@@ -147,20 +213,49 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
               <span className="font-semibold text-ink">{row.label}</span>
               <StatusPill status={row.state} />
             </div>
-            <div className="mt-1 font-mono text-xs text-muted">{row.masked_key}</div>
+            <CopyChip
+              value={issuedKeys[row.key_prefix] ?? ""}
+              resolve={() => fullKey(row.key_prefix)}
+              display={row.masked_key}
+              tag="key"
+              copiedMessage="Full API key copied"
+              title="Copies the full API key — everything behind the dots, ready to paste into X-API-Key."
+            />
             <div className="mt-1 text-xs text-muted">
-              {row.scopes.length ? `${row.scopes.length} endpoints` : "every endpoint"} ·
-              last used {when(row.last_used_at)}
+              {row.scopes.length ? `${row.scopes.length} APIs` : "every API"} ·{" "}
+              {row.rate_limit_per_min ? `${row.rate_limit_per_min}/min` : "no rate cap"} ·
+              {" "}last used {row.last_used_at ? fmtRelative(row.last_used_at) : "never"}
             </div>
             {row.state === "ACTIVE" && (
               <div className="mt-2">
-                <Button variant="dangerSoft" onClick={() => revoke.mutate(row.key_prefix)}>
+                <Button variant="dangerSoft" onClick={() => setRevoking(row)}>
                   Revoke
                 </Button>
               </div>
             )}
           </div>
         )}
+      />
+
+      {/* Revoking is instant, remote and permanent — so it is asked, and the question
+          names the key and says what breaks. */}
+      <ConfirmModal
+        isOpen={revoking !== null}
+        title={`Revoke ${revoking?.label ?? "this key"}?`}
+        message={
+          <>
+            Every call using <code className="text-ink">{revoking?.masked_key}</code> is
+            refused from the moment you confirm, including a job running right now.
+            This cannot be undone — the application has to be sent a new key and
+            redeployed with it.
+          </>
+        }
+        confirmLabel="Revoke the key"
+        danger
+        busy={revoke.isPending}
+        error={revoke.error}
+        onConfirm={() => revoking && revoke.mutate(revoking.key_prefix)}
+        onClose={() => setRevoking(null)}
       />
 
       {/* Issue */}
@@ -173,8 +268,14 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
           <ModalBody>
             {draft && (
               <div className="space-y-4">
-                <Field label="Label" hint="What this key is for — 'nightly sync'.">
-                  <Input value={draft.label}
+                <p className="rounded-xl bg-content2 p-3 text-xs leading-relaxed text-muted">
+                  The key is shown in full on the next screen, and the row on this list
+                  can copy it again afterwards — anyone with permission to issue keys
+                  can read it, so hand it out the way you would a password.
+                </p>
+                <Field label="Label" required
+                       hint="What this key is for — 'nightly sync'. It is how you will know which one to revoke later.">
+                  <Input value={draft.label} placeholder="Nightly sync"
                          onChange={(e) => setDraft({ ...draft, label: e.target.value })} />
                 </Field>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -194,10 +295,10 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
                 </div>
                 <div>
                   <div className="mb-1 text-sm font-medium text-body">
-                    Which endpoints this key may call
+                    Which APIs this key may call
                   </div>
                   <p className="mb-2 text-xs text-muted">
-                    Tick none to allow every endpoint of this application, including ones
+                    Tick none to allow every API of this application, including ones
                     built later — the usual choice. Tick some to pin it down.
                   </p>
                   <div className="max-h-56 space-y-1 overflow-y-auto rounded-xl border border-line p-3">
@@ -217,7 +318,7 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
                     ))}
                     {!(endpoints.data ?? []).length && (
                       <p className="text-xs text-muted">
-                        No endpoint built yet. Issue the key anyway — it will reach whatever
+                        No API built yet. Issue the key anyway — it will reach whatever
                         you build next.
                       </p>
                     )}
@@ -244,15 +345,39 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
               <ShieldAlert className="h-5 w-5 text-warn" /> Copy this key now
             </span>
           </ModalHeader>
-          <ModalBody>
+          <ModalBody className="gap-3">
             <p className="text-sm text-body">{issued?.warning}</p>
-            <Card className="mt-3 p-3">
-              <div className="break-all font-mono text-sm text-ink">{issued?.api_key}</div>
+            {/* The one credential surface, shared with the webhook secret: click it
+                and it is copied, and it stays a selectable field either way — on a
+                plain-http host `navigator.clipboard` does not exist, and this value
+                can never be shown again, so there is always a way to take it by
+                hand. It opens revealed for that reason too. */}
+            <SecretField
+              label={`API key — ${issued?.label ?? ""}`}
+              value={issued?.api_key ?? ""}
+              revealed
+              note="Hide blanks it out if you need to share this screen; it is still copied in full."
+            />
+            <Card className="mt-1 p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                    How they use it
+                  </div>
+                  <code className="mt-1 block break-all text-xs text-ink">
+                    curl -H &quot;X-API-Key: {issued?.api_key}&quot; &lt;api address&gt;
+                  </code>
+                </div>
+                <CopyButton
+                  value={`curl -H "X-API-Key: ${issued?.api_key ?? ""}" <api address>`}
+                  label="Copy curl"
+                />
+              </div>
+              <p className="mt-1 text-xs text-muted">
+                Connection details, on the last tab, has the addresses and a worked
+                example to send them.
+              </p>
             </Card>
-            <Button className="mt-3" variant="soft"
-                    onClick={() => issued && copy(issued.api_key)}>
-              <Copy className="h-4 w-4" /> Copy key
-            </Button>
           </ModalBody>
           <ModalFooter>
             <Button onClick={() => setIssued(null)}>I have copied it</Button>

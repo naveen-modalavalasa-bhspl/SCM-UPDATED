@@ -84,7 +84,7 @@ import {
 } from "@/modules/returns";
 // The API console — build an API from the screen over any table in the database.
 import {
-  ApiClientsPage, ApiClientDetailPage, PlatformLinksPage,
+  ApiClientsPage, ApiClientDetailPage, WebhookDetailPage, PlatformLinksPage,
 } from "@/modules/integrations";
 // `PurchaseConsolidation*`, not `Consolidation*`: the approvals module already owns
 // that name for INDENT consolidation, which is a different document entirely.
@@ -545,6 +545,9 @@ function AppRoutes() {
             child of /admin/integrations, which ends in a catch-all `:code` that would
             read any literal segment as a client code. */}
         <Route path="admin/app-links" element={<PlatformLinksPage />} />
+        {/* Two segments, so it never collides with the `:code` catch-all below —
+            one webhook's own screen, reached by opening its row. */}
+        <Route path="admin/integrations/webhooks/:source" element={<WebhookDetailPage />} />
         <Route path="admin/integrations/:code" element={<ApiClientDetailPage />} />
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}

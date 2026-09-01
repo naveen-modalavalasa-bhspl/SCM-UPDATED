@@ -4,8 +4,8 @@ Two prefixes, one router:
 
   * `/api/ext/v1/cams/**` — the 14 read feeds and the 5 write endpoints. API key, no
     session, no employee.
-  * `/api/apis/cams/**` — the SCM side: rotate the shared secret, see what arrived.
-    JWT + `require_permission`, like every other console route.
+  * `/api/apis/cams/**` — the SCM side: see what arrived. JWT + `require_permission`,
+    like every other console route.
 
 The write paths are registered twice, at `/…/cams/consumption` and at
 `/…/cams/cams/consumption`, so the integration works whether B-CAMS is configured with
@@ -36,6 +36,21 @@ SCOPE = "cams"
 
 feeds = APIRouter(prefix="/api/ext/v1/cams", tags=["b-cams"])
 console = APIRouter(prefix="/api/apis/cams", tags=["b-cams-console"])
+
+
+def _network(request: Request) -> dict:
+    """Socket details stored with B-CAMS receipts for the activity log."""
+    server = request.scope.get("server") or (None, None)
+    server_host = server[0] if isinstance(server, (tuple, list)) and len(server) > 0 else None
+    server_port = server[1] if isinstance(server, (tuple, list)) and len(server) > 1 else None
+    return {
+        "endpoint": request.url.path,
+        "http_method": request.method,
+        "ip_address": request.client.host if request.client else None,
+        "remote_port": request.client.port if request.client else None,
+        "local_ip_address": request.url.hostname or server_host,
+        "local_port": request.url.port or server_port,
+    }
 
 
 async def cams_caller(caller: Caller = Depends(require_api_key)) -> Caller:
@@ -179,7 +194,8 @@ def _register(write: docs.Write) -> None:
                       caller: Caller = Depends(cams_caller)):
         return await ingest.accept(
             db, await request.body(), request.headers.get(SIGNATURE_HEADER),
-            write.model, client_code=caller.client_code, count=write.count)
+            write.model, client_code=caller.client_code, count=write.count,
+            **_network(request))
 
     handler.__name__ = f"cams_{write.path.replace('-', '_')}"
     for route in (f"/{write.path}", f"/cams/{write.path}"):

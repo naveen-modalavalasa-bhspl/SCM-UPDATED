@@ -61,7 +61,7 @@ row can never appear on two pages.
 | Q7 `base_uom_id`, `conversion_factor` | **Yes.** From `mst_uom_conversions`. A UOM with no conversion row is its own base at factor 1. |
 | Q8 batch inline on stock-balance | **Confirmed.** `batch_number` and `expiry_date` are columns on `stk_balance` itself — no join, cannot go missing. `batch_id` is `null` (not `0`) when a row carries no batch. |
 | Q9 `valuation_rate` | **Real column, largely zero today.** The live costing columns are 0 across most rows; the feed sends the real value rather than inventing one. Source rates from `items.purchase_price` (also in the feed) until costing is populated. |
-| Q10 base URL / key / secret | Base URL above. Key: issued in the console, handed over out of band. HMAC secret: `POST /api/apis/cams/secret` mints it, shown once. |
+| Q10 base URL / key | Base URL above. Key: issued in the console, handed over out of band. There is no HMAC secret — the API key is the whole credential (2026-09-01). |
 
 ### §3 behaviour rules
 
@@ -120,8 +120,12 @@ POST /api/ext/v1/cams/stock-transfer          POST /api/ext/v1/cams/cams/stock-t
 POST /api/ext/v1/cams/wastage                 POST /api/ext/v1/cams/cams/wastage
 ```
 
-Headers: `X-API-Key`, `X-CAMS-Signature: sha256=<HMAC-SHA256(raw_body, shared_secret)>`,
-`Content-Type: application/json`. The HMAC is over the **raw bytes** of the body.
+Headers: `X-API-Key`, `Content-Type: application/json`.
+
+**Body signing was removed on 2026-09-01.** `X-CAMS-Signature` is no longer read; send
+it or don't, it is ignored either way. The API key and its `cams` scope are the entire
+write boundary, so these endpoints have no body-integrity or replay-tamper protection
+beyond TLS — treat the key accordingly.
 
 Payloads are exactly as written in §4 of the ask. Unknown extra fields are accepted and
 stored, so B-CAMS can add one without a coordinated release.
@@ -139,7 +143,7 @@ in may carry any offset (`…T06:53:31Z` is fine); SCM converts it to IST on arr
 Replay of an `event_id` already seen: `200 {"ok":true,"duplicate":true,…}`, nothing
 changes. The de-duplication window is the last 5000 events.
 
-Failures: `401` bad key or bad signature, `422` payload the schema rejects (the message
+Failures: `401` bad or missing key, `403` a key without the `cams` scope, `422` payload the schema rejects (the message
 names the field), `429` rate limit. Retry on any non-2xx — the same `event_id` is safe.
 
 ### The 14-Aug-2026 real-time feed
@@ -189,8 +193,8 @@ optional. An expiry write-off needs no separate feed: send it here with
 
 ### What SCM does with a write, today
 
-It authenticates it, verifies the signature, refuses replays, validates it and stores
-it as a durable receipt. It does **not** yet post the numbers onto `out_issues` or
+It authenticates the key, refuses replays, validates the payload and stores it as a
+durable receipt. It does **not** yet post the numbers onto `out_issues` or
 `stk_balance`: physical stock changes only through `inventory.move_stock()` and an
 issue's status only through the warehouse module, and neither can be reached from an
 integration endpoint. So B4 currently records the acknowledgement rather than closing
@@ -203,7 +207,6 @@ sweep overlapping the real-time pushes is harmless: a receipt is written once pe
 SCM-side visibility (JWT + `admin.settings.manage`):
 
 ```
-POST /api/apis/cams/secret        mint/rotate the shared secret — shown once
 GET  /api/apis/cams/events        what arrived, newest first (?event=facility.consumption)
 GET  /api/apis/cams/events/{id}   one receipt, with its payload
 ```

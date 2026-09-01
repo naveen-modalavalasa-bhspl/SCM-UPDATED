@@ -63,10 +63,15 @@ export interface ApiKey {
   created_at?: string | null;
 }
 
-/** The one response that ever carries the raw key. Never re-fetchable. */
+/** The response to an issue. Carries the raw key and the "copy it now" warning. */
 export interface IssuedKey extends ApiKey {
   api_key: string;
   warning: string;
+}
+
+/** The same key fetched again, so a row on the list can copy it in full. */
+export interface RevealedKey extends ApiKey {
+  api_key: string;
 }
 
 export interface KeyWrite {
@@ -284,6 +289,15 @@ export interface WebhookSecret {
   note: string;
 }
 
+export interface IntegrationSecretState {
+  has_secret: boolean;
+  needs_password: boolean;
+}
+
+export interface IntegrationSecretReveal {
+  shared_secret: string;
+}
+
 export interface WebhookDelivery {
   source: string;
   event: string;
@@ -342,7 +356,6 @@ export interface WebhookDocs {
   samples: { event: string; body: unknown }[];
   signing_note: string;
 }
-
 
 /* ---------------------------------------------------------------- B-CAMS -- */
 /* The clinic app pushes field movements at us and reads 14 feeds back. It is a
@@ -411,4 +424,83 @@ export interface CamsEvent {
     problems: string[];
     applied_at?: string;
   } | null;
+}
+
+/* ---- Activity Log -------------------------------------------------------- */
+
+/** One thing that happened, whichever of the four sources it came from.
+ *
+ *  `headline` and `outcome_word` arrive already worded: what an event is called and
+ *  which words describe it are decided on the server (`activity.py`), so the same
+ *  event cannot be described two ways on two screens. */
+export interface ActivityRow {
+  id: string;
+  at: string | null;
+  /** IN = they sent us something. OUT = they read something from us. */
+  direction: "IN" | "OUT";
+  channel: "WEBHOOK" | "ADAPTER" | "APPLICATION";
+  channel_note: string;
+  party: string;
+  party_code?: string | null;
+  event: string;
+  outcome: "OK" | "DUPLICATE" | "FAILED";
+  outcome_word: string;
+  headline: string;
+  detail?: string | null;
+  status_code?: number | null;
+  rows?: number | null;
+  reference?: string | null;
+  request_id?: string | null;
+  endpoint?: string | null;
+  http_method?: string | null;
+  ip_address?: string | null;
+  remote_port?: number | null;
+  local_ip_address?: string | null;
+  local_port?: number | null;
+  /** False for a row from the in-memory call ring, which empties on restart. The
+   *  screen marks these rather than letting a restart read as silence. */
+  durable: boolean;
+}
+
+export interface ActivityParty {
+  party: string;
+  party_code?: string | null;
+  channel: string;
+  total: number;
+  failed: number;
+  last_at?: string | null;
+}
+
+export interface ActivitySummary {
+  days: number;
+  total: number;
+  inbound: number;
+  outbound: number;
+  failed: number;
+  last_at?: string | null;
+  last_failure_at?: string | null;
+  reads_since_restart: boolean;
+  by_party: ActivityParty[];
+}
+
+export interface ActivityOption {
+  code: string;
+  name: string;
+}
+
+export interface ActivityFilters {
+  parties: ActivityOption[];
+  channels: ActivityOption[];
+  outcomes: ActivityOption[];
+}
+
+export interface ActivityQuery {
+  page?: number;
+  size?: number;
+  direction?: string;
+  outcome?: string;
+  party?: string;
+  channel?: string;
+  search?: string;
+  days?: number;
 }

@@ -1,9 +1,11 @@
 import { api } from "@/shared/api/client";
 import type {
+  ActivityFilters, ActivityQuery, ActivityRow, ActivitySummary,
   ApiClient, ApiEndpoint, ApiKey, CallLog, CamsDocs, CamsEvent, CamsSecret, CamsStatus,
   ClientWrite, EndpointClip, EndpointWrite,
-  ImportResult, IssuedKey,
+  ImportResult, IntegrationSecretReveal, IntegrationSecretState, IssuedKey,
   KeyWrite, LinkLogRow, LinkLogStats, LinkReveal, LinkTest, Page, PlatformLink,
+  RevealedKey,
   ConnectionDocs, Preview, SourceColumn, SourceTable, Usage, Webhook,
   WebhookDocs,
   WebhookDelivery,
@@ -49,9 +51,14 @@ export const integrationsApi = {
   keys: async (code: string): Promise<ApiKey[]> =>
     (await api.get(`${BASE}/clients/${code}/keys`)).data,
 
-  /** The response carries the raw key. It is never retrievable again. */
+  /** The response carries the raw key, and shows it once in the dialog. */
   issueKey: async (code: string, body: KeyWrite): Promise<IssuedKey> =>
     (await api.post(`${BASE}/clients/${code}/keys`, body)).data,
+
+  /** The full key again, for a copy off the list. A POST, on
+   *  `integration.keys.manage` — the same permission that issued it. */
+  revealKey: async (prefix: string): Promise<RevealedKey> =>
+    (await api.post(`${BASE}/keys/${prefix}/reveal`)).data,
 
   revokeKey: async (prefix: string): Promise<ApiKey> =>
     (await api.post(`${BASE}/keys/${prefix}/revoke`)).data,
@@ -120,6 +127,11 @@ export const webhooksApi = {
   list: async (): Promise<Webhook[]> =>
     (await api.get(`${BASE}/webhooks`)).data,
 
+  /** One webhook, for its own screen — the same row the list carries, fetched on its
+   *  own so the detail page opens on a deep link without the list behind it. */
+  get: async (source: string): Promise<Webhook> =>
+    (await api.get(`${BASE}/webhooks/${source}`)).data,
+
   create: async (body: WebhookWrite): Promise<Webhook> =>
     (await api.post(`${BASE}/webhooks`, body)).data,
 
@@ -134,6 +146,12 @@ export const webhooksApi = {
   rotateSecret: async (source: string): Promise<WebhookSecret> =>
     (await api.post(`${BASE}/webhooks/${source}/secret`)).data,
 
+  secretState: async (source: string): Promise<IntegrationSecretState> =>
+    (await api.get(`${BASE}/webhooks/${source}/secret`)).data,
+
+  revealSecret: async (source: string, password?: string): Promise<IntegrationSecretReveal> =>
+    (await api.post(`${BASE}/webhooks/${source}/secret/reveal`, { password })).data,
+
   /** Clear the HCM sequence cursor. Needed when a push SCM itself refused left a gap
    *  the sender can never close, which wedges every later push on 409. */
   resetSequence: async (source: string): Promise<Webhook> =>
@@ -144,9 +162,12 @@ export const webhooksApi = {
   docs: async (source: string): Promise<WebhookDocs> =>
     (await api.get(`${BASE}/webhooks/${source}/docs`)).data,
 
-  deliveries: async (source?: string): Promise<Page<WebhookDelivery>> =>
+  /** What has arrived. `size` is how far back the Received tab can see: its search,
+   *  result and date filters all narrow what this brought back, so a page too small
+   *  would make "this month" mean "the last 50 pushes". */
+  deliveries: async (source?: string, size = 50): Promise<Page<WebhookDelivery>> =>
     (await api.get(`${BASE}/webhook-deliveries`, {
-      params: clean({ source, size: 50 }),
+      params: clean({ source, size }),
     })).data,
 };
 
@@ -217,4 +238,20 @@ export const platformLinksApi = {
    *  values are held in component state only and are gone on reload. */
   reveal: async (code: string): Promise<LinkReveal> =>
     (await api.post(`${BASE}/platform/${code}/reveal`)).data,
+};
+
+/** The Activity Log — one feed over applications AND webhooks.
+ *
+ *  Read-only, and every list it offers is SERVED: `filters()` returns the parties,
+ *  channels and outcomes that actually exist, so an application or a webhook
+ *  registered a minute ago is selectable without a change in here. */
+export const activityApi = {
+  feed: async (query: ActivityQuery = {}): Promise<Page<ActivityRow>> =>
+    (await api.get(`${BASE}/activity`, { params: clean({ ...query }) })).data,
+
+  summary: async (days?: number): Promise<ActivitySummary> =>
+    (await api.get(`${BASE}/activity/summary`, { params: clean({ days }) })).data,
+
+  filters: async (): Promise<ActivityFilters> =>
+    (await api.get(`${BASE}/activity/filters`)).data,
 };

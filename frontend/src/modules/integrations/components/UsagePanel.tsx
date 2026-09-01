@@ -2,12 +2,12 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Activity, AlertTriangle, Rows3, Timer } from "lucide-react";
 import {
-  Card, EmptyState, ErrorBanner, ResponsiveList, StatCard, type Column,
+  EmptyState, ErrorBanner, FilterBar, FilterToggle, ResponsiveList, StatCard,
+  type Column,
 } from "@/shared/components";
+import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { integrationsApi } from "../api";
 import type { CallLog } from "../types";
-
-const when = (v?: string | null) => (v ? new Date(v).toLocaleString() : "—");
 
 /** Every call this application made, kept or refused — where "why is it failing?" is
  *  answered. The log lives in the server's memory, not a table, so it starts empty
@@ -27,6 +27,7 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
   });
 
   const totalPages = Math.max(1, Math.ceil((logs.data?.total ?? 0) / (logs.data?.size || 20)));
+  const failures = usage.data?.errors ?? 0;
 
   const columns: Column<CallLog>[] = [
     {
@@ -34,14 +35,14 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
       header: "When",
       render: (row) => (
         <div className="text-sm">
-          <div className="text-ink">{when(row.at)}</div>
+          <div className="text-ink">{fmtDateTime(row.at)}</div>
           <div className="text-xs text-muted">{row.ip_address ?? ""}</div>
         </div>
       ),
     },
     {
       key: "slug",
-      header: "Endpoint",
+      header: "API",
       render: (row) => (
         <div className="text-sm">
           <div className="font-mono text-ink">{row.slug ?? "—"}</div>
@@ -54,8 +55,11 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
       header: "Result",
       render: (row) => (
         <div className="text-sm">
+          {/* The number AND the word. A storekeeper reading this screen does not know
+              what 403 means, and the whole reason to open Usage is to find out why a
+              call is not working. */}
           <span className={row.status_code >= 400 ? "text-bad" : "text-ok"}>
-            {row.status_code}
+            {row.status_code} {row.status_code >= 400 ? "refused" : "served"}
           </span>
           <div className="text-xs text-muted">
             {row.row_count ?? 0} rows · {row.duration_ms ?? 0} ms
@@ -67,7 +71,11 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
       key: "error",
       header: "Message",
       hideOnNarrow: true,
-      render: (row) => <span className="text-xs text-muted">{row.error ?? ""}</span>,
+      render: (row) => (
+        <span className={`text-xs ${row.error ? "text-bad" : "text-muted"}`}>
+          {row.error ?? ""}
+        </span>
+      ),
     },
   ];
 
@@ -75,33 +83,47 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
     <div>
       {usage.error && <ErrorBanner error="Usage could not be loaded." />}
 
-      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mb-2 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="Calls" value={usage.data?.calls ?? 0}
                   icon={<Activity className="h-4 w-4" />} />
         <StatCard label="Rows served" value={usage.data?.rows ?? 0}
                   icon={<Rows3 className="h-4 w-4" />} />
-        <StatCard label="Failures" value={usage.data?.errors ?? 0}
-                  tone={(usage.data?.errors ?? 0) > 0 ? "text-bad" : "text-ink"}
+        <StatCard label="Failures" value={failures}
+                  tone={failures > 0 ? "text-bad" : "text-ink"}
                   icon={<AlertTriangle className="h-4 w-4" />} />
         <StatCard label="Last call"
-                  value={<span className="text-base">{when(usage.data?.last_called_at)}</span>}
+                  value={<span className="text-base">
+                    {usage.data?.last_called_at ? fmtRelative(usage.data.last_called_at) : "Never"}
+                  </span>}
                   icon={<Timer className="h-4 w-4" />} />
       </div>
 
-      <Card className="mb-4 p-3">
-        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-body">
-          <input type="checkbox" className="h-4 w-4" checked={errorsOnly}
-                 onChange={(e) => {
-                   setErrorsOnly(e.target.checked);
-                   setPage(1);
-                 }} />
-          Show refusals and failures only
-        </label>
-        <p className="mt-1 text-xs text-muted">
-          Counted since the server last started. The console keeps no table of its own,
-          so this is a rolling window, not an archive.
-        </p>
-      </Card>
+      {/* Directly under the numbers it qualifies. It was three lines further down,
+          inside the filter card, where it read as a note about the filter. */}
+      <p className="mb-4 text-xs text-muted">
+        Counted since the server last started. The console keeps no table of its own,
+        so this is a rolling window, not an archive — an empty log after a restart does
+        not mean nothing has ever called.
+      </p>
+
+      <FilterBar
+        right={
+          <span className="text-sm text-muted">
+            {logs.data?.total ?? 0} {(logs.data?.total ?? 0) === 1 ? "call" : "calls"}
+          </span>
+        }
+      >
+        <FilterToggle
+          active={errorsOnly}
+          onChange={(value) => {
+            setErrorsOnly(value);
+            setPage(1);
+          }}
+          icon={<AlertTriangle className="h-4 w-4 opacity-70" />}
+        >
+          Refusals and failures only
+        </FilterToggle>
+      </FilterBar>
 
       <ResponsiveList
         data={logs.data?.items ?? []}
@@ -113,8 +135,10 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
         onPageChange={setPage}
         empty={
           <EmptyState
-            title="Nothing has called yet"
-            hint="Calls appear here the moment the application uses its key — including the ones that were refused."
+            title={errorsOnly ? "Nothing has been refused" : "Nothing has called yet"}
+            hint={errorsOnly
+              ? "No call from this application has been turned away since the server started."
+              : "Calls appear here the moment the application uses its key — including the ones that were refused, and why."}
           />
         }
         renderCard={(row) => (
@@ -126,7 +150,7 @@ export function UsagePanel({ clientCode }: { clientCode: string }) {
               </span>
             </div>
             <div className="mt-1 text-xs text-muted">
-              {when(row.at)} · {row.row_count ?? 0} rows · {row.duration_ms ?? 0} ms
+              {fmtDateTime(row.at)} · {row.row_count ?? 0} rows · {row.duration_ms ?? 0} ms
             </div>
             {row.error && <div className="mt-1 text-xs text-bad">{row.error}</div>}
           </div>

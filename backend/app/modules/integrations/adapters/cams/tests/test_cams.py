@@ -5,7 +5,8 @@ what does not need one:
 
   * the contract B-CAMS wrote down (the response shape, the paging keys, `is_active`
     filtering the right way round, ids that are never re-issued as zero);
-  * the signature and the replay guard, which are the whole of the write boundary;
+  * the replay guard, which is now the whole of the write boundary the adapter
+    itself owns (the API key is checked by the route's dependency, not here);
   * that every feed compiles to real SQL against the live models — a renamed column
     anywhere in masters, inventory, indents or warehouse fails here rather than at
     06:30 on their sync.
@@ -19,7 +20,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy.dialects import mysql
 
-from app.core.exceptions import AuthenticationError, ValidationError
+from app.core.exceptions import ValidationError
 from app.modules.integrations.adapters.cams import docs as cams_docs
 from app.modules.integrations.adapters.cams import ingest, reads, router
 from app.modules.integrations.adapters.cams.enums import MAX_EVENT_ID, Tier
@@ -33,7 +34,6 @@ SECRET = "test-secret-not-a-real-one"
 
 def signed(body: bytes, secret: str = SECRET) -> str:
     return f"sha256={hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()}"
-
 
 # --------------------------------------------------------------------------- #
 # Every feed is real SQL over the real models
