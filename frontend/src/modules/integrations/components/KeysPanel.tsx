@@ -35,6 +35,9 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
   const [issued, setIssued] = useState<IssuedKey | null>(null);
   const [issuedKeys, setIssuedKeys] = useState<Record<string, string>>({});
   const [revoking, setRevoking] = useState<ApiKey | null>(null);
+  // The key whose value is being pasted back in, and what has been typed so far.
+  const [attaching, setAttaching] = useState<ApiKey | null>(null);
+  const [pasted, setPasted] = useState("");
   // Keys already fetched, and the fetches in flight — a hover and the press that
   // follows it must not become two reveals of the same key.
   const cache = useRef<Record<string, string>>({});
@@ -78,6 +81,20 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
     },
   });
 
+  const attach = useMutation({
+    mutationFn: ({ prefix, key }: { prefix: string; key: string }) =>
+      integrationsApi.attachKey(prefix, key),
+    onSuccess: (row) => {
+      queryClient.invalidateQueries({ queryKey: ["apis"] });
+      // Copyable from this moment, without a round trip: the server kept exactly the
+      // string that was pasted, because that is the only string that matched.
+      cache.current[row.key_prefix] = pasted.trim();
+      setAttaching(null);
+      setPasted("");
+      toast.success("Key attached. The row copies it in full now.");
+    },
+  });
+
   const revoke = useMutation({
     mutationFn: (prefix: string) => integrationsApi.revokeKey(prefix),
     onSuccess: () => {
@@ -97,6 +114,55 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
     });
   };
 
+  /**
+   * What the row offers where the key goes.
+   *
+   * A key issued from here is copyable from birth, and one issued before the console
+   * kept a copyable value heals itself the first time its partner calls — the header
+   * proves itself against the stored hash, so `security.require_api_key` can record
+   * it. Until that call happens the server holds only a digest, which nobody can run
+   * backwards, so the row asks for the value rather than offering a press that fails.
+   *
+   * Except on a revoked key: its value opens nothing, so there is nothing to recover
+   * and the chip is inert — an affordance that leads somewhere pointless reads as one
+   * more thing that is broken.
+   */
+  const keyChip = (row: ApiKey) =>
+    row.can_copy || issuedKeys[row.key_prefix] ? (
+      <CopyChip
+        value={issuedKeys[row.key_prefix] ?? ""}
+        resolve={() => fullKey(row.key_prefix)}
+        display={row.masked_key}
+        tag="key"
+        copiedMessage="Full API key copied"
+        title="Copies the full API key — everything behind the dots, ready to paste into X-API-Key."
+      />
+    ) : row.state === "REVOKED" ? (
+      <span
+        title="Revoked, and stored as a hash only. Its value opens nothing, so there is nothing to recover."
+        className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md border
+                   border-line bg-content2 px-2 py-1 font-mono text-[11px] text-muted opacity-60"
+      >
+        <span className="truncate">{row.masked_key}</span>
+      </span>
+    ) : (
+      <button
+        type="button"
+        onClick={() => { setPasted(""); setAttaching(row); }}
+        title="Only this key's hash is stored, so it cannot be read back. Paste the key you were given and the row will copy it from then on."
+        className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md border
+                   border-warn/40 bg-content2 px-2 py-1 font-mono text-[11px] text-muted
+                   transition hover:border-warn hover:text-ink focus-visible:outline-none
+                   focus-visible:ring-2 focus-visible:ring-warn/30"
+      >
+        <span className="truncate">{row.masked_key}</span>
+        <span className="shrink-0 rounded border border-warn/40 bg-content1 px-1 text-[9px]
+                         font-semibold uppercase tracking-wider text-warn">
+          paste to copy
+        </span>
+      </button>
+    );
+
   const columns: Column<ApiKey>[] = [
     {
       key: "label",
@@ -106,14 +172,7 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
       render: (row) => (
         <div className="min-w-0">
           <div className="font-semibold text-ink">{row.label}</div>
-          <CopyChip
-            value={issuedKeys[row.key_prefix] ?? ""}
-            resolve={() => fullKey(row.key_prefix)}
-            display={row.masked_key}
-            tag="key"
-            copiedMessage="Full API key copied"
-            title="Copies the full API key — everything behind the dots, ready to paste into X-API-Key."
-          />
+          {keyChip(row)}
         </div>
       ),
     },
@@ -180,7 +239,9 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
           A key is the password this application calls with — it goes in the{" "}
           <code className="text-ink">X-API-Key</code> header of every request. The row
           shows it masked so the screen can be shared; copying a row copies the whole
-          key.
+          key. A row marked <span className="text-warn">paste to copy</span> predates
+          that and is stored as a hash only: it clears itself the next time that
+          application calls in, or you can paste the value once and be done.
         </p>
         <Button onClick={() => setDraft({ ...BLANK })}>
           <KeyRound className="h-4 w-4" /> Issue key
@@ -213,14 +274,7 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
               <span className="font-semibold text-ink">{row.label}</span>
               <StatusPill status={row.state} />
             </div>
-            <CopyChip
-              value={issuedKeys[row.key_prefix] ?? ""}
-              resolve={() => fullKey(row.key_prefix)}
-              display={row.masked_key}
-              tag="key"
-              copiedMessage="Full API key copied"
-              title="Copies the full API key — everything behind the dots, ready to paste into X-API-Key."
-            />
+            {keyChip(row)}
             <div className="mt-1 text-xs text-muted">
               {row.scopes.length ? `${row.scopes.length} APIs` : "every API"} ·{" "}
               {row.rate_limit_per_min ? `${row.rate_limit_per_min}/min` : "no rate cap"} ·
@@ -236,6 +290,39 @@ export function KeysPanel({ clientCode }: { clientCode: string }) {
           </div>
         )}
       />
+
+      {/* Paste the value back in. Only accepted if it hashes to what was issued, so a
+          wrong paste is refused here rather than becoming a key that copies nonsense. */}
+      <Modal isOpen={attaching !== null} onClose={() => setAttaching(null)} size="lg">
+        <ModalContent>
+          <ModalHeader className="font-display text-lg font-bold text-ink">
+            Attach the value of {attaching?.label}
+          </ModalHeader>
+          <ModalBody className="gap-3">
+            <p className="text-sm text-body">
+              This key was issued before the console kept a copyable value, so only its
+              hash is stored and nobody — including this screen — can read it back.
+              Paste the key you were given and the row will copy it from then on. It is
+              checked against the hash, so a mistyped key is refused, not saved.
+            </p>
+            <Field label="API key" required
+                   hint={`Starts with ${attaching?.key_prefix ?? ""}. If you no longer have it, revoke this key and issue a new one instead.`}>
+              <Input value={pasted} placeholder={attaching?.masked_key}
+                     onChange={(e) => setPasted(e.target.value)} />
+            </Field>
+            {attach.error && <ErrorBanner error={attach.error} />}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="subtle" onClick={() => setAttaching(null)}>Cancel</Button>
+            <Button disabled={!pasted.trim() || attach.isPending}
+                    onClick={() => attaching && attach.mutate({
+                      prefix: attaching.key_prefix, key: pasted.trim(),
+                    })}>
+              Attach the key
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
 
       {/* Revoking is instant, remote and permanent — so it is asked, and the question
           names the key and says what breaks. */}

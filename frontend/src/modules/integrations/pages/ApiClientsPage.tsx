@@ -1,7 +1,9 @@
 import { useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Plug, Plus, Radio } from "lucide-react";
+import {
+  Activity, Columns3, MonitorSmartphone, Plug, Plus, Radio, Server, ShieldCheck,
+} from "lucide-react";
 import {
   Button, EmptyState, ErrorBanner, FilterBar, PageHeader, ResponsiveList,
   SubNav, type Column,
@@ -10,7 +12,7 @@ import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { integrationsApi } from "../api";
 import { ActivityLog } from "../components/ActivityLog";
 import { ClientFormModal } from "../components/ClientFormModal";
-import { DirectionNote, Steps } from "../components/Explain";
+import { FlowExplainer } from "../components/Explain";
 import { HealthPill, healthOf } from "../components/Health";
 import { WebhooksPanel, type WebhooksPanelHandle } from "../components/WebhooksPanel";
 import type { ApiClient } from "../types";
@@ -28,6 +30,15 @@ const TABS = [
   { key: "webhooks", label: "Webhooks", icon: Radio },
   { key: "activity", label: "Activity log", icon: Activity },
 ];
+
+/** Our end of every wire on this screen, written once. Both diagrams draw SCM in the
+ *  same place with the same words, so the only thing that changes between the tabs is
+ *  the direction the packets run — which is the one fact the tabs differ on. */
+const SCM_END = {
+  icon: Server,
+  label: "SCM",
+  note: "this ERP — stock, indents, POs",
+};
 
 /** The order the work happens in, said once on the screen where the work starts.
  *  A row registered here is inert until both of the other two exist — which is what
@@ -203,31 +214,59 @@ export default function ApiClientsPage() {
         <ActivityLog />
       ) : tab === "webhooks" ? (
         <>
-          <DirectionNote icon={Radio} title="Webhooks" from="Their system" to="SCM"
-                         tone="info">
+          {/* SCM stays on the LEFT in both diagrams and the packets run the other way
+              here. The two tabs are mirror images of each other on purpose: which end
+              of the wire the traffic starts at is the whole difference between them,
+              and a reader flipping between the tabs sees it move. */}
+          <FlowExplainer
+            icon={Radio}
+            title="Webhooks"
+            tone="info"
+            from={SCM_END}
+            to={{
+              icon: MonitorSmartphone, label: "Their system",
+              note: "HCM, payroll, a partner",
+            }}
+            forward={false}
+            gate={{
+              icon: ShieldCheck,
+              label: "A valid signature, and an event you registered",
+            }}
+            plainly="It is a doorbell with a name on it. They ring the moment something happens at their end, and SCM opens only for the ring it recognises."
+            steps={WEBHOOK_SETUP}
+          >
             A webhook is an outside system PUSHING an event into SCM the moment it
             happens — an employee changed, a document was signed. It posts to an
             address issued here, signs the body with a secret issued here, and may only
             send the events it was registered for. What SCM does with each one comes
             from a fixed list, never from a table this screen can point at.
-          </DirectionNote>
-
-          {/* The order of the work, in the same place and the same shape as the
-              applications tab states it. */}
-          <Steps steps={WEBHOOK_SETUP} className="mb-4" />
+          </FlowExplainer>
 
           <WebhooksPanel ref={webhooks} />
         </>
       ) : (
         <>
-          <DirectionNote icon={Plug} title="Applications" from="SCM" to="Their system">
+          <FlowExplainer
+            icon={Plug}
+            title="Applications"
+            from={SCM_END}
+            to={{
+              icon: MonitorSmartphone, label: "Their system",
+              note: "billing, a dashboard, a portal",
+            }}
+            // The DATA leaves SCM, even though the CALL is dialled the other way — the
+            // thin dotted return line is that call. Drawing the call as the main arrow
+            // is the confusion this diagram exists to end.
+            forward
+            gate={{ icon: Columns3, label: "Only the columns you ticked" }}
+            plainly="It is a library card. They read the shelves you open for them, one row at a time, and can never write anything back."
+            steps={SETUP}
+          >
             An application is an outside system that READS SCM data — a billing system
             pricing a job, a dashboard counting stock. It calls SCM with a key you
             issue, and sees only the tables and columns you build for it: it can narrow
             what an API returns, never widen it, and it can never write.
-          </DirectionNote>
-
-          <Steps steps={SETUP} className="mb-4" />
+          </FlowExplainer>
 
           <FilterBar
             search={search}

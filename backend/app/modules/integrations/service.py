@@ -15,6 +15,7 @@ statement is assembled from validated names and bound parameters rather than
 concatenated.
 """
 import logging
+import secrets
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from time import perf_counter
@@ -31,7 +32,9 @@ from app.core.pagination import PageParams
 from app.modules.integrations import introspect, security, store
 from app.modules.integrations.enums import MAX_EXT_PAGE_SIZE
 from app.modules.integrations.schemas import ClientWrite, EndpointWrite, KeyWrite
-from app.modules.integrations.security import Caller, key_state, masked, new_key
+from app.modules.integrations.security import (
+    Caller, hash_key, key_state, masked, new_key,
+)
 from app.shared.time import now as ist_now
 
 log = logging.getLogger("app.integrations")
@@ -195,10 +198,43 @@ async def reveal_key(db: AsyncSession, prefix: str, user) -> dict:
     raw = _key_text(doc)
     if raw is None:
         raise ValidationError(
-            "This key was issued before the console kept a copyable value — only its "
-            "hash was stored. Issue a replacement key to get one that can be copied.")
+            "Only this key's hash is stored, so it cannot be read back. Paste the key "
+            "itself to attach it — or issue a replacement.")
     log.info("API key %s revealed to %s", prefix, getattr(user, "full_name", "?"))
     return {**_key_out(doc), "api_key": raw}
+
+
+async def attach_key(db: AsyncSession, prefix: str, raw: str, user) -> dict:
+    """Give a hash-only key its copyable value back, from the value itself.
+
+    A key issued before `key_secret` was kept has only a digest behind it, and a
+    digest does not run backwards: the console can say "cannot be read" honestly, but
+    the holder of the key can still hand it over. This takes the pasted string and
+    keeps it only if it hashes to the digest already stored, so the check is the same
+    one a live call passes — nothing can be planted here that the key does not
+    already verify as, and a typo is refused rather than silently recorded.
+
+    The other half of the same recovery is `security.require_api_key`, which does this
+    without being asked the first time the partner actually calls.
+    """
+    doc = await store.get(db, store.key_key(prefix))
+    if doc is None:
+        raise NotFoundError("API key not found")
+    if _key_text(doc) is not None:
+        raise ValidationError("This key can already be copied from the list.")
+    pasted = (raw or "").strip()
+    if not pasted:
+        raise ValidationError("Paste the API key.")
+    if not secrets.compare_digest(str(doc.get("key_hash", "")), hash_key(pasted)):
+        raise ValidationError(
+            f"That is not the key {masked(prefix)} — it does not match what was "
+            "issued. Check it end to end, or issue a replacement.")
+    doc["key_secret"] = pasted.encode("utf-8").hex()
+    await store.put(db, store.key_key(prefix), doc)
+    await db.commit()
+    log.info("API key %s: copyable value attached by %s", prefix,
+             getattr(user, "full_name", "?"))
+    return _key_out(doc)
 
 
 def _key_text(doc: dict) -> str | None:
@@ -215,6 +251,10 @@ def _key_out(doc: dict) -> dict:
     out = {k: v for k, v in doc.items() if k not in ("key_hash", "key_secret")}
     out["masked_key"] = masked(str(doc.get("key_prefix", "")))
     out["state"] = key_state(doc)
+    # Whether the row's copy press can actually deliver a key. Sent with the row so
+    # the list says so BEFORE the press: a chip that offers a copy and then reports a
+    # failure is the same call the partner cannot make, announced one click later.
+    out["can_copy"] = _key_text(doc) is not None
     return out
 
 
@@ -899,14 +939,18 @@ async def serve_logged(db: AsyncSession, slug: str, caller: Caller,
                         endpoint=endpoint, http_method=http_method,
                         ip_address=ip_address, remote_port=remote_port,
                         local_ip_address=local_ip_address, local_port=local_port,
-                        error=exc.message)
+                        query=dict(query), error=exc.message)
         raise
+    # The query is kept as well as the count. The reply itself is never stored - a
+    # read of five hundred rows is not held a second time to be looked at later - so
+    # what the application ASKED for is the only record of what it was sent, and the
+    # activity log's event page is where somebody goes looking for it.
     security.record(caller.client_code, key_prefix=caller.prefix, slug=slug,
                     status_code=200, row_count=len(result["items"]),
                     duration_ms=_elapsed(started), endpoint=endpoint,
                     http_method=http_method, ip_address=ip_address,
                     remote_port=remote_port, local_ip_address=local_ip_address,
-                    local_port=local_port)
+                    local_port=local_port, query=dict(query))
     return result
 
 

@@ -1,17 +1,14 @@
 import { useState } from "react";
-import type { ReactNode } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
+import { Activity, AlertTriangle, ArrowDownLeft, ArrowUpRight } from "lucide-react";
 import {
-  Activity, AlertTriangle, ArrowDownLeft, ArrowUpRight, Clock3, Globe2, Hash,
-  Plug, Puzzle, Radio, Route, Server,
-} from "lucide-react";
-import {
-  Button, Card, EmptyState, ErrorBanner, FilterBar, KpiTiles, ResponsiveList, Select,
-  StatusPill, type Column, type KpiTileSpec,
+  Card, EmptyState, ErrorBanner, FilterBar, KpiTiles, ResponsiveList, Select,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { activityApi } from "../api";
+import { Direction, OutcomePill, wasRefused } from "./ActivityChrome";
 import type { ActivityRow } from "../types";
 
 /**
@@ -39,24 +36,6 @@ import type { ActivityRow } from "../types";
  * selectable with no change to this file.
  */
 
-/** The three results, in the app's own status colours.
- *
- *  `StatusPill` maps a document status to a tone and takes a `label` that overrides
- *  the words without touching the status. An integration outcome is not a document
- *  status, so it is translated to the nearest one here — module-local, one line, and
- *  the shared pill is still the only thing that decides what green looks like. */
-const OUTCOME_STATUS: Record<string, string> = {
-  OK: "APPROVED",
-  FAILED: "REJECTED",
-  DUPLICATE: "DRAFT",
-};
-
-const CHANNEL_ICON = {
-  WEBHOOK: Radio,
-  ADAPTER: Puzzle,
-  APPLICATION: Plug,
-} as const;
-
 /** How far back to look. A window, not an archive — the stores behind it are capped. */
 const WINDOWS = [
   { value: "1", label: "Last 24 hours" },
@@ -65,175 +44,39 @@ const WINDOWS = [
   { value: "90", label: "Last 90 days" },
 ];
 
-function OutcomePill({ row }: { row: ActivityRow }) {
-  return (
-    <StatusPill status={OUTCOME_STATUS[row.outcome] ?? "DRAFT"}
-                label={row.outcome_word} />
-  );
-}
-
-/** The arrow says which way the data moved. Two icons carry the one fact the whole
- *  row hangs off, and the text beside them repeats it for a screen reader. */
-function Direction({ row }: { row: ActivityRow }) {
-  const Icon = row.direction === "IN" ? ArrowDownLeft : ArrowUpRight;
-  const ChannelIcon = CHANNEL_ICON[row.channel] ?? Plug;
-  return (
-    <span className="flex items-center gap-1.5" title={row.channel_note}>
-      <Icon className={`h-4 w-4 shrink-0 ${
-        row.direction === "IN" ? "text-info" : "text-brand"}`} aria-hidden="true" />
-      <ChannelIcon className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden="true" />
-      <span className="sr-only">{row.channel_note}. </span>
-    </span>
-  );
-}
-
-function valueOrDash(value: string | number | null | undefined, fallback = "Not recorded by this log") {
-  if (value === null || value === undefined || value === "") return fallback;
-  return String(value);
-}
-
-function DetailTile({
-  label,
-  value,
-  icon,
-  mono = false,
-}: {
-  label: string;
-  value: string | number | null | undefined;
-  icon?: ReactNode;
-  mono?: boolean;
-}) {
-  return (
-    <div className="min-w-0 rounded-lg border border-line/70 bg-content1 p-3">
-      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase text-muted">
-        {icon}
-        <span>{label}</span>
-      </div>
-      <div className={`min-w-0 break-words text-sm text-ink ${mono ? "font-mono text-xs" : ""}`}>
-        {valueOrDash(value)}
-      </div>
-    </div>
-  );
-}
-
-function ActivityDetailModal({
-  row,
-  onClose,
-}: {
-  row: ActivityRow | null;
-  onClose: () => void;
-}) {
-  const isInbound = row?.direction === "IN";
-  const directionText = isInbound
-    ? "The outside system sent data into SCM."
-    : "The outside application read data out of SCM.";
-  const endpoint = row?.endpoint ?? (row?.event ? `/api/ext/v1/${row.event}` : null);
-  const rowCount = row?.rows === null || row?.rows === undefined
-    ? null
-    : `${row.rows} ${row.rows === 1 ? "row" : "rows"}`;
-  const dataSummary = row
-    ? [row.event, rowCount].filter(Boolean).join(" | ")
-    : null;
-
-  return (
-    <Modal isOpen={row !== null} onClose={onClose} size="3xl" scrollBehavior="inside">
-      <ModalContent>
-        <ModalHeader className="font-display text-lg font-bold text-ink">
-          {row?.headline ?? "Activity detail"}
-        </ModalHeader>
-        <ModalBody className="gap-4">
-          {row && (
-            <>
-              <div className="rounded-lg border border-line/70 bg-content2 p-3">
-                <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <Direction row={row} />
-                  <OutcomePill row={row} />
-                  <span className="text-xs text-muted">{row.channel_note}</span>
-                </div>
-                <p className="text-sm leading-relaxed text-body">{directionText}</p>
-                {row.detail && (
-                  <p className="mt-2 text-sm leading-relaxed text-muted">{row.detail}</p>
-                )}
-              </div>
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-lg border border-line/70 bg-content1 p-3">
-                  <div className="mb-1 text-[11px] font-semibold uppercase text-muted">
-                    From
-                  </div>
-                  <div className="text-sm font-semibold text-ink">{row.party}</div>
-                  <div className="mt-1 text-xs text-muted">
-                    Data: <span className="font-medium text-body">{valueOrDash(dataSummary, "No data summary")}</span>
-                  </div>
-                  <div className="mt-1 font-mono text-xs text-muted">
-                    IP: {valueOrDash(row.ip_address, "Not stored")}
-                  </div>
-                  <div className="mt-0.5 font-mono text-xs text-muted">
-                    Port: {valueOrDash(row.remote_port, "Not stored")}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-line/70 bg-content1 p-3">
-                  <div className="mb-1 text-[11px] font-semibold uppercase text-muted">
-                    Through
-                  </div>
-                  <div className="text-sm font-semibold text-ink">SCM external API</div>
-                  <div className="mt-1 font-mono text-xs text-muted">
-                    {row.http_method ? `${row.http_method} ` : ""}{valueOrDash(endpoint)}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-line/70 bg-content1 p-3">
-                  <div className="mb-1 text-[11px] font-semibold uppercase text-muted">
-                    Receiving side
-                  </div>
-                  <div className="text-sm font-semibold text-ink">SCM</div>
-                  <div className="mt-1 text-xs text-muted">
-                    {isInbound ? "Received the push" : "Served the read request"}
-                  </div>
-                  <div className="mt-1 font-mono text-xs text-muted">
-                    IP: {valueOrDash(row.local_ip_address, "Not stored")}
-                  </div>
-                  <div className="mt-0.5 font-mono text-xs text-muted">
-                    Port: {valueOrDash(row.local_port, "Not stored")}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <DetailTile label="Exact time" value={row.at ? fmtDateTime(row.at) : null}
-                            icon={<Clock3 className="h-3.5 w-3.5" />} />
-                <DetailTile label="System" value={row.party}
-                            icon={<Server className="h-3.5 w-3.5" />} />
-                <DetailTile label="Channel" value={row.channel}
-                            icon={<Globe2 className="h-3.5 w-3.5" />} />
-                <DetailTile label="Endpoint" value={endpoint}
-                            icon={<Route className="h-3.5 w-3.5" />} mono />
-                <DetailTile label="Status code" value={row.status_code ?? "No HTTP code stored"}
-                            icon={<Hash className="h-3.5 w-3.5" />} />
-                <DetailTile label="Rows" value={rowCount ?? "No row count stored"} />
-                <DetailTile label="Reference or key" value={row.reference} mono />
-                <DetailTile label="Request ID" value={row.request_id} mono />
-                <DetailTile label="Event" value={row.event} mono />
-                <DetailTile label="Storage" value={row.durable ? "Stored permanently" : "Kept until server restart"} />
-              </div>
-            </>
-          )}
-        </ModalBody>
-        <ModalFooter>
-          <Button variant="ghost" onClick={onClose}>Close</Button>
-        </ModalFooter>
-      </ModalContent>
-    </Modal>
-  );
-}
-
 export function ActivityLog() {
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [party, setParty] = useState("");
-  const [outcome, setOutcome] = useState("");
-  const [direction, setDirection] = useState("");
-  const [days, setDays] = useState("7");
-  const [selected, setSelected] = useState<ActivityRow | null>(null);
+  // The filters start from the URL so that coming back from an event lands where the
+  // reader left — page nine of a filtered week, not page one of everything. They are
+  // not written back on every keystroke: only the link out to an event carries them
+  // (see `openRow`), so nothing here fights the tab this screen lives on for the
+  // address bar.
+  const [params] = useSearchParams();
+  const [page, setPage] = useState(() => Number(params.get("page")) || 1);
+  const [search, setSearch] = useState(() => params.get("search") ?? "");
+  const [party, setParty] = useState(() => params.get("party") ?? "");
+  const [outcome, setOutcome] = useState(() => params.get("outcome") ?? "");
+  const [direction, setDirection] = useState(() => params.get("direction") ?? "");
+  const [days, setDays] = useState(() => params.get("days") ?? "7");
+  const nav = useNavigate();
+
+  /** Where a row opens. The id carries a store key or the timestamp the row was
+   *  found by, so it is encoded — and it is a PAGE, not a dialog: an event is
+   *  something people forward to the partner who sent it, and the body it carried
+   *  does not fit in a box over the list.
+   *
+   *  The way back travels with it, spelled out in the address rather than held in
+   *  memory, so it survives a refresh and a forwarded link. */
+  const openRow = (row: ActivityRow) => {
+    const here = new URLSearchParams({ tab: "activity" });
+    if (page > 1) here.set("page", String(page));
+    if (search) here.set("search", search);
+    if (party) here.set("party", party);
+    if (outcome) here.set("outcome", outcome);
+    if (direction) here.set("direction", direction);
+    if (days !== "7") here.set("days", days);
+    const back = encodeURIComponent(`/admin/integrations?${here.toString()}`);
+    nav(`/admin/integrations/activity/${encodeURIComponent(row.id)}?back=${back}`);
+  };
 
   const reset = () => setPage(1);
   const query = {
@@ -339,7 +182,12 @@ export function ActivityLog() {
       render: (row) => (
         <div className="text-sm">
           <div className="truncate text-ink">{row.party}</div>
-          <div className="text-xs text-muted">{row.channel_note}</div>
+          {/* What the channel normally does — unless this one was turned away, in
+              which case it did not do it, and saying "read out of us" under a red
+              pill is the row contradicting itself. */}
+          <div className="text-xs text-muted">
+            {wasRefused(row) ? "Turned away" : row.channel_note}
+          </div>
         </div>
       ),
     },
@@ -364,7 +212,7 @@ export function ActivityLog() {
             </div>
           )}
           <div className="mt-1 text-[11px] font-medium text-brand">
-            Click for full trace
+            Open full trace
           </div>
         </div>
       ),
@@ -489,7 +337,7 @@ export function ActivityLog() {
         data={data?.items ?? []}
         columns={columns}
         keyOf={(row) => row.id}
-        onRowClick={setSelected}
+        onRowClick={openRow}
         loading={isLoading}
         page={page}
         totalPages={totalPages}
@@ -524,8 +372,6 @@ export function ActivityLog() {
           </div>
         )}
       />
-
-      <ActivityDetailModal row={selected} onClose={() => setSelected(null)} />
 
       {/* Said once, at the bottom, plainly. The failure half of this log is written to
           the database and survives anything; the read half is an in-memory ring the

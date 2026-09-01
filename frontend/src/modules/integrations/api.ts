@@ -1,6 +1,6 @@
 import { api } from "@/shared/api/client";
 import type {
-  ActivityFilters, ActivityQuery, ActivityRow, ActivitySummary,
+  ActivityEvent, ActivityFilters, ActivityQuery, ActivityRow, ActivitySummary,
   ApiClient, ApiEndpoint, ApiKey, CallLog, CamsDocs, CamsEvent, CamsSecret, CamsStatus,
   ClientWrite, EndpointClip, EndpointWrite,
   ImportResult, IntegrationSecretReveal, IntegrationSecretState, IssuedKey,
@@ -59,6 +59,11 @@ export const integrationsApi = {
    *  `integration.keys.manage` — the same permission that issued it. */
   revealKey: async (prefix: string): Promise<RevealedKey> =>
     (await api.post(`${BASE}/keys/${prefix}/reveal`)).data,
+
+  /** Hand a hash-only key its value back, from the value itself. The server keeps it
+   *  only if it hashes to the digest already stored. */
+  attachKey: async (prefix: string, apiKey: string): Promise<ApiKey> =>
+    (await api.post(`${BASE}/keys/${prefix}/attach`, { api_key: apiKey })).data,
 
   revokeKey: async (prefix: string): Promise<ApiKey> =>
     (await api.post(`${BASE}/keys/${prefix}/revoke`)).data,
@@ -254,4 +259,10 @@ export const activityApi = {
 
   filters: async (): Promise<ActivityFilters> =>
     (await api.get(`${BASE}/activity/filters`)).data,
+
+  /** One event, in full — the page behind a row. The id travels as a query
+   *  parameter: it carries the store key or the timestamp the row was found by,
+   *  and those hold characters a path segment would have to escape. */
+  event: async (id: string): Promise<ActivityEvent> =>
+    (await api.get(`${BASE}/activity/event`, { params: { id } })).data,
 };

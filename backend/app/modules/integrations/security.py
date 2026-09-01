@@ -194,6 +194,18 @@ async def require_api_key(
         _refuse(doc, client, exc.status_code, exc.message, slug, ip, port,
                 request.url.path, request.method, local_ip, local_port)
 
+    # A key issued before the console kept a copyable value has only a digest behind
+    # it, and the Keys list can then never hand it out again. The header just proved
+    # itself against that digest, so recording it here can only ever store what the
+    # key already IS — and the row heals itself the first time the partner calls,
+    # without anybody being asked to paste anything. Stored exactly as verified, hex
+    # like the webhook secret, so it re-hashes to the same digest.
+    dirty = False
+    if not doc.get("key_secret"):
+        doc["key_secret"] = x_api_key.encode("utf-8").hex()
+        dirty = True
+        log.info("API key %s: copyable value recovered from a verified call", prefix)
+
     # One write per minute at most. Stamping every call would turn a read-only feed
     # into a write on the hot path, and a nightly sync pulling 400 pages would be 400
     # UPDATEs to record something with one-minute resolution anyway.
@@ -201,6 +213,8 @@ async def require_api_key(
     last = _stamp(doc.get("last_used_at"))
     if last is None or (now - last).total_seconds() > 60:
         doc["last_used_at"] = now.isoformat()
+        dirty = True
+    if dirty:
         await store.put(db, store.key_key(prefix), doc)
         await db.commit()
 

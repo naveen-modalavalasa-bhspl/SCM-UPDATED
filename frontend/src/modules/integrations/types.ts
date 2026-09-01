@@ -61,6 +61,9 @@ export interface ApiKey {
   revoked_by_name?: string | null;
   created_by_name?: string | null;
   created_at?: string | null;
+  /** False for a key the server holds only a hash of — the row cannot copy it, and
+   *  says so instead of offering a press that fails. */
+  can_copy: boolean;
 }
 
 /** The response to an issue. Carries the raw key and the "copy it now" warning. */
@@ -460,6 +463,43 @@ export interface ActivityRow {
   /** False for a row from the in-memory call ring, which empties on restart. The
    *  screen marks these rather than letting a restart read as silence. */
   durable: boolean;
+}
+
+/** One line of an event's record, already read out in plain words by the server.
+ *
+ *  The three sources record different fields, and a browser that mapped each one
+ *  would need editing every time a source learns to record something new — so the
+ *  label, the wording and whether a value is an identifier are all decided in
+ *  `activity.py` and this file only draws them. */
+export interface ActivityFact {
+  field: string;
+  label: string;
+  value: string;
+  /** An identifier rather than a sentence — drawn monospaced. */
+  mono: boolean;
+  /** Too long for a line in a grid — drawn as its own block. */
+  block: boolean;
+}
+
+/** The endpoint an application read, and every column it can ever return. */
+export interface ActivityServed {
+  slug: string;
+  name: string;
+  table: string;
+  columns: string[];
+}
+
+/** One row of the log, opened — everything its source recorded about it. */
+export interface ActivityEvent extends ActivityRow {
+  /** The body that moved: the pushed JSON, the query an application sent, or the
+   *  context a refusal recorded. Null when the source kept none. */
+  payload: unknown;
+  payload_label: string;
+  payload_note: string;
+  served?: ActivityServed | null;
+  /** The source's own record, verbatim, for anyone who needs field names. */
+  record: Record<string, unknown>;
+  facts: ActivityFact[];
 }
 
 export interface ActivityParty {

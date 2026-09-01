@@ -29,9 +29,9 @@ from app.modules.integrations import (
     activity, adapters, introspect, platform_links, service, webhooks,
 )
 from app.modules.integrations.schemas import (
-    ActivityFiltersOut, ActivityRowOut, ActivitySummaryOut,
+    ActivityEventOut, ActivityFiltersOut, ActivityRowOut, ActivitySummaryOut,
     CallLogOut, ClientOut, ClientWrite, ColumnOut, EndpointImportIn, EndpointOut,
-    EndpointWrite, ExtEndpointOut, ExtPage, ImportResultOut, KeyIssuedOut, KeyOut,
+    EndpointWrite, ExtEndpointOut, ExtPage, ImportResultOut, KeyAttachIn, KeyIssuedOut, KeyOut,
     KeyRevealOut, KeyWrite, LinkLogRow, LinkRevealOut, LinkTestOut, PlatformLinkOut, PreviewOut,
     SecretRevealIn, SecretRevealOut, SecretStateOut, TableOut, UsageOut, WebhookOut,
     WebhookSecretOut, WebhookWrite,
@@ -150,6 +150,18 @@ async def reveal_key(prefix: str, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(KEYS))):
     """The full key, so the list can copy it. Same permission that issued it."""
     return await service.reveal_key(db, prefix, user)
+
+
+@console.post("/keys/{prefix}/attach", response_model=KeyOut)
+async def attach_key(prefix: str, body: KeyAttachIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(KEYS))):
+    """Attach the real value to a key stored as a hash only, so it can be copied.
+
+    Kept only if it hashes to the digest already on the row, which is the same check a
+    live call passes — so this can record what the key IS, never what someone says it
+    is.
+    """
+    return await service.attach_key(db, prefix, body.api_key, user)
 
 
 @console.post("/keys/{prefix}/revoke", response_model=KeyOut)
@@ -482,6 +494,16 @@ async def activity_feed(params: PageParams = Depends(), direction: str = "",
 async def activity_summary(days: int = 0, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(VIEW))):
     return await activity.summary(db, days=days or None)
+
+
+# The `id` is a query parameter, not a path segment: a row id carries the store key
+# or the timestamp it was found by, and those hold characters a path would have to
+# escape. One event, opened - the page behind a row on the list.
+
+@console.get("/activity/event", response_model=ActivityEventOut)
+async def activity_event(id: str = "", db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(VIEW))):
+    return await activity.event(db, id)
 
 
 @console.get("/activity/filters", response_model=ActivityFiltersOut)

@@ -112,6 +112,14 @@ class KeyOut(BaseModel):
     revoked_by_name: str | None = None
     created_by_name: str | None = None
     created_at: datetime | None = None
+    # False for a key stored as a hash only — the list must not offer a copy it
+    # cannot honour. See `service._key_out`.
+    can_copy: bool = False
+
+
+class KeyAttachIn(BaseModel):
+    """The key itself, pasted back in to make a hash-only row copyable again."""
+    api_key: str = Field(min_length=1, max_length=200)
 
 
 class KeyIssuedOut(KeyOut):
@@ -527,6 +535,45 @@ class ActivityRowOut(BaseModel):
     #: False for a row that came from the in-memory call ring, which empties on
     #: restart. The screen says so rather than showing a gap as silence.
     durable: bool = True
+
+
+class ActivityFactOut(BaseModel):
+    """One line of an event's record, already read out in plain words.
+
+    Composed on the server for the same reason `headline` is: the three sources record
+    different fields, and a browser that mapped each one would have to be edited every
+    time a source learns to record something new.
+    """
+    field: str
+    label: str
+    value: str
+    #: An identifier rather than a sentence - drawn in a monospaced face.
+    mono: bool = False
+    #: Too long for a line in a grid - drawn as its own block.
+    block: bool = False
+
+
+class ActivityServedOut(BaseModel):
+    """The endpoint an application read, and every column it can ever return."""
+    slug: str
+    name: str
+    table: str = ""
+    columns: list[str] = []
+
+
+class ActivityEventOut(ActivityRowOut):
+    """One row of the log, opened - everything the source recorded about it.
+
+    `payload` is the body that moved; `facts` is the rest of the record in plain
+    words; `record` is that same record verbatim, for anyone who needs the field
+    names rather than the labels.
+    """
+    payload: Any = None
+    payload_label: str = ""
+    payload_note: str = ""
+    served: ActivityServedOut | None = None
+    record: dict[str, Any] = {}
+    facts: list[ActivityFactOut] = []
 
 
 class ActivityPartyOut(BaseModel):

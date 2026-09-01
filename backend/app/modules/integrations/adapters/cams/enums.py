@@ -25,6 +25,21 @@ MAX_STORED_PAYLOAD = 40_000
 # Page size B-CAMS asks for is 500; the ceiling is the console's own.
 DEFAULT_PAGE_SIZE = 500
 
+# The one `sys_settings` row this adapter's configuration lives in — the inbound HMAC
+# secret and whether an unsigned write is tolerated while the two sides are wired up.
+# Deliberately NOT under `EVENT_PREFIX`: the receipts are enumerated by that prefix and
+# a config row swept up with them would read back as a corrupt event.
+CONFIG_KEY = "apis.cams.config"
+
+# How B-CAMS signs a write. The header is named in the 401 that `ingest.verify` raises
+# and in the connection notes `docs` serves, so it is stated once here rather than
+# spelled out at each. `SIGNATURE_ALGO` labels the digest inside the header value
+# (`sha256=<hex>`) — the same shape the console's own webhooks use, so a partner
+# implementing both signs them the same way. Changing either breaks every caller
+# already deployed.
+SIGNATURE_HEADER = "X-CAMS-Signature"
+SIGNATURE_ALGO = "sha256"
+
 class Tier(str, Enum):
     """`warehouse.tier` — Q1 of the ask.
 

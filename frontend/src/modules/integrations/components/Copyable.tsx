@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, Copy, Eye, EyeOff } from "lucide-react";
 import { Button, Card, useToast } from "@/shared/components";
+import { errorMessage } from "@/shared/api/errors";
 
 export async function writeToClipboard(text: string): Promise<boolean> {
   try {
@@ -97,10 +98,13 @@ export function CopyChip({
   tag?: string;
   copiedMessage?: string;
   /** Fetches what to copy when the row itself only holds a masked stand-in. It is
-   *  called on hover/focus as well as on the press, so the value is already in hand
-   *  by the time the click lands and the clipboard write stays inside the gesture —
-   *  a write that happens after an await is refused by some browsers. The caller
-   *  caches, so the extra calls cost one request in total. */
+   *  called on pointer-down, hover and focus as well as on the press, so the value is
+   *  already in hand by the time the click lands and the clipboard write stays inside
+   *  the gesture — a write that happens after an await is refused by some browsers,
+   *  and on a plain-http LAN host there is no `navigator.clipboard` at all, only the
+   *  `execCommand` carrier below, which needs the activation the click still holds.
+   *  Hover does not exist on a touch screen; pointer-down always fires, and fires
+   *  before the click. The caller caches, so the extra calls cost one request. */
   resolve?: () => Promise<string>;
 }) {
   const toast = useToast();
@@ -111,8 +115,11 @@ export function CopyChip({
     if (resolve) {
       try {
         text = await resolve();
-      } catch {
-        toast.error("Could not read the full value. Try again.");
+      } catch (err) {
+        // The server's own sentence, not a shrug. "Only this key's hash is stored"
+        // is a different problem from a dropped connection and has a different
+        // answer, and a press that reported neither left the reader retrying.
+        toast.error(errorMessage(err));
         return;
       }
     }
@@ -136,6 +143,7 @@ export function CopyChip({
       type="button"
       title={title}
       onClick={copy}
+      onPointerDown={warm}
       onMouseEnter={warm}
       onFocus={warm}
       className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md border border-line
