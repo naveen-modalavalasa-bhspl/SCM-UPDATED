@@ -9,11 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
-from sqlalchemy.exc import DataError
+from sqlalchemy.exc import DataError, IntegrityError
 
 from app.core.exceptions import (
     AppException, app_exception_handler, data_error_handler, http_exception_handler,
-    request_validation_exception_handler, unhandled_exception_handler,
+    integrity_error_handler, request_validation_exception_handler,
+    unhandled_exception_handler,
 )
 from app.platform.admin.app_logs import capture_backend_error, safe_request_id
 
@@ -104,6 +105,10 @@ app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 # Ahead of the catch-all: a value the column cannot hold is the caller's problem, and
 # answering 500 hid which field it was on every screen that writes a short column.
 app.add_exception_handler(DataError, data_error_handler)
+# Same reasoning: a duplicate number, a missing required column or a row something
+# else still points at is the caller's to fix, and answering 500 said nothing about
+# which. The constraint name never leaves the log — see integrity_error_handler.
+app.add_exception_handler(IntegrityError, integrity_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 

@@ -53,7 +53,7 @@ async def config(db: AsyncSession) -> dict:
 
 
 async def rotate_secret(db: AsyncSession, user) -> dict:
-    """Mint a new shared secret. The only response that carries it — shown once.
+    """Mint a new shared secret. The only response that carries it -- shown once.
 
     Only the digest is kept, exactly as an API key is: a secret SCM can read back is a
     secret every future console screen and every DB export carries.
@@ -71,7 +71,7 @@ async def rotate_secret(db: AsyncSession, user) -> dict:
     await db.commit()
     log.info("B-CAMS shared secret rotated by %s", doc["rotated_by_name"] or "?")
     return {"shared_secret": raw, "rotated_at": doc["rotated_at"],
-            "note": "Shown once. Store it in B-CAMS now — SCM cannot show it again."}
+            "note": "Shown once. Store it in B-CAMS now -- SCM cannot show it again."}
 
 
 def hmac_storable(raw: str) -> str:
@@ -93,7 +93,7 @@ def _secret(doc: Mapping[str, Any]) -> bytes | None:
     try:
         return bytes.fromhex(stored)
     except ValueError:
-        log.error("B-CAMS secret is not readable — rotate it")
+        log.error("B-CAMS secret is not readable -- rotate it")
         return None
 
 
@@ -115,7 +115,7 @@ async def verify(db: AsyncSession, body: bytes, header: str | None) -> None:
     secret = _secret(doc)
     if secret is None:
         if doc.get("require_signature") is False:
-            # An explicit, recorded decision — used while the two sides are being wired
+            # An explicit, recorded decision -- used while the two sides are being wired
             # up. Never the state a deployment is left in.
             log.warning("B-CAMS write accepted UNSIGNED: no shared secret is configured")
             return
@@ -171,7 +171,11 @@ async def seen(db: AsyncSession, event_id: str) -> dict | None:
 
 
 async def record(db: AsyncSession, payload, body: bytes, *, client_code: str | None,
-                 rows: int) -> dict:
+                 rows: int, endpoint: str | None = None,
+                 http_method: str | None = None, ip_address: str | None = None,
+                 remote_port: int | None = None,
+                 local_ip_address: str | None = None,
+                 local_port: int | None = None) -> dict:
     """Store the receipt and answer with it. Committed here — the answer is the proof."""
     text = body.decode("utf-8", "replace")
     fits = len(body) <= MAX_STORED_PAYLOAD
@@ -181,6 +185,12 @@ async def record(db: AsyncSession, payload, body: bytes, *, client_code: str | N
         "received_at": ist_now().isoformat(),
         "generated_at": payload.generated_at.isoformat() if payload.generated_at else None,
         "client_code": client_code,
+        "endpoint": endpoint,
+        "http_method": http_method,
+        "ip_address": ip_address,
+        "remote_port": remote_port,
+        "local_ip_address": local_ip_address,
+        "local_port": local_port,
         "rows": rows,
         "body_sha256": hashlib.sha256(body).hexdigest(),
         "payload": json.loads(text) if fits else None,
@@ -237,7 +247,11 @@ def duplicate(receipt: Mapping[str, Any]) -> dict:
 # --------------------------------------------------------------------------- #
 
 async def accept(db: AsyncSession, body: bytes, signature: str | None, model,
-                 *, client_code: str | None, count) -> dict:
+                 *, client_code: str | None, count, endpoint: str | None = None,
+                 http_method: str | None = None, ip_address: str | None = None,
+                 remote_port: int | None = None,
+                 local_ip_address: str | None = None,
+                 local_port: int | None = None) -> dict:
     """Verify -> parse -> de-duplicate -> store. One path, because four would drift.
 
     The signature is checked BEFORE the payload is parsed and before the event id is
@@ -250,8 +264,12 @@ async def accept(db: AsyncSession, body: bytes, signature: str | None, model,
     if already is not None:
         log.info("B-CAMS %s replayed: %s", payload.event, payload.event_id)
         return duplicate(already)
-    receipt = await record(db, payload, body, client_code=client_code,
-                           rows=count(payload))
+    receipt = await record(
+        db, payload, body, client_code=client_code, rows=count(payload),
+        endpoint=endpoint, http_method=http_method, ip_address=ip_address,
+        remote_port=remote_port, local_ip_address=local_ip_address,
+        local_port=local_port,
+    )
 
     # NEW 2026-08-26 — consumption and wastage now DEDUCT. The receipt is recorded and
     # committed FIRST, above, and the posting is a second transaction on purpose:

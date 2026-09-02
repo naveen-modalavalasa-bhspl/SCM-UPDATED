@@ -124,6 +124,28 @@ export function SupplierRFQDetailPage() {
     return limit != null && taxRate(line) > limit + 1e-9;
   });
 
+  /** The starred answers this quotation is still missing.
+   *
+   *  FIXED — the asterisk was the ONLY thing on this form saying a field had to be
+   *  answered, and the submit ignored it: a quotation went in with no price on a line,
+   *  no delivery days and no validity, and the buyer had to chase the vendor for the
+   *  numbers the form had already asked for. The check reads the same fields the stars
+   *  are drawn on, so the two can never disagree.
+   *
+   *  A rate of 0 counts as unanswered rather than as a free supply — the box opens at
+   *  0, so "still 0" is what an untouched line looks like. */
+  const gaps = useMemo(() => {
+    const out: string[] = [];
+    if (!header.valid_till) out.push("Valid until");
+    if (!header.expected_delivery_date) out.push("Can deliver by");
+    const count = (label: string, n: number) =>
+      n ? out.push(`${label} on ${n} line${n === 1 ? "" : "s"}`) : 0;
+    count("Rate", lines.filter((line) => !(Number(line.rate) > 0)).length);
+    count("Delivery days",
+      lines.filter((line) => String(line.delivery_days ?? "").trim() === "").length);
+    return out;
+  }, [header.valid_till, header.expected_delivery_date, lines]);
+
   const totals = useMemo(() => {
     let sub = 0;
     let tax = 0;
@@ -420,10 +442,18 @@ export function SupplierRFQDetailPage() {
           </p>
         )}
 
+        {open && gaps.length > 0 && (
+          <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+            Still to answer: {gaps.join(", ")}. Every field marked * has to be filled
+            in before the quotation can go in.
+          </p>
+        )}
+
         {open && (
           <Button
             className="w-full sm:w-auto"
-            disabled={save.isPending || !lines.length || overCeiling.length > 0}
+            disabled={save.isPending || !lines.length || overCeiling.length > 0
+              || gaps.length > 0}
             onClick={() => save.mutate()}
           >
             {save.isPending

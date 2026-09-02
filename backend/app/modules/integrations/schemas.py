@@ -112,6 +112,14 @@ class KeyOut(BaseModel):
     revoked_by_name: str | None = None
     created_by_name: str | None = None
     created_at: datetime | None = None
+    # False for a key stored as a hash only — the list must not offer a copy it
+    # cannot honour. See `service._key_out`.
+    can_copy: bool = False
+
+
+class KeyAttachIn(BaseModel):
+    """The key itself, pasted back in to make a hash-only row copyable again."""
+    api_key: str = Field(min_length=1, max_length=200)
 
 
 class KeyIssuedOut(KeyOut):
@@ -119,6 +127,26 @@ class KeyIssuedOut(KeyOut):
     api_key: str
     warning: str = ("Copy this key now — only a hash is saved and it cannot be shown "
                     "again. Issue a new one if it is lost.")
+
+
+class KeyRevealOut(KeyOut):
+    """The stored key handed back for a copy, on `integration.keys.manage`."""
+    api_key: str
+
+
+class SecretStateOut(BaseModel):
+    """What the page may know without seeing the per-application secret."""
+    has_secret: bool
+    needs_password: bool
+
+
+class SecretRevealIn(BaseModel):
+    password: str | None = Field(default=None, max_length=200)
+
+
+class SecretRevealOut(BaseModel):
+    """The stored shared secret, returned only after the reveal check."""
+    shared_secret: str
 
 
 # --------------------------------------------------------------------------- #
@@ -469,3 +497,114 @@ class RevealedFieldOut(BaseModel):
 class LinkRevealOut(BaseModel):
     code: str
     fields: list[RevealedFieldOut] = []
+
+
+# --------------------------------------------------------------------------- #
+# Activity Log
+# --------------------------------------------------------------------------- #
+
+class ActivityRowOut(BaseModel):
+    """One thing that happened, in the same shape whichever source it came from.
+
+    `headline` and `outcome_word` are the row as a person reads it; the status code
+    and the reference are the evidence underneath. Both are served rather than
+    assembled in the browser, so the wording of an event lives in one place.
+    """
+    id: str
+    at: datetime | None = None
+    direction: str            # IN (they sent) | OUT (they read)
+    channel: str              # WEBHOOK | ADAPTER | APPLICATION
+    channel_note: str = ""
+    party: str
+    party_code: str | None = None
+    event: str
+    outcome: str              # OK | DUPLICATE | FAILED
+    outcome_word: str
+    headline: str
+    detail: str | None = None
+    status_code: int | None = None
+    rows: int | None = None
+    reference: str | None = None
+    request_id: str | None = None
+    endpoint: str | None = None
+    http_method: str | None = None
+    ip_address: str | None = None
+    remote_port: int | None = None
+    local_ip_address: str | None = None
+    local_port: int | None = None
+    #: False for a row that came from the in-memory call ring, which empties on
+    #: restart. The screen says so rather than showing a gap as silence.
+    durable: bool = True
+
+
+class ActivityFactOut(BaseModel):
+    """One line of an event's record, already read out in plain words.
+
+    Composed on the server for the same reason `headline` is: the three sources record
+    different fields, and a browser that mapped each one would have to be edited every
+    time a source learns to record something new.
+    """
+    field: str
+    label: str
+    value: str
+    #: An identifier rather than a sentence - drawn in a monospaced face.
+    mono: bool = False
+    #: Too long for a line in a grid - drawn as its own block.
+    block: bool = False
+
+
+class ActivityServedOut(BaseModel):
+    """The endpoint an application read, and every column it can ever return."""
+    slug: str
+    name: str
+    table: str = ""
+    columns: list[str] = []
+
+
+class ActivityEventOut(ActivityRowOut):
+    """One row of the log, opened - everything the source recorded about it.
+
+    `payload` is the body that moved; `facts` is the rest of the record in plain
+    words; `record` is that same record verbatim, for anyone who needs the field
+    names rather than the labels.
+    """
+    payload: Any = None
+    payload_label: str = ""
+    payload_note: str = ""
+    served: ActivityServedOut | None = None
+    record: dict[str, Any] = {}
+    facts: list[ActivityFactOut] = []
+
+
+class ActivityPartyOut(BaseModel):
+    party: str
+    party_code: str | None = None
+    channel: str
+    total: int
+    failed: int
+    last_at: datetime | None = None
+
+
+class ActivitySummaryOut(BaseModel):
+    days: int
+    total: int
+    inbound: int
+    outbound: int
+    failed: int
+    last_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    reads_since_restart: bool = True
+    by_party: list[ActivityPartyOut] = []
+
+
+class ActivityOptionOut(BaseModel):
+    code: str
+    name: str
+
+
+class ActivityFiltersOut(BaseModel):
+    """Served, not hardcoded: an application or a webhook registered today is
+    selectable today, with no change in the browser."""
+    parties: list[ActivityOptionOut] = []
+    channels: list[ActivityOptionOut] = []
+    outcomes: list[ActivityOptionOut] = []

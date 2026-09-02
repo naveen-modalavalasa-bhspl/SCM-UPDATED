@@ -8,7 +8,8 @@ import {
   CardBody, Skeleton,
   Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
-import { PageHeader, Button, Can, Card } from "@/shared/components";
+import { PageHeader, Button, Can, Card, ErrorBanner, useToast } from "@/shared/components";
+import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
@@ -77,6 +78,7 @@ export function IndentDetailPage() {
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
 
   const {
     data: indent, isLoading, isFetching, error: loadError, refetch: refetchIndent,
@@ -133,12 +135,23 @@ export function IndentDetailPage() {
       predicate: (query) => isIndentModuleQuery(query) && query.queryKey[3] !== "journey",
     });
   };
+  // `e.message` is already the sentence the shared client wrote (shared/api/errors.ts),
+  // so a refusal reaches the banner below in the same words it would anywhere else.
   const onErr = (e: Error) => setError(e.message);
 
   const submit = useMutation({
     mutationFn: () => indentApi.submit(indentId),
     onMutate: () => cancelIndentDecisionReads(qc, accountScope, indentId),
-    onSuccess: (updated) => refreshAfterAction(updated, true),
+    onSuccess: (updated) => {
+      refreshAfterAction(updated, true);
+      // The screen stays put and only the stepper moves, so without this the most
+      // consequential press a requester makes — the one that starts the approval
+      // chain and locks the indent — looked like nothing happened.
+      toast.success({
+        title: "Sent for approval",
+        message: `${updated.indent_no} is with its approver and can no longer be edited.`,
+      });
+    },
     onError: onErr,
   });
   const deleteDraft = useMutation({
@@ -149,6 +162,13 @@ export function IndentDetailPage() {
       qc.removeQueries({ queryKey: indentKeys.journey(accountScope, indentId) });
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
       nav("/indents");
+      // After the navigation on purpose: the toast outlives this screen, so it is
+      // still on the list page the user lands on — which is the only place left to
+      // tell them the draft is actually gone.
+      toast.success({
+        title: "Draft deleted",
+        message: `${indent?.indent_no ?? "The draft"} has been removed.`,
+      });
     },
     onError: onErr,
   });
@@ -157,6 +177,10 @@ export function IndentDetailPage() {
     onSuccess: (updated) => {
       refreshAfterAction(updated, true);
       qc.invalidateQueries({ queryKey: ["approvals"], refetchType: "all" });
+      toast.success({
+        title: "Sent back for approval",
+        message: `${updated.indent_no} has gone back to its approver with your corrections.`,
+      });
     },
     onError: onErr,
   });
@@ -266,8 +290,11 @@ export function IndentDetailPage() {
               <Button
                 variant="danger"
                 disabled={actionPending}
-                onClick={() => {
-                  if (window.confirm(`Delete draft ${indent.indent_no}? This cannot be undone.`)) {
+                onClick={async () => {
+                  // The catalog's own copy (`indent.delete`), so this reads the same
+                  // as every other destructive confirm in the app instead of being
+                  // the browser's unstyled grey box.
+                  if (await alerts.confirm("indent.delete", { number: indent.indent_no })) {
                     deleteDraft.mutate();
                   }
                 }}
@@ -384,7 +411,7 @@ export function IndentDetailPage() {
       </div>
 
       {error && (
-        <div className="mt-4 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">{error}</div>
+        <ErrorBanner error={error} className="mt-4" />
       )}
 
       {showActions && (

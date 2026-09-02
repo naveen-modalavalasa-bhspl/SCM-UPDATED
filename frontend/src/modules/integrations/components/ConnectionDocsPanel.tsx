@@ -5,6 +5,7 @@ import {
   Button, Card, ErrorBanner, ScrollBox, useToast,
 } from "@/shared/components";
 import { integrationsApi } from "../api";
+import { writeToClipboard } from "./Copyable";
 import type { DocEndpoint } from "../types";
 
 /**
@@ -89,27 +90,27 @@ export function ConnectionDocsPanel({ clientCode }: { clientCode: string }) {
     return lines.join("\n");
   };
 
-  const copyDoc = () => {
+  // Through the module's one carrier, not `navigator.clipboard` directly: it falls
+  // back to a selection where that API does not exist (any plain-http host) and it
+  // ANSWERS whether the copy landed, so the toast can never claim one that did not.
+  // The box below stays the guarantee either way — the partner has no SCM login, so
+  // this text has to be gettable by hand.
+  const copyDoc = async () => {
     const text = asMarkdown();
-    const done = "Documentation copied — paste it into an email to them.";
-    const written = navigator.clipboard?.writeText(text);
-    // `?.` short-circuits the whole chain where the API is missing, so the toast has
-    // to be raised on both paths or the plain-http host gives no feedback at all.
-    if (!written) {
-      setSamples((held) => ({ ...held, __doc__: text }));
-      toast.success("Copied into the box at the bottom — select it and copy.");
+    if (await writeToClipboard(text)) {
+      toast.success("Documentation copied — paste it into an email to them.");
       return;
     }
-    written.then(() => toast.success(done),
-                 () => { setSamples((held) => ({ ...held, __doc__: text }));
-                         toast.success("Copied into the box at the bottom."); });
+    setSamples((held) => ({ ...held, __doc__: text }));
+    toast.success("Copied into the box at the bottom — select it and copy.");
   };
 
-  if (docs.error) return <ErrorBanner error="Connection details could not be loaded." />;
   const d = docs.data;
 
   return (
     <div className="space-y-4">
+      {docs.error && <ErrorBanner error="Connection details could not be loaded." />}
+
       <div className="flex flex-wrap items-start justify-between gap-2">
         <p className="max-w-2xl text-sm text-muted">
           Everything {d?.client_name ?? "this application"} needs to start calling.

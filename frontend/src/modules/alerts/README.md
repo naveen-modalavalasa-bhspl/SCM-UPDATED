@@ -161,6 +161,31 @@ already made — announce it with a self-closing `success` instead.
   reach for it when the user must read or answer something.
 - A failure with somewhere to pin it → `<ErrorBanner>` next to the form.
 
+## Where the wording of a FAILURE comes from
+
+This catalog is for events the app announces on purpose. What a *failed request*
+says is not in here — it is decided once, from the response, by
+`describeError()` in `shared/api/errors.ts`:
+
+- The server's own reason wins. `{"error": "Only the requester can edit this
+  indent"}` is shown word for word; a status code can never say that much.
+- Nothing technical is ever shown. SQL, tracebacks, driver codes and axios
+  internals are dropped and replaced by the status default. They are already in
+  `sys_app_logs`.
+- Level follows what the person can do about it. `warning` when they can fix it
+  from this screen (a missing field, a duplicate); `error` when they cannot (no
+  permission, session gone, server down).
+
+The shared axios interceptor rewrites `error.message` with that sentence, so a
+screen rendering `(error as Error).message` gets it without knowing any of this.
+`<ErrorBanner>` and `useToast().fromError()` read the structured form, which also
+carries `title`, `field` and the backend's `error_code`.
+
+Only two failures raise a DIALOG, both from `apiAlerts.ts` and both because they
+belong to no screen: `network.unreachable` and `session.expired`. Everything else
+is shown by the screen that asked for it — and `useAction` checks before adding a
+toast, so a failure already pinned to an `<ErrorBanner>` is not also announced.
+
 ## Files
 
 | File | What it is |

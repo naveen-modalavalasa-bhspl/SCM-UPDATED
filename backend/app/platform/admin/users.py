@@ -14,6 +14,7 @@ from app.core.pagination import PageParams, paginate
 from app.core.security import hash_password
 from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
 from app.platform.rbac.models import Role, UserRole
+from app.platform.rbac.profiles import PROFILE_PREFIX
 from app.platform.rbac.service import HCM_ROLE_DESCRIPTION_PREFIX
 from app.platform.settings.models import UserCredential, UserSession
 from app.platform.settings.service import write_audit
@@ -255,8 +256,15 @@ async def access_summary(db: AsyncSession) -> dict:
         select(func.count()).select_from(HcmEmployee)
         .where(HcmEmployee.is_active.is_(True)))
     with_access = await db.scalar(select(func.count()).select_from(UserCredential))
+    # Job-profile rows live in rbac_roles too (profiles.py) and are counted on their
+    # own screen. Every other roles reader filters them out (rbac/service.py), so
+    # counting them here made this card disagree with the list underneath it.
     roles = await db.scalar(
-        select(func.count()).select_from(Role).where(Role.is_active.is_(True)))
+        select(func.count()).select_from(Role).where(
+            Role.is_active.is_(True),
+            or_(Role.description.is_(None),
+                Role.description.notlike(f"{PROFILE_PREFIX}%")),
+        ))
     return {"active_employees": employees or 0,
             "users_with_access": with_access or 0,
             "active_roles": roles or 0}

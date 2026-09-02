@@ -1,5 +1,6 @@
-import axios from "axios";
+import axios, { type AxiosError } from "axios";
 import { reportFrontendError } from "@/shared/errorLogging";
+import { describeError, type Notice } from "@/shared/api/errors";
 
 // Backend has one error shape ({success:false, error}); this interceptor rewrites
 // every failure's `message` to something the UI can show directly. It rejects the
@@ -108,11 +109,14 @@ api.interceptors.response.use(
     if (axios.isCancel(error)) return Promise.reject(error);
 
     const status = error.response?.status;
+    // What the SERVER said, kept raw for the log. `sys_app_logs` is read by whoever
+    // is diagnosing the failure, and the sentence shown to the user is deliberately
+    // the less precise of the two.
     const message =
       error.response?.data?.error ??
       error.response?.data?.detail ??
       error.message ??
-      "Something went wrong";
+      "Request failed";
     reportFrontendError({
       message: typeof message === "string" ? message : "Request failed",
       error_type: error.name ?? "ApiError",
@@ -138,13 +142,14 @@ api.interceptors.response.use(
       else localStorage.removeItem("token");
       if (location.pathname !== door) location.href = door;
     }
-    if (!error.response) {
-      const path = error.config?.url ? ` (${error.config.url})` : "";
-      error.message =
-        `Cannot reach the API${path}. Check that the frontend proxy and backend are running.`;
-    } else {
-      error.message = typeof message === "string" ? message : "Request failed";
-    }
+    // One translation for the whole app (see `shared/api/errors.ts`). `message` is
+    // rewritten in place because ~75 screens render `(error as Error).message`
+    // straight into their own markup and none of them should have to know how; the
+    // structured form rides along on `.notice` for the surfaces that show a title
+    // and a sentence, or that pin the message to a field.
+    const notice = describeError(error);
+    error.message = notice.message;
+    (error as AxiosError & { notice?: Notice }).notice = notice;
     return Promise.reject(error);
   },
 );

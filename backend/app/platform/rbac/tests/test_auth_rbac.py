@@ -270,13 +270,30 @@ async def test_invalid_and_expired_tokens_are_401(client):
 async def test_framework_errors_use_the_app_error_envelope(client):
     validation = await client.post("/api/auth/login", json={})
     assert validation.status_code == 422
-    assert validation.json()["success"] is False
-    assert isinstance(validation.json()["error"], str)
-    assert "username" in validation.json()["error"]
+    body = validation.json()
+    assert body["success"] is False
+    assert isinstance(body["error"], str)
+    # The field is named, and named the way the request names it, so the screen can
+    # pin the message to the box it belongs to.
+    assert "username" in body["error"]
+    assert body["error_code"] == "VALIDATION_ERROR"
+    assert body["title"]
+    assert body["detail"] == body["error"]
+    assert body["field"] in ("username", "password")
 
     missing = await client.get("/api/definitely-not-a-route")
     assert missing.status_code == 404
-    assert missing.json() == {"success": False, "error": "Not Found"}
+    # "Not Found" is HTTP vocabulary, not an answer. Same envelope, said in English.
+    assert missing.json() == {
+        "success": False,
+        "error": "We could not find what you asked for. "
+                 "It may have been removed or renamed.",
+        "error_code": "NOT_FOUND",
+        "title": "Not found",
+        "detail": "We could not find what you asked for. "
+                  "It may have been removed or renamed.",
+        "field": None,
+    }
 
 
 async def test_admin_reads_require_their_admin_permissions(

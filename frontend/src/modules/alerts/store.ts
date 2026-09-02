@@ -22,6 +22,8 @@ let nextId = 1;
 const listeners = new Set<Listener>();
 /** id -> resolve, so dismissing anywhere settles the promise the caller awaits. */
 const pending = new Map<number, (confirmed: boolean) => void>();
+/** id -> the promise handed to the caller, so a merged duplicate can share it. */
+const promises = new Map<number, Promise<boolean>>();
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
 
 function emit() {
@@ -110,6 +112,29 @@ export function pushAlert(
     autoCloseMs,
   };
 
+  // One dropped connection fails every query on the screen at once, and each of
+  // those used to queue its own "Can't reach the server" — dismissed one, read the
+  // same sentence again, four times over. An announcement already queued in the
+  // same words is the same announcement, so it is joined rather than repeated. A
+  // CONFIRM is never merged: two questions that read alike can still be about two
+  // different documents, and each caller is waiting on its own answer.
+  if (mode === "alert") {
+    const twin = queue.find((existing) =>
+      existing.mode === "alert"
+      && existing.variant === item.variant
+      && existing.title === item.title
+      && existing.message === item.message);
+    if (twin) {
+      const running = timers.get(twin.id);
+      if (running) clearTimeout(running);
+      if (twin.autoCloseMs !== null) {
+        // Restart the clock: the newest raise is when the user last needed to see it.
+        timers.set(twin.id, setTimeout(() => resolveAlert(twin.id, false), twin.autoCloseMs));
+      }
+      return promises.get(twin.id) ?? Promise.resolve(false);
+    }
+  }
+
   queue = [...queue, item];
   emit();
 
@@ -117,7 +142,9 @@ export function pushAlert(
     timers.set(id, setTimeout(() => resolveAlert(id, false), autoCloseMs));
   }
 
-  return new Promise<boolean>((resolve) => pending.set(id, resolve));
+  const promise = new Promise<boolean>((resolve) => pending.set(id, resolve));
+  promises.set(id, promise);
+  return promise;
 }
 
 /** Close one dialog and settle its promise. Safe to call twice. */
@@ -129,6 +156,7 @@ export function resolveAlert(id: number, confirmed: boolean) {
   }
   const resolve = pending.get(id);
   pending.delete(id);
+  promises.delete(id);
   queue = queue.filter((item) => item.id !== id);
   emit();
   resolve?.(confirmed);
@@ -144,6 +172,7 @@ export function __resetAlerts() {
   timers.forEach(clearTimeout);
   timers.clear();
   pending.clear();
+  promises.clear();
   queue = [];
   catalog = DEFAULT_CATALOG;
   nextId = 1;

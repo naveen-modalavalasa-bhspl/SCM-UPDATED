@@ -185,6 +185,18 @@ export function SupplierPODetailPage() {
   const nothingLeft = (po.lines ?? []).every((line) => line.pending_qty <= 0);
   const busy = save.isPending || submit.isPending;
 
+  // The two starred fields, enforced on the SUBMIT only.
+  //
+  // FIXED — the form said "required before you can submit", marked both with an
+  // asterisk, and then submitted without them: a note reached the receiving gate with
+  // no invoice and no e-way bill, which are the two papers the gate checks the vehicle
+  // against. A draft is still allowed to be incomplete — that is what a draft is for —
+  // so "Save draft" is untouched.
+  const missingPapers = [
+    !header.invoice_no?.trim() ? "invoice number" : null,
+    !header.eway_bill_no?.trim() ? "e-way bill number" : null,
+  ].filter(Boolean) as string[];
+
   // An order is an offer to buy. Until it is answered nothing can be despatched
   // against it, and once it is answered the buyer can only change it by amending it —
   // which asks the question again. Orders sent before this step existed carry no
@@ -589,6 +601,13 @@ export function SupplierPODetailPage() {
             </table>
           </div>
 
+          {missingPapers.length > 0 && (
+            <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+              Add the {missingPapers.join(" and the ")} before submitting. It can be
+              saved as a draft without them.
+            </p>
+          )}
+
           <div className="flex flex-wrap justify-end gap-2">
             <Button variant="ghost" disabled={busy} onClick={() => setComposing(false)}>
               Close
@@ -596,7 +615,10 @@ export function SupplierPODetailPage() {
             <Button variant="subtle" disabled={busy} onClick={() => save.mutate()}>
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
-            <Button disabled={busy} onClick={() => submit.mutate()}>
+            <Button
+              disabled={busy || missingPapers.length > 0}
+              onClick={() => submit.mutate()}
+            >
               <Send className="h-4 w-4" /> {submit.isPending ? "Submitting…" : "Submit dispatch"}
             </Button>
           </div>

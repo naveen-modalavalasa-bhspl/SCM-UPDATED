@@ -130,6 +130,27 @@ class TestKeys:
                "client_code": "BILLING", "label": "x", "scopes": []}
         assert "key_hash" not in service._key_out(doc)
 
+    def test_a_row_says_whether_its_copy_press_can_actually_deliver(self):
+        # The list must not offer a copy it cannot honour: a key from before the
+        # console kept a copyable value has only its hash, and the press on that row
+        # asks for the value instead of reporting a failure one click later.
+        raw, prefix, digest = security.new_key()
+        hash_only = {"key_prefix": prefix, "key_hash": digest,
+                     "client_code": "BILLING", "label": "x", "scopes": []}
+        assert service._key_out(hash_only)["can_copy"] is False
+        assert service._key_out(
+            {**hash_only, "key_secret": raw.encode("utf-8").hex()})["can_copy"] is True
+        # Hex that is not a key reads as not copyable rather than raising.
+        assert service._key_out({**hash_only, "key_secret": "zz"})["can_copy"] is False
+
+    def test_the_value_kept_for_copying_is_the_one_that_was_issued(self):
+        raw, _, digest = security.new_key()
+        doc = {"key_secret": raw.encode("utf-8").hex()}
+        assert service._key_text(doc) == raw
+        # Which is what makes attaching one safe: the pasted string only survives if
+        # it hashes to the digest already stored.
+        assert security.hash_key(service._key_text(doc)) == digest
+
     def test_two_keys_are_never_the_same(self):
         assert len({security.new_key()[0] for _ in range(50)}) == 50
 

@@ -8,7 +8,7 @@ A sub-group is a LOCATION group hanging off a parent: the parent decides *who*, 
 child narrows it to *where*, so members are the parent's members restricted to the
 employees at that place.
 """
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -17,6 +17,7 @@ from app.platform.hcm.models import (
     HcmEmployee, HcmFacility, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.rbac.models import Role, UserGroup, UserGroupMember, UserRole
+from app.platform.rbac.profiles import PROFILE_PREFIX
 from app.platform.rbac.service import HCM_ROLE_DESCRIPTION_PREFIX
 from app.shared.enums import GroupType
 from app.shared.models.warehouse import Warehouse
@@ -215,8 +216,20 @@ async def remove_member(db: AsyncSession, group_id: int, employee_id: int) -> di
 
 
 async def list_roles(db: AsyncSession) -> dict:
-    """HCM roles first; temporary SCM access roles are appended."""
-    rows = (await db.execute(select(Role).order_by(
+    """HCM roles first; temporary SCM access roles are appended.
+
+    Job-profile rows (profiles.py) are excluded, as they are by every other roles
+    reader. They are held through a POSITION, never through rbac_user_roles, so
+    filtering the user list by one matched nobody and always came back empty.
+
+    Retired roles stay in the list — an admin still needs to find who holds one —
+    but they are not `assignable`: granting a role that has been retired is how a
+    dead grant gets issued.
+    """
+    rows = (await db.execute(select(Role).where(
+        or_(Role.description.is_(None),
+            Role.description.notlike(f"{PROFILE_PREFIX}%")),
+    ).order_by(
         Role.description.startswith(HCM_ROLE_DESCRIPTION_PREFIX).desc(), Role.name,
     ))).scalars().all()
     return {"items": [{"id": r.id, "code": r.code, "name": r.name,
@@ -224,7 +237,8 @@ async def list_roles(db: AsyncSession) -> dict:
                        "is_active": r.is_active,
                        "source": ("HCM" if (r.description or "").startswith(
                            HCM_ROLE_DESCRIPTION_PREFIX) else "SCM"),
-                       "assignable": not (r.description or "").startswith(
+                       "assignable": r.is_active and not (
+                           r.description or "").startswith(
                            HCM_ROLE_DESCRIPTION_PREFIX)}
                       for r in rows]}
 
