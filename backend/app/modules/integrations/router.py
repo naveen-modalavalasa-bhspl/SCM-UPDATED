@@ -165,10 +165,12 @@ async def update_endpoint(code: str, slug: str, body: EndpointWrite,
     return await service.save_endpoint(db, code, body, user, replacing=slug)
 
 
-@console.delete("/endpoints/{slug}", response_model=EndpointOut)
-async def delete_endpoint(slug: str, db: AsyncSession = Depends(get_db),
+@console.delete("/clients/{code}/endpoints/{slug}", response_model=EndpointOut)
+async def delete_endpoint(code: str, slug: str, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(CONSOLE))):
-    return await service.delete_endpoint(db, slug)
+    """Under `/clients/{code}/`: an address belongs to an application, so a route that
+    took the slug alone could no longer say WHICH /stock it meant."""
+    return await service.delete_endpoint(db, code, slug)
 
 
 @console.get("/clients/{code}/docs")
@@ -182,13 +184,13 @@ async def connection_docs(code: str, request: Request,
     return await service.connection_docs(db, code, base)
 
 
-@console.get("/endpoints/{slug}/sample")
-async def endpoint_sample(slug: str, rows: int = 2,
+@console.get("/clients/{code}/endpoints/{slug}/sample")
+async def endpoint_sample(code: str, slug: str, rows: int = 2,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(VIEW))):
     """A real response from this endpoint, so its shape is seen rather than imagined.
     Runs it exactly as an API key would, with a small page."""
-    return await service.endpoint_sample(db, slug, rows)
+    return await service.endpoint_sample(db, code, slug, rows)
 
 
 @console.get("/clients/{code}/endpoints/export")

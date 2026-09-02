@@ -11,7 +11,9 @@ from app.shared.models.base import utcnow
 class Setting(Base):
     __tablename__ = "sys_settings"
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    setting_key = Column(String(100), unique=True, nullable=False)
+    # 150, not 100: `apis.endpoint.<CLIENT>.<slug>` worst-cases at 105 (see
+    # `integrations/store.MAX_KEY`). Widened by `d3c4b5a6f7e8`.
+    setting_key = Column(String(150), unique=True, nullable=False)
     setting_value = Column(Text, nullable=True)
     value_type = Column(String(20), nullable=False, default="string")
     category = Column(String(50), nullable=True)

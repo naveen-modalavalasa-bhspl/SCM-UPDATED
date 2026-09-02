@@ -70,15 +70,19 @@ export const integrationsApi = {
     Promise<ApiEndpoint> =>
     (await api.put(`${BASE}/clients/${code}/endpoints/${slug}`, body)).data,
 
-  deleteEndpoint: async (slug: string): Promise<ApiEndpoint> =>
-    (await api.delete(`${BASE}/endpoints/${slug}`)).data,
+  /** Under the application: an address belongs to one, so the slug alone could no
+   *  longer say which /stock is meant. */
+  deleteEndpoint: async (code: string, slug: string): Promise<ApiEndpoint> =>
+    (await api.delete(`${BASE}/clients/${code}/endpoints/${slug}`)).data,
 
   /** This application's whole endpoint set, to paste into another deployment.
    *  Carries no keys — see the note on the backend route. */
   exportEndpoints: async (code: string): Promise<EndpointClip> =>
     (await api.get(`${BASE}/clients/${code}/endpoints/export`)).data,
 
-  /** All-or-nothing, and re-validated against the database it lands on. */
+  /** All-or-nothing, and re-validated against the database it lands on. Addresses
+   *  arrive unchanged — each application owns its own copy of an address, so a set
+   *  seeds a new application here or on the next deployment without renaming. */
   importEndpoints: async (code: string, clip: unknown, replace = false):
     Promise<ImportResult> =>
     (await api.post(`${BASE}/clients/${code}/endpoints/import`,
@@ -90,8 +94,9 @@ export const integrationsApi = {
     (await api.get(`${BASE}/clients/${code}/docs`)).data,
 
   /** A real response from one endpoint — the shape seen rather than imagined. */
-  sample: async (slug: string, rows = 2): Promise<unknown> =>
-    (await api.get(`${BASE}/endpoints/${slug}/sample`, { params: { rows } })).data,
+  sample: async (code: string, slug: string, rows = 2): Promise<unknown> =>
+    (await api.get(`${BASE}/clients/${code}/endpoints/${slug}/sample`,
+                   { params: { rows } })).data,
 
   logs: async (code: string,
                query: { page?: number; size?: number; errors_only?: boolean } = {}):

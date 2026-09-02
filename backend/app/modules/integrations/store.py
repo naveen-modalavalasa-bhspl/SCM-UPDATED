@@ -26,10 +26,12 @@ CLIENT = f"{PREFIX}client."
 KEY = f"{PREFIX}key."
 ENDPOINT = f"{PREFIX}endpoint."
 
-# `sys_settings.setting_key` is VARCHAR(100). The longest key this module writes is
-# `apis.endpoint.` + a 60-character slug = 74, so nothing can be silently truncated —
-# which on MySQL would collide two endpoints onto one row.
-MAX_KEY = 100
+# `sys_settings.setting_key` is VARCHAR(150). The longest key this module writes is
+# `apis.endpoint.` + a 30-character client code + `.` + a 60-character slug = 105, so
+# nothing can be silently truncated — which on MySQL would collide two endpoints onto
+# one row. The column was widened from 100 by `d3c4b5a6f7e8` for exactly this: an
+# address is filed under its application, and 74 no longer covers the worst case.
+MAX_KEY = 150
 
 
 def client_key(code: str) -> str:
@@ -40,8 +42,23 @@ def key_key(prefix: str) -> str:
     return f"{KEY}{prefix}"
 
 
-def endpoint_key(slug: str) -> str:
-    return f"{ENDPOINT}{slug}"
+def endpoint_key(client_code: str, slug: str) -> str:
+    """An address is filed UNDER ITS APPLICATION, not globally.
+
+    The API key already says which application is calling, so two of them may each own
+    `/hcm-employees` and each get their own definition. Before this the address was
+    global and had exactly one owner, which meant seeding a second application from a
+    first one's set — the whole point of copy/paste — collided on every single row.
+
+    Upper-cased because `ClientWrite._code` upper-cases the code it stores, so the key
+    is the same however the caller spelled it.
+    """
+    return f"{ENDPOINT}{(client_code or '').strip().upper()}.{slug}"
+
+
+def endpoints_of(client_code: str) -> str:
+    """The key prefix every one of an application's endpoints starts with."""
+    return f"{ENDPOINT}{(client_code or '').strip().upper()}."
 
 
 async def put(db: AsyncSession, key: str, payload: dict, description: str = "") -> None:

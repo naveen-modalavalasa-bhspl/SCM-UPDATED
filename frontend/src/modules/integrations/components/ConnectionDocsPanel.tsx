@@ -36,7 +36,7 @@ export function ConnectionDocsPanel({ clientCode }: { clientCode: string }) {
   const fetchSample = async (slug: string) => {
     setLoading(slug);
     try {
-      const body = await integrationsApi.sample(slug, 2);
+      const body = await integrationsApi.sample(clientCode, slug, 2);
       setSamples((held) => ({ ...held, [slug]: JSON.stringify(body, null, 2) }));
     } catch {
       setSamples((held) => ({

@@ -33,6 +33,11 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
   const [problem, setProblem] = useState("");
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveText, setMoveText] = useState("");
+  /* The paste box's OWN refusal, deliberately not `problem`. That one is rendered
+   * inside the Build-an-API dialog, which is closed during a paste — so routing the
+   * server's reason through it wrote the message to a surface nobody could see, and
+   * a refused paste read as a dead button: no error, no toast, nothing applied. */
+  const [moveProblem, setMoveProblem] = useState("");
 
   const list = useQuery({
     queryKey: ["apis", "endpoints", clientCode],
@@ -147,7 +152,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["apis", "endpoints", clientCode] });
       setMoveOpen(false);
-      setProblem("");
+      setMoveProblem("");
       toast.success(
         `${result.created} added, ${result.updated} updated`
         + (result.retired ? `, ${result.retired} switched off` : ""),
@@ -155,7 +160,8 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
     },
     // The server refuses the WHOLE clip when any one API does not fit, and says which
     // ones — that message is the useful part, so it is surfaced rather than replaced.
-    onError: (error) => setProblem(
+    // What it refuses for now is a table or column this deployment does not have.
+    onError: (error) => setMoveProblem(
       (error as { response?: { data?: { error?: string } } })?.response?.data?.error
       || "Those APIs could not be applied here.",
     ),
@@ -166,9 +172,10 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
     try {
       clip = JSON.parse(moveText);
     } catch {
-      setProblem("That is not a copied set of APIs.");
+      setMoveProblem("That is not a copied set of APIs.");
       return;
     }
+    setMoveProblem("");
     importSet.mutate({ clip, replace });
   };
 
@@ -190,7 +197,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
   });
 
   const remove = useMutation({
-    mutationFn: (slug: string) => integrationsApi.deleteEndpoint(slug),
+    mutationFn: (slug: string) => integrationsApi.deleteEndpoint(clientCode, slug),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["apis"] });
       toast.success("Endpoint switched off");
@@ -364,7 +371,9 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
               : "Move APIs between deployments"}
           </p>
           <p className="text-xs text-muted">
-            Copy on one deployment, paste on the next. Keys never travel — each
+            Seed an application from a set somebody already built — another
+            application here, or this one on the next deployment. Addresses arrive
+            unchanged, because each application owns its own. Keys never travel; each
             deployment issues its own. Nothing is applied unless every API in the box
             fits this database, so a paste either lands whole or not at all.
           </p>
@@ -376,6 +385,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
             className="min-h-32 w-full rounded-lg border border-line bg-content1 p-3
                        font-mono text-xs text-ink"
           />
+
           <div className="flex flex-wrap items-center gap-2">
             <Button disabled={!moveText.trim() || importSet.isPending}
                     onClick={() => runImport(false)}>
@@ -390,6 +400,11 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
             </Button>
             <Button variant="ghost" onClick={() => setMoveOpen(false)}>Close</Button>
           </div>
+          {/* In the box, under the buttons that caused it. The clip is all-or-nothing,
+            * so a refusal means nothing changed — and the server names the APIs it
+            * choked on, which is the only way to tell "this set belongs to another
+            * application" apart from "this table is not on this deployment". */}
+          {moveProblem && <ErrorBanner error={moveProblem} />}
         </Card>
       )}
 
