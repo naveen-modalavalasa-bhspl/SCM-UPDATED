@@ -9,6 +9,9 @@ from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.shared.time import not_in_past
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchDocuments, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
+)
 
 
 class StockRow(BaseModel):
@@ -191,7 +194,7 @@ class MRCreateIn(BaseModel):
     indent it is working, and the Material Requests screen raises a free-standing
     buy that no indent asked for. Same document either way.
     """
-    items: list[MRLineIn] = Field(min_length=1)
+    items: list[MRLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     indent_id: int | None = None
     indent_no: str | None = None
     priority: str | None = None
@@ -211,7 +214,7 @@ class MRLineReviseIn(BaseModel):
 
 
 class MRReviseIn(BaseModel):
-    lines: list[MRLineReviseIn] = Field(default_factory=list)
+    lines: list[MRLineReviseIn] = Field(default_factory=list, max_length=MAX_DOCUMENT_LINES)
     comments: str = ""
 
 
@@ -282,13 +285,13 @@ class AllocationDecisionIn(BaseModel):
 
 class AllocationIn(BaseModel):
     indent_id: int
-    decisions: list[AllocationDecisionIn]
+    decisions: Annotated[list[AllocationDecisionIn], DocumentLines]
     remarks: str | None = None
 
 
 class AllocBatchActionIn(BaseModel):
     """Approve or reject a whole cycle's allocations in one act."""
-    allocation_ids: list[int]
+    allocation_ids: Annotated[list[int], BatchIds]
     comments: str = ""
 
 
@@ -307,7 +310,7 @@ class AllocationRevisionIn(BaseModel):
 class AllocApproveIn(BaseModel):
     """Approve, optionally revising the quantities first."""
     comments: str = ""
-    revisions: list[AllocationRevisionIn] = Field(default_factory=list)
+    revisions: list[AllocationRevisionIn] = Field(default_factory=list, max_length=MAX_DOCUMENT_LINES)
 
 
 class AllocationLineAvailability(BaseModel):
@@ -333,7 +336,7 @@ class AllocationLineAvailability(BaseModel):
 
 
 class AllocationHistoryBatchIn(BaseModel):
-    allocation_ids: list[int]
+    allocation_ids: Annotated[list[int], BatchIds]
 
 
 class AllocationBatchIn(BaseModel):
@@ -343,7 +346,7 @@ class AllocationBatchIn(BaseModel):
     batch screen is a faster way to fill them in, not a different decision. Each still
     becomes its own allocation with its own ladder, so nothing about how a reservation
     is written or approved changes."""
-    allocations: list[AllocationIn]
+    allocations: Annotated[list[AllocationIn], BatchDocuments]
 
 
 class AllocationBatchFailureOut(BaseModel):
@@ -415,7 +418,7 @@ class AdjustmentIn(BaseModel):
     # a bad value comes back as the app's own error shape rather than a Pydantic 422.
     reason: str
     remarks: str | None = None
-    items: list[AdjustmentItemIn]
+    items: Annotated[list[AdjustmentItemIn], DocumentLines]
 
 
 class AdjustmentRejectIn(BaseModel):
@@ -659,7 +662,7 @@ class STOIn(BaseModel):
     from_project_id: int = 0
     to_project_id: int = 0
     remarks: str | None = None
-    items: list[STOItemIn]
+    items: Annotated[list[STOItemIn], DocumentLines]
 
 
 class STOItemOut(BaseModel):
@@ -703,7 +706,7 @@ class CycleCountIn(BaseModel):
     warehouse_id: int
     count_date: date
     remarks: str | None = None
-    item_ids: list[int] = Field(default_factory=list)
+    item_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
 
 
 class CycleCountItemUpdateIn(BaseModel):
@@ -714,7 +717,7 @@ class CycleCountItemUpdateIn(BaseModel):
 
 class CycleCountUpdateIn(BaseModel):
     remarks: str | None = None
-    items: list[CycleCountItemUpdateIn]
+    items: Annotated[list[CycleCountItemUpdateIn], DocumentLines]
 
 
 class CycleCountItemOut(BaseModel):

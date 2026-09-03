@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
@@ -28,26 +29,43 @@ async def lifespan(app: FastAPI):
     from app.platform.workflow import scheduler as approval_scheduler
     from app.core.database import SessionLocal
 
-    scheduler.start()
-    try:
-        async with SessionLocal() as db:
-            enabled, interval = await get_hcm_schedule(db)
-        scheduler.configure(enabled, interval)
-    except Exception as exc:  # don't block startup if settings/DB not ready
-        log.warning("HCM scheduler not configured at startup: %s", exc)
+    # ONE process in the deployment runs the schedulers (2026-09-03).
+    #
+    # They were started unconditionally, which is why the app could not be run with
+    # more than one worker: two schedulers mean the HCM sync fires twice — two
+    # concurrent syncs writing the same mirror tables — and every overdue-approval
+    # reminder is delivered twice to a real person. That was one of the three pieces
+    # of in-process state blocking `--workers`, and it is the one with visible
+    # consequences outside the system.
+    #
+    # `RUN_SCHEDULERS` defaults TRUE, so a single developer process is unchanged. In
+    # compose it is true on exactly one single-replica `worker` service and false on
+    # every web worker. A separate container rather than a leader lock or an APScheduler
+    # job store: it is simpler to reason about, and it moves the sync's 3,733-position
+    # mirror off the loop that is serving user traffic at the same time.
+    if settings.RUN_SCHEDULERS:
+        scheduler.start()
+        try:
+            async with SessionLocal() as db:
+                enabled, interval = await get_hcm_schedule(db)
+            scheduler.configure(enabled, interval)
+        except Exception as exc:  # don't block startup if settings/DB not ready
+            log.warning("HCM scheduler not configured at startup: %s", exc)
 
-    # Overdue-approval chasing. Its own scheduler so a slow HCM sync cannot delay it,
-    # and so turning one off leaves the other alone. Ships disabled: it writes
-    # notifications to real people, and that is an administrator's decision to make.
-    approval_scheduler.start()
-    try:
-        from app.platform.workflow import reminders
+        # Overdue-approval chasing. Its own scheduler so a slow HCM sync cannot delay
+        # it, and so turning one off leaves the other alone. Ships disabled: it writes
+        # notifications to real people, and that is an administrator's decision to make.
+        approval_scheduler.start()
+        try:
+            from app.platform.workflow import reminders
 
-        async with SessionLocal() as db:
-            config = await reminders.get_config(db)
-        approval_scheduler.configure(config["enabled"], config["interval_minutes"])
-    except Exception as exc:
-        log.warning("Approval reminder scheduler not configured at startup: %s", exc)
+            async with SessionLocal() as db:
+                config = await reminders.get_config(db)
+            approval_scheduler.configure(config["enabled"], config["interval_minutes"])
+        except Exception as exc:
+            log.warning("Approval reminder scheduler not configured at startup: %s", exc)
+    else:
+        log.info("RUN_SCHEDULERS is off — this process serves requests only")
 
     # Register screens added since the last deploy. Additive only — it never drops a
     # page — so unlike scripts.seed this is safe to run against the live database.
@@ -103,8 +121,12 @@ CREATE TABLE IF NOT EXISTS pro_po_comments (
     except Exception as exc:
         log.warning("pro_po_comments ensure skipped: %s", exc)
     yield
-    scheduler.shutdown()
-    approval_scheduler.shutdown()
+    if settings.RUN_SCHEDULERS:
+        scheduler.shutdown()
+        approval_scheduler.shutdown()
+    from app.core import cache
+
+    await cache.close()
 
 
 app = FastAPI(title="SCM ERP", version="0.1.0", lifespan=lifespan)
@@ -129,6 +151,13 @@ async def request_identity(request, call_next):
     response.headers["X-Request-ID"] = request.state.request_id
     return response
 
+# API responses over the wire, compressed (2026-09-03). nginx gzips the static bundle;
+# this covers what nginx PROXIES — the JSON, which is where a list screen's 300 KB
+# page of rows lives, and which a warehouse tablet on 4G pays for on every filter
+# change. 500 bytes is the usual floor: below it the header overhead and the CPU are
+# not worth the saving.
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -152,6 +181,50 @@ app.add_exception_handler(DataError, data_error_handler)
 # which. The constraint name never leaves the log — see integrity_error_handler.
 app.add_exception_handler(IntegrityError, integrity_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
+
+
+# Per-endpoint latency histograms, request counts and error rates on /metrics
+# (2026-09-03). The scan that preceded this found ZERO references to Prometheus,
+# OpenTelemetry, Sentry or statsd anywhere in the codebase. There is a good in-app
+# error log (platform/admin/app_logs.py, and it redacts properly), but nothing
+# measured latency, throughput, error rate or pool saturation — so at 2,000 users
+# "the app is slow" arrives as a phone call and there is no way to say which of the
+# twenty known causes it was. That is the difference between an outage measured in
+# minutes and one measured in days.
+#
+# Off unless METRICS_ENABLED, and the proxy does not forward /metrics: it is an
+# unauthenticated endpoint that names every route in the system.
+if settings.METRICS_ENABLED:
+    try:
+        from prometheus_fastapi_instrumentator import Instrumentator
+
+        Instrumentator().instrument(app).expose(app, include_in_schema=False)
+
+        # The pool gauge, which is the one number that says whether B-02 has been
+        # sized correctly on this host. Saturation is invisible from the outside:
+        # it presents as latency, and the fix (raise the pool, raise the server's
+        # max_connections) is the opposite of the fix for a slow query.
+        from prometheus_client import Gauge
+
+        from app.core.database import engine
+
+        def _pool(fn):
+            def read():
+                try:
+                    return float(fn(engine.pool))
+                except Exception:
+                    return 0.0
+            return read
+
+        Gauge("db_pool_checked_out", "Connections currently in use").set_function(
+            _pool(lambda pool: pool.checkedout()))
+        Gauge("db_pool_size", "Connections the pool holds").set_function(
+            _pool(lambda pool: pool.size()))
+        Gauge("db_pool_overflow", "Connections opened beyond pool_size").set_function(
+            _pool(lambda pool: pool.overflow()))
+        log.info("Metrics exposed on /metrics")
+    except Exception as exc:
+        log.warning("METRICS_ENABLED is set but instrumentation failed: %s", exc)
 
 
 @app.get("/health", tags=["health"])

@@ -16,6 +16,12 @@ python-multipart==0.0.20
 httpx==0.28.1
 tenacity==9.0.0
 APScheduler==3.10.4
+# The shared cache, rate limiter and cross-worker state (app/core/cache.py). OPTIONAL
+# at runtime: with REDIS_URL unset every user of it falls back to a per-process dict.
+redis==5.2.1
+# Per-endpoint latency histograms and the connection-pool gauge on /metrics, behind
+# METRICS_ENABLED (app/main.py). Nothing measured anything before 2026-09-03.
+prometheus-fastapi-instrumentator==7.0.0
 # Masters template/export/import (app/shared/masters/bulk.py).
 openpyxl==3.1.5
 pytest==8.3.4

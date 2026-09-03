@@ -1,15 +1,21 @@
 """Employee authentication and selected-position session context."""
+from datetime import timedelta
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core import cache
+from app.core.config import settings
 from app.core.exceptions import (
     AuthenticationError,
     NotFoundError,
     PermissionError_,
     ValidationError,
 )
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import (
+    create_access_token, hash_password_async, verify_password_async,
+)
 from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment,
@@ -32,7 +38,57 @@ BAD_CREDENTIALS = (
 )
 
 
-async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[HcmEmployee, str]:
+#: What a locked account is told. Unlike BAD_CREDENTIALS this does confirm the account
+#: exists — deliberately: by the time it is shown, whoever is typing has already made
+#: `LOGIN_MAX_FAILED_ATTEMPTS` failed attempts against it, so it tells an attacker
+#: nothing they did not already learn by causing the lockout, and it is the difference
+#: between a locked-out storekeeper calling the help desk and one retyping their
+#: password for ten minutes.
+ACCOUNT_LOCKED = (
+    "Too many failed sign-in attempts. This account is locked for {minutes} minutes."
+)
+#: What the address-level throttle says. No account is named, because at this point
+#: none has been looked up.
+TOO_MANY_ATTEMPTS = (
+    "Too many sign-in attempts from this device. Wait a minute and try again."
+)
+
+
+async def _register_failure(db: AsyncSession, cred: UserCredential) -> None:
+    """Count one bad password, and lock the account once there are too many.
+
+    FIXED 2026-09-03. `failed_attempts` and `locked_until` have been columns on
+    `sys_user_credentials` since the beginning and NOTHING ever incremented them —
+    `change_password` cleared them, which was the only code that touched either. So
+    the lockout existed on the screen, in the model and in the admin's mental model,
+    and did not exist in fact: password guessing was unlimited against a 300 ms bcrypt
+    on an unthrottled endpoint.
+
+    Committed even though the caller is about to raise: a counter that is rolled back
+    with the failed request counts nothing.
+    """
+    cred.failed_attempts = (cred.failed_attempts or 0) + 1
+    if cred.failed_attempts >= settings.LOGIN_MAX_FAILED_ATTEMPTS:
+        cred.locked_until = utcnow() + timedelta(minutes=settings.LOGIN_LOCKOUT_MINUTES)
+        cred.failed_attempts = 0
+    await db.commit()
+
+
+async def authenticate(db: AsyncSession, username: str, password: str,
+                       client_ip: str | None = None) -> tuple[HcmEmployee, str]:
+    # Per-address throttle, ahead of everything including the employee lookup.
+    #
+    # Per-account lockout alone does not cover the attack that matters here: one
+    # attempt each against a thousand employee ids trips no single account's counter,
+    # and every one of those attempts costs a 300 ms bcrypt on the shared event loop.
+    # An unmetered login endpoint in front of bcrypt is a denial-of-service button —
+    # ~100 requests per second takes the whole application down without a single valid
+    # credential. nginx's `limit_req` guards the same door from outside; this one also
+    # holds when the API is reached directly.
+    if client_ip and not await cache.allow(
+            f"login:ip:{client_ip}", settings.LOGIN_RATE_PER_MINUTE):
+        raise AuthenticationError(TOO_MANY_ATTEMPTS, code="RATE_LIMITED")
+
     employee_id = int(username) if username.strip().isdigit() else None
     employee = (await db.execute(
         select(HcmEmployee).where(
@@ -51,10 +107,23 @@ async def authenticate(db: AsyncSession, username: str, password: str) -> tuple[
         raise AuthenticationError(BAD_CREDENTIALS, code="INVALID_CREDENTIALS")
 
     cred = await db.get(UserCredential, employee.id)
-    if not cred or not verify_password(password, cred.password_hash):
+    # Checked BEFORE the hash: a locked account must not go on paying for a bcrypt per
+    # attempt, or the lockout stops the guessing and not the load it causes.
+    if cred is not None and cred.locked_until and cred.locked_until > utcnow():
+        raise AuthenticationError(
+            ACCOUNT_LOCKED.format(minutes=settings.LOGIN_LOCKOUT_MINUTES),
+            code="ACCOUNT_LOCKED")
+
+    if not cred or not await verify_password_async(password, cred.password_hash):
+        if cred is not None:
+            await _register_failure(db, cred)
         raise AuthenticationError(BAD_CREDENTIALS, code="INVALID_CREDENTIALS")
 
     cred.last_login_at = utcnow()
+    # A sign-in that works is what clears the count — otherwise a user who fumbles
+    # their password twice a day is locked out by the end of the week.
+    cred.failed_attempts = 0
+    cred.locked_until = None
     await db.commit()
 
     position = await rbac_service.get_default_position(db, employee.id)
@@ -258,15 +327,15 @@ async def change_password(db: AsyncSession, user: HcmEmployee,
     invitation to mint one.
     """
     cred = await db.get(UserCredential, user.id)
-    if cred is None or not verify_password(current, cred.password_hash):
+    if cred is None or not await verify_password_async(current, cred.password_hash):
         raise AuthenticationError("Current password is incorrect")
     if len(new) < MIN_PASSWORD_LENGTH:
         raise ValidationError(
             f"Use at least {MIN_PASSWORD_LENGTH} characters for the new password")
-    if verify_password(new, cred.password_hash):
+    if await verify_password_async(new, cred.password_hash):
         raise ValidationError("The new password must differ from the current one")
 
-    cred.password_hash = hash_password(new)
+    cred.password_hash = await hash_password_async(new)
     cred.must_change = False
     # A password the owner just proved they know clears the failed-attempt lock;
     # leaving it set would lock them out of the credential they had just replaced.

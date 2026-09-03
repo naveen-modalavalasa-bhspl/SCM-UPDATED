@@ -4,6 +4,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 
 from app.modules.indents.enums import IndentType
 from app.shared.time import iso as ist_iso, not_in_past
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchIds, DocumentLines, MAX_DOCUMENT_LINES,
+)
 
 
 def _utc_iso(value: datetime | None) -> str | None:
@@ -28,7 +31,7 @@ class IndentCreate(BaseModel):
     indent_type: IndentType = IndentType.REGULAR
     vehicle_id: int | None = None
     remarks: str | None = None
-    items: list[IndentItemIn]
+    items: Annotated[list[IndentItemIn], DocumentLines]
 
 
 class IndentUpdate(BaseModel):
@@ -38,7 +41,7 @@ class IndentUpdate(BaseModel):
     vehicle_id: int | None = None
     office_id: int | None = None
     remarks: str | None = None
-    items: list[IndentItemIn] | None = None
+    items: Annotated[list[IndentItemIn], DocumentLines] | None = None
 
 
 class MonthlyCopyIn(BaseModel):
@@ -51,7 +54,7 @@ class MonthlyCopyIn(BaseModel):
 
 
 class MonthlySubmitIn(BaseModel):
-    indent_ids: list[int]
+    indent_ids: Annotated[list[int], BatchIds]
 
 
 class ActionIn(BaseModel):
@@ -237,7 +240,7 @@ class AcknowledgeLineIn(BaseModel):
 
 
 class AcknowledgeIn(BaseModel):
-    lines: list[AcknowledgeLineIn] = Field(min_length=1)
+    lines: list[AcknowledgeLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     #: What state the goods arrived in. GOOD or DAMAGED only — SHORT is NOT asked for
     #: and must never be, because the quantities above already say it: a requester who
     #: types 6 against 10 dispatched has reported the shortage. Offering a SHORT flag

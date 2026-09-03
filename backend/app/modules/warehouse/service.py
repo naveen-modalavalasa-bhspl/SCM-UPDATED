@@ -64,6 +64,7 @@ from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
+from app.shared.limits import MAX_UNITS_PER_CODE_MINT, UNIT_MINT_CHUNK
 
 logger = logging.getLogger(__name__)
 
@@ -3962,17 +3963,32 @@ async def _place_unit_codes(
     # code, so with no code there is nothing to record.
     if not codeformat.is_code_tracked(item, config):
         return
-
-    if units > 1000:
-        label = "Asset" if is_asset else "Consumable"
+    # A LARGE QUANTITY IS FINE. Coding that many units individually, in one request,
+    # is not (2026-09-03).
+    #
+    # This loop mints one `whs_serial_numbers` row per whole unit, driven by the
+    # QUANTITY -- so it is not covered by any of the request-list caps in
+    # `shared/limits.py`. At 300,000 units it builds 300,000 ORM objects, inserts
+    # them, re-reads every serial for the item, names them and updates them, all
+    # inside one transaction holding one pooled connection, under an nginx that gives
+    # up at 60 seconds. It does not finish: the proxy returns 504 while the work
+    # carries on holding its locks, or the worker is recycled and the whole thing
+    # rolls back -- and either way the storekeeper has no idea which happened.
+    #
+    # Refused rather than silently degraded to a lot code: quietly not coding units
+    # somebody asked to have coded is a traceability change, and that is a decision
+    # for the business, not for a size limit. The way out is a smaller receipt today
+    # and a chunked background job once the queue exists.
+    if int(units) > MAX_UNITS_PER_CODE_MINT:
         raise ValidationError(
-            f"Cannot generate individual {label} tracking codes for {int(units)} units "
-            f"of {item.code} at once. Please turn off '{label} Tracking' for this item "
-            f"under Masters > Items > Tracking, or reduce the putaway quantity."
+            f"This line would give individual codes to {int(units):,} units, and one "
+            f"request may code at most {MAX_UNITS_PER_CODE_MINT:,}. The quantity "
+            "itself is not the problem -- receive it in smaller putaways, or turn "
+            "unit coding off for this item if its units are not tracked individually."
         )
 
     rows: list[m.SerialNumber] = []
-    for _ in range(int(units)):
+    for index in range(int(units)):
         row = m.SerialNumber(
             # `whs_serial_numbers.serial_number` is UNIQUE in the live database (the
             # ORM does not declare it, so nothing here warned about it). Every unit of
@@ -3988,6 +4004,11 @@ async def _place_unit_codes(
         )
         db.add(row)
         rows.append(row)
+        # Flushed in chunks so peak memory is bounded by UNIT_MINT_CHUNK rather than
+        # by the line quantity. The ids are needed before the codes can be built
+        # either way -- see below.
+        if (index + 1) % UNIT_MINT_CHUNK == 0:
+            await db.flush()
     # Flushed first: the code formula runs off the row id when there is no serial to
     # build on, so the rows must exist before they can be named.
     await db.flush()
@@ -3996,12 +4017,18 @@ async def _place_unit_codes(
     # collide either. Read once, and only for this item: `{seq}` makes the default
     # shape unique on its own, but the format is a SETTING and a shape without it
     # renders the same string for all 30 units of a line.
+    # Excluded by their PLACEHOLDER, not by an id list (2026-09-03). This was
+    # `id NOT IN (<every row just inserted>)`, which renders the whole id list into
+    # one SQL statement: fine for a line of 30, megabytes of SQL for a line of
+    # 300,000, and a query the planner cannot use an index for either way. The rows
+    # being excluded are exactly the ones still holding the `~PENDING-` placeholder,
+    # so saying that directly is both cheaper and clearer.
     taken = {
         code.strip().lower()
         for code in (await db.execute(
             select(m.SerialNumber.serial_number)
             .where(m.SerialNumber.item_id == item_id,
-                   m.SerialNumber.id.notin_([row.id for row in rows]))
+                   ~m.SerialNumber.serial_number.startswith("~PENDING-"))
         )).scalars()
         if code
     }
@@ -10917,9 +10944,42 @@ async def scan(db: AsyncSession, code: str) -> s.ScanResult:
 # same store for delivery photos and bills. Re-exported under the names the warehouse
 # router already calls, so its endpoints are unchanged.
 list_attachments = attachments.list_attachments
-add_attachment = attachments.add_attachment
 attachment_file = attachments.attachment_file
-delete_attachment = attachments.delete_attachment
+
+
+async def add_attachment(db: AsyncSession, *, entity_type: str, entity_id: int,
+                         upload, doc_category: str | None, user):
+    """File one against a warehouse document this login may actually work.
+
+    FIXED 2026-09-03 — this was the platform function re-exported raw, and its route
+    takes `entity_type` and `entity_id` as FORM FIELDS. Anyone holding `receipt.create`
+    could therefore post a file against any receipt, inspection, issue or dispatch in
+    the company, at any warehouse — false evidence filed on somebody else's document,
+    which is the whole reason attachments exist on these papers. `assert_attachment_scope`
+    is the same check the list and download routes have run since they were fixed; it
+    also refuses an `entity_type` that is not one of the four, so the form field can no
+    longer file bytes under an arbitrary key that only another module reads.
+    """
+    await assert_attachment_scope(db, user, entity_type, entity_id)
+    return await attachments.add_attachment(
+        db, entity_type=entity_type, entity_id=entity_id, upload=upload,
+        doc_category=doc_category, user=user)
+
+
+async def delete_attachment(db: AsyncSession, attachment_id: int, user) -> None:
+    """Remove one, once this login is proved to hold the document it hangs on.
+
+    FIXED 2026-09-03 — likewise re-exported raw, and addressed by attachment id alone.
+    `receipt.create` was a licence to delete ANY row in `sys_attachments`: another
+    warehouse's QC photographs, an indent's delivery proof, a shipment's way bill.
+    The row is read first so the check runs against the document it actually names.
+    """
+    row = await attachments.require_attachment(
+        db, attachment_id, entity_type=tuple(_ATTACHMENT_PARENTS))
+    await assert_attachment_scope(db, user, row.entity_type, row.entity_id)
+    await attachments.delete_attachment(
+        db, attachment_id, user,
+        entity_type=row.entity_type, entity_id=row.entity_id)
 
 
 async def list_notifications(db: AsyncSession, params: PageParams, user, *,

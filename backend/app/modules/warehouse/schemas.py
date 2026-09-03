@@ -16,6 +16,11 @@ from app.modules.warehouse.enums import (
     IssueType, PickStrategy, ReceiptType,
 )
 from app.shared.models.warehouse import STORAGE_TYPES
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchIds, ConfigEntries, DocumentLines, SerialList,
+    MAX_BATCH_IDS, MAX_DOCUMENT_LINES, MAX_SERIALS_PER_LINE,
+    assert_serial_budget,
+)
 
 ORM = ConfigDict(from_attributes=True)
 
@@ -437,8 +442,8 @@ class ReceiptItemWrite(BaseModel):
     bin_id: int | None = None
     rejection_reason: str | None = None
     remarks: str | None = None
-    serial_numbers: list[str] | None = None
-    imei_numbers: list[str] | None = None
+    serial_numbers: Annotated[list[str], SerialList] | None = None
+    imei_numbers: Annotated[list[str], SerialList] | None = None
     # Display only, like item_code above, and ignored on the way in — the service
     # reads tracking off the item master. Here so a PRE-FILLED line can render its
     # serial and IMEI cells instead of hiding the numbers it was handed.
@@ -482,7 +487,19 @@ class ReceiptWrite(BaseModel):
     lr_no: str | None = None
     gate_entry_no: str | None = None
     remarks: str | None = None
-    items: list[ReceiptItemWrite] = Field(default_factory=list)
+    items: list[ReceiptItemWrite] = Field(default_factory=list, max_length=MAX_DOCUMENT_LINES)
+
+    @model_validator(mode="after")
+    def _serial_budget(self):
+        """One request may not carry more units than a worker should.
+
+        The per-line cap is not enough on its own: ReceiptWrite accepts up to
+        MAX_DOCUMENT_LINES lines, each with up to MAX_SERIALS_PER_LINE
+        serials, and that product is half a million units in one
+        transaction -- the exact shape that locks the warehouse tables and
+        runs past the proxy timeout."""
+        assert_serial_budget(self, "items")
+        return self
 
 
 class ReceiptItemRead(_Read):
@@ -640,13 +657,13 @@ class InspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
-    parameters: list[InspectionParameter] | None = None
+    parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
     rejection_reason: str | None = None
     remarks: str | None = None
-    serial_numbers: list[str] | None = None
-    imei_numbers: list[str] | None = None
+    serial_numbers: Annotated[list[str], SerialList] | None = None
+    imei_numbers: Annotated[list[str], SerialList] | None = None
 
 
 class InspectionWrite(BaseModel):
@@ -656,7 +673,19 @@ class InspectionWrite(BaseModel):
     inspection_type: InspectionType = InspectionType.INCOMING
     inspector_id: int | None = None
     remarks: str | None = None
-    items: list[InspectionItemWrite] = []
+    items: Annotated[list[InspectionItemWrite], DocumentLines] = []
+
+    @model_validator(mode="after")
+    def _serial_budget(self):
+        """One request may not carry more units than a worker should.
+
+        The per-line cap is not enough on its own: InspectionWrite accepts up to
+        MAX_DOCUMENT_LINES lines, each with up to MAX_SERIALS_PER_LINE
+        serials, and that product is half a million units in one
+        transaction -- the exact shape that locks the warehouse tables and
+        runs past the proxy timeout."""
+        assert_serial_budget(self, "items")
+        return self
 
 
 class InspectionItemRead(_Read):
@@ -712,7 +741,7 @@ class OutboundInspectionItemWrite(BaseModel):
     batch_no: str | None = None
     inspected_qty: Decimal = Decimal("0")
     accepted_qty: Decimal = Decimal("0")
-    parameters: list[InspectionParameter] | None = None
+    parameters: Annotated[list[InspectionParameter], ConfigEntries] | None = None
     result: InspectionResult = InspectionResult.PENDING
     defect_type: str | None = None
     rejection_reason: str | None = None
@@ -725,7 +754,7 @@ class OutboundInspectionWrite(BaseModel):
     warehouse_id: int | None = None
     inspector_id: int | None = None
     remarks: str | None = None
-    items: list[OutboundInspectionItemWrite] = []
+    items: Annotated[list[OutboundInspectionItemWrite], DocumentLines] = []
 
 
 class OutboundInspectionItemRead(_Read):
@@ -929,7 +958,7 @@ class PutawayCreate(BaseModel):
     means every eligible line on the GRN.
     """
     grn_id: int
-    grn_item_ids: list[int] = Field(default_factory=list)
+    grn_item_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
 
 
 class PutawayCandidate(BaseModel):
@@ -1000,8 +1029,8 @@ class StockMovementWrite(BaseModel):
     item_id: int
     batch_id: int | None = None
     quantity: Decimal = Field(gt=0)
-    serial_numbers: list[str] | None = None
-    imei_numbers: list[str] | None = None
+    serial_numbers: Annotated[list[str], SerialList] | None = None
+    imei_numbers: Annotated[list[str], SerialList] | None = None
     remarks: str | None = Field(default=None, max_length=500)
 
 
@@ -1039,7 +1068,7 @@ class StockMovementOrderItemWrite(BaseModel):
     destination_bin_id: int
     quantity: Decimal = Field(gt=0)
     batch_id: int | None = None
-    serial_numbers: list[str] | None = None
+    serial_numbers: Annotated[list[str], SerialList] | None = None
 
     @model_validator(mode='after')
     def check_bins(self):
@@ -1051,7 +1080,19 @@ class StockMovementOrderItemWrite(BaseModel):
 class StockMovementOrderWrite(BaseModel):
     warehouse_id: int
     reason: str | None = Field(default=None, max_length=500)
-    items: list[StockMovementOrderItemWrite] = Field(min_length=1)
+    items: list[StockMovementOrderItemWrite] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+
+    @model_validator(mode="after")
+    def _serial_budget(self):
+        """One request may not carry more units than a worker should.
+
+        The per-line cap is not enough on its own: StockMovementOrderWrite accepts up to
+        MAX_DOCUMENT_LINES lines, each with up to MAX_SERIALS_PER_LINE
+        serials, and that product is half a million units in one
+        transaction -- the exact shape that locks the warehouse tables and
+        runs past the proxy timeout."""
+        assert_serial_budget(self, "items")
+        return self
 
 
 class StockMovementOrderItemRead(BaseModel):
@@ -1123,7 +1164,7 @@ class PickingWrite(BaseModel):
     ref_id: int | None = None
     strategy: PickStrategy = PickStrategy.FEFO
     assigned_to_id: int | None = None
-    items: list[PickingItemWrite] = []
+    items: Annotated[list[PickingItemWrite], DocumentLines] = []
 
 
 class PickLine(BaseModel):
@@ -1192,8 +1233,8 @@ class IssueItemWrite(BaseModel):
     issued_qty: Decimal | None = None
     rate: Decimal | None = None
     remarks: str | None = None
-    serial_numbers: list[str] | None = None
-    imei_numbers: list[str] | None = None
+    serial_numbers: Annotated[list[str], SerialList] | None = None
+    imei_numbers: Annotated[list[str], SerialList] | None = None
 
 
 class IssueWrite(BaseModel):
@@ -1213,7 +1254,19 @@ class IssueWrite(BaseModel):
     direction: IssueDirection = IssueDirection.OUT
     original_issue_id: int | None = None
     remarks: str | None = None
-    items: list[IssueItemWrite] = []
+    items: Annotated[list[IssueItemWrite], DocumentLines] = []
+
+    @model_validator(mode="after")
+    def _serial_budget(self):
+        """One request may not carry more units than a worker should.
+
+        The per-line cap is not enough on its own: IssueWrite accepts up to
+        MAX_DOCUMENT_LINES lines, each with up to MAX_SERIALS_PER_LINE
+        serials, and that product is half a million units in one
+        transaction -- the exact shape that locks the warehouse tables and
+        runs past the proxy timeout."""
+        assert_serial_budget(self, "items")
+        return self
 
 
 class IssueItemRead(_Read):
@@ -1391,7 +1444,7 @@ class DispatchWrite(BaseModel):
     freight_amount: Decimal | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
-    items: list[DispatchItemWrite] = []
+    items: Annotated[list[DispatchItemWrite], DocumentLines] = []
 
 
 class PackageWrite(BaseModel):
@@ -1404,7 +1457,7 @@ class PackageWrite(BaseModel):
     height_cm: Decimal | None = None
     is_fragile: bool = False
     is_temp_controlled: bool = False
-    item_ids: list[int] = []
+    item_ids: Annotated[list[int], BatchIds] = []
 
 
 class ConsignmentPackageItemWrite(BaseModel):
@@ -1412,7 +1465,7 @@ class ConsignmentPackageItemWrite(BaseModel):
     item_id: int
     batch_id: int | None = None
     serial_no: str | None = None
-    serial_numbers: list[str] = []
+    serial_numbers: Annotated[list[str], SerialList] = []
     quantity: Decimal
     rate: Decimal | None = None
     remarks: str | None = None
@@ -1428,12 +1481,24 @@ class ConsignmentPackageWrite(BaseModel):
     height_cm: Decimal | None = None
     is_fragile: bool = False
     is_temp_controlled: bool = False
-    items: list[ConsignmentPackageItemWrite] = []
+    items: Annotated[list[ConsignmentPackageItemWrite], DocumentLines] = []
 
     @field_validator("package_no", "package_type", "barcode", mode="before")
     @classmethod
     def blank_to_none(cls, value):
         return None if value == "" else value
+
+    @model_validator(mode="after")
+    def _serial_budget(self):
+        """One request may not carry more units than a worker should.
+
+        The per-line cap is not enough on its own: ConsignmentPackageWrite accepts up to
+        MAX_DOCUMENT_LINES lines, each with up to MAX_SERIALS_PER_LINE
+        serials, and that product is half a million units in one
+        transaction -- the exact shape that locks the warehouse tables and
+        runs past the proxy timeout."""
+        assert_serial_budget(self, "items")
+        return self
 
 
 class ConsignmentWrite(BaseModel):
@@ -1457,7 +1522,7 @@ class ConsignmentWrite(BaseModel):
     freight_amount: Decimal | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
-    packages: list[ConsignmentPackageWrite] = []
+    packages: Annotated[list[ConsignmentPackageWrite], DocumentLines] = []
 
 
 class DispatchEventWrite(BaseModel):
@@ -1479,7 +1544,7 @@ class AcknowledgeWrite(BaseModel):
     acknowledged_by_name: str | None = None
     pod_url: str | None = None
     remarks: str | None = None
-    lines: list[AcknowledgeLine] = []
+    lines: Annotated[list[AcknowledgeLine], DocumentLines] = []
 
 
 class DispatchItemRead(_Read):
@@ -1630,7 +1695,7 @@ class ReturnWrite(BaseModel):
     vendor_id: int | None = None
     warehouse_id: int | None = None
     reason: str | None = None
-    items: list[ReturnItemWrite] = []
+    items: Annotated[list[ReturnItemWrite], DocumentLines] = []
 
 
 class ReturnItemRead(_Read):
@@ -1924,7 +1989,7 @@ class AcknowledgeIssueIn(BaseModel):
 class IssueSerialLineIn(BaseModel):
     """One line's physical units, named after approval."""
     id: int
-    serial_numbers: list[str] = Field(default_factory=list)
+    serial_numbers: list[str] = Field(default_factory=list, max_length=MAX_SERIALS_PER_LINE)
 
 
 class IssueSerialsIn(BaseModel):
@@ -1935,7 +2000,19 @@ class IssueSerialsIn(BaseModel):
     the full set, so without a way to name them after approval a serialized issue
     could never be posted at all.
     """
-    lines: list[IssueSerialLineIn]
+    lines: Annotated[list[IssueSerialLineIn], DocumentLines]
+
+    @model_validator(mode="after")
+    def _serial_budget(self):
+        """One request may not carry more units than a worker should.
+
+        The per-line cap is not enough on its own: IssueSerialsIn accepts up to
+        MAX_DOCUMENT_LINES lines, each with up to MAX_SERIALS_PER_LINE
+        serials, and that product is half a million units in one
+        transaction -- the exact shape that locks the warehouse tables and
+        runs past the proxy timeout."""
+        assert_serial_budget(self, "lines")
+        return self
 
 
 class DashboardRead(BaseModel):
@@ -1972,7 +2049,7 @@ BinRead.model_rebuild()
 
 class IssueBatchIn(BaseModel):
     """The issues to post in one go — a whole monthly cycle, usually."""
-    issue_ids: list[int]
+    issue_ids: Annotated[list[int], BatchIds]
 
 
 class DespatchPrefillLine(BaseModel):

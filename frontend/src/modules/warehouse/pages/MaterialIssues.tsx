@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { Forward, FileText, CheckCircle } from "lucide-react";
 import {
-  Button, Can, ConfirmModal, StatusPill, type Column,
+  Button, Can, ConfirmModal, SourceRef, SourceRefLine, StatusPill,
+  type Column, type SourceRefCandidate,
 } from "@/shared/components";
 import { alerts } from "@/modules/alerts";
 import { DocumentList } from "../components/DocumentList";
@@ -46,6 +47,25 @@ export default function MaterialIssues({
 }) {
   const nav = useNavigate();
 
+  /* What this issue was raised AGAINST. An outward issue serves an indent (or, where
+     one was cut, a picklist); a return reverses the issue it came back from. The link
+     was always on the row — `indent_id` is the whole reason `out_issues` exists — but
+     the list only ever leaked it into the "Issued to" subline, and only when there was
+     no project or vehicle to crowd it out. So an issue against IND0011 showed
+     "AP39TL9499" and the indent number appeared nowhere on the screen. */
+  const sourceOf = (r: Issue): SourceRefCandidate[] => [
+    { label: "Indent", no: r.indent_no, to: r.indent_id ? `/indents/${r.indent_id}` : null },
+    // No detail screen for a picklist yet, so this one reads as text.
+    { label: "Picklist", no: r.pick_no },
+    {
+      label: "Return of",
+      no: r.original_issue_no,
+      to: r.original_issue_id
+        ? `/warehouse/transactions/material-issues/${r.original_issue_id}`
+        : null,
+    },
+  ];
+
   const columns: Column<Issue>[] = [
     {
       key: "no",
@@ -58,13 +78,18 @@ export default function MaterialIssues({
       ),
     },
     {
+      key: "against",
+      header: "Against",
+      render: (r) => <SourceRef refs={sourceOf(r)} />,
+    },
+    {
       key: "to",
       header: "Issued to",
       render: (r) => (
         <div className="min-w-0">
           <div className="truncate text-sm text-ink">{r.issued_to_name ?? r.department_name ?? "—"}</div>
           <div className="truncate text-[11px] text-muted">
-            {[r.project_name, r.vehicle_number].filter(Boolean).join(" · ") || r.indent_no || "—"}
+            {[r.project_name, r.vehicle_number].filter(Boolean).join(" · ") || "—"}
           </div>
         </div>
       ),
@@ -231,6 +256,7 @@ export default function MaterialIssues({
           <div className="text-[11px] text-muted">
             {fmtQty(r.total_qty)} across {r.total_items} lines · {fmtDate(r.issue_date)}
           </div>
+          <SourceRefLine refs={sourceOf(r)} />
         </div>
       )}
     />

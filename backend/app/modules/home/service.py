@@ -259,14 +259,56 @@ async def _recent_activity(
     return visible
 
 
+#: How long a built dashboard is reused. A KPI tile is a count of documents, not a
+#: balance anybody transacts against, and it does not need to be accurate to the
+#: second — but it is the most expensive endpoint in the system and it is hit on every
+#: sign-in and every return to Home. Sixty seconds is the trade: a document you just
+#: raised may take up to a minute to appear in your own tile.
+SUMMARY_CACHE_SECONDS = 60
+
+
+def _summary_cache_key(user, date_range: str) -> str:
+    """Everything the answer depends on, and nothing else.
+
+    The employee AND the active position, because both permissions and the visibility
+    scope are derived from the pair — the same key `get_user_permissions` uses. Caching
+    on the employee alone would serve one hat's dashboard to another, which is a
+    permissions leak and not a stale number.
+    """
+    return (f"home:summary:{getattr(user, 'id', 0)}:"
+            f"{getattr(user, 'active_position_id', None)}:{date_range}")
+
+
 async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dict:
+    """The Home dashboard. Cached per (employee, position, date range) for a minute.
+
+    ~17 awaited calls, several of them multi-query — per-status counts per module, the
+    visibility-scope predicates, the pending queue, the menu build. Nothing was cached,
+    and every user hit it the moment they signed in.
+    """
+    from app.core import cache as shared_cache
+
+    cache_key = _summary_cache_key(user, date_range)
+    cached = await shared_cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    payload = await _build_summary(db, user, date_range)
+    await shared_cache.set_json(cache_key, payload, SUMMARY_CACHE_SECONDS)
+    return payload
+
+
+async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week") -> dict:
     permissions = await get_user_permissions(
         db, user, getattr(user, "active_position_id", None),
     )
     since = _range_start(date_range)
     menu = await get_user_menu(db, permissions, await warehouse_menu_label(
         db, user, getattr(user, "active_position_id", None)))
-    pending = await engine.pending_for_user(db, user)
+    # Two COUNTs, not every row. The dashboard only ever needed the total and the
+    # overdue total, and materialising a few thousand pending rows to call len()
+    # on them was the most expensive thing on the most frequently hit endpoint.
+    pending_total, pending_overdue = await engine.pending_counts_for_user(db, user)
 
     kpis: list[dict] = []
     actions: list[dict] = []
@@ -334,15 +376,15 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
     # store keeper post carried the OE queue onto the store keeper hat that RBAC had
     # just taken approvals away from.
     if APPROVE_PERMISSIONS & permissions:
-        overdue = sum(1 for row in pending if _is_overdue(row))
+        overdue = pending_overdue
         kpis.append(_kpi(
-            "approvals", "APPROVALS", len(pending), f"{overdue} Overdue",
+            "approvals", "APPROVALS", pending_total, f"{overdue} Overdue",
             "/approvals", "circle-check", tone="green",
             detail_tone="orange" if overdue else "green",
         ))
-        if pending:
+        if pending_total:
             attention.append(_attention(
-                "approvals", "Requests pending your approval", len(pending),
+                "approvals", "Requests pending your approval", pending_total,
                 "/approvals", "file-text",
             ))
 

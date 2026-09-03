@@ -1998,7 +1998,12 @@ async def delete_file(db: AsyncSession, return_id: int, attachment_id: int,
             "This return has been submitted, so its photographs and bills can no "
             "longer be changed.")
     _assert_raiser(doc, user)
-    await attachments.delete_attachment(db, attachment_id, user)
+    # `entity_id=return_id` is what ties the id in the path to the document in it. The
+    # return was checked and the raiser was checked, but the ATTACHMENT never was — so
+    # a raiser of any draft return could delete any file in `sys_attachments`, from any
+    # module, by putting their own return number in front of somebody else's id.
+    await attachments.delete_attachment(db, attachment_id, user,
+                                        entity_type=ENTITY_TYPE, entity_id=return_id)
 
 
 # ---------------------------------------------------------------------------

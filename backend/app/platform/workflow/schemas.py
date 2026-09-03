@@ -2,6 +2,9 @@
 from datetime import date
 
 from pydantic import BaseModel, Field, model_validator
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchIds, MAX_BATCH_IDS, MAX_CONFIG_ENTRIES,
+)
 
 
 class WorkflowActionIn(BaseModel):
@@ -61,7 +64,7 @@ class WorkflowStageIn(BaseModel):
     is_optional: bool = False
     can_edit_document: bool = False
     sla_hours: int | None = Field(default=None, ge=1)
-    conditions: list[WorkflowConditionIn] = Field(default_factory=list)
+    conditions: list[WorkflowConditionIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class WorkflowIn(BaseModel):
@@ -69,7 +72,7 @@ class WorkflowIn(BaseModel):
     name: str
     doc_type: str
     is_active: bool = True
-    stages: list[WorkflowStageIn] = Field(default_factory=list)
+    stages: list[WorkflowStageIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 # ---------------- approval ladders (Settings > Approvals Config) ----------------
@@ -81,8 +84,8 @@ class LadderRungIn(BaseModel):
     is_enabled: bool = True
     # None means a legacy role-wide rung. An explicit list restricts the role to
     # these exact HCM positions; [] intentionally disables every position.
-    selected_position_ids: list[int] | None = None
-    conditions: list[WorkflowConditionIn] = Field(default_factory=list)
+    selected_position_ids: Annotated[list[int], BatchIds] | None = None
+    conditions: list[WorkflowConditionIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class LadderPolicyMixin(BaseModel):
@@ -102,7 +105,7 @@ class LadderPolicyMixin(BaseModel):
 class LadderIn(LadderPolicyMixin):
     project_id: int | None = None
     doc_type: str
-    rungs: list[LadderRungIn] = Field(default_factory=list)
+    rungs: list[LadderRungIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class CustomLadderStepIn(BaseModel):
@@ -133,7 +136,7 @@ class CustomLadderIn(LadderPolicyMixin):
     # The RANK of raiser this chain serves (hcm_positions.role_id). None is the chain
     # everybody else uses, and is what every chain saved before this existed carries.
     raiser_role_id: int | None = None
-    steps: list[CustomLadderStepIn] = Field(default_factory=list)
+    steps: list[CustomLadderStepIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class FlowMoveDocumentIn(BaseModel):
@@ -159,8 +162,8 @@ class FlowCopyIn(BaseModel):
     from_project_id: int | None = None
     from_raiser_role_id: int | None = None
     doc_type: str
-    to_project_ids: list[int] = Field(default_factory=list)
-    to_raiser_role_ids: list[int] = Field(default_factory=list)
+    to_project_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
+    to_raiser_role_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
     drop_steps_at_or_below: bool = True
 
     @model_validator(mode="after")
@@ -182,7 +185,7 @@ class ApprovalPostIn(BaseModel):
     # The job profile this chair carries. Seating someone grants it; None leaves the
     # post as a ladder rung only, which is what every post is until an admin picks one.
     rbac_role_id: int | None = None
-    employee_ids: list[int] = Field(default_factory=list)
+    employee_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
     is_active: bool | None = None
 
 
@@ -194,7 +197,7 @@ class LadderCopyIn(BaseModel):
     """
     from_project_id: int | None = None
     doc_type: str
-    to_project_ids: list[int] = Field(min_length=1)
+    to_project_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
 
 
 class ReminderConfigIn(BaseModel):

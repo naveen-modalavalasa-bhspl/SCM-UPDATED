@@ -240,6 +240,14 @@ SCOPE_DELEGATES = {
     # indents: access rule AND rung, shared by list_indents and indent_stats so the
     # dashboard can never disagree with the list under it.
     "_indent_visibility",
+    # home.summary is a cache wrapper (2026-09-03): it keys on
+    # (employee, active_position, date_range) and hands the actual build to
+    # `_build_summary`, which applies every scope the tiles need. The position is in
+    # the cache key precisely BECAUSE the answer is scoped — caching on the employee
+    # alone would serve one hat's dashboard to another, which is a permissions leak
+    # and not a stale number. Named here so the guard follows the delegation instead
+    # of reading the wrapper and concluding the scope was dropped.
+    "_build_summary",
 }
 
 

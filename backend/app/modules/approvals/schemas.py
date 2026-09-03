@@ -3,6 +3,9 @@ from datetime import date, datetime
 
 from fastapi import Query
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
+)
 
 
 def _utc_iso(value: datetime | None) -> str | None:
@@ -20,7 +23,7 @@ class ApprovalQuantityIn(BaseModel):
 
 class IndentApprovalActionIn(BaseModel):
     comments: str = ""
-    items: list[ApprovalQuantityIn] = Field(min_length=1)
+    items: list[ApprovalQuantityIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 class ConsolidationApprovalLineIn(ApprovalQuantityIn):
@@ -39,8 +42,8 @@ class ConsolidationApprovalIn(BaseModel):
     """
 
     comments: str = ""
-    indent_ids: list[int] = Field(min_length=1)
-    lines: list[ConsolidationApprovalLineIn] = []
+    indent_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
+    lines: Annotated[list[ConsolidationApprovalLineIn], DocumentLines] = []
 
 
 class ConsolidationApprovalFailureOut(BaseModel):
@@ -434,7 +437,7 @@ class IssueFromStockIn(BaseModel):
     move — whether it is an issue, a transfer or a bin change is derived from the two
     points, never chosen, so it cannot be used to dodge an approval.
     """
-    lines: list[IssueFromStockLineIn] = Field(min_length=1)
+    lines: list[IssueFromStockLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     reason: str = Field(default="", max_length=500)
     # Send the indent on to the next rung once what is held has been issued. The
     # approved quantities are untouched — only the remainder travels — so the next

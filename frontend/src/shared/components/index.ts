@@ -39,3 +39,8 @@ export {
   KpiTile, KpiTiles, ContextStrip, TONES, shortMoney, shortQty,
 } from "./KpiStrip";
 export type { KpiTileSpec, ContextStatSpec, Tone } from "./KpiStrip";
+
+// The document a document came from — the backward link (indent / PO / GRN) that every
+// list already held in its data and none of them drew, so tracing a row to its origin
+// meant opening rows one at a time.
+export { SourceRef, SourceRefLine, type SourceRefCandidate } from "./SourceRef";

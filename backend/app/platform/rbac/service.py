@@ -1,4 +1,5 @@
 """Position-aware RBAC read logic: effective roles, permissions, and menu."""
+import asyncio
 import logging
 import re
 
@@ -6,6 +7,7 @@ from sqlalchemy import event, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.platform.hcm import mappers
@@ -38,6 +40,36 @@ _GRANT_MODELS = (Role, RolePermission, UserRole, UserGroup, UserGroupMember)
 
 _MEMO_KEYS = ("user_permissions_memo", "scope_memo_rung")
 
+#: Where the cross-request copy of the same answer lives. One prefix so a grant change
+#: can drop the lot without knowing which logins were affected — the alternative is
+#: mapping a role back to every employee holding it through groups and posts, which is
+#: the query this cache exists to avoid running.
+PERM_CACHE_PREFIX = "perms:"
+
+#: Fire-and-forget invalidations, held so the garbage collector cannot drop a task
+#: mid-flight. asyncio only keeps a weak reference to a running task.
+_pending_invalidations: set = set()
+
+
+def _invalidate_permission_cache() -> None:
+    """Drop the shared permission cache, from a SYNCHRONOUS event handler.
+
+    The flush hook below cannot await — it is SQLAlchemy's, not ours — but it is the
+    one place that reliably sees a grant change, which is exactly why the per-request
+    memo is dropped there rather than in each write helper. So the async half is
+    scheduled onto the loop the request is already running on. No loop (a seed script,
+    a migration) means no shared cache to invalidate either.
+    """
+    from app.core import cache
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(cache.delete_prefix(PERM_CACHE_PREFIX))
+    _pending_invalidations.add(task)
+    task.add_done_callback(_pending_invalidations.discard)
+
 
 @event.listens_for(Session, "after_flush")
 def _drop_permission_memo(session, _flush_context) -> None:
@@ -45,6 +77,9 @@ def _drop_permission_memo(session, _flush_context) -> None:
     if any(isinstance(obj, _GRANT_MODELS) for obj in touched):
         for key in _MEMO_KEYS:
             session.info.pop(key, None)
+        # Same invalidation, one rung wider: the per-request memo protects the request
+        # doing the change, and this protects every other worker's cached copy.
+        _invalidate_permission_cache()
 
 
 def hcm_role_description(role_id: int) -> str:
@@ -503,15 +538,45 @@ async def get_user_permissions(
     # approval of forty-one indents paid for the same five queries forty-one times.
     # Keyed by (employee, position) exactly as the answer is derived, so the grant set
     # is still per login and per hat; nothing about who may do what moves.
-    cache = db.info.setdefault("user_permissions_memo", {})
+    memo = db.info.setdefault("user_permissions_memo", {})
     key = (user.id, position_id)
-    if key in cache:
-        return set(cache[key])
+    if key in memo:
+        return set(memo[key])
+
+    # Second rung, ACROSS requests (2026-09-03). The memo above saves the repeated
+    # lookups inside one request; this saves them between requests, which is where the
+    # volume is. Every authenticated call reaches `require_permission`, and answering
+    # it cost an employee SELECT, a joined position lookup over
+    # hcm_position_assignments/positions/departments/offices, a roles query and a
+    # permissions join — four to six queries per request for an answer that changes
+    # about monthly. At 300 req/s that is ~1,500 identical queries a second.
+    #
+    # The TTL is the whole safety story: it is now the lag between an admin revoking a
+    # grant and the revocation biting, so it is short (PERMISSION_CACHE_SECONDS,
+    # 5 minutes) and the flush hook drops the prefix outright the moment any grant
+    # model is written — see `_invalidate_permission_cache`. Cache misses and a Redis
+    # that is down both simply fall through to the queries below.
+    from app.core import cache as shared_cache
+
+    # PERMISSION_CACHE_SECONDS <= 0 turns the cross-request rung off entirely, leaving
+    # the per-request memo. Two reasons it is a switch rather than a constant: an
+    # operator who needs a revoked grant to bite instantly can pay the queries for it,
+    # and a load test can measure what the cache is actually worth.
+    ttl = settings.PERMISSION_CACHE_SECONDS
+    cache_key = f"{PERM_CACHE_PREFIX}{user.id}:{position_id}"
+    if ttl > 0:
+        cached = await shared_cache.get_json(cache_key)
+        if cached is not None:
+            codes = set(cached)
+            memo[key] = set(codes)
+            return codes
 
     roles = await get_user_roles(db, user.id, position_id)
     role_ids = [role.id for role in roles]
     if not role_ids:
-        cache[key] = set()
+        memo[key] = set()
+        if ttl > 0:
+            await shared_cache.set_json(cache_key, [], ttl)
         return set()
     stmt = (
         select(Permission.code)
@@ -519,7 +584,9 @@ async def get_user_permissions(
         .where(RolePermission.role_id.in_(role_ids))
     )
     codes = set((await db.execute(stmt)).scalars().all())
-    cache[key] = set(codes)
+    memo[key] = set(codes)
+    if ttl > 0:
+        await shared_cache.set_json(cache_key, sorted(codes), ttl)
     return codes
 
 

@@ -956,6 +956,8 @@ async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...
                          doc_category: str | None = Form(None), file: UploadFile = File(...),
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(RECEIPT_CREATE))):
+    # `entity_type`/`entity_id` arrive as form fields — see `service.add_attachment`,
+    # which scopes them before a byte is written.
     return await service.add_attachment(
         db, entity_type=entity_type, entity_id=entity_id, upload=file,
         doc_category=doc_category, user=user)

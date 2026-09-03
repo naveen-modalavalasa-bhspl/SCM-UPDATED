@@ -16,6 +16,9 @@ from pydantic import (
 
 from app.modules.integrations.adapters.cams.enums import MAX_EVENT_ID, AckStatus, EventType
 from app.shared.time import to_ist
+from app.shared.limits import (  # request-size guards, see the module
+    MAX_DOCUMENT_LINES,
+)
 
 # An event_id is a filename in all but name — it becomes part of a `sys_settings` key.
 EVENT_ID_PATTERN = r"^[A-Za-z0-9._:-]{8,80}$"
@@ -99,7 +102,7 @@ class AckIn(_Payload):
     acknowledged_by_employee_code: str | None = Field(default=None, max_length=50)
     acknowledged_at: Stamp | None = None
     status: AckStatus
-    items: list[AckLine] = Field(default_factory=list)
+    items: list[AckLine] = Field(default_factory=list, max_length=MAX_DOCUMENT_LINES)
 
     @model_validator(mode="after")
     def _identified(self):
@@ -143,7 +146,7 @@ class ConsumptionLine(BaseModel):
 
 class ConsumptionIn(_Payload):
     consumption_date: Day
-    records: list[ConsumptionLine] = Field(min_length=1)
+    records: list[ConsumptionLine] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 # --------------------------------------------------------------------------- #
@@ -201,7 +204,7 @@ class StockBalanceIn(_Payload):
     # Two different numbers on one endpoint; SCM records which it got and never merges
     # them. Unconstrained for the same reason as `scope`.
     basis: str | None = Field(default=None, max_length=30)
-    facilities: list[FacilityStock] = Field(min_length=1)
+    facilities: list[FacilityStock] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +232,7 @@ class StockTransferIn(_Payload):
     from_: TransferPoint = Field(alias="from")
     to: TransferPoint
     approved_by_employee_code: str | None = None
-    items: list[TransferLine] = Field(min_length=1)
+    items: list[TransferLine] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -263,7 +266,7 @@ class WastageLine(BaseModel):
 
 class WastageIn(_Payload):
     wastage_date: Day
-    records: list[WastageLine] = Field(min_length=1)
+    records: list[WastageLine] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 # --------------------------------------------------------------------------- #

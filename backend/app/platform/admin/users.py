@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
 from app.platform.rbac.models import Role, UserRole
 from app.platform.rbac.profiles import PROFILE_PREFIX
@@ -148,11 +148,11 @@ async def grant_access(db: AsyncSession, employee_id: int, role_ids: list[int],
     credential = await db.get(UserCredential, employee_id)
     if credential is None:
         credential = UserCredential(employee_id=employee_id,
-                                    password_hash=hash_password(password),
+                                    password_hash=await hash_password_async(password),
                                     must_change=generated is not None)
         db.add(credential)
     else:
-        credential.password_hash = hash_password(password)
+        credential.password_hash = await hash_password_async(password)
         credential.must_change = generated is not None
         credential.locked_until = None
         credential.failed_attempts = 0
@@ -194,7 +194,7 @@ async def reset_password(db: AsyncSession, employee_id: int, actor) -> dict:
     if credential is None:
         raise NotFoundError("That employee does not have SCM access")
     generated = secrets.token_urlsafe(TEMP_PASSWORD_BYTES)
-    credential.password_hash = hash_password(generated)
+    credential.password_hash = await hash_password_async(generated)
     credential.must_change = True
     credential.failed_attempts = 0
     credential.locked_until = None

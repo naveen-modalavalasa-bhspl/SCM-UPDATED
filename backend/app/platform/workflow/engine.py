@@ -1560,6 +1560,41 @@ async def pending_for_user(db, user, doc_types: list[str] | None = None) -> list
     return [_pending_row(row) for row in rows]
 
 
+async def pending_counts_for_user(db, user,
+                                  doc_types: list[str] | None = None) -> tuple[int, int]:
+    """How many are waiting on this login, and how many of those are overdue.
+
+    Two COUNTs, where the Home dashboard used to call `pending_for_user` and take
+    `len()` of the result. That materialised EVERY pending row and built a Python dict
+    per row on the single most frequently hit endpoint in the system — an approver with
+    a backlog of a few thousand pulled all of them to render one number.
+
+    The conditions come from `_pending_conditions` and `other_hat_condition`, the same
+    two the list uses, so who a document is waiting on is decided in exactly one place
+    and this can never drift from the queue it counts.
+
+    Overdue is `due_at < utcnow()` in SQL rather than parsed per row in Python —
+    matching `_pending_row`'s own `overdue` flag, which is naive UTC for the same
+    reason.
+    """
+    conditions = _pending_conditions(user, doc_types)
+    other_hat = await other_hat_condition(db, user, doc_types)
+    if other_hat is not None:
+        conditions.append(other_hat)
+
+    base = (
+        select(func.count(Pending.id))
+        .select_from(Pending)
+        .join(Instance, Instance.id == Pending.instance_id)
+        .where(*conditions)
+    )
+    total = int(await db.scalar(base) or 0)
+    overdue = int(await db.scalar(
+        base.where(Pending.due_at.isnot(None), Pending.due_at < utcnow())
+    ) or 0)
+    return total, overdue
+
+
 async def pending_page(db, user, page: int, size: int,
                        doc_types: list[str] | None = None) -> dict:
     """`pending_for_user` as a page. Rule 11: every list answers {items,total,page,size}."""

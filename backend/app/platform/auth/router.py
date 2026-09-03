@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
+from app.core.throttle import caller_address
 from app.platform.auth import service
 from app.platform.auth.schemas import (
     MeOut,
@@ -18,9 +19,10 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=TokenOut)
-async def login(form: OAuth2PasswordRequestForm = Depends(),
+async def login(request: Request, form: OAuth2PasswordRequestForm = Depends(),
                 db: AsyncSession = Depends(get_db)):
-    _, token = await service.authenticate(db, form.username, form.password)
+    _, token = await service.authenticate(db, form.username, form.password,
+                                          client_ip=caller_address(request))
     return TokenOut(access_token=token)
 
 

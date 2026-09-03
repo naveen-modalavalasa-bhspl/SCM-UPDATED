@@ -1,12 +1,15 @@
 from pydantic import BaseModel, Field
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, ConfigEntries, MAX_CONFIG_ENTRIES,
+)
 
 
 class RolePageAccessIn(BaseModel):
-    page_codes: list[str] = Field(default_factory=list)
+    page_codes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class RoleFeatureAccessIn(BaseModel):
-    permission_codes: list[str] = Field(default_factory=list)
+    permission_codes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class UserGroupIn(BaseModel):
@@ -29,7 +32,7 @@ class RoleIn(BaseModel):
 
 
 class RolePermissionsIn(BaseModel):
-    permission_codes: list[str] = Field(default_factory=list)
+    permission_codes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
 
 class RoleCloneIn(BaseModel):
@@ -39,7 +42,7 @@ class RoleCloneIn(BaseModel):
 
 class JobProfileAccessIn(BaseModel):
     """A job profile's whole grant, saved in one shot (profiles.py)."""
-    page_codes: list[str] = []
-    permission_codes: list[str] = []
+    page_codes: Annotated[list[str], ConfigEntries] = []
+    permission_codes: Annotated[list[str], ConfigEntries] = []
     scope: str = "SELF"
     name: str | None = None

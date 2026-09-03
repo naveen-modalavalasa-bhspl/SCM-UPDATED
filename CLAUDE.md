@@ -33,6 +33,9 @@ $env:ALLOW_DEMO_DATA="true"       # development only; demo seeds are blocked oth
 # --reload-dir app: without it the reloader also watches .venv, so a pip install
 # triggers a several-hundred-file reload that can wedge the server.
 .venv/Scripts/python -m uvicorn app.main:app --reload --reload-dir app   # :8000
+# In a CONTAINER it is gunicorn, not uvicorn: one uvicorn process is one CPU core for
+# the whole deployment (backend/gunicorn.conf.py). Locally the single process is fine
+# and RUN_SCHEDULERS defaults true, so the HCM sync still runs.
 # Reachable from other machines on the LAN (needs CORS_ALLOW_PRIVATE_NETWORK=true
 # in .env, and a one-off inbound firewall rule for ports 8000 and 5173):
 .venv/Scripts/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
@@ -374,6 +377,103 @@ TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY
   `/api/warehouse/consignments`, which is guarded by `dispatch.view`. A Logistics job
   profile needs `dispatch.view` (and `dispatch.create` to edit one) on top of the
   `transport.*` codes. That is unchanged by this work, not introduced by it.
+
+---
+
+## Running at scale, and the attachment rule (2026-09-03)
+
+Three read-only reviews (load rating, field readiness, security) rated the system at
+roughly **50–120 concurrent users against a target of 1,000–2,000**. The domain logic,
+the indexing, the workflow engine and the row-locked stock paths were not the problem;
+everything AROUND them was. What changed:
+
+**A file belongs to a document, and every route must say which.** `sys_attachments` is
+one table keyed by `(entity_type, entity_id)` — a soft key nothing enforces — so a
+route taking a bare `attachment_id` was acting on the whole store. Warehouse's
+`DELETE /attachments/{id}` and indents' `DELETE /receipt-attachments/{id}` would delete
+any file in the system, and warehouse's `POST /attachments` filed bytes wherever its
+form fields said. `attachments.delete_attachment` now REFUSES to run without a stated
+`entity_type` (keyword-only, no default), so a new route cannot forget;
+`require_attachment` returns the row so the caller can then run its own module's
+visibility check on `row.entity_id`. Uploads are whitelisted by extension AND by the
+file's own leading bytes — `content_type` is written by the client — and the 20 MB cap
+is enforced WHILE the bytes stream to disk. `.svg` and `.html` are refused for the same
+reason `.exe` is: served back from our own origin they are stored XSS.
+
+**bcrypt never runs on the event loop.** `hash_password_async` / `verify_password_async`
+are what request handlers call; the sync pair stays for scripts and tests. A `verify`
+called from an `async def` stopped the whole application for 250 ms, which capped the
+system at about four sign-ins per second — a shift change could not get through.
+
+**One process runs the schedulers.** `RUN_SCHEDULERS` is true on exactly one
+single-replica `worker` container and false on every web worker. Two schedulers means
+two concurrent HCM syncs writing the same mirror tables and every reminder delivered
+twice to a real person. Do not start APScheduler from a web worker.
+
+**Shared state lives in Redis, and Redis is optional.** `core/cache.py` carries the
+permission cache, the integrations rate limiter and the login throttle. With
+`REDIS_URL` unset every one of them falls back to a per-process dict with the same
+semantics, so development needs nothing installed — but a per-process limiter
+multiplies the configured ceiling by the worker count, which is why more than one
+worker requires it. Nothing in `cache.py` may fail a request; `allow()` is the one
+deliberate exception, and it fails closed.
+
+**The permission cache TTL is a security parameter.** `get_user_permissions` now
+caches across requests, which removes most of the database traffic — every
+authenticated request re-derived the set in 4–6 queries. That TTL is now the lag
+between an admin revoking a grant and the revocation biting, so keep
+`PERMISSION_CACHE_SECONDS` under 15 minutes. A write to any grant model drops the
+whole prefix through the existing `after_flush` hook; the TTL is only the backstop.
+
+**Sized from the environment, not from code.** `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` default
+to the development 5+5 (several developers share one MySQL capped at 151) and
+production sets 20+10. The pool is PER WORKER, so
+`WEB_CONCURRENCY × BACKEND_REPLICAS × (size + overflow)` must stay under the server's
+`max_connections` — `deploy/mysql.cnf` raises it to 500 and sets the buffer pool, the
+slow query log and a 30 s statement timeout.
+
+**Login is throttled twice.** Per account (`failed_attempts`/`locked_until` — columns
+that had existed since the beginning with nothing incrementing them) and per address
+(`core/throttle.py`, plus nginx `limit_req`). The lock is checked BEFORE the hash, so a
+locked account stops costing a bcrypt per attempt.
+
+**There is a backup.** `deploy/backup.sh` in the `backup` service. Set
+`BACKUP_HOST_DIR` to off-host storage — the default named volume sits on the same
+machine as the database it protects.
+
+**There are metrics.** `METRICS_ENABLED` exposes per-endpoint latency and a
+connection-pool gauge on `/metrics`, which nginx deliberately does not proxy.
+
+Still open, in payoff order: route-level `React.lazy` (one 2.7 MB chunk), the Home
+dashboard's per-item query loop, synchronous Excel export on the event loop, a job
+queue for exports/imports/mail/webhooks, and a load test against a production-sized
+dataset — the numbers above are derived from code, not measured.
+
+---
+
+## How much one request may carry (2026-09-03)
+
+`app/shared/limits.py`. Ninety-five request-body list fields had no maximum length —
+indent lines, allocation and issue batches, serial and IMEI lists, workflow stages,
+every `*_ids` selection. A resilience review traced a crash to it: a quantity of
+200,000–300,000 is one harmless `NUMERIC(16,3)` write, but a SERIAL-TRACKED line
+expands it into that many individual unit records (`_claim_units`, `_land_units`,
+`_ship_units`, `_mark_serials` all call `int(quantity)` and work per unit), so one
+document locks hundreds of thousands of rows in a single request, holds the pool and
+runs past nginx's 60-second read timeout. The screen dies and the user cannot tell
+whether it worked.
+
+The caps: 500 document lines, 500 batch ids, 200 whole documents in one batch, 1,000
+serials per line, **5,000 serials per request** and 100 configuration entries. The
+last one is the load-bearing check — the per-line cap alone still permits 500 × 1,000
+with every individual line legal, so `assert_serial_budget` counts the whole request
+in a `model_validator` on the six warehouse schemas that nest serial lines.
+
+**These are REQUEST limits, not business limits.** A site that genuinely needs to
+issue 50,000 serials uploads a manifest and lets a worker process it in chunks.
+Raising a number in `limits.py` to make a screen work is almost always the wrong fix —
+the right one is the durable job queue that is still outstanding
+(`docs/09_CAPACITY_BACKLOG.md`).
 
 ---
 

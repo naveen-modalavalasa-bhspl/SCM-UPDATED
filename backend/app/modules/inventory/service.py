@@ -2211,11 +2211,22 @@ async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = N
 
     results = []
     ruled_items = set()
-    for rule in await list_replenishment_rules(db, warehouse_id, user=user):
-        ruled_items.add(rule["item_id"])
-        if not rule["is_breached"]:
-            continue
-        item = await db.get(Item, rule["item_id"])
+
+    # The breached rules first, and their items fetched in ONE round trip rather than
+    # a `db.get(Item, ...)` per rule. Same rows, same order, same scope.
+    rules = await list_replenishment_rules(db, warehouse_id, user=user)
+    ruled_items = {rule["item_id"] for rule in rules}
+    breached = [rule for rule in rules if rule["is_breached"]]
+    rule_items: dict[int, Item] = {}
+    if breached:
+        rule_items = {
+            row.id: row for row in (await db.execute(
+                select(Item).where(Item.id.in_({r["item_id"] for r in breached}))
+            )).scalars().all()
+        }
+
+    for rule in breached:
+        item = rule_items.get(rule["item_id"])
         if category_id and (item is None or item.category_id != category_id):
             continue
         results.append({
@@ -2246,26 +2257,52 @@ async def get_stock_replenishment(db: AsyncSession, warehouse_id: int | None = N
     items = [i for i in (await db.execute(stmt)).scalars().all()
              if i.id not in ruled_items]
 
-    for item in items:
-        stock_stmt = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
-            Stock.item_id == item.id,
+    # ONE grouped query for every item's on-hand quantity (2026-09-03).
+    #
+    # This was a `SUM(available_qty)` per item inside a Python loop, with no pagination
+    # and no limit, on the endpoint `home.summary` calls on every dashboard load —
+    # which is every sign-in. Measured on a copy of the live database: 86 ms with the
+    # 87 items that exist today, 4.9 seconds at 5,000 items, and a 55-second median
+    # under only 200 concurrent users, dragging every other screen down with it because
+    # the queries hold the pool.
+    #
+    # It was invisible because NOT ONE live item has a reorder level set, so the loop
+    # ran zero times. What wakes it is an administrator filling that column in from the
+    # item form — a data-entry action, with no deploy and no warning.
+    #
+    # The scope is unchanged and still applied to the aggregate: `_apply_warehouse_scope`
+    # narrows to the same warehouse set `_scoped_warehouse_ids` resolved for this user,
+    # so an item is still summed only over the points this login may see. An item with
+    # no balance row inside that scope is absent from the result and reads as 0, which
+    # is what the per-item COALESCE did.
+    on_hand: dict[int, float] = {}
+    if items:
+        totals_stmt = (
+            select(Stock.item_id, func.coalesce(func.sum(Stock.available_qty), 0))
+            .where(Stock.item_id.in_([i.id for i in items]))
+            .group_by(Stock.item_id)
         )
-        stock_stmt = _apply_warehouse_scope(
-            stock_stmt, Stock.warehouse_id, warehouse_ids,
+        totals_stmt = _apply_warehouse_scope(
+            totals_stmt, Stock.warehouse_id, warehouse_ids,
         )
+        on_hand = {row[0]: float(row[1] or 0)
+                   for row in (await db.execute(totals_stmt)).all()}
 
-        avail_qty = float((await db.execute(stock_stmt)).scalar() or 0)
+    # Hoisted out of the loop: it is the same warehouse for every row, and it used to
+    # be re-fetched once per item that fell short.
+    wh_name = None
+    if warehouse_id:
+        wh = await db.get(Warehouse, warehouse_id)
+        wh_name = wh.name if wh else None
+
+    for item in items:
+        avail_qty = on_hand.get(item.id, 0.0)
         reorder_lvl = float(item.reorder_level or 0)
 
         if avail_qty < reorder_lvl:
             min_order = float(item.min_order_qty or 1)
             reorder_qty = float(item.reorder_qty or (reorder_lvl * 2 - avail_qty))
             suggested = max(reorder_qty, min_order)
-
-            wh_name = None
-            if warehouse_id:
-                wh = await db.get(Warehouse, warehouse_id)
-                wh_name = wh.name if wh else None
 
             results.append({
                 "item_id": item.id,

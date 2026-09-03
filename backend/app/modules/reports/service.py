@@ -3,6 +3,7 @@
 Read-only by construction: nothing here writes, commits or deletes. A report that
 could change a number is a report nobody can audit with.
 """
+import asyncio
 import csv
 import io
 from datetime import date, datetime, timezone
@@ -301,8 +302,13 @@ def export_header(spec: LedgerSpec, applied: Mapping[str, str], rows: int,
     return lines
 
 
-async def _export_rows(db: AsyncSession, spec: LedgerSpec,
-                       query: Mapping[str, str]) -> tuple[list, dict]:
+async def _export_rows(db: AsyncSession, spec: LedgerSpec, query: Mapping[str, str],
+                       user=None) -> tuple[list, dict]:
+    """FIXED 2026-09-03 -- `user` was neither a parameter nor a module global here, so
+    the line below raised `NameError` and EVERY reports export answered 500. Both
+    callers already accepted a `user` and simply never forwarded it, which is the same
+    bug read the other way: had it resolved, the export would have been built with no
+    visibility scope at all while the screen it came from had one."""
     stmt, applied = await _filtered(db, spec, query, user)
     result = await db.execute(stmt.limit(MAX_EXPORT_ROWS))
     return list(result.mappings()), applied
@@ -336,9 +342,15 @@ async def export_csv(db: AsyncSession, key: str, query: Mapping[str, str],
     """(filename, csv text) for the current filter set. Same rows, same order as the
     screen — an export that does not match what was on screen is not evidence."""
     spec = get_spec(key)
-    rows, applied = await _export_rows(db, spec, query)
+    rows, applied = await _export_rows(db, spec, query, user)
     columns = export_columns(spec, query)
 
+    # Formatted on a worker thread. Writing 20,000 rows is pure CPU with no `await`
+    # in it, so doing it inline froze every other user for the duration.
+    return await asyncio.to_thread(_build_csv, spec, rows, applied, columns, actor)
+
+
+def _build_csv(spec: LedgerSpec, rows, applied: dict, columns, actor) -> tuple[str, str]:
     buffer = io.StringIO()
     # Excel on Windows opens \r\n cleanly; \n alone puts everything on one line.
     writer = csv.writer(buffer, lineterminator="\r\n")
@@ -368,13 +380,20 @@ async def export_xlsx(db: AsyncSession, key: str, query: Mapping[str, str],
     200-column-wide audit extract readable. Frozen panes and an autofilter come with
     it because the first thing anybody does with this file is sort it.
     """
+    spec = get_spec(key)
+    rows, applied = await _export_rows(db, spec, query, user)
+    columns = export_columns(spec, query)
+    # Off the event loop, for the same reason as the CSV: building an openpyxl
+    # workbook is CPU-bound from start to finish, and one person exporting a
+    # 20,000-row audit ledger used to stop the entire application until it finished.
+    return await asyncio.to_thread(_build_xlsx, spec, rows, applied, columns, actor)
+
+
+def _build_xlsx(spec: LedgerSpec, rows, applied: dict, columns,
+                actor) -> tuple[str, bytes]:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
-
-    spec = get_spec(key)
-    rows, applied = await _export_rows(db, spec, query)
-    columns = export_columns(spec, query)
 
     book = Workbook()
     sheet = book.active

@@ -14,10 +14,12 @@ per module:
                               token — never one from the request.
 """
 from datetime import date
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import throttle
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
@@ -575,7 +577,13 @@ async def enable_vendor_account(vendor_id: int, db: AsyncSession = Depends(get_d
 #  position; `get_current_vendor` is the guard, and the vendor id comes from the token.
 
 @supplier.post("/login", response_model=VendorTokenOut)
-async def vendor_login(body: VendorLoginIn, db: AsyncSession = Depends(get_db)):
+async def vendor_login(body: VendorLoginIn, request: Request,
+                       db: AsyncSession = Depends(get_db)):
+    # The same 300 ms bcrypt as the employee login, on a door open to the internet and
+    # unmetered until 2026-09-03. Carriers sign in here too — `/api/carrier/*` is this
+    # same portal — so one throttle covers both.
+    await throttle.guard(request, "vendor-login", settings.LOGIN_RATE_PER_MINUTE,
+                         message="Too many sign-in attempts. Wait a minute.")
     return await service.vendor_login(db, body.username, body.password)
 
 

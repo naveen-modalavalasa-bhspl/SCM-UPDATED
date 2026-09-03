@@ -16,6 +16,67 @@ class Settings(BaseSettings):
     # from os.environ so it can live in .env like every other setting.
     TEST_DATABASE_URL: str | None = None
 
+    # --- Connection pool (per worker process) ---
+    #
+    # The defaults are the DEVELOPMENT numbers, kept because several developers point
+    # their own uvicorn at one shared MySQL capped at 151 connections and 20+10 each
+    # exhausts it (error 1040, which surfaces as blank screens rather than as an
+    # error). They are wrong for production, where the app owns its database: at ten
+    # connections the eleventh concurrent request queues for `DB_POOL_TIMEOUT` seconds
+    # and then throws, which is roughly 50× oversubscribed at 500 users.
+    #
+    # Production sets these in the environment — 20 + 10 per worker — and raises the
+    # server's own `max_connections` to cover workers × replicas × (size + overflow)
+    # plus headroom. See `deploy/mysql.cnf`.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT: int = 30
+    #: Drop pooled connections before the server's own `wait_timeout` does.
+    DB_POOL_RECYCLE: int = 1800
+
+    # --- Redis (optional, and the app is fully functional without it) ---
+    #
+    # Unset means every cache and limiter falls back to the per-process behaviour it
+    # had before — correct, just not shared — so a developer needs nothing new
+    # installed. Set in production, where it is what makes more than one worker
+    # possible: an in-process rate limiter multiplies the configured ceiling by the
+    # number of workers, and a per-process introspection cache lets two workers answer
+    # the same question differently.
+    REDIS_URL: str | None = None
+    #: How long a resolved permission set and menu stay cached across requests. Kept
+    #: short deliberately: this is now the lag between an admin revoking a grant and
+    #: the revocation taking effect, so it trades directly against B-04's 60–70%
+    #: reduction in database traffic. Never raise it past 15 minutes.
+    PERMISSION_CACHE_SECONDS: int = 300
+
+    # --- Background jobs ---
+    #
+    # The HCM sync and the overdue-approval reminders run in-process on APScheduler.
+    # With more than one worker that means the sync runs N times concurrently against
+    # the same mirror tables and real people get N copies of every reminder. Exactly
+    # ONE process in a deployment sets this true — the dedicated worker container in
+    # compose.yaml — and every web worker leaves it false. Defaults true so a single
+    # developer process behaves exactly as it always has.
+    RUN_SCHEDULERS: bool = True
+
+    # --- Login throttling ---
+    #
+    # The lockout columns (`failed_attempts`, `locked_until`) have existed on
+    # `sys_user_credentials` since the beginning and nothing ever incremented them, so
+    # an unlimited dictionary attack ran against a 300 ms bcrypt on an unmetered
+    # endpoint — which is a denial-of-service button as much as a credential risk.
+    LOGIN_MAX_FAILED_ATTEMPTS: int = 8
+    LOGIN_LOCKOUT_MINUTES: int = 15
+    #: Sign-in attempts one address may make per minute, across all accounts. Catches
+    #: the spray that per-account lockout cannot: one attempt each against a thousand
+    #: employee ids never trips a single account's counter.
+    LOGIN_RATE_PER_MINUTE: int = 30
+
+    # --- Observability ---
+    #: Serve Prometheus metrics on /metrics. Off by default; the deployment turns it
+    #: on and keeps the path off the public proxy.
+    METRICS_ENABLED: bool = False
+
     # --- Auth — required ---
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
