@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type React from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Boxes, PanelLeftClose, PanelLeftOpen, UserRound } from "lucide-react";
+import { LogOut, Boxes, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react";
+import { getTheme, setTheme, type ThemeChoice } from "@/shared/theme";
 import {
   Avatar,
   Dropdown,
@@ -150,6 +151,66 @@ function Brand({ compact = false }: { compact?: boolean }) {
 
 const RAIL_STORAGE_KEY = "scm.sidebar.collapsed";
 
+/** A long position name, scrolled on hover so the WHOLE of it can be read without
+ *  widening the rail.
+ *
+ *  The classic marquee trick: the name is written twice in a track that slides left by
+ *  exactly one copy, so it loops seamlessly and every character passes through the box.
+ *  A name that already fits never moves — the two copies just sit there. Only the first
+ *  copy is announced; the duplicate is `aria-hidden` so a screen reader does not read
+ *  the name twice. */
+export function ScrollingName({ name, className = "" }: {
+  name: string; className?: string;
+}) {
+  return (
+    <span title={name}
+          className={`lt-marquee overflow-hidden whitespace-nowrap ${className}`}>
+      <span className="lt-marquee-track">
+        <span className="lt-marquee-item">{name}</span>
+        <span className="lt-marquee-item" aria-hidden>{name}</span>
+      </span>
+    </span>
+  );
+}
+
+/** Light/dark in one press, beside the bell and the avatar.
+ *
+ *  It writes the same `scm.theme` the Profile page does (`shared/theme.ts` owns the
+ *  storage and the `data-theme` attribute), so the two controls can never disagree.
+ *  Three states collapse to two here on purpose: a toggle answers "make it the other
+ *  one", and `system` stays reachable on Profile for anyone who wants to follow the OS.
+ *  The OS is still watched, so a system-themed session flips the icon when the desktop
+ *  does. */
+function ThemeToggle() {
+  const [choice, setChoice] = useState<ThemeChoice>(() => getTheme());
+  const [systemDark, setSystemDark] = useState(
+    () => typeof window !== "undefined"
+      && window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => { setSystemDark(media.matches); setChoice(getTheme()); };
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+  const isDark = choice === "dark" || (choice === "system" && systemDark);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        const next: ThemeChoice = isDark ? "light" : "dark";
+        setTheme(next);
+        setChoice(next);
+      }}
+      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+      title={isDark ? "Light mode" : "Dark mode"}
+      className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-line bg-content1 text-muted transition-colors hover:bg-content2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+    >
+      {isDark ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
+    </button>
+  );
+}
+
 export function AppLayout() {
   const { me, logout, switchPosition } = useAuth();
   const menu = visible(me?.menu ?? []);
@@ -238,7 +299,9 @@ export function AppLayout() {
       classNames={{ trigger: "border-line bg-content1" }}
     >
       {me.positions.map((position) => (
-        <SelectItem key={String(position.id)}>{position.name}</SelectItem>
+        <SelectItem key={String(position.id)} textValue={position.name}>
+          <ScrollingName name={position.name} className="block max-w-full" />
+        </SelectItem>
       ))}
     </Select>
   ) : null;
@@ -371,6 +434,7 @@ export function AppLayout() {
               <div className={`min-w-0 ${collapsed ? "" : "md:hidden"}`}>
                 {positionSelector(true)}
               </div>
+              <ThemeToggle />
               <div className="shrink-0">
                 <NotificationBell />
               </div>

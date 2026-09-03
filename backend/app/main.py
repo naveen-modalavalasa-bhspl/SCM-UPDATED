@@ -79,10 +79,20 @@ app = FastAPI(title="SCM ERP", version="0.1.0", lifespan=lifespan)
 app.state.error_reporter = capture_backend_error
 
 
+from app.platform.settings.clientinfo import client_info, set_client_info
+
+
 @app.middleware("http")
 async def request_identity(request, call_next):
-    """Give browser and server errors the same searchable correlation id."""
+    """Give browser and server errors the same searchable correlation id, and park the
+    caller's context where `write_audit` can reach it.
+
+    The address, device and location live only on the request, and threading them
+    through every service function that writes an audit row would be a large change for
+    five columns — so they are captured once, here. The geo lookup is cached per address
+    and can never fail the request: see `settings/clientinfo.py`."""
     request.state.request_id = safe_request_id(request.headers.get("x-request-id"))
+    set_client_info(await client_info(request))
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     return response

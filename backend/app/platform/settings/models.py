@@ -64,6 +64,17 @@ class AuditLog(Base):
     actor_id = Column(BigInteger, nullable=True, index=True)
     actor_name = Column(String(200), nullable=True)
     ip_address = Column(String(45), nullable=True)
+    # Where from and on what. Captured off the request by the middleware (see
+    # `settings/clientinfo.py`): the user-agent is parsed locally, the location is
+    # resolved from the address. Snapshots, like every other display field in this
+    # build — a device that is renamed or an address that is reassigned never
+    # rewrites history. All nullable: every row written before these columns existed
+    # keeps its blanks, and the screen shows a dash rather than inventing a place.
+    location = Column(String(200), nullable=True)
+    device_type = Column(String(30), nullable=True)    # Desktop | Mobile | Tablet
+    browser = Column(String(50), nullable=True)
+    os = Column(String(50), nullable=True)
+    user_agent = Column(String(500), nullable=True)
     created_at = Column(DateTime, nullable=False, default=utcnow, index=True)
 
 

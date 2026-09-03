@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import PageParams
-from app.modules.reports import service, traceability
+from app.modules.reports import attachments, service, traceability
 from app.modules.reports.schemas import ReportLedgerInfo, ReportRows
 from app.platform.rbac import permissions as perms
 
@@ -76,12 +76,23 @@ async def traceability_kinds(user=Depends(require_permission(perms.REPORT_VIEW))
 
 
 @router.get("/traceability/search")
-async def traceability_search(q: str, limit: int = 25,
+async def traceability_search(q: str = "", limit: int = 25, kind: str | None = None,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.REPORT_VIEW))):
     """Every document whose number matches, across every kind on the trail. A partial
-    number is enough — somebody reading a printed gate pass types the tail of it."""
-    return await traceability.search(db, q, limit=min(max(limit, 1), 50))
+    number is enough — somebody reading a printed gate pass types the tail of it.
+
+    `kind` narrows to one document type and reads `q` as a serial number, which is how
+    Live Tracking lists the indent register and jumps to one number. That mode is the
+    only one an empty `q` is meaningful for — it lists the register — so `q` defaults
+    to blank rather than being required, and without `kind` a blank term still returns
+    nothing, exactly as the Document Trail has always answered it.
+
+    The cap follows the mode and is applied by `search` itself (rule 2 — no `if` in a
+    router): 50 for a trail lookup, 500 for the register listing.
+    """
+    return await traceability.attach_approval(
+        db, await traceability.search(db, q, limit=limit, kind=kind))
 
 
 @router.get("/traceability/chain")
@@ -89,8 +100,49 @@ async def traceability_chain(kind: str, doc_id: int,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(perms.REPORT_VIEW))):
     """The whole chain around one document — both directions, each node with its
-    status and its full approval history."""
-    return await traceability.trace(db, kind, doc_id)
+    status and its full approval history, each stamped with the ladder it ran under."""
+    chain = await traceability.trace(db, kind, doc_id)
+    await traceability.attach_approval(db, chain["nodes"])
+    return chain
+
+
+# --------------------------------------------------------------------------- #
+# Attachments — every file filed against a document, in one register.
+#
+# Declared ABOVE `/{ledger}` for the same reason the trail is: that path is a
+# catch-all string, so "attachments" would otherwise be read as a ledger name.
+#
+# `report.view` is the gate, the same one the ledgers use, because every document a
+# row here names is one those ledgers already show this login — and `attachments.py`
+# scopes the ROWS to that login on top of it. The bytes are never served from this
+# module: `download_url` points at the owning module's own scoped route.
+# --------------------------------------------------------------------------- #
+
+@router.get("/attachments/sources")
+async def attachment_sources(user=Depends(require_permission(perms.REPORT_VIEW))):
+    """The document types the dashboard can group by. Served so the screen's filter
+    cannot drift from the entity types the register is able to bound."""
+    return attachments.sources()
+
+
+@router.get("/attachments/summary")
+async def attachment_summary(entity_type: str | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.REPORT_VIEW))):
+    """The KPI strip, counted over the same scoped set the register lists."""
+    return await attachments.summary(db, user, entity_type=entity_type)
+
+
+@router.get("/attachments")
+async def attachment_rows(params: PageParams = Depends(),
+                          entity_type: str | None = None, kind: str | None = None,
+                          search: str | None = None,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.REPORT_VIEW))):
+    """One page of the register — a DOCUMENT per row, carrying its files."""
+    return await attachments.list_documents(
+        db, user, page=params.page, size=params.size,
+        entity_type=entity_type, kind=kind, search=search)
 
 
 @router.get("/{ledger}", response_model=ReportRows)

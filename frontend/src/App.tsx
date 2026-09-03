@@ -6,6 +6,8 @@ import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
 import { MailPage } from "@/modules/admin/pages/MailPage";
 import { TraceabilityPage } from "@/modules/reports/pages/TraceabilityPage";
+import { LiveTrackingPage } from "@/modules/reports/pages/LiveTrackingPage";
+import { AttachmentsReportPage } from "@/modules/reports/pages/AttachmentsReportPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { ForgotPasswordPage, ResetPasswordPage } from "@/pages/PasswordResetPages";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -561,6 +563,13 @@ function AppRoutes() {
         {/* Above `:ledger`, which is a catch-all string param — a literal
             segment after it would be read as a ledger name. */}
         <Route path="reports/traceability" element={<TraceabilityPage />} />
+        {/* Live Tracking follows ONE indent as it moves — the Journey and the
+            downstream trail, polled. Beside the Document Trail rather than
+            replacing it: the Trail finds any document by number, this one
+            watches an indent. Both are literal segments and must stay above
+            `:ledger`, which reads any segment after it as a ledger name. */}
+        <Route path="reports/live-tracking" element={<LiveTrackingPage />} />
+        <Route path="reports/attachments" element={<AttachmentsReportPage />} />
         <Route path="reports/:ledger" element={<ReportLedgerPage />} />
         {/* An address with no screen says so. It used to render Home, which made a
             typo look like the app had simply ignored the click. */}

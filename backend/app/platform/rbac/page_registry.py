@@ -179,6 +179,19 @@ PAGES: list[PageDef] = [
     PageDef("rep_traceability", "/reports/traceability", "Document Trail",
             parent="grp_reports", module="reports", icon="git-branch",
             sort_order=79),
+    # Reports > Attachments: the files filed against every document the other ledgers
+    # already list for this login, as one register. Same view permission as those
+    # ledgers, and `reports/attachments.py` scopes the rows to the login on top of it.
+    PageDef("rep_attachments", "/reports/attachments", "Attachments",
+            parent="grp_reports", module="reports", icon="file-stack",
+            sort_order=75),
+    # Reports > Live Tracking: the indent Journey and the Document Trail chain, polled,
+    # so an approval pressed in another building reaches the reader without a refresh.
+    # Beside the Document Trail rather than replacing it — the Trail answers "find any
+    # document by number", this one follows ONE indent as it moves.
+    PageDef("rep_live_tracking", "/reports/live-tracking", "Live Tracking",
+            parent="grp_reports", module="reports", icon="radio",
+            sort_order=76),
     # The company mailbox: Inbox, Sent and Compose. Under Settings because it is one
     # shared account for the whole deployment, not a per-user inbox — and because the
     # same mailbox is what sends every password-reset link. Admin-only until granted:

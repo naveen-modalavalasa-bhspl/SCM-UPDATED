@@ -28,6 +28,10 @@ export { PrintTemplate } from "./PrintTemplate";
 export { FilterMenu, type FilterOption } from "./FilterMenu";
 export * from "./filterChrome";
 export { FilterBar, SearchField, FilterToggle, FilterDateRange } from "./FilterBar";
+// The one attachment preview — images, PDFs and text, paged with the keyboard. Shared
+// because every module files paperwork against its documents and none of them should
+// draw their own lightbox.
+export { SharedAttachmentViewer, type Attachment } from "./SharedAttachmentViewer";
 
 // The clickable KPI strip every module's overview leads with. One definition, so a
 // tile means the same thing and looks the same wherever it appears.

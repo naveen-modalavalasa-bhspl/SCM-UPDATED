@@ -2,9 +2,11 @@
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.exceptions import NotFoundError
 from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.platform.rbac import permissions as perms
@@ -316,6 +318,29 @@ async def upload_receipt_attachment(
 ):
     return await service.add_receipt_attachment(
         db, indent_id, file, doc_category=doc_category, user=user)
+
+
+@indent_router.get("/{indent_id:int}/receipt-attachments/{attachment_id:int}/download")
+async def download_receipt_attachment(
+    indent_id: int, attachment_id: int, db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(perms.INDENT_VIEW)),
+):
+    """The receipt photo or bill itself, for whoever may read the indent it hangs on.
+
+    Nested under the indent on purpose, and `get_indent` is called first: it is the
+    module's own visibility check, so an indent this login may not read cannot have its
+    paperwork pulled out by walking attachment ids. The attachment must then actually
+    belong to THAT indent — without it the id in the path would be decorative and any
+    readable indent would unlock every file in the store.
+    """
+    await service.get_indent(db, indent_id, user)
+    row = await db.get(attachments.Attachment, attachment_id)
+    if (row is None or row.entity_type != service.ACK_ENTITY_TYPE
+            or int(row.entity_id) != indent_id):
+        # 404, not 403 — an id that is not yours must not confirm it exists.
+        raise NotFoundError(f"Attachment {attachment_id} not found")
+    path, file_name, mime_type = await attachments.attachment_file(db, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @indent_router.delete("/receipt-attachments/{attachment_id}", status_code=204)

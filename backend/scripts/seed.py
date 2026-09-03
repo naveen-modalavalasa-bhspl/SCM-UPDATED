@@ -261,6 +261,13 @@ PAGE_TREE = [
      P.REPORT_VIEW, 73, "grp_reports"),
     ("rep_warehouse", "/reports/warehouse", "Warehouse Ledger", "truck",
      P.REPORT_VIEW, 74, "grp_reports"),
+    # Attachments and Live Tracking are Reports tabs that do NOT render inside
+    # ReportLedgerPage — their routes serve their own screens — so each carries its own
+    # page row (same view permission) rather than being a `:ledger` name.
+    ("rep_attachments", "/reports/attachments", "Attachments", "file-stack",
+     P.REPORT_VIEW, 75, "grp_reports"),
+    ("rep_live_tracking", "/reports/live-tracking", "Live Tracking", "radio",
+     P.REPORT_VIEW, 76, "grp_reports"),
 
     ("grp_rbac", "/rbac/access", "RBAC", "shield", P.ADMIN_ROLES_MANAGE, 80, None),
     ("rbac_access", "/rbac/access", "Roles & Access", "key",

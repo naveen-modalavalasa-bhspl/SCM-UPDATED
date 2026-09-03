@@ -5,6 +5,7 @@ from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.pagination import PageParams, paginate
+from app.platform.settings.clientinfo import get_client_info
 from app.platform.settings.models import AuditLog, Setting
 from app.platform.settings.schemas import (
     CodeFormatSettings, CompanySettings, FallbackSettings, HcmSyncSettings,
@@ -210,6 +211,7 @@ async def write_audit(db: AsyncSession, *, entity: str, action: AuditAction,
     changed = diff_fields(before, after)
     if action == AuditAction.UPDATE and changed is None:
         return   # a PUT that changed nothing is not an event worth recording
+    client = get_client_info()
 
     db.add(AuditLog(
         entity_type=entity,
@@ -220,7 +222,18 @@ async def write_audit(db: AsyncSession, *, entity: str, action: AuditAction,
         changed_fields=changed,
         actor_id=getattr(actor, "id", None),
         actor_name=getattr(actor, "full_name", None),
-        ip_address=ip_address,
+        # An explicit argument wins; otherwise the address the middleware captured for
+        # this request. Almost every caller passes nothing, which is why the column was
+        # NULL on every row ever written.
+        # An explicit argument wins; otherwise what the middleware captured for this
+        # request. Almost every caller passes nothing, which is why these columns were
+        # empty on every row ever written.
+        ip_address=ip_address or client.get("ip_address"),
+        location=client.get("location"),
+        device_type=client.get("device_type"),
+        browser=client.get("browser"),
+        os=client.get("os"),
+        user_agent=client.get("user_agent"),
     ))
     await db.flush()
 
@@ -252,6 +265,11 @@ async def list_audit(db: AsyncSession, params: PageParams, entity: str | None = 
         "id": r.id, "entity": r.entity_type, "entity_id": r.entity_id,
         "entity_no": r.entity_no, "action": r.action, "actor_id": r.actor_id,
         "actor_name": r.actor_name, "changed_fields": r.changed_fields,
+        # Already on the row and never served. It is the only "where from" this log
+        # actually holds — no geo lookup, no third-party call, just what the request
+        # arrived with — so the screen shows it and says nothing it cannot prove.
+        "ip_address": r.ip_address, "location": r.location,
+        "device_type": r.device_type, "browser": r.browser, "os": r.os,
         "at": r.created_at.isoformat() if r.created_at else None,
     } for r in page["items"]]
     return page
