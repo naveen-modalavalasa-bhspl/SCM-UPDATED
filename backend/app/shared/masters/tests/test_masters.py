@@ -669,10 +669,46 @@ async def test_an_unknown_tag_type_is_rejected(client, tagger):
 
 
 # ------------------------- packaging ladder -------------------------- #
-async def test_packaging_master_is_only_a_container_type(client, admin):
+async def test_a_container_type_carries_its_own_box_but_not_what_it_holds(client, admin):
+    """The line the packaging master is drawn along.
+
+    The spec here is the CONTAINER'S — its outer box empty, its tare weight, the
+    handling rules that follow from how it is built — because none of that depends on
+    what goes inside, and a warehouse checks a bin against those measurements. How MUCH
+    it holds, and what it weighs full, are not here: the same box takes 50 SIM cards or
+    4 litres of oil, so both belong to each item's own rung.
+    """
     body = (await client.post("/api/packaging", json={
-        "code": "PACKET", "name": "Packet"}, headers=admin)).json()
-    assert set(body) == {"id", "code", "name", "is_active"}
+        "code": "TOTE", "name": "Tote", "length_cm": 60, "width_cm": 40,
+        "height_cm": 32, "weight_kg": 1.8, "max_stack_tiers": 4,
+        "fill_efficiency_pct": 75}, headers=admin)).json()
+
+    assert body["length_cm"] == 60
+    assert body["weight_kg"] == 1.8            # TARE — the container empty
+    assert body["max_stack_tiers"] == 4
+    assert body["fill_efficiency_pct"] == 75
+    # Derived on read, never stored: 60 x 40 x 32 cm is 0.0768 m3.
+    assert round(body["volume_cbm"], 6) == 0.0768
+    # And it still says nothing about the goods.
+    assert "quantity" not in body and "gross_weight_kg" not in body
+
+
+async def test_a_container_measured_on_two_sides_is_refused(client, admin):
+    # Two sides describe nothing a slotting check can use, and a missing side treated
+    # as zero would let anything through.
+    r = await client.post("/api/packaging", json={
+        "code": "HALF", "name": "Half measured", "length_cm": 60, "width_cm": 40},
+        headers=admin)
+    assert r.status_code == 422
+
+
+async def test_a_non_stackable_container_is_one_tier_by_definition(client, admin):
+    # Storing the two so they can disagree is how a screen ends up showing
+    # "not stackable, 4 high".
+    body = (await client.post("/api/packaging", json={
+        "code": "DRUM", "name": "Drum", "is_stackable": False, "max_stack_tiers": 4},
+        headers=admin)).json()
+    assert body["max_stack_tiers"] == 1
 
 
 async def test_packaging_breakdown_multiplies_up_the_ladder(client, admin, db):
@@ -776,6 +812,79 @@ async def test_upper_packaging_levels_require_whole_container_counts(client, adm
     }, headers=admin)
     assert r.status_code == 422
     assert "whole number" in r.json()["error"]
+
+
+async def test_a_rung_inherits_the_container_box_and_can_override_it(client, admin):
+    """Blank sides on a rung mean "the container type's", which is the ordinary case.
+
+    Configuring a ladder would be unusable if every rung had to repeat the same carton's
+    measurements, so the override exists only for the item that genuinely packs
+    differently — and `dims_from` says which of the two the warehouse actually used.
+    """
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    carton = (await client.post("/api/packaging", json={
+        "code": "CARTON", "name": "Carton", "length_cm": 40, "width_cm": 30,
+        "height_cm": 25}, headers=admin)).json()
+
+    await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1, "package_id": carton["id"],
+        "quantity": 50, "gross_weight_kg": 12.5}, headers=admin)
+    await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2, "package_id": carton["id"],
+        "quantity": 4, "length_cm": 80, "width_cm": 60, "height_cm": 50},
+        headers=admin)
+
+    rows = (await client.get(f"/api/items/{item['id']}/packaging-breakdown",
+                             headers=admin)).json()["items"]
+    assert rows[0]["dims_from"] == "PACKAGE"
+    assert round(rows[0]["volume_cbm"], 6) == 0.03        # 40 x 30 x 25
+    assert rows[0]["gross_weight_kg"] == 12.5
+    assert rows[1]["dims_from"] == "RUNG"
+    assert round(rows[1]["volume_cbm"], 6) == 0.24        # 80 x 60 x 50, not the carton
+    # The ladder still multiplies up: 4 of a 50-unit carton is 200 units.
+    assert rows[1]["base_quantity"] == 200
+
+
+async def test_a_rung_measured_on_two_sides_is_refused(client, admin):
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    box = (await client.post("/api/packaging", json={"code": "BOX", "name": "Box"},
+                             headers=admin)).json()
+    r = await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1, "package_id": box["id"], "quantity": 10,
+        "length_cm": 40, "height_cm": 25}, headers=admin)
+    assert r.status_code == 422
+
+
+async def test_only_one_rung_can_be_the_default_putaway_unit(client, admin):
+    """Setting one clears the others rather than refusing the save.
+
+    "At most one TRUE per item" is not something a unique index can express, and a form
+    that refuses until the storekeeper goes and finds the old default first is a form
+    that gets worked around.
+    """
+    item = (await client.post("/api/items", json=await item_payload(client, admin),
+                              headers=admin)).json()
+    carton = (await client.post("/api/packaging", json={
+        "code": "CARTON", "name": "Carton"}, headers=admin)).json()
+    pallet = (await client.post("/api/packaging", json={
+        "code": "PALLET", "name": "Pallet"}, headers=admin)).json()
+
+    first = (await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 1, "package_id": carton["id"],
+        "quantity": 50, "is_default_putaway_unit": True}, headers=admin)).json()
+    assert first["is_default_putaway_unit"] is True
+
+    await client.post("/api/item-packaging", json={
+        "item_id": item["id"], "level": 2, "package_id": pallet["id"],
+        "quantity": 20, "is_default_putaway_unit": True}, headers=admin)
+
+    rows = (await client.get("/api/item-packaging",
+                             params={"item_id": item["id"], "size": 50},
+                             headers=admin)).json()["items"]
+    flagged = [r["level"] for r in rows if r["is_default_putaway_unit"]]
+    assert flagged == [2]
 
 
 async def test_only_the_highest_packaging_level_can_be_removed(client, admin):

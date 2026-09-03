@@ -88,10 +88,16 @@ class POAmendIn(POHeaderIn):
     lines: list[POAmendLineIn] | None = None
 
 
+class POVendorResponseLineIn(BaseModel):
+    id: int
+    rate: float = Field(ge=0)
+
+
 class POVendorResponseIn(BaseModel):
     """The vendor's answer. A decline must say why; an acceptance need not."""
     accept: bool
     note: str = ""
+    lines: list[POVendorResponseLineIn] | None = None
 
 
 class PORevisionOut(BaseModel):
@@ -118,6 +124,40 @@ class POFromQuotationIn(POHeaderIn):
 
 class ActionIn(BaseModel):
     comments: str = ""
+
+
+# --------------------------------------------------------------------------- #
+#  PO approval discussion — approver <=> raiser chat
+# --------------------------------------------------------------------------- #
+
+class POCommentIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class POCommentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_id: int
+    author_id: int | None = None
+    author_name: str | None = None
+    message: str
+    created_at: datetime
+
+
+class POApprovalQtyLineIn(BaseModel):
+    """One line's approved quantity — may only be DECREASED by the approver."""
+    id: int
+    quantity: float = Field(gt=0)
+
+
+class POApprovalQtyIn(BaseModel):
+    """What the approver is signing: how much may actually be bought.
+
+    Quantities may only go DOWN — an approval can trim a request, never inflate it.
+    The edited numbers are what the vendor receives; the original is in the revision
+    snapshot if it was an amendment.
+    """
+    lines: list[POApprovalQtyLineIn] = Field(min_length=1)
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +421,7 @@ class ReqOut(ReqListRow):
     # Every material request folded in, not just `source_mr_no`.
     source_mr_nos: list[str] = []
     has_rfq: bool = False
+    has_consolidation: bool = False
     items: list[ReqItemOut] = []
 
 
@@ -416,9 +457,9 @@ class RFQCreate(BaseModel):
 
 
 class RFQQuantityIn(BaseModel):
-    """One line's quantity, by RFQ line id."""
+    """One line's quantity, by RFQ line id. 0 means drop the line."""
     id: int
-    quantity: float = Field(gt=0)
+    quantity: float = Field(ge=0)
 
 
 class RFQQuantitiesIn(BaseModel):
@@ -484,6 +525,7 @@ class RFQListRow(BaseModel):
     rfq_date: date | None = None
     due_date: date | None = None
     status: str
+    vendor_status: str | None = None
     total_items: int
     vendor_count: int
     response_count: int
@@ -623,6 +665,7 @@ class ConsolidationOut(ConsolidationListRow):
     approved_by_name: str | None = None
     approved_at: datetime | None = None
     remarks: str | None = None
+    has_rfq: bool = False
     items: list[ConsolidationItemOut] = []
 
 
@@ -878,6 +921,8 @@ class VendorPOLineOut(BaseModel):
     ordered_qty: float
     despatched_qty: float
     pending_qty: float
+    rate: float | None = None
+    amount: float | None = None
 
 
 class VendorPOOut(BaseModel):

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
+  Card, ErrorBanner, Field, Input, StatusPill, useToast,
 } from "@/shared/components";
 import { fmtDate, todayIst } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
@@ -56,7 +56,7 @@ export function SupplierRFQDetailPage() {
   const [lines, setLines] = useState<QuoteLine[]>([]);
   const [header, setHeader] = useState({
     vendor_ref_no: "", valid_till: "", expected_delivery_date: "",
-    payment_terms: "", freight_amount: "0", discount_amount: "0", remarks: "",
+    payment_terms: "", freight_amount: "", discount_amount: "", remarks: "",
   });
 
   const { data: rfq, error: rfqError } = useQuery({
@@ -76,8 +76,8 @@ export function SupplierRFQDetailPage() {
       valid_till: quote.valid_till ?? "",
       expected_delivery_date: quote.expected_delivery_date ?? "",
       payment_terms: quote.payment_terms ?? "",
-      freight_amount: String(quote.freight_amount ?? 0),
-      discount_amount: String(quote.discount_amount ?? 0),
+      freight_amount: quote.freight_amount ? String(quote.freight_amount) : "",
+      discount_amount: quote.discount_amount ? String(quote.discount_amount) : "",
       remarks: quote.remarks ?? "",
     });
     setLines(quote.items.map((item) => ({
@@ -85,16 +85,16 @@ export function SupplierRFQDetailPage() {
       item_name: item.item_name ?? `Item ${item.item_id}`,
       item_code: item.item_code ?? "—",
       uom_code: item.uom_code ?? "",
-      quantity: String(item.quantity),
+      quantity: item.quantity ? String(item.quantity) : "",
       requested: Number(item.requested_quantity ?? item.quantity),
       required_date: item.required_date,
-      rate: String(item.rate ?? 0),
-      discount_percent: String(item.discount_percent ?? 0),
+      rate: item.rate ? String(item.rate) : "",
+      discount_percent: item.discount_percent ? String(item.discount_percent) : "",
       // Opens at the notified rate. That is what is normally charged, so the vendor
       // types nothing in the usual case and can only bring it down from there.
-      cgst_rate: String(item.cgst_rate ?? item.max_cgst_rate ?? 0),
-      sgst_rate: String(item.sgst_rate ?? item.max_sgst_rate ?? 0),
-      igst_rate: String(item.igst_rate ?? item.max_igst_rate ?? 0),
+      cgst_rate: (item.cgst_rate ?? item.max_cgst_rate) != null && (item.cgst_rate ?? item.max_cgst_rate) !== 0 ? String(item.cgst_rate ?? item.max_cgst_rate) : "",
+      sgst_rate: (item.sgst_rate ?? item.max_sgst_rate) != null && (item.sgst_rate ?? item.max_sgst_rate) !== 0 ? String(item.sgst_rate ?? item.max_sgst_rate) : "",
+      igst_rate: (item.igst_rate ?? item.max_igst_rate) != null && (item.igst_rate ?? item.max_igst_rate) !== 0 ? String(item.igst_rate ?? item.max_igst_rate) : "",
       delivery_days: item.delivery_days == null ? "" : String(item.delivery_days),
       hsn_code: item.hsn_code,
       max_cgst: item.max_cgst_rate ?? null,
@@ -141,22 +141,20 @@ export function SupplierRFQDetailPage() {
     const count = (label: string, n: number) =>
       n ? out.push(`${label} on ${n} line${n === 1 ? "" : "s"}`) : 0;
     count("Rate", lines.filter((line) => !(Number(line.rate) > 0)).length);
-    count("Delivery days",
-      lines.filter((line) => String(line.delivery_days ?? "").trim() === "").length);
     return out;
   }, [header.valid_till, header.expected_delivery_date, lines]);
 
   const totals = useMemo(() => {
-    let sub = 0;
+    let sumNet = 0;
     let tax = 0;
     for (const line of lines) {
       const gross = Number(line.quantity || 0) * Number(line.rate || 0);
       const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
-      sub += net;
+      sumNet += net;
       tax += (net * taxRate(line)) / 100;
     }
-    const grand = sub + tax + Number(header.freight_amount || 0)
-      - Number(header.discount_amount || 0);
+    const sub = sumNet - Number(header.discount_amount || 0);
+    const grand = sub + tax + Number(header.freight_amount || 0);
     return { sub, tax, grand };
   }, [lines, interstate, header.freight_amount, header.discount_amount]);
 
@@ -191,6 +189,7 @@ export function SupplierRFQDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["supplier-quote", id] });
       queryClient.invalidateQueries({ queryKey: ["supplier-rfqs"] });
       toast.success("Quotation submitted");
+      nav("/supplier/rfqs");
     },
   });
 
@@ -199,20 +198,34 @@ export function SupplierRFQDetailPage() {
     setLines(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
 
   return (
-    <div>
-      <PageHeader
-        back={{ to: "/supplier/rfqs", label: "Back to Your RFQs" }}
-        eyebrow="Supplier"
-        title={rfq?.rfq_no ?? "Request"}
-        actions={
-          <Button variant="subtle" onClick={() => nav("/supplier/rfqs")}>Back</Button>
-        }
-      />
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      {/* Premium Hero Header */}
+      <div className="relative mb-8 overflow-hidden rounded-3xl bg-gradient-to-br from-brand via-brand/90 to-brand/80 p-8 sm:p-10 text-white shadow-xl">
+        <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-white/10 blur-3xl transition-transform duration-700 hover:scale-110" />
+        <div className="absolute -bottom-20 -left-20 h-48 w-48 rounded-full bg-white/10 blur-2xl transition-transform duration-700 hover:scale-110" />
+        <div className="relative z-10 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="mb-2 flex items-center gap-2 text-sm font-semibold uppercase tracking-widest text-white/80">
+              <span className="h-1.5 w-1.5 rounded-full bg-white/80 animate-pulse" />
+              Supplier Portal
+            </p>
+            <h1 className="font-display text-3xl font-extrabold tracking-tight sm:text-4xl">
+              {rfq?.rfq_no ?? "Request"}
+            </h1>
+          </div>
+          <button
+            onClick={() => nav("/supplier/rfqs")}
+            className="rounded-xl bg-white/20 px-4 py-2 text-sm font-semibold text-white shadow-sm backdrop-blur-md ring-1 ring-white/30 transition-all hover:bg-white/30 hover:scale-105"
+          >
+            Back to Your RFQs
+          </button>
+        </div>
+      </div>
 
       <ErrorBanner error={rfqError ?? save.error} />
 
       {rfq && (
-        <Card className="mb-4 p-5">
+        <Card className="mb-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-gradient-to-r from-sky-50 to-indigo-50">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <h2 className="font-display text-lg font-bold text-ink">
@@ -226,7 +239,12 @@ export function SupplierRFQDetailPage() {
             <StatusPill status={quote?.status ?? rfq.status} />
           </div>
           {rfq.terms && (
-            <p className="mt-4 border-t border-line pt-4 text-sm text-body">{rfq.terms}</p>
+            <div className="mt-4 border-t border-line pt-4">
+              <span className="block mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
+                Payment terms
+              </span>
+              <p className="text-sm text-body">{rfq.terms}</p>
+            </div>
           )}
           {!open && (
             <p className="mt-4 rounded-lg bg-surface-2 px-3 py-2 text-sm text-body">
@@ -236,7 +254,7 @@ export function SupplierRFQDetailPage() {
         </Card>
       )}
 
-      <Card className="mb-4 space-y-4 p-5">
+      <Card className="mb-6 space-y-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-white">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-ink">Your prices</h2>
           {/* Said out loud, with the reason. A vendor who sees only an IGST box and no
@@ -260,8 +278,23 @@ export function SupplierRFQDetailPage() {
           const over = limit != null && taxRate(line) > limit + 1e-9;
           const short = Number(line.quantity || 0) < line.requested;
           const taxed = net + (net * taxRate(line)) / 100;
+
+          // Eye-feasting colors to differentiate lines
+          const LINE_COLORS = [
+            { bg: "#f0f9ff", border: "#bae6fd" }, // sky
+            { bg: "#ecfdf5", border: "#a7f3d0" }, // emerald
+            { bg: "#fdf4ff", border: "#fbcfe8" }, // fuchsia
+            { bg: "#fffbeb", border: "#fde68a" }, // amber
+            { bg: "#f5f3ff", border: "#ddd6fe" }, // violet
+          ];
+          const color = LINE_COLORS[index % LINE_COLORS.length];
+
           return (
-            <div key={line.rfq_item_id} className="rounded-xl border border-line p-3">
+            <div 
+              key={line.rfq_item_id} 
+              className="rounded-2xl border p-5 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5"
+              style={{ backgroundColor: color.bg, borderColor: color.border }}
+            >
               <div className="mb-3">
                 <div className="text-sm font-medium text-ink">{line.item_name}</div>
                 <div className="font-mono text-[11px] text-muted">
@@ -339,12 +372,6 @@ export function SupplierRFQDetailPage() {
                   </>
                 )}
 
-                <Field label="Delivery days" required>
-                  <Input
-                    type="number" min="0" value={line.delivery_days} disabled={!open}
-                    onChange={(e) => set(index, { delivery_days: e.target.value })}
-                  />
-                </Field>
                 <div className="flex items-end pb-2">
                   <div>
                     <div className="text-[11px] text-muted">Line total</div>
@@ -371,7 +398,7 @@ export function SupplierRFQDetailPage() {
         )}
       </Card>
 
-      <Card className="space-y-4 p-5">
+      <Card className="space-y-5 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-white">
         <h2 className="text-sm font-semibold text-ink">Terms and totals</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Field label="Your reference">
@@ -386,7 +413,7 @@ export function SupplierRFQDetailPage() {
               onChange={(e) => setHeader({ ...header, valid_till: e.target.value })}
             />
           </Field>
-          <Field label="Can deliver by" required>
+          <Field label="Can deliver by">
             <Input
               type="date" min={todayIst()} value={header.expected_delivery_date} disabled={!open}
               onChange={(e) => setHeader({ ...header, expected_delivery_date: e.target.value })}
@@ -450,16 +477,15 @@ export function SupplierRFQDetailPage() {
         )}
 
         {open && (
-          <Button
-            className="w-full sm:w-auto"
-            disabled={save.isPending || !lines.length || overCeiling.length > 0
-              || gaps.length > 0}
+          <button
+            className="w-full sm:w-auto rounded-xl bg-gradient-to-r from-brand to-brand/80 px-6 py-3 text-sm font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl hover:from-brand/90 hover:to-brand focus:outline-none focus:ring-4 focus:ring-brand/30 disabled:opacity-50 disabled:pointer-events-none"
+            disabled={save.isPending || !lines.length || overCeiling.length > 0 || gaps.length > 0}
             onClick={() => save.mutate()}
           >
             {save.isPending
               ? "Submitting…"
-              : quote?.status === "DRAFT" ? "Submit quotation" : "Submit revision"}
-          </Button>
+              : quote?.status === "DRAFT" ? "Submit quotation" : "Edit & submit quote"}
+          </button>
         )}
       </Card>
     </div>

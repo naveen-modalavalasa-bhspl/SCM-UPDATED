@@ -43,9 +43,6 @@ const empty = {
   dosage_form_id: "", valuation_method: "FIFO", requires_special_storage: false,
   storage_conditions: "", requires_special_transport: false,
   transport_conditions: "",
-  // Kept as strings like every other input on this form; the backend coerces, and an
-  // empty box means "not measured" rather than zero.
-  length_cm: "", width_cm: "", height_cm: "", unit_volume_cbm: "",
   is_active: true,
 };
 
@@ -364,8 +361,6 @@ export function ItemMasterTab() {
       manufacturer_id: row.manufacturer_id ?? "", item_class_id: row.item_class_id ?? "",
       item_sub_class_id: row.item_sub_class_id ?? "", uom_id: row.uom_id ?? "",
       hsn_id: row.hsn_id ?? "",
-      length_cm: row.length_cm ?? "", width_cm: row.width_cm ?? "",
-      height_cm: row.height_cm ?? "", unit_volume_cbm: row.unit_volume_cbm ?? "",
       dosage_form_id: row.dosage_form_id ?? "" } as Form);
     setHsnCode(row.hsn_code ?? "");
     setTagValues({}); setDraftComponents([]); setEditing(row); setTab("Basic");
@@ -607,7 +602,6 @@ export function ItemMasterTab() {
                 onChange={(v) => set("requires_special_transport", v)} />
               <Field label="Transport Conditions"><Input value={form.transport_conditions}
                 onChange={(e) => set("transport_conditions", e.target.value)} /></Field>
-              <div className="md:col-span-2"><ShelfSpace form={form} set={set} /></div>
             </div>}
           </ModalBody>
           <ModalFooter className="items-center">
@@ -627,92 +621,6 @@ export function ItemMasterTab() {
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <div className="rounded-xl bg-content2 p-5 text-sm text-body">{children}</div>;
-}
-
-/**
- * `unit_volume_cbm` from L x W x H, in cubic metres. Mirrors
- * `backend/app/modules/warehouse/capacity.unit_volume` — the same rule on both sides,
- * because this box is a preview of what the warehouse will compute, and a preview that
- * disagrees with the answer is worse than no preview.
- */
-function derivedVolume(form: { length_cm: unknown; width_cm: unknown; height_cm: unknown }) {
-  const [l, w, h] = [form.length_cm, form.width_cm, form.height_cm].map(Number);
-  if (![l, w, h].every((n) => Number.isFinite(n) && n > 0)) return null;
-  return (l * w * h) / 1_000_000;
-}
-
-/**
- * How much shelf one unit needs.
- *
- * Nothing here is required. An item nobody has measured has NO volume rather than a
- * volume of zero — zero would report a packed bin as empty, which reads as "there is
- * room". Leaving these blank simply means the warehouse screens say "not measured"
- * against this item, which is the honest answer.
- */
-function ShelfSpace({ form, set }: {
-  form: Form;
-  set: (key: keyof Form, value: string | boolean) => void;
-}) {
-  const derived = derivedVolume(form);
-  const typed = Number(form.unit_volume_cbm);
-  const explicit = Number.isFinite(typed) && typed > 0;
-  const effective = explicit ? typed : derived;
-
-  return (
-    <div className="rounded-xl border border-line bg-content2 p-4">
-      <div className="mb-1 font-display text-sm font-bold text-ink">Shelf space</div>
-      <p className="mb-3 text-xs leading-relaxed text-muted">
-        What one {form.uom_id ? "unit" : "unit"} takes up, so a storage location can say
-        how full it is during put-away and how much an issue frees. Measure the three
-        sides, or state the volume directly — the stated figure wins when both are
-        given. Leave blank if it has not been measured.
-      </p>
-      <div className="grid gap-3 sm:grid-cols-4">
-        {([
-          ["length_cm", "Length (cm)"],
-          ["width_cm", "Width (cm)"],
-          ["height_cm", "Height (cm)"],
-        ] as const).map(([key, label]) => (
-          <Field key={key} label={label}>
-            <Input
-              type="number"
-              min="0"
-              value={String(form[key] ?? "")}
-              onChange={(e) => set(key, e.target.value)}
-            />
-          </Field>
-        ))}
-        <Field label="Unit volume (m³)">
-          <Input
-            type="number"
-            min="0"
-            step="0.000001"
-            placeholder={derived == null ? "" : derived.toPrecision(4)}
-            value={String(form.unit_volume_cbm ?? "")}
-            onChange={(e) => set("unit_volume_cbm", e.target.value)}
-          />
-        </Field>
-      </div>
-      <div className="mt-3 text-xs">
-        {effective == null ? (
-          <span className="text-muted">
-            Not measured — locations holding this item will say so rather than counting
-            it as taking no room.
-          </span>
-        ) : (
-          <span className="text-ok">
-            One unit takes <b className="tabular">{effective.toPrecision(4)} m³</b>
-            {explicit && derived != null && Math.abs(derived - typed) > 1e-9 && (
-              <span className="text-muted">
-                {" "}— the stated figure, not the {derived.toPrecision(4)} m³ the
-                dimensions come to.
-              </span>
-            )}
-          </span>
-        )}
-      </div>
-    </div>
-  );
 }
 
 /** Renders whatever the category asked for. A LIST attribute becomes a dropdown of
@@ -998,6 +906,11 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
   const qc = useQueryClient();
   const [packageId, setPackageId] = useState("");
   const [quantity, setQuantity] = useState("");
+  // What ONE of these weighs full, and the sides where this item packs differently
+  // from the container type. Both optional: blank sides inherit the container's, which
+  // is the ordinary case and keeps a ladder cheap to configure.
+  const [grossWeight, setGrossWeight] = useState("");
+  const [override, setOverride] = useState({ length_cm: "", width_cm: "", height_cm: "" });
   const [error, setError] = useState<string | null>(null);
 
   const rungs = useQuery({
@@ -1037,16 +950,46 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
   const projectedBaseQuantity = enteredQuantity * (below?.base_quantity ?? 1);
   const add = useMutation({
     mutationFn: () => {
+      const sides = ["length_cm", "width_cm", "height_cm"] as const;
+      const measured = sides.every((key) => Number(override[key]) > 0);
       const payload = {
         item_id: itemId, level: nextLevel, package_id: Number(packageId),
-        quantity: enteredQuantity, is_active: true,
+        quantity: enteredQuantity,
+        gross_weight_kg: grossWeight === "" ? null : Number(grossWeight),
+        // All three or none — the server refuses a half-measured box, because two
+        // sides describe nothing a slotting check can use.
+        ...(measured
+          ? Object.fromEntries(sides.map((key) => [key, Number(override[key])]))
+          : { length_cm: null, width_cm: null, height_cm: null }),
+        is_active: true,
       };
       return inactiveAtNextLevel
         ? mastersApi.itemPackaging.update(inactiveAtNextLevel.id, payload)
         : mastersApi.itemPackaging.create(payload);
     },
     onSuccess: () => {
-      setPackageId(""); setQuantity(""); setError(null);
+      setPackageId(""); setQuantity(""); setGrossWeight(""); setError(null);
+      setOverride({ length_cm: "", width_cm: "", height_cm: "" });
+      qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
+      qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
+    },
+    onError: (reason: Error) => setError(reason.message),
+  });
+  // Which rung putaway and bin occupancy work in. Sent as a plain update of the rung;
+  // the server clears the flag on every other rung of the same item, because "at most
+  // one TRUE per item" is not something a unique index can express.
+  const setDefault = useMutation({
+    mutationFn: (rung: MasterItemPackaging) =>
+      mastersApi.itemPackaging.update(rung.id, {
+        item_id: rung.item_id, level: rung.level, package_id: rung.package_id,
+        quantity: rung.quantity, length_cm: rung.length_cm ?? null,
+        width_cm: rung.width_cm ?? null, height_cm: rung.height_cm ?? null,
+        gross_weight_kg: rung.gross_weight_kg ?? null,
+        max_stack_tiers: rung.max_stack_tiers ?? null,
+        is_default_putaway_unit: true, is_active: true,
+      }),
+    onSuccess: () => {
+      setError(null);
       qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
       qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
     },
@@ -1075,6 +1018,49 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
           ? `${amount(row.base_quantity)} ${row.base_uom_code ?? baseUom ?? "units"}`
           : "—";
       } },
+    // The half the warehouse reads. A rung with no box is a rung no bin can check, and
+    // the ladder is the only screen where that is fixable — so it says so here rather
+    // than leaving a storekeeper to discover it at the putaway.
+    { key: "space", header: "Shelf space", render: (r) => {
+        const row = breakdown.data?.find((b) => b.level === r.level);
+        if (!row) return "—";
+        if (row.volume_cbm == null) {
+          return (
+            <span className="text-xs text-warn">
+              Not measured — no bin can check it
+            </span>
+          );
+        }
+        return (
+          <span className="text-xs">
+            <span className="tabular font-semibold text-ink">
+              {row.volume_cbm.toPrecision(3)} m³
+            </span>
+            <span className="text-muted">
+              {" "}· {amount(Number(row.length_cm))} × {amount(Number(row.width_cm))} ×{" "}
+              {amount(Number(row.height_cm))} cm
+              {row.dims_from === "PACKAGE" ? " (container type)" : ""}
+              {row.gross_weight_kg != null ? ` · ${amount(row.gross_weight_kg)} kg` : ""}
+            </span>
+          </span>
+        );
+      } },
+    { key: "default", header: "Putaway unit", render: (r) => (
+        r.is_default_putaway_unit ? (
+          <span className="rounded-full bg-ok-bg px-2 py-0.5 text-[11px] font-semibold text-ok">
+            Default
+          </span>
+        ) : (
+          <Button
+            variant="ghost"
+            className="text-xs"
+            onClick={() => setDefault.mutate(r)}
+            disabled={setDefault.isPending}
+          >
+            Make default
+          </Button>
+        )
+      ) },
     { key: "act", header: "", render: (r) => (
         r.level === highestLevel
           ? <Button variant="ghost" className="text-bad"
@@ -1086,8 +1072,14 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
     <div className="space-y-4">
       {error && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{error}</div>}
       <p className="text-sm text-muted">
-        Level 1 contains the product directly in {baseUom ?? "the item's UOM"}.
-        Each higher level contains a whole number of the container immediately below.
+        Level 1 contains the product directly in {baseUom ?? "the item's UOM"}. Each
+        higher level contains a whole number of the container immediately below.
+      </p>
+      <p className="text-sm text-muted">
+        These levels are what the warehouse checks a bin against — not the loose item.
+        A putaway is measured in whole packs, so the box comes from the container type
+        (set once, under Masters &gt; Packages) and only the loaded weight, which
+        depends on what is inside, is asked for here.
       </p>
       <div className="grid gap-3 md:grid-cols-[2fr_1fr_auto] md:items-end">
         <Field label={`Level ${nextLevel} container type`}>
@@ -1106,6 +1098,36 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
                 disabled={!packageId || !quantityValid || add.isPending}>
           Add level {nextLevel}
         </Button>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-[1fr_1fr] md:items-start mt-2">
+        <Field
+          label="Gross weight of one, loaded (kg)"
+          hint="Container plus contents. Optional — without it a rack's weight limit cannot be checked against this pack."
+        >
+          <Input type="number" min={0} step="0.001" value={grossWeight}
+                 onChange={(e) => setGrossWeight(e.target.value)} />
+        </Field>
+        <div>
+          <span className="mb-1.5 block text-sm font-medium text-body">
+            Dimensions (cm)
+          </span>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {([
+              ["length_cm", "Length"],
+              ["width_cm", "Width"],
+              ["height_cm", "Height"],
+            ] as const).map(([key, label]) => (
+              <Input key={key} type="number" min={0} step="0.1" value={override[key]}
+                     placeholder={label}
+                     aria-label={label}
+                     onChange={(e) => setOverride({ ...override, [key]: e.target.value })} />
+            ))}
+          </div>
+          <span className="mt-1 block text-xs text-muted">
+            Only where this item genuinely packs differently from the container type.
+          </span>
+        </div>
       </div>
       {quantity && nextLevel > 1 && !Number.isInteger(enteredQuantity) && (
         <div className="text-sm text-bad">

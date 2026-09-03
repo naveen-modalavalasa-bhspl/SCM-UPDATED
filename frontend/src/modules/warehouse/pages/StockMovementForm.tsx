@@ -13,7 +13,7 @@ import {
   warehouseOptions,
   occupancyPreview
 } from "../api";
-import { CapacityMeter } from "../components/CapacityMeter";
+import { CapacityMeter, fmtCount, volume, weight } from "../components/CapacityMeter";
 import { Lookup } from "../components/Lookup";
 import { Section } from "../components/DocumentMeta";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
@@ -130,6 +130,21 @@ export default function StockMovementForm() {
   const freedUnmeasured = useMemo(() => freedCapacity.reduce((sum, row) => sum + row.unmeasured_lines, 0), [freedCapacity]);
   const consumedUnmeasured = useMemo(() => consumedCapacity.reduce((sum, row) => sum + row.unmeasured_lines, 0), [consumedCapacity]);
 
+  /* What the whole transfer moves, in the unit the floor actually handles.
+   *
+   * A movement is the one document where both halves are read at once — the same packs
+   * leave one shelf and land on another — so the totals are worth stating over the
+   * meters rather than leaving a storekeeper to add four cards up. Summed from the
+   * server's own per-location figures, never recomputed here. */
+  const totalOf = (rows: typeof capacityData, key: "move_units" | "move_volume" | "move_weight") =>
+    rows.reduce((sum, row) => sum + Math.abs(Number(row[key] ?? 0)), 0);
+  const load = useMemo(() => ({
+    units: totalOf(consumedCapacity, "move_units"),
+    volume: totalOf(consumedCapacity, "move_volume"),
+    weight: totalOf(consumedCapacity, "move_weight"),
+    worst: consumedCapacity.find((row) => row.status === "OVER" || row.status === "WONT_FIT"),
+  }), [consumedCapacity]);
+
 
   return (
     <div>
@@ -213,6 +228,35 @@ export default function StockMovementForm() {
         )}
       </div>
 
+      {/* The load, once, before the two halves are drawn. It is the same packs on both
+        * sides of the move, so stating it per section would say it twice and invite the
+        * reader to wonder why the numbers match. */}
+      {isBinManaged && load.units > 0 && (
+        <div className={`mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border px-4 py-3 ${
+          load.worst ? "border-bad/40 bg-bad-bg/30" : "border-line bg-content2"
+        }`}>
+          <div className="flex items-baseline gap-1.5">
+            <span className="tabular font-display text-2xl font-black leading-none text-ink">
+              {fmtCount(load.units)}
+            </span>
+            <span className="text-xs font-semibold text-body">
+              handling unit{load.units === 1 ? "" : "s"} on the move
+            </span>
+          </div>
+          {load.volume > 0 && (
+            <span className="tabular text-xs text-muted">{volume(load.volume)}</span>
+          )}
+          {load.weight > 0 && (
+            <span className="tabular text-xs text-muted">{weight(load.weight)}</span>
+          )}
+          <span className="ml-auto text-xs text-muted">
+            {load.worst
+              ? <span className="font-semibold text-bad">{load.worst.headline}</span>
+              : "Every destination has room for it."}
+          </span>
+        </div>
+      )}
+
       {isBinManaged && outwardMoves.length > 0 && (
         <Section
           title="Space freed (Source locations)"
@@ -230,7 +274,9 @@ export default function StockMovementForm() {
           {freedUnmeasured > 0 && (
             <p className="mt-3 text-xs text-muted">
               {freedUnmeasured} line{freedUnmeasured === 1 ? "" : "s"} could not be
-              measured, so the space they free is not in these figures.
+              measured, so the space they free is not in these figures. Measure the
+              container type under Masters &gt; Packages, or override the sides on the
+              item&rsquo;s own packaging rung.
             </p>
           )}
         </Section>
@@ -253,7 +299,9 @@ export default function StockMovementForm() {
           {consumedUnmeasured > 0 && (
             <p className="mt-3 text-xs text-muted">
               {consumedUnmeasured} line{consumedUnmeasured === 1 ? "" : "s"} could not be
-              measured, so the space they consume is not in these figures.
+              measured, so the space they consume is not in these figures. Measure the
+              container type under Masters &gt; Packages, or override the sides on the
+              item&rsquo;s own packaging rung.
             </p>
           )}
         </Section>

@@ -129,12 +129,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     items: [],
   });
   const [touched, setTouched] = useState(false);
+  const [vendorName, setVendorName] = useState<string>("");
   const [sourceGateId, setSourceGateId] = useState<number | null>(null);
-  // Documents picked before the first save: they have no receipt to hang off yet.
-  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
-  const [serialLine, setSerialLine] = useState<number | null>(null);
-  const [imeiLine, setImeiLine] = useState<number | null>(null);
-  const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-receipt", id],
@@ -143,7 +139,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   });
 
   /* Gate entries still waiting to become a GRN. Converting one flips its `receipt_type`,
-   * so an entry that was already converted on its own screen is gone from this list —
+   * so an entry that was already converted on its own screen is gone from this list ?
    * it IS a GRN draft by then. Shares the Lookup's cache key, so this is not a second
    * request; it exists only so the field can say why it is empty rather than looking
    * broken. */
@@ -153,6 +149,26 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     staleTime: 5 * 60_000,
     enabled: isGrn && !editing,
   });
+
+  const poFallback = useMemo(() => {
+    return form.po_id && form.po_no ? [{ id: form.po_id, code: form.po_no, name: form.po_no }] : undefined;
+  }, [form.po_id, form.po_no]);
+
+  const vendorFallback = useMemo(() => {
+    return form.vendor_id && vendorName ? [{ id: form.vendor_id, name: vendorName, code: "" }] : undefined;
+  }, [form.vendor_id, vendorName]);
+
+  const warehouseFallback = useMemo(() => {
+    return form.warehouse_id && doc?.warehouse_name 
+      ? [{ id: form.warehouse_id, name: doc.warehouse_name, code: "" }] 
+      : undefined;
+  }, [form.warehouse_id, doc?.warehouse_name]);
+
+  // Documents picked before the first save: they have no receipt to hang off yet.
+  const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  const [serialLine, setSerialLine] = useState<number | null>(null);
+  const [imeiLine, setImeiLine] = useState<number | null>(null);
+  const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
   /** Loading a saved receipt back into the editable shape. */
   useEffect(() => {
@@ -203,6 +219,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         imei_numbers: l.imei_numbers,
       })),
     });
+    if (doc.vendor_name) setVendorName(doc.vendor_name);
   }, [doc]);
 
   /**
@@ -239,8 +256,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         ordered_qty: num(line.ordered_qty),
         // What is still owed, as the count to confirm rather than a figure to trust:
         // the storekeeper overwrites it with what actually turned up.
-        received_qty: "" as any,
-        accepted_qty: "" as any,
+        received_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
+        accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         rate: line.rate ?? null,
       }));
       if (!added.length) {
@@ -252,18 +269,20 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         project_id: current.project_id || prefill.project_id || undefined,
         items: [...current.items, ...added],
       }));
+      if (prefill.vendor_name) setVendorName(prefill.vendor_name);
       setTouched(true);
     },
   });
 
   const fillPoDetails = useMutation({
     mutationFn: (poId: number) => poApi.get(poId),
-    onSuccess: (po) => {
+    onSuccess: (po: any) => {
       setForm((current) => ({
         ...current,
-        vendor_id: po.vendor_id ?? current.vendor_id,
-        project_id: po.project_id ?? current.project_id,
+        vendor_id: po.vendor_id ?? po.data?.vendor_id ?? current.vendor_id,
+        project_id: po.project_id ?? po.data?.project_id ?? current.project_id,
       }));
+      setVendorName(po.vendor_name ?? po.data?.vendor_name ?? "");
     }
   });
 
@@ -354,8 +373,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           // What the vendor says is on the vehicle, as the count to CONFIRM. The
           // storekeeper overwrites it with what is physically there, and the gap is
           // exactly the shortage the GRN exists to record.
-          received_qty: "" as any,
-          accepted_qty: "" as any,
+          received_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
+          accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
           rate: line.rate ?? null,
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,
@@ -564,6 +583,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   }, []), [form.items, isGrn, doc]);
 
   const validateQuantities = () => {
+    for (const [index, line] of form.items.entries()) {
+      if (line.po_item_id && num(line.received_qty) > num(line.ordered_qty)) {
+        const name = savedLine(index)?.item_name ?? line.item_name ?? "";
+        throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: Received quantity cannot exceed ordered quantity.`);
+      }
+    }
+    
     if (uncountedLines.length === 0) return;
     const where = uncountedLines
       .map((l) => `line ${l.index + 1}${l.name ? ` (${l.name})` : ""}`)
@@ -582,7 +608,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
    *  serial on submit, from the Serial format in Settings > Code Formats, and a
    *  serial the storekeeper actually read is never replaced. So a partial list is a
    *  legitimate save on both documents. */
-  const validateSerialLines = () => {
+  const validateSerialLines = (strict: boolean = false) => {
     for (const [index, line] of form.items.entries()) {
       if (!line.is_serial_tracked) continue;
       const required = Math.floor(num(line.received_qty));
@@ -592,6 +618,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       const actual = line.serial_numbers?.length ?? 0;
       if (actual > required) {
         throw new Error(`Line ${index + 1}: ${actual} serial numbers for ${required} received units.`);
+      }
+      if (strict && actual !== required) {
+        throw new Error(`Line ${index + 1}: Please provide exactly ${required} serial numbers for confirmation.`);
       }
     }
 
@@ -664,7 +693,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       // Same check as Save, and for the same reason: this posts the whole form, so a
       // box cleared since the last save fails on the server's parser rather than here.
       if (!locked) validateQuantities();
-      validateSerialLines();
+      validateSerialLines(true);
       if (!locked) await updateReceipt(Number(id), form);
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
@@ -805,6 +834,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           ariaLabel={`Received quantity, line ${i + 1}`}
           value={l.received_qty}
           disabled={locked}
+          max={l.po_item_id ? num(l.ordered_qty) : undefined}
           invalid={touched && blankQty(l.received_qty)}
           onChange={(v) => patchLine(i, { received_qty: v, accepted_qty: v })}
         />
@@ -952,29 +982,13 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       width: "w-28",
       hideOnNarrow: true,
       render: (l, i) => {
-        // FIXED 2026-08-21 — this returned a dash unless the item master had
-        // `is_imei_tracked` ticked, so on every other item there was no control at all:
-        // an IMEI is OPTIONAL, and "optional" was being enforced as "impossible". A
-        // storekeeper holding a handset with a readable IMEI had nowhere to put it.
-        //
-        // The backend already accepts this — `_apply_receipt_lines` only applies the
-        // one-per-unit ceiling to IMEI-tracked items and stores whatever else it is
-        // given — so nothing on the write side changes.
-        //
-        // KNOWN LIMIT, deliberately not fixed here: `_unit_mode` picks the identifier
-        // for an item as serial → IMEI → code off the MASTER FLAGS, so an IMEI typed
-        // against an untracked item is stored and displayed but is not what that unit
-        // is matched on when it is issued or scanned. Making it matchable means
-        // changing that ladder, which touches issue, picking and scanning — a separate
-        // decision, not a side effect of letting somebody type a number.
         const captured = l.imei_numbers?.length ?? 0;
         const required = Math.floor(num(l.received_qty));
+        if (!l.is_imei_tracked) return <span className="text-muted">—</span>;
         return (
           <Button variant="ghost" onClick={() => setImeiLine(i)}>
             <ScanLine className="h-4 w-4" />
-            {captured
-              ? `${captured}${l.is_imei_tracked ? `/${required}` : ""}`
-              : l.is_imei_tracked ? `0/${required}` : "Add"}
+            {captured ? `${captured}/${required}` : `0/${required}`}
           </Button>
         );
       },
@@ -1037,21 +1051,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 </Button>
               </Can>
             )}
-            {/* The same two statuses `complete_receipt` accepts, and nothing else. It
-              * used to offer SUBMITTED (which the backend rejects) and hide itself
-              * once `is_stock_posted` was set — so a GRN whose stock had banked but
-              * whose status had not caught up had no button left to finish it. Posting
-              * is idempotent, so showing it on an already-posted QC_PASSED row is
-              * safe and is exactly the way out of that corner. */}
             {editing && isGrn && ["QC_PASSED", "PARTIALLY_RECEIVED"].includes(doc?.status ?? "") && (
               <Can do="grn.qc">
                 <Button onClick={() => setConfirming("complete")}>Post to stock</Button>
               </Can>
             )}
-            {/* Only on a consignment that has actually banked its stock here. The MDP
-              * is a staging point for these goods, not their destination, so the next
-              * hop is offered right where the arrival is confirmed rather than making
-              * the storekeeper start a fresh issue and retype every line. */}
             {editing && doc?.receipt_type === "DISPATCH" && doc?.is_stock_posted && (
               <Can do="issue.forward">
                 <Button onClick={() => forward.mutate()} disabled={forward.isPending}>
@@ -1128,13 +1132,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               name="my-warehouses"
               load={myWarehouseOptions}
               value={form.warehouse_id || ""}
+              fallback={warehouseFallback}
               isDisabled={locked}
               onChange={(v) =>
                 setForm((f) => ({
                   ...f,
                   warehouse_id: v === "" ? 0 : v,
-                  // The consignment picker lists what is addressed to one point, so a
-                  // different point means a different list and a stale choice.
                   dispatch_id: null,
                 }))
               }
@@ -1166,21 +1169,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               />
             </Field>
           )}
-          {/* Picked, not typed. It used to be a free-text box because nothing in this
-            * system raised purchase orders, so a picker would have offered an empty
-            * list while the goods arrived anyway. Procurement raises them now, and the
-            * order is the one thing worth identifying at the gate — the lines, units,
-            * ordered quantities and rates all come off it.
-            *
-            * The typed box survives underneath for a delivery whose order is not in
-            * this system: those still turn up, and refusing to receive them would be a
-            * worse failure than an unlinked receipt.
-            *
-            * Hidden at an MDP or LIP: nothing is bought there. Every arrival is a
-            * consignment from the point above, so both fields were dead boxes that
-            * only invited a storekeeper to invent a purchase order. The values stay
-            * on `form` untouched, so an existing receipt keeps whatever it was saved
-            * with. */}
           {!isLocalPoint && (
             <>
               <Field
@@ -1198,12 +1186,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                   value={form.po_id ?? ""}
                   isDisabled={locked || fillFromPo.isPending || fillFromOrder.isPending
                     || fillFromDespatch.isPending}
-                  // A receipt already linked to an order that has since been fully
-                  // received is off the picker's list; without this its number would
-                  // render as the placeholder on a document that plainly has one.
-                  fallback={form.po_id && form.po_no
-                    ? [{ id: form.po_id, code: form.po_no, name: form.po_no }]
-                    : undefined}
+                  fallback={poFallback}
                   onChange={(v, option) =>
                     choosePo(v === "" ? null : Number(v), option?.code ?? "")}
                   placeholder={fillFromPo.isPending || fillFromOrder.isPending
@@ -1222,11 +1205,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                   />
                 </Field>
               )}
-              {/* Advisory, never a gate. Doc B12 makes the invoice and e-way bill
-                * mandatory before dispatch, and a vendor who filed a note here has
-                * already given us both — but goods turn up without one, and a blocked
-                * gate is a worse failure than an unlinked receipt. So this offers the
-                * note when there is one and says so plainly when there is not. */}
               {form.po_id && (
                 <Field
                   label="Vendor's despatch note"
@@ -1256,8 +1234,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                   name="vendors"
                   load={vendorOptions}
                   value={form.vendor_id ?? ""}
+                  fallback={vendorFallback}
                   isDisabled={locked || !!form.po_id}
-                  onChange={(v) => set("vendor_id", v === "" ? null : v)}
+                  onChange={(v) => set("vendor_id", v === "" ? null : Number(v))}
                   placeholder="Vendor"
                 />
               </Field>
@@ -1324,7 +1303,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             minTableWidth={isGrn ? "min-w-[1500px]" : "min-w-[900px]"}
             // No hand-added lines on a consignment receipt: an empty line has no item
             // to pick, and anything not on the challan did not arrive.
-            onAdd={locked || fromConsignment
+            // to pick, and anything not on the challan did not arrive.
+            onAdd={locked || fromConsignment || !!form.po_id
               ? undefined
               : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}

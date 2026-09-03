@@ -212,6 +212,64 @@ class SerialStatus(str, Enum):
     SCRAPPED = "scrapped"
 
 
+class TrackingType(str, Enum):
+    """What one physical unit of an item is IDENTIFIED by, on any screen that lists
+    identifiers.
+
+    Not a column: it is read off the item master (`is_serial_tracked`,
+    `is_imei_tracked`, `is_asset`) together with whether the point actually holds
+    coded units. It exists because the issue screen used to list serials, IMEIs,
+    asset codes and consumable codes in one undifferentiated column, and a
+    storekeeper holding a handset could not tell which of its two numbers the line
+    was asking him to scan.
+
+    Distinct from `service._unit_mode`, and deliberately so. `_unit_mode` answers
+    "which column does the backend VALIDATE against" and has three members, because
+    an asset code and a consumable code are the same column to a matcher. This
+    answers "what is the storekeeper looking at", which is the question a badge on a
+    screen is for, and there an asset tag and a consumable lot code are not the same
+    thing at all.
+    """
+    SERIAL = "SERIAL"
+    IMEI = "IMEI"
+    ASSET = "ASSET"
+    CONSUMABLE = "CONSUMABLE"
+    NONE = "NONE"
+
+
+# The wording of a tracking type, SERVED (`GET /api/warehouse/tracking-types`) rather
+# than mapped in a screen — same rule as `ACTIVITY_META` in logistics. `label` names
+# the badge, `unit` names one of them in a sentence ("3 of 5 asset tags"), and `hint`
+# is what the storekeeper is being asked to read off the goods.
+TRACKING_META: dict[str, dict[str, str]] = {
+    TrackingType.SERIAL.value: {
+        "label": "Serial no",
+        "unit": "serial",
+        "hint": "Scan the serial number printed on the unit or its carton.",
+    },
+    TrackingType.IMEI.value: {
+        "label": "IMEI",
+        "unit": "IMEI",
+        "hint": "Scan the 15-digit IMEI on the handset or its box label.",
+    },
+    TrackingType.ASSET.value: {
+        "label": "Asset tag",
+        "unit": "asset tag",
+        "hint": "Scan the asset tag stamped on the unit at putaway.",
+    },
+    TrackingType.CONSUMABLE.value: {
+        "label": "Consumable lot",
+        "unit": "lot code",
+        "hint": "Scan the consumable code stamped on the pack at putaway.",
+    },
+    TrackingType.NONE.value: {
+        "label": "Not tracked",
+        "unit": "unit",
+        "hint": "This item is counted, not identified — there is nothing to scan.",
+    },
+}
+
+
 class BatchStatus(str, Enum):
     """`stk_batches.status`."""
     ACTIVE = "ACTIVE"

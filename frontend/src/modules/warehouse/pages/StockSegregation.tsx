@@ -173,9 +173,39 @@ function LocationsTab() {
               })}
               
               {(locationChildren.get(selectedLocationId ?? null) || []).length === 0 && (
-                <div className="p-6 text-xs text-muted text-center flex flex-col items-center gap-2">
-                  <div className="h-8 w-8 rounded-full bg-content2 flex items-center justify-center">📍</div>
-                  Bottom Level Location
+                <div className="p-5 flex flex-col">
+                  <div className="text-[10px] font-bold tracking-wider text-muted uppercase mb-4 text-center bg-content2 py-1.5 px-3 rounded-full self-center">
+                    Complete Hierarchy
+                  </div>
+                  <div className="flex flex-col gap-0 mt-2">
+                    {breadcrumbs.map((crumb, idx) => {
+                      const isLast = idx === breadcrumbs.length - 1;
+                      return (
+                        <div key={crumb.id} className="flex items-start">
+                          <div className="flex flex-col items-center mr-3 h-full pt-1">
+                            <div 
+                              className={`w-3 h-3 rounded-full flex-shrink-0 z-10 transition-all duration-300 ${
+                                isLast 
+                                  ? 'bg-primary ring-4 ring-primary/20 shadow-sm shadow-primary/40' 
+                                  : 'bg-content3 border border-content1'
+                              }`} 
+                            />
+                            {!isLast && <div className="w-px h-10 bg-line/80 -mt-1" />}
+                          </div>
+                          <div className={`pb-2 flex flex-col ${isLast ? 'opacity-100' : 'opacity-70'} transition-opacity`}>
+                            <span className={`text-sm ${isLast ? 'font-bold text-primary' : 'font-semibold text-body'}`}>
+                              {crumb.code}
+                            </span>
+                            {crumb.name && (
+                              <span className="text-xs text-muted truncate max-w-[180px]" title={crumb.name}>
+                                {crumb.name}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>

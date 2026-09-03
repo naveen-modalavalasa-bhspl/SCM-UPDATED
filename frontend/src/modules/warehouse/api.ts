@@ -12,11 +12,13 @@ import type {
   DispatchWrite,
   ConsignmentWrite,
   Inspection,
+  HandlingUnit,
   InspectionWrite,
   OutboundInspection,
   OutboundInspectionWrite,
   Issue,
   IssueDispatchSource,
+  IssueStockSource,
   IssueWrite,
   ItemOption,
   ItemLocationsOut,
@@ -37,7 +39,9 @@ import type {
   PurchaseReturnWrite,
   Putaway,
   PutawayCandidate,
+  PutawayCodes,
   PutawayConfirm,
+  PutawayUnitCode,
   PutawayCreate,
   Receipt,
   ReceiptWrite,
@@ -54,6 +58,7 @@ import type {
   WarehouseLocation,
   WarehouseOption,
   WarehouseWrite,
+  TrackingTypeMeta,
 } from "./types";
 
 /**
@@ -128,8 +133,23 @@ export const deleteBin = (id: number) => del(`${BASE}/bins/${id}`);
  */
 export const locationOccupancy = (
   locationId: number,
-  params: { item_id?: number; qty?: number; direction?: "IN" | "OUT" } = {},
+  params: {
+    item_id?: number;
+    qty?: number;
+    direction?: "IN" | "OUT";
+    /** Which pack the quantity moves in. A bin is checked against handling units, so
+     *  "3 cases" and "1500 eaches" are different questions about the same `qty`. */
+    item_packaging_id?: number | null;
+  } = {},
 ) => get<LocationOccupancy>(`${BASE}/locations/${locationId}/occupancy`, params);
+
+/**
+ * Which packaging units an item can be put away in, each with its own box and gross
+ * weight. Served rather than assembled here so the volume on the picker is the volume
+ * the bin check will use.
+ */
+export const itemHandlingUnits = (itemId: number) =>
+  get<HandlingUnit[]>(`${BASE}/items/${itemId}/handling-units`);
 
 /**
  * The same answer for a whole draft, one row per location it touches.
@@ -253,6 +273,21 @@ export const listPutaways = (params: ListParams = {}) =>
 
 export const getPutaway = (id: number) => get<Putaway>(`${BASE}/putaways/${id}`);
 
+/**
+ * The label sheet's header — what this putaway minted and how many.
+ *
+ * A separate call from `getPutaway`: a task carries one line, but a line of 500 units
+ * carries 500 codes, and only the detail screen's label panel ever wants them. This one
+ * carries none of them, only the count; `putawayCodeUnits` pages through the codes.
+ */
+export const putawayCodes = (id: number) =>
+  get<PutawayCodes>(`${BASE}/putaways/${id}/codes`);
+
+/** One page of the codes, searchable by code, serial or IMEI. */
+export const putawayCodeUnits = (
+  id: number, params: { page?: number; size?: number; search?: string } = {},
+) => get<Page<PutawayUnitCode>>(`${BASE}/putaways/${id}/codes/units`, params);
+
 /** GRN lines a manual putaway could be raised for. Ineligible ones come back too,
  *  carrying the reason, so the picker can grey them out instead of hiding them. */
 export const putawayCandidates = (grn_id: number) =>
@@ -268,8 +303,17 @@ export const startPutaway = (id: number) => post<Putaway>(`${BASE}/putaways/${id
 export const confirmPutaway = (id: number, body: PutawayConfirm) =>
   post<Putaway>(`${BASE}/putaways/${id}/confirm`, body);
 
-/** Bins the engine suggests for this task, best first. */
-export const suggestBins = (id: number) => get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`);
+/**
+ * Bins worth offering for this task, best first.
+ *
+ * Ranked on whether the pack in hand actually goes in — not on free cube, which puts an
+ * empty bay the pallet cannot enter at the very top. Pass the rung the screen has
+ * selected: change the pack and the order changes, because a bay that takes four totes
+ * takes no pallets at all.
+ */
+export const suggestBins = (id: number, itemPackagingId?: number | null) =>
+  get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`,
+             itemPackagingId ? { item_packaging_id: itemPackagingId } : {});
 
 export const listStockMovements = (params: ListParams = {}) =>
   get<Page<StockMovement>>(`${BASE}/stock-movements`, params);
@@ -297,9 +341,31 @@ export const actOnStockMovementOrder = (
     `${BASE}/stock-movement-orders/${orderId}/act`, { action, comments });
 
 
+/**
+ * Every (batch, bin) the given items can be drawn from at this warehouse, oldest
+ * stock first — what a quantity larger than any one bin is SPLIT across.
+ *
+ * `indent_id` for the same reason `binOptions` takes it: an issue against an
+ * approved allocation must still be offered the stock its own reservation holds.
+ */
+export const issueStockSources = (
+  warehouse_id: number,
+  item_ids: number[],
+  indent_id?: number | null,
+) =>
+  get<IssueStockSource[]>(`${BASE}/issues/stock-sources`, {
+    warehouse_id,
+    item_ids: item_ids.join(","),
+    indent_id,
+  });
+
+/** What each kind of unit identifier is called. Served so no screen writes the
+ *  words "asset tag" or "IMEI" itself — see the backend's `TRACKING_META`. */
+export const trackingTypes = () => get<TrackingTypeMeta[]>(`${BASE}/tracking-types`);
+
 export const getStockAvailability = (
   warehouse_id: number,
-  source_bin_id: number,
+  source_bin_id: number | null | undefined,
   item_id: number,
   batch_id?: number | null,
 ) => get<StockAvailability>(`${BASE}/stock-movements/availability`, {
@@ -476,7 +542,12 @@ export const getReturnableLines = (grnId: number) =>
 /* ------------------------------------------------------- serials & batches -- */
 
 export const listSerials = (
-  params: ListParams & { item_id?: number; batch_id?: number; warehouse_id?: number; bin_id?: number } = {},
+  params: ListParams & {
+    item_id?: number; batch_id?: number; warehouse_id?: number; bin_id?: number;
+    // Scope the list to one issue line: units another document — or another line of
+    // the same issue — is already holding drop out, the ones this line holds stay.
+    issue_id?: number; issue_line_id?: number;
+  } = {},
 ) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
 
@@ -605,14 +676,14 @@ export const warehouseOptions = (_search?: string) =>
 
 /** Every active point in the network. ONLY for a destination field — you transfer
  *  or dispatch TO somewhere you do not hold, so scoping those would break transfers. */
-export const allWarehouseOptions = (_search?: string) =>
-  get<WarehouseOption[]>(`${BASE}/options/warehouses`, { all_points: true });
+export const allWarehouseOptions = (search?: string) =>
+  get<WarehouseOption[]>(`${BASE}/options/warehouses`, { all_points: true, search });
 
 /** Only the points this login actually holds. For the field that names where the
  *  goods physically are — the receiving point on an inward, the issuing point on an
  *  issue. Never for a destination, which is by definition somebody else's. */
-export const myWarehouseOptions = (_search?: string) =>
-  get<WarehouseOption[]>(`${BASE}/options/warehouses`, { mine_only: true });
+export const myWarehouseOptions = (search?: string) =>
+  get<WarehouseOption[]>(`${BASE}/options/warehouses`, { mine_only: true, search });
 
 /** Consignments on their way to this point that nobody has inwarded yet. */
 export const incomingDispatchOptions = (warehouse_id: number, search?: string) =>

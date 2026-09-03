@@ -444,22 +444,11 @@ class EvaluationMethod(str, Enum):
     not comparable, and only the quotes in hand define what good looks like.
     """
     LOWEST_PRICE = "LOWEST_PRICE"
-    # Price plus everything else that costs money — freight, packing, tax.
-    LOWEST_LANDED_COST = "LOWEST_LANDED_COST"
     SHORTEST_LEAD_TIME = "SHORTEST_LEAD_TIME"
-    # Landed cost and lead time together, 70/30.
-    WEIGHTED_SCORE = "WEIGHTED_SCORE"
 
 
-#: What an RFQ or a transport request is evaluated by when nobody has said. Landed
-#: cost, not headline price: it is what the company actually pays, and it is what the
-#: old `ORDER BY grand_total` was already approximating.
-DEFAULT_EVALUATION_METHOD = EvaluationMethod.LOWEST_LANDED_COST.value
-
-#: The weights WEIGHTED_SCORE uses. Named so the number on the comparison sheet can
-#: be explained without reading the scoring code.
-WEIGHTED_COST_SHARE = 0.7
-WEIGHTED_TIME_SHARE = 0.3
+#: What an RFQ or a transport request is evaluated by when nobody has said.
+DEFAULT_EVALUATION_METHOD = EvaluationMethod.LOWEST_PRICE.value
 
 
 class RFQStatus(str, Enum):

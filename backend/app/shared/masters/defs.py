@@ -8,8 +8,8 @@ from datetime import date
 from decimal import Decimal
 import re
 
-from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import false, func, or_, select
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -154,33 +154,11 @@ class ItemIn(BaseModel):
     storage_conditions: str | None = None
     requires_special_transport: bool = False
     transport_conditions: str | None = None
-    # How much room one unit takes on a shelf, which is what makes a bin's volume
-    # capacity readable at all. Either measure the three sides or state the figure;
-    # `warehouse.capacity.unit_volume` prefers the figure when both are given.
-    #
-    # All four are optional and there is no backfill, deliberately: an item nobody has
-    # measured has NO volume rather than a volume of zero, and the warehouse screens
-    # say "not measured" instead of reporting a packed bin as empty.
-    length_cm: float | None = None
-    width_cm: float | None = None
-    height_cm: float | None = None
-    unit_volume_cbm: float | None = None
+    # No dimensions and no unit volume here, deliberately. How much room the goods take
+    # is a property of the PACK they move in, not of one loose unit — a bin holds boxes,
+    # not a puddle of cubic metres. It is configured on the item's Packaging tab
+    # (mst_item_packaging) and read by modules/warehouse/capacity.py.
     is_active: bool = True
-
-    @field_validator("length_cm", "width_cm", "height_cm", "unit_volume_cbm",
-                     mode="before")
-    @classmethod
-    def blank_to_none(cls, value):
-        """An empty cell in an imported sheet says nothing about the column; it does
-        not say zero. Zero would be a measurement, and a wrong one."""
-        return None if value == "" else value
-
-    @field_validator("length_cm", "width_cm", "height_cm", "unit_volume_cbm")
-    @classmethod
-    def not_negative(cls, value):
-        if value is not None and value < 0:
-            raise ValueError("A dimension or volume cannot be negative")
-        return value
 
 
 def item_out(i: Item) -> dict:
@@ -215,8 +193,6 @@ def item_out(i: Item) -> dict:
             "storage_conditions": i.storage_conditions,
             "requires_special_transport": i.requires_special_transport,
             "transport_conditions": i.transport_conditions,
-            "length_cm": i.length_cm, "width_cm": i.width_cm,
-            "height_cm": i.height_cm, "unit_volume_cbm": i.unit_volume_cbm,
             "is_active": i.is_active}
 
 
@@ -989,14 +965,51 @@ async def apply_item_sub_class(
 
 
 class PackagingIn(BaseModel):
-    """A reusable container type — Packet, Box, Tanker.
+    """A reusable container type — Packet, Box, Tote, Euro-pallet — and its own
+    physical spec.
 
-    Dimensions, weight, volume and capacity do not belong here. How much a container
-    holds is configured independently for each item and its own UOM.
+    The spec here is the CONTAINER'S, not the goods': its outer bounding box empty, its
+    tare weight, and the handling rules that follow from how it is built. None of that
+    depends on what goes inside, which is why it is configured once here and inherited
+    by every item that packs in this container.
+
+    What does depend on the contents — how many base units one holds, and what it
+    weighs full — belongs to each item's own rung in `mst_item_packaging`, because the
+    same box holds 50 SIM cards or 4 litres of oil.
     """
     code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9-]+$")
     name: str
+    # All three or none: two sides describe nothing a slotting check can use, and a
+    # half-measured container is why a bin check has to say "not measured" rather than
+    # quietly assume the missing side away.
+    length_cm: float | None = Field(default=None, gt=0, le=100000)
+    width_cm: float | None = Field(default=None, gt=0, le=100000)
+    height_cm: float | None = Field(default=None, gt=0, le=100000)
+    #: TARE — what the container weighs empty.
+    weight_kg: float | None = Field(default=None, ge=0, le=1000000)
+    is_stackable: bool = True
+    #: 1 means non-stackable. Blank means nobody has said, which the capacity check
+    #: treats as unknown and never as unlimited.
+    max_stack_tiers: int | None = Field(default=None, ge=1, le=999)
+    #: May it be tipped to make it fit? A drum may not; a carton may.
+    is_rotatable: bool = True
+    #: Void factor — the share of the container's own cube goods actually reach.
+    fill_efficiency_pct: float | None = Field(default=None, gt=0, le=100)
+    is_returnable: bool = False
     is_active: bool = True
+
+    @model_validator(mode="after")
+    def whole_box_or_none(self):
+        sides = (self.length_cm, self.width_cm, self.height_cm)
+        if any(s is not None for s in sides) and not all(s is not None for s in sides):
+            raise ValueError(
+                "Give all three of length, width and height, or none of them — a "
+                "container measured on two sides cannot be checked against a bin.")
+        # A non-stackable container is one tier by definition. Storing the two so they
+        # can disagree is how a screen ends up showing "not stackable, 4 high".
+        if not self.is_stackable:
+            self.max_stack_tiers = 1
+        return self
 
 
 def _num(value):
@@ -1005,6 +1018,18 @@ def _num(value):
 
 def packaging_out(p: Packaging) -> dict:
     return {"id": p.id, "code": p.code, "name": p.name,
+            "length_cm": _num(p.length_cm), "width_cm": _num(p.width_cm),
+            "height_cm": _num(p.height_cm), "weight_kg": _num(p.weight_kg),
+            # Derived, never stored — three sides and a cube that can disagree is a bug
+            # report waiting to happen, and the sides are the thing anyone measures.
+            "volume_cbm": (
+                None if not (p.length_cm and p.width_cm and p.height_cm)
+                else float(p.length_cm) * float(p.width_cm) * float(p.height_cm) / 1e6),
+            "is_stackable": True if p.is_stackable is None else bool(p.is_stackable),
+            "max_stack_tiers": p.max_stack_tiers,
+            "is_rotatable": True if p.is_rotatable is None else bool(p.is_rotatable),
+            "fill_efficiency_pct": _num(p.fill_efficiency_pct),
+            "is_returnable": bool(p.is_returnable),
             "is_active": p.is_active}
 
 
@@ -1183,25 +1208,54 @@ async def apply_item_group(db: AsyncSession, row: ItemGroup,
 #  Item packaging — the tray -> box -> container ladder
 # --------------------------------------------------------------------------- #
 class ItemPackagingIn(BaseModel):
+    """One rung of an item's ladder — a PACKAGING UNIT, in the WMS sense.
+
+    `quantity` is the conversion factor (1 BOX = 50 EACH). The dimensions are an
+    OVERRIDE of the container type's own box and are blank in the ordinary case, so a
+    ladder stays cheap to configure and only genuine exceptions are typed.
+    `gross_weight_kg` is what ONE of these weighs full — item-specific by definition,
+    which is exactly why it cannot live on the container type.
+    """
     item_id: int
     level: int
     package_id: int
     quantity: float
+    length_cm: float | None = Field(default=None, gt=0, le=100000)
+    width_cm: float | None = Field(default=None, gt=0, le=100000)
+    height_cm: float | None = Field(default=None, gt=0, le=100000)
+    gross_weight_kg: float | None = Field(default=None, ge=0, le=1000000)
+    max_stack_tiers: int | None = Field(default=None, ge=1, le=999)
+    is_default_putaway_unit: bool = False
     is_active: bool = True
+
+    @model_validator(mode="after")
+    def whole_box_or_none(self):
+        sides = (self.length_cm, self.width_cm, self.height_cm)
+        if any(s is not None for s in sides) and not all(s is not None for s in sides):
+            raise ValueError(
+                "Override all three of length, width and height, or leave all three "
+                "blank to use the container type's own measurements.")
+        return self
 
 
 def item_packaging_out(p: ItemPackaging) -> dict:
     return {"id": p.id, "item_id": p.item_id, "level": p.level,
             "package_id": p.package_id, "package_name": p.package_name,
             "quantity": _num(p.quantity), "uom_id": p.uom_id,
-            "uom_code": p.uom_code, "is_active": p.is_active}
+            "uom_code": p.uom_code,
+            "length_cm": _num(p.length_cm), "width_cm": _num(p.width_cm),
+            "height_cm": _num(p.height_cm),
+            "gross_weight_kg": _num(p.gross_weight_kg),
+            "max_stack_tiers": p.max_stack_tiers,
+            "is_default_putaway_unit": bool(p.is_default_putaway_unit),
+            "is_active": p.is_active}
 
 
 async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
                                data: ItemPackagingIn) -> None:
-    """Level 1 is measured in the item's own unit; every level above counts the
-    level below it. The rungs are stored, never the running totals — a stored total
-    is one edit away from disagreeing with its own parts."""
+    """Level 1 is measured in the item's own unit; every level above counts the level
+    below it. The rungs are stored, never the running totals — a stored total is one
+    edit away from disagreeing with its own parts."""
     if data.level < 1:
         raise ValidationError("Packaging levels start at 1")
     if data.quantity <= 0:
@@ -1233,6 +1287,19 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
     # Every result is ultimately expressed in the item's own stocking UOM.
     row.uom_id, row.uom_code = item.uom_id, item.uom_code
 
+    # At most one default putaway unit per item. Enforced here rather than by an index
+    # for the reason `apply_vendor_item` gives about its preferred vendor: "at most one
+    # TRUE per item" is not something a unique index can express. Turning one rung on
+    # turns the others off, because the alternative is a form that refuses to save and
+    # sends the storekeeper away to find the old default first.
+    if data.is_default_putaway_unit:
+        await db.execute(
+            update(ItemPackaging)
+            .where(ItemPackaging.item_id == data.item_id,
+                   ItemPackaging.id != (row.id or 0))
+            .values(is_default_putaway_unit=False)
+        )
+
 
 async def validate_item_packaging_deactivate(
     db: AsyncSession, row: ItemPackaging,
@@ -1262,6 +1329,13 @@ async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
         .order_by(ItemPackaging.level)
     )).scalars().all()
 
+    containers = {
+        c.id: c for c in (await db.execute(
+            select(Packaging).where(
+                Packaging.id.in_({r.package_id for r in rows if r.package_id}))
+        )).scalars().all()
+    } if rows else {}
+
     out, running = [], 1.0
     for index, row in enumerate(rows):
         if row.level != index + 1:
@@ -1278,6 +1352,15 @@ async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
             })
             if lower_index > 0:
                 package_count *= float(lower.quantity or 0)
+        container = containers.get(row.package_id)
+        # The rung's own override, else the container type's box. Volume is multiplied
+        # out on read for the same reason the running totals are: a stored cube is one
+        # edit away from disagreeing with the sides it came from.
+        own = all(v is not None for v in (row.length_cm, row.width_cm, row.height_cm))
+        sides = ((row.length_cm, row.width_cm, row.height_cm) if own else
+                 (container.length_cm, container.width_cm, container.height_cm)
+                 if container else (None, None, None))
+        measured = all(v is not None for v in sides)
         out.append({
             "level": row.level, "package_id": row.package_id,
             "package_name": row.package_name, "quantity": _num(row.quantity),
@@ -1285,6 +1368,17 @@ async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
             "package_breakup": package_breakup,
             # What one of this package holds, expressed in the item's own unit.
             "base_quantity": running, "base_uom_code": item.uom_code,
+            # What the warehouse checks a bin against — see modules/warehouse/capacity.
+            "length_cm": _num(sides[0]), "width_cm": _num(sides[1]),
+            "height_cm": _num(sides[2]),
+            "volume_cbm": (float(sides[0]) * float(sides[1]) * float(sides[2]) / 1e6
+                           if measured else None),
+            "dims_from": ("RUNG" if own else "PACKAGE" if measured else None),
+            "gross_weight_kg": _num(row.gross_weight_kg),
+            "tare_weight_kg": _num(container.weight_kg) if container else None,
+            "max_stack_tiers": (row.max_stack_tiers
+                                or (container.max_stack_tiers if container else None)),
+            "is_default_putaway_unit": bool(row.is_default_putaway_unit),
         })
     return out
 

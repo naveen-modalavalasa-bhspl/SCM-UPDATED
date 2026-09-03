@@ -95,6 +95,20 @@ export interface POAmend extends POHeader {
   }[] | null;
 }
 
+export interface POComment {
+  id: number;
+  po_id: number;
+  author_id?: number | null;
+  author_name?: string | null;
+  message: string;
+  created_at: string;
+}
+
+export interface POApprovalQtyLine {
+  id: number;
+  quantity: number;
+}
+
 export interface POListRow {
   id: number;
   po_no: string;
@@ -255,6 +269,7 @@ export interface Consolidation extends ConsolidationListRow {
   approved_by_name?: string | null;
   approved_at?: string | null;
   remarks?: string | null;
+  has_rfq?: boolean;
   items: ConsolidationItem[];
 }
 
@@ -283,11 +298,12 @@ export interface Requisition extends ReqListRow {
   approved_at?: string | null;
   source_mr_id?: number | null;
   source_mr_no?: string | null;
+  has_consolidation?: boolean;
+  has_rfq?: boolean;
   /** Read at request time off HCM (the raiser's department) and settings (the
    *  company). Neither is a column on `pro_requisitions` and neither is editable. */
   department_id?: number | null;
   department_name?: string | null;
-  has_rfq?: boolean;
   company_name?: string | null;
   /** One "needed by" for the whole document. A line may still carry its own. */
   required_date?: string | null;
@@ -368,10 +384,11 @@ export interface RFQVendor {
 export interface RFQListRow {
   id: number;
   rfq_no: string;
-  title?: string | null;
-  rfq_date?: string | null;
-  due_date?: string | null;
+  title: string | null;
+  rfq_date: string | null;
+  due_date: string | null;
   status: string;
+  vendor_status?: string | null;
   total_items: number;
   vendor_count: number;
   response_count: number;
@@ -732,6 +749,8 @@ export interface VendorPOLine {
   ordered_qty: number;
   despatched_qty: number;
   pending_qty: number;
+  rate?: number | null;
+  amount?: number | null;
 }
 
 export interface VendorPO {

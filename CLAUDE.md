@@ -167,6 +167,58 @@ check; and `create_mr_from_shortfall` deduplicates per indent **line**, not per 
 — per indent was enough while a shortage was raised once, and rounds of serving mean a
 later shortage on the same indent is a different shortage that was being dropped.
 
+### A material issue is one ask per item, split over the bins that serve it (2026-09-03)
+
+An issue LINE names one batch and one bin. The shelf frequently does not: fifteen
+monitors sitting five in one bay and ten in another are two picks. The form could
+express only one of them, so a storekeeper wrote 15 against a bin holding 5, the unit
+picker — correctly scoped to that line's own batch and bin — then offered 5 codes for a
+line claiming 15, and the gap between "codes selected" and "issued quantity" was the
+only hint anything was wrong. It was read as a defect in the picker. It was the
+document being unable to say what was happening.
+
+**A split is a sibling LINE, not a new table.** `out_issue_items` already carries
+`indent_item_id`, already allows several rows per item, and every downstream reader is
+already per line — the reservation stamp, `_issue_unit_supply`, `move_stock_out`, the
+occupancy preview, `stk_ledger`. So two bins are two lines against one indent line and
+nothing behind the screen changed. The grid groups them (`frontend/src/modules/
+warehouse/issueSplits.ts`): a parent row per item states the ask, a child row per pick
+states its (batch, bin), what that location holds, what is taken from it, and how many
+identifiers are named against THAT pick.
+
+**The invariant, which fails silently if narrowed:** `requested_qty` is DISTRIBUTED
+across a group's splits, never repeated. `_apply_issue_lines` refuses a line requesting
+nothing and refuses a line issuing more than it requests, and `out_issues.total_qty` is
+a plain SUM over lines — so a group asking for 15 must have splits whose requested
+quantities add to 15. `redistribute` is the only thing that writes them: adding or
+removing a pick measures the ask FIRST and puts it back over the new set, and
+`normalizeSplits` does the same on the way to the server. Put the full ask on each
+split instead and the document silently asks for double.
+
+`GET /api/warehouse/issues/stock-sources` is where the splits come from — every
+(batch, bin) an item can be drawn from, ordered expiry-then-batch-then-bin, so a screen
+taking them in order is doing FIFO without knowing what FIFO is. Read off `stk_balance`
+alone, NEVER off `whs_serial_numbers`: that table is one row per physical unit and holds
+773k of them. It honours `_stock_offerable(indent_id)` for the same reason `bin_options`
+does. Auto-split runs once on a freshly pulled draft, when that answer lands, and only
+on groups whose single source cannot serve them.
+
+**Which identifier is being asked for is SERVED, never inferred in a screen.**
+`enums.TRACKING_META` (`GET /api/warehouse/tracking-types`) names each kind, and
+`IssueItemRead.tracking_type` says which one a line wants. A serial, an IMEI, an asset
+tag and a consumable lot code are fifteen characters of upper case and digits apiece —
+indistinguishable by eye — so a storekeeper holding a handset could not tell which of
+its two printed numbers the line wanted. `_tracking_type` is deliberately WIDER than
+`_unit_mode`: the latter answers "which column does the matcher validate against" and
+folds an asset tag and a lot code into one CODE, because to a matcher they are the same
+column. On the shelf they are two different labels in two different places. Do not
+collapse the two — `test_an_asset_tag_and_a_lot_code_are_not_the_same_label` exists to
+catch it.
+
+The picker is scoped to one pick's own batch and bin (it always was) and now SAYS so,
+because a correctly short list reads as missing stock otherwise. Parity is checked per
+PICK: ten units over two bins with all ten codes on the first used to look complete.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:
@@ -379,7 +431,92 @@ TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY
     from `VITE_API_URL` / `VITE_API_PROXY`, never a literal in code. No credentials,
     hosts, or keys baked into source. (Enums, permission codes, status maps are
     intentional constants, not config.)
-14. **Capacity and Occupancy.** Occupancy is read, never stored (it is computed on demand using dimensions and stock). Capacity warns, never blocks (a full bin shows warnings but still accepts stock, allowing exceptions to be logged instead of halting operations).
+14. **Capacity and Occupancy, in HANDLING UNITS** (`modules/warehouse/capacity.py`).
+    A bin holds packs, not a puddle of cubic metres: space is
+    `ceil(qty / units per pack) x volume of one pack`, measured at a rung of the item's
+    own ladder (`mst_item_packaging`), because half a case still occupies a case's
+    footprint. `mst_items` carries NO dimensions and no unit volume — `qty x
+    volume_per_each` reports a full bin as nearly empty and was removed for it
+    (`b8e4f1c7a2d9`).
+    A location is checked on **four independent gates** — cube (derated by its void
+    factor), payload against GROSS weight, the bounding box (does one unit physically
+    enter it), and the discrete limit ("one euro-pallet, or four totes"), stated or
+    slotted. Passing three and failing one is failing.
+    Occupancy is **read, never stored** — computed on demand from stock through each
+    item's default putaway unit, so a putaway, an issue or a correction changes the
+    answer by existing. Capacity **warns, never blocks**: the goods are on the floor
+    whether or not the master data says they fit, and refusing only means stock sits in
+    a bin nobody wrote down. Every verdict's wording is SERVED (`status`, `headline`,
+    `detail`, and each gate's own sentence), never composed in a screen.
+    An unmeasured pack has NO volume, not zero — zero reads as "there is room".
+    **A bin suggestion is ranked on the PACK, never on free space.** `_suggest_bin`
+    (the task's prefilled bin) and `suggested_bins` (the chips) both score candidates
+    with `capacity.suggestion_fit` and order them by `capacity.SUGGESTION_RANK`, which
+    is deliberately NOT `SEVERITY`: severity ranks what to tell somebody, so "nobody
+    measured this" is mild news, while a ranking has to treat a bin known to have room
+    as better advice than one nothing is known about, and both as better than one the
+    load provably does not enter. `WONT_FIT` therefore sorts below `FULL` — a full bay
+    is one to come back to, a bay the pack does not fit is never the answer. Ranking on
+    free cube put an empty bay the pallet cannot enter at the very top, most confidently
+    exactly where it was most wrong. Consolidation (the bin already holding the item)
+    survives as the tie-break, via a stable sort.
+
+### A 500 on a screen that worked yesterday is usually an UNAPPLIED MIGRATION
+
+Two outages on 2026-09-03, one cause: the database was behind the models.
+
+`sys_audit_log` was missing `location`, `device_type`, `browser`, `os` and
+`user_agent`. Every `write_audit` INSERT names all five, so **approving a material
+request 500'd**, and so did the home dashboard. The migration that adds them
+(`fb6b1c0ef043`) already existed, already idempotent — it had simply never been run,
+because it sat on the second of two Alembic heads and `alembic upgrade head` refuses
+to move with more than one.
+
+So when a screen 500s, check drift BEFORE reading code:
+
+```
+.venv/Scripts/python -m alembic heads     # more than one? nothing is upgrading
+.venv/Scripts/python -m alembic current
+```
+
+Compare the models to the live schema directly — SQLAlchemy's metadata against
+`information_schema` — rather than guessing from the traceback. A missing COLUMN
+raises 1054 the moment anybody opens that screen; a missing INDEX raises nothing at
+all until a sort gets big enough or a JSON column widens the sort record (see the
+section below).
+
+As of 2026-09-03 this database has **0 missing tables and 0 missing columns**, and 54
+missing single-column indexes, all on `lgs_*` and `pro_*` tables that were created by
+hand rather than by `create_all` (the bootstrap note explains why those exist). Those
+are a performance matter, not a correctness one — but they are the reason a
+`pro_*` list screen can be slow for no visible reason.
+
+### Never sort a list on a non-indexed column of a JSON-bearing table (2026-09-03)
+
+The stock ledger returned a 500 on every load. The cause was `ORDER BY created_at
+DESC` over `SELECT *` on `stk_ledger`, which raised MySQL 1038, "Out of sort memory".
+
+It is NOT a volume problem, and diagnosing it as one sends you looking in the wrong
+place: the table held **333 rows**. `stk_ledger.serial_numbers` is a `json` column;
+MySQL sizes a filesort record by each column's MAXIMUM possible width, a JSON
+column's maximum is enormous, and one sort record alone therefore exceeds the default
+`sort_buffer_size` of 256 KB. It fails identically at three rows and three million.
+
+**Twenty-five tables here carry a JSON column** — `stk_ledger`, `stk_balance`, every
+`hcm_*` mirror (`raw`), `wf_instances` (`resolved_chain`), `sys_audit_log`,
+`sys_app_logs`, `inb_receipt_items`, the inspection items, `pro_po_revisions`. A list
+query over any of them must order by an INDEXED column, and the primary key is
+already indexed on every one.
+
+Order by `id`, not by `created_at`, and it fixes a second defect at the same time:
+`created_at` is not unique (a posting writes its whole batch in one transaction — 333
+ledger rows share 168 distinct timestamps), so ordering on it leaves ties undefined
+between one page and the next and rows repeat on page 2 or vanish. An auto-increment
+primary key is the insert order AND unique, and reading it backwards is an index scan
+with no sort at all.
+
+Raising `sort_buffer_size` would also stop the error, and is the wrong fix: it hides a
+full-table filesort behind a bigger buffer instead of removing it.
 
 ## Before finishing any task
 Run `pytest` (must pass) and `npm run build` (must compile). Don't create files
@@ -489,9 +626,18 @@ built against a different backend contract and is to be rewritten (see
   NULL `parent_id` values as distinct, so an index cannot do it).
 - `mst_category_tags` is the one tagging surface for attributes, specs and features.
   `mst_attribute_mappings` is dead but not dropped; the migration copied it across.
-- A package (`mst_packaging`) is a container type only. How much of an item one holds
-  lives on `mst_item_packaging`, one row per level, and the breakdown is multiplied
-  up on read so totals cannot drift from their rungs.
+- A package (`mst_packaging`) is a container type **and its own physical spec**: the
+  outer box empty, the TARE weight, and the handling rules that follow from how it is
+  built (stackable, max tiers, may it be turned, void factor). None of that depends on
+  the contents, so it is configured once and inherited.
+  How much of an item one holds lives on `mst_item_packaging`, one row per level, and
+  the breakdown is multiplied up on read so totals cannot drift from their rungs. A
+  rung is a full **packaging unit**: the conversion factor, an optional dimension
+  OVERRIDE (blank means the container type's), the GROSS weight — item-specific, hence
+  not on the container — and `is_default_putaway_unit`, at most one per item and
+  enforced in `apply_item_packaging` for the reason `apply_vendor_item` gives about its
+  preferred vendor. This is what `modules/warehouse/capacity.py` checks a bin against
+  (rule 14); an item with no measured rung is one no location can report a fill for.
 - Asset vs consumable is a per-item flag. The asset/consumable **code** is generated
   during putaway in the warehouse module, never in masters.
 - Projects are read-only (HCM owns them): the write routes are not registered.

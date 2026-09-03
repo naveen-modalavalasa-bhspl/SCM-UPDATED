@@ -50,9 +50,16 @@ export function PackagingTab() {
   return (
     <>
       <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
-        Maintain reusable <strong className="text-body">container types</strong> such
-        as Packet, Box and Tanker. Capacity is configured per item on its Packaging
-        tab because the same container type can hold different products and units.
+        Maintain reusable <strong className="text-body">container types</strong> such as
+        Packet, Box, Tote and Euro-pallet, together with the{" "}
+        <strong className="text-body">physical spec of the container itself</strong> —
+        its outer box empty, what it weighs empty, and whether it may be stacked or
+        turned. The warehouse checks a bin against those measurements, so a container
+        left unmeasured is one no location can say it has room for.
+        <br />
+        How <em>much</em> a container holds is not here: the same box takes 50 SIM cards
+        or 4 litres of oil, so the quantity and the loaded weight belong to each item on
+        its own Packaging tab.
       </div>
       <MasterCrud<MasterPackaging>
         title="Package" queryKey="packaging" searchable
@@ -60,6 +67,31 @@ export function PackagingTab() {
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },
+          { key: "box", header: "Outer box", render: (r) => (
+              r.length_cm == null ? <span className="text-warn">Not measured</span> : (
+                <span className="tabular text-sm">
+                  {r.length_cm} × {r.width_cm} × {r.height_cm} cm
+                </span>
+              )
+            ) },
+          { key: "cube", header: "Cube", hideOnNarrow: true, render: (r) => (
+              r.volume_cbm == null
+                ? "—"
+                : <span className="tabular text-sm">{r.volume_cbm.toPrecision(3)} m³</span>
+            ) },
+          { key: "tare", header: "Tare", hideOnNarrow: true, render: (r) => (
+              r.weight_kg == null ? "—" : <span className="tabular text-sm">{r.weight_kg} kg</span>
+            ) },
+          { key: "stack", header: "Handling", hideOnNarrow: true, render: (r) => (
+              <span className="text-xs text-muted">
+                {r.max_stack_tiers === 1 || r.is_stackable === false
+                  ? "Do not stack"
+                  : r.max_stack_tiers
+                    ? `Stack ${r.max_stack_tiers} high`
+                    : "Stacking not stated"}
+                {r.is_rotatable === false ? " · do not turn" : ""}
+              </span>
+            ) },
           { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
         ]}
         renderCard={(r) => (
@@ -68,6 +100,12 @@ export function PackagingTab() {
               <Code>{r.code}</Code><Active on={r.is_active} />
             </div>
             <div className="text-sm text-body">{r.name}</div>
+            <div className="text-xs text-muted">
+              {r.length_cm == null
+                ? "Not measured — no bin can check it"
+                : `${r.length_cm} × ${r.width_cm} × ${r.height_cm} cm` +
+                  (r.weight_kg != null ? ` · ${r.weight_kg} kg empty` : "")}
+            </div>
           </div>
         )}
         fetchList={(search) => mastersApi.packaging.list({ search, size: 200 }).then((p) => p.items)}
@@ -76,10 +114,47 @@ export function PackagingTab() {
             pattern: /^[A-Za-z0-9-]+$/,
             patternMessage: "Use letters, numbers or a hyphen" },
           { key: "name", label: "Container type", required: true, maxLength: 200 },
+          // All three or none. The server refuses a half-measured box for the same
+          // reason: two sides describe nothing a slotting check can use, and a missing
+          // side treated as zero would let anything through.
+          { key: "length_cm", label: "Length (cm)", type: "number", half: true, min: 0,
+            hint: "The outer box, empty. Give all three or leave all three blank.",
+            validate: wholeBox },
+          { key: "width_cm", label: "Width (cm)", type: "number", half: true, min: 0,
+            validate: wholeBox },
+          { key: "height_cm", label: "Height (cm)", type: "number", half: true, min: 0,
+            validate: wholeBox },
+          { key: "weight_kg", label: "Tare weight (kg)", type: "number", half: true,
+            min: 0,
+            hint: "What it weighs EMPTY. Loaded weight is per item, on its own rung." },
+          { key: "is_stackable", label: "Stackable", type: "switch" },
+          { key: "max_stack_tiers", label: "Maximum tiers", type: "number", min: 1,
+            half: true,
+            hint: "How many may sit on one another. Blank means nobody has said, which a bin check treats as unknown — never as unlimited." },
+          { key: "is_rotatable", label: "May be turned on its side", type: "switch",
+            hint: "A carton may; a drum may not. A container that may not be turned is checked upright only." },
+          { key: "fill_efficiency_pct", label: "Usable share (%)", type: "number",
+            min: 1, max: 100, half: true,
+            hint: "Void factor — the share of its own cube that goods actually reach. Loose parts in a rigid tote settle at 70-80%." },
+          { key: "is_returnable", label: "Returnable", type: "switch" },
           { key: "is_active", label: "Active", type: "switch" },
         ]}
-        emptyForm={{ code: "", name: "", is_active: true }}
-        toForm={(r) => ({ code: r.code, name: r.name, is_active: r.is_active })}
+        emptyForm={{
+          code: "", name: "", length_cm: "", width_cm: "", height_cm: "",
+          weight_kg: "", is_stackable: true, max_stack_tiers: "", is_rotatable: true,
+          fill_efficiency_pct: "", is_returnable: false, is_active: true,
+        }}
+        toForm={(r) => ({
+          code: r.code, name: r.name,
+          length_cm: r.length_cm ?? "", width_cm: r.width_cm ?? "",
+          height_cm: r.height_cm ?? "", weight_kg: r.weight_kg ?? "",
+          is_stackable: r.is_stackable ?? true,
+          max_stack_tiers: r.max_stack_tiers ?? "",
+          is_rotatable: r.is_rotatable ?? true,
+          fill_efficiency_pct: r.fill_efficiency_pct ?? "",
+          is_returnable: r.is_returnable ?? false,
+          is_active: r.is_active,
+        })}
         bulk={mastersApi.packaging}
         onCreate={(v) => mastersApi.packaging.create(v as Partial<MasterPackaging>)}
         onUpdate={(id, v) => mastersApi.packaging.update(id, v as Partial<MasterPackaging>)}
@@ -87,6 +162,21 @@ export function PackagingTab() {
       />
     </>
   );
+}
+
+/** All three sides or none of them. Attached to each side so whichever one the user is
+ *  standing in tells them, rather than the message landing on a field they never
+ *  touched. Mirrors `PackagingIn.whole_box_or_none` on the server. */
+function wholeBox(
+  _value: unknown,
+  all: Record<string, string | number | boolean | null | (string | number)[]>,
+): string | null {
+  const sides = ["length_cm", "width_cm", "height_cm"]
+    .map((key) => all[key])
+    .map((v) => (v === "" || v == null ? null : Number(v)));
+  const set = sides.filter((v) => v != null).length;
+  if (set === 0 || set === 3) return null;
+  return "Give all three sides, or leave all three blank — a container measured on two sides cannot be checked against a bin.";
 }
 
 export function AttributesTab({ uoms }: { uoms: Option[] }) {

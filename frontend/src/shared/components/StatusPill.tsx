@@ -32,12 +32,12 @@ const TONE: Record<string, Tone> = {
  * is looking at, so only the wording moves and the tone still comes from the real
  * status.
  */
-export function StatusPill({ status, label }: { status: string; label?: string }) {
+export function StatusPill({ status, label, variant = "flat" }: { status: string; label?: string; variant?: "solid" | "bordered" | "light" | "flat" | "faded" | "shadow" | "dot" }) {
   return (
     <Chip
       size="sm"
       radius="full"
-      variant="flat"
+      variant={variant}
       color={TONE[status] ?? "default"}
       classNames={{ content: "text-[11px] font-semibold uppercase tracking-wide" }}
     >

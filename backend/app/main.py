@@ -70,6 +70,38 @@ async def lifespan(app: FastAPI):
             log.info("rbac_permissions relabelled: %s", relabelled)
     except Exception as exc:
         log.warning("Page registry sync skipped: %s", exc)
+
+    # PO approval chat table — created on demand if alembic hasn't run yet.
+    # The feature added pro_po_comments after the last DB snapshot; without this
+    # a GET /api/pos/{id}/comments would 500 with "Table doesn't exist" until the
+    # admin runs `alembic upgrade head`. CREATE IF NOT EXISTS keeps it safe on
+    # every restart and is a no-op once the migration has landed.
+    try:
+        from sqlalchemy import text as _text
+        from app.core.database import engine as _engine
+        async with _engine.begin() as conn:
+            await conn.execute(_text("""
+CREATE TABLE IF NOT EXISTS pro_po_comments (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    po_id BIGINT NOT NULL,
+    author_id BIGINT NULL,
+    author_name VARCHAR(200) NULL,
+    message TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    CONSTRAINT fk_pro_po_comments_po FOREIGN KEY (po_id) REFERENCES pro_purchase_orders(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""))
+            # indexes — IF NOT EXISTS not supported for INDEX with async, ignore duplicate
+            for _ddl in (
+                "CREATE INDEX ix_pro_po_comments_po_id ON pro_po_comments(po_id)",
+                "CREATE INDEX ix_pro_po_comments_po_created ON pro_po_comments(po_id, created_at)",
+            ):
+                try:
+                    await conn.execute(_text(_ddl))
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.warning("pro_po_comments ensure skipped: %s", exc)
     yield
     scheduler.shutdown()
     approval_scheduler.shutdown()

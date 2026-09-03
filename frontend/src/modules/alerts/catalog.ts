@@ -310,12 +310,24 @@ const DEFINITIONS: AlertDef[] = [
   ),
   alert(
     // The stock IS in the bin — nothing was refused. Sticky because it is the only
-    // record the storekeeper sees of a shelf now over its stated capacity, and a
+    // record the storekeeper sees of a shelf now past what it is rated for, and a
     // message that vanishes after three seconds is a message nobody read.
-    "putaway.over_capacity", "warning", "Stored, but {bin} is over capacity",
-    "{item} is in {bin}. That puts it {over} m³ past the {capacity} m³ it is " +
-      "listed as holding — the placement is recorded on the task either way, so " +
-      "restack it or raise the location's capacity when you get a moment.",
+    //
+    // `{reason}` is the sentence the server wrote for the gate that failed: a putaway
+    // can breach the cube, the payload, the unit limit or the doorway, and naming the
+    // gate here would mean writing those four sentences a second time.
+    "putaway.over_capacity", "warning", "Stored, but {bin} is past what it is rated for",
+    "{item} is in {bin}. {reason} The placement is recorded on the task either " +
+      "way, so restack it or raise the location's limits when you get a moment.",
+    undefined,
+    true,
+  ),
+  alert(
+    // A different problem with a different fix: the load is not too much for the shelf,
+    // it does not physically enter it. Free space elsewhere in the bin does not help.
+    "putaway.wont_fit", "warning", "Stored, but it does not fit {bin}",
+    "{item} is recorded in {bin}. {reason} Move it to a location that takes this " +
+      "pack, or break the load down — the placement stands until you do.",
     undefined,
     true,
   ),

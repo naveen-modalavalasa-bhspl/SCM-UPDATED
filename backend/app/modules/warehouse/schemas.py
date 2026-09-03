@@ -89,9 +89,15 @@ class BinRead(_Read):
     path: str | None = None
     level: int | None = None
     capacity_qty: Decimal | None = None
+    #: The USABLE cube on a decorated row: stated (or worked out from the three sides
+    #: below) and then derated by the void factor, so a screen never re-derives it.
     capacity_volume: Decimal | None = None
     max_weight_capacity: Decimal | None = None
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
     height_cm: Decimal | None = None
+    max_handling_units: int | None = None
+    fill_efficiency_pct: Decimal | None = None
     aisle_width_meters: Decimal | None = None
     temperature_controlled: bool = False
     humidity_percentage: Decimal | None = None
@@ -101,14 +107,31 @@ class BinRead(_Read):
     is_pickable: bool
     is_active: bool
     occupied_qty: Decimal | None = None
-    # Volume, read never stored — see modules/warehouse/capacity.py. Present on the
-    # rows the suggestion list decorates and None everywhere else, so a screen can tell
-    # "this bin is empty" from "nobody worked it out for this row".
+    # Read, never stored — see modules/warehouse/capacity.py. Present on the rows the
+    # suggestion list decorates and None everywhere else, so a screen can tell "this bin
+    # is empty" from "nobody worked it out for this row". `capacity_volume` here is the
+    # USABLE cube: stated or derived from the sides, then derated by the void factor.
     occupied_volume: Decimal | None = None
     free_volume: Decimal | None = None
     utilisation_pct: float | None = None
     capacity_status: str | None = None
     is_partial: bool | None = None
+    # The discrete and payload gates, so a chip can say "1 of 1 pallet" — the limit no
+    # cube expresses and the reason a bay with room left is still full.
+    capacity_units: int | None = None
+    occupied_units: Decimal | None = None
+    capacity_weight_kg: Decimal | None = None
+    occupied_weight_kg: Decimal | None = None
+    # What this bin says about the LOAD IN HAND, as opposed to how full it is in
+    # general — set only on the suggestion chips, which are ranked on it. `capacity_
+    # status` describes the shelf; `fit_status` is the decision, and the two differ
+    # exactly where it matters: a nine-tenths empty bay a pallet does not enter.
+    fit_status: str | None = None
+    #: Does ONE unit of this pack physically go in? None when either box is unmeasured.
+    fits_pack: bool | None = None
+    #: How many more of this pack it would still take, stated or slotted from the sides.
+    slots_free: int | None = None
+    slot_capacity: int | None = None
     children: list["BinRead"] = Field(default_factory=list)
 
 
@@ -121,9 +144,17 @@ class BinWrite(BaseModel):
     # A location's kind: BIN and COLD_STORAGE_BIN hold stock, the rest are structure.
     bin_type: str = "BIN"
     capacity_qty: Decimal | None = None
+    # Leave blank and the cube is worked out from the three sides below, so a location
+    # measured once needs nothing typed twice.
     capacity_volume: Decimal | None = None
     max_weight_capacity: Decimal | None = None
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
     height_cm: Decimal | None = None
+    #: "This bay takes one euro-pallet, or four totes" — the gate no cube expresses.
+    max_handling_units: int | None = Field(default=None, ge=1, le=100000)
+    #: Void factor, 1-100. Blank means 100%: nobody has derated this location.
+    fill_efficiency_pct: Decimal | None = Field(default=None, gt=0, le=100)
     aisle_width_meters: Decimal | None = None
     temperature_controlled: bool = False
     humidity_percentage: Decimal | None = None
@@ -148,7 +179,8 @@ class BinWrite(BaseModel):
 
     @field_validator(
         "name", "description", "barcode", "floor_level", "shelf_level",
-        "capacity_qty", "capacity_volume", "max_weight_capacity", "height_cm",
+        "capacity_qty", "capacity_volume", "max_weight_capacity", "length_cm",
+        "width_cm", "height_cm", "max_handling_units", "fill_efficiency_pct",
         "aisle_width_meters", "humidity_percentage", "target_temperature_celsius",
         "min_temperature_celsius", "max_temperature_celsius", "storage_type_id",
         mode="before",
@@ -159,11 +191,13 @@ class BinWrite(BaseModel):
 
 
 class OccupancyLine(BaseModel):
-    """One proposed movement's own share of a location's space.
+    """One proposed movement, resolved into the handling units it actually is.
 
-    `volume` is None when the item has never been measured — the line is still listed
-    so the screen can name what it could not count, rather than quietly leaving it out
-    of a total that then reads as complete.
+    `qty` is in the item's own UOM and `handling_units` is what that comes to in whole
+    packs — `ceil(qty / pack_base_qty)`, because half a case still occupies a case's
+    footprint. `volume` and `weight` are None when the pack has no box or no gross
+    weight; the line is still listed so the screen can NAME what it could not count,
+    rather than quietly leaving it out of a total that then reads as complete.
     """
     item_id: int | None = None
     item_code: str | None = None
@@ -171,19 +205,62 @@ class OccupancyLine(BaseModel):
     uom_code: str | None = None
     qty: Decimal | None = None
     direction: str = "IN"
-    unit_volume_cbm: Decimal | None = None
+    #: The packaging unit this line was measured in.
+    item_packaging_id: int | None = None
+    pack_name: str | None = None
+    pack_level: int | None = None
+    pack_base_qty: Decimal | None = None
+    pack_volume_cbm: Decimal | None = None
+    pack_gross_weight_kg: Decimal | None = None
+    handling_units: Decimal | None = None
     volume: Decimal | None = None
+    weight: Decimal | None = None
+
+
+class CapacityGate(BaseModel):
+    """One of the four independent checks a location is put through.
+
+    Every gate carries the same shape whether it measures a cube, a payload, a count or
+    answers a plain yes/no, so a screen renders all four through one component and adds
+    no arithmetic of its own. `detail` is a sentence written by
+    `modules/warehouse/capacity.py`; a screen picks a colour from `status` and never
+    writes the words.
+
+    `key` is VOLUME, WEIGHT, FOOTPRINT or UNITS. The FOOTPRINT gate is a verdict rather
+    than a fraction — a pallet either enters the bay or it does not — so its numeric
+    fields are all None and only `status` and `detail` say anything.
+    """
+    key: str
+    label: str
+    unit: str | None = None
+    status: str
+    capacity: Decimal | None = None
+    occupied: Decimal | None = None
+    projected: Decimal | None = None
+    free: Decimal | None = None
+    over_by: Decimal | None = None
+    pct: float | None = None
+    detail: str
+    #: The caveat under the bar — a derated capacity, an unweighed line, a container
+    #: that may not be turned. None when there is nothing to add.
+    note: str | None = None
 
 
 class LocationOccupancy(BaseModel):
     """How full one storage location is, and what a proposed move would do to it.
 
-    Served by `capacity.location_occupancy`, which owns both the arithmetic and the
-    wording: `headline` and `detail` are sentences, not codes, so the putaway screen
-    and the issue screen say the same thing about the same state. A screen chooses a
-    colour from `status` and never writes the words itself.
+    Served by `capacity.location_occupancy`, which owns the arithmetic and the wording
+    both: `headline` and `detail` are sentences, not codes, so the putaway screen and
+    the issue screen say the same thing about the same state.
 
-    Every volume is cubic metres. `capacity_volume` is None when the location has none
+    Space is measured in HANDLING UNITS, never in loose per-unit volume — the module
+    docstring says at length why. A quantity is converted to whole packs and each pack
+    carries its own outer box and gross weight, so the four `gates` below are the cube,
+    the payload, whether one unit physically enters the location, and the discrete limit
+    on how many it takes.
+
+    `capacity_volume` is the USABLE cube: stated (or derived from the location's own
+    sides) and then derated by its void factor. It is None when the location has none
     configured — not zero, which would read as "no room at all".
     """
     location_id: int
@@ -195,33 +272,56 @@ class LocationOccupancy(BaseModel):
     counts_locations: int
 
     capacity_volume: Decimal | None = None
+    #: Before the void factor, so a screen can show what was derated from.
+    stated_volume: Decimal | None = None
+    fill_efficiency_pct: Decimal | None = None
     occupied_volume: Decimal
     free_volume: Decimal | None = None
     utilisation_pct: float | None = None
-
-    #: The honesty fields: stock whose item has no measured volume is counted in
-    #: neither `occupied_volume` nor the bar, so the screen must say so.
-    unmeasured_items: int = 0
-    unmeasured_qty: Decimal | None = None
-    measured_items: int = 0
-    #: Proposed lines whose item has no measured volume, so they are not in `move_volume`.
-    unmeasured_lines: int = 0
-    is_partial: bool = False
-
-    # The single-move fields. A document with several lines has no one item or
-    # quantity, so these stay None and the caller reads `lines` instead.
-    item_id: int | None = None
-    item_name: str | None = None
-    unit_volume_cbm: Decimal | None = None
-    qty: Decimal | None = None
-    direction: str = "IN"
-    move_volume: Decimal | None = None
-    lines: list["OccupancyLine"] = Field(default_factory=list)
-
     projected_volume: Decimal | None = None
     projected_free_volume: Decimal | None = None
     projected_pct: float | None = None
     over_by: Decimal | None = None
+
+    #: The whole verdict, gate by gate. Ordered as the storekeeper should read them.
+    gates: list["CapacityGate"] = Field(default_factory=list)
+    capacity_weight_kg: Decimal | None = None
+    occupied_weight_kg: Decimal | None = None
+    projected_weight_kg: Decimal | None = None
+    capacity_units: int | None = None
+    occupied_units: Decimal | None = None
+    projected_units: Decimal | None = None
+    location_length_cm: Decimal | None = None
+    location_width_cm: Decimal | None = None
+    location_height_cm: Decimal | None = None
+
+    #: The honesty fields: stock whose item has no measured pack is counted in neither
+    #: `occupied_volume` nor the bar, so the screen must say so.
+    unmeasured_items: int = 0
+    unmeasured_qty: Decimal | None = None
+    measured_items: int = 0
+    #: Proposed lines whose pack has no box, so they are not in `move_volume`.
+    unmeasured_lines: int = 0
+    is_partial: bool = False
+
+    # The single-move fields. A document with several lines has no one item or pack, so
+    # these stay None and the caller reads `lines` instead.
+    item_id: int | None = None
+    item_name: str | None = None
+    qty: Decimal | None = None
+    item_packaging_id: int | None = None
+    pack_name: str | None = None
+    pack_base_qty: Decimal | None = None
+    pack_volume_cbm: Decimal | None = None
+    pack_length_cm: Decimal | None = None
+    pack_width_cm: Decimal | None = None
+    pack_height_cm: Decimal | None = None
+    pack_gross_weight_kg: Decimal | None = None
+    direction: str = "IN"
+    move_volume: Decimal | None = None
+    move_weight: Decimal | None = None
+    move_units: Decimal | None = None
+    lines: list["OccupancyLine"] = Field(default_factory=list)
 
     status: str
     headline: str
@@ -234,6 +334,10 @@ class OccupancyMoveIn(BaseModel):
     item_id: int
     qty: Decimal = Decimal("0")
     direction: str = "IN"
+    #: Which rung of the item's ladder this quantity moves in. Blank falls back to the
+    #: item's default putaway unit, which is what an issue or a transfer wants: the
+    #: goods are already packed the way they are packed.
+    item_packaging_id: int | None = None
 
     @field_validator("direction")
     @classmethod
@@ -269,7 +373,11 @@ class LocationRead(_Read):
     capacity_weight: Decimal | None = None
     capacity_volume: Decimal | None = None
     max_weight_capacity: Decimal | None = None
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
     height_cm: Decimal | None = None
+    max_handling_units: int | None = None
+    fill_efficiency_pct: Decimal | None = None
     aisle_width_meters: Decimal | None = None
     temperature_controlled: bool
     humidity_percentage: Decimal | None = None
@@ -716,15 +824,100 @@ class PutawayRead(_Read):
     imei_numbers: list[str] | None = None
     is_serial_tracked: bool = False
     is_asset: bool = False
-    # How much shelf this line needs. None means the item has never been measured —
+    # WHICH pack this line is in, and what that comes to on a shelf. "3 cases" and
+    # "1500 eaches" are the same `qty` and need entirely different space, so the task
+    # carries the rung. None throughout means the item has no measured packaging unit —
     # said plainly rather than shown as zero, which would read as "takes no room".
-    unit_volume_cbm: Decimal | None = None
+    item_packaging_id: int | None = None
+    package_id: int | None = None
+    package_name: str | None = None
+    pack_base_qty: Decimal | None = None
+    pack_volume_cbm: Decimal | None = None
+    pack_gross_weight_kg: Decimal | None = None
+    handling_units: Decimal | None = None
     line_volume_cbm: Decimal | None = None
+    line_weight_kg: Decimal | None = None
+    #: Every rung this item could be put away in, so the screen can offer the choice
+    #: without a second round trip.
+    packs: list["HandlingUnit"] = Field(default_factory=list)
     # Filled only on the response to `confirm`: what the shelf looked like at the
     # moment of the press, including an overflow if there was one. A full bin never
     # stops a putaway, so this is how the screen gets to say it happened.
     capacity: LocationOccupancy | None = None
     created_at: datetime | None = None
+
+
+class PutawayUnitCode(_Read):
+    """One printable identity minted by a putaway.
+
+    `scope` says what the code names. UNIT is one physical thing off
+    `whs_serial_numbers`; LOT is the whole balance row, which is all a continuous item
+    can carry — 30 grams of cotton is one lot, not 30 things to label.
+
+    `code` is what the QR carries and what is written under it. It is the asset or the
+    consumable code, and falls back to the serial for an item whose code tracking is
+    switched off — a label with nothing scannable on it is worse than no label.
+    """
+    id: int
+    code: str
+    #: ASSET | CONSUMABLE | SERIAL — which of the three the `code` above actually is.
+    code_type: str
+    #: UNIT | LOT.
+    scope: str = "UNIT"
+    serial_number: str | None = None
+    imei: str | None = None
+    status: str | None = None
+
+
+class PutawayCodes(BaseModel):
+    """The label sheet's HEADER: what a putaway minted, how many, and what it names.
+
+    A separate call from `PutawayRead` on purpose: a task carries one line, but a line
+    of 500 units carries 500 codes and the queue screen has no use for them. And this
+    call carries no codes either — only `total_codes` — because opening the panel must
+    not depend on how big the lorry was. The codes come a page at a time from
+    `GET /putaways/{id}/codes/units`.
+
+    Which units belong to a putaway is answered by its `lot_no`: the lot is stamped at
+    confirm from the storage path and belongs to exactly one putaway, so it is the one
+    key that separates this placement's units from the same item's units placed into
+    the same bin yesterday.
+
+    `reason` is filled when there are none and explains WHY in the same voice the rest
+    of the module answers "why can I not do this" — an empty sheet with nothing said
+    reads as a defect in the screen.
+    """
+    putaway_id: int
+    putaway_no: str | None = None
+    status: str
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_id: int | None = None
+    batch_no: str | None = None
+    #: Warranty end for an asset, expiry for anything else — the screen labels it off
+    #: `is_asset`, exactly as the task meta does.
+    expiry_date: date | None = None
+    is_asset: bool = False
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    bin_id: int | None = None
+    bin_code: str | None = None
+    #: `block A / flr-1 / lane-1 / rack-1 / bin A1` — the whole storage path, so a
+    #: label says where the goods came to rest and not just a bin code.
+    bin_path: str | None = None
+    lot_no: str | None = None
+    qty: Decimal | None = None
+    completed_at: datetime | None = None
+    #: Whether the item master's asset/consumable code toggle is on for this item.
+    is_code_tracked: bool = True
+    #: ASSET | CONSUMABLE, the kind this item mints. None when nothing was minted.
+    code_type: str | None = None
+    #: How many codes this putaway minted. A count, so the panel can say "500 codes"
+    #: and size its pager without pulling five hundred rows to find out.
+    total_codes: int = 0
+    reason: str | None = None
 
 
 class PutawayCreate(BaseModel):
@@ -756,9 +949,44 @@ class PutawayCandidate(BaseModel):
     reason: str | None = None
 
 
+class HandlingUnit(BaseModel):
+    """One packaging unit an item can move in — a rung of its ladder, resolved.
+
+    Served by `capacity.handling_units` rather than assembled in the screen, so the
+    volume on the picker is the volume the bin check will use. `dims_from` says whether
+    the box came from this rung (RUNG) or was inherited from the container type
+    (PACKAGE), because a storekeeper comparing two items deserves to know which.
+    """
+    item_packaging_id: int | None = None
+    item_id: int | None = None
+    level: int
+    package_id: int | None = None
+    package_name: str | None = None
+    #: How many base units ONE of these holds — the conversion factor, multiplied up
+    #: through every rung below it.
+    base_qty: Decimal | None = None
+    uom_code: str | None = None
+    length_cm: Decimal | None = None
+    width_cm: Decimal | None = None
+    height_cm: Decimal | None = None
+    volume_cbm: Decimal | None = None
+    gross_weight_kg: Decimal | None = None
+    tare_weight_kg: Decimal | None = None
+    max_stack_tiers: int | None = None
+    is_rotatable: bool | None = None
+    fill_efficiency_pct: Decimal | None = None
+    is_default: bool = False
+    is_measured: bool = False
+    dims_from: str | None = None
+
+
 class PutawayConfirm(BaseModel):
     actual_bin_id: int
     qty: Decimal | None = None
+    #: The rung being put away. Blank falls back to whatever the task was raised with,
+    #: and then to the item's default putaway unit — so an untouched screen still
+    #: measures the load rather than refusing to.
+    item_packaging_id: int | None = None
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
@@ -1016,11 +1244,55 @@ class IssueItemRead(_Read):
     # Which identifier names one unit of this item — SERIAL, IMEI or CODE. The screen
     # validates on this one and shows the rest of the matched unit beside it.
     unit_mode: str | None = None
+    # What KIND of identifier that is, for the badge on the row: SERIAL, IMEI, ASSET,
+    # CONSUMABLE or NONE. Wider than `unit_mode` on purpose — an asset tag and a
+    # consumable lot code are one column to the matcher and two different labels on
+    # the goods. See `enums.TrackingType`.
+    tracking_type: str | None = None
     # The reserved units, stated in that same currency.
     unit_keys: list[str] | None = None
     # Whether this item has identified units in stock at all, so a bulk consumable
     # line does not offer a picker with nothing in it.
     has_units: bool = False
+    # How many units this line's OWN batch and bin can still give it, counting the
+    # ones it already holds out. Served so the screen and the approver can see a line
+    # that could never be posted while the batch is still editable — after approval
+    # the batch is frozen. See `_issue_unit_supply`.
+    units_available: int | None = None
+
+
+class IssueStockSource(_Read):
+    """One (batch, bin) an issue line can draw from, with what it holds.
+
+    The unit of the split: a quantity larger than any single source is spread over
+    several of these, one issue line each, instead of being written against a bin
+    that cannot serve it.
+    """
+    item_id: int
+    bin_id: int | None = None
+    bin_code: str | None = None
+    bin_name: str | None = None
+    batch_id: int | None = None
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    mfg_date: date | None = None
+    # Four numbers, not one. `available_qty` is what is free to ANYBODY, and on an
+    # approved allocation that is routinely zero over stock the issuing document has
+    # itself reserved — reporting it alone told a storekeeper his correct document was
+    # impossible. `drawable_qty` is what this line may actually take.
+    available_qty: Decimal
+    reserved_qty: Decimal = Decimal("0")
+    own_reserved_qty: Decimal = Decimal("0")
+    total_qty: Decimal = Decimal("0")
+    drawable_qty: Decimal
+
+
+class TrackingTypeRead(_Read):
+    """The badge catalogue — see `enums.TRACKING_META`."""
+    code: str
+    label: str
+    unit: str
+    hint: str
 
 
 class IssueRead(_Read):
@@ -1794,4 +2066,7 @@ class ItemLocationsOut(BaseModel):
     total_on_hand: float
     locations: list[ItemLocation]
 
+# Forward references: LocationOccupancy names CapacityGate/OccupancyLine and
+# PutawayRead names HandlingUnit, all declared after them.
 LocationOccupancy.model_rebuild()
+PutawayRead.model_rebuild()

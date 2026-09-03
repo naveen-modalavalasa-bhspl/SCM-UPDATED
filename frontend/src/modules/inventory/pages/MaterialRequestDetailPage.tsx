@@ -293,7 +293,7 @@ export function MaterialRequestDetailPage() {
         * that there is nothing to buy, and after it this is the only thing left to do
         * on this screen. The backend refuses a second one, so a request that already
         * crossed says so rather than raising a duplicate demand. */}
-      {data.status === "APPROVED" && (
+      {data.status === "APPROVED" && !data.has_requisition && (
         // A one-line handoff strip, not a hero panel: the decision on this screen is
         // already made, and the next step is somebody else's document. Left-aligned
         // beside the rest of the page — a centred block in the middle of a left-aligned

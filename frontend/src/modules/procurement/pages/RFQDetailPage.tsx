@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
 import {
   Button, Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
   StatusPill, useToast, type Column,
@@ -30,6 +30,10 @@ export function RFQDetailPage() {
   const queryClient = useQueryClient();
   const rfqId = Number(id);
   const [copied, setCopied] = useState<number | null>(null);
+  // Expanded by default so an approver immediately sees the editable quantities
+  // — in `PENDING_APPROVAL` the decision is about how much. Collapsing behind
+  // "View" hid the one field the approval exists to change (see screenshot).
+  const [linesExpanded, setLinesExpanded] = useState(true);
 
   const { data: rfq, isLoading, error } = useQuery({
     queryKey: ["rfq", id],
@@ -56,6 +60,11 @@ export function RFQDetailPage() {
   // Editing the asked-for quantity is part of approving it, so it follows the
   // same gate — an approver who cannot sign must not change the ask.
   const editableQty = !!canDecide && can("rfq.approve");
+
+  // Auto-expand line items when the approver can edit — the quantities ARE the decision
+  useEffect(() => {
+    if (editableQty) setLinesExpanded(true);
+  }, [editableQty]);
 
   // Previewing a different ranking is a query parameter, not a save: looking at the
   // quotes another way is not choosing one, so the RFQ's own method is untouched
@@ -97,19 +106,46 @@ export function RFQDetailPage() {
   // The approver's own edit: how much, and nothing else. `rfq.approve` reaches it —
   // the buyer's Edit screen needs `rfq.create`, which an approver rarely holds, and
   // the deadline, the vendors and the item list are not theirs to change anyway.
+  // The approved quantity is what the supplier is asked to price — `_publish_rfq`
+  // copies `RFQItem.quantity` into the draft quotation at approval time.
   const [qtyEdits, setQtyEdits] = useState<Record<number, string>>({});
   const saveQuantities = useMutation({
     mutationFn: () => rfqApi.setQuantities(
       rfqId,
       Object.entries(qtyEdits)
-        .filter(([, value]) => value !== "" && Number(value) > 0)
+        .filter(([, value]) => value !== "" && Number(value) >= 0)
         .map(([lineId, value]) => ({ id: Number(lineId), quantity: Number(value) })),
     ),
-    onSuccess: () => { setQtyEdits({}); refresh("Quantities updated")(); },
+    onSuccess: () => { setQtyEdits({}); refresh("Quantities updated — supplier will be asked for the new quantities")(); },
+    onError: (e: unknown) => {
+      // Let ErrorBanner show it, but also surface immediately
+      // eslint-disable-next-line no-console
+      console.error(e);
+    },
   });
 
   const submit = useMutation({ mutationFn: () => rfqApi.submit(rfqId), onSuccess: refresh("Sent for approval") });
-  const approve = useMutation({ mutationFn: () => rfqApi.approve(rfqId), onSuccess: refresh("Approved — vendors can now see it") });
+  const approve = useMutation({
+    mutationFn: async () => {
+      // Save any pending quantity edits before approving — an approver who trims
+      // 12 -> 10 and presses "Approve & publish" expects 10 to be what the vendor sees.
+      // Without this the edit is discarded and the supplier is asked for the original.
+      const edits = Object.entries(qtyEdits)
+        .filter(([, value]) => {
+          if (value === "") return false;
+          const n = Number(value);
+          return !Number.isNaN(n) && n >= 0;
+        })
+        .map(([lineId, value]) => ({ id: Number(lineId), quantity: Number(value) }));
+
+      if (edits.length > 0) {
+        await rfqApi.setQuantities(rfqId, edits);
+        setQtyEdits({});
+      }
+      return rfqApi.approve(rfqId);
+    },
+    onSuccess: () => { setQtyEdits({}); refresh("Approved — vendors can now see the approved quantities")(); },
+  });
   const reject = useMutation({ mutationFn: () => rfqApi.reject(rfqId), onSuccess: refresh("Rejected") });
   const close = useMutation({ mutationFn: () => rfqApi.close(rfqId), onSuccess: refresh("Closed to further quotes") });
   const award = useMutation({
@@ -166,11 +202,21 @@ export function RFQDetailPage() {
       render: (r) => (editableQty ? (
         <div className="flex items-center justify-end gap-2">
           <Input
-            type="number" min="0" step="0.001" className="w-28"
+            type="number" min="0" max={String(r.quantity)} step="0.001" className="w-28"
             value={qtyEdits[r.id] ?? String(r.quantity)}
             onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
+            title="Approved quantity — decrease only, 0 removes the line. Supplier will be asked for this number."
+            aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
           />
-          <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
+          <span className="text-xs text-muted w-10 text-left">{r.uom_code ?? ""}</span>
+          <button
+            type="button"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md text-danger hover:bg-danger/10"
+            onClick={() => setQtyEdits({ ...qtyEdits, [r.id]: "0" })}
+            title="Remove item from RFQ"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
         </div>
       ) : `${r.quantity} ${r.uom_code ?? ""}`.trim()),
     },
@@ -280,7 +326,7 @@ export function RFQDetailPage() {
         }
       />
 
-      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? raisePo.error} />
+      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? raisePo.error ?? saveQuantities.error} />
 
       <DetailShell
         main={(
@@ -295,7 +341,7 @@ export function RFQDetailPage() {
                       label: "Requisition",
                       value: rfq.requisition_id
                         ? <DocRef no={rfq.requisition_no ?? `#${rfq.requisition_id}`}
-                            onOpen={() => nav(`/procurement/requisitions/${rfq.requisition_id}`)} />
+                          onOpen={() => nav(`/procurement/requisitions/${rfq.requisition_id}`)} />
                         : <DocRef no={rfq.consolidation_no} />,
                     },
                     { label: "Priority", value: rfq.priority ?? "Normal" },
@@ -316,38 +362,81 @@ export function RFQDetailPage() {
                 </div>
 
                 {rfq.terms && (
-                  <p className="mt-4 border-t border-line/60 pt-4 text-sm text-body">{rfq.terms}</p>
+                  <div className="mt-4 border-t border-line/60 pt-4">
+                    <span className="block mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
+                      Payment terms
+                    </span>
+                    <p className="text-sm text-body">{rfq.terms}</p>
+                  </div>
                 )}
               </SectionCard>
             )}
 
-            <SectionCard title="Lines" className="p-2">
-              <ResponsiveList
-                data={rfq?.items ?? []}
-                columns={lineColumns}
-                keyOf={(r) => r.id}
-                loading={isLoading}
-                empty="No lines on this RFQ."
-                renderCard={(r) => (
-                  <div className="space-y-1">
-                    <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
-                    <div className="text-xs text-muted">
-                      {r.quantity} {r.uom_code ?? ""}
-                      {r.required_date ? ` \u00b7 needed by ${fmtDate(r.required_date)}` : ""}
+            <SectionCard
+              title="Line Items"
+              className="p-2"
+              action={
+                <Button
+                  variant="subtle"
+                  onClick={() => setLinesExpanded(!linesExpanded)}
+                  className="h-8 text-xs flex items-center gap-1"
+                >
+                  {linesExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  {linesExpanded ? "Hide" : "View"}
+                </Button>
+              }
+            >
+              {linesExpanded && (
+                <>
+                  {editableQty && (
+                    <p className="px-3 pb-2 text-xs text-muted">
+                      Adjust quantities before approving — decrease only, 0 removes the line. The approved number is what the vendor will be asked to quote/supply.
+                    </p>
+                  )}
+                  <ResponsiveList
+                    data={rfq?.items ?? []}
+                    columns={lineColumns}
+                    keyOf={(r) => r.id}
+                    loading={isLoading}
+                    empty="No lines on this RFQ."
+                    renderCard={(r) => (
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
+                        <div className="text-xs text-muted font-mono">{r.item_code ?? ""}</div>
+                        {editableQty ? (
+                          <div className="flex items-center gap-2">
+                            <Input
+                              type="number" min="0" max={String(r.quantity)} step="0.001" className="w-28"
+                              value={qtyEdits[r.id] ?? String(r.quantity)}
+                              onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
+                              aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
+                            />
+                            <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
+                            <button type="button" className="inline-flex h-9 w-9 items-center justify-center rounded-md text-danger hover:bg-danger/10" onClick={() => setQtyEdits({ ...qtyEdits, [r.id]: "0" })} title="Remove item from RFQ">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted">
+                            {r.quantity} {r.uom_code ?? ""}
+                            {r.required_date ? ` \u00b7 needed by ${fmtDate(r.required_date)}` : ""}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  />
+                  {editableQty && (
+                    <div className="flex justify-end border-t border-line/60 p-3">
+                      <Button
+                        variant="subtle"
+                        disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
+                        onClick={() => saveQuantities.mutate()}
+                      >
+                        {saveQuantities.isPending ? "Saving\u2026" : "Save quantities"}
+                      </Button>
                     </div>
-                  </div>
-                )}
-              />
-              {editableQty && (
-                <div className="flex justify-end border-t border-line/60 p-3">
-                  <Button
-                    variant="subtle"
-                    disabled={saveQuantities.isPending || Object.keys(qtyEdits).length === 0}
-                    onClick={() => saveQuantities.mutate()}
-                  >
-                    {saveQuantities.isPending ? "Saving\u2026" : "Save quantities"}
-                  </Button>
-                </div>
+                  )}
+                </>
               )}
             </SectionCard>
 

@@ -35,8 +35,11 @@ function Node({
   const selected = selectedId === bin.id;
   // Volume is the figure the put-away and issue screens work in, and the tree rolls
   // the bins under a rack up into it — so a zone with a capacity reports its own fill,
-  // not a blank. Shown only where a capacity was actually set.
+  // not a blank. The handling-unit limit rolls up the same way and is shown beside it:
+  // a bay at its stated pallet limit is full whatever its cube says, and a tree that
+  // only draws the cube sends a storekeeper to a bay with no slot left in it.
   const hasVolume = bin.capacity_volume != null && bin.capacity_volume > 0;
+  const hasUnits = bin.capacity_units != null && bin.capacity_units > 0;
 
   return (
     <div>
@@ -80,15 +83,25 @@ function Node({
         {!bin.is_pickable && bin.is_active && (
           <Chip size="sm" variant="flat" color="warning">No pick</Chip>
         )}
-        {hasVolume && (
+        {(hasVolume || hasUnits) && (
           <span
             className="shrink-0"
-            title={`${volume(bin.occupied_volume)} of ${volume(bin.capacity_volume)} used`}
+            title={
+              (hasVolume
+                ? `${volume(bin.occupied_volume)} of ${volume(bin.capacity_volume)} used`
+                : "") +
+              (hasVolume && hasUnits ? " · " : "") +
+              (hasUnits
+                ? `${bin.occupied_units ?? 0} of ${bin.capacity_units} handling units`
+                : "")
+            }
           >
             <CapacityBadge
               capacity={bin.capacity_volume}
               occupied={bin.occupied_volume}
               status={bin.capacity_status}
+              units={bin.occupied_units}
+              capacityUnits={bin.capacity_units}
             />
           </span>
         )}

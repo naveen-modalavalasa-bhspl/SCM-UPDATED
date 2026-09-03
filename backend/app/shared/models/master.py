@@ -184,19 +184,10 @@ class Item(Base):
     requires_special_transport = Column(Boolean, nullable=False, default=False)
     transport_conditions = Column(String(300), nullable=True)
 
-    # How much room ONE unit of this item (in the item's own UOM) takes on a shelf.
-    # A bin's capacity is a volume, so nothing can be said about how full a bin is
-    # until the goods in it have one too.
-    #
-    # Two ways in, because a storekeeper measures a carton and a planner quotes a
-    # figure: the three dimensions, or `unit_volume_cbm` typed directly. The explicit
-    # figure wins when both are present — see `warehouse.capacity.unit_volume` — and
-    # an item with neither has NO volume rather than a volume of zero, which is the
-    # difference between "this bin has room" and "nobody has measured this yet".
-    length_cm = Column(Numeric(10, 2), nullable=True)
-    width_cm = Column(Numeric(10, 2), nullable=True)
-    height_cm = Column(Numeric(10, 2), nullable=True)
-    unit_volume_cbm = Column(Numeric(18, 6), nullable=True)
+    # NO dimensions and no unit volume live here, on purpose. An item is measured at
+    # the packaging level it physically moves in — see mst_item_packaging — because a
+    # bin holds boxes, not a puddle of cubic metres: 500 SIM cards are ten rigid boxes
+    # on a pallet, and `qty x volume_per_each` reports that pallet as nearly empty.
 
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
@@ -354,13 +345,21 @@ class ItemSubClass(Base):
 
 
 class Packaging(Base):
-    """A reusable container type: Packet, Box, Tanker.
+    """A reusable container type — Packet, Box, Tote, Euro-pallet — and its physical
+    spec.
 
-    This master deliberately carries no capacity or physical specification. How much
-    it holds belongs to each item's own chain in mst_item_packaging.
+    The spec is the container's OWN: its outer bounding box empty, its tare weight, and
+    the handling rules that follow from its construction (can it be stacked, how many
+    high, may it be turned to fit). None of that depends on what is inside it, which is
+    why it belongs here and is configured once.
 
-    Legacy capacity, dimension, weight and returnable columns remain mapped because
-    the live table has them, but the API no longer reads or writes them.
+    What DOES depend on the contents — how many base units one holds, and what it
+    weighs full — lives on each item's own rung in `mst_item_packaging`, because the
+    same box holds 50 SIM cards or 4 litres of oil.
+
+    A rung may override the three dimensions where an item genuinely packs differently
+    in the same container type; blank there means "whatever the container type says",
+    which is the ordinary case.
     """
     __tablename__ = "mst_packaging"
     id = pk()
@@ -369,22 +368,52 @@ class Packaging(Base):
     uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
     uom_code = Column(String(20), nullable=True)          # snapshot
     qty_per_pack = Column(Numeric(16, 3), nullable=True)
+
+    # The OUTER bounding box of the empty container, in centimetres. All three or
+    # none — two sides describe nothing a slotting check can use.
     length_cm = Column(Numeric(10, 2), nullable=True)
     width_cm = Column(Numeric(10, 2), nullable=True)
     height_cm = Column(Numeric(10, 2), nullable=True)
-    weight_kg = Column(Numeric(10, 3), nullable=True)
+    # TARE: what the container weighs empty. Gross weight is on the item's rung.
+    weight_kg = Column(Numeric(12, 3), nullable=True)
+
+    # Handling rules. `max_stack_tiers` of 1 means non-stackable; NULL means nobody has
+    # said, which the capacity check treats as "unknown", never as "unlimited".
+    is_stackable = Column(Boolean, nullable=True)
+    max_stack_tiers = Column(Integer, nullable=True)
+    # May the container be turned to make it fit? A drum may not; a carton may.
+    is_rotatable = Column(Boolean, nullable=True)
+    # Void factor — the share of the container's own cube that goods actually reach.
+    # Loose parts in a rigid tote settle at 70-80%, and pretending otherwise overstates
+    # every bin in the building.
+    fill_efficiency_pct = Column(Numeric(5, 2), nullable=True)
+
     is_returnable = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
 class ItemPackaging(Base):
-    """One rung of an item's packing ladder.
+    """One rung of an item's packing ladder — a PACKAGING UNIT in the WMS sense.
 
-    Level 1 is the smallest pack and its quantity is in the item's own UOM — a tray
-    holds 10 litres. Every level above counts the level below it: level 2 is 10
-    trays, level 3 is 10 boxes. Only the rung is stored; the running totals (100
+    Level 1 is the smallest pack and its quantity is in the item's own UOM: a tray
+    holds 10 litres. Every level above counts the level below it, so level 2 is 10
+    trays and level 3 is 10 boxes. Only the rung is stored; the running totals (100
     litres, 1000 litres) are multiplied up on read, so a stored total can never
     disagree with its own parts.
+
+    `quantity` is the conversion factor. The rest of what a WMS needs from a packaging
+    unit is here too:
+
+    - the three dimensions, as an OVERRIDE of the container type's own box. Blank —
+      the ordinary case — means the container type's, so a ladder is cheap to set up
+      and only the exceptions are typed.
+    - `gross_weight_kg`, what ONE of these weighs full. Item-specific by definition,
+      which is exactly why it cannot live on `mst_packaging`.
+    - `is_default_putaway_unit`: the rung putaway and bin occupancy work in unless the
+      document says otherwise. At most one per item.
+
+    Volume is never stored. It is L x W x H on read, for the same reason the running
+    totals are: a stored cube is one edit away from disagreeing with its own sides.
     """
     __tablename__ = "mst_item_packaging"
     id = pk()
@@ -396,6 +425,14 @@ class ItemPackaging(Base):
     quantity = Column(Numeric(16, 3), nullable=False, default=1)
     uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
     uom_code = Column(String(20), nullable=True)          # snapshot
+
+    length_cm = Column(Numeric(10, 2), nullable=True)
+    width_cm = Column(Numeric(10, 2), nullable=True)
+    height_cm = Column(Numeric(10, 2), nullable=True)
+    gross_weight_kg = Column(Numeric(12, 3), nullable=True)
+    max_stack_tiers = Column(Integer, nullable=True)
+    is_default_putaway_unit = Column(Boolean, nullable=False, default=False)
+
     is_active = Column(Boolean, nullable=False, default=True)
     __table_args__ = (
         UniqueConstraint("item_id", "level", name="uq_item_packaging_level"),

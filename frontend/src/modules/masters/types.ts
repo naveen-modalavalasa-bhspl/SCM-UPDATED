@@ -46,16 +46,9 @@ export interface MasterItem {
   storage_conditions?: string | null;
   requires_special_transport: boolean;
   transport_conditions?: string | null;
-  /**
-   * How much room one unit takes on a shelf. Either measure the three sides or state
-   * the figure — the warehouse prefers the figure when both are given. All optional:
-   * an item nobody has measured has NO volume rather than a volume of zero, which is
-   * the difference between "this bin has room" and "nobody has measured this yet".
-   */
-  length_cm?: number | null;
-  width_cm?: number | null;
-  height_cm?: number | null;
-  unit_volume_cbm?: number | null;
+  // No dimensions and no unit volume here, on purpose. How much room the goods take is
+  // a property of the PACK they move in — see MasterItemPackaging — because a bin holds
+  // boxes, not a puddle of cubic metres.
   is_active: boolean;
 }
 
@@ -256,17 +249,46 @@ export interface MasterItemClass {
   is_active: boolean;
 }
 
-/** A kind of container: Tray, Box, Container. Deliberately says nothing about how
- *  much it holds — a tray of milk and a tray of vials differ, so the quantity is a
- *  property of the item's chain in MasterItemPackaging. */
+/**
+ * A kind of container: Tray, Box, Tote, Euro-pallet — and its own physical spec.
+ *
+ * The spec is the CONTAINER'S: its outer box empty, its tare weight, and the handling
+ * rules that follow from how it is built. It says nothing about how much it holds — a
+ * tray of milk and a tray of vials differ — so the quantity, and the GROSS weight that
+ * depends on it, are properties of the item's own rung in MasterItemPackaging.
+ */
 export interface MasterPackaging {
   id: number;
   code: string;
   name: string;
+  /** The outer bounding box, empty. All three or none. */
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  /** Derived from the sides on the server, never stored. */
+  volume_cbm?: number | null;
+  /** TARE — what it weighs empty. */
+  weight_kg?: number | null;
+  is_stackable?: boolean;
+  /** 1 means non-stackable. Null means nobody has said, which a capacity check reads
+   *  as unknown and never as unlimited. */
+  max_stack_tiers?: number | null;
+  /** May it be tipped to make it fit? A drum may not; a carton may. */
+  is_rotatable?: boolean;
+  /** Void factor — the share of its own cube goods actually reach. */
+  fill_efficiency_pct?: number | null;
+  is_returnable?: boolean;
   is_active: boolean;
 }
 
-/** One rung of an item's packing ladder: 10 litres in a tray, 10 trays in a box. */
+/**
+ * One rung of an item's packing ladder — a PACKAGING UNIT: 10 litres in a tray, 10
+ * trays in a box.
+ *
+ * `quantity` is the conversion factor. The dimensions OVERRIDE the container type's own
+ * box and are blank in the ordinary case; `gross_weight_kg` is what one of these weighs
+ * full, which is item-specific and so cannot live on the container type.
+ */
 export interface MasterItemPackaging {
   id: number;
   item_id: number;
@@ -276,6 +298,14 @@ export interface MasterItemPackaging {
   quantity: number;
   uom_id?: number | null;
   uom_code?: string | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  gross_weight_kg?: number | null;
+  max_stack_tiers?: number | null;
+  /** The rung putaway and bin occupancy work in unless a document says otherwise.
+   *  At most one per item — setting one clears the others. */
+  is_default_putaway_unit?: boolean;
   is_active: boolean;
 }
 
@@ -295,6 +325,17 @@ export interface PackagingBreakdown {
   /** What one of this package holds, in the item's own unit. */
   base_quantity: number;
   base_uom_code?: string | null;
+  /** What the warehouse checks a bin against. The rung's own sides where it overrides
+   *  them, the container type's otherwise — `dims_from` says which. */
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  volume_cbm?: number | null;
+  dims_from?: "RUNG" | "PACKAGE" | null;
+  gross_weight_kg?: number | null;
+  tare_weight_kg?: number | null;
+  max_stack_tiers?: number | null;
+  is_default_putaway_unit?: boolean;
 }
 
 /** One component of a kit. A real item, so the contents can be issued. */

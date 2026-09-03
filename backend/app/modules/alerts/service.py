@@ -368,12 +368,29 @@ _DEFINITIONS: list[AlertDef] = [
     _alert(
         # The stock IS in the bin — this is not a failure and nothing was refused. It
         # is sticky because it is the only record the storekeeper sees of a shelf that
-        # is now over its stated capacity, and a message that vanishes after three
+        # is now past what it is rated for, and a message that vanishes after three
         # seconds is a message nobody read.
-        "putaway.over_capacity", AlertVariant.WARNING, "Stored, but {bin} is over capacity",
-        "{item} is in {bin}. That puts it {over} m³ past the {capacity} m³ it is "
-        "listed as holding — the placement is recorded on the task either way, so "
-        "restack it or raise the location's capacity when you get a moment.",
+        #
+        # `{reason}` is the sentence the server already wrote for the gate that failed
+        # (`warehouse/capacity.py`), because a putaway can breach the cube, the payload,
+        # the unit limit or the doorway, and "over capacity" without saying WHICH is
+        # advice nobody can act on. Naming the gate here would mean writing the four
+        # sentences a second time and letting them drift.
+        "putaway.over_capacity", AlertVariant.WARNING,
+        "Stored, but {bin} is past what it is rated for",
+        "{item} is in {bin}. {reason} The placement is recorded on the task either "
+        "way, so restack it or raise the location's limits when you get a moment.",
+        sticky=True,
+    ),
+    _alert(
+        # Separate from over_capacity because it is a different problem with a different
+        # fix: the load is not too much for the shelf, it does not physically enter it.
+        # More space elsewhere in the bin does not help, so "restack it" would be wrong
+        # advice — the pallet has to go somewhere else, or be broken down.
+        "putaway.wont_fit", AlertVariant.WARNING,
+        "Stored, but it does not fit {bin}",
+        "{item} is recorded in {bin}. {reason} Move it to a location that takes this "
+        "pack, or break the load down — the placement stands until you do.",
         sticky=True,
     ),
     _alert(

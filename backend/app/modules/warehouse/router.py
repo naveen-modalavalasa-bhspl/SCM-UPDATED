@@ -102,17 +102,29 @@ async def list_locations(warehouse_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/locations/{location_id}/occupancy", response_model=s.LocationOccupancy)
 async def location_occupancy(location_id: int, item_id: int | None = None,
                              qty: Decimal | None = None, direction: str = "IN",
+                             item_packaging_id: int | None = None,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(STOCK_VIEW))):
     """How full a storage location is, and what a proposed move would do to it.
 
     One endpoint for both directions on purpose: putaway asks it with `direction=IN`
     ("does this fit"), material issue with `direction=OUT` ("how much does this give
-    back"). Behind `stock.view` like the location tree beside it — reading how full a
-    shelf is is reading stock.
+    back"). `item_packaging_id` names the pack the quantity moves in, because a bin is
+    checked against handling units and "3 cases" is not "1500 eaches". Behind
+    `stock.view` like the location tree beside it — reading how full a shelf is is
+    reading stock.
     """
-    return await service.location_occupancy(db, location_id, item_id=item_id,
-                                            qty=qty, direction=direction)
+    return await service.location_occupancy(
+        db, location_id, item_id=item_id, qty=qty, direction=direction,
+        item_packaging_id=item_packaging_id)
+
+
+@router.get("/items/{item_id}/handling-units", response_model=list[s.HandlingUnit])
+async def item_handling_units(item_id: int, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """Which packaging units this item can be put away in, each with its box and gross
+    weight. Behind `stock.view`: it is the picker on the putaway screen."""
+    return await service.item_handling_units(db, item_id)
 
 
 @router.post("/locations/occupancy-preview", response_model=list[s.LocationOccupancy])
@@ -324,10 +336,38 @@ async def get_putaway(task_id: int, db: AsyncSession = Depends(get_db),
     return await service.get_putaway(db, task_id, user=user)
 
 
+@router.get("/putaways/{task_id}/codes", response_model=s.PutawayCodes)
+async def putaway_codes(task_id: int, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(PUTAWAY_VIEW))):
+    """The label sheet's header: what this putaway minted and how many.
+
+    Its own call rather than a field on `PutawayRead`: a task carries one line, but a
+    line of 500 units carries 500 codes and the queue screen has no use for them. The
+    codes themselves come from `/codes/units`, a page at a time."""
+    return await service.putaway_codes(db, task_id, user=user)
+
+
+@router.get("/putaways/{task_id}/codes/units", response_model=Page[s.PutawayUnitCode])
+async def putaway_code_units(task_id: int, params: PageParams = Depends(),
+                             search: str | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(PUTAWAY_VIEW))):
+    """One page of the codes, searchable by code, serial or IMEI."""
+    return await service.putaway_code_units(db, params, task_id, search=search,
+                                            user=user)
+
+
 @router.get("/putaways/{task_id}/suggested-bins", response_model=list[s.BinRead])
-async def suggested_bins(task_id: int, db: AsyncSession = Depends(get_db),
+async def suggested_bins(task_id: int, item_packaging_id: int | None = None,
+                         db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(PUTAWAY_VIEW))):
-    return await service.suggested_bins(db, task_id)
+    """Bins worth offering for this task, ranked on whether the pack in hand goes in.
+
+    `item_packaging_id` is the rung the storekeeper picked on the screen, which need not
+    be the one the task was raised with — change the pack and the answer changes, since
+    a bay that takes four totes takes no pallets at all."""
+    return await service.suggested_bins(db, task_id,
+                                        item_packaging_id=item_packaging_id)
 
 
 @router.post("/putaways/{task_id}/start", response_model=s.PutawayRead)
@@ -493,6 +533,30 @@ async def post_issues_batch(body: s.IssueBatchIn, db: AsyncSession = Depends(get
                             user=Depends(require_permission(ISSUE_POST))):
     """Post a whole cycle. One stock movement and one ledger row per issue."""
     return await service.post_issues_batch(db, body.issue_ids, user)
+
+
+# Above /issues/{issue_id} for the same reason "cycles" is: FastAPI matches in
+# declaration order and neither of these is an int.
+
+@router.get("/issues/stock-sources", response_model=list[s.IssueStockSource])
+async def issue_stock_sources(warehouse_id: int, item_ids: str,
+                              indent_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(ISSUE_VIEW))):
+    """Every (batch, bin) the given items can be drawn from, oldest stock first."""
+    return await service.issue_stock_sources(
+        db,
+        warehouse_id=warehouse_id,
+        item_ids=[int(value) for value in item_ids.split(",") if value.strip().isdigit()],
+        indent_id=indent_id,
+        user=user,
+    )
+
+
+@router.get("/tracking-types", response_model=list[s.TrackingTypeRead])
+async def tracking_types(user=Depends(require_permission(ISSUE_VIEW))):
+    """What each kind of unit identifier is called, so no screen names them itself."""
+    return service.tracking_types()
 
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)
@@ -782,11 +846,14 @@ async def cancel_return(return_id: int, body: s.ReasonIn, db: AsyncSession = Dep
 async def list_serials(params: PageParams = Depends(), status: str | None = None,
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
-                       search: str | None = None, db: AsyncSession = Depends(get_db),
+                       search: str | None = None, issue_id: int | None = None,
+                       issue_line_id: int | None = None,
+                       db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
-                                      bin_id=bin_id, search=search, user=user)
+                                      bin_id=bin_id, search=search, issue_id=issue_id,
+                                      issue_line_id=issue_line_id, user=user)
 
 
 @router.get("/serials/lookup")
@@ -962,11 +1029,11 @@ async def vendor_options(search: str | None = None, db: AsyncSession = Depends(g
 
 
 @router.get("/options/warehouses", response_model=list[s.Option])
-async def warehouse_options(mine_only: bool = False, all_points: bool = False,
+async def warehouse_options(search: str | None = None, mine_only: bool = False, all_points: bool = False,
                             db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(STOCK_VIEW))):
     return await service.warehouse_options(
-        db, mine_only=mine_only, all_points=all_points, user=user)
+        db, search=search, mine_only=mine_only, all_points=all_points, user=user)
 
 
 @router.get("/options/bins", response_model=list[s.Option])

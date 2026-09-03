@@ -170,6 +170,7 @@ class MROut(MRListRow):
     project_name: str | None = None
     remarks: str | None = None
     approved_at: datetime | None = None
+    has_requisition: bool = False
     items: list[MRItemOut] = Field(default_factory=list)
 
 

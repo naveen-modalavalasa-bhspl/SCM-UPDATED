@@ -7,6 +7,7 @@ import {
   Button as HButton,
   Card as HCard,
   Input as HInput,
+  Textarea as HTextarea,
   Select as HSelect,
   SelectItem as HSelectItem,
 } from "@heroui/react";
@@ -196,6 +197,18 @@ export function Input({ className, ...props }: InputProps) {
       variant="bordered"
       radius="md"
       classNames={{ inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
+      {...(props as any)}
+    />
+  );
+}
+
+export function Textarea({ className, minRows = 3, ...props }: InputProps & { minRows?: number }) {
+  return (
+    <HTextarea
+      variant="bordered"
+      radius="md"
+      minRows={minRows}
+      classNames={{ inputWrapper: `border-line bg-content1 ${className ?? ""}` }}
       {...(props as any)}
     />
   );

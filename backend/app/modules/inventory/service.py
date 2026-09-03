@@ -863,7 +863,26 @@ async def list_movements(db: AsyncSession, params: PageParams,
     """The stock ledger."""
     stmt = await _movement_query(db, item_id, warehouse_id, direction, ref_type,
                                  search, date_from, date_to, user=user)
-    page = await paginate(db, stmt.order_by(StockMovement.created_at.desc()), params)
+    # BY `id`, NEVER by `created_at`. Two independent reasons, and the first one is not
+    # what it looks like:
+    #
+    # 1. `ORDER BY created_at DESC` raised MySQL 1038, "Out of sort memory", and took
+    #    the whole screen out with a 500. NOT because the table is big — it held 333
+    #    rows when this was first hit. `stk_ledger.serial_numbers` is a JSON column,
+    #    MySQL sizes a filesort record by each column's MAXIMUM width, and a JSON
+    #    column's maximum is enormous, so ONE sort record can exceed the default
+    #    256 KB `sort_buffer_size`. Row count never enters into it. Any `SELECT *`
+    #    ordered on a non-indexed column of a JSON-bearing table does this, and
+    #    twenty-five tables here carry one.
+    # 2. `created_at` is not unique — 333 rows share 168 distinct values, because a
+    #    posting writes its whole ledger batch in one transaction. Ordering on it
+    #    alone leaves the order of a tie undefined between one page and the next, so
+    #    rows can repeat on page 2 or be skipped entirely.
+    #
+    # The primary key answers both: it is the insert order (verified: zero rows where
+    # a higher id carries an earlier `created_at`), it is unique, and reading it
+    # backwards is an index scan with no sort at all.
+    page = await paginate(db, stmt.order_by(StockMovement.id.desc()), params)
 
     # The asset / consumable code is generated at putaway and lives on the balance row,
     # not on the ledger. One lookup per page keyed the same way stk_balance is keyed,
@@ -908,15 +927,29 @@ async def list_movements(db: AsyncSession, params: PageParams,
         # Unknown item (deleted master) keeps the old behaviour rather than silently
         # re-filing somebody's serials as consumable codes.
         serial_tracked, is_asset = flags.get(row.item_id, (True, False))
+        
+        # Ensure units is a list if it's not None, so Pydantic doesn't crash
+        # and so we can join it correctly.
+        if units is not None:
+            if isinstance(units, (str, int, float, bool)):
+                units = [str(units)]
+            elif isinstance(units, list):
+                units = [str(u) for u in units if u is not None]
+            else:
+                try:
+                    units = [str(u) for u in units if u is not None]
+                except TypeError:
+                    units = [str(units)]
+                    
         if serial_tracked:
             row.serial_numbers = units
         else:
             row.serial_numbers = None
             code = ", ".join(units) if units else None
             if is_asset:
-                row.asset_code = asset or code
+                row.asset_code = code or asset
             else:
-                row.consumable_code = consumable or code
+                row.consumable_code = code or consumable
     return page
 
 
@@ -976,6 +1009,18 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
         # while the request IS in approval — there is no turn to be yours otherwise.
         if user is not None:
             mr.can_act = await engine.can_act_now(db, DocType.MR.value, mr.id, user)
+            
+    if mr.status == MRStatus.APPROVED.value:
+        claimed = await db.execute(text(
+            "SELECT 1 FROM pro_requisition_sources s "
+            "JOIN pro_requisitions r ON r.id = s.requisition_id "
+            "WHERE s.mr_id = :mr_id AND r.status != 'CANCELLED' "
+            "UNION "
+            "SELECT 1 FROM pro_requisitions "
+            "WHERE source_mr_id = :mr_id AND status != 'CANCELLED'"
+        ), {"mr_id": mr.id})
+        mr.has_requisition = claimed.first() is not None
+
     return mr
 
 

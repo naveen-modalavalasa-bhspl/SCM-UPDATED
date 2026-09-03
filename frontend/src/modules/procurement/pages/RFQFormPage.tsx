@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Button, Card, ErrorBanner, Field, FormActions, Input, PageHeader, Select,
+  Button, Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select,
   useToast,
 } from "@/shared/components";
 import { api } from "@/shared/api/client";
-import { requisitionApi, rfqApi } from "../api";
+import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import { OrgFields, type OrgValue } from "../components/OrgFields";
 import { todayIst } from "@/shared/datetime";
@@ -33,6 +33,7 @@ export function RFQFormPage() {
   const queryClient = useQueryClient();
   const editing = Boolean(id);
   const fromRequisition = params.get("requisition");
+  const fromConsolidation = params.get("consolidation");
 
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
@@ -61,6 +62,12 @@ export function RFQFormPage() {
     queryKey: ["requisition", fromRequisition],
     queryFn: () => requisitionApi.get(Number(fromRequisition)),
     enabled: Boolean(fromRequisition) && !editing,
+  });
+
+  const { data: sourceConsolidation } = useQuery({
+    queryKey: ["consolidation", fromConsolidation],
+    queryFn: () => consolidationApi.get(Number(fromConsolidation)),
+    enabled: Boolean(fromConsolidation) && !editing,
   });
 
   const { data: vendors = [] } = useQuery({
@@ -127,6 +134,27 @@ export function RFQFormPage() {
     })));
   }, [source]);
 
+  useEffect(() => {
+    if (!sourceConsolidation) return;
+    setTitle(`Quotation for ${sourceConsolidation.cons_no}`);
+    setOrg({
+      departmentId: "",
+      warehouseId: sourceConsolidation.warehouse_id ?? "",
+      warehouseName: sourceConsolidation.warehouse_name ?? "",
+      projectId: sourceConsolidation.project_id ?? "",
+      companyName: "",
+    });
+    setTerms((current) => current || sourceConsolidation.remarks || "");
+    setLines(sourceConsolidation.items.map((item) => ({
+      item_id: item.item_id,
+      item_code: item.item_code ?? "",
+      item_name: item.item_name ?? "",
+      quantity: String(item.approved_qty),
+      uom_code: item.uom_code,
+      required_date: item.required_date ?? "",
+    })));
+  }, [sourceConsolidation]);
+
   const save = useMutation({
     mutationFn: () => {
       const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
@@ -149,7 +177,11 @@ export function RFQFormPage() {
       };
       return editing
         ? rfqApi.update(Number(id), payload)
-        : rfqApi.create({ ...payload, requisition_id: fromRequisition ? Number(fromRequisition) : null });
+        : rfqApi.create({ 
+            ...payload, 
+            requisition_id: fromRequisition ? Number(fromRequisition) : null,
+            consolidation_id: fromConsolidation ? Number(fromConsolidation) : null
+          });
     },
     onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ["rfqs"] });
@@ -219,6 +251,32 @@ export function RFQFormPage() {
         </Card>
       )}
 
+      {sourceConsolidation && (
+        <Card className="mb-4 p-4">
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted">
+            Carried from {sourceConsolidation.cons_no}
+          </p>
+          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
+            {[
+              ["Project", sourceConsolidation.project_name],
+              ["Status", sourceConsolidation.status],
+              ["Approved By", sourceConsolidation.approved_by_name],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-xs text-muted">{label}</dt>
+                <dd className="mt-1 text-body">{value || "—"}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="mt-3 border-t border-line pt-3 text-xs text-muted">
+            Requisitions rolled up:{" "}
+            <span className="font-mono text-body">
+              {sourceConsolidation.source_count}
+            </span>
+          </p>
+        </Card>
+      )}
+
       <Card className="space-y-5 p-5">
         {/* Editable either way: a requisition pre-fills them, and an RFQ raised cold
           * has nowhere else to get them from. */}
@@ -235,8 +293,8 @@ export function RFQFormPage() {
                    onChange={(e) => setDueDate(e.target.value)} />
           </Field>
           <Field label="Terms">
-            <Input value={terms} onChange={(e) => setTerms(e.target.value)}
-                   placeholder="Payment, delivery, warranty" />
+            <Textarea value={terms} onChange={(e) => setTerms(e.target.value)}
+                      placeholder="Payment, delivery, warranty" />
           </Field>
           <Field
             label="Award on"

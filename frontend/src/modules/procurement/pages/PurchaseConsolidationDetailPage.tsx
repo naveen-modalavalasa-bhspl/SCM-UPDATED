@@ -119,6 +119,13 @@ export function PurchaseConsolidationDetailPage() {
                 </Button>
               </Can>
             )}
+            {doc.status === "APPROVED" && !doc.has_rfq && (
+              <Can do="rfq.create">
+                <Button onClick={() => nav(`/procurement/rfqs/new?consolidation=${doc.id}`)}>
+                  Create RFQ
+                </Button>
+              </Can>
+            )}
           </>
         }
       />

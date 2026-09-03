@@ -96,9 +96,25 @@ class WarehouseLocation(Base):
     shelf_level = Column(Integer, nullable=True)
 
     capacity_weight = Column(Numeric(16, 3), nullable=True)
+    # The three gates a putaway is checked against, plus the discrete one.
+    #
+    # `capacity_volume` is the stated cube in m3. Left blank it is DERIVED from the
+    # three dimensions below, so a bin measured once needs nothing typed twice.
     capacity_volume = Column(Numeric(16, 3), nullable=True)
+    # Gate 2: what the rack can physically carry, against the GROSS weight of the
+    # handling units standing on it.
     max_weight_capacity = Column(Numeric(16, 3), nullable=True)
+    # Gate 3: the bin's own inner bounding box. A pallet whose cube "fits" a shelf it
+    # is too wide to enter does not fit, and only these three columns can say so.
+    length_cm = Column(Numeric(10, 2), nullable=True)
+    width_cm = Column(Numeric(10, 2), nullable=True)
     height_cm = Column(Numeric(10, 2), nullable=True)
+    # Gate 4, the discrete one: "this bay takes one euro-pallet, or four totes". No
+    # cube expresses that, and it is the limit a floor actually works to.
+    max_handling_units = Column(Integer, nullable=True)
+    # Void factor for the bin itself — gangway, dunnage, the space you need to get a
+    # hand in. NULL means 100%, i.e. nobody has derated this location.
+    fill_efficiency_pct = Column(Numeric(5, 2), nullable=True)
     aisle_width_meters = Column(Numeric(10, 2), nullable=True)
 
     temperature_controlled = Column(Boolean, nullable=False, default=False)

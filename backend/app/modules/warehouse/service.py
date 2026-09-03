@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from uuid import uuid4
 
-from sqlalchemy import String, and_, false, func, or_, select
+from sqlalchemy import String, and_, false, func, literal, or_, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -43,7 +43,7 @@ from app.modules.warehouse.enums import (
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
     PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
-    ReturnStatus, SerialStatus, WarehouseDocType,
+    ReturnStatus, SerialStatus, TRACKING_META, TrackingType, WarehouseDocType,
 )
 from app.platform.settings import attachments, codeformat
 from app.platform.settings import service as settings_service
@@ -455,7 +455,11 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
             "capacity_qty": b.capacity_qty,
             "capacity_volume": b.capacity_volume,
             "max_weight_capacity": b.max_weight_capacity,
+            "length_cm": b.length_cm,
+            "width_cm": b.width_cm,
             "height_cm": b.height_cm,
+            "max_handling_units": b.max_handling_units,
+            "fill_efficiency_pct": b.fill_efficiency_pct,
             "aisle_width_meters": b.aisle_width_meters,
             "temperature_controlled": b.temperature_controlled,
             "humidity_percentage": b.humidity_percentage,
@@ -467,6 +471,8 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
             # Filled by the roll-up below.
             "occupied_volume": None, "free_volume": None,
             "utilisation_pct": None, "capacity_status": None, "is_partial": None,
+            "capacity_units": None, "occupied_units": None,
+            "capacity_weight_kg": None, "occupied_weight_kg": None,
             "children": [],
         }
 
@@ -474,6 +480,9 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
     # sits in a bin, so a rack's figure is the sum of the bins under it — rolled up
     # after the tree is threaded rather than queried per node.
     room = await capacity.bin_occupancy_map(db, rows)
+    # The roll-up needs each node's own row to read its spec (its sides, its void
+    # factor, its unit limit), which the plain dict above deliberately flattens.
+    nodes_by_id = {b.id: b for b in rows}
 
     def describe(node: dict, depth: int, prefix: str) -> None:
         node["level"] = depth
@@ -487,26 +496,50 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
         # A location whose parent is missing (or points outside this warehouse) is shown
         # at the root rather than dropped — invisible data is worse than misplaced data.
         (parent["children"] if parent else roots).append(node)
-    def roll_up(node: dict) -> tuple[Decimal, bool]:
-        """Post-order: a node holds its own stock plus everything beneath it."""
+    def roll_up(node: dict) -> tuple[Decimal, Decimal, Decimal, bool]:
+        """Post-order: a node holds its own stock plus everything beneath it.
+
+        All three measures roll up together — cube, handling units and gross weight —
+        because a rack's verdict is the worst of the three, exactly as a bin's is, and
+        computing them in separate passes is how two of them end up disagreeing.
+        """
         own = room.get(node["id"], {})
         total = _d(own.get("occupied_volume"))
+        units = _d(own.get("occupied_units"))
+        weight = _d(own.get("occupied_weight_kg"))
         partial = bool(own.get("is_partial"))
         for child in node["children"]:
-            child_total, child_partial = roll_up(child)
+            child_total, child_units, child_weight, child_partial = roll_up(child)
             total += child_total
+            units += child_units
+            weight += child_weight
             partial = partial or child_partial
 
-        cap = _d(node["capacity_volume"])
-        cap = cap if cap > ZERO else None
+        # The USABLE cube, so a node derated for void space reads the same here as it
+        # does on the putaway meter — `BinSpec` is the one place that arithmetic lives.
+        spec = capacity.BinSpec(nodes_by_id[node["id"]])
         node["occupied_volume"] = total
-        node["free_volume"] = None if cap is None else cap - total
+        node["occupied_units"] = units
+        node["occupied_weight_kg"] = weight
+        node["capacity_volume"] = spec.usable_volume
+        node["capacity_units"] = spec.max_units
+        node["capacity_weight_kg"] = spec.max_weight
+        node["free_volume"] = (None if spec.usable_volume is None
+                               else spec.usable_volume - total)
         node["utilisation_pct"] = (
-            None if cap is None else float(round(total * 100 / cap, 2))
+            None if not spec.usable_volume
+            else float(round(total * 100 / spec.usable_volume, 2))
         )
-        node["capacity_status"] = capacity.fill_status(cap, total)
+        # The worst of the gates that were configured, for the reason `_overall` gives:
+        # a bay at its stated pallet limit is full whatever its cube says.
+        verdicts = [capacity.fill_status(spec.usable_volume, total)]
+        if spec.max_units:
+            verdicts.append(capacity.fill_status(_d(spec.max_units), units))
+        if spec.max_weight:
+            verdicts.append(capacity.fill_status(spec.max_weight, weight))
+        node["capacity_status"] = min(verdicts, key=lambda s: capacity.SEVERITY[s])
         node["is_partial"] = partial
-        return total, partial
+        return total, units, weight, partial
 
     for root in roots:
         describe(root, 1, "")
@@ -606,7 +639,8 @@ async def list_locations(db: AsyncSession, warehouse_id: int) -> list[m.Warehous
 
 async def location_occupancy(db: AsyncSession, location_id: int, *,
                              item_id: int | None = None, qty=None,
-                             direction: str = "IN") -> dict:
+                             direction: str = "IN",
+                             item_packaging_id: int | None = None) -> dict:
     """How full one location is, and what a proposed move would do to it.
 
     The arithmetic and the wording both live in `capacity` (a location's occupancy is
@@ -614,7 +648,13 @@ async def location_occupancy(db: AsyncSession, location_id: int, *,
     to it, so the router stays three lines like every other.
     """
     return await capacity.location_occupancy(
-        db, location_id, item_id=item_id, qty=qty, direction=direction)
+        db, location_id, item_id=item_id, qty=qty, direction=direction,
+        item_packaging_id=item_packaging_id)
+
+
+async def item_handling_units(db: AsyncSession, item_id: int) -> list[dict]:
+    """The packaging units an item can be put away in, for the putaway picker."""
+    return await capacity.handling_units(db, item_id)
 
 
 async def occupancy_preview(db: AsyncSession, data: s.OccupancyPreviewIn) -> list[dict]:
@@ -2308,7 +2348,8 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
                               user) -> m.PutawayTask:
     """Creates the task itself. Split from `_raise_putaway_task` so the manual route
     can apply its own rules about what may be re-raised before building one."""
-    suggested = await _suggest_bin(db, receipt.warehouse_id, line.item_id)
+    suggested = await _suggest_bin(db, receipt.warehouse_id, line.item_id,
+                                   _d(line.accepted_qty))
     item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
         # From the receipt it belongs to — see the note on the GRN number.
@@ -2335,31 +2376,78 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
     return task
 
 
-async def _suggest_bin(db: AsyncSession, warehouse_id: int, item_id: int) -> Bin | None:
+#: How many candidates a suggestion is chosen from. Enough that a run of full bays does
+#: not exhaust the list, small enough that raising a GRN's worth of tasks stays two
+#: queries per line rather than a scan of the building.
+_SUGGESTION_POOL = 12
+
+
+async def _suggest_bin(db: AsyncSession, warehouse_id: int, item_id: int,
+                       qty=None) -> Bin | None:
     """Picks a bin for an incoming line.
 
-    Preference is the bin that already holds this item — keeping one item in one place
-    is what makes picking fast — falling back to any active pickable bin. Capacity is
-    not modelled per item, so this suggests rather than decides; the storekeeper can
-    override, and the override is recorded.
+    Preference is a bin that already holds this item — keeping one item in one place is
+    what makes picking fast — falling back to any active bin stock can sit in.
+
+    But preference is not the whole answer, and the comment that used to stand here
+    ("capacity is not modelled per item, so this suggests rather than decides") stopped
+    being true when capacity became a question about HANDLING UNITS. It is now perfectly
+    answerable whether this pallet enters that bay, so a suggestion that ignores it is
+    just a wrong suggestion made confidently: the storekeeper walks to the shelf named on
+    their task, finds the pallet does not go in, and overrides — every time, for that
+    item, until somebody re-slots it by hand.
+
+    So the candidates are ranked on the SAME verdict the putaway screen's chips use
+    (`capacity.suggestion_fit`), and the consolidation preference survives as the tie-
+    break it should always have been: stable sort, bins already holding the item first.
+    A bin is still only suggested — the storekeeper overrides and the override is
+    recorded — and a warehouse with nothing measured ranks every candidate equal and
+    lands on the same bin it always did.
     """
     from app.modules.inventory.models import Stock
 
-    held = (await db.execute(
+    held_ids = [row[0] for row in (await db.execute(
         select(Stock.bin_id).where(
             Stock.warehouse_id == warehouse_id, Stock.item_id == item_id,
             Stock.bin_id != m.NO_BIN, Stock.total_qty > 0)
-        .order_by(Stock.total_qty.desc()).limit(1)
-    )).scalar_one_or_none()
-    if held:
-        return await db.get(Bin, held)
+        .order_by(Stock.total_qty.desc()).limit(_SUGGESTION_POOL)
+    )).all()]
 
-    return (await db.execute(
+    preferred = []
+    if held_ids:
+        preferred = (await db.execute(
+            select(Bin).where(Bin.id.in_(held_ids), Bin.is_active.is_(True))
+        )).scalars().all()
+        # Keep the "holds the most of it" order the query asked for; `IN` does not.
+        rank = {bin_id: index for index, bin_id in enumerate(held_ids)}
+        preferred = sorted(preferred, key=lambda b: rank.get(b.id, len(rank)))
+
+    others = (await db.execute(
         select(Bin).where(
             Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True),
-            Bin.bin_type.in_(m.BIN_TYPES))
-        .order_by(Bin.code).limit(1)
-    )).scalar_one_or_none()
+            Bin.bin_type.in_(m.BIN_TYPES), Bin.id.notin_([b.id for b in preferred] or [0]))
+        .order_by(Bin.code).limit(_SUGGESTION_POOL)
+    )).scalars().all()
+
+    candidates = [*preferred, *others]
+    if not candidates:
+        return None
+
+    packs = (await capacity.pack_ladders(db, [item_id])).get(item_id, [])
+    pack = capacity.choose_pack(packs)
+    room = await capacity.bin_occupancy_map(db, candidates)
+    return min(
+        # `enumerate` keeps the consolidation order as the tie-break: `min` is stable in
+        # the sense that follows from comparing the index last, and nothing else here
+        # distinguishes two equally-good bins.
+        enumerate(candidates),
+        key=lambda pair: (
+            capacity.SUGGESTION_RANK.get(
+                capacity.suggestion_fit(pack, pair[1], room[pair[1].id], qty)["fit_status"],
+                2),
+            pair[0],
+        ),
+    )[1]
 
 
 async def _po_number(db: AsyncSession, po_id: int | None) -> str | None:
@@ -3009,7 +3097,8 @@ async def cancel_inspection(db: AsyncSession, inspection_id: int, reason: str | 
 # Putaway
 # ---------------------------------------------------------------------------
 
-async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
+async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask,
+                            ladders: dict | None = None) -> dict:
     """`whs_warehouse_items` is a work queue and carries only ids, so the labels the
     screen needs are resolved here rather than being snapshotted onto the table —
     a task lives for hours, not years, and cannot go stale in that time."""
@@ -3021,7 +3110,18 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
         await db.get(m.ReceiptItem, task.grn_item_id)
         if task.grn_item_id else None
     )
-    each_volume = capacity.unit_volume(item)
+    # The rung this task is in, and every rung it COULD be in. Resolved here rather
+    # than in the screen so the volume on the picker is the volume the bin check will
+    # use — the same rule the rest of the module keeps.
+    #
+    # `ladders` is passed in by the list, which resolves the whole page in one pair of
+    # queries: `pack_ladders` is already batched, and asking it per row turned a queue
+    # of twenty into forty extra round trips for an answer it can give in two.
+    if ladders is None:
+        ladders = await capacity.pack_ladders(db, [task.item_id])
+    packs = ladders.get(task.item_id, [])
+    pack = capacity.choose_pack(packs, task.item_packaging_id)
+    space = capacity.space_for(pack, task.qty)
     return {
         "id": task.id, "putaway_no": task.putaway_no,
         "grn_id": task.grn_id, "grn_no": receipt.grn_no if receipt else None,
@@ -3038,13 +3138,23 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask) -> dict:
             )
         ),
         "qty": task.qty,
-        # What this line will take up on a shelf. `_decorate_putaway` already has the
-        # item in hand, so both are free here; None means the item has never been
-        # measured, which the screen says rather than guessing at zero.
-        "unit_volume_cbm": each_volume,
-        "line_volume_cbm": (
-            None if each_volume is None else each_volume * _d(task.qty)
-        ),
+        # WHICH pack, and what that comes to on a shelf. None throughout means the item
+        # has no measured packaging unit, which the screen says rather than guessing at
+        # zero — zero would report a full bin as having room.
+        "item_packaging_id": pack.item_packaging_id if pack else None,
+        "package_id": pack.package_id if pack else None,
+        "package_name": pack.package_name if pack else None,
+        "pack_base_qty": pack.base_qty if pack else None,
+        "pack_volume_cbm": pack.volume_cbm if pack else None,
+        "pack_gross_weight_kg": pack.gross_weight_kg if pack else None,
+        "handling_units": space["units"] if space["volume"] is not None else None,
+        "line_volume_cbm": space["volume"],
+        "line_weight_kg": space["weight"],
+        "packs": [
+            {**p.as_dict(),
+             "is_default": bool(pack and p.item_packaging_id == pack.item_packaging_id)}
+            for p in packs
+        ],
         "suggested_bin_id": task.suggested_bin_id,
         "suggested_bin_code": await _bin_code(db, task.suggested_bin_id),
         "actual_bin_id": task.actual_bin_id,
@@ -3092,7 +3202,10 @@ async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | N
             m.PutawayTask.putaway_no.ilike(like), m.PutawayTask.lot_no.ilike(like)))
 
     page = await paginate(db, stmt.order_by(m.PutawayTask.id.desc()), params)
-    page["items"] = [await _decorate_putaway(db, t) for t in page["items"]]
+    # Every item on the page in one pair of queries, rather than a pair per row.
+    ladders = await capacity.pack_ladders(
+        db, {t.item_id for t in page["items"] if t.item_id})
+    page["items"] = [await _decorate_putaway(db, t, ladders) for t in page["items"]]
     return page
 
 
@@ -3103,6 +3216,205 @@ async def get_putaway(db: AsyncSession, task_id: int, user=None) -> dict:
                            warehouse_col=m.PutawayTask.warehouse_id,
                            label="Putaway task")
     return await _decorate_putaway(db, task)
+
+
+async def putaway_codes(db: AsyncSession, task_id: int, user=None) -> dict:
+    """What this putaway minted, and how many of them — the label sheet's header.
+
+    Deliberately WITHOUT the codes themselves. A putaway of 500 units mints 500 codes
+    (`_place_unit_codes` allows up to 1000) and the screen shows a page of them at a
+    time, so the header is a COUNT, not the rows: opening the panel must not depend on
+    how big the lorry was. The codes come from `putaway_code_units`, paginated like
+    every other list in the system.
+
+    `reason` is filled when there are none and explains WHY, in the same voice as
+    `_putaway_block_reason` — an empty sheet with nothing said reads as a defect in the
+    screen, and the three ways it happens have three different fixes.
+    """
+    task, head, item, is_asset, tracked = await _putaway_code_head(db, task_id, user)
+
+    # A code names a unit that is physically somewhere, so there is nothing to print
+    # until the stock has been placed.
+    stmt = _putaway_unit_stmt(task)
+    if stmt is None:
+        head["reason"] = (
+            f"{task.putaway_no or 'This task'} is {(task.status or '').lower()}. "
+            f"Codes are minted when the stock is placed in its bin."
+        )
+        return head
+
+    head["total_codes"] = await db.scalar(
+        select(func.count()).select_from(stmt.subquery())
+    ) or 0
+    if head["total_codes"]:
+        return head
+
+    # No unit rows: either the item is continuous and its identity sits on the balance
+    # row, or code tracking is off for it and nothing was minted at all.
+    if await _putaway_lot_code(db, task) is not None:
+        head["total_codes"] = 1
+        return head
+
+    label = "Asset" if is_asset else "Consumable"
+    head["reason"] = (
+        f"{label} code tracking is switched off for {item.code if item else 'this item'}"
+        f" — turn it on under Masters > Items > Tracking, and units received from then"
+        f" on carry a code. A code already printed is never re-minted."
+        if not tracked else
+        f"{item.name if item else 'This item'} is measured, not counted, so its units"
+        f" cannot each carry a code — 30 grams is one lot, not 30 things to label."
+    )
+    return head
+
+
+async def putaway_code_units(db: AsyncSession, params: PageParams, task_id: int, *,
+                             search: str | None = None, user=None) -> dict:
+    """One page of the codes a putaway minted.
+
+    Paginated because the list runs to a thousand rows and rule 11 has no exception for
+    a list that happens to hang off a document. Ordered by `id`, never by a timestamp: a
+    putaway writes its whole batch of units in one transaction, so `created_at` ties on
+    every row of it and the tie leaves page 2 undefined — rows repeat or vanish between
+    pages. The primary key is the insert order AND unique, and reading it forwards is an
+    index scan with no sort at all.
+    """
+    task, _head, _item, _is_asset, _tracked = await _putaway_code_head(db, task_id, user)
+    stmt = _putaway_unit_stmt(task)
+    if stmt is None:
+        return {"items": [], "total": 0, "page": params.page, "size": params.size}
+
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            m.SerialNumber.serial_number.ilike(like),
+            m.SerialNumber.imei.ilike(like),
+            m.SerialNumber.asset_code.ilike(like),
+            m.SerialNumber.consumable_code.ilike(like)))
+
+    page = await paginate(db, stmt.order_by(m.SerialNumber.id), params)
+    page["items"] = [_unit_code_row(row) for row in page["items"]]
+    if page["total"]:
+        return page
+
+    # The continuous-item fallback: one code on the LOT, because there is no unit to
+    # name. A single row, so it only ever belongs on the first page.
+    lot = await _putaway_lot_code(db, task)
+    if lot is not None and params.page == 1 and (
+        not search or search.strip().lower() in lot["code"].lower()
+    ):
+        page["items"], page["total"] = [lot], 1
+    return page
+
+
+async def _putaway_code_head(db: AsyncSession, task_id: int, user):
+    """The task, the label header, and the two item facts both callers need.
+
+    Shared so the header call and the paged list cannot disagree about which putaway
+    they are describing — the scope check included, which both must apply.
+    """
+    task = await _get(db, m.PutawayTask, task_id, "Putaway task")
+    # FIXED — see `_assert_in_scope`.
+    await _assert_in_scope(db, user, m.PutawayTask, task,
+                           warehouse_col=m.PutawayTask.warehouse_id,
+                           label="Putaway task")
+
+    item = await db.get(Item, task.item_id)
+    wh = await db.get(Warehouse, task.warehouse_id)
+    batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
+    receipt_item = (
+        await db.get(m.ReceiptItem, task.grn_item_id) if task.grn_item_id else None
+    )
+    is_asset = bool(getattr(item, "is_asset", False))
+    tracked = codeformat.is_code_tracked(item, await codeformat.code_settings(db))
+
+    head = {
+        "putaway_id": task.id, "putaway_no": task.putaway_no, "status": task.status,
+        "item_id": task.item_id,
+        "item_code": item.code if item else None,
+        "item_name": item.name if item else None,
+        "uom_code": item.uom_code if item else None,
+        "batch_id": task.batch_id, "batch_no": batch.batch_no if batch else None,
+        "expiry_date": (
+            batch.expiry_date if batch else
+            (receipt_item.expiry_date if receipt_item else None)
+        ),
+        "is_asset": is_asset,
+        "warehouse_id": task.warehouse_id, "warehouse_name": wh.name if wh else None,
+        "bin_id": task.actual_bin_id,
+        "bin_code": await _bin_code(db, task.actual_bin_id),
+        "bin_path": " / ".join(
+            node.code for node in await _ancestry(db, task.actual_bin_id)
+        ) or None,
+        "lot_no": task.lot_no, "qty": task.qty, "completed_at": task.completed_at,
+        "is_code_tracked": tracked,
+        "code_type": ("ASSET" if is_asset else "CONSUMABLE") if tracked else None,
+        "total_codes": 0, "reason": None,
+    }
+    return task, head, item, is_asset, tracked
+
+
+def _putaway_unit_stmt(task: m.PutawayTask):
+    """The units THIS putaway placed, or None when it has not placed any yet.
+
+    Keyed on the task's own `lot_no`. That is the one thing separating this placement
+    from the same item's units placed into the same bin yesterday: the lot is stamped at
+    confirm from the storage path (`_next_lot_no`) and belongs to exactly one putaway.
+    Item + bin is the obvious key and the wrong one — it sweeps in the whole shelf, and
+    a sheet printed off it re-labels goods somebody already stickered.
+
+    Never `item_id` alone either: `whs_serial_numbers` is one row per physical unit and
+    holds 773k of them (see the model), so an unbounded read of it is the 26-second
+    query the issue screen used to have.
+    """
+    if task.status != PutawayStatus.COMPLETED.value or not task.lot_no:
+        return None
+    return select(m.SerialNumber).where(
+        m.SerialNumber.item_id == task.item_id,
+        m.SerialNumber.lot_no == task.lot_no,
+    )
+
+
+def _unit_code_row(row: m.SerialNumber) -> dict:
+    """One printable identity. `code` falls back to the serial for an item whose code
+    tracking is switched off — a label with nothing scannable on it is worse than no
+    label, and for such a unit the serial IS its identity."""
+    return {
+        "id": row.id,
+        "code": row.asset_code or row.consumable_code or row.serial_number,
+        "code_type": ("ASSET" if row.asset_code else
+                      "CONSUMABLE" if row.consumable_code else "SERIAL"),
+        "scope": "UNIT",
+        "serial_number": row.serial_number, "imei": row.imei, "status": row.status,
+    }
+
+
+async def _putaway_lot_code(db: AsyncSession, task: m.PutawayTask) -> dict | None:
+    """The one code a continuous item's placement carries, on the balance row.
+
+    Grams and litres have no unit to name, so `_code_lot` stamps the identity on
+    `stk_balance` instead. Same formula, same putaway — only the thing it names differs.
+    """
+    from app.modules.inventory.models import Stock
+
+    if not task.actual_bin_id:
+        return None
+    lot = await db.scalar(
+        select(Stock).where(
+            Stock.item_id == task.item_id,
+            Stock.warehouse_id == task.warehouse_id,
+            Stock.bin_id == task.actual_bin_id,
+            Stock.batch_id == (task.batch_id or m.NO_BATCH),
+        ).limit(1)
+    )
+    code = (lot.asset_code or lot.consumable_code) if lot is not None else None
+    if not code:
+        return None
+    return {
+        "id": lot.id, "code": code,
+        "code_type": "ASSET" if lot.asset_code else "CONSUMABLE",
+        "scope": "LOT",
+        "serial_number": None, "imei": None, "status": None,
+    }
 
 
 # A line with a task in one of these already has its putaway accounted for: three of
@@ -3267,8 +3579,24 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     # down. So: work out what this does to the shelf, carry on regardless, and record
     # what was known at the moment it was pressed. Read BEFORE `move_stock`, because
     # afterwards the stock is in the bin and "what did it look like before" is gone.
+    # Which pack is being placed: the press wins, then whatever the task was raised
+    # with, then the item's default putaway unit. A screen that was never touched still
+    # measures the load rather than refusing to.
+    chosen_id = data.item_packaging_id or task.item_packaging_id
     room = await capacity.location_occupancy(
-        db, target.id, item_id=task.item_id, qty=qty, direction=capacity.IN)
+        db, target.id, item_id=task.item_id, qty=qty, direction=capacity.IN,
+        item_packaging_id=chosen_id)
+    placed = capacity.choose_pack(
+        (await capacity.pack_ladders(db, [task.item_id])).get(task.item_id, []),
+        chosen_id)
+    if placed is not None:
+        # Stamped on the task, not just reported: what a bin holds is read back from
+        # stock through each item's DEFAULT rung, so the document is the only record of
+        # the pack this particular load actually arrived in.
+        task.item_packaging_id = placed.item_packaging_id
+        task.package_id = placed.package_id
+        task.package_name = placed.package_name
+        task.handling_units = capacity.space_for(placed, qty)["units"]
 
     receipt = await get_receipt(db, task.grn_id) if task.grn_id else None
     project_id = (receipt.project_id if receipt else None) or 0
@@ -3359,6 +3687,19 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             batch_id=task.batch_id,
             uom_id=task.uom_id,
             qty=remainder,
+            # The rest of the same load, so it is the same pack: a part-placed pallet
+            # does not become loose eaches because half of it went on a shelf. Without
+            # this the remainder falls back to the item's default rung and the second
+            # half of one delivery is measured differently from the first.
+            item_packaging_id=task.item_packaging_id,
+            package_id=task.package_id,
+            package_name=task.package_name,
+            handling_units=capacity.space_for(
+                capacity.choose_pack(
+                    (await capacity.pack_ladders(db, [task.item_id]))
+                    .get(task.item_id, []),
+                    task.item_packaging_id),
+                remainder)["units"],
             suggested_bin_id=task.suggested_bin_id,
             putaway_type=task.putaway_type,
             status=PutawayStatus.PENDING.value,
@@ -4457,7 +4798,8 @@ async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) 
     return page
 
 
-async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list[dict]:
+async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8, *,
+                         item_packaging_id: int | None = None) -> list[dict]:
     """Bins worth offering for a task, best first: the ones already holding this item,
     then any active pickable bin.
 
@@ -4497,20 +4839,31 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
     # suggestion while it still has space, and until this the screen could not say.
     room = await capacity.bin_occupancy_map(db, rows)
 
-    # Re-sort so bins with usable space come first. The preferred list is already the
-    # strongest signal, but a "preferred" bin that is full should not sit above an empty
-    # one: a storekeeper trusting the order would keep walking toward a full shelf.
-    # Sort key: OVER / FULL bins last, then by free_volume descending (more room = better).
-    _STATUS_RANK = {
-        capacity.STATUS_OK: 0, capacity.STATUS_TIGHT: 1,
-        capacity.STATUS_NO_CAPACITY: 2, capacity.STATUS_UNMEASURED: 2,
-        capacity.STATUS_FULL: 3, capacity.STATUS_OVER: 4,
-    }
+    # Which pack is going onto the shelf. Every ranking below is about THIS pack: "is
+    # there room" is not a question about a bin on its own, and a bay that takes four
+    # totes takes no pallets at all.
+    packs = (await capacity.pack_ladders(db, [task.item_id])).get(task.item_id, [])
+    # The rung the SCREEN has selected wins over the one the task was raised with: a
+    # storekeeper who changes the pack is telling us what is actually on the trolley,
+    # and the ranking is only worth anything if it follows that.
+    pack = capacity.choose_pack(packs, item_packaging_id or task.item_packaging_id)
+    fit = {b.id: capacity.suggestion_fit(pack, b, room[b.id], task.qty) for b in rows}
+
+    # Re-sort so bins that will actually take this load come first. The preferred list
+    # is the strongest signal and Python's sort is stable, so a bin already holding the
+    # item stays ahead of a stranger at the same rank — but a "preferred" bin that is
+    # full, or that this pallet does not physically enter, must not sit above an empty
+    # one: a storekeeper trusting the order would keep walking toward a shelf they
+    # cannot use. WONT_FIT ranks below FULL for that reason — a full bay is one to come
+    # back to, a bay the pack does not enter is never the answer.
     from decimal import Decimal as _Dec
     rows = sorted(
         rows,
         key=lambda b: (
-            _STATUS_RANK.get(room[b.id]["status"], 2),
+            capacity.SUGGESTION_RANK.get(fit[b.id]["fit_status"], 2),
+            # More slots left beats more air left: the floor works in whole packs, and
+            # cube is the tie-break for bins nobody has slotted.
+            -(fit[b.id]["slots_free"] if fit[b.id]["slots_free"] is not None else 0),
             -float(room[b.id]["free_volume"] or _Dec("0")),
         ),
     )
@@ -4522,8 +4875,12 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
             "bin_type": b.bin_type, "storage_type_id": b.storage_type_id,
             "barcode": b.barcode, "floor_level": b.floor_level,
             "shelf_level": b.shelf_level, "path": None, "level": None,
-            "capacity_qty": b.capacity_qty, "capacity_volume": b.capacity_volume,
-            "max_weight_capacity": b.max_weight_capacity, "height_cm": b.height_cm,
+            "capacity_qty": b.capacity_qty,
+            "capacity_volume": room[b.id]["capacity_volume"],
+            "max_weight_capacity": b.max_weight_capacity,
+            "length_cm": b.length_cm, "width_cm": b.width_cm, "height_cm": b.height_cm,
+            "max_handling_units": b.max_handling_units,
+            "fill_efficiency_pct": b.fill_efficiency_pct,
             "aisle_width_meters": b.aisle_width_meters,
             "temperature_controlled": b.temperature_controlled,
             "humidity_percentage": b.humidity_percentage,
@@ -4537,6 +4894,13 @@ async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8) -> list
             "utilisation_pct": room[b.id]["utilisation_pct"],
             "capacity_status": room[b.id]["status"],
             "is_partial": room[b.id]["is_partial"],
+            "capacity_units": room[b.id]["capacity_units"],
+            "occupied_units": room[b.id]["occupied_units"],
+            "capacity_weight_kg": room[b.id]["capacity_weight_kg"],
+            "occupied_weight_kg": room[b.id]["occupied_weight_kg"],
+            # What this bin says about THIS load, as opposed to how full it is in
+            # general. `capacity_status` is the shelf; `fit_status` is the decision.
+            **fit[b.id],
             "children": [],
         }
         for b in rows
@@ -5218,6 +5582,37 @@ def _issue_serial_marker(issue_id: int) -> str:
     return f"Reserved for issue {issue_id}"
 
 
+def _issue_line_serial_marker(issue_id: int, line_id: int | None) -> str:
+    """The reservation stamp for ONE line of an issue.
+
+    A held unit used to be stamped `Reserved for issue 72` — per DOCUMENT. An issue
+    carrying the same item on two lines is the normal shape of a consolidated
+    fulfilment (two batches of the same monitor), and with one stamp for the pair
+    there was no way to say which line held which unit. Everything downstream then
+    read the whole item's units against a single line: the screen showed BOTH lines
+    every unit the issue held (the "serials are displaying overall, not by batch"
+    report), `_mark_serials` compared one line's quantity against both lines'
+    reservations, and `set_issue_serials` restated line A's units onto line B, where
+    the batch check refused them with "is not in the selected batch". One line, one
+    stamp, and every reader below keys on it.
+    """
+    if not line_id:
+        return _issue_serial_marker(issue_id)
+    return f"{_issue_serial_marker(issue_id)} line {line_id}"
+
+
+def _issue_reservation_clause(issue_id: int):
+    """Matches every reservation stamp this issue may carry — its own and its lines'.
+
+    The separator is part of the pattern on purpose: `LIKE 'Reserved for issue 7%'`
+    would also match issue 71's rows. Rows still carrying the old document-level
+    stamp are matched too, so an issue drafted before this change is still readable.
+    """
+    base = _issue_serial_marker(issue_id)
+    return or_(m.SerialNumber.remarks == base,
+               m.SerialNumber.remarks.like(f"{base} line %"))
+
+
 async def _project_name(db: AsyncSession, project_id: int | None) -> str | None:
     """The project's display name, snapshotted beside its id (rule 10)."""
     from app.shared.models.master import Project
@@ -5254,16 +5649,27 @@ async def _issue_snapshot_values(
 async def _clear_issue_serial_reservations(
     db: AsyncSession,
     issue_id: int,
+    *,
+    line_ids: set[int] | None = None,
 ) -> None:
-    rows = (await db.execute(
-        select(m.SerialNumber).where(
-            m.SerialNumber.remarks == _issue_serial_marker(issue_id),
-            m.SerialNumber.status.in_(
-                (SerialStatus.AVAILABLE.value, SerialStatus.ISSUED.value)
-            ),
-        )
-    )).scalars().all()
-    for row in rows:
+    """Release this issue's held units — all of them, or only the named lines'.
+
+    `line_ids` is what lets `set_issue_serials` re-cut ONE line without dropping the
+    reservations the storekeeper already made on the others; clearing the document
+    wholesale and re-reserving everything is what used to shuffle units between lines
+    of the same item.
+    """
+    stmt = select(m.SerialNumber).where(
+        _issue_reservation_clause(issue_id),
+        m.SerialNumber.status.in_(
+            (SerialStatus.AVAILABLE.value, SerialStatus.ISSUED.value)
+        ),
+    )
+    if line_ids is not None:
+        stmt = stmt.where(m.SerialNumber.remarks.in_(
+            [_issue_line_serial_marker(issue_id, line_id) for line_id in line_ids]
+        ))
+    for row in (await db.execute(stmt)).scalars().all():
         row.remarks = None
 
 
@@ -5296,6 +5702,34 @@ def _unit_mode(item) -> str:
     return UNIT_MODE_CODE
 
 
+def _tracking_type(item, *, has_units: bool = True) -> str:
+    """Which KIND of identifier a storekeeper is being asked to read, for the badge.
+
+    `_unit_mode` above answers a different question — which column the matcher
+    validates against — and folds an asset tag and a consumable lot code into one
+    CODE. On the shelf they are two different labels in two different places, so the
+    screen needs them apart; the fold stays where it belongs, in matching.
+
+    `has_units` is per LINE, not per item: an item may be asset-coded in the master
+    and still have nothing coded at THIS point, and a badge promising an asset tag
+    over an empty picker is worse than no badge.
+    """
+    if bool(getattr(item, "is_serial_tracked", False)):
+        return TrackingType.SERIAL.value
+    if bool(getattr(item, "is_imei_tracked", False)):
+        return TrackingType.IMEI.value
+    if not has_units:
+        return TrackingType.NONE.value
+    if bool(getattr(item, "is_asset", False)):
+        return TrackingType.ASSET.value
+    return TrackingType.CONSUMABLE.value
+
+
+def tracking_types() -> list[dict]:
+    """The badge catalogue, served so no screen writes these words itself."""
+    return [{"code": code, **meta} for code, meta in TRACKING_META.items()]
+
+
 def _unit_keys(row, mode: str) -> list[str]:
     """Every value that may be typed or scanned to mean this unit, in this mode.
 
@@ -5319,8 +5753,13 @@ async def _reserve_issue_serials(
     issue: m.MaterialIssue,
     inputs: list[s.IssueItemWrite],
 ) -> None:
-    marker = _issue_serial_marker(issue.id)
+    # Every line carries its own stamp, so a unit held for line 3 is never read as
+    # line 5's. See _issue_line_serial_marker.
+    markers = {line.id: _issue_line_serial_marker(issue.id, line.id)
+               for line in issue.items}
+    line_no_by_marker = {markers[line.id]: line.line_no for line in issue.items}
     for line, data in zip(issue.items, inputs, strict=True):
+        marker = markers[line.id]
         item = await _item_snapshot(db, line.item_id)
         serials = [value.strip() for value in (data.serial_numbers or []) if value.strip()]
         if len(serials) != len(set(serials)):
@@ -5401,7 +5840,14 @@ async def _reserve_issue_serials(
                 raise ValidationError(f"{value} is not in the selected batch")
             if row.remarks and row.remarks.startswith("Reserved for issue ") \
                     and row.remarks != marker:
-                raise ValidationError(f"{value} is reserved by another issue")
+                # Naming WHICH line already holds it when it is this document own
+                # line. "reserved by another issue" was the message a storekeeper
+                # got for a unit he had picked himself two rows up, and it sent
+                # him looking for a document that does not exist.
+                other = line_no_by_marker.get(row.remarks)
+                raise ValidationError(
+                    f"{value} is already named on line {other} of this issue"
+                    if other else f"{value} is reserved by another issue")
             row.remarks = marker
         # The document always keeps the canonical serial — in code mode that IS the
         # code — while `unit_keys` echoes back what the storekeeper actually validated.
@@ -5410,31 +5856,233 @@ async def _reserve_issue_serials(
         setattr(line, "unit_mode", mode)
 
 
+async def _issue_units_by_line(
+    db: AsyncSession,
+    issue: m.MaterialIssue,
+) -> dict[int, list[m.SerialNumber]]:
+    """Which physical units each LINE of this issue holds, keyed on line id.
+
+    Three stamps, one question. The reservation stamp names its own line, so those
+    rows land where they belong with nothing to work out. The shipped and returned
+    stamps stay per DOCUMENT — a unit in flight is read back by that exact string at
+    the far end (`_land_units`, `_issued_serial_index`), and re-cutting it would
+    strand every consignment already on the road — so those, and any row still
+    carrying the pre-2026-09 document-level reservation stamp, are attributed here:
+    spread over the lines carrying that item, in line order, each taking at most its
+    own issued quantity. That is what a posted issue's units actually are, and it
+    replaces the per-item lump that used to be shown against every line at once.
+    """
+    item_ids = {line.item_id for line in issue.items}
+    if not item_ids:
+        return {}
+    rows = (await db.execute(
+        select(m.SerialNumber).where(
+            # Narrowed to this document's items first. The stamp is what identifies
+            # the row, but `remarks` is a 500-wide free-text column with only a prefix
+            # index on it — matching on it alone read all 773k units, which is where
+            # four of the twenty-six seconds went.
+            m.SerialNumber.item_id.in_(item_ids),
+            or_(
+                _issue_reservation_clause(issue.id),
+                m.SerialNumber.remarks.in_((
+                    f"Issued by issue {issue.id}",
+                    f"Returned by issue {issue.id}",
+                )),
+            )
+        ).order_by(m.SerialNumber.id)
+    )).scalars().all()
+
+    by_line: dict[int, list[m.SerialNumber]] = {line.id: [] for line in issue.items}
+    unattributed: dict[int, list[m.SerialNumber]] = {}
+    line_marker = {
+        _issue_line_serial_marker(issue.id, line.id): line.id for line in issue.items
+    }
+    for row in rows:
+        line_id = line_marker.get(row.remarks or "")
+        if line_id is not None:
+            by_line[line_id].append(row)
+        else:
+            unattributed.setdefault(row.item_id, []).append(row)
+
+    for line in issue.items:
+        pool = unattributed.get(line.item_id)
+        if not pool:
+            continue
+        room = int(_d(line.issued_qty)) - len(by_line[line.id])
+        if room <= 0:
+            continue
+        by_line[line.id].extend(pool[:room])
+        del pool[:room]
+    return by_line
+
+
+def _unit_claim_free_clause(marker: str):
+    """A unit nothing else is holding — or one this very line already holds.
+
+    `_CLAIMED_REMARK_PREFIXES` is the same set `_claim_units` skips on; stating it
+    once here keeps "what may I still pick" and "what may I still auto-claim" the
+    same question.
+    """
+    unclaimed = [m.SerialNumber.remarks.is_(None)]
+    unclaimed.append(and_(*[
+        ~m.SerialNumber.remarks.like(f"{prefix}%")
+        for prefix in _CLAIMED_REMARK_PREFIXES
+    ]))
+    return or_(m.SerialNumber.remarks == marker, *unclaimed)
+
+
+#: Past this many units on one line the availability probe stops being cheap, and a
+#: line that large is test data or a bulk transfer, not something a warning helps.
+_SUPPLY_PROBE_CEILING = 10_000
+
+
+async def _issue_unit_supply(
+    db: AsyncSession,
+    issue: m.MaterialIssue,
+) -> dict[int, int]:
+    """How many units each line could still be given, from the source IT names —
+    counted only as far as that line needs.
+
+    The whole point of the count. `post_issue` refuses a serial-tracked line that
+    cannot name one unit per issued unit, and by then the batch and bin are frozen —
+    approval locks them — so a line pointed at a batch holding nothing was a document
+    that could never be posted and could never be corrected either. Read here, the
+    same answer is on the screen, at submit and in the approver's inbox, while the
+    batch is still editable.
+
+    STOPS AT `issued_qty + 1`. `whs_serial_numbers` holds one row per physical unit
+    and this database already carries 465,354 available units of a single item at one
+    warehouse, so a plain COUNT of the shelf took ten seconds and would only grow.
+    Nothing here needs the shelf's total: the question is "does this line have
+    enough", and one more than enough answers it. The `LIMIT` inside the subquery is
+    what makes the index scan stop — the answer costs the same whether the bin holds
+    twenty units or half a million.
+
+    So a returned number equal to `issued_qty + 1` means "at least that many"; every
+    smaller number is exact.
+
+    WIDENED 2026-09-03 to every tracked mode, not just serials. It was serial-only
+    because only `post_issue` read it and only serial lines are held to one named unit
+    per issued unit — for anyone else it was "two thirds of the work on a typical issue
+    and nobody's answer". It is somebody's answer now: the issue screen states how many
+    codes a pick can actually name beside the quantity it takes, because those are two
+    different numbers off two different tables and a storekeeper reading one as the
+    other is the confusion this whole change exists to end. The probe is bounded, so
+    widening it costs about a millisecond a line — measured against the 465k-unit item,
+    where the same count unbounded takes 816 ms.
+    """
+    if issue.is_stock_posted:
+        # Nothing left to answer. The units are off the shelf, so every line would
+        # report what is still lying beside them — a number the screen would then
+        # draw as a shortfall against a document that has already gone out.
+        return {}
+    outward = issue.direction == IssueDirection.OUT.value
+    expected_status = (
+        SerialStatus.AVAILABLE.value if outward else SerialStatus.ISSUED.value
+    )
+    # Every item on the document that HAS identified units at this point, not just the
+    # serial-tracked ones. `post_issue` still only holds serial lines to one named unit
+    # per issued unit — an IMEI- or code-named item tops up from whatever the shelf has
+    # (see `_claim_units`) — but the screen now shows the count for all of them, so it
+    # has to be answered for all of them. `== 1` rather than `.is_(True)` for the same
+    # reason as the probe below.
+    coded_items = set((await db.execute(
+        select(m.SerialNumber.item_id)
+        .where(m.SerialNumber.item_id.in_({line.item_id for line in issue.items}),
+               m.SerialNumber.warehouse_id == issue.warehouse_id,
+               m.SerialNumber.is_active == 1)
+        .distinct()
+    )).scalars().all()) if issue.items else set()
+
+    supply: dict[int, int] = {}
+    for line in issue.items:
+        if line.item_id not in coded_items:
+            continue
+        need = max(int(_d(line.issued_qty)), 0)
+        if need > _SUPPLY_PROBE_CEILING:
+            # No answer rather than a slow one or a wrong one. Counting to a hundred
+            # thousand is the one case where this probe stops being cheap, and a line
+            # that big is not one a screen can usefully warn about anyway — leaving it
+            # unanswered means the screen says nothing and submit does not block, and
+            # `post_issue` still refuses an incomplete set at the shelf.
+            continue
+        cap = need + 1
+        probe = (
+            select(literal(1))
+            .select_from(m.SerialNumber)
+            .where(m.SerialNumber.item_id == line.item_id,
+                   m.SerialNumber.warehouse_id == issue.warehouse_id,
+                   m.SerialNumber.status == expected_status,
+                   # `== 1`, not `.is_(True)`: SQLAlchemy renders the latter as
+                   # `is_active IS true`, which MySQL will not resolve through an
+                   # index, and the scan falls back to reading rows.
+                   m.SerialNumber.is_active == 1)
+        )
+        # NO_BATCH / NO_BIN mean "the line names none", exactly as `_claim_units` and
+        # `move_stock_out` read them: no narrowing, not a lookup for id 0.
+        if line.batch_id and line.batch_id != m.NO_BATCH:
+            probe = probe.where(m.SerialNumber.batch_id == line.batch_id)
+        if line.bin_id and line.bin_id != m.NO_BIN:
+            probe = probe.where(m.SerialNumber.bin_id == line.bin_id)
+        if outward:
+            # Free, or already held by THIS line. A unit coming back is by definition
+            # stamped with the claim it is being released from, so the test only
+            # applies on the way out.
+            probe = probe.where(_unit_claim_free_clause(
+                _issue_line_serial_marker(issue.id, line.id)))
+        supply[line.id] = int((await db.execute(
+            select(func.count()).select_from(probe.limit(cap).subquery())
+        )).scalar() or 0)
+    return supply
+
+
+async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> None:
+    """Refuse to submit an issue that could never be posted.
+
+    Only serial-tracked lines: those are the ones `post_issue` and `_mark_serials`
+    hold to one named unit per issued unit. An IMEI- or code-named item tops up from
+    whatever the shelf has and ships regardless — a missing identity row must never
+    stop real goods from moving (see `_claim_units`).
+
+    Every failing line is reported at once, naming the batch, so the storekeeper
+    fixes the document in one pass instead of one approval cycle per line.
+    """
+    if issue.direction != IssueDirection.OUT.value:
+        return
+    supply = await _issue_unit_supply(db, issue)
+    short: list[str] = []
+    for line in issue.items:
+        wanted = _d(line.issued_qty)
+        if wanted <= ZERO:
+            continue
+        item = await _item_snapshot(db, line.item_id)
+        if not item.is_serial_tracked:
+            continue
+        # `_issue_unit_supply` already counts the units this line is holding — they
+        # are `available` rows stamped with its own marker — so adding the captured
+        # set on top would count the storekeeper's own picks twice.
+        available = supply.get(line.id, 0)
+        if available >= int(wanted):
+            continue
+        where = (f"batch {line.batch_no}" if line.batch_no else "the unbatched stock")
+        if line.bin_code:
+            where += f" in bin {line.bin_code}"
+        short.append(
+            f"line {line.line_no} ({item.code}) needs {int(wanted)} serial numbers "
+            f"but {where} holds {available}")
+    if short:
+        raise ValidationError(
+            "This issue cannot be served with the serial numbers on the shelf — "
+            + "; ".join(short)
+            + ". Change the batch or the quantity before submitting: after approval "
+              "the batch is frozen and the issue could never be posted.")
+
+
 async def _decorate_issue_serials(
     db: AsyncSession,
     issue: m.MaterialIssue,
 ) -> m.MaterialIssue:
-    rows = (await db.execute(
-        select(m.SerialNumber).where(
-            m.SerialNumber.remarks.in_(
-                (
-                    _issue_serial_marker(issue.id),
-                    f"Issued by issue {issue.id}",
-                    f"Returned by issue {issue.id}",
-                )
-            )
-        )
-    )).scalars().all()
-    by_item: dict[int, list[str]] = {}
-    # IMEI travels with the serial, so the issue screen and everything downstream can
-    # show both without going back to whs_serial_numbers per line.
-    imeis_by_item: dict[int, list[str]] = {}
-    rows_by_item: dict[int, list[m.SerialNumber]] = {}
-    for row in rows:
-        by_item.setdefault(row.item_id, []).append(row.serial_number)
-        rows_by_item.setdefault(row.item_id, []).append(row)
-        if row.imei:
-            imeis_by_item.setdefault(row.item_id, []).append(row.imei)
+    rows_by_line = await _issue_units_by_line(db, issue)
     item_ids = {line.item_id for line in issue.items}
     serial_by_item: dict[int, bool] = {}
     imei_tracked_by_item: dict[int, bool] = {}
@@ -5442,48 +6090,195 @@ async def _decorate_issue_serials(
     coded_items: set[int] = set()
     if item_ids:
         item_rows = (await db.execute(
-            select(Item.id, Item.is_serial_tracked, Item.is_imei_tracked)
+            # `is_asset` too: it is what separates an asset tag from a consumable lot
+            # code on the badge, and both are UNIT_MODE_CODE to the matcher.
+            select(Item.id, Item.is_serial_tracked, Item.is_imei_tracked, Item.is_asset)
             .where(Item.id.in_(item_ids))
         )).all()
         serial_by_item = {
             item_id: bool(is_serial_tracked)
-            for item_id, is_serial_tracked, _ in item_rows
+            for item_id, is_serial_tracked, _, _ in item_rows
         }
         imei_tracked_by_item = {
             item_id: bool(is_imei_tracked)
-            for item_id, _, is_imei_tracked in item_rows
+            for item_id, _, is_imei_tracked, _ in item_rows
         }
         item_by_id = {
             item_id: SimpleNamespace(is_serial_tracked=bool(serial),
-                                     is_imei_tracked=bool(imei))
-            for item_id, serial, imei in item_rows
+                                     is_imei_tracked=bool(imei),
+                                     is_asset=bool(asset))
+            for item_id, serial, imei, asset in item_rows
         }
         # Which items actually have identified units AT THIS POINT. Without it the
         # screen would offer a unit picker on every bulk line, where there is nothing
         # to pick — and units coded at the warehouse are not pickable from an MDP.
+        # `== 1` rather than `.is_(True)` for the same reason as `_issue_unit_supply`:
+        # `IS true` costs MySQL the loose index scan, and this DISTINCT over 773k unit
+        # rows went from 9.6 seconds to a few milliseconds with it.
         coded_items = set((await db.execute(
             select(m.SerialNumber.item_id)
             .where(m.SerialNumber.item_id.in_(item_ids),
                    m.SerialNumber.warehouse_id == issue.warehouse_id,
-                   m.SerialNumber.is_active.is_(True))
+                   m.SerialNumber.is_active == 1)
             .distinct()
         )).scalars().all())
+    # How many units this line's own source actually holds, so the screen can say so
+    # before the document is submitted rather than at the shelf. Read once per
+    # (item, batch, bin) — a consolidated issue repeats the same source across lines.
+    supply = await _issue_unit_supply(db, issue)
     for line in issue.items:
         mode = _unit_mode(item_by_id.get(line.item_id))
-        setattr(line, "serial_numbers", by_item.get(line.item_id, []))
-        setattr(line, "imei_numbers", imeis_by_item.get(line.item_id, []))
+        # Per LINE, not per item. Two lines of the same monitor in two batches are two
+        # different sets of units, and lumping them showed each line the other's.
+        line_rows = rows_by_line.get(line.id, [])
+        setattr(line, "serial_numbers", [row.serial_number for row in line_rows])
+        # IMEI travels with the serial, so the issue screen and everything downstream
+        # can show both without going back to whs_serial_numbers per line.
+        setattr(line, "imei_numbers", [row.imei for row in line_rows if row.imei])
         setattr(line, "is_serial_tracked", serial_by_item.get(line.item_id, False))
         setattr(line, "is_imei_tracked", imei_tracked_by_item.get(line.item_id, False))
         setattr(line, "unit_mode", mode)
-        setattr(line, "has_units", line.item_id in coded_items)
+        has_units = line.item_id in coded_items
+        setattr(line, "has_units", has_units)
+        # What the badge on the screen says. Read per line, because `has_units` is —
+        # see `_tracking_type`.
+        setattr(line, "tracking_type",
+                _tracking_type(item_by_id.get(line.item_id), has_units=has_units))
+        setattr(line, "units_available", supply.get(line.id))
         # What the storekeeper validated on, echoed back in the same currency he typed:
         # the serial for a serialized item, the IMEI for a handset, the code otherwise.
         setattr(line, "unit_keys", [
-            keys[0] for keys in
-            (_unit_keys(row, mode) for row in rows_by_item.get(line.item_id, []))
-            if keys
+            keys[0] for keys in (_unit_keys(row, mode) for row in line_rows) if keys
         ])
     return issue
+
+
+async def issue_stock_sources(
+    db: AsyncSession,
+    *,
+    warehouse_id: int,
+    item_ids: list[int],
+    indent_id: int | None = None,
+    user=None,
+) -> list[dict]:
+    """Every (batch, bin) an item can actually be drawn from here, oldest first.
+
+    The screen needs this because a line has ONE bin and ONE batch and the shelf
+    frequently does not: fifteen monitors sitting five in one bay and ten in another
+    are two picks, and the form could express only one of them. A storekeeper typed 15
+    against a bin holding 5, the picker then offered 5 codes for a line claiming 15,
+    and the mismatch between "codes selected" and "issued quantity" was the only hint
+    anything was wrong.
+
+    **`available_qty` alone is NOT what a line may draw, and reporting it as such is
+    worse than saying nothing.** An approved allocation RESERVES the stock it is about
+    to issue, so a document issuing exactly what was reserved for it sees its own
+    balance row at `available_qty = 0` — the goods are on the shelf, spoken for, by
+    this very document. Reporting 0 there tells a storekeeper his correct document is
+    impossible. `own_reserved_qty` is that hold, and `drawable_qty` is the sum: the
+    same rule `_stock_offerable` already applies to which ROWS are visible, applied to
+    the quantity on them. Everyone else's reservations stay out of it.
+
+    Read off `stk_balance` alone (4 ms for a whole document), never off
+    `whs_serial_numbers`: that table is one row per physical unit, holds 773k of them,
+    and a COUNT grouped by batch and bin measured 7.5 seconds. How many CODED units a
+    pick can name is a different question with a different answer, and it is served per
+    line by `_issue_unit_supply`, which stops counting as soon as it has enough.
+
+    Ordered the way stock should leave: expiry first, then the older batch, then the
+    bin code, so the default split a screen builds from this list is FIFO without the
+    screen knowing what FIFO is.
+    """
+    from app.modules.inventory.models import Reservation, Stock
+
+    ids = [int(value) for value in dict.fromkeys(item_ids) if value]
+    if not warehouse_id or not ids:
+        return []
+
+    # What THIS indent is already holding on each balance row. Aggregated in a
+    # subquery rather than joined directly: a balance row can carry several
+    # reservation rows, and joining them would multiply the quantity sums.
+    if indent_id:
+        mine = (
+            select(Reservation.stock_id.label("stock_id"),
+                   func.sum(Reservation.quantity).label("qty"))
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.ref_id == indent_id,
+                   Reservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(Reservation.stock_id)
+            .subquery()
+        )
+        own = func.coalesce(func.sum(mine.c.qty), 0)
+    else:
+        mine = None
+        own = literal(0)
+
+    stmt = (
+        select(
+            Stock.item_id,
+            Stock.bin_id,
+            Stock.batch_id,
+            func.sum(Stock.available_qty).label("available_qty"),
+            func.sum(Stock.reserved_qty).label("reserved_qty"),
+            func.sum(Stock.total_qty).label("total_qty"),
+            own.label("own_reserved_qty"),
+            Bin.code,
+            Bin.name,
+            m.Batch.batch_no,
+            m.Batch.expiry_date,
+            m.Batch.mfg_date,
+        )
+        .select_from(Stock)
+        .outerjoin(Bin, Bin.id == Stock.bin_id)
+        .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
+    )
+    if mine is not None:
+        stmt = stmt.outerjoin(mine, mine.c.stock_id == Stock.id)
+    stmt = (
+        stmt
+        .where(Stock.warehouse_id == warehouse_id,
+               Stock.item_id.in_(ids),
+               _stock_offerable(indent_id))
+        .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
+                  Bin.code, Bin.name, m.Batch.batch_no,
+                  m.Batch.expiry_date, m.Batch.mfg_date)
+        .order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date,
+                  Stock.batch_id, Bin.code)
+    )
+    if user is not None:
+        stmt = stmt.where(await scope_condition(
+            db, user,
+            warehouse_col=Stock.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
+
+    rows = (await db.execute(stmt)).all()
+    out = []
+    for (item_id, bin_id, batch_id, available_qty, reserved_qty, total_qty,
+         own_qty, bin_code, bin_name, batch_no, expiry_date, mfg_date) in rows:
+        own_reserved = _d(own_qty)
+        drawable = _d(available_qty) + own_reserved
+        if drawable <= ZERO:
+            continue
+        out.append({
+            "item_id": item_id,
+            # NO_BIN / NO_BATCH mean "the line names none" everywhere else in this
+            # module (`_claim_units`, `move_stock_out`); they are handed back as null
+            # so a screen never writes 0 into a picker as though it were an id.
+            "bin_id": bin_id or None,
+            "bin_code": bin_code or (None if not bin_id else f"Bin {bin_id}"),
+            "bin_name": bin_name or bin_code,
+            "batch_id": batch_id or None,
+            "batch_no": batch_no,
+            "expiry_date": expiry_date,
+            "mfg_date": mfg_date,
+            "available_qty": _d(available_qty),
+            "reserved_qty": _d(reserved_qty),
+            "own_reserved_qty": own_reserved,
+            "total_qty": _d(total_qty),
+            "drawable_qty": drawable,
+        })
+    return out
 
 
 async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
@@ -5535,6 +6330,10 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             remarks=line.remarks,
         ))
     _issue_totals(issue)
+    # Flushed so every line has an id before `_reserve_issue_serials` stamps units
+    # with it — a reservation is per LINE now, and a line with no id yet would fall
+    # back to the document-level stamp this change exists to retire.
+    await db.flush()
 
 
 async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | None = None,
@@ -6551,6 +7350,11 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
         raise ValidationError("An issue with no lines has nothing to approve")
+    # Checked HERE, while the batch is still editable. It used to be checked only at
+    # post_issue, which runs after approval has frozen the batch and the bin, so a
+    # line pointed at a batch holding too few serials became an issue that could
+    # neither be posted nor corrected.
+    await _assert_units_obtainable(db, issue)
 
     context = {
         "warehouse_id": issue.warehouse_id,
@@ -7402,7 +8206,7 @@ async def _claim_issue_units(
             item_id=line.item_id,
             warehouse_id=issue.warehouse_id,
             qty=qty,
-            marker=_issue_serial_marker(issue.id),
+            marker=_issue_line_serial_marker(issue.id, line.id),
             batch_id=line.batch_id or None,
             bin_id=line.bin_id or None,
             # A serialized line ships exactly the serials the storekeeper scanned.
@@ -7418,6 +8222,39 @@ async def _claim_issue_units(
     return claimed
 
 
+async def _adopt_legacy_issue_reservations(
+    db: AsyncSession, issue: m.MaterialIssue,
+) -> None:
+    """Re-stamp any unit still held under the old document-level reservation.
+
+    An issue drafted before reservations became per-line carries rows marked
+    `Reserved for issue 72` with no line on them. `_mark_serials` reads per line now,
+    so without this a document already sitting in approval would post to "0 are
+    reserved for this issue". The rows are handed to the lines of that item in line
+    order, each taking at most its issued quantity — the same rule
+    `_issue_units_by_line` reads them by, applied once and written down.
+    """
+    legacy = (await db.execute(
+        select(m.SerialNumber).where(
+            m.SerialNumber.remarks == _issue_serial_marker(issue.id)
+        ).order_by(m.SerialNumber.id).with_for_update()
+    )).scalars().all()
+    if not legacy:
+        return
+    pool: dict[int, list[m.SerialNumber]] = {}
+    for row in legacy:
+        pool.setdefault(row.item_id, []).append(row)
+    for line in issue.items:
+        rows = pool.get(line.item_id)
+        if not rows:
+            continue
+        room = int(_d(line.issued_qty))
+        for row in rows[:room]:
+            row.remarks = _issue_line_serial_marker(issue.id, line.id)
+        del rows[:room]
+    await db.flush()
+
+
 async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool) -> None:
     """Flips the status of the units leaving or coming back with an issue.
 
@@ -7430,19 +8267,23 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
     """
     new_status = (SerialStatus.ISSUED if outward else SerialStatus.RETURNED).value
     from_status = (SerialStatus.AVAILABLE if outward else SerialStatus.ISSUED).value
-    marker = _issue_serial_marker(issue.id)
+    await _adopt_legacy_issue_reservations(db, issue)
 
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
         wanted = int(_d(line.issued_qty))
         if wanted <= 0:
             continue
+        # This LINE's units, by its own stamp. Keyed on the document before, so an
+        # issue carrying the same item twice weighed both lines' reservations against
+        # one line's quantity and refused itself with "N serials are required, but M
+        # are reserved for this issue".
         rows = (await db.execute(
             select(m.SerialNumber).where(
                 m.SerialNumber.item_id == line.item_id,
                 m.SerialNumber.warehouse_id == issue.warehouse_id,
                 m.SerialNumber.status == from_status,
-                m.SerialNumber.remarks == marker,
+                m.SerialNumber.remarks == _issue_line_serial_marker(issue.id, line.id),
                 m.SerialNumber.is_active.is_(True))
             .with_for_update()
         )).scalars().all()
@@ -9584,8 +10425,19 @@ async def returnable_lines(db: AsyncSession, grn_id: int) -> list[m.ReceiptItem]
 async def list_serials(db: AsyncSession, params: PageParams, *, status: str | None = None,
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
-                       search: str | None = None, user=None) -> dict:
+                       search: str | None = None, issue_id: int | None = None,
+                       issue_line_id: int | None = None, user=None) -> dict:
+    """Units, optionally narrowed to what one issue line may still pick.
+
+    `issue_id` + `issue_line_id` drop every unit another document — or another line
+    of this same issue — is already holding, while keeping the ones this line holds
+    itself. Without it the picker offered the same serial on two lines of the same
+    item, and the second line only found out at the shelf.
+    """
     stmt = select(m.SerialNumber)
+    if issue_id:
+        stmt = stmt.where(_unit_claim_free_clause(
+            _issue_line_serial_marker(issue_id, issue_line_id)))
     if user is not None:
         stmt = stmt.where(await scope_condition(
             db, user,
@@ -10826,6 +11678,18 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
                 "free_volume": float(free_vol) if free_vol is not None else None,
                 "volume_utilisation_pct": float(round(vol_pct, 2)) if vol_pct is not None else None,
                 "volume_status": vol_status,
+                # --- the discrete and payload gates ---
+                # A bay at its stated pallet limit is full whatever its cube says, so a
+                # utilisation report that only ranks on volume points a slotting review
+                # at the wrong locations. `volume_status` is already the WORST of the
+                # three verdicts (see `bin_occupancy_map`); these are the figures
+                # behind it.
+                "capacity_units": occ.get("capacity_units"),
+                "occupied_units": float(occ.get("occupied_units") or 0),
+                "capacity_weight_kg": (
+                    float(occ["capacity_weight_kg"])
+                    if occ.get("capacity_weight_kg") is not None else None),
+                "occupied_weight_kg": float(occ.get("occupied_weight_kg") or 0),
                 "is_pickable": "Yes" if b.is_pickable else "No",
             })
         return {
@@ -10842,7 +11706,12 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
                 _col("occupied_volume", "Occupied Vol (m³)", True),
                 _col("free_volume", "Free Vol (m³)", True),
                 _col("volume_utilisation_pct", "Vol Util %", True),
-                _col("volume_status", "Vol Status"),
+                _col("volume_status", "Status"),
+                # handling-unit and payload columns
+                _col("occupied_units", "Units", True),
+                _col("capacity_units", "Max Units", True),
+                _col("occupied_weight_kg", "Load (kg)", True),
+                _col("capacity_weight_kg", "Max Load (kg)", True),
                 _col("is_pickable", "Pickable"),
             ],
             "rows": rows,
@@ -10911,7 +11780,7 @@ async def vendor_options(db: AsyncSession, search: str | None = None) -> list[di
     return [{"id": r.id, "code": r.code, "name": r.name} for r in rows]
 
 
-async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
+async def warehouse_options(db: AsyncSession, *, search: str | None = None, mine_only: bool = False,
                             all_points: bool = False, user=None) -> list[dict]:
     """Stocking points for a picker. Scoped to this login unless asked otherwise.
 
@@ -10931,6 +11800,11 @@ async def warehouse_options(db: AsyncSession, *, mine_only: bool = False,
     default now does.
     """
     stmt = select(Warehouse).where(Warehouse.is_active.is_(True))
+    if search:
+        from sqlalchemy import or_
+        stmt = stmt.where(
+            or_(Warehouse.code.ilike(f"%{search}%"), Warehouse.name.ilike(f"%{search}%"))
+        )
     if not all_points:
         allowed = await warehouse_ids_for_user(db, user) if user is not None else None
         if allowed is not None:
@@ -11087,11 +11961,16 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
 
 async def po_lines(db: AsyncSession, po_id: int) -> dict:
     from app.modules.procurement.models import PurchaseOrder, POItem
+    from app.modules.master.models import Vendor
     
     stmt = select(PurchaseOrder).where(PurchaseOrder.id == po_id)
     po = (await db.execute(stmt)).scalars().first()
     if not po:
         return {"lines": []}
+        
+    vendor_name = po.vendor_name
+    if not vendor_name and po.vendor_id:
+        vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
         
     stmt_lines = select(POItem).where(POItem.po_id == po_id)
     rows = (await db.execute(stmt_lines.order_by(POItem.id))).scalars().all()
@@ -11114,7 +11993,7 @@ async def po_lines(db: AsyncSession, po_id: int) -> dict:
     
     return {
         "vendor_id": po.vendor_id,
-        "vendor_name": po.vendor_name,
+        "vendor_name": vendor_name,
         "vendor_gstin": po.vendor_gstin,
         "project_id": po.project_id,
         "project_name": po.project_name,

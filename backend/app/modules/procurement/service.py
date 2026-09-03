@@ -25,7 +25,7 @@ from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory import hooks as inventory_hooks
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
-    DespatchNote, DespatchNoteItem, POItem, PurchaseConsolidation,
+    DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
     PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
     PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
@@ -696,6 +696,13 @@ async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
         ))).scalar_one_or_none()
     if not po:
         raise NotFoundError(f"PO {po_id} not found")
+    
+    if not po.vendor_name and po.vendor_id:
+        from app.modules.master.models import Vendor
+        vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
+        if vendor_name:
+            po.vendor_name = vendor_name
+            
     return po
 
 
@@ -1356,6 +1363,101 @@ async def mark_vendor_notification_read(db: AsyncSession, vendor_id: int,
     await db.commit()
 
 
+async def po_comments(db: AsyncSession, po_id: int, user=None) -> list:
+    """Discussion thread between the raiser and the approver."""
+    await get_po(db, po_id, user)
+    return list((await db.execute(
+        select(POComment).where(POComment.po_id == po_id)
+        .order_by(POComment.created_at.asc(), POComment.id.asc())
+    )).scalars().all())
+
+
+async def add_po_comment(db: AsyncSession, po_id: int, message: str, user) -> object:
+    """Post a question or reply on a PO."""
+    po = await get_po(db, po_id, user)
+    clean = (message or "").strip()
+    if not clean:
+        raise ValidationError("Message cannot be empty")
+    if len(clean) > 2000:
+        raise ValidationError("Message too long (max 2000 characters)")
+    row = POComment(
+        po_id=po.id,
+        author_id=getattr(user, "id", None),
+        author_name=getattr(user, "full_name", None) or getattr(user, "username", None) or "Unknown",
+        message=clean,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+async def update_po_approval_quantities(
+    db: AsyncSession, po_id: int, data, user
+) -> PurchaseOrder:
+    """Approver trims quantities — only DOWN — while the order is in approval.
+
+    The edited numbers are what the vendor receives; nothing is re-typed after
+    approval. An increase is refused — the approver can only trim a request,
+    never inflate it.
+    """
+    po = await get_po(db, po_id, user)
+    if po.status != POStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"Only a PO awaiting approval can be edited (status {po.status})")
+    actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
+    if po.id not in actionable:
+        raise ValidationError("Only the current approver can edit quantities during approval")
+
+    by_id = {line.id: line for line in po.items}
+    if not by_id:
+        raise ValidationError("PO has no lines to edit")
+    incoming = {line.id: _d(line.quantity) for line in data.lines}
+    if set(incoming.keys()) != set(by_id.keys()) and len(incoming) != len(by_id):
+        # allow partial payload: require every sent id exists; missing ones stay as-is
+        for pid in incoming:
+            if pid not in by_id:
+                raise ValidationError(f"Unknown PO line id {pid}")
+    # also ensure no duplicate ids
+    if len(incoming) != len(set(incoming.keys())):
+        raise ValidationError("Duplicate line ids")
+
+    for pid, new_qty in incoming.items():
+        original = by_id[pid]
+        old_qty = _d(original.quantity)
+        if new_qty > old_qty:
+            raise ValidationError(
+                f"{original.item_code or original.item_name or pid}: "
+                f"quantity can only be decreased ({old_qty} → {new_qty} not allowed)"
+            )
+        if new_qty <= 0:
+            raise ValidationError(f"{original.item_code or pid}: quantity must be > 0")
+        received = _d(original.received_quantity or 0)
+        if new_qty < received:
+            raise ValidationError(
+                f"{original.item_code or pid}: quantity cannot go below already received {received}"
+            )
+
+    # apply
+    for pid, new_qty in incoming.items():
+        line = by_id[pid]
+        line.quantity = new_qty
+        line.amount = new_qty * _d(line.rate)
+    # lines not in payload stay unchanged
+
+    # recompute totals from stored lines (same math as amend/create)
+    sub_total = tax_total = Decimal("0")
+    for line in by_id.values():
+        amount = _d(line.amount)
+        sub_total += amount
+        tax_total += amount * _d(line.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+
+    await db.commit()
+    logger.info("PO %s quantities trimmed during approval by %s: %s",
+                po.po_no, getattr(user, "full_name", user), incoming)
+    return await get_po_detail(db, po.id, user)
+
+
 async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
     """Every version this order has been, newest first. Read-only, always."""
     await get_po(db, po_id, user)
@@ -1995,6 +2097,16 @@ async def get_requisition(db: AsyncSession, req_id: int, user=None) -> Requisiti
         .limit(1)
     )
     req.has_rfq = bool(existing_rfq)
+
+    # If it is on a consolidation sheet, it should not be allowed to raise an RFQ individually.
+    existing_cons = await db.scalar(
+        select(PurchaseConsolidationSource.id)
+        .join(PurchaseConsolidation, PurchaseConsolidation.id == PurchaseConsolidationSource.consolidation_id)
+        .where(PurchaseConsolidationSource.requisition_id == req.id,
+               PurchaseConsolidation.status.notin_([ConsolidationStatus.CANCELLED.value, ConsolidationStatus.REJECTED.value]))
+        .limit(1)
+    )
+    req.has_consolidation = bool(existing_cons)
     return req
 
 
@@ -2226,6 +2338,17 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
             raise ValidationError(
                 "Only an approved consolidated sheet can go out for quotation "
                 f"(status {sheet.status})")
+
+        existing_rfq = await db.scalar(
+            select(RFQ.id)
+            .where(RFQ.consolidation_id == sheet.id,
+                   RFQ.status != RFQStatus.CANCELLED.value)
+            .limit(1)
+        )
+        if existing_rfq:
+            raise ValidationError(
+                f"Consolidated sheet {sheet.cons_no} has already been converted to an RFQ"
+            )
 
     if data.evaluation_method and not evaluation.is_valid(data.evaluation_method):
         raise ValidationError(
@@ -2461,6 +2584,12 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
     Allowed while the RFQ is still DRAFT or PENDING_APPROVAL, and never once it is
     PUBLISHED: past that a vendor has been shown the quantity and may already have
     quoted against it. Every change is logged with who made it.
+
+    The edited numbers are what the supplier receives — `_publish_rfq` copies
+    `RFQItem.quantity` into the draft `QuotationItem` at publish time, so trimming
+    here trims what the vendor is asked to price. Increase is refused: an approval
+    can trim a request, never inflate it. 0 removes the line; removing the last
+    line is refused so the RFQ never publishes empty.
     """
     rfq = await get_rfq(db, rfq_id, user)
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
@@ -2468,9 +2597,26 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         raise ValidationError(
             f"Quantities can only be changed before an RFQ is published "
             f"(this one is {rfq.status})")
+    # PENDING_APPROVAL may only be edited by the current approver — same check
+    # `update_po_approval_quantities` makes. DRAFT is the buyer's own document.
+    if rfq.status == RFQStatus.PENDING_APPROVAL.value:
+        actionable = await engine.actionable_doc_ids(db, DocType.RFQ.value, [rfq.id], user)
+        if rfq.id not in actionable:
+            raise ValidationError("Only the current approver can edit quantities while awaiting approval")
+
+    if not data.lines:
+        raise ValidationError("No quantities supplied")
 
     by_id = {line.id: line for line in rfq.items}
+    if not by_id:
+        raise ValidationError("RFQ has no lines to edit")
+    # Guard unknown ids before mutating anything
+    for incoming in data.lines:
+        if incoming.id not in by_id:
+            raise ValidationError(f"Line {incoming.id} is not on {rfq.rfq_no}")
+
     changes: list[str] = []
+    to_delete: list[int] = []
     for incoming in data.lines:
         line = by_id.get(incoming.id)
         if line is None:
@@ -2479,12 +2625,31 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         now = _d(incoming.quantity)
         if was == now:
             continue
+        if now > was:
+            raise ValidationError(f"Quantities can only be decreased (item {line.item_code or line.item_id}: {was} -> {now})")
+        if now < 0:
+            raise ValidationError(f"Quantity cannot be negative (item {line.item_code or line.item_id})")
+        if now == 0:
+            to_delete.append(line.id)
+            changes.append(f"{line.item_code or line.item_id}: {was} -> Removed")
+            continue
         line.quantity = now
         changes.append(f"{line.item_code or line.item_id}: {was} -> {now}")
 
+    # Deleting — ensure at least one line remains
+    if to_delete:
+        if len(to_delete) >= len(by_id):
+            raise ValidationError("Cannot remove all lines — an RFQ must keep at least one item")
+        for line_id in to_delete:
+            await db.delete(by_id[line_id])
+
     if changes:
+        # keep header count in sync — the RFQ form and the vendor portal both read it
+        remaining = len(by_id) - len(to_delete)
+        rfq.total_items = remaining
         logger.info("%s quantities changed by %s (%s)",
                     rfq.rfq_no, user.full_name, "; ".join(changes))
+        await db.flush()
     await db.commit()
     return await get_rfq(db, rfq_id, user)
 
@@ -2822,6 +2987,7 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
                 price=normalized_price or _d(quote.sub_total) or _d(quote.grand_total),
                 landed_cost=normalized_landed_cost or _d(quote.grand_total),
                 lead_days=quote.delivery_days,
+                expected_delivery_date=quote.expected_delivery_date,
             )
         )
 
@@ -3057,7 +3223,7 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
                            params: PageParams, search: str | None = None,
                            status: str | None = None) -> dict:
     stmt = (
-        select(RFQ)
+        select(RFQ, RFQVendor.status)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
         .where(RFQVendor.vendor_id == vendor_id, _vendor_visible())
     )
@@ -3076,7 +3242,14 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
     if status:
         stmt = stmt.where(RFQ.status == status, _vendor_visible())
     stmt = stmt.order_by(RFQ.created_at.desc())
-    return await paginate(db, stmt, params)
+    
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
+    result = await db.execute(stmt.offset(params.offset).limit(params.size))
+    items = []
+    for rfq, vendor_status in result.all():
+        rfq.vendor_status = vendor_status
+        items.append(rfq)
+    return {"items": items, "total": total or 0, "page": params.page, "size": params.size}
 
 
 async def vendor_get_rfq(db: AsyncSession, vendor_id: int, rfq_id: int) -> RFQ:
@@ -3115,6 +3288,12 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
     )).scalars().first()
     if quote is None:
         raise NotFoundError("No quotation has been opened for you on this RFQ")
+    
+    if quote.status == QuotationStatus.DRAFT.value and not quote.payment_terms:
+        vendor = await db.get(Vendor, vendor_id)
+        if vendor and vendor.payment_terms_days is not None:
+            quote.payment_terms = f"Net {vendor.payment_terms_days} days"
+
     await _attach_tax_context(db, quote)
     return quote
 
@@ -3417,7 +3596,7 @@ async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOr
 
 
 async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
-                               accept: bool, note: str = "") -> PurchaseOrder:
+                               accept: bool, note: str = "", lines: list | None = None) -> PurchaseOrder:
     """The vendor's answer to an order: yes, or no with a reason.
 
     This is the step that turns an order into an agreement. Until it is given, the
@@ -3442,8 +3621,67 @@ async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
                         else POVendorStatus.REJECTED.value)
     po.vendor_responded_at = utcnow()
     po.vendor_response_note = (note or "").strip() or None
+    
     if accept:
-        po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
+        if lines:
+            # Vendor has provided updated rates for the items
+            po = (await db.execute(
+                select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
+                .where(PurchaseOrder.id == po.id)
+            )).scalars().first()
+            
+            sub_total = Decimal(0)
+            tax_total = Decimal(0)
+            lines_by_id = {line.id: line for line in lines}
+            
+            for item in po.items:
+                if item.id in lines_by_id:
+                    item.rate = _d(lines_by_id[item.id].rate)
+                
+                amount = _d(item.quantity) * item.rate
+                item.amount = amount
+                sub_total += amount
+                tax_total += amount * _d(item.tax_percent or 0) / Decimal(100)
+                
+            _apply_po_totals(po, sub_total, tax_total)
+            
+            # If the supplier changed the rates, the PO needs internal re-approval
+            from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
+            from app.platform.workflow import engine
+            from app.shared.enums import DocType, InstanceStatus
+            
+            creator = await db.get(HcmEmployee, po.created_by_id)
+            if not creator:
+                raise ValidationError("Cannot route for approval: order creator not found")
+                
+            # Get the creator's active position to resolve the correct ladder
+            assignment = (await db.execute(
+                select(HcmPositionAssignment).where(
+                    HcmPositionAssignment.employee_id == creator.id,
+                    HcmPositionAssignment.is_active == True
+                )
+            )).scalars().first()
+            position_id = assignment.position_id if assignment else None
+            
+            # Monkeypatch the active_position_id onto the creator object for the engine
+            creator.active_position_id = position_id
+                
+            instance = await engine.start(
+                db, DocType.PO.value, po.id,
+                context={"total_amount": float(po.total_amount),
+                         "project_id": po.project_id or None,
+                         "requester_position_id": position_id,
+                         "doc_no": po.po_no},
+                user=creator
+            )
+            
+            if instance.status == InstanceStatus.APPROVED.value:
+                po.status = POStatus.APPROVED.value
+            else:
+                po.status = POStatus.PENDING_APPROVAL.value
+        else:
+            po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
+
     await db.commit()
     await db.refresh(po)
     logger.info("%s %s by vendor %s", po.po_no, po.vendor_status, vendor_id)
@@ -3538,6 +3776,8 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
             despatched_qty=already.get(line.id, Decimal(0)),
             pending_qty=max(_d(line.quantity) - already.get(line.id, Decimal(0)),
                             Decimal(0)),
+            rate=float(line.rate),
+            amount=float(line.amount),
         )
         for line in po.items
     ]

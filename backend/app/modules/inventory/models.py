@@ -120,6 +120,21 @@ class StockMovement(Base):
 Index("ix_stk_ledger_item_created", StockMovement.item_id,
       StockMovement.created_at.desc())
 Index("ix_stk_ledger_ref", StockMovement.ref_type, StockMovement.ref_id)
+# `created_at` ON ITS OWN, as well as behind `item_id` above.
+#
+# The composite is led by `item_id`, so it can only serve a query that names an item.
+# The ledger screen's first request names none — it opens on the whole ledger, newest
+# first — and that ORDER BY therefore had no index at all and fell back to a filesort.
+# `serial_numbers` is a JSON column, MySQL sizes a sort record by each column's
+# MAXIMUM width, and a JSON maximum is large enough that ONE record exceeds the
+# default 256 KB `sort_buffer_size`: the screen died with MySQL 1038, "Out of sort
+# memory", on a table holding 333 rows.
+#
+# Ordering the query by the primary key instead (see `list_movements`) also avoids the
+# sort, and is right for its own reasons. This index is here because that fix only
+# holds while every caller remembers to do it: with `created_at` indexed, sorting on
+# it is an index scan and the failure cannot come back — whatever anyone writes next.
+Index("ix_stk_ledger_created", StockMovement.created_at.desc())
 
 
 class Reservation(Base):

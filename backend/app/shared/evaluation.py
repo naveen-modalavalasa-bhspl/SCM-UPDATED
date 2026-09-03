@@ -15,12 +15,11 @@ The one invariant every method holds to: **higher score is better**. A reader of
 comparison sheet should never have to know which method produced it to see who won.
 """
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 from app.shared.enums import (
     DEFAULT_EVALUATION_METHOD,
-    WEIGHTED_COST_SHARE,
-    WEIGHTED_TIME_SHARE,
     EvaluationMethod,
 )
 
@@ -48,6 +47,7 @@ class Candidate:
     # None means the quote did not say. Treated as the WORST in the set rather than as
     # zero — a silent quote must never win "fastest" by default.
     lead_days: int | None = None
+    expected_delivery_date: date | None = None
 
 
 @dataclass
@@ -79,25 +79,13 @@ def describe() -> list[dict]:
     """The methods, as the dropdown shows them. Served rather than hardcoded in the
     screen so the label and the arithmetic cannot disagree."""
     return [
-        {"value": EvaluationMethod.LOWEST_LANDED_COST.value,
-         "label": "Lowest landed cost",
-         "help": "Price plus freight, other charges and tax — what it actually "
-                 "costs. The default.",
-         "is_default": True},
         {"value": EvaluationMethod.LOWEST_PRICE.value,
          "label": "Lowest price",
          "help": "The headline figure only, before freight and tax.",
-         "is_default": False},
+         "is_default": True},
         {"value": EvaluationMethod.SHORTEST_LEAD_TIME.value,
          "label": "Fastest delivery",
          "help": "Fewest days to deliver. Price is ignored.",
-         "is_default": False},
-        {"value": EvaluationMethod.WEIGHTED_SCORE.value,
-         "label": "Best value",
-         "help": (f"Landed cost and delivery time together, "
-                  f"{int(WEIGHTED_COST_SHARE * 100)}/"
-                  f"{int(WEIGHTED_TIME_SHARE * 100)}, each scored against the best "
-                  "quote received."),
          "is_default": False},
     ]
 
@@ -124,9 +112,20 @@ def rank(candidates: list[Candidate], method: str | None = None) -> list[Ranked]
     # silent quote could still come first on "fastest". Saying nothing must never be
     # as good as saying something.
     stated = [c.lead_days for c in priced if c.lead_days is not None]
-    worst_days = Decimal(max(stated)) + ONE if stated else ONE
-    days = {c.ref: (Decimal(c.lead_days) if c.lead_days is not None else worst_days)
-            for c in priced}
+    stated_dates = [c.expected_delivery_date for c in priced if c.expected_delivery_date is not None]
+    
+    if stated_dates:
+        worst_date = max(stated_dates).toordinal() + 1
+        days = {
+            c.ref: (Decimal(c.expected_delivery_date.toordinal()) if c.expected_delivery_date else Decimal(worst_date))
+            for c in priced
+        }
+    else:
+        worst_days = Decimal(max(stated)) + ONE if stated else ONE
+        days = {
+            c.ref: (Decimal(c.lead_days) if c.lead_days is not None else worst_days)
+            for c in priced
+        }
 
     best_price = min((c.price for c in priced if c.price > ZERO), default=ONE)
     best_landed = min((c.landed_cost for c in priced if c.landed_cost > ZERO),
@@ -137,15 +136,8 @@ def rank(candidates: list[Candidate], method: str | None = None) -> list[Ranked]
     for candidate in priced:
         if method == EvaluationMethod.LOWEST_PRICE.value:
             scores[candidate.ref] = _ratio(best_price, candidate.price)
-        elif method == EvaluationMethod.SHORTEST_LEAD_TIME.value:
+        else:  # SHORTEST_LEAD_TIME is the only other option now
             scores[candidate.ref] = _ratio(best_days, days[candidate.ref])
-        elif method == EvaluationMethod.WEIGHTED_SCORE.value:
-            cost = _ratio(best_landed, candidate.landed_cost)
-            time = _ratio(best_days, days[candidate.ref])
-            scores[candidate.ref] = (cost * _d(WEIGHTED_COST_SHARE)
-                                     + time * _d(WEIGHTED_TIME_SHARE))
-        else:  # LOWEST_LANDED_COST
-            scores[candidate.ref] = _ratio(best_landed, candidate.landed_cost)
 
     # `sorted` is stable, so equal scores stay in the order they were handed in.
     ordered = sorted(priced, key=lambda c: scores[c.ref], reverse=True)

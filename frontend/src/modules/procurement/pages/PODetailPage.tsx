@@ -1,29 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, FilePen, Printer, Send, X } from "lucide-react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  Button, Can, Card, Field, Input, PageHeader, StatusPill, useToast,
-} from "@/shared/components";
+  ArrowLeft, Check, ChevronDown, ChevronRight, FilePen, Printer, Send, X,
+  ShoppingCart, Package, Building2, Calendar, Coins, MapPin, FileText, ShieldCheck, History, Sparkles, TrendingDown, Save,
+} from "lucide-react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Button, Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
 import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
-import { SectionCard, FactGrid } from "../components/DetailKit";
-import {
-  blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue,
-} from "../components/POHeaderFields";
+import { POApprovalChat } from "../components/POApprovalChat";
+import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
 
-const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-}).format(value ?? 0);
+const money = (value: number | null | undefined) =>
+  new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
 
-/** Purchase-order document view used by both the approval inbox and My Decisions. */
 export function PODetailPage() {
   const { id } = useParams();
   const poId = Number(id);
@@ -34,11 +30,8 @@ export function PODetailPage() {
   const approvalView = params.get("approval") === "1";
   const decisionView = params.get("decision") === "1";
   const [comments, setComments] = useState("");
-  // The header a draft order can still be given: project, remarks, the four terms,
-  // the two addresses, discount and freight. An order written from a won tender
-  // arrives with none of them — the quotation never carried any — so this is where a
-  // buyer says what was actually agreed before sending it up for approval.
   const [header, setHeader] = useState<POHeaderValue>(blankPOHeader());
+  const [linesExpanded, setLinesExpanded] = useState(true);
 
   const po = useQuery({
     queryKey: ["purchase-order", poId],
@@ -46,81 +39,63 @@ export function PODetailPage() {
     enabled: Number.isFinite(poId) && poId > 0,
   });
 
-  // FIXED 2026-08-23 — `poHeaderFrom` was imported and never called, so this form
-  // opened BLANK on an order that had terms and addresses stored. Two bugs in one:
-  // the buyer could not see what was agreed, and because Save and Amend both send
-  // `poHeaderPayload(header)`, pressing either wrote those blanks over the real
-  // values. The server no longer accepts a wipe by omission, but the screen still has
-  // to show what is on the document.
-  //
-  // Keyed on the order and its revision, never on `po.data` itself: the query refetches
-  // after every mutation and re-seeding on each one would yank a field out from under
-  // somebody mid-edit. A new revision IS a new set of values, so that re-seeds.
   useEffect(() => {
     if (po.data) setHeader(poHeaderFrom(po.data));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [po.data?.id, po.data?.revision_no]);
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
-    qc.invalidateQueries({ queryKey: ["pos"] });
-    qc.invalidateQueries({ queryKey: ["approvals"] });
-    // The approval trail is engine state, and pressing Approve here CHANGES it.
-    // Without this the page kept showing the rung it was on before the press and
-    // only a full reload caught up. Keyed on the prefix so one line covers every
-    // document type this page can be showing.
-    qc.invalidateQueries({ queryKey: ["procurement", "approval-trail"] });
-  };
 
   useEffect(() => {
     if (po.data) setHeader(poHeaderFrom(po.data));
   }, [po.data]);
 
-  // Only fetched once the order has actually been amended. An order on revision 0 has
-  // no history worth a round trip, and most orders never leave it.
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
+    qc.invalidateQueries({ queryKey: ["pos"] });
+    qc.invalidateQueries({ queryKey: ["approvals"] });
+    qc.invalidateQueries({ queryKey: ["procurement", "approval-trail"] });
+  };
+
   const revisions = useQuery({
     queryKey: ["purchase-order-revisions", poId],
     queryFn: () => poApi.revisions(poId),
     enabled: (po.data?.revision_no ?? 0) > 0,
   });
 
-  // An amendment is a change to something somebody has already agreed to, so it is
-  // deliberately a separate act from editing a draft: it asks for a reason, and the
-  // server files the whole previous order away before applying it.
   const [amending, setAmending] = useState(false);
   const [amendReason, setAmendReason] = useState("");
   const [amendLines, setAmendLines] = useState<DraftLine[]>([]);
   const startAmending = () => {
     setAmending(true);
-    setAmendLines(po.data?.items.map((i: any) => ({
-      id: i.id,
-      item_id: i.item_id,
-      item_code: i.item_code,
-      item_name: i.item_name,
-      quantity: String(i.quantity),
-      original_quantity: String(i.quantity),
-      rate: String(i.rate),
-      tax_percent: String(i.tax_percent),
-    })) ?? []);
+    setAmendLines(
+      po.data?.items.map((i: any) => ({
+        id: i.id,
+        item_id: i.item_id,
+        item_code: i.item_code,
+        item_name: i.item_name,
+        quantity: String(i.quantity),
+        original_quantity: String(i.quantity),
+        rate: String(i.rate),
+        tax_percent: String(i.tax_percent),
+      })) ?? [],
+    );
   };
-  
+
   const amend = useMutation({
-    mutationFn: () => poApi.amend(poId, {
-      reason: amendReason,
-      expected_date: po.data?.expected_date ?? null,
-      ...poHeaderPayload(header),
-      lines: amendLines.map(l => ({
-        id: l.id ?? null,
-        item_id: Number(l.item_id),
-        quantity: Number(l.quantity),
-        rate: Number(l.rate ?? 0),
-        tax_percent: Number(l.tax_percent ?? 0),
-      }))
-    }),
+    mutationFn: () =>
+      poApi.amend(poId, {
+        reason: amendReason,
+        expected_date: po.data?.expected_date ?? null,
+        ...poHeaderPayload(header),
+        lines: amendLines.map((l) => ({
+          id: l.id ?? null,
+          item_id: Number(l.item_id),
+          quantity: Number(l.quantity),
+          rate: Number(l.rate ?? 0),
+          tax_percent: Number(l.tax_percent ?? 0),
+        })),
+      }),
     onSuccess: (updated) => {
-      toast.success(
-        `${formatPONo(updated.po_no, updated.revision_no)} amended — `
-        + "send it for approval again",
-      );
+      toast.success(`${formatPONo(updated.po_no, updated.revision_no)} amended — send it for approval again`);
       setAmending(false);
       setAmendReason("");
       qc.invalidateQueries({ queryKey: ["purchase-order-revisions", poId] });
@@ -128,8 +103,6 @@ export function PODetailPage() {
     },
   });
 
-  /** DRAFT only, server-side too: past that the order is in approval or has been sent,
-   *  and a term that changes after somebody signed it is a different agreement. */
   const saveHeader = useMutation({
     mutationFn: () => poApi.update(poId, poHeaderPayload(header)),
     onSuccess: () => {
@@ -139,23 +112,17 @@ export function PODetailPage() {
   });
 
   const decide = useMutation({
-    mutationFn: (action: "approve" | "reject") => action === "approve"
-      ? poApi.approve(poId, comments)
-      : poApi.reject(poId, comments),
+    mutationFn: (action: "approve" | "reject") =>
+      action === "approve" ? poApi.approve(poId, comments) : poApi.reject(poId, comments),
     onSuccess: (_result, action) => {
       const number = formatPONo(po.data?.po_no, po.data?.revision_no);
       void alerts.success(action === "approve" ? "po.approved" : "po.rejected", { number });
       setComments("");
       refresh();
-      // Only when the approver came from their inbox. Signing a PO opened directly
-      // must leave them on the document — sending them to /approvals from here is
-      // navigating away from a screen they did not arrive at through approvals.
       if (approvalView || decisionView) nav("/approvals");
     },
   });
 
-  /** Hand the draft to its approver. The engine owns who that is — this only moves
-   *  the document's own status, exactly as `submit_po` does server-side. */
   const submit = useMutation({
     mutationFn: () => poApi.submit(poId),
     onSuccess: () => {
@@ -164,442 +131,536 @@ export function PODetailPage() {
     },
   });
 
-  /** The last step before the warehouse can receive: the GRN guard requires
-   *  SENT_TO_VENDOR, so nothing can be booked in against an unsent order. */
   const send = useMutation({
     mutationFn: () => poApi.sendToVendor(poId),
     onSuccess: () => {
       const number = formatPONo(po.data?.po_no, po.data?.revision_no);
-      void alerts.success("po.sent_to_vendor", {
-        number, vendor: po.data?.vendor_name ?? "the vendor",
-      });
+      void alerts.success("po.sent_to_vendor", { number, vendor: po.data?.vendor_name ?? "the vendor" });
       refresh();
     },
   });
 
   const sendWithConfirm = async () => {
     if (send.isPending || !po.data) return;
-    if (await alerts.confirm("po.send_vendor", {
-      number: formatPONo(po.data.po_no, po.data.revision_no), vendor: po.data.vendor_name ?? "the vendor",
-    })) send.mutate();
+    if (await alerts.confirm("po.send_vendor", { number: formatPONo(po.data.po_no, po.data.revision_no), vendor: po.data.vendor_name ?? "the vendor" }))
+      send.mutate();
   };
 
   const decideWithConfirm = async (action: "approve" | "reject") => {
     if (decide.isPending || !po.data) return;
     const number = formatPONo(po.data.po_no, po.data.revision_no);
-    const asked = action === "approve"
-      ? await alerts.confirm("po.approve", {
-        number,
-        amount: money(po.data.total_amount),
-      })
-      : await alerts.confirm("po.reject", { number });
+    const asked =
+      action === "approve"
+        ? await alerts.confirm("po.approve", { number, amount: money(po.data.total_amount) })
+        : await alerts.confirm("po.reject", { number });
     if (asked) decide.mutate(action);
   };
+
+  // ── approval quantity editing (decrease only) ────────────────────────
+  const [qtyDraft, setQtyDraft] = useState<Record<number, string>>({});
+  const [qtyTouched, setQtyTouched] = useState(false);
+
+  useEffect(() => {
+    if (po.data?.items) {
+      const map: Record<number, string> = {};
+      po.data.items.forEach((it: any) => (map[it.id] = String(it.quantity)));
+      setQtyDraft(map);
+      setQtyTouched(false);
+    }
+  }, [po.data?.id, po.data?.items]);
+
+  const qtyChanges = useMemo(() => {
+    if (!po.data?.items) return [] as { id: number; quantity: number; prev: number }[];
+    return po.data.items
+      .map((it: any) => {
+        const raw = qtyDraft[it.id];
+        const parsed = Number(raw);
+        const prev = Number(it.quantity);
+        if (!raw || Number.isNaN(parsed)) return null;
+        if (parsed === prev) return null;
+        return { id: it.id, quantity: parsed, prev };
+      })
+      .filter(Boolean) as { id: number; quantity: number; prev: number }[];
+  }, [qtyDraft, po.data?.items]);
+
+  const hasQtyIncrease = qtyChanges.some((c) => c.quantity > c.prev);
+  const hasInvalidQty = qtyChanges.some((c) => c.quantity <= 0);
+
+  const saveQty = useMutation({
+    mutationFn: () => poApi.updateApprovalQuantities(poId, qtyChanges.map((c) => ({ id: c.id, quantity: c.quantity }))),
+    onSuccess: () => {
+      toast.success("Quantities trimmed — vendor will receive the edited numbers");
+      setQtyTouched(false);
+      refresh();
+    },
+    onError: (e: any) => toast.error(e?.message ?? "Could not save quantities"),
+  });
 
   if (po.isLoading) return <p className="p-6 text-sm text-muted">Loading purchase order…</p>;
   if (po.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(po.error as Error).message}</p>;
   if (!po.data) return <p className="p-6 text-muted">Purchase order not found.</p>;
 
-  // Was `approvalView && …`, so the panel only appeared when the approver arrived from
-  // their inbox: a PO opened from the register showed no way to sign it at all. The
-  // status is the real gate — and the engine still refuses anyone who is not the
-  // current approver, so this widens the doorway, never the authority.
-  // FIXED 2026-08-20 — was `status === "PENDING_APPROVAL"`, which is true for every
-  // holder of po.approve on every pending order in the company, including ones with
-  // somebody else entirely. awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you.
-  // `?? status` on purpose: if the backend has not been restarted, or is an older
-  // build, `awaiting_me` is undefined — and a bare `&&` would then hide the button
-  // from the person who IS supposed to approve. Falling back to the old status check
-  // means the worst case is the pre-2026-08-20 behaviour (a button that 403s), never
-  // a document nobody can sign.
-  const canDecide = po.data.awaiting_me ?? (po.data.status === "PENDING_APPROVAL");
-  // Mirrors `amend_po`'s own window. Kept as one named value rather than inline so
-  // the button and the server's refusal cannot drift apart silently.
-  const canAmend = po.data.vendor_status === "ACCEPTED"
-    || (po.data.vendor_status == null && po.data.status === "SENT_TO_VENDOR");
-
+  const canDecide = po.data.awaiting_me ?? po.data.status === "PENDING_APPROVAL";
+  const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
+  const canAmend = po.data.vendor_status === "ACCEPTED" || (po.data.vendor_status == null && po.data.status === "SENT_TO_VENDOR");
   const isDraft = po.data.status === "DRAFT";
-  // Nothing left to change: the goods are in and the paperwork is closed, or the order
-  // never became one. The server refuses an amendment on these too.
-  const isFinished = ["RECEIVED", "CLOSED", "CANCELLED", "REJECTED"]
-    .includes(po.data.status);
+  const isFinished = ["RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
 
   const steps: Step[] = (() => {
     const s = po.data.status;
     const vs = po.data.vendor_status;
-    const baseSteps: Step[] = [
+    const base: Step[] = [
       { id: "draft", label: "Draft", status: "complete" },
       { id: "approved", label: "Approved", status: "upcoming" },
       { id: "sent", label: "Sent to Supplier", status: "upcoming" },
       { id: "accepted", label: "Accepted", status: "upcoming" },
       { id: "received", label: "Received", status: "upcoming" },
     ];
-    if (s === "DRAFT" || s === "SUBMITTED" || s === "PENDING_APPROVAL") {
-      baseSteps[1].status = "current";
-    } else if (s === "REJECTED") {
-      baseSteps[1] = { id: "approved", label: "Rejected", status: "error" };
-    } else {
-      baseSteps[1].status = "complete";
-      if (s === "APPROVED") {
-        baseSteps[2].status = "current";
-      } else {
-        baseSteps[2].status = "complete";
-        if (vs === "REJECTED") {
-          baseSteps[3] = { id: "accepted", label: "Rejected by Supplier", status: "error" };
-        } else if (s === "SENT_TO_VENDOR") {
-          baseSteps[3].status = "current";
-        } else {
-          baseSteps[3].status = "complete";
-          if (s === "ACCEPTED_BY_SUPPLIER") {
-            baseSteps[4].status = "current";
-          } else if (s === "PARTIALLY_RECEIVED") {
-            baseSteps[4].status = "current";
-            baseSteps[4].description = "Partially received";
-          } else if (s === "RECEIVED" || s === "CLOSED") {
-            baseSteps[4].status = "complete";
-          }
+    if (s === "DRAFT" || s === "SUBMITTED" || s === "PENDING_APPROVAL") base[1].status = "current";
+    else if (s === "REJECTED") base[1] = { id: "approved", label: "Rejected", status: "error" };
+    else {
+      base[1].status = "complete";
+      if (s === "APPROVED") base[2].status = "current";
+      else {
+        base[2].status = "complete";
+        if (vs === "REJECTED") base[3] = { id: "accepted", label: "Rejected by Supplier", status: "error" };
+        else if (s === "SENT_TO_VENDOR") base[3].status = "current";
+        else {
+          base[3].status = "complete";
+          if (s === "ACCEPTED_BY_SUPPLIER") base[4].status = "current";
+          else if (s === "PARTIALLY_RECEIVED") { base[4].status = "current"; base[4].description = "Partially received"; }
+          else if (s === "RECEIVED" || s === "CLOSED") base[4].status = "complete";
         }
       }
     }
-    return baseSteps;
+    return base;
   })();
 
-  return <>
-    <Button variant="ghost" onClick={() => nav(backTo)}>
-      <ArrowLeft className="h-4 w-4" /> {decisionView ? "Back to My Decisions" : approvalView ? "Back to approvals" : "Back to purchase orders"}
-    </Button>
-    <PageHeader
-      eyebrow="Purchase order"
-      title={formatPONo(po.data.po_no, po.data.revision_no)}
-      actions={<div className="flex flex-wrap items-center gap-2">
-        <StatusPill status={po.data.status} />
-        {/* The vendor's answer is a different axis from our own status: an order can be
-          * SENT_TO_VENDOR and either agreed or still unanswered. Said out loud. */}
-        {po.data.vendor_status && <StatusPill status={po.data.vendor_status} />}
-        {/* Opens the order on its own, laid out for paper. The browser's own print
-          * dialog saves it as a PDF — no server-side renderer to keep in step with
-          * the screen, and it prints exactly what is on the document. */}
-        <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")}>
-          <Printer className="h-4 w-4" /> PDF
-        </Button>
-        {/* Amend is for an order that has left the building. A draft is simply edited,
-          * and a finished order can no longer be changed at all — the same line the
-          * server draws in `_UNAMENDABLE`, so the button never offers what the API
-          * would refuse. SENT_TO_VENDOR stays in: every order raised before the
-          * acceptance rung existed sits on it. */}
-        {/* Amendment has a WINDOW: it opens at the vendor's acceptance and closes at
-          * their first despatch. Before the yes there is no agreement to amend — an
-          * order in our own approval, or approved and unsent, has never been seen by a
-          * counterparty, so changing it is editing it, and the way to do that is
-          * reject and re-raise. After the despatch the paperwork has to describe what
-          * actually went out.
-          *
-          * Legacy orders sent before the acceptance rung existed carry no answer at
-          * all and are genuinely out with a vendor, so they stay amendable — the same
-          * allowance `amend_po` makes on the same test, so the button never offers
-          * what the API would refuse, and never hides what it would allow. */}
-        {!isFinished && (canAmend) && <Can do="po.edit">
-          <Button variant="subtle" onClick={startAmending}>
-            <FilePen className="h-4 w-4" /> Amend
-          </Button>
-        </Can>}
-        {/* One button per status, never two: a draft can only be submitted, an
-          * approved order can only be sent. Each is gated on its own permission —
-          * raising an order and committing it to a vendor are different rights. */}
-        {po.data.status === "DRAFT" && <Can do="po.submit">
-          <Button disabled={busy} onClick={() => submit.mutate()}>
-            <Send className="h-4 w-4" /> {submit.isPending ? "Sending…" : "Send for approval"}
-          </Button>
-        </Can>}
-        {po.data.status === "APPROVED" && <Can do="po.send_vendor">
-          <Button disabled={busy} onClick={() => void sendWithConfirm()}>
-            <Send className="h-4 w-4" /> {send.isPending ? "Sending…" : "Send to vendor"}
-          </Button>
-        </Can>}
-      </div>}
-    />
-    
-    <div className="mb-6 -mx-2 sm:mx-0">
-      <Stepper steps={steps} className="bg-surface-2/50 rounded-xl" />
-    </div>
+  return (
+    <div className="space-y-4">
+      <Button variant="ghost" onClick={() => nav(backTo)}>
+        <ArrowLeft className="h-4 w-4" /> {decisionView ? "Back to My Decisions" : approvalView ? "Back to approvals" : "Back to purchase orders"}
+      </Button>
 
-    {(submit.error || send.error) && <p className="mb-4 rounded-xl bg-danger/10 p-4 text-sm text-danger">
-      {((submit.error ?? send.error) as Error).message}
-    </p>}
-
-    <SectionCard title="Order" className="mb-4">
-      <FactGrid
-        facts={[
-          { label: "Vendor", value: po.data.vendor_name ?? "—" },
-          { label: "Indent", value: <span className="font-mono">{po.data.indent_no ?? "—"}</span> },
-          { label: "Project", value: po.data.project_name ?? "—" },
-          { label: "Expected date", value: fmtDate(po.data.expected_date) },
-        ]}
-      />
-      {po.data.remarks && (
-        <p className="mt-4 whitespace-pre-line border-t border-line/60 pt-4 text-sm text-body">
-          {po.data.remarks}
-        </p>
-      )}
-      {/* Where this order came from when it came off an award rather than an indent.
-          Every document in the chain points backward at the one before it. */}
-      {po.data.quotation_no && (
-        <div className="mt-4 border-t border-line/60 pt-4">
-          <FactGrid
-            cols={3}
-            facts={[
-              { label: "Requisition", value: <span className="font-mono">{po.data.requisition_no ?? "—"}</span> },
-              { label: "RFQ", value: <span className="font-mono">{po.data.rfq_no ?? "—"}</span> },
-              { label: "Quotation", value: <span className="font-mono">{po.data.quotation_no}</span> },
-            ]}
-          />
-        </div>
-      )}
-    </SectionCard>
-
-    <div className="overflow-x-auto rounded-xl border border-line">
-      <table className="w-full text-left text-sm">
-        <thead className="bg-content2 text-xs text-muted"><tr><th className="p-3">Item</th><th className="p-3 text-right">Quantity</th><th className="p-3 text-right">Rate</th><th className="p-3 text-right">Tax</th><th className="p-3 text-right">Amount</th></tr></thead>
-        <tbody className="divide-y divide-line">{po.data.items.map((item) => {
-          const previous = revisionLines(revisions.data?.[0]);
-          const prev = previous.find((line: any) => line.item_id === item.item_id);
-          // A line the last filed revision does not mention is one this amendment
-          // added. No revision on file means nothing has changed.
-          const isNew = previous.length > 0 && !prev;
-          
-          return (
-            <tr key={item.id} className={isNew ? "bg-primary/5" : ""}>
-              <td className="p-3">
-                <strong className="text-ink">{item.item_name ?? "—"}</strong>
-                {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
-                <p className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</p>
-                {/* What the vendor promised for THIS line, off the quotation that won.
-                    Under the item rather than in a column of its own: most orders
-                    carry one lead time or none, and a mostly-empty column costs every
-                    row its width. Absent on a PO raised from an indent — nobody
-                    quoted, so nobody promised. */}
-                {item.delivery_days != null && (
-                  <p className="text-xs text-muted">
-                    Vendor quoted {item.delivery_days} day{item.delivery_days === 1 ? "" : "s"} to deliver
-                  </p>
-                )}
-              </td>
-              <td className="p-3 text-right">
-                {prev && prev.quantity !== item.quantity && (
-                  <span className="line-through text-muted mr-1 text-xs">{prev.quantity}</span>
-                )}
-                {item.quantity} {item.uom_code ?? ""}
-              </td>
-              <td className="p-3 text-right">{money(item.rate)}</td>
-              <td className="p-3 text-right">{item.tax_percent}%</td>
-              <td className="p-3 text-right font-semibold">{money(item.amount)}</td>
-            </tr>
-          );
-        })}</tbody>
-      </table>
-    </div>
-
-    {/* Fill in what the chain could not: an order raised from an award knows the
-      * money and nothing that was agreed in words. Draft only, and gated on po.edit —
-      * hiding it is not the guard, the endpoint refuses a non-draft either way. */}
-    {isDraft && <Can do="po.edit">
-      <Card className="mt-4 space-y-4 p-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold text-ink">Order details</h2>
-          <Button
-            variant="subtle"
-            disabled={saveHeader.isPending}
-            onClick={() => saveHeader.mutate()}
-          >
-            {saveHeader.isPending ? "Saving…" : "Save details"}
-          </Button>
-        </div>
-        {saveHeader.error && (
-          <p className="text-sm text-danger">{(saveHeader.error as Error).message}</p>
-        )}
-        <POHeaderFields
-          value={header}
-          onChange={(patch) => setHeader({ ...header, ...patch })}
-        />
-      </Card>
-    </Can>}
-
-    {/* What the order comes to: the lines summed, then the money that belongs to the
-      * document rather than to any line. Same arithmetic the server stored —
-      * total = subtotal - discount + tax + freight. */}
-    {/* Every component of the figure, and the figure. An approver signs the total,
-        so it is set apart rather than being the fifth of five identical cells. */}
-    <SectionCard className="mt-4">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <dl className="grid flex-1 grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
-          {([
-            ["Subtotal", po.data.sub_total ?? 0],
-            ["Discount", po.data.discount_amount ?? 0],
-            ["Tax", po.data.tax_amount ?? 0],
-            ["Freight", po.data.freight_amount ?? 0],
-          ] as const).map(([label, value]) => (
-            <div key={label}>
-              <dt className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">{label}</dt>
-              <dd className="mt-0.5 tabular-nums text-sm font-medium text-ink">{money(value)}</dd>
+      {/* ── HERO — gradient, glass, eye feast ────────────────────────── */}
+      <div className="overflow-hidden rounded-[20px] bg-gradient-to-br from-red-900 via-red-950 to-rose-950 p-[1px] shadow-xl">
+        <div className="rounded-[19px] bg-gradient-to-br from-red-900 via-red-950 to-rose-950 p-5 sm:p-6 text-slate-50">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="inline-flex items-center gap-2 rounded-full bg-slate-50 px-3 py-1 text-xs font-bold uppercase tracking-widest text-slate-900 shadow-sm">
+                <Sparkles className="h-3.5 w-3.5" /> Purchase Order
+              </div>
+              <h1 className="mt-3 font-display text-3xl font-extrabold tracking-tight drop-shadow-sm text-slate-50">
+                {formatPONo(po.data.po_no, po.data.revision_no)}
+              </h1>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-200">
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-black/25 px-2.5 py-1 text-slate-50 backdrop-blur"><Building2 className="h-3.5 w-3.5"/>{po.data.vendor_name ?? "—"}</span>
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-black/25 px-2.5 py-1 text-slate-50 backdrop-blur"><Calendar className="h-3.5 w-3.5"/>{fmtDate(po.data.po_date) ?? "—"}</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate-50 px-3 py-1 text-xs font-extrabold text-slate-900 shadow-sm"><Coins className="h-3.5 w-3.5"/>₹ {money(po.data.total_amount)}</span>
+              </div>
             </div>
-          ))}
-        </dl>
-        <div className="rounded-xl bg-content2/70 px-4 py-3 text-right">
-          <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">Total</div>
-          <div className="mt-0.5 font-display text-2xl font-bold tabular-nums text-ink">
-            {money(po.data.total_amount)}
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusPill status={po.data.status} variant="solid" />
+              {po.data.vendor_status && <StatusPill status={po.data.vendor_status} variant="solid" />}
+              <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
+                <Printer className="h-4 w-4" /> PDF
+              </Button>
+              {!isFinished && canAmend && (
+                <Can do="po.edit">
+                  <Button variant="subtle" onClick={startAmending} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
+                    <FilePen className="h-4 w-4" /> Amend
+                  </Button>
+                </Can>
+              )}
+              {po.data.status === "DRAFT" && (
+                <Can do="po.submit">
+                  <Button disabled={busy} onClick={() => submit.mutate()} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
+                    <Send className="h-4 w-4" /> {submit.isPending ? "Sending…" : "Send for approval"}
+                  </Button>
+                </Can>
+              )}
+              {po.data.status === "APPROVED" && (
+                <Can do="po.send_vendor">
+                  <Button disabled={busy} onClick={() => void sendWithConfirm()} className="!bg-emerald-500 !text-white shadow-sm hover:!bg-emerald-600">
+                    <Send className="h-4 w-4" /> {send.isPending ? "Sending…" : "Send to vendor"}
+                  </Button>
+                </Can>
+              )}
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              { label: "Vendor", value: po.data.vendor_name, icon: Building2, tint: "bg-black/25" },
+              { label: "Indent", value: po.data.indent_no ?? "—", icon: FileText, tint: "bg-black/25" },
+              { label: "Project", value: po.data.project_name ?? "—", icon: ShoppingCart, tint: "bg-black/25" },
+              { label: "Expected", value: fmtDate(po.data.expected_date), icon: Calendar, tint: "bg-black/25" },
+            ].map((k) => (
+              <div key={k.label} className={`rounded-2xl ${k.tint} p-3 backdrop-blur`}>
+                <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-300"><k.icon className="h-3.5 w-3.5"/>{k.label}</div>
+                <div className="mt-1 truncate text-sm font-bold text-slate-50">{k.value || "—"}</div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
-    </SectionCard>
 
-    {/* Addresses and terms, ALWAYS — including the blanks. This is what an approver is
-      * signing, and a field that disappears when empty cannot be told apart from a
-      * field nobody thought to ask for. An empty term on an order worth six figures is
-      * something the person signing it should see. */}
-    <SectionCard title="Addresses" className="mt-4">
-      <dl className="grid gap-4 text-sm sm:grid-cols-2">
-        {([
-          ["Billing address", po.data.billing_address],
-          ["Shipping address", po.data.shipping_address],
-        ] as const).map(([label, text]) => (
-          <div key={label}>
-            <dt className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">{label}</dt>
-            <dd className="mt-1 whitespace-pre-line text-sm text-ink">{text || "—"}</dd>
-          </div>
-        ))}
-      </dl>
-    </SectionCard>
+      <div className="-mx-2 sm:mx-0">
+        <Stepper steps={steps} className="rounded-2xl bg-white shadow-sm ring-1 ring-line" />
+      </div>
 
-    <Card className="mt-4 p-4">
-      <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>
-      <dl className="grid gap-3 text-sm sm:grid-cols-2">
-        {([
-          ["Payment terms", po.data.payment_terms],
-          ["Delivery terms", po.data.delivery_terms],
-          ["Material terms", po.data.material_terms],
-          ["Logistics terms", po.data.logistics_terms],
-        ] as const).map(([label, text]) => (
-          <div key={label}>
-            <dt className="text-muted">{label}</dt>
-            <dd className="whitespace-pre-line text-ink">{text || "—"}</dd>
-          </div>
-        ))}
-      </dl>
-    </Card>
-
-    {/* What has been changed since, and why. Empty on an order still on its original
-      * revision, which is most of them. */}
-    {(po.data.revision_no ?? 0) > 0 && <Card className="mt-4 p-4">
-      <h2 className="mb-3 text-sm font-semibold text-ink">
-        Amendment history · now at revision {po.data.revision_no}
-      </h2>
-      {po.data.amendment_reason && (
-        <p className="mb-3 text-sm text-body">
-          Latest: {po.data.amendment_reason}
-          {po.data.amended_at ? ` · ${fmtDate(po.data.amended_at)}` : ""}
-        </p>
+      {(submit.error || send.error) && (
+        <p className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200">{((submit.error ?? send.error) as Error).message}</p>
       )}
-      <ol className="space-y-2 text-sm">
-        {(revisions.data ?? []).map((rev) => (
-          <li key={rev.id} className="rounded-lg border border-line p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-medium text-ink">Revision {rev.revision_no}</span>
-              <span className="text-xs text-muted">
-                {rev.changed_by_name ?? "—"} · {fmtDate(rev.created_at)}
-              </span>
+
+      {/* ── Order facts — amber block ─────────────────────────────── */}
+      <div className="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-amber-400 via-orange-400 to-amber-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex items-center gap-2 text-amber-700">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-white"><ShoppingCart className="h-4 w-4"/></div>
+            <h2 className="text-sm font-extrabold uppercase tracking-widest">Order overview</h2>
+            <span className="ml-auto rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-700">Snapshot</span>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              { label: "Vendor", value: po.data.vendor_name ?? "—" },
+              { label: "Indent", value: po.data.indent_no ?? "—", mono: true },
+              { label: "Project", value: po.data.project_name ?? "—" },
+              { label: "Expected date", value: fmtDate(po.data.expected_date) },
+            ].map((f) => (
+              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-amber-100">
+                <div className="text-[11px] font-bold uppercase tracking-widest text-amber-700/70">{f.label}</div>
+                <div className={`mt-1 truncate text-sm font-bold text-ink ${f.mono ? "font-mono" : ""}`}>{f.value}</div>
+              </div>
+            ))}
+          </div>
+          {po.data.remarks && (
+            <div className="mt-4 rounded-xl bg-white p-3 text-sm text-body ring-1 ring-amber-100">
+              <span className="font-bold text-ink">Remarks: </span>{po.data.remarks}
             </div>
-            <p className="mt-1 text-body">{rev.reason ?? "—"}</p>
-            <p className="mt-1 text-xs text-muted">
-              Was {rev.status ?? "—"}
-              {rev.vendor_status ? ` · vendor had ${rev.vendor_status.toLowerCase()} it` : ""}
-              {typeof rev.snapshot?.total_amount === "number"
-                ? ` · total was ${money(rev.snapshot.total_amount as number)}` : ""}
-            </p>
-          </li>
-        ))}
-        {(revisions.data ?? []).length === 0 && (
-          <li className="text-muted">Loading the earlier versions…</li>
-        )}
-      </ol>
-    </Card>}
-
-    {amending && <Card className="mt-4 space-y-3 p-4">
-      <h2 className="text-sm font-semibold text-ink">Amend this order</h2>
-      <p className="text-xs text-muted">
-        The current version is filed away and the order goes back to draft: it is
-        approved again, and{" "}
-        {po.data.vendor_status === "ACCEPTED"
-          ? "the vendor has to accept the new version before anything can be delivered."
-          : "sent to the vendor again for their answer."}
-      </p>
-      <Field label="Why is it being amended?">
-        <Input
-          autoFocus
-          value={amendReason}
-          onChange={(event) => setAmendReason(event.target.value)}
-          placeholder="Required — e.g. delivery pushed to month end at the vendor's request"
-        />
-      </Field>
-      {/* The same fields the draft editor shows. Quantities and rates stay as they are
-        * here: changing what is being bought is a bigger act than changing a term, and
-        * the endpoint takes lines separately when that day comes. */}
-      <POHeaderFields
-        value={header}
-        disabled={true}
-        onChange={(patch) => setHeader({ ...header, ...patch })}
-      />
-      <div className="pt-2 border-t border-line">
-        <h3 className="text-sm font-semibold mb-3">Order Lines</h3>
-        <LinePicker
-          lines={amendLines}
-          onChange={setAmendLines}
-          showRate
-          showTax
-          showDate={false}
-          freezeRateAndTax={true}
-        />
+          )}
+          {po.data.quotation_no && (
+            <div className="mt-4 grid gap-3 rounded-xl bg-white p-3 ring-1 ring-amber-100 sm:grid-cols-3">
+              {[
+                { label: "Requisition", value: po.data.requisition_no },
+                { label: "RFQ", value: po.data.rfq_no },
+                { label: "Quotation", value: po.data.quotation_no },
+              ].map((f) => (
+                <div key={f.label}><div className="text-[11px] font-bold uppercase tracking-widest text-muted">{f.label}</div><div className="font-mono text-sm font-semibold text-ink">{f.value ?? "—"}</div></div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
-      {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
-      <div className="flex justify-end gap-2">
-        <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>
-          Cancel
-        </Button>
-        <Button
-          disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0}
-          onClick={() => amend.mutate()}
-        >
-          {amend.isPending ? "Amending…" : "Save as a new revision"}
-        </Button>
-      </div>
-    </Card>}
 
-    <div className="mt-4">
-      <ApprovalTrail docType="PO" docId={po.data.id} />
+      {/* ── Line items — emerald block, editable on approval ───────── */}
+      <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-teal-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-emerald-400 via-teal-400 to-emerald-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500 text-white"><Package className="h-4 w-4"/></div>
+            <h2 className="text-sm font-extrabold uppercase tracking-widest text-emerald-700">Line items</h2>
+            <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-700">{po.data.items.length} items</span>
+            <Button variant="subtle" onClick={() => setLinesExpanded(!linesExpanded)} className="ml-auto h-8 text-xs">
+              {linesExpanded ? <ChevronDown className="h-3.5 w-3.5"/> : <ChevronRight className="h-3.5 w-3.5"/>}{linesExpanded ? "Hide" : "View"}
+            </Button>
+          </div>
+          {isApprovalPending && (
+            <div className="mb-3 flex items-center gap-2 rounded-xl bg-amber-50 p-3 text-xs font-medium text-amber-800 ring-1 ring-amber-200">
+              <TrendingDown className="h-4 w-4 shrink-0"/> Approver may <b>decrease</b> quantities here (increase blocked). Edited numbers are what the vendor receives.
+            </div>
+          )}
+          {linesExpanded && (
+            <div className="overflow-x-auto rounded-xl bg-white ring-1 ring-emerald-100">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-emerald-600 text-xs font-bold uppercase tracking-widest text-white">
+                  <tr><th className="p-3">Item</th><th className="p-3 text-right">Quantity</th><th className="p-3 text-right">Rate</th><th className="p-3 text-right">Tax</th><th className="p-3 text-right">Amount</th></tr>
+                </thead>
+                <tbody className="divide-y divide-emerald-50">
+                  {po.data.items.map((item: any) => {
+                    const previous = revisionLines(revisions.data?.[0]);
+                    const prev = previous.find((line: any) => line.item_id === item.item_id);
+                    const isNew = previous.length > 0 && !prev;
+                    const isQtyChanged = previous.length > 0 && prev && Number(prev.quantity) !== Number(item.quantity);
+                    const isRateChanged = previous.length > 0 && prev && Number(prev.rate) !== Number(item.rate);
+                    const editable = isApprovalPending;
+                    const original = Number(item.quantity);
+                    const draftVal = qtyDraft[item.id] ?? String(item.quantity);
+                    const parsed = Number(draftVal);
+                    const isDecrease = !Number.isNaN(parsed) && parsed < original;
+                    const isIncrease = !Number.isNaN(parsed) && parsed > original;
+                    return (
+                      <tr key={item.id} className={`${isNew ? "bg-violet-50" : ""} ${isQtyChanged ? "bg-blue-50/50" : ""} ${isDecrease ? "bg-amber-50/60" : ""} ${isIncrease ? "bg-red-50" : ""} ${isRateChanged && !isQtyChanged ? "bg-cyan-50/40" : ""}`}>
+                        <td className="p-3">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-bold text-ink">{item.item_name ?? "—"}</span>
+                            {isNew && <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-violet-700">New Item</span>}
+                            {isQtyChanged && <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-blue-700">Qty Changed</span>}
+                            {isRateChanged && <span className="rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-cyan-700">Rate Changed</span>}
+                          </div>
+                          <div className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</div>
+                          {item.delivery_days != null && <div className="text-xs text-emerald-700">Vendor quoted {item.delivery_days} day{item.delivery_days===1?"":"s"}</div>}
+                        </td>
+                        <td className="p-3 text-right">
+                          {editable ? (
+                            <div className="ml-auto flex max-w-[160px] flex-col items-end gap-1">
+                              {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
+                              <div className="flex items-center justify-end gap-1">
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={original}
+                                  step="0.001"
+                                  value={draftVal}
+                                  onChange={(e) => { setQtyDraft((s) => ({ ...s, [item.id]: e.target.value })); setQtyTouched(true); }}
+                                  className={`w-24 rounded-lg border px-2 py-1.5 text-right text-sm font-bold outline-none focus:ring-2 ${isIncrease ? "border-red-300 bg-red-50 text-red-700 ring-red-200" : isDecrease ? "border-amber-300 bg-amber-50 text-amber-800 ring-amber-200" : "border-emerald-200 bg-white text-ink ring-emerald-200"}`}
+                                />
+                                <span className="text-xs text-muted">{item.uom_code ?? ""}</span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-end">
+                              {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
+                              <div><span className="font-bold">{item.quantity}</span> <span className="text-xs text-muted">{item.uom_code ?? ""}</span></div>
+                            </div>
+                          )}
+                          {editable && isIncrease && <div className="mt-1 text-[11px] font-bold text-red-600">Increase not allowed</div>}
+                          {editable && isDecrease && <div className="mt-1 text-[11px] font-bold text-amber-700">↓ trimmed</div>}
+                        </td>
+                        <td className="p-3 text-right tabular-nums">
+                          <div className="flex flex-col items-end">
+                            {isRateChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{money(prev.rate)}</span></div>}
+                            <span>{money(item.rate)}</span>
+                          </div>
+                        </td>
+                        <td className="p-3 text-right">{item.tax_percent}%</td>
+                        <td className="p-3 text-right font-extrabold tabular-nums">
+                          <div className="flex flex-col items-end">
+                            {isRateChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{money(prev.amount)}</span></div>}
+                            <span>{money(item.amount)}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {isApprovalPending && linesExpanded && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className="text-xs text-muted">
+                {qtyChanges.length ? `${qtyChanges.length} line(s) changed` : "No quantity changes yet"} {hasQtyIncrease && <span className="font-bold text-red-600">· increase blocked</span>}
+              </div>
+              <Button
+                disabled={!qtyTouched || qtyChanges.length===0 || hasQtyIncrease || hasInvalidQty || saveQty.isPending}
+                onClick={() => saveQty.mutate()}
+                className="ml-auto"
+              >
+                <Save className="h-4 w-4"/>{saveQty.isPending ? "Saving…" : "Save trimmed quantities"}
+              </Button>
+              {saveQty.error && <span className="text-xs font-semibold text-red-600">{(saveQty.error as Error).message}</span>}
+              {saveQty.isSuccess && <span className="text-xs font-bold text-emerald-700">Saved — vendor gets edited qty</span>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Chat — approver <=> raiser ───────────────────────────── */}
+      <POApprovalChat poId={poId} />
+
+      {/* ── Totals — blue block ───────────────────────────────────── */}
+      <div className="overflow-hidden rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-indigo-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-blue-500 via-indigo-500 to-sky-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex items-center gap-2 text-blue-700">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-600 text-white"><Coins className="h-4 w-4"/></div>
+            <h2 className="text-sm font-extrabold uppercase tracking-widest">Commercials</h2>
+            <span className="ml-auto text-xs font-semibold text-blue-600">Edited total is sent to vendor</span>
+          </div>
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <dl className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-4">
+              {[
+                { label: "Subtotal", value: po.data.sub_total, tint: "from-blue-50 to-white border-blue-100" },
+                { label: "Discount", value: po.data.discount_amount, tint: "from-violet-50 to-white border-violet-100" },
+                { label: "Tax", value: po.data.tax_amount, tint: "from-emerald-50 to-white border-emerald-100" },
+                { label: "Freight", value: po.data.freight_amount, tint: "from-amber-50 to-white border-amber-100" },
+              ].map((k) => (
+                <div key={k.label} className={`rounded-xl border bg-gradient-to-br p-3 ${k.tint}`}>
+                  <dt className="text-[11px] font-bold uppercase tracking-widest text-muted">{k.label}</dt>
+                  <dd className="mt-1 text-sm font-extrabold tabular-nums text-ink">₹ {money(k.value as number)}</dd>
+                </div>
+              ))}
+            </dl>
+            <div className="rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 px-5 py-4 text-right text-white shadow">
+              <div className="text-[11px] font-bold uppercase tracking-widest text-white/80">Total payable</div>
+              <div className="font-display text-3xl font-extrabold tabular-nums">₹ {money(po.data.total_amount)}</div>
+              {(() => {
+                const prevTotal = revisions.data?.[0]?.snapshot?.total_amount;
+                if (typeof prevTotal === "number") {
+                  const diff = Number(po.data.total_amount) - prevTotal;
+                  if (diff !== 0) {
+                    return (
+                      <div className={`mt-1 text-xs font-bold ${diff > 0 ? "text-red-200" : "text-emerald-300"}`}>
+                        {diff > 0 ? "+" : ""}₹ {money(diff)} from prev version
+                      </div>
+                    );
+                  }
+                }
+                return null;
+              })()}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Addresses — rose block ────────────────────────────────── */}
+      <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-pink-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-rose-400 via-pink-400 to-rose-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex items-center gap-2 text-rose-700">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-500 text-white"><MapPin className="h-4 w-4"/></div>
+            <h2 className="text-sm font-extrabold uppercase tracking-widest">Addresses</h2>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {[
+              { label: "Billing address", text: po.data.billing_address },
+              { label: "Shipping address", text: po.data.shipping_address },
+            ].map((f) => (
+              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-rose-100">
+                <div className="text-[11px] font-bold uppercase tracking-widest text-rose-700/70">{f.label}</div>
+                <div className="mt-1 whitespace-pre-line text-sm font-medium text-ink">{f.text || "—"}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Terms — violet block ──────────────────────────────────── */}
+      <div className="overflow-hidden rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-purple-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-purple-500 to-fuchsia-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex items-center gap-2 text-violet-700">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-600 text-white"><FileText className="h-4 w-4"/></div>
+            <h2 className="text-sm font-extrabold uppercase tracking-widest">Terms & conditions</h2>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {[
+              { label: "Payment terms", text: po.data.payment_terms },
+              { label: "Delivery terms", text: po.data.delivery_terms },
+              { label: "Material terms", text: po.data.material_terms },
+              { label: "Logistics terms", text: po.data.logistics_terms },
+            ].map((f) => (
+              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-violet-100">
+                <div className="text-[11px] font-bold uppercase tracking-widest text-violet-700/70">{f.label}</div>
+                <div className="mt-1 whitespace-pre-line text-sm font-medium text-ink">{f.text || "—"}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {isDraft && (
+        <Can do="po.edit">
+          <div className="overflow-hidden rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm">
+            <div className="h-1 w-full bg-gradient-to-r from-indigo-500 to-violet-500" />
+            <div className="p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-indigo-700"><div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white"><FilePen className="h-4 w-4"/></div><h2 className="text-sm font-extrabold uppercase tracking-widest">Order details</h2></div>
+                <Button variant="subtle" disabled={saveHeader.isPending} onClick={() => saveHeader.mutate()}>{saveHeader.isPending ? "Saving…" : "Save details"}</Button>
+              </div>
+              {saveHeader.error && <p className="mb-2 text-sm font-semibold text-red-600">{(saveHeader.error as Error).message}</p>}
+              <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100"><POHeaderFields value={header} onChange={(patch) => setHeader({ ...header, ...patch })} /></div>
+            </div>
+          </div>
+        </Can>
+      )}
+
+      {(po.data.revision_no ?? 0) > 0 && (
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm">
+          <div className="h-1 w-full bg-gradient-to-r from-slate-400 to-slate-600" />
+          <div className="p-4">
+            <div className="mb-3 flex items-center gap-2 text-slate-700"><div className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-700 text-white"><History className="h-4 w-4"/></div><h2 className="text-sm font-extrabold uppercase tracking-widest">Amendment history · rev {po.data.revision_no}</h2></div>
+            {po.data.amendment_reason && <p className="mb-3 rounded-xl bg-white p-3 text-sm ring-1 ring-slate-200">Latest: {po.data.amendment_reason} {po.data.amended_at ? `· ${fmtDate(po.data.amended_at)}` : ""}</p>}
+            <ol className="space-y-2 text-sm">
+              {(revisions.data ?? []).map((rev) => (
+                <li key={rev.id} className="rounded-xl border border-slate-200 bg-white p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-bold text-ink">Revision {rev.revision_no}</span><span className="text-xs text-muted">{rev.changed_by_name ?? "—"} · {fmtDate(rev.created_at)}</span></div>
+                  <p className="mt-1 text-body">{rev.reason ?? "—"}</p>
+                  <p className="mt-1 text-xs text-muted">Was {rev.status ?? "—"}{rev.vendor_status ? ` · vendor had ${rev.vendor_status.toLowerCase()} it` : ""}{typeof rev.snapshot?.total_amount === "number" ? ` · total was ${money(rev.snapshot.total_amount as number)}` : ""}</p>
+                </li>
+              ))}
+              {(revisions.data ?? []).length === 0 && <li className="text-muted">Loading earlier versions…</li>}
+            </ol>
+          </div>
+        </div>
+      )}
+
+      {amending && (
+        <Card className="space-y-3 p-4">
+          <h2 className="text-sm font-bold text-ink">Amend this order</h2>
+          <p className="text-xs text-muted">
+            The current version is filed away and the order goes back to draft: it is approved again, and {po.data.vendor_status === "ACCEPTED" ? "the vendor has to accept the new version before anything can be delivered." : "sent to the vendor again for their answer."}
+          </p>
+          <Field label="Why is it being amended?">
+            <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
+          </Field>
+          <POHeaderFields value={header} disabled={true} onChange={(patch) => setHeader({ ...header, ...patch })} />
+          <div className="border-t border-line pt-2">
+            <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
+            <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} freezeRateAndTax={true} />
+          </div>
+          {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>Cancel</Button>
+            <Button disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0} onClick={() => amend.mutate()}>{amend.isPending ? "Amending…" : "Save as a new revision"}</Button>
+          </div>
+        </Card>
+      )}
+
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-slate-600 via-slate-500 to-indigo-500" />
+        <div className="p-3 sm:p-4"><ApprovalTrail docType="PO" docId={po.data.id} /></div>
+      </div>
+
+      {po.data.status === "PENDING_APPROVAL" && (po.data.pending_with?.length > 0 || po.data.current_approver_name) && !canDecide && (
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm p-4 text-sm font-medium text-ink flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-amber-500" />
+          Waiting on {po.data.pending_with?.length ? po.data.pending_with.join(", ") : po.data.current_approver_name} for approval
+        </div>
+      )}
+
+      {canDecide && (
+        <div className="overflow-hidden rounded-2xl border border-amber-300 bg-gradient-to-br from-amber-50 via-orange-50 to-white shadow-md">
+          <div className="h-1 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600" />
+          <div className="p-4">
+            <div className="mb-3 flex items-center gap-2 text-amber-800">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-white"><ShieldCheck className="h-4 w-4"/></div>
+              <h2 className="text-sm font-extrabold uppercase tracking-widest">Approve this order</h2>
+              <span className="ml-auto hidden sm:inline text-xs font-semibold text-amber-700">Edited quantities will be sent to vendor</span>
+            </div>
+            {(po.data.pending_with?.length || po.data.current_approver_name) && (
+              <p className="mb-3 rounded-xl bg-white p-2.5 text-sm font-medium ring-1 ring-amber-200">
+                Waiting on {po.data.pending_with?.length ? po.data.pending_with.join(", ") : po.data.current_approver_name}.
+              </p>
+            )}
+            <Field label="Comments">
+              <Input value={comments} onChange={(e) => setComments((e.target as HTMLInputElement).value)} placeholder="Optional approval comment — visible in trail" />
+            </Field>
+            {decide.error && <p className="mt-2 text-sm font-semibold text-red-600">{(decide.error as Error).message}</p>}
+            <div className="mt-3 flex justify-end gap-2">
+              <Can do="po.reject">
+                <Button variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
+              </Can>
+              <Can do="po.approve">
+                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className="!bg-emerald-600 hover:!bg-emerald-700"><Check className="h-4 w-4"/> Approve</Button>
+              </Can>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
-
-    {canDecide && <Card className="mt-4 space-y-3 p-4">
-      {/* `pending_with` is read live by the server; `current_approver_name` is the
-          snapshot behind it and only used where the live read came back empty. */}
-      {(po.data.pending_with?.length || po.data.current_approver_name) && <p className="text-sm text-muted">
-        Waiting on {po.data.pending_with?.length
-          ? po.data.pending_with.join(", ")
-          : po.data.current_approver_name}.
-      </p>}
-      <Field label="Comments">
-        <Input value={comments} onChange={(event) => setComments(event.target.value)} placeholder="Optional approval comment" />
-      </Field>
-      {decide.error && <p className="text-sm text-danger">{(decide.error as Error).message}</p>}
-      <div className="flex justify-end gap-2">
-        <Can do="po.reject">
-          <Button variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4" /> Reject</Button>
-        </Can>
-        <Can do="po.approve">
-          <Button disabled={busy} onClick={() => void decideWithConfirm("approve")}><Check className="h-4 w-4" /> Approve</Button>
-        </Can>
-      </div>
-    </Card>}
-  </>;
+  );
 }

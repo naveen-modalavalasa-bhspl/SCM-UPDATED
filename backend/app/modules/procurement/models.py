@@ -728,6 +728,26 @@ Index("ix_pro_cons_source_req", PurchaseConsolidationSource.requisition_id)
 # Modules -> platform, never the reverse (rule 5): this passes plain strings, so the
 # platform never imports a model.
 # --------------------------------------------------------------------------- #
+class POComment(Base):
+    """Discussion on a purchase order between the raiser and the approver.
+
+    One flat thread per PO, append-only. Approver asks, raiser replies — the
+    history stays beside the document so the approval decision can be made with
+    context rather than over a side channel that the audit never sees.
+    """
+    __tablename__ = "pro_po_comments"
+    id = pk()
+    po_id = Column(ForeignKey("pro_purchase_orders.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    author_id = soft_fk()
+    author_name = Column(String(200), nullable=True)
+    message = Column(Text, nullable=False)
+    created_at = created_at_col()
+
+
+Index("ix_pro_po_comments_po_created", POComment.po_id, POComment.created_at)
+
+
 doc_registry.register(DocType.PO.value, "pro_purchase_orders")
 doc_registry.register(DocType.REQUISITION.value, "pro_requisitions")
 doc_registry.register(DocType.RFQ.value, "pro_rfqs")

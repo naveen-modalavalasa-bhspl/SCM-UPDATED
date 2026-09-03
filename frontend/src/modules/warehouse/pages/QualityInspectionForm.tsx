@@ -136,6 +136,19 @@ export default function QualityInspectionForm({
     enabled: !!doc?.receipt_id,
   });
 
+  const [warehouseName, setWarehouseName] = useState("");
+  const [grnNo, setGrnNo] = useState("");
+
+  const grnFallback = useMemo(() => {
+    const no = doc?.grn_no || grnNo;
+    return form.receipt_id && no ? [{ id: form.receipt_id, name: no, code: no }] : undefined;
+  }, [form.receipt_id, doc?.grn_no, grnNo]);
+
+  const warehouseFallback = useMemo(() => {
+    const wName = doc?.warehouse_name || warehouseName;
+    return form.warehouse_id && wName ? [{ id: form.warehouse_id, name: wName, code: "" }] : undefined;
+  }, [form.warehouse_id, doc?.warehouse_name, warehouseName]);
+
   const grnSerials = useMemo(() => {
     const byLine = new Map<number, string[]>();
     for (const line of grn?.items ?? []) byLine.set(line.id, line.serial_numbers ?? []);
@@ -168,7 +181,6 @@ export default function QualityInspectionForm({
         items: (receipt.items ?? []).map((l) => ({
           receipt_item_id: l.id,
           item_id: l.item_id,
-          // Carried through so the line can name itself before the first save.
           item_code: l.item_code,
           item_name: l.item_name,
           batch_no: l.batch_no,
@@ -183,6 +195,8 @@ export default function QualityInspectionForm({
           serial_numbers: l.serial_numbers ?? [],
         })),
       }));
+      if (receipt.warehouse_name) setWarehouseName(receipt.warehouse_name);
+      if (receipt.grn_no) setGrnNo(receipt.grn_no);
     },
   });
 
@@ -502,6 +516,7 @@ export default function QualityInspectionForm({
               name="receipts"
               load={grnOptions}
               value={form.receipt_id ?? ""}
+              fallback={grnFallback}
               isDisabled={locked}
               onChange={(v) => {
                 set("receipt_id", v === "" ? null : v);
@@ -515,6 +530,7 @@ export default function QualityInspectionForm({
               name="warehouses"
               load={warehouseOptions}
               value={form.warehouse_id ?? ""}
+              fallback={warehouseFallback}
               isDisabled={locked}
               onChange={(v) => set("warehouse_id", v === "" ? null : v)}
               placeholder="Warehouse"

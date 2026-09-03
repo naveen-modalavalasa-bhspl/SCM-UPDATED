@@ -412,6 +412,7 @@ export interface MaterialRequestListRow {
    *  request is waiting on. One person often holds two rungs of the same ladder, so
    *  being named the approver is not the same as being able to sign right now. */
   can_act?: boolean;
+  has_requisition?: boolean;
   created_at: string;
 }
 

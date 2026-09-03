@@ -84,6 +84,14 @@ export const poApi = {
     api.post<PurchaseOrder>(`/api/pos/${id}/reject`, { comments }).then((r) => r.data),
   sendToVendor: (id: number) =>
     api.post<PurchaseOrder>(`/api/pos/${id}/send-to-vendor`).then((r) => r.data),
+  /** Discussion thread — approver asks, raiser replies — flat per PO, append-only. */
+  comments: (id: number) =>
+    api.get<import("./types").POComment[]>(`/api/pos/${id}/comments`).then((r) => r.data),
+  postComment: (id: number, message: string) =>
+    api.post<import("./types").POComment>(`/api/pos/${id}/comments`, { message }).then((r) => r.data),
+  /** Approver trims quantities — decrease only — while awaiting approval. */
+  updateApprovalQuantities: (id: number, lines: { id: number; quantity: number }[]) =>
+    api.put<PurchaseOrder>(`/api/pos/${id}/approval-quantities`, { lines }).then((r) => r.data),
 };
 
 export const requisitionApi = {
@@ -259,8 +267,8 @@ export const supplierApi = {
     api.get<PORevision[]>(`/api/supplier/pos/${poId}/revisions`).then((r) => r.data),
   /** Accept the order, or decline it with a reason. Nothing may be despatched against
    *  an order that has not been accepted. */
-  respondToPo: (id: number, accept: boolean, note = "") =>
-    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note })
+  respondToPo: (id: number, accept: boolean, note = "", lines?: { id: number; rate: number }[]) =>
+    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note, lines })
       .then((r) => r.data),
   createDespatch: (poId: number, body: DespatchNoteWrite) =>
     api.post<DespatchNote>(`/api/supplier/pos/${poId}/despatch-notes`, body)

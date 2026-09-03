@@ -28,6 +28,13 @@ vi.mock("../api", async (importOriginal) => {
         move_volume: 20,
         headline: "BIN-2 has room",
         unmeasured_lines: 0,
+        // The four gates the meter draws. A cube-only payload is not what the server
+        // sends, and a fixture that pretends otherwise stops testing the real screen.
+        gates: [{
+          key: "VOLUME", label: "Cube", unit: "m³", status: "OK",
+          capacity: 500, occupied: 450, projected: 470, free: 30, over_by: 0, pct: 94,
+          detail: "30 m³ of 500 m³ free after this.", note: null,
+        }],
         lines: [],
       }
     ),

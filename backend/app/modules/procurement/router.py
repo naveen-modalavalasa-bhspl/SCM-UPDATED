@@ -28,7 +28,7 @@ from app.modules.procurement.schemas import (
     ConsolidationStatsOut, DemandPoolRow, LedgerStatsOut, POStatsOut, QuoteStatsOut,
     ReqStatsOut, RFQStatsOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
-    POAmendIn, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
+    POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
     PORevisionOut, POVendorResponseIn, QuoteListRow,
     QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate,
@@ -160,6 +160,31 @@ async def po_revisions(po_id: int, db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     """Every version this order has been. Reading one needs only `po.view`."""
     return await service.po_revisions(db, po_id, user)
+
+
+# ── PO discussion (approver <=> raiser) & approval quantity edits ──────────
+
+@pos.get("/{po_id}/comments", response_model=list[POCommentOut])
+async def po_comments(po_id: int, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(perms.PO_VIEW))):
+    """Conversation on this PO — approver asks, raiser replies."""
+    return await service.po_comments(db, po_id, user)
+
+
+@pos.post("/{po_id}/comments", response_model=POCommentOut, status_code=201)
+async def post_po_comment(po_id: int, body: POCommentIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.add_po_comment(db, po_id, body.message, user)
+
+
+@pos.put("/{po_id}/approval-quantities", response_model=POOut)
+async def update_po_approval_quantities(
+        po_id: int, body: POApprovalQtyIn,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.PO_APPROVE))):
+    """Approver trims quantities — decrease only — while awaiting approval."""
+    return await service.update_po_approval_quantities(db, po_id, body, user)
 
 
 
@@ -690,7 +715,7 @@ async def vendor_respond_to_po(po_id: int, body: POVendorResponseIn,
     """Accept the order, or decline it with a reason. The vendor id comes from the
     token, never from the caller, so this can only ever answer their own order."""
     await service.vendor_respond_to_po(
-        db, account.vendor_id, po_id, body.accept, body.note)
+        db, account.vendor_id, po_id, body.accept, body.note, getattr(body, "lines", None))
     return await service.vendor_get_po(db, account.vendor_id, po_id)
 
 

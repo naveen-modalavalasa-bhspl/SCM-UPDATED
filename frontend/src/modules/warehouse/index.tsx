@@ -23,6 +23,7 @@ import MastersLayout from "./pages/masters/MastersLayout";
 import Warehouses from "./pages/masters/Warehouses";
 import WarehouseForm from "./pages/masters/WarehouseForm";
 import WarehouseDetail from "./pages/masters/WarehouseDetail";
+import BinForm from "./pages/masters/BinForm";
 import FloorPlan from "./pages/masters/FloorPlan";
 import StorageTypes from "./pages/masters/StorageTypes";
 import ScanView from "./pages/ScanView";
@@ -180,6 +181,8 @@ export function WarehouseModule() {
         <Route path="warehouses/new" element={<WarehouseForm />} />
         <Route path="warehouses/:id" element={<WarehouseDetail />} />
         <Route path="warehouses/:id/edit" element={<WarehouseForm />} />
+        <Route path="warehouses/:id/bins/new" element={<BinForm />} />
+        <Route path="warehouses/:id/bins/:bin_id/edit" element={<BinForm />} />
         <Route path="floor-plan" element={<FloorPlan />} />
         <Route path="storage-types" element={<StorageTypes />} />
       </Route>

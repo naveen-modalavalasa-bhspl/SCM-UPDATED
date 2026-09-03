@@ -262,6 +262,17 @@ class PutawayTask(Base):
     uom_id = Column(BigInteger, nullable=True)
     qty = Column(Numeric(15, 3), nullable=False, default=0)
 
+    # WHICH packaging unit landed on the dock. "3 cases" and "1500 eaches" are the same
+    # `qty` and need entirely different shelf space, so the document has to carry the
+    # rung it arrived in — a bin is checked against handling units, never against loose
+    # volume. Blank falls back to the item's default putaway unit.
+    item_packaging_id = Column(BigInteger, index=True, nullable=True)
+    package_id = Column(BigInteger, nullable=True)
+    package_name = Column(String(200), nullable=True)     # snapshot
+    # ceil(qty / units per pack) — whole packs, because half a case still occupies a
+    # case's footprint. Stamped at confirm from the rung above.
+    handling_units = Column(Numeric(15, 3), nullable=True)
+
     suggested_bin_id = Column(BigInteger, nullable=True)
     actual_bin_id = Column(BigInteger, nullable=True)
 
@@ -744,6 +755,18 @@ class SerialNumber(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
+
+    # The table is per PHYSICAL UNIT, so it is the largest in the schema by a wide
+    # margin — 773k rows against 94 stock balances — and `item_id` alone is worth
+    # almost nothing on it (23 distinct items). These two are the shapes every unit
+    # lookup actually has; without them opening one material issue took 26 seconds.
+    # The `remarks` prefix index is created by `d4e5f6a7b8c9` in raw SQL: the column
+    # is 500 wide and MySQL will only index the front of it.
+    __table_args__ = (
+        Index("ix_whs_serial_stock_lookup",
+              "item_id", "warehouse_id", "status", "is_active", "batch_id", "bin_id"),
+        Index("ix_whs_serial_point_item", "item_id", "warehouse_id", "is_active"),
+    )
 
 
 # A location and a bin are the same row in the same table (`whs_warehouse_locations`);

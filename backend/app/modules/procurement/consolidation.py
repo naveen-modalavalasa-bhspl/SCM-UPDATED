@@ -29,12 +29,13 @@ from app.core.pagination import PageParams, paginate
 from app.shared.scope import scope_condition
 from app.modules.procurement.models import (
     PurchaseConsolidation, PurchaseConsolidationItem, PurchaseConsolidationSource,
-    Requisition, RequisitionItem,
+    Requisition, RequisitionItem, RFQ,
 )
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
     AuditAction, ConsolidationStatus, DocType, InstanceStatus, RequisitionStatus,
+    RFQStatus,
 )
 from app.shared.models.base import utcnow
 from app.shared.numbering import next_number
@@ -88,6 +89,14 @@ async def get_consolidation(db: AsyncSession, cons_id: int,
     doc = (await db.execute(stmt)).scalar_one_or_none()
     if doc is None:
         raise NotFoundError(f"Consolidated sheet {cons_id} not found")
+
+    existing_rfq = await db.scalar(
+        select(RFQ.id)
+        .where(RFQ.consolidation_id == doc.id,
+               RFQ.status != RFQStatus.CANCELLED.value)
+        .limit(1)
+    )
+    doc.has_rfq = bool(existing_rfq)
     return doc
 
 

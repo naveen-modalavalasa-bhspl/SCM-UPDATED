@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Award, Check, Search, Trophy } from "lucide-react";
+import { Award, Check, Search, Trophy, ChevronDown, ChevronRight, Star } from "lucide-react";
 import { Button, Can, Card, ScrollBox, StatusPill } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { money } from "../pages/RequisitionListPage";
@@ -161,6 +161,7 @@ export function QuotationComparison({
   // Rows this vendor did not quote at all. Off by default: "did not quote" is itself
   // an answer a buyer needs to see.
   const [quotedOnly, setQuotedOnly] = useState(false);
+  const [linesExpanded, setLinesExpanded] = useState(false);
 
   const columns = useMemo(() => {
     if (shown === null) return totals.slice(0, VISIBLE);
@@ -204,7 +205,27 @@ export function QuotationComparison({
   }, [comparison.items, itemQuery, quotedOnly, columns]);
 
   return (
-    <Card className="p-0">
+    <Card className="p-0 overflow-hidden shadow-lg border-line">
+      {totals.length > 0 && totals.some((t) => t.is_recommended) && (
+        <div className="bg-gradient-to-r from-brand/20 via-brand/5 to-transparent border-b border-brand/20 p-5">
+          <div className="flex items-start gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand/20 text-brand shadow-sm">
+              <Trophy className="h-6 w-6" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-brand uppercase tracking-wider mb-1 flex items-center gap-2">
+                <Star className="h-4 w-4" /> Top Ranked Supplier
+              </h3>
+              <p className="text-lg font-bold text-ink">
+                {totals.find((t) => t.is_recommended)?.vendor_name ?? `Vendor ${totals.find((t) => t.is_recommended)?.vendor_id}`}
+              </p>
+              <p className="text-sm text-muted mt-1">
+                This supplier offers the best overall proposal based on the selected evaluation method.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       {/* The vendor switchboard. Only earns its place past the default window, but
         * once an RFQ went to twelve suppliers it is the only way to read the sheet. */}
       <div className="flex flex-wrap items-center gap-2 border-b border-line p-3">
@@ -321,6 +342,21 @@ export function QuotationComparison({
           </thead>
 
           <tbody>
+            <tr>
+              <td colSpan={columns.length + 1} className="p-0">
+                <button
+                  type="button"
+                  onClick={() => setLinesExpanded(!linesExpanded)}
+                  className="w-full flex items-center justify-center gap-2 py-3 bg-surface-2/30 hover:bg-surface-2/60 text-sm font-medium text-ink transition-colors border-y border-line"
+                >
+                  {linesExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  {linesExpanded ? "Hide Line Items" : "View Line Items"}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+          {linesExpanded && (
+          <tbody>
             {rows.map((row) => (
               <tr key={row.rfq_item_id} className="align-top">
                 <th scope="row" className={`${PINNED} border-t border-line px-3 py-3 text-left`}>
@@ -353,6 +389,7 @@ export function QuotationComparison({
               </tr>
             )}
           </tbody>
+          )}
 
           <tfoot>
             <FooterRow label="Delivery by" columns={columns} render={(t) =>

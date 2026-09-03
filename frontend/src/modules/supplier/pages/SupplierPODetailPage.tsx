@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Send, Truck, X, CreditCard, Package, Route, Building, MapPin } from "lucide-react";
+import { Accordion, AccordionItem } from "@heroui/react";
 import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
 } from "@/shared/components";
@@ -70,12 +71,15 @@ export function SupplierPODetailPage() {
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [editing, setEditing] = useState<DespatchNote | null>(null);
   const [responseNote, setResponseNote] = useState("");
+  const [amendedRates, setAmendedRates] = useState<Record<number, number>>({});
 
   /** Yes, or no with a reason. The vendor id comes from the token server-side, so this
    *  can only ever answer this vendor's own order. */
   const respond = useMutation({
-    mutationFn: (accept: boolean) =>
-      supplierApi.respondToPo(poId, accept, responseNote),
+    mutationFn: (accept: boolean) => {
+      const linesData = Object.entries(amendedRates).map(([id, rate]) => ({ id: Number(id), rate }));
+      return supplierApi.respondToPo(poId, accept, responseNote, linesData.length > 0 ? linesData : undefined);
+    },
     onSuccess: (_result, accept) => {
       toast.success(accept ? "Order accepted" : "Order declined");
       setResponseNote("");
@@ -376,63 +380,63 @@ export function SupplierPODetailPage() {
         </p>
       )}
 
-      {(po.payment_terms || po.delivery_terms || po.material_terms || po.logistics_terms) && (
-        <Card className="mb-5 p-6">
-          <h2 className="mb-4 text-base font-semibold text-ink">Terms and Conditions</h2>
-          <div className="flex flex-col gap-4">
-            {([
-              ["Payment terms", po.payment_terms, CreditCard],
-              ["Delivery terms", po.delivery_terms, Truck],
-              ["Material terms", po.material_terms, Package],
-              ["Logistics terms", po.logistics_terms, Route],
-            ] as const).filter(([, text]) => text).map(([label, text, Icon]) => (
-              <div 
-                key={label} 
-                className="group flex flex-col rounded-xl border border-line/50 bg-surface-2/30 p-4 transition-all hover:bg-surface-2 hover:shadow-sm"
-              >
-                <div className="mb-3 flex items-center gap-2 text-muted transition-colors group-hover:text-ink">
-                  <Icon className="h-4 w-4" />
-                  <h3 className="text-xs font-bold uppercase tracking-wider">{label}</h3>
+      <Accordion variant="splitted" className="mb-5 px-0">
+        {(po.payment_terms || po.delivery_terms || po.material_terms || po.logistics_terms) ? (
+          <AccordionItem key="terms" aria-label="Terms and Conditions" title={<h2 className="text-base font-semibold text-ink">Terms and Conditions</h2>}>
+            <div className="flex flex-col gap-4 pb-4">
+              {([
+                ["Payment terms", po.payment_terms, CreditCard],
+                ["Delivery terms", po.delivery_terms, Truck],
+                ["Material terms", po.material_terms, Package],
+                ["Logistics terms", po.logistics_terms, Route],
+              ] as const).filter(([, text]) => text).map(([label, text, Icon]) => (
+                <div 
+                  key={label} 
+                  className="group flex flex-col rounded-xl border border-line/50 bg-surface-2/30 p-4 transition-all hover:bg-surface-2 hover:shadow-sm"
+                >
+                  <div className="mb-3 flex items-center gap-2 text-muted transition-colors group-hover:text-ink">
+                    <Icon className="h-4 w-4" />
+                    <h3 className="text-xs font-bold uppercase tracking-wider">{label}</h3>
+                  </div>
+                  <div className="flex-1 whitespace-pre-line break-words text-sm leading-relaxed text-body">{text}</div>
                 </div>
-                <div className="flex-1 whitespace-pre-line break-words text-sm leading-relaxed text-body">{text}</div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {(po.billing_address || po.shipping_address) && (
-        <Card className="mb-5 p-6">
-          <h2 className="mb-4 text-base font-semibold text-ink">Addresses</h2>
-          <div className="flex flex-col gap-4">
-            {([
-              ["Bill to", po.billing_address, Building],
-              ["Ship to", po.shipping_address, MapPin],
-            ] as const).filter(([, text]) => text).map(([label, text, Icon]) => (
-              <div 
-                key={label} 
-                className="group flex flex-col rounded-xl border border-line/50 bg-surface-2/30 p-4 transition-all hover:bg-surface-2 hover:shadow-sm"
-              >
-                <div className="mb-3 flex items-center gap-2 text-muted transition-colors group-hover:text-ink">
-                  <Icon className="h-4 w-4" />
-                  <h3 className="text-xs font-bold uppercase tracking-wider">{label}</h3>
+              ))}
+            </div>
+          </AccordionItem>
+        ) : []}
+        {(po.billing_address || po.shipping_address) ? (
+          <AccordionItem key="addresses" aria-label="Addresses" title={<h2 className="text-base font-semibold text-ink">Addresses</h2>}>
+            <div className="flex flex-col gap-4 pb-4">
+              {([
+                ["Bill to", po.billing_address, Building],
+                ["Ship to", po.shipping_address, MapPin],
+              ] as const).filter(([, text]) => text).map(([label, text, Icon]) => (
+                <div 
+                  key={label} 
+                  className="group flex flex-col rounded-xl border border-line/50 bg-surface-2/30 p-4 transition-all hover:bg-surface-2 hover:shadow-sm"
+                >
+                  <div className="mb-3 flex items-center gap-2 text-muted transition-colors group-hover:text-ink">
+                    <Icon className="h-4 w-4" />
+                    <h3 className="text-xs font-bold uppercase tracking-wider">{label}</h3>
+                  </div>
+                  <div className="flex-1 whitespace-pre-line break-words text-sm leading-relaxed text-body">{text}</div>
                 </div>
-                <div className="flex-1 whitespace-pre-line break-words text-sm leading-relaxed text-body">{text}</div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
+              ))}
+            </div>
+          </AccordionItem>
+        ) : []}
+      </Accordion>
 
       <h2 className="mb-2 text-sm font-semibold text-ink">Ordered</h2>
       <Card className="mb-5 overflow-x-auto p-0">
-        <table className="w-full min-w-[560px] text-left text-sm">
+        <table className="w-full min-w-[700px] text-left text-sm">
           <thead className="bg-content2 text-xs text-muted">
             <tr>
               <th className="p-3">Item</th>
-              <th className="p-3 text-right">Ordered</th>
-              <th className="p-3 text-right">Dispatched</th>
-              <th className="p-3 text-right">Still owed</th>
+              <th className="p-3 text-right w-32">Ordered</th>
+              <th className="p-3 text-right w-32">Rate (₹)</th>
+              <th className="p-3 text-right w-32">Dispatched</th>
+              <th className="p-3 text-right w-32">Still owed</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-line">
@@ -442,19 +446,35 @@ export function SupplierPODetailPage() {
               // A line the last filed revision does not mention is one this
               // amendment added. No revision on file means nothing has changed.
               const isNew = previous.length > 0 && !prev;
+              const qtyChanged = prev && prev.quantity !== line.ordered_qty;
+              const isChanged = isNew || qtyChanged;
 
               return (
-                <tr key={line.po_item_id} className={isNew ? "bg-primary/5" : ""}>
+                <tr key={line.po_item_id} className={isChanged ? "bg-primary/5" : ""}>
                   <td className="p-3">
                     <strong className="text-ink">{line.item_name ?? "—"}</strong>
                     {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
+                    {qtyChanged && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">Qty Changed</span>}
                     <p className="font-mono text-xs text-muted">{line.item_code}</p>
                   </td>
                   <td className="tabular p-3 text-right">
-                    {prev && prev.quantity !== line.ordered_qty && (
+                    {qtyChanged && (
                       <span className="line-through text-muted mr-1 text-xs">{prev.quantity}</span>
                     )}
                     {line.ordered_qty} {line.uom_code ?? ""}
+                  </td>
+                  <td className="tabular p-2 text-right">
+                    {awaitingAnswer && isChanged ? (
+                      <Input
+                        type="number"
+                        placeholder="New rate"
+                        className="text-right w-24 ml-auto"
+                        value={amendedRates[line.po_item_id] ?? line.rate ?? ""}
+                        onChange={(e) => setAmendedRates(r => ({ ...r, [line.po_item_id]: Number(e.target.value) }))}
+                      />
+                    ) : (
+                      money(line.rate)
+                    )}
                   </td>
                   <td className="tabular p-3 text-right text-muted">{line.despatched_qty}</td>
                   <td className="tabular p-3 text-right font-semibold">{line.pending_qty}</td>

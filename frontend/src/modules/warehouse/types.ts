@@ -125,9 +125,17 @@ export interface Bin {
   /** Depth in the tree, 1 at the root. Derived by the tree endpoint. */
   level?: number | null;
   capacity_qty?: number | null;
+  /** The USABLE cube on a decorated row: stated (or worked out from the three sides
+   *  below) and then derated by the void factor. A screen never re-derives it. */
   capacity_volume?: number | null;
   max_weight_capacity?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
   height_cm?: number | null;
+  /** "This bay takes one euro-pallet, or four totes" — the gate no cube expresses. */
+  max_handling_units?: number | null;
+  /** Void factor, 1-100. Null means 100%: nobody has derated this location. */
+  fill_efficiency_pct?: number | null;
   aisle_width_meters?: number | null;
   temperature_controlled?: boolean;
   humidity_percentage?: number | null;
@@ -142,15 +150,33 @@ export interface Bin {
   occupied_qty?: number | null;
   /**
    * Volume, in cubic metres, filled by the suggested-bins endpoint. Read from the
-   * stock standing in the bin, never stored — so it is absent (not zero) on the
-   * endpoints that do not work it out.
+   * handling units the stock in this bin comes to, never stored — so it is absent
+   * (not zero) on the endpoints that do not work it out.
    */
   occupied_volume?: number | null;
   free_volume?: number | null;
   utilisation_pct?: number | null;
   capacity_status?: CapacityStatus | null;
-  /** True when some of the stock here has no measured volume, so the figure is a floor. */
+  /** True when some of the stock here has no measured pack, so the figure is a floor. */
   is_partial?: boolean | null;
+  /** The discrete and payload gates — a bay at its pallet limit is full whatever
+   *  its cube says, which is why a chip shows these beside the bar. */
+  capacity_units?: number | null;
+  occupied_units?: number | null;
+  capacity_weight_kg?: number | null;
+  occupied_weight_kg?: number | null;
+  /**
+   * What this bin says about the LOAD IN HAND, as opposed to how full it is in
+   * general. Set only on the suggested-bins endpoint, which is RANKED on it:
+   * `capacity_status` describes the shelf, `fit_status` is the decision, and the two
+   * differ exactly where it matters — a nine-tenths empty bay a pallet does not enter.
+   */
+  fit_status?: CapacityStatus | null;
+  /** Does ONE unit of the chosen pack physically go in? Null when either is unmeasured. */
+  fits_pack?: boolean | null;
+  /** How many more of this pack it would still take — stated, or slotted from the sides. */
+  slots_free?: number | null;
+  slot_capacity?: number | null;
 }
 
 /**
@@ -163,10 +189,78 @@ export type CapacityStatus =
   | "TIGHT"
   | "FULL"
   | "OVER"
+  /** The bounding box says no: the pack does not physically enter the location,
+   *  however much cube is left in it. */
+  | "WONT_FIT"
   | "NO_CAPACITY"
   | "UNMEASURED";
 
-/** One proposed movement's own share of a location's space. */
+/** Which of the four checks a gate is. */
+export type CapacityGateKey = "VOLUME" | "WEIGHT" | "FOOTPRINT" | "UNITS";
+
+/**
+ * One of the four independent checks a location is put through.
+ *
+ * Every gate carries the same shape whether it measures a cube, a payload, a count, or
+ * answers a plain yes/no, so one component renders all four and adds no arithmetic of
+ * its own. FOOTPRINT is a verdict rather than a fraction — a pallet either enters the
+ * bay or it does not — so its numeric fields are null and only `status` and `detail`
+ * say anything.
+ */
+export interface CapacityGate {
+  key: CapacityGateKey;
+  label: string;
+  unit?: string | null;
+  status: CapacityStatus;
+  capacity?: number | null;
+  occupied?: number | null;
+  projected?: number | null;
+  free?: number | null;
+  over_by?: number | null;
+  pct?: number | null;
+  detail: string;
+  /** The caveat under the bar — a derated capacity, an unweighed line, a container
+   *  that may not be turned. Null when there is nothing to add. */
+  note?: string | null;
+}
+
+/**
+ * One packaging unit an item can move in — a rung of its ladder, resolved.
+ *
+ * Served by the backend so the volume on the picker is the volume the bin check will
+ * use. `dims_from` says whether the box was measured on this rung or inherited from
+ * the container type, because a storekeeper comparing two items deserves to know.
+ */
+export interface HandlingUnit {
+  item_packaging_id?: number | null;
+  item_id?: number | null;
+  level: number;
+  package_id?: number | null;
+  package_name?: string | null;
+  /** How many base units ONE of these holds — the conversion factor, multiplied up
+   *  through every rung below it. */
+  base_qty?: number | null;
+  uom_code?: string | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  volume_cbm?: number | null;
+  gross_weight_kg?: number | null;
+  tare_weight_kg?: number | null;
+  max_stack_tiers?: number | null;
+  is_rotatable?: boolean | null;
+  fill_efficiency_pct?: number | null;
+  is_default: boolean;
+  is_measured: boolean;
+  dims_from?: "RUNG" | "PACKAGE" | null;
+}
+
+/**
+ * One proposed movement, resolved into the handling units it actually is.
+ *
+ * `qty` is in the item's own UOM; `handling_units` is what that comes to in whole
+ * packs, because half a case still occupies a case's footprint.
+ */
 export interface OccupancyLine {
   item_id?: number | null;
   item_code?: string | null;
@@ -174,18 +268,30 @@ export interface OccupancyLine {
   uom_code?: string | null;
   qty?: number | null;
   direction: "IN" | "OUT";
-  unit_volume_cbm?: number | null;
-  /** Null when the item has never been measured — listed anyway, so it can be named. */
+  item_packaging_id?: number | null;
+  pack_name?: string | null;
+  pack_level?: number | null;
+  pack_base_qty?: number | null;
+  pack_volume_cbm?: number | null;
+  pack_gross_weight_kg?: number | null;
+  handling_units?: number | null;
+  /** Null when the pack has never been measured — listed anyway, so it can be named. */
   volume?: number | null;
+  weight?: number | null;
 }
 
 /**
  * How full one storage location is, and what a proposed move would do to it.
  *
- * Every volume is cubic metres. `capacity_volume` is null when the location has none
- * configured — not zero, which would read as "no room at all". `headline` and
- * `detail` are sentences from the server; the screen renders them rather than
- * composing its own, so putaway and material issue say the same thing.
+ * Space is measured in HANDLING UNITS, never in loose per-unit volume: a quantity is
+ * converted to whole packs and each pack carries its own outer box and gross weight.
+ * So `gates` is four answers, not one — the cube, the payload, whether a unit
+ * physically enters the location, and the discrete limit on how many it takes.
+ *
+ * `capacity_volume` is the usable cube and is null when the location has none
+ * configured — not zero, which would read as "no room at all". `headline` and `detail`
+ * are sentences from the server; the screen renders them rather than composing its
+ * own, so putaway and material issue say the same thing about the same state.
  */
 export interface LocationOccupancy {
   location_id: number;
@@ -197,11 +303,30 @@ export interface LocationOccupancy {
   counts_locations: number;
 
   capacity_volume?: number | null;
+  /** Before the void factor, so a screen can show what was derated from. */
+  stated_volume?: number | null;
+  fill_efficiency_pct?: number | null;
   occupied_volume: number;
   free_volume?: number | null;
   utilisation_pct?: number | null;
+  projected_volume?: number | null;
+  projected_free_volume?: number | null;
+  projected_pct?: number | null;
+  over_by?: number | null;
 
-  /** Stock here whose item has no measured volume, so the bar is a floor, not a total. */
+  /** The whole verdict, gate by gate, ordered as the storekeeper should read them. */
+  gates: CapacityGate[];
+  capacity_weight_kg?: number | null;
+  occupied_weight_kg?: number | null;
+  projected_weight_kg?: number | null;
+  capacity_units?: number | null;
+  occupied_units?: number | null;
+  projected_units?: number | null;
+  location_length_cm?: number | null;
+  location_width_cm?: number | null;
+  location_height_cm?: number | null;
+
+  /** Stock here whose item has no measured pack, so the bar is a floor, not a total. */
   unmeasured_items: number;
   unmeasured_qty?: number | null;
   measured_items: number;
@@ -210,16 +335,21 @@ export interface LocationOccupancy {
 
   item_id?: number | null;
   item_name?: string | null;
-  unit_volume_cbm?: number | null;
   qty?: number | null;
+  item_packaging_id?: number | null;
+  pack_name?: string | null;
+  pack_base_qty?: number | null;
+  pack_volume_cbm?: number | null;
+  /** The pack's own sides, so the fit diagram is drawn from data rather than guessed. */
+  pack_length_cm?: number | null;
+  pack_width_cm?: number | null;
+  pack_height_cm?: number | null;
+  pack_gross_weight_kg?: number | null;
   direction: "IN" | "OUT";
   move_volume?: number | null;
+  move_weight?: number | null;
+  move_units?: number | null;
   lines: OccupancyLine[];
-
-  projected_volume?: number | null;
-  projected_free_volume?: number | null;
-  projected_pct?: number | null;
-  over_by?: number | null;
 
   status: CapacityStatus;
   headline: string;
@@ -232,6 +362,10 @@ export interface OccupancyMove {
   item_id: number;
   qty: number;
   direction: "IN" | "OUT";
+  /** Which rung of the item's ladder this quantity moves in. Omitted falls back to the
+   *  item's default putaway unit, which is what an issue or a transfer wants: the goods
+   *  are already packed the way they are packed. */
+  item_packaging_id?: number | null;
 }
 
 export interface BinWrite {
@@ -246,9 +380,19 @@ export interface BinWrite {
   barcode?: string | null;
   floor_level?: number | null;
   shelf_level?: number | null;
+  /** Leave blank and the cube is worked out from the three sides below, so a location
+   *  measured once needs nothing typed twice. */
   capacity_volume?: number | null;
   max_weight_capacity?: number | null;
+  /** The location's own inner box. A pallet whose cube fits a bay it is too wide to
+   *  enter does not fit, and only these three can say so. */
+  length_cm?: number | null;
+  width_cm?: number | null;
   height_cm?: number | null;
+  /** "This bay takes one euro-pallet, or four totes" — the gate no cube expresses. */
+  max_handling_units?: number | null;
+  /** Void factor, 1-100. Blank means 100%: nobody has derated this location. */
+  fill_efficiency_pct?: number | null;
   aisle_width_meters?: number | null;
   temperature_controlled?: boolean;
   humidity_percentage?: number | null;
@@ -636,10 +780,21 @@ export interface Putaway {
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
   is_asset?: boolean;
-  /** Cubic metres one unit takes. Null when the item has never been measured. */
-  unit_volume_cbm?: number | null;
-  /** `unit_volume_cbm x qty` — what this whole line needs on a shelf. */
+  /** WHICH pack this task is in. "3 cases" and "1500 eaches" are the same `qty` and
+   *  need entirely different shelf space, so the task carries the rung. */
+  item_packaging_id?: number | null;
+  package_id?: number | null;
+  package_name?: string | null;
+  pack_base_qty?: number | null;
+  pack_volume_cbm?: number | null;
+  pack_gross_weight_kg?: number | null;
+  /** `ceil(qty / pack_base_qty)` — whole packs, because half a case still occupies a
+   *  case's footprint. Null when the item has no measured packaging unit. */
+  handling_units?: number | null;
   line_volume_cbm?: number | null;
+  line_weight_kg?: number | null;
+  /** Every rung this item could be put away in, so the picker needs no second call. */
+  packs?: HandlingUnit[];
   /**
    * Only on the response to `confirm`: the shelf as it was at the moment of the press,
    * overflow included. A full bin never stops a putaway, so this is how the screen
@@ -649,9 +804,63 @@ export interface Putaway {
   created_at?: string;
 }
 
+/** One printable identity minted by a putaway. */
+export interface PutawayUnitCode {
+  id: number;
+  /** What the QR carries and what is printed under it. */
+  code: string;
+  code_type: "ASSET" | "CONSUMABLE" | "SERIAL";
+  /** UNIT is one physical thing; LOT is the whole balance row, which is all a
+   *  measured item can carry — 30 grams is one lot, not 30 things to label. */
+  scope: "UNIT" | "LOT";
+  serial_number?: string | null;
+  imei?: string | null;
+  status?: string | null;
+}
+
+/**
+ * `GET /warehouse/putaways/{id}/codes` — the label sheet's HEADER: what this putaway
+ * minted, how many, and the item, batch and location they name.
+ *
+ * It carries no codes, only `total_codes`: opening the panel must not depend on how big
+ * the lorry was. The codes come a page at a time from `/codes/units`.
+ */
+export interface PutawayCodes {
+  putaway_id: number;
+  putaway_no?: string | null;
+  status: string;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  /** Warranty end for an asset, expiry for anything else — labelled off `is_asset`. */
+  expiry_date?: string | null;
+  is_asset?: boolean;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  bin_path?: string | null;
+  lot_no?: string | null;
+  qty?: number | null;
+  completed_at?: string | null;
+  is_code_tracked?: boolean;
+  code_type?: "ASSET" | "CONSUMABLE" | null;
+  /** How many codes this putaway minted. A count, so the panel can say "500 codes"
+   *  and size its pager without pulling five hundred rows to find out. */
+  total_codes: number;
+  /** Why the sheet is empty. Served, never composed in the screen. */
+  reason?: string | null;
+}
+
 export interface PutawayConfirm {
   actual_bin_id: number;
   qty?: number;
+  /** The rung being put away. Omitted falls back to the task's own, then to the item's
+   *  default putaway unit — so an untouched screen still measures the load. */
+  item_packaging_id?: number | null;
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
@@ -845,13 +1054,62 @@ export interface IssueItem {
   imei_numbers?: string[] | null;
   /** Which identifier names one unit of this item: SERIAL -> IMEI -> CODE. */
   unit_mode?: UnitMode | null;
+  /** What KIND of identifier that is, for the badge. Wider than `unit_mode`: an
+   *  asset tag and a consumable lot code are the same column to the matcher and
+   *  two different labels on the goods. */
+  tracking_type?: TrackingType | null;
   /** The reserved units, stated in that same currency. */
   unit_keys?: string[] | null;
   /** Whether the item has identified units in stock at all. */
   has_units?: boolean;
+  /**
+   * How many units THIS line's own batch and bin can still give it. Served, never
+   * counted in the screen: after approval the batch is frozen, so a line the batch
+   * cannot serve has to be visible while it is still editable.
+   */
+  units_available?: number | null;
 }
 
 export type UnitMode = "SERIAL" | "IMEI" | "CODE";
+
+/** What a storekeeper is being asked to read off the goods. Served — see
+ *  `trackingTypes()` and the backend's `enums.TRACKING_META`. */
+export type TrackingType = "SERIAL" | "IMEI" | "ASSET" | "CONSUMABLE" | "NONE";
+
+export interface TrackingTypeMeta {
+  code: TrackingType;
+  /** Names the badge. */
+  label: string;
+  /** Names one of them in a sentence: "3 of 5 asset tags". */
+  unit: string;
+  /** What to read off the goods. */
+  hint: string;
+}
+
+/** One (batch, bin) an issue line can draw from, and what it holds. The unit of a
+ *  split: a quantity larger than any single source becomes several of these. */
+export interface IssueStockSource {
+  item_id: number;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  bin_name?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  mfg_date?: string | null;
+  /** Free to anybody. NOT what this document may draw — see `drawable_qty`. */
+  available_qty: number;
+  /** Held by every document, this one included. */
+  reserved_qty: number;
+  /** The part of that hold belonging to THIS issue's own indent. An approved
+   *  allocation reserves the stock it is about to issue, so a document issuing
+   *  exactly what was reserved for it sees `available_qty` at zero over goods that
+   *  are on the shelf and spoken for by itself. */
+  own_reserved_qty: number;
+  total_qty: number;
+  /** `available_qty + own_reserved_qty` — what a line here may actually take. */
+  drawable_qty: number;
+}
 
 export interface IssueItemWrite {
   id?: number;
@@ -861,8 +1119,10 @@ export interface IssueItemWrite {
   item_name?: string | null;
   is_serial_tracked?: boolean;
   unit_mode?: UnitMode | null;
+  tracking_type?: TrackingType | null;
   unit_keys?: string[] | null;
   has_units?: boolean;
+  units_available?: number | null;
   // Carried on the line so the form knows whether to ask for a batch. Set from the
   // chosen item, alongside is_serial_tracked, when the item is picked.
   is_batch_tracked?: boolean;

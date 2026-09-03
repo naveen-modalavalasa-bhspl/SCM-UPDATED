@@ -1,7 +1,43 @@
 import { useEffect, useState } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { ScanLine, Trash2 } from "lucide-react";
+import { Boxes, MapPin, ScanLine, Trash2 } from "lucide-react";
 import { Button, ErrorBanner } from "@/shared/components";
+import { TrackingBadge } from "./TrackingBadge";
+import type { TrackingType, TrackingTypeMeta } from "../types";
+
+/**
+ * One unit as the picker shows it: the value being validated, plus every other
+ * identifier the same physical unit carries and where it is standing.
+ *
+ * The list used to be a single column of monospace strings. A serial, an IMEI, an
+ * asset tag and a consumable lot code all look the same in that column — fifteen
+ * characters of upper case and digits — so nothing on screen said which of them the
+ * storekeeper was looking at, or which of a handset's two numbers he was expected to
+ * scan. Naming the type per row, once, is the fix.
+ */
+export interface PickerUnit {
+  /** The identifier this line is validated on — what selection is keyed by. */
+  value: string;
+  type?: TrackingType | null;
+  serial?: string | null;
+  imei?: string | null;
+  code?: string | null;
+  batchNo?: string | null;
+  binCode?: string | null;
+}
+
+/** Where the units being picked are standing, and how many the pick is for. Shown
+ *  above the list because the list is SCOPED to it: a unit in another bin or another
+ *  batch is not on offer here, and a storekeeper who does not know that reads a short
+ *  list as missing stock. */
+export interface PickerScope {
+  batchNo?: string | null;
+  binCode?: string | null;
+  /** What that exact batch-and-bin holds, from the served sources. */
+  available?: number | null;
+  /** Which split of the item this is, when the line was split over locations. */
+  splitLabel?: string | null;
+}
 
 /**
  * Captures the serial numbers of a receipt or issue line — or, at inspection, picks
@@ -36,6 +72,10 @@ export function SerialNumbersModal({
   available = null,
   imeiBySerial,
   metaByValue,
+  unitByValue,
+  scope,
+  trackingType,
+  trackingMeta,
   pickMode = "reject",
   noun = "serial",
 }: {
@@ -64,6 +104,15 @@ export function SerialNumbersModal({
    *  shown under it, so picking one identifier reflects the others rather than
    *  leaving the storekeeper to look them up. */
   metaByValue?: Record<string, string>;
+  /** The full unit behind each offered value. Present = the typed, columned picker;
+   *  absent = the plain list, which is what QC and the GRN still want. */
+  unitByValue?: Record<string, PickerUnit>;
+  /** The batch and bin this pick is confined to. */
+  scope?: PickerScope;
+  /** What kind of identifier the line is asking for, for the badge and the wording. */
+  trackingType?: TrackingType | null;
+  /** The served row for that type — see `TRACKING_META`. */
+  trackingMeta?: TrackingTypeMeta | null;
   /** `reject` is QC semantics; `select` is used when issuing stock from a bin. */
   pickMode?: "reject" | "select";
 }) {
@@ -95,8 +144,34 @@ export function SerialNumbersModal({
 
   if (picking) {
     const selected = new Set(serials);
+
+    /**
+     * Every string that means this unit.
+     *
+     * The label stuck on the goods carries the SERIAL, but a line keyed on an asset
+     * code or an IMEI lists those — so a scan of the label matched nothing at all and
+     * the storekeeper fell back to reading the list by eye. All of a unit's numbers
+     * are searched, whichever one the line happens to be validated on.
+     *
+     * `unitByValue` is the structured form the issue picker passes; `metaByValue` is
+     * the display string the GRN and QC pickers still pass. Both are read, so neither
+     * caller loses the match.
+     */
+    const aliases = (value: string): string[] => {
+      const unit = unitByValue?.[value];
+      return [
+        value,
+        unit?.serial ?? null,
+        unit?.imei ?? null,
+        unit?.code ?? null,
+        imeiBySerial?.[value] ?? null,
+        ...(metaByValue?.[value] ?? "").split(/[\s·,]+/),
+      ].filter((token): token is string => !!token && token.trim().length > 0);
+    };
+
+    const needle = entry.trim().toLowerCase();
     const visible = (available ?? []).filter((s) =>
-      entry.trim() ? s.toLowerCase().includes(entry.trim().toLowerCase()) : true,
+      needle ? aliases(s).some((token) => token.toLowerCase().includes(needle)) : true,
     );
     const rejected = (available ?? []).filter((s) => !selected.has(s));
     const toggle = (serial: string) =>
@@ -148,15 +223,17 @@ export function SerialNumbersModal({
       const value = entry.trim();
       if (!value) return;
       const rows = available ?? [];
+      // The value the line is keyed on first, then any other identifier of the
+      // same unit — so one scan of the label finds it whichever number is on it.
       const hit =
         rows.find((s) => same(s, value))
-        ?? rows.find((s) => (metaByValue?.[s] ?? "")
-          .split(/[\s·,]+/)
-          .some((token) => same(token, value)))
-        ?? rows.find((s) => same(imeiBySerial?.[s] ?? "", value));
+        ?? rows.find((s) => aliases(s).some((token) => same(token, value)));
       setEntry("");
       if (!hit) {
-        setError(`${value} is not among the units available here.`);
+        setError(
+          `${value} is not among the units in this batch and location.`
+          + (selectMode ? " Check the split it belongs to." : ""),
+        );
         return;
       }
       if (!selectMode) {
@@ -165,28 +242,65 @@ export function SerialNumbersModal({
         return;
       }
       if (selected.has(hit)) {
-        setError(`${hit} is already on this line.`);
+        setError(`${hit} is already on this pick.`);
         return;
       }
       if (selected.size >= required) {
-        setError(`This line is for ${required}; remove one before scanning another.`);
+        setError(`This pick is for ${required}; remove one before scanning another.`);
         return;
       }
       setError(null);
       toggle(hit);
     };
 
+    const typed = !!unitByValue;
+    const unitNoun = trackingMeta?.unit ?? noun;
+    const plural = (count: number) => `${unitNoun}${count === 1 ? "" : "s"}`;
+
     return (
-      <Modal isOpen={isOpen} onClose={onClose} size="lg" scrollBehavior="inside">
+      <Modal isOpen={isOpen} onClose={onClose} size={typed ? "3xl" : "lg"} scrollBehavior="inside">
         <ModalContent>
-          <ModalHeader className="flex-col items-start gap-0.5">
-            <span className="font-display text-lg font-bold text-ink">
-              {selectMode ? "Select serial numbers" : "Reject serial numbers"}
+          <ModalHeader className="flex-col items-start gap-1">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="font-display text-lg font-bold text-ink">
+                {selectMode
+                  ? `Assign ${plural(2)}`
+                  : "Reject serial numbers"}
+              </span>
+              <TrackingBadge type={trackingType} meta={trackingMeta} />
             </span>
             <span className="text-xs font-normal text-muted">{itemLabel}</span>
           </ModalHeader>
 
           <ModalBody>
+            {/* What this pick is confined to. The list below holds ONLY the units in
+              * this batch and this bin — that is what stops a storekeeper picking a
+              * unit out of a bay the line is not drawing on — so the scope has to be
+              * on screen, or a correctly short list reads as missing stock. */}
+            {selectMode && scope && (
+              <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-line/70 bg-content2/50 px-3 py-2 text-xs">
+                {scope.splitLabel && (
+                  <span className="font-semibold text-ink">{scope.splitLabel}</span>
+                )}
+                <span className="flex items-center gap-1.5 text-muted">
+                  <Boxes className="h-3.5 w-3.5" aria-hidden />
+                  Batch <b className="font-mono text-ink">{scope.batchNo || "unbatched"}</b>
+                </span>
+                <span className="flex items-center gap-1.5 text-muted">
+                  <MapPin className="h-3.5 w-3.5 text-brand" aria-hidden />
+                  <b className="font-mono text-ink">{scope.binCode || "no bin"}</b>
+                </span>
+                {scope.available != null && (
+                  <span className="text-muted">
+                    Holds <b className="tabular text-ink">{scope.available}</b>
+                  </span>
+                )}
+                <span className="ml-auto text-muted">
+                  This pick needs <b className="tabular text-ink">{required}</b>{" "}
+                  {plural(required)}
+                </span>
+              </div>
+            )}
             {!readOnly && (
               <label className="relative mb-3 block">
                 <ScanLine className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
@@ -200,8 +314,10 @@ export function SerialNumbersModal({
                       scanOrSearch();
                     }
                   }}
-                  placeholder={selectMode ? "Search or scan an available serial" : "Search serials"}
-                  aria-label="Search serial numbers"
+                  placeholder={selectMode
+                    ? `Scan or search ${unitNoun === "IMEI" ? "an" : "a"} ${unitNoun}`
+                    : "Search serials"}
+                  aria-label={`Search ${plural(2)}`}
                   className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
                 />
               </label>
@@ -211,7 +327,7 @@ export function SerialNumbersModal({
             <div className="mb-3 flex items-center justify-between text-sm">
               <span className="text-muted">
                 {selectMode
-                  ? `Select exactly ${required} serial${required === 1 ? "" : "s"} for this package.`
+                  ? trackingMeta?.hint ?? `Select exactly ${required} ${plural(required)}.`
                   : "Tick the units you are rejecting."}
               </span>
               <span className="font-semibold text-ink">
@@ -249,7 +365,7 @@ export function SerialNumbersModal({
                 </Button>
                 {willAdd <= 0 && selected.size >= required && (
                   <span className="text-xs text-muted">
-                    This line is full at {required}.
+                    This pick is full at {required}.
                   </span>
                 )}
               </div>
@@ -257,11 +373,90 @@ export function SerialNumbersModal({
 
             {(available ?? []).length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
-                {selectMode ? "No unpacked serials are available for this item." : "No serials were captured on the GRN for this line."}
+                {selectMode
+                  ? `No ${plural(2)} are available in this batch and location.`
+                  : "No serials were captured on the GRN for this line."}
               </div>
             ) : visible.length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
-                No serials match the search.
+                Nothing here matches the search.
+              </div>
+            ) : typed ? (
+              /* The columned picker. One row per unit, and the TYPE is stated in its
+               * own column rather than left to be inferred from the shape of the
+               * string — an IMEI and an asset tag are indistinguishable by eye. The
+               * batch and bin repeat down every row on purpose: they are what the
+               * list is scoped to, so a row that somehow carries a different one is
+               * visible instead of silent. */
+              <div className="overflow-x-auto rounded-xl border border-line/70">
+                <table className="w-full min-w-[620px] border-collapse text-sm">
+                  <thead className="bg-content2">
+                    <tr>
+                      <th className="w-10 px-3 py-2" aria-label="Selected" />
+                      <th className="w-8 px-1 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">#</th>
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">
+                        {trackingMeta?.label ?? "Identifier"}
+                      </th>
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">
+                        Also on this unit
+                      </th>
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Batch</th>
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Location</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((value, i) => {
+                      const unit = unitByValue?.[value];
+                      const isSelected = selected.has(value);
+                      // Full at the ceiling: an unticked row that cannot be ticked
+                      // says so by going quiet, rather than by refusing the click
+                      // with an error the storekeeper has to read.
+                      const full = selectMode && !isSelected && selected.size >= required;
+                      return (
+                        <tr
+                          key={value}
+                          onClick={() => !readOnly && !full && toggle(value)}
+                          className={`border-t border-line/70 ${
+                            isSelected ? "bg-brand/5" : full ? "opacity-50" : "hover:bg-content2/60"
+                          } ${readOnly || full ? "" : "cursor-pointer"}`}
+                        >
+                          <td className="px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={selectMode ? isSelected : !isSelected}
+                              disabled={readOnly || full}
+                              onChange={() => toggle(value)}
+                              onClick={(e) => e.stopPropagation()}
+                              aria-label={`${selectMode ? "Select" : "Reject"} ${value}`}
+                              className="h-4 w-4 accent-current text-brand"
+                            />
+                          </td>
+                          <td className="px-1 py-2 text-[11px] text-muted tabular">{i + 1}</td>
+                          <td className="px-3 py-2">
+                            <span className="flex items-center gap-2">
+                              <TrackingBadge type={unit?.type ?? trackingType} meta={trackingMeta} size="sm" />
+                              <span className="font-mono text-sm font-semibold text-ink">{value}</span>
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 font-mono text-[11px] leading-4 text-muted">
+                            {[
+                              unit?.serial && unit.serial !== value ? `SN ${unit.serial}` : null,
+                              unit?.imei && unit.imei !== value ? `IMEI ${unit.imei}` : null,
+                              unit?.code && unit.code !== value ? `Code ${unit.code}` : null,
+                            ].filter(Boolean).join("  ·  ") || "—"}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs text-body">{unit?.batchNo || "—"}</td>
+                          <td className="px-3 py-2 font-mono text-xs text-body">
+                            <span className="flex items-center gap-1">
+                              <MapPin className="h-3 w-3 shrink-0 text-brand" aria-hidden />
+                              {unit?.binCode || "—"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             ) : (
               <ul className="space-y-1.5">
@@ -320,7 +515,9 @@ export function SerialNumbersModal({
               <Button
                 onClick={() => {
                   if (selectMode && selected.size !== required) {
-                    setError(`Select exactly ${required} serial numbers; ${selected.size} selected.`);
+                    setError(
+                      `This pick is for ${required} ${plural(required)}; ${selected.size} selected.`,
+                    );
                     return;
                   }
                   onSave((available ?? []).filter((s) => selected.has(s)));
