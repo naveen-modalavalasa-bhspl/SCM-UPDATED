@@ -75,15 +75,31 @@ def key_state(doc: dict) -> str:
 # --------------------------------------------------------------------------- #
 # Rate limiting
 # --------------------------------------------------------------------------- #
-# In-process and per-worker: two uvicorn workers mean a key's effective ceiling is
-# twice what the console shows. Said plainly rather than hidden, because the point of
-# this limiter is to stop a broken client's retry loop from hammering MySQL, not to
-# meter a paid quota — and a shared limiter would mean Redis, which is not deployed.
+# SHARED across workers since 2026-09-03, when Redis was deployed for exactly this.
+#
+# It used to be in-process and per-worker, which was stated plainly rather than hidden:
+# two uvicorn workers meant a key's effective ceiling was twice what the console shows.
+# That was tolerable only because there was one worker — and it is one of the three
+# pieces of process-local state that made a second worker unsafe, so it had to go
+# before the app could be scaled out at all.
+#
+# `cache.allow` keeps the same fixed-window shape and falls back to the dict below
+# when no REDIS_URL is set, so a developer's ceiling still behaves as it always did.
 _HITS: dict[str, deque] = {}
 _WINDOW_SECONDS = 60
 
 
+async def check_rate_shared(prefix: str, limit: int) -> None:
+    """The limiter the request path uses: one ceiling for the whole deployment."""
+    from app.core import cache
+
+    if not await cache.allow(f"apikey:{prefix}", limit, _WINDOW_SECONDS):
+        raise RateLimitError(f"Rate limit reached: {limit} requests per minute")
+
+
 def check_rate(prefix: str, limit: int) -> None:
+    """The per-process counter `cache.allow` degrades to. Kept as its own function so
+    the window semantics can be asserted without a Redis in the test environment."""
     if not limit or limit <= 0:
         return
     stamps = _HITS.setdefault(prefix, deque())
@@ -189,7 +205,7 @@ async def require_api_key(
         _refuse(doc, client, 401, "API client is disabled", slug, ip, port,
                 request.url.path, request.method, local_ip, local_port)
     try:
-        check_rate(prefix, int(doc.get("rate_limit_per_min") or 0))
+        await check_rate_shared(prefix, int(doc.get("rate_limit_per_min") or 0))
     except RateLimitError as exc:
         _refuse(doc, client, exc.status_code, exc.message, slug, ip, port,
                 request.url.path, request.method, local_ip, local_port)

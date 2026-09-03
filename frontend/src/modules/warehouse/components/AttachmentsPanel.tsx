@@ -98,6 +98,10 @@ export function AttachmentsPanel({
           <input
             ref={fileRef}
             type="file"
+            // Convenience only. The server refuses anything outside its own whitelist
+            // (platform/settings/attachments.py) and checks the file's leading bytes;
+            // this just saves picking one that was never going to be accepted.
+            accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.csv"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];

@@ -19,6 +19,7 @@ returns the whole list of problems with nothing written.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -382,7 +383,10 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
 
     @router.get(base + "/template", name=f"template_{defn.path}")
     async def template(user=Depends(get_current_user)):
-        return _xlsx_response(build_template(defn), _filename(defn, "template"))
+        # Off the event loop: openpyxl is CPU-bound with no `await` in it, and a
+        # workbook built inline blocks every other request for its duration.
+        body = await asyncio.to_thread(build_template, defn)
+        return _xlsx_response(body, _filename(defn, "template"))
 
     @router.get(base + "/export", name=f"export_{defn.path}")
     async def export(
@@ -407,7 +411,8 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             stmt = stmt.where(or_(*[c.ilike(f"%{search}%") for c in cols]))
         stmt = stmt.order_by(getattr(defn.model, defn.order_col))
         rows = (await db.execute(stmt)).scalars().all()
-        return _xlsx_response(build_export(defn, rows), _filename(defn, "export"))
+        body = await asyncio.to_thread(build_export, defn, rows)
+        return _xlsx_response(body, _filename(defn, "export"))
 
     if defn.read_only:
         return

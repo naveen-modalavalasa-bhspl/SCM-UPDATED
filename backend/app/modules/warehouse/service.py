@@ -9924,9 +9924,42 @@ async def scan(db: AsyncSession, code: str) -> s.ScanResult:
 # same store for delivery photos and bills. Re-exported under the names the warehouse
 # router already calls, so its endpoints are unchanged.
 list_attachments = attachments.list_attachments
-add_attachment = attachments.add_attachment
 attachment_file = attachments.attachment_file
-delete_attachment = attachments.delete_attachment
+
+
+async def add_attachment(db: AsyncSession, *, entity_type: str, entity_id: int,
+                         upload, doc_category: str | None, user):
+    """File one against a warehouse document this login may actually work.
+
+    FIXED 2026-09-03 — this was the platform function re-exported raw, and its route
+    takes `entity_type` and `entity_id` as FORM FIELDS. Anyone holding `receipt.create`
+    could therefore post a file against any receipt, inspection, issue or dispatch in
+    the company, at any warehouse — false evidence filed on somebody else's document,
+    which is the whole reason attachments exist on these papers. `assert_attachment_scope`
+    is the same check the list and download routes have run since they were fixed; it
+    also refuses an `entity_type` that is not one of the four, so the form field can no
+    longer file bytes under an arbitrary key that only another module reads.
+    """
+    await assert_attachment_scope(db, user, entity_type, entity_id)
+    return await attachments.add_attachment(
+        db, entity_type=entity_type, entity_id=entity_id, upload=upload,
+        doc_category=doc_category, user=user)
+
+
+async def delete_attachment(db: AsyncSession, attachment_id: int, user) -> None:
+    """Remove one, once this login is proved to hold the document it hangs on.
+
+    FIXED 2026-09-03 — likewise re-exported raw, and addressed by attachment id alone.
+    `receipt.create` was a licence to delete ANY row in `sys_attachments`: another
+    warehouse's QC photographs, an indent's delivery proof, a shipment's way bill.
+    The row is read first so the check runs against the document it actually names.
+    """
+    row = await attachments.require_attachment(
+        db, attachment_id, entity_type=tuple(_ATTACHMENT_PARENTS))
+    await assert_attachment_scope(db, user, row.entity_type, row.entity_id)
+    await attachments.delete_attachment(
+        db, attachment_id, user,
+        entity_type=row.entity_type, entity_id=row.entity_id)
 
 
 async def list_notifications(db: AsyncSession, params: PageParams, user, *,

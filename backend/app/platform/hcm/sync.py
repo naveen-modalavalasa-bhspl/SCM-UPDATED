@@ -330,7 +330,7 @@ async def _issue_missing_logins(db: AsyncSession, *, commit: bool = True) -> int
     Off unless NEW_USER_DEFAULT_PASSWORD is set (rule 13: no secret in code).
     """
     from app.core.config import settings
-    from app.core.security import hash_password
+    from app.core.security import hash_password_async
     from app.platform.settings.models import UserCredential
 
     password = settings.NEW_USER_DEFAULT_PASSWORD
@@ -347,7 +347,7 @@ async def _issue_missing_logins(db: AsyncSession, *, commit: bool = True) -> int
 
     # Hashed once, not per row: bcrypt is deliberately slow, and 1900 of them would
     # turn a sync into a coffee break.
-    digest = hash_password(password)
+    digest = await hash_password_async(password)
     db.add_all(UserCredential(employee_id=employee_id, password_hash=digest,
                               must_change=False)
                for employee_id in missing)

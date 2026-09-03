@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.core.security import hash_password, verify_password
+from app.core.security import hash_password_async, verify_password_async
 from app.platform.hcm.models import HcmEmployee
 from app.platform.mail import client
 from app.platform.mail.schemas import MailSendIn
@@ -445,10 +445,10 @@ async def reset_password(db: AsyncSession, token: str, new_password: str) -> Non
     if cred is None:
         raise ValidationError(
             "This reset link is no longer valid. Ask for a new one.")
-    if verify_password(new_password, cred.password_hash):
+    if await verify_password_async(new_password, cred.password_hash):
         raise ValidationError("The new password must differ from the current one")
 
-    cred.password_hash = hash_password(new_password)
+    cred.password_hash = await hash_password_async(new_password)
     # The whole point of a reset is that the holder chose this password themselves,
     # so there is nothing left to force them to change at next sign-in.
     cred.must_change = False

@@ -1,5 +1,77 @@
 name: scm-erp
 
+# Restructured 2026-09-03 to carry more than a handful of concurrent users.
+#
+# What was here before was a correct DEVELOPMENT setup: one API process on one CPU
+# core, ten database connections, a stock MySQL, no cache, no worker, no compression,
+# no backup and no metrics. Four things changed, and all four are configuration:
+#
+#   1. The API runs gunicorn with several workers and can be replicated (`backend`),
+#      which is only safe because the schedulers left the web process.
+#   2. Those schedulers run in ONE place — the `worker` service, single replica.
+#   3. `redis` carries the rate limiter, the permission cache and the introspection
+#      cache, which were per-process dicts that a second worker would have duplicated.
+#   4. `backup` dumps the database on a schedule, and the db has a real my.cnf and
+#      resource limits.
+#
+# Read `deploy/mysql.cnf` before changing worker counts or pool sizes: the connection
+# pool is per worker, so the server's max_connections has to cover
+# workers x replicas x (DB_POOL_SIZE + DB_MAX_OVERFLOW) plus headroom.
+
+# Every environment key the backend and the worker read. YAML anchor rather than two
+# copies: the pair must stay identical apart from RUN_SCHEDULERS, and the last time
+# this list was maintained by hand two features were dead on the deployed app while
+# working locally (there is no `env_file:` here, so a key not named below does not
+# exist inside the container, whatever .env.deploy says).
+x-backend-env: &backend-env
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+  SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+  ALLOW_DEMO_DATA: "false"
+  CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+  CORS_ALLOW_PRIVATE_NETWORK: ${CORS_ALLOW_PRIVATE_NETWORK:-false}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+  HCM_BASE_URL: ${HCM_BASE_URL:?HCM_BASE_URL is required}
+  HCM_API_KEY: ${HCM_API_KEY:?HCM_API_KEY is required}
+  HCM_TIMEOUT_SECONDS: ${HCM_TIMEOUT_SECONDS:-5}
+  HCM_RETRIES: ${HCM_RETRIES:-3}
+  # Where uploaded documents live. MUST match the mount point of the uploads volume:
+  # the container filesystem is read-only, so without both the volume and this key
+  # every GRN, PO and delivery attachment fails with "Read-only file system".
+  UPLOAD_DIR: /app/var/uploads
+  # Per worker process. See deploy/mysql.cnf for how these bound max_connections.
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+  DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+  # The shared cache and limiter. Unset would still work — every user falls back to a
+  # per-process dict — but then a second worker is not safe.
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  PERMISSION_CACHE_SECONDS: ${PERMISSION_CACHE_SECONDS:-300}
+  LOGIN_MAX_FAILED_ATTEMPTS: ${LOGIN_MAX_FAILED_ATTEMPTS:-8}
+  LOGIN_LOCKOUT_MINUTES: ${LOGIN_LOCKOUT_MINUTES:-15}
+  LOGIN_RATE_PER_MINUTE: ${LOGIN_RATE_PER_MINUTE:-30}
+  METRICS_ENABLED: ${METRICS_ENABLED:-true}
+  # Without the MAIL_* block `settings.mail_configured` is false, so every
+  # "forgot password" returns its deliberate 204 and sends nothing at all.
+  MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
+  MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-587}
+  MAIL_USERNAME: ${MAIL_USERNAME:-}
+  MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+  MAIL_FROM: ${MAIL_FROM:-}
+  MAIL_FROM_NAME: ${MAIL_FROM_NAME:-SCM ERP}
+  MAIL_STARTTLS: ${MAIL_STARTTLS:-true}
+  MAIL_SMTP_SSL: ${MAIL_SMTP_SSL:-false}
+  MAIL_IMAP_HOST: ${MAIL_IMAP_HOST:-}
+  MAIL_IMAP_PORT: ${MAIL_IMAP_PORT:-993}
+  MAIL_IMAP_SSL: ${MAIL_IMAP_SSL:-true}
+  # Where a reset link points. Defaults to localhost IN CODE, which is useless in a
+  # container — the link is opened by a person on their own machine.
+  APP_BASE_URL: ${APP_BASE_URL:-}
+  PASSWORD_RESET_MINUTES: ${PASSWORD_RESET_MINUTES:-30}
+  PASSWORD_RESET_EMAIL_DOMAIN: ${PASSWORD_RESET_EMAIL_DOMAIN:-}
+  # Unset means an HCM joiner gets NO login and an admin has to cut one by hand.
+  # That is a deliberate choice, not a default — see .env.deploy.example.
+  NEW_USER_DEFAULT_PASSWORD: ${NEW_USER_DEFAULT_PASSWORD:-}
+
 services:
   db:
     image: mysql:8.4
@@ -9,11 +81,12 @@ services:
       MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
     volumes:
       - mysql_data:/var/lib/mysql
+      # The character set used to be passed as a command flag and everything else was
+      # left at stock defaults — a 128 MB buffer pool and max_connections=151, which
+      # capped scale-out no matter how many workers were added.
+      - ./deploy/mysql.cnf:/etc/mysql/conf.d/scm.cnf:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -24,6 +97,77 @@ services:
       start_period: 30s
     security_opt:
       - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          # Keep innodb_buffer_pool_size in deploy/mysql.cnf at 50-70% of this. They
+          # are two halves of one decision: a pool larger than the limit is OOM-killed.
+          memory: ${DB_MEMORY_LIMIT:-4g}
+    networks:
+      - app
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # 256 MB and evict the coldest keys rather than start refusing writes: everything
+    # stored here is a cache or a one-minute counter, so losing the oldest entry costs
+    # one extra query, while a write refusal would surface as a failed request.
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 320m
+    networks:
+      - app
+
+  migrate:
+    # Runs ONCE, before any application container starts, and exits.
+    #
+    # This used to live in the backend image's CMD, which is correct for exactly one
+    # container and a race for any more than that: with `replicas: 2` both backends
+    # start together and both run `alembic upgrade head` against the same database.
+    # Alembic takes no lock of its own, so the two can read the same current revision
+    # and both apply the next one -- a half-applied schema, with the version table
+    # claiming success. `service_completed_successfully` below is what makes it one.
+    #
+    # A NEW database is NOT built by this. Alembic cannot replay from empty (see
+    # CLAUDE.md): run `python -m scripts.bootstrap` once by hand, then this keeps it
+    # up to date forever after.
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-env
+      RUN_SCHEDULERS: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Not `unless-stopped`: this is a job, and restarting a finished migration on
+    # every daemon restart is how a deploy silently re-runs one.
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - python scripts/wait_for_db.py && alembic upgrade head
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
     networks:
       - app
 
@@ -32,52 +176,28 @@ services:
       context: ./backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
-      ALLOW_DEMO_DATA: "false"
-      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
-      HCM_BASE_URL: ${HCM_BASE_URL:?HCM_BASE_URL is required}
-      HCM_API_KEY: ${HCM_API_KEY:?HCM_API_KEY is required}
-      HCM_TIMEOUT_SECONDS: ${HCM_TIMEOUT_SECONDS:-5}
-      HCM_RETRIES: ${HCM_RETRIES:-3}
-      # Everything below was MISSING until 2026-08-26, and this list is the whole
-      # reason two features were dead on the deployed app while working locally.
-      # `backend/.env` is in .dockerignore and there is no `env_file:` here, so a
-      # setting that is not named on this list does not exist inside the container,
-      # whatever `.env.deploy` says.
-      #
-      # Without the MAIL_* block `settings.mail_configured` is false, so every
-      # "forgot password" returned its deliberate 204 and sent nothing at all.
-      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
-      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-587}
-      MAIL_USERNAME: ${MAIL_USERNAME:-}
-      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
-      MAIL_FROM: ${MAIL_FROM:-}
-      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-SCM ERP}
-      MAIL_STARTTLS: ${MAIL_STARTTLS:-true}
-      MAIL_SMTP_SSL: ${MAIL_SMTP_SSL:-false}
-      MAIL_IMAP_HOST: ${MAIL_IMAP_HOST:-}
-      MAIL_IMAP_PORT: ${MAIL_IMAP_PORT:-993}
-      MAIL_IMAP_SSL: ${MAIL_IMAP_SSL:-true}
-      # Where a reset link points. Defaults to localhost IN CODE, which is useless in
-      # a container — the link is opened by a person on their own machine. Falls back
-      # to the public browser origin, which is what it almost always is; NOT declared
-      # required, so an existing deployment still comes up without editing .env.deploy.
-      APP_BASE_URL: ${APP_BASE_URL:-${CORS_ORIGINS}}
-      PASSWORD_RESET_MINUTES: ${PASSWORD_RESET_MINUTES:-30}
-      # The only domain a reset link may be delivered to, e.g. bhspl.in.
-      PASSWORD_RESET_EMAIL_DOMAIN: ${PASSWORD_RESET_EMAIL_DOMAIN:-}
-      # Unset means an HCM joiner gets NO login and an admin has to cut one by hand.
-      # That is a deliberate choice, not a default — see .env.deploy.example.
-      NEW_USER_DEFAULT_PASSWORD: ${NEW_USER_DEFAULT_PASSWORD:-}
+      <<: *backend-env
+      # FALSE on every web worker. APScheduler in-process meant the HCM sync ran once
+      # per worker — concurrent syncs writing the same mirror tables — and every
+      # overdue-approval reminder reached a real person once per worker.
+      RUN_SCHEDULERS: "false"
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-5}
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     expose:
       - "8000"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      # Attachments. Without this the store is inside the read-only container layer and
+      # EVERY upload fails on the deployed app while working perfectly in development.
+      - uploads_data:/app/var
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -90,6 +210,86 @@ services:
       timeout: 5s
       retries: 3
       start_period: 45s
+    deploy:
+      # Two API containers behind the nginx upstream, each running WEB_CONCURRENCY
+      # gunicorn workers. nginx resolves `backend` to both.
+      replicas: ${BACKEND_REPLICAS:-2}
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-2g}
+    networks:
+      - app
+
+  worker:
+    # The same image, doing the work that must happen exactly once.
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      RUN_SCHEDULERS: "true"
+      # One process. Not a tuning choice — a second one would duplicate the schedules.
+      WEB_CONCURRENCY: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Never scaled. The whole point of this service is that there is one of it; if a
+    # scheduler ever needs to survive this container dying, the answer is a leader lock
+    # in Redis, not a second replica.
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: ${WORKER_MEMORY_LIMIT:-1g}
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - uploads_data:/app/var
+    security_opt:
+      - no-new-privileges:true
+    # No container migrates. The `migrate` service does, once, and everything here
+    # waits for it to exit cleanly.
+    command:
+      - sh
+      - -c
+      - python scripts/wait_for_db.py && exec gunicorn -c gunicorn.conf.py
+    networks:
+      - app
+
+  backup:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: db
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?MYSQL_DATABASE is required}
+      MYSQL_USER: ${MYSQL_USER:?MYSQL_USER is required}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./deploy/backup.sh:/usr/local/bin/backup.sh:ro
+      # A named volume is the FLOOR, not the plan: it lives on the same host as the
+      # database it protects, so it survives a dropped table and not a dead machine.
+      # Point BACKUP_HOST_DIR at mounted off-host storage in production.
+      - ${BACKUP_HOST_DIR:-backups_data}:/backups
+    entrypoint:
+      - sh
+      - -c
+      # Sleeps first so a restart loop cannot dump continuously, then every interval.
+      - >
+        while true; do
+          sleep ${BACKUP_INTERVAL_SECONDS:-86400};
+          sh /usr/local/bin/backup.sh || echo "[backup] FAILED";
+        done
+    security_opt:
+      - no-new-privileges:true
     networks:
       - app
 
@@ -109,11 +309,18 @@ services:
       - /tmp
     security_opt:
       - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     networks:
       - app
 
 volumes:
   mysql_data:
+  # The attachment store. Shared by `backend` and `worker` so either can serve a file.
+  uploads_data:
+  backups_data:
 
 networks:
   app:

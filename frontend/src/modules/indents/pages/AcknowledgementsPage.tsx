@@ -505,6 +505,7 @@ function AcknowledgementModal({ row, onClose }: {
                 <FileText className="h-4 w-4" /> Add bill
                 <input
                   type="file"
+                  accept="image/*,application/pdf"
                   className="hidden"
                   onChange={(event) => {
                     const file = event.target.files?.[0];

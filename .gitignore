@@ -116,3 +116,10 @@ backend/var/
 # docs/masters/*/generator/ rebuilds these from the source lists in one command, so
 # the .xlsx are output, not source, and binary diffs say nothing in review.
 docs/masters/**/*.xlsx
+
+# ---- Runtime logs ----
+# `logs.json` was COMMITTED until 2026-09-03, carrying employee names, internal IP
+# addresses and stack traces. Runtime output is never source; the in-app log table
+# (platform/admin/app_logs.py) is where a deployment reads its errors, and it redacts.
+logs.json
+*.log

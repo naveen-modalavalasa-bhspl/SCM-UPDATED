@@ -22,17 +22,26 @@ if _is_sqlite:
 else:
     engine = create_async_engine(
         settings.DATABASE_URL,
-        # The shared MySQL caps out at max_connections=151 and every developer
-        # points their own uvicorn at it. At 20+10 a handful of running servers
-        # exhausts the server and every query dies with "Too many connections"
-        # (error 1040) — which surfaces as blank screens, not as an error.
-        # 5+5 keeps one server well inside its share; raise it only on a box
-        # that owns its database.
-        pool_size=5,
-        max_overflow=5,
+        # Sized from the environment since 2026-09-03, defaulting to the old 5+5.
+        #
+        # 5+5 was the right call for the shared MySQL: it caps out at
+        # max_connections=151 and every developer points their own uvicorn at it, so
+        # at 20+10 a handful of running servers exhausts the server and every query
+        # dies with "Too many connections" (error 1040) — which surfaces as blank
+        # screens, not as an error. It is the wrong call in production, where the app
+        # owns its database: ten connections total means the eleventh concurrent
+        # request queues for pool_timeout and then throws, which at 500 users is
+        # roughly 50× oversubscribed and reads to the floor as "the ERP is down".
+        #
+        # A number in the code could only ever be right for one of those two. See
+        # DB_POOL_SIZE in core/config.py, and raise the SERVER's max_connections to
+        # match (deploy/mysql.cnf) — the pool is per worker process, so the ceiling
+        # is workers × replicas × (size + overflow) plus headroom.
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
         pool_pre_ping=True,
-        pool_recycle=1800,   # drop connections before the server's wait_timeout does
-        pool_timeout=30,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
         echo=False,
     )
 

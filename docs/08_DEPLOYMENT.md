@@ -91,16 +91,52 @@ migrations.
 
 ## Backups
 
-The named Docker volume protects data across normal container recreation, but
-it is not a backup. Schedule an encrypted MySQL logical backup or volume
-snapshot outside this Compose project, copy it off-host, and regularly test a
-restore. Take an on-demand backup before every application upgrade.
+The stack now runs its own backup: the `backup` service loops on
+`BACKUP_INTERVAL_SECONDS` (daily by default) and writes a gzipped
+`mysqldump --single-transaction` per run, pruning anything older than
+`BACKUP_KEEP_DAYS`. See `deploy/backup.sh`.
+
+**Set `BACKUP_HOST_DIR`.** Left at its default the dumps land in a named volume
+on the same host as the database they protect, which survives a dropped table
+and not a dead machine. Point it at mounted off-host storage.
+
+The named Docker volume protects data across normal container recreation and is
+not a backup. Test a restore regularly — a directory of dumps nobody has ever
+restored is not a proven backup — and take an on-demand one before every
+application upgrade:
+
+```
+docker compose --env-file .env.deploy exec backup sh /usr/local/bin/backup.sh
+```
 
 ## Operating notes
 
-- Run one backend container. The HCM synchronization scheduler currently runs
-  inside the API process; multiple replicas would execute the same scheduled
-  job unless a distributed scheduler/lock is added.
+- **The API scales out; the schedulers do not.** `backend` runs
+  `BACKEND_REPLICAS` containers of `WEB_CONCURRENCY` gunicorn workers each, all
+  with `RUN_SCHEDULERS=false`. The `worker` service is the single process that
+  runs the HCM sync and the overdue-approval reminders, and it must stay at one
+  replica — two would run concurrent syncs against the same mirror tables and
+  deliver every reminder twice to a real person. Scaling it needs a leader lock
+  in Redis, not a second replica.
+- **Size the pool and `max_connections` together.** The SQLAlchemy pool is per
+  worker process, so the ceiling is
+  `WEB_CONCURRENCY x BACKEND_REPLICAS x (DB_POOL_SIZE + DB_MAX_OVERFLOW)` plus
+  headroom for the worker, the backup job and a DBA session. `deploy/mysql.cnf`
+  sets `max_connections=500` against a default of 300 in use.
+- **`innodb_buffer_pool_size` and `DB_MEMORY_LIMIT` are one decision.** Keep the
+  pool at 50-70% of the container limit; larger and it is OOM-killed.
+- **Redis is required for more than one worker**, and only for that. With
+  `REDIS_URL` unset the rate limiter, the permission cache and the introspection
+  cache fall back to per-process dicts — correct in a single process, and wrong
+  the moment there are two (a per-process limiter multiplies the configured
+  ceiling by the worker count).
+- **Attachments need the `uploads_data` volume and `UPLOAD_DIR` set to its mount
+  point.** The container filesystem is read-only; without both, every upload
+  fails with "Read-only file system" on the deployed app while working perfectly
+  in development. Verify by uploading a GRN attachment after `compose up`.
+- **`/metrics` is not proxied.** It is unauthenticated and names every route in
+  the system, so nginx returns 404 for it; scrape `backend:8000/metrics` from
+  inside the compose network. Turn it off with `METRICS_ENABLED=false`.
 - Terminate HTTPS before this Compose stack and forward the original host and
   protocol headers. Nginx passes these headers to FastAPI.
 - The containers run with read-only application filesystems and

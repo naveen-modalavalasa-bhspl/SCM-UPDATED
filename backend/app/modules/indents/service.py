@@ -1546,6 +1546,33 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
         upload=upload, doc_category=doc_category, user=user)
 
 
+async def delete_receipt_attachment(db: AsyncSession, attachment_id: int, user) -> None:
+    """Withdraw one, under exactly the rule that allowed attaching it.
+
+    The route is addressed by attachment id alone, so the parent indent is read OFF
+    the row — `require_attachment` refuses an id that is not an acknowledgement file
+    in the first place, which is what stops one module's permission reaching another
+    module's paperwork. The raiser check and the status check are then the same two
+    `add_receipt_attachment` makes: whoever may file the proof may take it back, and
+    only while the indent is still expecting goods. Once it is delivered the evidence
+    is what the acknowledgement was accepted on, and removing it would change a
+    settled document.
+    """
+    row = await attachments.require_attachment(
+        db, attachment_id, entity_type=ACK_ENTITY_TYPE)
+    indent = await get_indent(db, int(row.entity_id))
+    if indent.requested_by_id != user.id:
+        raise PermissionError_(
+            "Only the person who raised this indent can remove its delivery proof")
+    if indent.status not in _RECEIVABLE_STATUSES:
+        raise ValidationError(
+            f"{indent.indent_no} is no longer awaiting delivery, so its delivery "
+            "proof can no longer be changed.")
+    await attachments.delete_attachment(
+        db, attachment_id, user,
+        entity_type=ACK_ENTITY_TYPE, entity_id=indent.id)
+
+
 #: What the requester may say about the state of what arrived.
 #:
 #: GOOD and DAMAGED, and deliberately NOT SHORT. A shortage is already stated by the

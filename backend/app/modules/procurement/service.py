@@ -19,7 +19,9 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import (
+    create_access_token, hash_password_async, verify_password_async,
+)
 from app.modules.indents import service as indent_service
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory import hooks as inventory_hooks
@@ -2968,7 +2970,7 @@ async def ensure_vendor_account(db: AsyncSession, data: VendorAccountIn,
         raise ValidationError(f"The username {username!r} is already in use")
     account = VendorUser(
         vendor_id=vendor.id, username=username,
-        password_hash=hash_password(DEFAULT_VENDOR_PASSWORD),
+        password_hash=await hash_password_async(DEFAULT_VENDOR_PASSWORD),
         is_active=True, must_change_password=True,
     )
     db.add(account)
@@ -2997,7 +2999,7 @@ async def reset_vendor_password(db: AsyncSession, vendor_id: int, user) -> Vendo
     account = await _vendor_account(db, vendor_id)
     if account is None:
         raise NotFoundError(f"Vendor {vendor_id} has no portal account")
-    account.password_hash = hash_password(DEFAULT_VENDOR_PASSWORD)
+    account.password_hash = await hash_password_async(DEFAULT_VENDOR_PASSWORD)
     account.must_change_password = True
     await db.commit()
     await db.refresh(account)
@@ -3011,7 +3013,7 @@ async def vendor_login(db: AsyncSession, username: str, password: str) -> dict:
     # One message for "no such account", "wrong password" and "disabled". Telling
     # them apart tells an outsider which vendor codes are real.
     if (account is None or not account.is_active
-            or not verify_password(password, account.password_hash)):
+            or not await verify_password_async(password, account.password_hash)):
         raise AuthenticationError("Incorrect username or password")
     vendor = await db.get(Vendor, account.vendor_id)
     account.last_login_at = utcnow()
@@ -3030,11 +3032,11 @@ async def vendor_login(db: AsyncSession, username: str, password: str) -> dict:
 async def vendor_change_password(db: AsyncSession, vendor_id: int,
                                  current: str, new: str) -> None:
     account = await _vendor_account(db, vendor_id)
-    if account is None or not verify_password(current, account.password_hash):
+    if account is None or not await verify_password_async(current, account.password_hash):
         raise AuthenticationError("Current password is incorrect")
     if new == DEFAULT_VENDOR_PASSWORD:
         raise ValidationError("Choose a password that is not the shared default")
-    account.password_hash = hash_password(new)
+    account.password_hash = await hash_password_async(new)
     account.must_change_password = False
     await db.commit()
 

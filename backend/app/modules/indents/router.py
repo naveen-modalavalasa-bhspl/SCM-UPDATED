@@ -304,7 +304,12 @@ async def acknowledge(indent_id: int, body: AcknowledgeIn,
 
 @indent_router.get("/{indent_id}/receipt-attachments", response_model=list[AttachmentRead])
 async def receipt_attachments(indent_id: int, db: AsyncSession = Depends(get_db),
-                              _=Depends(require_permission(perms.INDENT_VIEW))):
+                              user=Depends(require_permission(perms.INDENT_VIEW))):
+    # `get_indent` first — the same visibility check the download route beside this one
+    # already ran. Without it `indent.view` listed the file names, uploaders and
+    # timestamps on every indent in the company, including the ones this login's own
+    # scope hides from the register two screens away.
+    await service.get_indent(db, indent_id, user)
     return await attachments.list_attachments(db, service.ACK_ENTITY_TYPE, indent_id)
 
 
@@ -348,7 +353,20 @@ async def delete_receipt_attachment(
     attachment_id: int, db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE)),
 ):
-    await attachments.delete_attachment(db, attachment_id, user)
+    """Withdraw a delivery photo or bill, for the person who filed it.
+
+    FIXED 2026-09-03 — this used to hand `attachment_id` straight to the platform
+    delete. `sys_attachments` is one table for every module, so `indent.acknowledge`
+    was a licence to delete ANY file in the system: a GRN's invoice, a shipment's way
+    bill, another region's QC photographs. The id in the path proved nothing.
+
+    The route is addressed by attachment id (the panel has no indent in hand when it
+    renders a row), so the parent is read off the row and then checked properly:
+    `service.delete_receipt_attachment` runs the same rule the upload does — the
+    raiser of that indent, while it is still expecting goods — because the person who
+    may attach the proof is the person who may withdraw it.
+    """
+    await service.delete_receipt_attachment(db, attachment_id, user)
 
 
 @indent_router.post("/{indent_id}/bookmark", response_model=IndentOut)

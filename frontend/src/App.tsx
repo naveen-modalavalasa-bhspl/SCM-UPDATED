@@ -1,139 +1,173 @@
-import type { ReactNode } from "react";
+import { Suspense, lazy, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useHref } from "react-router-dom";
 import { HeroUIProvider } from "@heroui/react";
 import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
-import { MailPage } from "@/modules/admin/pages/MailPage";
-import { TraceabilityPage } from "@/modules/reports/pages/TraceabilityPage";
-import { LiveTrackingPage } from "@/modules/reports/pages/LiveTrackingPage";
-import { AttachmentsReportPage } from "@/modules/reports/pages/AttachmentsReportPage";
 import { LoginPage } from "@/pages/LoginPage";
-import { ForgotPasswordPage, ResetPasswordPage } from "@/pages/PasswordResetPages";
-import { NotFoundPage } from "@/pages/NotFoundPage";
-import { ProfilePage } from "@/pages/ProfilePage";
-import { HomePage } from "@/modules/home/pages/HomePage";
-import { IndentListPage } from "@/modules/indents/pages/ListPage";
-import { IndentFormPage } from "@/modules/indents/pages/FormPage";
-import { IndentDetailPage } from "@/modules/indents/pages/DetailPage";
-import { IndentDashboardPage } from "@/modules/indents/pages/DashboardPage";
-import { IndentBoardPage } from "@/modules/indents/pages/BoardPage";
-import AcknowledgementsPage from "@/modules/indents/pages/AcknowledgementsPage";
-import { IndentReportsPage } from "@/modules/indents/pages/ReportsPage";
-import { IndentNotificationsPage } from "@/modules/indents/pages/NotificationsPage";
 // Approvals is its own module now — the inbox, decisions, reports and the
 // indent review screen all live there, not inside indents.
-import {
-  ApprovalCorrectionPage, ApprovalsPage, ConsolidationDetailPage, ConsolidationIssuePage,
-  ConsolidationItemPage, ConsolidationPage, MyDecisionsPage,
-  ApprovalOverviewPage,
-} from "@/modules/approvals";
-import { IndentJourneyPage } from "@/modules/indents/pages/JourneyPage";
-import { POListPage } from "@/modules/procurement/pages/POListPage";
-import { PODetailPage } from "@/modules/procurement/pages/PODetailPage";
-import { POPrintPage } from "@/modules/procurement/pages/POPrintPage";
-import { MaterialIssuePrintPage } from "@/modules/warehouse/pages/MaterialIssuePrintPage";
-import { GRNPrintPage } from "@/modules/warehouse/pages/GRNPrintPage";
-import { ConsignmentPrintPage } from "@/modules/warehouse/pages/ConsignmentPrintPage";
-import { PicklistPrintPage } from "@/modules/warehouse/pages/PicklistPrintPage";
-import { PutawayPrintPage } from "@/modules/warehouse/pages/PutawayPrintPage";
-import { InspectionPrintPage } from "@/modules/warehouse/pages/InspectionPrintPage";
-import { DispatchPrintPage } from "@/modules/warehouse/pages/DispatchPrintPage";
-import { StockMovementPrintPage } from "@/modules/warehouse/pages/StockMovementPrintPage";
 // The gate pass, outside the shell for the same reason the order print is: what
 // leaves the printer is the pass the driver shows at the gate.
-import { GatePassPrintPage } from "@/modules/logistics/pages/GatePassPrintPage";
-import { POFormPage } from "@/modules/procurement/pages/POFormPage";
 // The warehouse module owns goods receipt, stock and issues now; it routes its own
 // sub-pages, so these paths hand the whole subtree to it.
-import { WarehouseModule } from "@/modules/warehouse";
-import { AdminPage } from "@/modules/admin/pages/AdminPage";
-import { UsersPage } from "@/modules/rbac/pages/UsersPage";
-import { GroupsPage } from "@/modules/rbac/pages/GroupsPage";
-import { JobProfilesPage } from "@/modules/rbac/pages/JobProfilesPage";
-import { RulesPage } from "@/modules/admin/pages/RulesPage";
-import { ApprovalFlowPage } from "@/modules/admin/pages/ApprovalFlowPage";
-import { ChainEditorPage } from "@/modules/admin/pages/ChainEditorPage";
-import { PoliciesPage } from "@/modules/admin/pages/PoliciesPage";
-import { AuditPage } from "@/modules/admin/pages/AuditPage";
-import { AppLogsPage } from "@/modules/admin/pages/AppLogsPage";
-import { NumberingPage } from "@/modules/admin/pages/NumberingPage";
-import { NotificationsPage } from "@/modules/admin/pages/NotificationsPage";
-import { MastersPage } from "@/modules/masters/pages/MastersPage";
-import { InventoryOverviewPage } from "@/modules/inventory/pages/OverviewPage";
 // Each inventory screen is its own route so it can appear in the left rail.
-import { StockBalanceView } from "@/modules/inventory/components/StockBalanceView";
-import { StockLedgerView } from "@/modules/inventory/components/StockLedgerView";
-import { StockReplenishmentView } from "@/modules/inventory/components/StockReplenishmentView";
-import { StockTransferView } from "@/modules/inventory/components/StockTransferView";
-import { StockAdjustmentsView } from "@/modules/inventory/components/StockAdjustmentsView";
-import { StockValuationView } from "@/modules/inventory/components/StockValuationView";
-import { FulfilmentDeskPage } from "@/modules/inventory/pages/FulfilmentDeskPage";
-import { FulfilmentBatchPage } from "@/modules/inventory/pages/FulfilmentBatchPage";
-import { MaterialRequestFormPage } from "@/modules/inventory/pages/MaterialRequestFormPage";
-import { MaterialRequestsPage } from "@/modules/inventory/pages/MaterialRequestsPage";
-import { AllocationPage } from "@/modules/inventory/pages/AllocationPage";
-import { AllocationApprovalDetailPage } from "@/modules/inventory/pages/AllocationApprovalDetailPage";
-import { AllocationCycleApprovalPage } from "@/modules/inventory/pages/AllocationCycleApprovalPage";
-import { StockingPointsPage } from "@/modules/inventory/pages/StockingPointsPage";
-import { MaterialRequestDetailPage } from "@/modules/inventory/pages/MaterialRequestDetailPage";
-import { FallbackLogPage } from "@/modules/admin/pages/FallbackLogPage";
-import { ItemDemandPage } from "@/modules/inventory/pages/ItemDemandPage";
-import { LabelsPage } from "@/modules/inventory/pages/LabelsPage";
-import {
-  ReturnsOverviewPage, ReturnsListPage, ReturnFormPage, ReturnDetailPage,
-  ReceivingConfigPage, DecisionQueuePage, PurchaseReturnsPage,
-} from "@/modules/returns";
 // The API console — build an API from the screen over any table in the database.
-import {
-  ActivityEventPage, ApiClientsPage, ApiClientDetailPage, WebhookDetailPage,
-  PlatformLinksPage,
-} from "@/modules/integrations";
 // `PurchaseConsolidation*`, not `Consolidation*`: the approvals module already owns
 // that name for INDENT consolidation, which is a different document entirely.
-import { PurchaseConsolidationListPage } from "@/modules/procurement/pages/PurchaseConsolidationListPage";
-import { PurchaseConsolidationFormPage } from "@/modules/procurement/pages/PurchaseConsolidationFormPage";
-import { PurchaseConsolidationDetailPage } from "@/modules/procurement/pages/PurchaseConsolidationDetailPage";
 // Logistics: consignment -> dispatch -> transport -> acknowledgement, plus the
 // transport provider's own portal. Consignments and Dispatch are the warehouse's own
 // screens, re-exported by the logistics module and mounted under /logistics/* — the
 // same documents and the same flow, reached from the module that works them.
-import {
-  ConsignmentsScreen, ConsignmentFormScreen, DispatchPage, DispatchConfirmPage,
-  TransportRequestsPage, TransportFormPage, TransportDetailPage, ProviderSelectionPage,
-  LogisticsActivityPage, LogisticsVendorsPage,
-  CarrierLayout, CarrierLoginPage, CarrierJobsPage, CarrierJobPage,
-  CarrierAckPage,
-  LogisticsOverviewPage,
-} from "@/modules/logistics";
-import { ProcurementOverviewPage } from "@/modules/procurement/pages/ProcurementOverviewPage";
-import { RequisitionListPage } from "@/modules/procurement/pages/RequisitionListPage";
-import { ProcurementLedgerPage } from "@/modules/procurement/pages/ProcurementLedgerPage";
-import { SuppliersPage } from "@/modules/procurement/pages/SuppliersPage";
-import { RequisitionFormPage } from "@/modules/procurement/pages/RequisitionFormPage";
-import { MRConsolidationPage } from "@/modules/procurement/pages/MRConsolidationPage";
-import { RequisitionDetailPage } from "@/modules/procurement/pages/RequisitionDetailPage";
-import { RFQListPage } from "@/modules/procurement/pages/RFQListPage";
-import { RFQFormPage } from "@/modules/procurement/pages/RFQFormPage";
-import { RFQDetailPage } from "@/modules/procurement/pages/RFQDetailPage";
-import { QuotationListPage } from "@/modules/procurement/pages/QuotationListPage";
-import { SupplierAccountsPage } from "@/modules/procurement/pages/SupplierAccountsPage";
 // The supplier portal — a second audience, on its own shell and its own token.
-import { SupplierLayout } from "@/modules/supplier/SupplierLayout";
-import { SupplierLoginPage } from "@/modules/supplier/pages/SupplierLoginPage";
-import { SupplierPasswordPage } from "@/modules/supplier/pages/SupplierPasswordPage";
-import { SupplierRFQListPage } from "@/modules/supplier/pages/SupplierRFQListPage";
-import { SupplierRFQDetailPage } from "@/modules/supplier/pages/SupplierRFQDetailPage";
-import { SupplierPOListPage } from "@/modules/supplier/pages/SupplierPOListPage";
-import { SupplierPODetailPage } from "@/modules/supplier/pages/SupplierPODetailPage";
-import { SupplierProfilePage } from "@/modules/supplier/pages/SupplierProfilePage";
-import { SettingsPage } from "@/modules/settings/pages/SettingsPage";
-import { CodeFormatsPage } from "@/modules/settings/pages/CodeFormatsPage";
 // One screen serves all four report ledgers; the ledger key is a route param.
-import { ReportLedgerPage } from "@/modules/reports";
 // Mounts the alert/confirm dialog host and pulls the server's copy catalog once.
-import { AlertProvider } from "@/modules/alerts";
 import { ToastProvider } from "@/shared/components";
+
+// ---------------------------------------------------------------------------
+// Route-level code splitting (2026-09-03)
+//
+// Every screen was a STATIC import here -- 102 of them -- so one bundle carried all
+// 120 pages and every user downloaded the warehouse module, the reports engine, the
+// integrations console and the admin panel to open the Home screen. Built size was a
+// single 2.68 MB JavaScript chunk; on a warehouse tablet over 4G that is the whole
+// wait before anything appears.
+//
+// `React.lazy` splits each route into its own chunk that is fetched when the route is
+// first visited. The login page is deliberately NOT lazy: it is the first paint, and
+// making it a second round trip would move the delay rather than remove it.
+//
+// Named exports need the `.then(m => ({ default: m.X }))` shim because `lazy` resolves
+// a module whose DEFAULT export is the component, and most pages here are named.
+// ---------------------------------------------------------------------------
+const AcknowledgementsPage = lazy(() => import("@/modules/indents/pages/AcknowledgementsPage"));
+const ActivityEventPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.ActivityEventPage })));
+const AdminPage = lazy(() => import("@/modules/admin/pages/AdminPage").then((m) => ({ default: m.AdminPage })));
+const AlertProvider = lazy(() => import("@/modules/alerts").then((m) => ({ default: m.AlertProvider })));
+const AllocationApprovalDetailPage = lazy(() => import("@/modules/inventory/pages/AllocationApprovalDetailPage").then((m) => ({ default: m.AllocationApprovalDetailPage })));
+const AllocationCycleApprovalPage = lazy(() => import("@/modules/inventory/pages/AllocationCycleApprovalPage").then((m) => ({ default: m.AllocationCycleApprovalPage })));
+const AllocationPage = lazy(() => import("@/modules/inventory/pages/AllocationPage").then((m) => ({ default: m.AllocationPage })));
+const ApiClientDetailPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.ApiClientDetailPage })));
+const ApiClientsPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.ApiClientsPage })));
+const AppLogsPage = lazy(() => import("@/modules/admin/pages/AppLogsPage").then((m) => ({ default: m.AppLogsPage })));
+const ApprovalCorrectionPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ApprovalCorrectionPage })));
+const ApprovalFlowPage = lazy(() => import("@/modules/admin/pages/ApprovalFlowPage").then((m) => ({ default: m.ApprovalFlowPage })));
+const ApprovalOverviewPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ApprovalOverviewPage })));
+const ApprovalsPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ApprovalsPage })));
+const AttachmentsReportPage = lazy(() => import("@/modules/reports/pages/AttachmentsReportPage").then((m) => ({ default: m.AttachmentsReportPage })));
+const AuditPage = lazy(() => import("@/modules/admin/pages/AuditPage").then((m) => ({ default: m.AuditPage })));
+const CarrierAckPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.CarrierAckPage })));
+const CarrierJobPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.CarrierJobPage })));
+const CarrierJobsPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.CarrierJobsPage })));
+const CarrierLayout = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.CarrierLayout })));
+const CarrierLoginPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.CarrierLoginPage })));
+const ChainEditorPage = lazy(() => import("@/modules/admin/pages/ChainEditorPage").then((m) => ({ default: m.ChainEditorPage })));
+const CodeFormatsPage = lazy(() => import("@/modules/settings/pages/CodeFormatsPage").then((m) => ({ default: m.CodeFormatsPage })));
+const ConsignmentFormScreen = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.ConsignmentFormScreen })));
+const ConsignmentPrintPage = lazy(() => import("@/modules/warehouse/pages/ConsignmentPrintPage").then((m) => ({ default: m.ConsignmentPrintPage })));
+const ConsignmentsScreen = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.ConsignmentsScreen })));
+const ConsolidationDetailPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationDetailPage })));
+const ConsolidationIssuePage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationIssuePage })));
+const ConsolidationItemPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationItemPage })));
+const ConsolidationPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationPage })));
+const DecisionQueuePage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.DecisionQueuePage })));
+const DispatchConfirmPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.DispatchConfirmPage })));
+const DispatchPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.DispatchPage })));
+const DispatchPrintPage = lazy(() => import("@/modules/warehouse/pages/DispatchPrintPage").then((m) => ({ default: m.DispatchPrintPage })));
+const FallbackLogPage = lazy(() => import("@/modules/admin/pages/FallbackLogPage").then((m) => ({ default: m.FallbackLogPage })));
+const ForgotPasswordPage = lazy(() => import("@/pages/PasswordResetPages").then((m) => ({ default: m.ForgotPasswordPage })));
+const FulfilmentBatchPage = lazy(() => import("@/modules/inventory/pages/FulfilmentBatchPage").then((m) => ({ default: m.FulfilmentBatchPage })));
+const FulfilmentDeskPage = lazy(() => import("@/modules/inventory/pages/FulfilmentDeskPage").then((m) => ({ default: m.FulfilmentDeskPage })));
+const GRNPrintPage = lazy(() => import("@/modules/warehouse/pages/GRNPrintPage").then((m) => ({ default: m.GRNPrintPage })));
+const GatePassPrintPage = lazy(() => import("@/modules/logistics/pages/GatePassPrintPage").then((m) => ({ default: m.GatePassPrintPage })));
+const GroupsPage = lazy(() => import("@/modules/rbac/pages/GroupsPage").then((m) => ({ default: m.GroupsPage })));
+const HomePage = lazy(() => import("@/modules/home/pages/HomePage").then((m) => ({ default: m.HomePage })));
+const IndentBoardPage = lazy(() => import("@/modules/indents/pages/BoardPage").then((m) => ({ default: m.IndentBoardPage })));
+const IndentDashboardPage = lazy(() => import("@/modules/indents/pages/DashboardPage").then((m) => ({ default: m.IndentDashboardPage })));
+const IndentDetailPage = lazy(() => import("@/modules/indents/pages/DetailPage").then((m) => ({ default: m.IndentDetailPage })));
+const IndentFormPage = lazy(() => import("@/modules/indents/pages/FormPage").then((m) => ({ default: m.IndentFormPage })));
+const IndentJourneyPage = lazy(() => import("@/modules/indents/pages/JourneyPage").then((m) => ({ default: m.IndentJourneyPage })));
+const IndentListPage = lazy(() => import("@/modules/indents/pages/ListPage").then((m) => ({ default: m.IndentListPage })));
+const IndentNotificationsPage = lazy(() => import("@/modules/indents/pages/NotificationsPage").then((m) => ({ default: m.IndentNotificationsPage })));
+const IndentReportsPage = lazy(() => import("@/modules/indents/pages/ReportsPage").then((m) => ({ default: m.IndentReportsPage })));
+const InspectionPrintPage = lazy(() => import("@/modules/warehouse/pages/InspectionPrintPage").then((m) => ({ default: m.InspectionPrintPage })));
+const InventoryOverviewPage = lazy(() => import("@/modules/inventory/pages/OverviewPage").then((m) => ({ default: m.InventoryOverviewPage })));
+const ItemDemandPage = lazy(() => import("@/modules/inventory/pages/ItemDemandPage").then((m) => ({ default: m.ItemDemandPage })));
+const JobProfilesPage = lazy(() => import("@/modules/rbac/pages/JobProfilesPage").then((m) => ({ default: m.JobProfilesPage })));
+const LabelsPage = lazy(() => import("@/modules/inventory/pages/LabelsPage").then((m) => ({ default: m.LabelsPage })));
+const LiveTrackingPage = lazy(() => import("@/modules/reports/pages/LiveTrackingPage").then((m) => ({ default: m.LiveTrackingPage })));
+const LogisticsActivityPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsActivityPage })));
+const LogisticsOverviewPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsOverviewPage })));
+const LogisticsVendorsPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.LogisticsVendorsPage })));
+const MRConsolidationPage = lazy(() => import("@/modules/procurement/pages/MRConsolidationPage").then((m) => ({ default: m.MRConsolidationPage })));
+const MailPage = lazy(() => import("@/modules/admin/pages/MailPage").then((m) => ({ default: m.MailPage })));
+const MastersPage = lazy(() => import("@/modules/masters/pages/MastersPage").then((m) => ({ default: m.MastersPage })));
+const MaterialIssuePrintPage = lazy(() => import("@/modules/warehouse/pages/MaterialIssuePrintPage").then((m) => ({ default: m.MaterialIssuePrintPage })));
+const MaterialRequestDetailPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestDetailPage").then((m) => ({ default: m.MaterialRequestDetailPage })));
+const MaterialRequestFormPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestFormPage").then((m) => ({ default: m.MaterialRequestFormPage })));
+const MaterialRequestsPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestsPage").then((m) => ({ default: m.MaterialRequestsPage })));
+const MyDecisionsPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.MyDecisionsPage })));
+const NotFoundPage = lazy(() => import("@/pages/NotFoundPage").then((m) => ({ default: m.NotFoundPage })));
+const NotificationsPage = lazy(() => import("@/modules/admin/pages/NotificationsPage").then((m) => ({ default: m.NotificationsPage })));
+const NumberingPage = lazy(() => import("@/modules/admin/pages/NumberingPage").then((m) => ({ default: m.NumberingPage })));
+const PODetailPage = lazy(() => import("@/modules/procurement/pages/PODetailPage").then((m) => ({ default: m.PODetailPage })));
+const POFormPage = lazy(() => import("@/modules/procurement/pages/POFormPage").then((m) => ({ default: m.POFormPage })));
+const POListPage = lazy(() => import("@/modules/procurement/pages/POListPage").then((m) => ({ default: m.POListPage })));
+const POPrintPage = lazy(() => import("@/modules/procurement/pages/POPrintPage").then((m) => ({ default: m.POPrintPage })));
+const PicklistPrintPage = lazy(() => import("@/modules/warehouse/pages/PicklistPrintPage").then((m) => ({ default: m.PicklistPrintPage })));
+const PlatformLinksPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.PlatformLinksPage })));
+const PoliciesPage = lazy(() => import("@/modules/admin/pages/PoliciesPage").then((m) => ({ default: m.PoliciesPage })));
+const ProcurementLedgerPage = lazy(() => import("@/modules/procurement/pages/ProcurementLedgerPage").then((m) => ({ default: m.ProcurementLedgerPage })));
+const ProcurementOverviewPage = lazy(() => import("@/modules/procurement/pages/ProcurementOverviewPage").then((m) => ({ default: m.ProcurementOverviewPage })));
+const ProfilePage = lazy(() => import("@/pages/ProfilePage").then((m) => ({ default: m.ProfilePage })));
+const ProviderSelectionPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.ProviderSelectionPage })));
+const PurchaseConsolidationDetailPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationDetailPage").then((m) => ({ default: m.PurchaseConsolidationDetailPage })));
+const PurchaseConsolidationFormPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationFormPage").then((m) => ({ default: m.PurchaseConsolidationFormPage })));
+const PurchaseConsolidationListPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationListPage").then((m) => ({ default: m.PurchaseConsolidationListPage })));
+const PurchaseReturnsPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnsPage })));
+const PutawayPrintPage = lazy(() => import("@/modules/warehouse/pages/PutawayPrintPage").then((m) => ({ default: m.PutawayPrintPage })));
+const QuotationListPage = lazy(() => import("@/modules/procurement/pages/QuotationListPage").then((m) => ({ default: m.QuotationListPage })));
+const RFQDetailPage = lazy(() => import("@/modules/procurement/pages/RFQDetailPage").then((m) => ({ default: m.RFQDetailPage })));
+const RFQFormPage = lazy(() => import("@/modules/procurement/pages/RFQFormPage").then((m) => ({ default: m.RFQFormPage })));
+const RFQListPage = lazy(() => import("@/modules/procurement/pages/RFQListPage").then((m) => ({ default: m.RFQListPage })));
+const ReceivingConfigPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReceivingConfigPage })));
+const ReportLedgerPage = lazy(() => import("@/modules/reports").then((m) => ({ default: m.ReportLedgerPage })));
+const RequisitionDetailPage = lazy(() => import("@/modules/procurement/pages/RequisitionDetailPage").then((m) => ({ default: m.RequisitionDetailPage })));
+const RequisitionFormPage = lazy(() => import("@/modules/procurement/pages/RequisitionFormPage").then((m) => ({ default: m.RequisitionFormPage })));
+const RequisitionListPage = lazy(() => import("@/modules/procurement/pages/RequisitionListPage").then((m) => ({ default: m.RequisitionListPage })));
+const ResetPasswordPage = lazy(() => import("@/pages/PasswordResetPages").then((m) => ({ default: m.ResetPasswordPage })));
+const ReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnDetailPage })));
+const ReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnFormPage })));
+const ReturnsListPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsListPage })));
+const ReturnsOverviewPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsOverviewPage })));
+const RulesPage = lazy(() => import("@/modules/admin/pages/RulesPage").then((m) => ({ default: m.RulesPage })));
+const SettingsPage = lazy(() => import("@/modules/settings/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const StockAdjustmentsView = lazy(() => import("@/modules/inventory/components/StockAdjustmentsView").then((m) => ({ default: m.StockAdjustmentsView })));
+const StockBalanceView = lazy(() => import("@/modules/inventory/components/StockBalanceView").then((m) => ({ default: m.StockBalanceView })));
+const StockLedgerView = lazy(() => import("@/modules/inventory/components/StockLedgerView").then((m) => ({ default: m.StockLedgerView })));
+const StockMovementPrintPage = lazy(() => import("@/modules/warehouse/pages/StockMovementPrintPage").then((m) => ({ default: m.StockMovementPrintPage })));
+const StockReplenishmentView = lazy(() => import("@/modules/inventory/components/StockReplenishmentView").then((m) => ({ default: m.StockReplenishmentView })));
+const StockTransferView = lazy(() => import("@/modules/inventory/components/StockTransferView").then((m) => ({ default: m.StockTransferView })));
+const StockValuationView = lazy(() => import("@/modules/inventory/components/StockValuationView").then((m) => ({ default: m.StockValuationView })));
+const StockingPointsPage = lazy(() => import("@/modules/inventory/pages/StockingPointsPage").then((m) => ({ default: m.StockingPointsPage })));
+const SupplierAccountsPage = lazy(() => import("@/modules/procurement/pages/SupplierAccountsPage").then((m) => ({ default: m.SupplierAccountsPage })));
+const SupplierLayout = lazy(() => import("@/modules/supplier/SupplierLayout").then((m) => ({ default: m.SupplierLayout })));
+const SupplierLoginPage = lazy(() => import("@/modules/supplier/pages/SupplierLoginPage").then((m) => ({ default: m.SupplierLoginPage })));
+const SupplierPODetailPage = lazy(() => import("@/modules/supplier/pages/SupplierPODetailPage").then((m) => ({ default: m.SupplierPODetailPage })));
+const SupplierPOListPage = lazy(() => import("@/modules/supplier/pages/SupplierPOListPage").then((m) => ({ default: m.SupplierPOListPage })));
+const SupplierPasswordPage = lazy(() => import("@/modules/supplier/pages/SupplierPasswordPage").then((m) => ({ default: m.SupplierPasswordPage })));
+const SupplierProfilePage = lazy(() => import("@/modules/supplier/pages/SupplierProfilePage").then((m) => ({ default: m.SupplierProfilePage })));
+const SupplierRFQDetailPage = lazy(() => import("@/modules/supplier/pages/SupplierRFQDetailPage").then((m) => ({ default: m.SupplierRFQDetailPage })));
+const SupplierRFQListPage = lazy(() => import("@/modules/supplier/pages/SupplierRFQListPage").then((m) => ({ default: m.SupplierRFQListPage })));
+const SuppliersPage = lazy(() => import("@/modules/procurement/pages/SuppliersPage").then((m) => ({ default: m.SuppliersPage })));
+const TraceabilityPage = lazy(() => import("@/modules/reports/pages/TraceabilityPage").then((m) => ({ default: m.TraceabilityPage })));
+const TransportDetailPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.TransportDetailPage })));
+const TransportFormPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.TransportFormPage })));
+const TransportRequestsPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.TransportRequestsPage })));
+const UsersPage = lazy(() => import("@/modules/rbac/pages/UsersPage").then((m) => ({ default: m.UsersPage })));
+const WarehouseModule = lazy(() => import("@/modules/warehouse").then((m) => ({ default: m.WarehouseModule })));
+const WebhookDetailPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.WebhookDetailPage })));
+
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -177,11 +211,19 @@ function LegacyAllocationApprovalsRedirect() {
   return <Navigate to={`/inventory/fulfilment?tab=approvals${hash}`} replace />;
 }
 
+
+/** Shown while a route's chunk is still arriving. Deliberately quiet: on a LAN the
+ *  chunk lands in milliseconds and a spinner would flash on every navigation. */
+function RouteFallback() {
+  return <div className="p-8 text-sm text-muted">Loading…</div>;
+}
+
 function AppRoutes() {
   const { me, loading } = useAuth();
   if (loading) return <FullScreen>Loading…</FullScreen>;
 
   return (
+    <Suspense fallback={<RouteFallback />}>
     <Routes>
       <Route path="/login" element={me ? <Navigate to="/" replace /> : <LoginPage />} />
       {/* Both PUBLIC — somebody who cannot sign in is the only caller they have.
@@ -576,6 +618,7 @@ function AppRoutes() {
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>
+    </Suspense>
   );
 }
 

@@ -16,6 +16,7 @@ Two groups, gated very differently on purpose:
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import throttle
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
@@ -76,9 +77,14 @@ async def forgot_password(body: ForgotPasswordIn, request: Request,
     walk a list of codes and learn which ones are real — or, worse, learn whether an
     address is already the one on file for an account.
     """
+    # Throttled per address (2026-09-03): the handler sends mail and answers 204 to
+    # everything, so nothing else here bounds how many messages one caller can push
+    # into a real person's inbox, or how much reset-claim data they can write.
+    await throttle.guard(request, "reset", 5,
+                         message="Too many reset requests. Try again in a minute.")
     await service.request_reset(
         db, body.emp_code, body.email,
-        ip_address=request.client.host if request.client else None,
+        ip_address=throttle.caller_address(request),
     )
 
 
