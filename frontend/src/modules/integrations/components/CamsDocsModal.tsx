@@ -3,41 +3,44 @@ import { useQuery } from "@tanstack/react-query";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import { Copy } from "lucide-react";
 import { Button, Card, ErrorBanner, useToast } from "@/shared/components";
-import { webhooksApi } from "../api";
+import { camsApi } from "../api";
 
 /**
- * Connection details for one webhook — what you send the system that will push to us.
+ * What B-CAMS is handed: the address to post to, how to sign, and one example body
+ * per event.
  *
- * The mirror image of `ConnectionDocsPanel`, which documents what an application
- * PULLS. Same rule: everything is derived on the server from the registration, so it
- * cannot drift from what the endpoint will actually accept. The events listed here
- * are literally the ones the receiver checks against.
+ * The same job `WebhookDocsModal` does for a registered webhook, and it exists for the
+ * same reason — the person integrating is another company's developer who will never
+ * have an SCM login, so the details have to leave this screen as text that can be
+ * pasted into an email. Copy as Markdown is therefore the primary action, not a
+ * convenience.
  *
- * Copy as Markdown matters more here than on the pull side: the sender is usually
- * another company's developer, who will never have an SCM login to read this screen.
+ * Nothing here is written in the browser. Every URL, header and example comes from
+ * `/api/apis/cams/docs`, built from the one table that also registers the endpoints,
+ * so the screen cannot advertise a path that does not exist or a body the validator
+ * would refuse. The host is the host the request arrived on — open this from the LAN
+ * and it shows the LAN address, which is the one that will actually work.
  */
-export function WebhookDocsModal({ source, onClose }: {
-  source: string | null;
+export function CamsDocsModal({ open, onClose }: {
+  open: boolean;
   onClose: () => void;
 }) {
   const toast = useToast();
   const [fallback, setFallback] = useState("");
 
   const docs = useQuery({
-    queryKey: ["apis", "webhook-docs", source],
-    queryFn: () => webhooksApi.docs(source as string),
-    enabled: source !== null,
+    queryKey: ["cams", "docs"],
+    queryFn: camsApi.docs,
+    enabled: open,
   });
 
   const asMarkdown = (): string => {
     const d = docs.data;
     if (!d) return "";
-    const lines = [
-      `# Pushing to SCM — ${d.name}`,
+    return [
+      "# Pushing to SCM — B-CAMS",
       "",
-      `\`${d.method} ${d.url}\``,
-      "",
-      `What SCM does with it: **${d.handler_label}**`,
+      `Base URL: \`${d.base_url}\``,
       "",
       "## Headers",
       "",
@@ -47,22 +50,27 @@ export function WebhookDocsModal({ source, onClose }: {
       "",
       d.signing_note,
       "",
-      "## Body",
+      "## Every body carries",
       "",
       "| Field | Meaning |",
       "| --- | --- |",
       ...d.envelope.map((e) => `| \`${e.field}\` | ${e.note} |`),
       "",
-      `## Events accepted (${d.events.length})`,
+      `## Endpoints (${d.writes.length})`,
       "",
-      ...d.events.map((e) => `- \`${e}\``),
-      "",
-      "Anything else is refused, and the refusal names what is accepted.",
+      "| Event | POST to | Effect |",
+      "| --- | --- | --- |",
+      ...d.writes.map((w) => `| \`${w.event}\` | \`${w.url}\` | ${w.effect} |`),
       "",
       "## Examples",
       "",
-      ...d.samples.flatMap((s) => [
-        `### ${s.event}`, "", "```json", JSON.stringify(s.body, null, 2), "```", "",
+      ...d.writes.flatMap((w) => [
+        `### ${w.label} — \`POST ${w.url}\``,
+        "",
+        "```json",
+        JSON.stringify(w.sample, null, 2),
+        "```",
+        "",
       ]),
       "## Answers",
       "",
@@ -72,8 +80,11 @@ export function WebhookDocsModal({ source, onClose }: {
       "",
       "A repeated `event_id` is answered `duplicate` and changes nothing, so retrying",
       "is always safe.",
-    ];
-    return lines.join("\n");
+      "",
+      `## Read feeds (${d.feeds.length})`,
+      "",
+      ...d.feeds.map((f) => `- \`GET ${f}\``),
+    ].join("\n");
   };
 
   const copyDoc = () => {
@@ -95,33 +106,32 @@ export function WebhookDocsModal({ source, onClose }: {
   const d = docs.data;
 
   return (
-    <Modal isOpen={source !== null} onClose={onClose} size="3xl">
+    <Modal isOpen={open} onClose={onClose} size="3xl">
       <ModalContent>
         <ModalHeader className="font-display text-lg font-bold text-ink">
-          How {d?.name ?? source} pushes to SCM
+          How B-CAMS pushes to SCM
         </ModalHeader>
         <ModalBody className="gap-3">
           <ErrorBanner error={docs.error} />
           {d && (
             /* Plain overflow-y, not `ScrollBox`: that one is for wide TABLES and
-             * scrolls sideways only, so capping its height here clipped the docs
-             * dead — the example body was cut off with nothing to scroll. */
+             * scrolls sideways only, so capping its height here would clip the
+             * examples dead with nothing to scroll. */
             <div className="max-h-[60vh] overflow-y-auto overscroll-y-contain">
               <div className="space-y-4 pr-1">
                 <Card className="space-y-2 p-3">
-                  <code className="block break-all text-sm text-ink">
-                    {d.method} {d.url}
-                  </code>
-                  <div className="text-xs text-muted">
-                    What SCM does with it:{" "}
-                    <span className="font-semibold text-body">{d.handler_label}</span>
+                  <div className="text-xs uppercase tracking-wide text-muted">
+                    Base URL
                   </div>
-                  {!d.has_secret && d.require_signature && (
-                    // Registered but unusable. Worth saying here, because this is the
-                    // page somebody is reading in order to hand the URL over.
+                  <code className="block break-all text-sm text-ink">
+                    {d.base_url}
+                  </code>
+                  {!d.configured && (
+                    // Documented but unusable. Worth saying on the page somebody is
+                    // reading in order to hand the address over.
                     <div className="rounded-lg bg-warn-bg/60 p-2 text-xs text-body">
-                      No secret has been issued yet, so every push will be refused.
-                      Issue one before sending these details.
+                      No shared secret has been issued yet, so every write will be
+                      refused. Issue one before sending these details.
                     </div>
                   )}
                 </Card>
@@ -133,47 +143,68 @@ export function WebhookDocsModal({ source, onClose }: {
                   <p className="pt-1 text-xs text-muted">{d.signing_note}</p>
                 </Section>
 
-                <Section title="Body">
+                <Section title="Every body carries">
                   {d.envelope.map((field) => (
                     <Line key={field.field} name={field.field} note={field.note} />
                   ))}
                 </Section>
 
-                <Section title={`Events accepted (${d.events.length})`}>
-                  <div className="flex flex-wrap gap-1">
-                    {d.events.map((event) => (
-                      <code key={event}
-                            className="rounded bg-content1 px-1.5 py-0.5 text-[11px] text-body">
-                        {event}
+                <Section title={`Endpoints (${d.writes.length})`}>
+                  {d.writes.map((write) => (
+                    <div key={write.event} className="rounded-lg bg-content1 p-2">
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        <span className="text-sm font-semibold text-ink">
+                          {write.label}
+                        </span>
+                        {write.deducts_stock && (
+                          <span className="rounded bg-ok/15 px-1.5 py-0.5 text-[10px]
+                                           font-semibold uppercase tracking-wide text-ok">
+                            Moves stock
+                          </span>
+                        )}
+                      </div>
+                      <code className="mt-1 block break-all text-xs text-body">
+                        {write.method} {write.url}
                       </code>
-                    ))}
-                  </div>
-                  <p className="pt-1 text-xs text-muted">
-                    Anything else is refused, and the refusal names what is accepted.
-                  </p>
+                      <div className="mt-0.5 font-mono text-[11px] text-muted">
+                        {write.event}
+                      </div>
+                    </div>
+                  ))}
                 </Section>
 
-                {d.samples.length > 0 && (
-                  <Section title={`Example — ${d.samples[0].event}`}>
+                {d.writes.length > 0 && (
+                  <Section title={`Example — ${d.writes[0].label}`}>
                     <pre className="whitespace-pre-wrap break-all rounded-lg
                                     bg-content1 p-3 font-mono text-[11px] text-body">
-                      {JSON.stringify(d.samples[0].body, null, 2)}
+                      {JSON.stringify(d.writes[0].sample, null, 2)}
                     </pre>
-                    {d.samples.length > 1 && (
-                      <p className="pt-1 text-xs text-muted">
-                        The other {d.samples.length - 1} event
-                        {d.samples.length > 2 ? "s are" : " is"} in the Markdown copy.
-                      </p>
-                    )}
+                    <p className="pt-1 text-xs text-muted">
+                      The other {d.writes.length - 1} examples are in the Markdown copy.
+                    </p>
                   </Section>
                 )}
 
                 <Section title="Answers">
-                  {d.answers.map((answer) => (
-                    <Line key={answer.status} name={String(answer.status)}
+                  {d.answers.map((answer, index) => (
+                    // Two rows share status 200 — accepted and duplicate — so the
+                    // status cannot be the key.
+                    <Line key={`${answer.status}-${index}`} name={String(answer.status)}
                           note={answer.note} />
                   ))}
                 </Section>
+
+                {d.feeds.length > 0 && (
+                  <Section title={`Read feeds (${d.feeds.length})`}>
+                    <div className="space-y-0.5">
+                      {d.feeds.map((feed) => (
+                        <code key={feed} className="block break-all text-[11px] text-muted">
+                          GET {feed}
+                        </code>
+                      ))}
+                    </div>
+                  </Section>
+                )}
 
                 {fallback && (
                   <Section title="Documentation — select all and copy">

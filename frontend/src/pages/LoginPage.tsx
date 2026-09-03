@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
 import { Input, Button } from "@heroui/react";
+import { Alert } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import loginHero from "@/assets/login-hero.png";
 
@@ -100,9 +101,13 @@ export function LoginPage() {
               </Link>
             </div>
 
-            {error && (
-              <div className="rounded-xl bg-bad-bg px-3 py-2 text-sm font-medium text-bad">{error}</div>
-            )}
+            {/* The shared alert, not a bespoke red box: a failed sign-in should look
+                like every other failure in the app. The sentence itself comes from
+                the one translation in shared/api/errors.ts, which for a rejected
+                sign-in is the server's own — deliberately the same words whether the
+                employee ID is unknown, retired, or simply typed with the wrong
+                password, so the form never confirms that an account exists. */}
+            {error && <Alert tone="danger" title={error} />}
 
             <Button
               type="submit"

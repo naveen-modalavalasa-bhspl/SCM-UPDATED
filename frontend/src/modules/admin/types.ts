@@ -4,6 +4,10 @@ export interface SyncResult {
   records_fetched: number;
   records_upserted: number;
   error_message?: string | null;
+  /** When this entity last ran. The card shows the newest row per entity, and a row
+   *  from an older run looks identical to one from this one without it. */
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 /** One piece of follow-up work a sync triggers, and whether it landed. */
@@ -183,6 +187,15 @@ export interface AuditRow {
   actor_name?: string | null;
   /** field -> {from, to}; only the fields that actually changed. */
   changed_fields?: Record<string, { from: unknown; to: unknown }> | null;
+  /** Where the request came from and on what. All null on rows written before the
+   *  columns existed — an honest gap the screen shows as a dash, never a guess.
+   *  `location` is the ADDRESS's location, which for a LAN login is the deployment's
+   *  own (see `settings/clientinfo.py`). */
+  ip_address?: string | null;
+  location?: string | null;
+  device_type?: string | null;
+  browser?: string | null;
+  os?: string | null;
   at?: string | null;
 }
 

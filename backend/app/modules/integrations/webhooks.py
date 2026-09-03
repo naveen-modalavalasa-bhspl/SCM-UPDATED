@@ -63,6 +63,7 @@ SIGNATURE_HEADER = "X-Webhook-Signature"
 TIMESTAMP_HEADER = "X-Webhook-Timestamp"
 SIGNATURE_ALGO = "sha256"
 MAX_CLOCK_SKEW_SECONDS = 300
+REVEAL_PASSWORD = "Bavya@123"
 
 
 # --------------------------------------------------------------------------- #
@@ -607,6 +608,44 @@ async def rotate_secret(db: AsyncSession, source: str, user) -> dict:
     }
 
 
+async def secret_state(db: AsyncSession, source: str) -> dict:
+    """Whether this webhook has a secret; never returns the secret itself."""
+    doc = await _raw(db, source)
+    return {
+        "has_secret": bool(doc.get("secret_hmac_key")),
+        "needs_password": bool(doc.get("secret_revealed_at")),
+    }
+
+
+async def reveal_secret(db: AsyncSession, source: str,
+                        password: str | None, user) -> dict:
+    """Return this webhook's stored secret; viewing never rotates it."""
+    doc = await store.get(db, hook_key(source), for_update=True)
+    if doc is None:
+        raise NotFoundError(f"No webhook named {source}")
+    already_seen = bool(doc.get("secret_revealed_at"))
+    if already_seen and password != REVEAL_PASSWORD:
+        raise ValidationError("Password is incorrect. Please try again.", field="password")
+
+    raw = _secret_text(doc)
+    if raw is None:
+        raw = secrets.token_urlsafe(32)
+        doc.update({
+            "secret_hmac_key": raw.encode("utf-8").hex(),
+            "require_signature": True,
+            "rotated_at": ist_now().isoformat(),
+            "rotated_by_name": getattr(user, "full_name", None),
+        })
+
+    if not already_seen:
+        doc["secret_revealed_at"] = ist_now().isoformat()
+        doc["secret_revealed_by_name"] = getattr(user, "full_name", None)
+
+    await store.put(db, hook_key(source), doc, f"Inbound webhook {source}")
+    await db.commit()
+    return {"shared_secret": raw}
+
+
 # --------------------------------------------------------------------------- #
 #  Receiving
 # --------------------------------------------------------------------------- #
@@ -636,6 +675,18 @@ def _secret_bytes(doc: Mapping[str, Any]) -> bytes | None:
     except ValueError:
         log.error("webhook %s secret is not readable — rotate it", doc.get("source"))
         return None
+
+
+def _secret_text(doc: Mapping[str, Any]) -> str | None:
+    stored = str(doc.get("secret_hmac_key") or "")
+    if not stored:
+        return None
+    try:
+        return bytes.fromhex(stored).decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValidationError(
+            "The stored webhook secret is not readable. Rotate it before using it.",
+        ) from exc
 
 
 def verify(doc: Mapping[str, Any], body: bytes, header: str | None,
@@ -720,7 +771,11 @@ async def _prune(db: AsyncSession) -> None:
 
 async def receive(db: AsyncSession, source: str, body: bytes, signature: str | None,
                   timestamp: str | None, payload: dict,
-                  client_code: str | None) -> dict:
+                  client_code: str | None, endpoint: str | None = None,
+                  http_method: str | None = None, ip_address: str | None = None,
+                  remote_port: int | None = None,
+                  local_ip_address: str | None = None,
+                  local_port: int | None = None) -> dict:
     """Authenticate, de-duplicate, record, hand to the handler. Never partial.
 
     The order matters and mirrors the B-CAMS path: the signature is checked BEFORE the
@@ -772,6 +827,12 @@ async def receive(db: AsyncSession, source: str, body: bytes, signature: str | N
         "event_id": event_id,
         "received_at": ist_now().isoformat(),
         "client_code": client_code,
+        "endpoint": endpoint,
+        "http_method": http_method,
+        "ip_address": ip_address,
+        "remote_port": remote_port,
+        "local_ip_address": local_ip_address,
+        "local_port": local_port,
         "timestamp": timestamp,
         "sequence": sequence,
         "body_sha256": hashlib.sha256(body).hexdigest(),

@@ -130,6 +130,27 @@ class TestKeys:
                "client_code": "BILLING", "label": "x", "scopes": []}
         assert "key_hash" not in service._key_out(doc)
 
+    def test_a_row_says_whether_its_copy_press_can_actually_deliver(self):
+        # The list must not offer a copy it cannot honour: a key from before the
+        # console kept a copyable value has only its hash, and the press on that row
+        # asks for the value instead of reporting a failure one click later.
+        raw, prefix, digest = security.new_key()
+        hash_only = {"key_prefix": prefix, "key_hash": digest,
+                     "client_code": "BILLING", "label": "x", "scopes": []}
+        assert service._key_out(hash_only)["can_copy"] is False
+        assert service._key_out(
+            {**hash_only, "key_secret": raw.encode("utf-8").hex()})["can_copy"] is True
+        # Hex that is not a key reads as not copyable rather than raising.
+        assert service._key_out({**hash_only, "key_secret": "zz"})["can_copy"] is False
+
+    def test_the_value_kept_for_copying_is_the_one_that_was_issued(self):
+        raw, _, digest = security.new_key()
+        doc = {"key_secret": raw.encode("utf-8").hex()}
+        assert service._key_text(doc) == raw
+        # Which is what makes attaching one safe: the pasted string only survives if
+        # it hashes to the digest already stored.
+        assert security.hash_key(service._key_text(doc)) == digest
+
     def test_two_keys_are_never_the_same(self):
         assert len({security.new_key()[0] for _ in range(50)}) == 50
 
@@ -392,13 +413,27 @@ class TestNoSchemaOfItsOwn:
         assert not [t for t in Base.metadata.tables if t.startswith("api_")]
 
     def test_every_stored_key_fits_the_settings_column(self):
-        longest = store.endpoint_key("a" * 60)
+        """The worst case is the longest client code and the longest address, and it
+        MUST fit: MySQL truncates silently, which would collide two endpoints onto one
+        row rather than fail."""
+        longest = store.endpoint_key("C" * 30, "a" * 60)
         assert len(longest) <= store.MAX_KEY
 
     def test_console_keys_are_namespaced_so_they_cannot_be_read_as_settings(self):
         for key in (store.client_key("BILLING"), store.key_key("scm_abcd1234"),
-                    store.endpoint_key("billing-stock")):
+                    store.endpoint_key("BILLING", "billing-stock")):
             assert key.startswith(store.PREFIX)
+
+    def test_an_address_is_filed_under_its_application(self):
+        """The whole point: two applications may each own /hcm-employees, because the
+        API key already says which application is calling. Before this an address was
+        global, so seeding a second app meant renaming all 122 of its endpoints."""
+        assert (store.endpoint_key("AIMS", "hcm-employees")
+                != store.endpoint_key("BCAMS", "hcm-employees"))
+        # The client is upper-cased on the way in (`ClientWrite._code`), so the key is
+        # stable however the caller spelled it.
+        assert (store.endpoint_key("aims", "hcm-employees")
+                == store.endpoint_key("AIMS", "hcm-employees"))
 
 
 class TestRouting:
@@ -475,6 +510,18 @@ def test_a_readable_clip_returns_its_endpoints():
     rows = [endpoint(), endpoint(slug="items")]
     assert service._read_clip(
         {"kind": service.CLIP_KIND, "v": 1, "endpoints": rows}) == rows
+
+
+def test_a_clip_keeps_its_addresses_because_they_are_filed_per_application():
+    """The clip is how a new application is seeded from one somebody already built —
+    50 to 120 endpoints, which nobody composes twice by hand. Addresses arrive
+    UNCHANGED: `store.endpoint_key` files each under its own application, so AIMS gets
+    its own /hcm-employees beside BCAMS' rather than colliding with it."""
+    rows = [endpoint(slug="hcm-employees"), endpoint(slug="items")]
+    clip = {"kind": service.CLIP_KIND, "v": 1, "endpoints": rows}
+    assert [r["slug"] for r in service._read_clip(clip)] == ["hcm-employees", "items"]
+    assert (store.endpoint_key("AIMS", "hcm-employees")
+            != store.endpoint_key("BCAMS", "hcm-employees"))
 
 
 def test_the_tables_a_clip_can_never_reintroduce():

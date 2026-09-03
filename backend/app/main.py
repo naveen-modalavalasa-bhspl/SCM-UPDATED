@@ -9,11 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
-from sqlalchemy.exc import DataError
+from sqlalchemy.exc import DataError, IntegrityError
 
 from app.core.exceptions import (
     AppException, app_exception_handler, data_error_handler, http_exception_handler,
-    request_validation_exception_handler, unhandled_exception_handler,
+    integrity_error_handler, request_validation_exception_handler,
+    unhandled_exception_handler,
 )
 from app.platform.admin.app_logs import capture_backend_error, safe_request_id
 
@@ -78,10 +79,20 @@ app = FastAPI(title="SCM ERP", version="0.1.0", lifespan=lifespan)
 app.state.error_reporter = capture_backend_error
 
 
+from app.platform.settings.clientinfo import client_info, set_client_info
+
+
 @app.middleware("http")
 async def request_identity(request, call_next):
-    """Give browser and server errors the same searchable correlation id."""
+    """Give browser and server errors the same searchable correlation id, and park the
+    caller's context where `write_audit` can reach it.
+
+    The address, device and location live only on the request, and threading them
+    through every service function that writes an audit row would be a large change for
+    five columns — so they are captured once, here. The geo lookup is cached per address
+    and can never fail the request: see `settings/clientinfo.py`."""
     request.state.request_id = safe_request_id(request.headers.get("x-request-id"))
+    set_client_info(await client_info(request))
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     return response
@@ -104,6 +115,10 @@ app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 # Ahead of the catch-all: a value the column cannot hold is the caller's problem, and
 # answering 500 hid which field it was on every screen that writes a short column.
 app.add_exception_handler(DataError, data_error_handler)
+# Same reasoning: a duplicate number, a missing required column or a row something
+# else still points at is the caller's to fix, and answering 500 said nothing about
+# which. The constraint name never leaves the log — see integrity_error_handler.
+app.add_exception_handler(IntegrityError, integrity_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 

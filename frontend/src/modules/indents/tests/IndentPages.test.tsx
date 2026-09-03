@@ -18,6 +18,8 @@ import { IndentBoardPage } from "../pages/BoardPage";
 import { IndentReportsPage } from "../pages/ReportsPage";
 import { IndentNotificationsPage } from "../pages/NotificationsPage";
 import { IndentDetailPage } from "../pages/DetailPage";
+import { AlertHost } from "@/modules/alerts/components/AlertHost";
+import { ToastProvider } from "@/shared/components";
 import { IndentJourneyPage } from "../pages/JourneyPage";
 import { groupJourneyHistory } from "../pages/JourneyPage";
 import { indentApi, indentKeys } from "../api";
@@ -195,15 +197,19 @@ function createTestQueryClient() {
 
 function renderWithProviders(ui: ReactElement, route = "/indents", client = createTestQueryClient()) {
   const result = render(
+    // ToastProvider because the app mounts one at its root and the detail screen
+    // announces a submit, a delete and a correction resubmit through it.
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <Routes>
-          <Route path="/indents/:id/journey" element={ui} />
-          <Route path="/indents/:id" element={ui} />
-          <Route path="/indents/*" element={ui} />
-          <Route path="*" element={ui} />
-        </Routes>
-      </MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[route]}>
+          <Routes>
+            <Route path="/indents/:id/journey" element={ui} />
+            <Route path="/indents/:id" element={ui} />
+            <Route path="/indents/*" element={ui} />
+            <Route path="*" element={ui} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -238,6 +244,7 @@ function renderAllRequestsFlow(
 ) {
   const result = render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
         <Routes>
@@ -245,6 +252,7 @@ function renderAllRequestsFlow(
           <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -256,6 +264,7 @@ function renderActivityLedgerFlow(
 ) {
   const result = render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
         <Routes>
@@ -263,6 +272,7 @@ function renderActivityLedgerFlow(
           <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -274,6 +284,7 @@ function renderNotificationsFlow(
 ) {
   const result = render(
     <QueryClientProvider client={client}>
+      <ToastProvider>
       <MemoryRouter initialEntries={[route]}>
         <LocationProbe />
         <Routes>
@@ -281,6 +292,7 @@ function renderNotificationsFlow(
           <Route path="/indents/:id" element={<><IndentDetailPage /><BrowserBackButton /></>} />
         </Routes>
       </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
   return { client, ...result };
@@ -3014,17 +3026,20 @@ describe("indent UI shell", () => {
       status: "DRAFT",
       can_submit: true,
     }));
-    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
-
     renderWithProviders(
       <>
         <IndentDetailPage />
+        <AlertHost />
         <LocationProbe />
       </>,
       "/indents/42",
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete Draft" }));
+
+    // The app's own confirm now, not the browser's grey box, so the question is
+    // answered on screen like every other destructive action in the app.
+    fireEvent.click(await screen.findByRole("button", { name: "Yes, Delete" }));
 
     await waitFor(() => expect(indentApi.delete).toHaveBeenCalledWith(42));
     await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/indents"));
@@ -3717,11 +3732,13 @@ describe("indent UI shell", () => {
     mockAccount.activePositionId = 20;
     view.rerender(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={["/indents/42"]}>
-          <Routes>
-            <Route path="/indents/:id" element={<IndentDetailPage />} />
-          </Routes>
-        </MemoryRouter>
+        <ToastProvider>
+          <MemoryRouter initialEntries={["/indents/42"]}>
+            <Routes>
+              <Route path="/indents/:id" element={<IndentDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
       </QueryClientProvider>,
     );
 

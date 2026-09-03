@@ -23,6 +23,8 @@ export interface SubNavItem {
   key: string;
   label: string;
   icon?: ComponentType<{ className?: string }>;
+  /** A small count pill beside the label — e.g. row counts on a register tab. */
+  count?: number;
   /** Route mode only: match this path exactly, so "/indents" ignores "/indents/board". */
   end?: boolean;
 }
@@ -47,6 +49,17 @@ const ITEM =
 const ON = "bg-brand text-white";
 const OFF = "text-muted hover:bg-content2 hover:text-body";
 
+function CountPill({ count, active }: { count?: number; active: boolean }) {
+  if (count === undefined) return null;
+  return (
+    <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular ${
+      active ? "bg-white/20 text-white" : "bg-surface text-muted"
+    }`}>
+      {count}
+    </span>
+  );
+}
+
 export function SubNav({
   items, label, value, onChange, bare = false, className = "",
 }: Props) {
@@ -58,19 +71,21 @@ export function SubNav({
       <div className={`flex min-w-max gap-1 p-1 ${
         bare ? "" : "rounded-xl border border-line bg-content1"
       }`}>
-        {items.map(({ key, label: text, icon: Icon, end }) =>
-          stateful ? (
+        {items.map(({ key, label: text, icon: Icon, count, end }) => {
+          const active = stateful ? value === key : undefined;
+          return stateful ? (
             <button
               key={key}
               type="button"
               // aria-current, not just colour: the active tab has to be announced,
               // and colour alone fails anyone who cannot see it.
-              aria-current={value === key ? "page" : undefined}
+              aria-current={active ? "page" : undefined}
               onClick={() => onChange!(key)}
-              className={`${ITEM} ${value === key ? ON : OFF}`}
+              className={`${ITEM} ${active ? ON : OFF}`}
             >
               {Icon && <Icon className="h-4 w-4" />}
               {text}
+              <CountPill count={count} active={active ?? false} />
             </button>
           ) : (
             <NavLink
@@ -79,11 +94,16 @@ export function SubNav({
               end={end}
               className={({ isActive }) => `${ITEM} ${isActive ? ON : OFF}`}
             >
-              {Icon && <Icon className="h-4 w-4" />}
-              {text}
+              {({ isActive }) => (
+                <>
+                  {Icon && <Icon className="h-4 w-4" />}
+                  {text}
+                  <CountPill count={count} active={isActive} />
+                </>
+              )}
             </NavLink>
-          ),
-        )}
+          );
+        })}
       </div>
     </nav>
   );

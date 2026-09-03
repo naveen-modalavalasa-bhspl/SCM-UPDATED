@@ -239,3 +239,38 @@ h3,
 @media (prefers-reduced-motion: reduce) {
   .pop-in { animation: none; }
 }
+
+/* ── A long name that scrolls itself on hover ──────────────────────────────────
+   Used by `ScrollingName` (shared/layout/AppLayout.tsx) for position names, which
+   run long — "Assistant District Manager, Krishna (Vijayawada Rural)" — and were
+   simply truncated in a rail nobody wants wider.
+
+   The track holds the name TWICE and slides left by exactly half its own width, so
+   the second copy arrives where the first began and the loop has no seam. Because
+   the shift is a percentage of the track, one animation fits every length: a long
+   name takes the same 9s to pass whether it is 30 characters or 90.
+
+   A name that already fits still "scrolls", but there is nothing past the edge to
+   reveal, so it reads as motionless. Motion is on HOVER and FOCUS only — never
+   ambient — and `prefers-reduced-motion` stops it outright, leaving the `title`
+   tooltip as the way to read the rest. */
+.lt-marquee { display: inline-block; max-width: 100%; vertical-align: bottom; }
+.lt-marquee-track { display: inline-flex; width: max-content; }
+.lt-marquee-item { padding-right: 2rem; }
+
+.lt-marquee:hover .lt-marquee-track,
+.lt-marquee:focus-visible .lt-marquee-track,
+.lt-marquee:focus-within .lt-marquee-track {
+  animation: lt-marquee-slide 9s linear infinite;
+}
+
+@keyframes lt-marquee-slide {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lt-marquee:hover .lt-marquee-track,
+  .lt-marquee:focus-visible .lt-marquee-track,
+  .lt-marquee:focus-within .lt-marquee-track { animation: none; }
+}

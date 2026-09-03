@@ -24,15 +24,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import require_permission
-from app.core.pagination import PageParams
+from app.core.pagination import Page, PageParams
 from app.modules.integrations import (
-    adapters, introspect, platform_links, service, webhooks,
+    activity, adapters, introspect, platform_links, service, webhooks,
 )
 from app.modules.integrations.schemas import (
+    ActivityEventOut, ActivityFiltersOut, ActivityRowOut, ActivitySummaryOut,
     CallLogOut, ClientOut, ClientWrite, ColumnOut, EndpointImportIn, EndpointOut,
-    EndpointWrite, ExtEndpointOut, ExtPage, ImportResultOut, KeyIssuedOut, KeyOut,
-    KeyWrite, LinkLogRow, LinkRevealOut, LinkTestOut, PlatformLinkOut, PreviewOut,
-    TableOut, UsageOut, WebhookOut, WebhookSecretOut, WebhookWrite,
+    EndpointWrite, ExtEndpointOut, ExtPage, ImportResultOut, KeyAttachIn, KeyIssuedOut, KeyOut,
+    KeyRevealOut, KeyWrite, LinkLogRow, LinkRevealOut, LinkTestOut, PlatformLinkOut, PreviewOut,
+    SecretRevealIn, SecretRevealOut, SecretStateOut, TableOut, UsageOut, WebhookOut,
+    WebhookSecretOut, WebhookWrite,
 )
 from app.modules.integrations.security import Caller, require_api_key
 from app.platform.rbac import permissions as perms
@@ -43,6 +45,21 @@ KEYS = perms.INTEGRATION_KEYS_MANAGE
 
 console = APIRouter(prefix="/api/apis", tags=["api-console"])
 external = APIRouter(prefix="/api/ext/v1", tags=["external-api"])
+
+
+def _network(request: Request) -> dict:
+    """Socket details for the activity log, derived from the actual request."""
+    server = request.scope.get("server") or (None, None)
+    server_host = server[0] if isinstance(server, (tuple, list)) and len(server) > 0 else None
+    server_port = server[1] if isinstance(server, (tuple, list)) and len(server) > 1 else None
+    return {
+        "endpoint": request.url.path,
+        "http_method": request.method,
+        "ip_address": request.client.host if request.client else None,
+        "remote_port": request.client.port if request.client else None,
+        "local_ip_address": request.url.hostname or server_host,
+        "local_port": request.url.port or server_port,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -128,6 +145,25 @@ async def issue_key(code: str, body: KeyWrite, db: AsyncSession = Depends(get_db
     return await service.issue_key(db, code, body, user)
 
 
+@console.post("/keys/{prefix}/reveal", response_model=KeyRevealOut)
+async def reveal_key(prefix: str, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(KEYS))):
+    """The full key, so the list can copy it. Same permission that issued it."""
+    return await service.reveal_key(db, prefix, user)
+
+
+@console.post("/keys/{prefix}/attach", response_model=KeyOut)
+async def attach_key(prefix: str, body: KeyAttachIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(KEYS))):
+    """Attach the real value to a key stored as a hash only, so it can be copied.
+
+    Kept only if it hashes to the digest already on the row, which is the same check a
+    live call passes — so this can record what the key IS, never what someone says it
+    is.
+    """
+    return await service.attach_key(db, prefix, body.api_key, user)
+
+
 @console.post("/keys/{prefix}/revoke", response_model=KeyOut)
 async def revoke_key(prefix: str, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(KEYS))):
@@ -165,10 +201,12 @@ async def update_endpoint(code: str, slug: str, body: EndpointWrite,
     return await service.save_endpoint(db, code, body, user, replacing=slug)
 
 
-@console.delete("/endpoints/{slug}", response_model=EndpointOut)
-async def delete_endpoint(slug: str, db: AsyncSession = Depends(get_db),
+@console.delete("/clients/{code}/endpoints/{slug}", response_model=EndpointOut)
+async def delete_endpoint(code: str, slug: str, db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(CONSOLE))):
-    return await service.delete_endpoint(db, slug)
+    """Under `/clients/{code}/`: an address belongs to an application, so a route that
+    took the slug alone could no longer say WHICH /stock it meant."""
+    return await service.delete_endpoint(db, code, slug)
 
 
 @console.get("/clients/{code}/docs")
@@ -182,13 +220,13 @@ async def connection_docs(code: str, request: Request,
     return await service.connection_docs(db, code, base)
 
 
-@console.get("/endpoints/{slug}/sample")
-async def endpoint_sample(slug: str, rows: int = 2,
+@console.get("/clients/{code}/endpoints/{slug}/sample")
+async def endpoint_sample(code: str, slug: str, rows: int = 2,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(VIEW))):
     """A real response from this endpoint, so its shape is seen rather than imagined.
     Runs it exactly as an API key would, with a small page."""
-    return await service.endpoint_sample(db, slug, rows)
+    return await service.endpoint_sample(db, code, slug, rows)
 
 
 @console.get("/clients/{code}/endpoints/export")
@@ -250,7 +288,7 @@ async def read(slug: str, request: Request, db: AsyncSession = Depends(get_db),
                caller: Caller = Depends(require_api_key)):
     return await service.serve_logged(
         db, slug, caller, dict(request.query_params),
-        ip=request.client.host if request.client else None)
+        **_network(request))
 
 
 # --------------------------------------------------------------------------- #
@@ -356,6 +394,21 @@ async def create_webhook(body: WebhookWrite, db: AsyncSession = Depends(get_db),
     return await webhooks.create_hook(db, body, user)
 
 
+@console.get("/webhooks/{source}/secret", response_model=SecretStateOut)
+async def webhook_secret_state(source: str, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(VIEW))):
+    """Whether this webhook secret exists; never returns the value."""
+    return await webhooks.secret_state(db, source)
+
+
+@console.post("/webhooks/{source}/secret/reveal", response_model=SecretRevealOut)
+async def reveal_webhook_secret(source: str, body: SecretRevealIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(KEYS))):
+    """Reveal the stored webhook secret. First reveal is free; later ones verify."""
+    return await webhooks.reveal_secret(db, source, body.password, user)
+
+
 @console.get("/webhooks/{source}", response_model=WebhookOut)
 async def get_webhook(source: str, db: AsyncSession = Depends(get_db),
                       user=Depends(require_permission(VIEW))):
@@ -419,6 +472,49 @@ async def webhook_delivery(source: str, event_id: str,
     return await webhooks.delivery(db, source, event_id)
 
 
+# --------------------------------------------------------------------------- #
+# Activity Log
+# --------------------------------------------------------------------------- #
+#
+# One list over applications AND webhooks, because "is this integration working" is
+# one question and it was being answered on four screens. Read-only and additive:
+# every row already exists somewhere for its own reasons (see `activity.py`), so
+# nothing on the write paths changed to make this possible.
+
+@console.get("/activity", response_model=Page[ActivityRowOut])
+async def activity_feed(params: PageParams = Depends(), direction: str = "",
+                        outcome: str = "", party: str = "", channel: str = "",
+                        search: str = "", days: int = 0,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(VIEW))):
+    return await activity.feed(db, params, direction=direction, outcome=outcome,
+                               party=party, channel=channel, search=search,
+                               days=days or None)
+
+
+@console.get("/activity/summary", response_model=ActivitySummaryOut)
+async def activity_summary(days: int = 0, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(VIEW))):
+    return await activity.summary(db, days=days or None)
+
+
+# The `id` is a query parameter, not a path segment: a row id carries the store key
+# or the timestamp it was found by, and those hold characters a path would have to
+# escape. One event, opened - the page behind a row on the list.
+
+@console.get("/activity/event", response_model=ActivityEventOut)
+async def activity_event(id: str = "", db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(VIEW))):
+    return await activity.event(db, id)
+
+
+@console.get("/activity/filters", response_model=ActivityFiltersOut)
+async def activity_filters(db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(VIEW))):
+    """The pickers, served — a system registered today is selectable today."""
+    return await activity.filters(db)
+
+
 hooks = APIRouter(prefix="/api/ext/v1/hooks", tags=["external-api"])
 
 
@@ -433,6 +529,7 @@ async def receive_webhook(source: str, request: Request,
         db, source, body, request.headers.get(webhooks.SIGNATURE_HEADER),
         request.headers.get(webhooks.TIMESTAMP_HEADER),
         webhooks.json_body(body), caller.client_code,
+        **_network(request),
     )
 
 

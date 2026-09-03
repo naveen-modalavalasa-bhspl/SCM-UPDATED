@@ -6,6 +6,8 @@ import { AuthProvider, useAuth } from "@/shared/auth/AuthContext";
 import { AppLayout } from "@/shared/layout/AppLayout";
 import { MailPage } from "@/modules/admin/pages/MailPage";
 import { TraceabilityPage } from "@/modules/reports/pages/TraceabilityPage";
+import { LiveTrackingPage } from "@/modules/reports/pages/LiveTrackingPage";
+import { AttachmentsReportPage } from "@/modules/reports/pages/AttachmentsReportPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { ForgotPasswordPage, ResetPasswordPage } from "@/pages/PasswordResetPages";
 import { NotFoundPage } from "@/pages/NotFoundPage";
@@ -84,7 +86,8 @@ import {
 } from "@/modules/returns";
 // The API console — build an API from the screen over any table in the database.
 import {
-  ApiClientsPage, ApiClientDetailPage, PlatformLinksPage,
+  ActivityEventPage, ApiClientsPage, ApiClientDetailPage, WebhookDetailPage,
+  PlatformLinksPage,
 } from "@/modules/integrations";
 // `PurchaseConsolidation*`, not `Consolidation*`: the approvals module already owns
 // that name for INDENT consolidation, which is a different document entirely.
@@ -545,6 +548,14 @@ function AppRoutes() {
             child of /admin/integrations, which ends in a catch-all `:code` that would
             read any literal segment as a client code. */}
         <Route path="admin/app-links" element={<PlatformLinksPage />} />
+        {/* Two segments, so it never collides with the `:code` catch-all below —
+            one webhook's own screen, reached by opening its row. */}
+        {/* One event of the Activity log, on its own address — two segments so it
+            never collides with the `:code` catch-all below. It is a page and not a
+            dialog because an event is something people forward to the partner who
+            sent it, and a box over the list has no address to send anyone. */}
+        <Route path="admin/integrations/activity/:id" element={<ActivityEventPage />} />
+        <Route path="admin/integrations/webhooks/:source" element={<WebhookDetailPage />} />
         <Route path="admin/integrations/:code" element={<ApiClientDetailPage />} />
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}
@@ -552,6 +563,13 @@ function AppRoutes() {
         {/* Above `:ledger`, which is a catch-all string param — a literal
             segment after it would be read as a ledger name. */}
         <Route path="reports/traceability" element={<TraceabilityPage />} />
+        {/* Live Tracking follows ONE indent as it moves — the Journey and the
+            downstream trail, polled. Beside the Document Trail rather than
+            replacing it: the Trail finds any document by number, this one
+            watches an indent. Both are literal segments and must stay above
+            `:ledger`, which reads any segment after it as a ledger name. */}
+        <Route path="reports/live-tracking" element={<LiveTrackingPage />} />
+        <Route path="reports/attachments" element={<AttachmentsReportPage />} />
         <Route path="reports/:ledger" element={<ReportLedgerPage />} />
         {/* An address with no screen says so. It used to render Home, which made a
             typo look like the app had simply ignored the click. */}

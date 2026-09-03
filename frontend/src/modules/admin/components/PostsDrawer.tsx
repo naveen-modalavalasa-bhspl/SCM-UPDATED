@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, Plus, X } from "lucide-react";
 
 import { Button, ErrorBanner, Field, Input, Select, useToast, selectOnFocus } from "@/shared/components";
+import { alerts } from "@/modules/alerts";
 import { adminApi } from "../api";
 import type { ApprovalPost, ApprovalPostMember } from "../types";
 
@@ -173,12 +174,21 @@ function PostList({ onEdit }: { onEdit: (post: ApprovalPost | "new") => void }) 
                     title={post.used_in_ladders > 0
                       ? `On ${post.used_in_ladders} chain(s)` : "Retire"}
                     onClick={() => {
+                      // The app's own confirm, not the browser's. `window.confirm`
+                      // draws an OS box with the site's hostname in it and no tone,
+                      // no wording rules and no styling — the one popup in the app
+                      // that did not look like the app.
                       const used = post.used_in_ladders > 0
                         ? ` It is on ${post.used_in_ladders} chain(s), which will skip this step.`
                         : "";
-                      if (window.confirm(`Retire ${post.name}?${used}`)) {
-                        retire.mutate(post.id);
-                      }
+                      void alerts.show({
+                        variant: "danger",
+                        mode: "confirm",
+                        title: `Retire ${post.name}?`,
+                        message: `The chair stops being offered on new chains.${used}`,
+                        confirmLabel: "Retire",
+                        cancelLabel: "Keep it",
+                      }).then((yes) => { if (yes) retire.mutate(post.id); });
                     }}
                     className="grid h-11 w-8 shrink-0 place-items-center text-muted hover:text-bad"
                   >

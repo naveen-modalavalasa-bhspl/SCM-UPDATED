@@ -578,6 +578,10 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Admin-only: it reads the same documents the other ledgers already show this
     # login, assembled into a chain.
     ("rep_traceability", "reports", "Reports · Document Trail"),
+    # Catalogued so they inherit below instead of landing Admin-only: both show the
+    # same documents the other ledgers already list for this login.
+    ("rep_attachments", "reports", "Reports · Attachments"),
+    ("rep_live_tracking", "reports", "Reports · Live Tracking"),
     ("grp_warehouse", "warehouse", "Warehouse"),
     ("wh_dashboard", "warehouse", "Warehouse · Dashboard"),
     ("wh_inward", "warehouse", "Warehouse » Material Inward"),
@@ -792,4 +796,10 @@ INHERITS_GRANTS_FROM.update({
     # saves them doing it by hand — and its endpoints are gated on `report.view`
     # independently.
     page_view_code("rep_traceability"): REPORT_VIEW,
+    # Same reasoning as the Document Trail beside them. The Attachments register shows
+    # files hanging off documents the other ledgers already show this login (and its
+    # endpoint scopes the rows again on top of `report.view`); Live Tracking is those
+    # ledgers' own reads, polled. Neither should fail closed to Admin.
+    page_view_code("rep_attachments"): REPORT_VIEW,
+    page_view_code("rep_live_tracking"): REPORT_VIEW,
 })

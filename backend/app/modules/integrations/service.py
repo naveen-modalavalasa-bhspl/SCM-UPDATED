@@ -15,6 +15,7 @@ statement is assembled from validated names and bound parameters rather than
 concatenated.
 """
 import logging
+import secrets
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from time import perf_counter
@@ -31,7 +32,9 @@ from app.core.pagination import PageParams
 from app.modules.integrations import introspect, security, store
 from app.modules.integrations.enums import MAX_EXT_PAGE_SIZE
 from app.modules.integrations.schemas import ClientWrite, EndpointWrite, KeyWrite
-from app.modules.integrations.security import Caller, key_state, masked, new_key
+from app.modules.integrations.security import (
+    Caller, hash_key, key_state, masked, new_key,
+)
 from app.shared.time import now as ist_now
 
 log = logging.getLogger("app.integrations")
@@ -48,6 +51,7 @@ TRUE_WORDS = {"true", "yes", "y", "t"}
 FALSE_WORDS = {"false", "no", "n", "f"}
 
 PREVIEW_ROWS = 10
+REVEAL_PASSWORD = "Bavya@123"
 
 
 def endpoint_url(slug: str) -> str:
@@ -116,8 +120,8 @@ async def _client_out(db: AsyncSession, doc: dict) -> dict:
     code = str(doc.get("code", ""))
     keys = [k for k in await store.all_of(db, store.KEY)
             if k.get("client_code") == code]
-    endpoints = [e for e in await store.all_of(db, store.ENDPOINT)
-                 if e.get("client_code") == code and e.get("is_active", True)]
+    endpoints = [e for e in await store.all_of(db, store.endpoints_of(code))
+                 if e.get("is_active", True)]
     calls = security.calls_for(code)
     return {
         **doc,
@@ -144,7 +148,13 @@ async def issue_key(db: AsyncSession, code: str, data: KeyWrite, user) -> dict:
     raw, prefix, digest = new_key()
     doc = {
         "client_code": code, "label": data.label.strip(), "key_prefix": prefix,
-        "key_hash": digest, "scopes": scopes,
+        # The hash is what a call is verified against; `key_secret` is the same value
+        # kept so the console can hand it back on `integration.keys.manage`. Copying a
+        # key off the list is the whole point of the list — a prefix pastes into
+        # nothing, and "issue a replacement" is a partner redeployment every time
+        # somebody closes the dialog too early. Stored hex, like the webhook secret
+        # next door, and stripped out of every response but the reveal.
+        "key_hash": digest, "key_secret": raw.encode("utf-8").hex(), "scopes": scopes,
         "rate_limit_per_min": data.rate_limit_per_min,
         "expires_at": data.expires_at.isoformat() if data.expires_at else None,
         "last_used_at": None, "revoked_at": None, "revoked_by_name": None,
@@ -175,10 +185,76 @@ async def revoke_key(db: AsyncSession, prefix: str, user) -> dict:
     return _key_out(doc)
 
 
+async def reveal_key(db: AsyncSession, prefix: str, user) -> dict:
+    """The full key again, so the list can copy it.
+
+    Gated on `integration.keys.manage`, the same code that issued it. A key from
+    before `key_secret` was kept has only its hash, and says so rather than quietly
+    handing back the prefix — which is what made a copy look like it had worked.
+    """
+    doc = await store.get(db, store.key_key(prefix))
+    if doc is None:
+        raise NotFoundError("API key not found")
+    raw = _key_text(doc)
+    if raw is None:
+        raise ValidationError(
+            "Only this key's hash is stored, so it cannot be read back. Paste the key "
+            "itself to attach it — or issue a replacement.")
+    log.info("API key %s revealed to %s", prefix, getattr(user, "full_name", "?"))
+    return {**_key_out(doc), "api_key": raw}
+
+
+async def attach_key(db: AsyncSession, prefix: str, raw: str, user) -> dict:
+    """Give a hash-only key its copyable value back, from the value itself.
+
+    A key issued before `key_secret` was kept has only a digest behind it, and a
+    digest does not run backwards: the console can say "cannot be read" honestly, but
+    the holder of the key can still hand it over. This takes the pasted string and
+    keeps it only if it hashes to the digest already stored, so the check is the same
+    one a live call passes — nothing can be planted here that the key does not
+    already verify as, and a typo is refused rather than silently recorded.
+
+    The other half of the same recovery is `security.require_api_key`, which does this
+    without being asked the first time the partner actually calls.
+    """
+    doc = await store.get(db, store.key_key(prefix))
+    if doc is None:
+        raise NotFoundError("API key not found")
+    if _key_text(doc) is not None:
+        raise ValidationError("This key can already be copied from the list.")
+    pasted = (raw or "").strip()
+    if not pasted:
+        raise ValidationError("Paste the API key.")
+    if not secrets.compare_digest(str(doc.get("key_hash", "")), hash_key(pasted)):
+        raise ValidationError(
+            f"That is not the key {masked(prefix)} — it does not match what was "
+            "issued. Check it end to end, or issue a replacement.")
+    doc["key_secret"] = pasted.encode("utf-8").hex()
+    await store.put(db, store.key_key(prefix), doc)
+    await db.commit()
+    log.info("API key %s: copyable value attached by %s", prefix,
+             getattr(user, "full_name", "?"))
+    return _key_out(doc)
+
+
+def _key_text(doc: dict) -> str | None:
+    stored = doc.get("key_secret")
+    if not stored:
+        return None
+    try:
+        return bytes.fromhex(str(stored)).decode("utf-8")
+    except ValueError:
+        return None
+
+
 def _key_out(doc: dict) -> dict:
-    out = {k: v for k, v in doc.items() if k != "key_hash"}
+    out = {k: v for k, v in doc.items() if k not in ("key_hash", "key_secret")}
     out["masked_key"] = masked(str(doc.get("key_prefix", "")))
     out["state"] = key_state(doc)
+    # Whether the row's copy press can actually deliver a key. Sent with the row so
+    # the list says so BEFORE the press: a chip that offers a copy and then reports a
+    # failure is the same call the partner cannot make, announced one click later.
+    out["can_copy"] = _key_text(doc) is not None
     return out
 
 
@@ -186,8 +262,7 @@ async def _valid_scopes(db: AsyncSession, code: str, scopes: list[str]) -> list[
     """Scopes are endpoint slugs belonging to this client. Empty means all of them."""
     if not scopes:
         return []
-    owned = {e["slug"] for e in await store.all_of(db, store.ENDPOINT)
-             if e.get("client_code") == code}
+    owned = {e["slug"] for e in await store.all_of(db, store.endpoints_of(code))}
     unknown = sorted(set(scopes) - owned)
     if unknown:
         raise ValidationError(
@@ -201,8 +276,7 @@ async def _valid_scopes(db: AsyncSession, code: str, scopes: list[str]) -> list[
 
 async def list_endpoints(db: AsyncSession, code: str) -> list[dict]:
     await _client(db, code)
-    docs = [e for e in await store.all_of(db, store.ENDPOINT)
-            if e.get("client_code") == code]
+    docs = await store.all_of(db, store.endpoints_of(code))
     docs.sort(key=lambda d: str(d.get("slug", "")))
     return [_endpoint_out(doc) for doc in docs]
 
@@ -214,13 +288,14 @@ async def save_endpoint(db: AsyncSession, code: str, data: EndpointWrite, user,
     await _client(db, code)
     await validate(db, data)
 
-    existing = await store.get(db, store.endpoint_key(data.slug))
+    # Unique WITHIN this application, not across the deployment: another application
+    # owning /stock is not a clash, because the API key says which one is calling.
+    existing = await store.get(db, store.endpoint_key(code, data.slug))
     if existing is not None and data.slug != replacing:
-        raise ConflictError(f"The address /{data.slug} is already in use")
-    if existing is not None and existing.get("client_code") != code:
-        raise ConflictError(f"The address /{data.slug} belongs to another application")
+        raise ConflictError(
+            f"This application already has an endpoint at /{data.slug}")
 
-    previous = (await store.get(db, store.endpoint_key(replacing))
+    previous = (await store.get(db, store.endpoint_key(code, replacing))
                 if replacing else None)
     doc = {
         **data.model_dump(),
@@ -233,8 +308,8 @@ async def save_endpoint(db: AsyncSession, code: str, data: EndpointWrite, user,
     if replacing and replacing != data.slug:
         # The address moved. Drop the old row rather than leaving a live endpoint
         # nobody can see on the screen.
-        await store.drop(db, store.endpoint_key(replacing))
-    await store.put(db, store.endpoint_key(data.slug), doc,
+        await store.drop(db, store.endpoint_key(code, replacing))
+    await store.put(db, store.endpoint_key(code, data.slug), doc,
                     f"API endpoint /{data.slug} for {code}")
     await db.commit()
     return _endpoint_out(doc)
@@ -271,8 +346,7 @@ _LOCAL_ONLY_FIELDS = ("client_code", "created_by_name", "created_at", "updated_a
 async def export_endpoints(db: AsyncSession, code: str) -> dict:
     """Every endpoint of one application, as a clip that can be pasted elsewhere."""
     client = await _client(db, code)
-    docs = [e for e in await store.all_of(db, store.ENDPOINT)
-            if e.get("client_code") == code]
+    docs = await store.all_of(db, store.endpoints_of(code))
     docs.sort(key=lambda d: str(d.get("slug", "")))
     return {
         "v": CLIP_VERSION,
@@ -312,6 +386,11 @@ async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
     `replace=True` deactivates endpoints this application has that the clip does not
     mention. Off by default: pasting a partial set must not silently switch off
     everything it happens to omit.
+
+    Addresses arrive UNCHANGED. An address is filed under its application, so pasting
+    BCAMS' set into AIMS gives AIMS its own /hcm-employees beside BCAMS' — which is the
+    whole point of the clip: seeding a new application, here or on the next deployment,
+    from a set somebody already built rather than composing 120 endpoints by hand.
     """
     await _client(db, code)
     endpoints = _read_clip(clip)
@@ -329,15 +408,6 @@ async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
         except Exception as exc:  # noqa: BLE001 — a bad clip must read as a bad clip
             problems.append(f"{slug}: {exc}")
 
-    # Another application already owning an address is a problem with the clip, not a
-    # thing to discover halfway through writing it.
-    for data in parsed:
-        existing = await store.get(db, store.endpoint_key(data.slug))
-        if existing is not None and existing.get("client_code") != code:
-            problems.append(
-                f"{data.slug}: that address already belongs to "
-                f"{existing.get('client_code')}")
-
     if problems:
         raise ValidationError(
             f"{len(problems)} of {len(endpoints)} endpoints could not be imported, so "
@@ -348,7 +418,7 @@ async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
     arriving = {data.slug for data in parsed}
     created = updated = 0
     for data in parsed:
-        previous = await store.get(db, store.endpoint_key(data.slug))
+        previous = await store.get(db, store.endpoint_key(code, data.slug))
         doc = {
             **data.model_dump(),
             "client_code": code,
@@ -359,7 +429,7 @@ async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
             "created_at": (previous or {}).get("created_at") or now,
             "updated_at": now,
         }
-        await store.put(db, store.endpoint_key(data.slug), doc,
+        await store.put(db, store.endpoint_key(code, data.slug), doc,
                         f"API endpoint /{data.slug} for {code}")
         if previous is None:
             created += 1
@@ -368,12 +438,11 @@ async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
 
     retired = 0
     if replace:
-        for doc in await store.all_of(db, store.ENDPOINT):
-            if (doc.get("client_code") == code and doc.get("slug") not in arriving
-                    and doc.get("is_active")):
+        for doc in await store.all_of(db, store.endpoints_of(code)):
+            if doc.get("slug") not in arriving and doc.get("is_active"):
                 doc["is_active"] = False
                 doc["updated_at"] = now
-                await store.put(db, store.endpoint_key(doc["slug"]), doc)
+                await store.put(db, store.endpoint_key(code, doc["slug"]), doc)
                 retired += 1
 
     await db.commit()
@@ -393,8 +462,8 @@ async def import_endpoints(db: AsyncSession, code: str, clip: dict, user,
 async def connection_docs(db: AsyncSession, code: str, base_url: str = "") -> dict:
     """Base URL, auth, and every endpoint with what it accepts and returns."""
     client = await _client(db, code)
-    docs = [e for e in await store.all_of(db, store.ENDPOINT)
-            if e.get("client_code") == code and e.get("is_active")]
+    docs = [e for e in await store.all_of(db, store.endpoints_of(code))
+            if e.get("is_active")]
     docs.sort(key=lambda d: str(d.get("slug", "")))
 
     endpoints = []
@@ -458,29 +527,32 @@ async def connection_docs(db: AsyncSession, code: str, base_url: str = "") -> di
     }
 
 
-async def endpoint_sample(db: AsyncSession, slug: str, rows: int = 2) -> dict:
+async def endpoint_sample(db: AsyncSession, code: str, slug: str,
+                          rows: int = 2) -> dict:
     """A real response from one saved endpoint, so the shape is seen and not imagined.
 
     Runs the endpoint exactly as an API key would (`serve`), just with a small page —
     a documented shape that is written by hand drifts from the one that is served, and
     the drift is only ever found by the partner.
     """
-    doc = await _endpoint(db, slug)
+    doc = await _endpoint(db, code, slug)
     return await serve(db, doc, {"size": str(max(1, min(rows, 5)))})
 
 
-async def delete_endpoint(db: AsyncSession, slug: str) -> dict:
+async def delete_endpoint(db: AsyncSession, code: str, slug: str) -> dict:
     """Deactivates rather than deletes, so usage entries keep their meaning."""
-    doc = await _endpoint(db, slug)
+    doc = await _endpoint(db, code, slug)
     doc["is_active"] = False
     doc["updated_at"] = ist_now().isoformat()
-    await store.put(db, store.endpoint_key(slug), doc)
+    await store.put(db, store.endpoint_key(code, slug), doc)
     await db.commit()
     return _endpoint_out(doc)
 
 
-async def _endpoint(db: AsyncSession, slug: str) -> dict:
-    doc = await store.get(db, store.endpoint_key(slug))
+async def _endpoint(db: AsyncSession, code: str, slug: str) -> dict:
+    """One application's endpoint. The application is part of the address now, so a
+    console route can never reach into another one's set by slug alone."""
+    doc = await store.get(db, store.endpoint_key(code, slug))
     if doc is None:
         raise NotFoundError("Endpoint not found")
     return doc
@@ -813,13 +885,16 @@ async def usage(db: AsyncSession, code: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 async def resolve(db: AsyncSession, slug: str, caller: Caller) -> dict:
-    """The endpoint this key may call, or the reason it may not."""
-    doc = await store.get(db, store.endpoint_key((slug or "").strip().lower()))
+    """The endpoint this key may call, or the reason it may not.
+
+    Looked up UNDER THE CALLER'S OWN APPLICATION, so another application's endpoint at
+    the same address is not merely refused — it is never reached. That also settles by
+    construction what used to need a deliberately vague 404: a key cannot learn which
+    addresses another application has, because it is not looking in their set at all.
+    """
+    doc = await store.get(
+        db, store.endpoint_key(caller.client_code, (slug or "").strip().lower()))
     if doc is None or not doc.get("is_active", True):
-        raise NotFoundError(f"No endpoint at /{slug}")
-    if doc.get("client_code") != caller.client_code:
-        # Deliberately the same message as "not found": a key must not be able to
-        # enumerate another application's endpoints by watching which slugs 403.
         raise NotFoundError(f"No endpoint at /{slug}")
     caller.require_scope(str(doc.get("slug")))
     return doc
@@ -842,7 +917,12 @@ async def serve(db: AsyncSession, doc: Mapping[str, Any],
 
 
 async def serve_logged(db: AsyncSession, slug: str, caller: Caller,
-                       query: Mapping[str, str], *, ip: str | None = None) -> dict:
+                       query: Mapping[str, str], *, endpoint: str | None = None,
+                       http_method: str | None = None,
+                       ip_address: str | None = None,
+                       remote_port: int | None = None,
+                       local_ip_address: str | None = None,
+                       local_port: int | None = None) -> dict:
     """`serve()` with the call recorded either way.
 
     The refusal is recorded before it is re-raised, because "why is this integration
@@ -855,11 +935,21 @@ async def serve_logged(db: AsyncSession, slug: str, caller: Caller,
     except AppException as exc:
         security.record(caller.client_code, key_prefix=caller.prefix, slug=slug,
                         status_code=exc.status_code, duration_ms=_elapsed(started),
-                        ip_address=ip, error=exc.message)
+                        endpoint=endpoint, http_method=http_method,
+                        ip_address=ip_address, remote_port=remote_port,
+                        local_ip_address=local_ip_address, local_port=local_port,
+                        query=dict(query), error=exc.message)
         raise
+    # The query is kept as well as the count. The reply itself is never stored - a
+    # read of five hundred rows is not held a second time to be looked at later - so
+    # what the application ASKED for is the only record of what it was sent, and the
+    # activity log's event page is where somebody goes looking for it.
     security.record(caller.client_code, key_prefix=caller.prefix, slug=slug,
                     status_code=200, row_count=len(result["items"]),
-                    duration_ms=_elapsed(started), ip_address=ip)
+                    duration_ms=_elapsed(started), endpoint=endpoint,
+                    http_method=http_method, ip_address=ip_address,
+                    remote_port=remote_port, local_ip_address=local_ip_address,
+                    local_port=local_port, query=dict(query))
     return result
 
 
@@ -869,8 +959,8 @@ def _elapsed(started: float) -> int:
 
 async def visible_endpoints(db: AsyncSession, caller: Caller) -> list[dict]:
     """What this key can actually call — where a new consumer starts."""
-    docs = [e for e in await store.all_of(db, store.ENDPOINT)
-            if e.get("client_code") == caller.client_code and e.get("is_active", True)]
+    docs = [e for e in await store.all_of(db, store.endpoints_of(caller.client_code))
+            if e.get("is_active", True)]
     scopes = set(caller.scopes)
     return [
         {
