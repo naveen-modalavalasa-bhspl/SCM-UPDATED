@@ -44,6 +44,26 @@ MAX_SERIALS_PER_LINE = 1_000
 #: units in one transaction, which is the exact failure this module exists to stop.
 MAX_SERIALS_PER_REQUEST = 5_000
 
+#: Units that may be individually CODED in one request.
+#:
+#: This is a different guard from the list caps above, and it is the one that catches
+#: the case they miss. `warehouse._place_unit_codes` mints ONE `whs_serial_numbers`
+#: row per whole unit of a countable, code-tracked item at a warehouse -- driven by
+#: the QUANTITY, not by any list the caller sent. A receipt or putaway of 300,000
+#: units therefore builds 300,000 ORM objects, inserts them, re-reads them, names
+#: them and updates them, inside one request and one transaction.
+#:
+#: A large quantity is perfectly normal and stays allowed. What is refused is
+#: individually coding that many units in one press: the codes are labels on stock,
+#: and stock moves on quantity. Split the receipt, or code the units once the durable
+#: job queue exists to do it in chunks.
+MAX_UNITS_PER_CODE_MINT = 10_000
+
+#: How many unit rows are built and flushed at a time under that ceiling. Bounds peak
+#: memory: without it every row of the request is held in one Python list before the
+#: first flush.
+UNIT_MINT_CHUNK = 1_000
+
 #: Configuration collections: workflow stages, ladder rungs, rule conditions and
 #: actions, inspection parameters, endpoint field lists. Small by nature; a request
 #: carrying hundreds is a mistake, not a large site.
@@ -86,6 +106,7 @@ def assert_serial_budget(model, *collections: str) -> None:
 __all__ = [
     "MAX_DOCUMENT_LINES", "MAX_BATCH_IDS", "MAX_BATCH_DOCUMENTS",
     "MAX_SERIALS_PER_LINE", "MAX_SERIALS_PER_REQUEST", "MAX_CONFIG_ENTRIES",
+    "MAX_UNITS_PER_CODE_MINT", "UNIT_MINT_CHUNK",
     "DocumentLines", "BatchIds", "BatchDocuments", "SerialList", "ConfigEntries",
     "assert_serial_budget", "Annotated",
 ]

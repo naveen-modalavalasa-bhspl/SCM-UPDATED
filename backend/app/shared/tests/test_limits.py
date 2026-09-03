@@ -86,3 +86,40 @@ def test_a_request_inside_the_budget_still_passes():
     # One line of exactly the per-line cap, well inside the request budget.
     payload[0]["serial_numbers"] = payload[0]["serial_numbers"][:MAX_SERIALS_PER_LINE]
     assert IssueSerialsIn(lines=payload).lines
+
+
+# ---------------------------------------------------------------------------
+#  Quantity-driven fan-out — the case the list caps above do NOT catch
+# ---------------------------------------------------------------------------
+
+def test_unit_coding_is_bounded_by_quantity_not_by_any_list():
+    """`_place_unit_codes` mints one row per whole unit from the QUANTITY, so no
+    request-list cap can reach it. 300,000 units is one decimal in the payload and
+    300,000 inserts, re-reads and updates in one transaction behind it."""
+    from app.shared.limits import MAX_UNITS_PER_CODE_MINT
+
+    assert MAX_UNITS_PER_CODE_MINT < 300_000
+
+
+def test_the_refusal_names_the_limit_and_a_way_forward():
+    import inspect
+
+    from app.modules.warehouse import service
+
+    source = inspect.getsource(service._place_unit_codes)
+    assert "MAX_UNITS_PER_CODE_MINT" in source
+    # The message has to distinguish the quantity (fine) from coding every unit of it
+    # (not fine), or the storekeeper reads it as "you cannot receive this much".
+    assert "quantity" in source and "smaller putaways" in source
+
+
+def test_new_rows_are_excluded_by_placeholder_not_by_an_id_list():
+    """The `taken` set used `id NOT IN (<every row just inserted>)`, which renders
+    the whole id list into one SQL statement — megabytes of SQL on a large line."""
+    import inspect
+
+    from app.modules.warehouse import service
+
+    source = inspect.getsource(service._place_unit_codes)
+    assert "~PENDING-" in source
+    assert "notin_" not in source

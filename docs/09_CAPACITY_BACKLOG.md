@@ -165,3 +165,47 @@ backup. Closed by `app/shared/limits.py`: unbounded request lists.
 
 Suggested order: limits (done) → job/outbox foundation + move HCM sync and reminders
 onto it → batch orchestration → outbox for mail, notifications and webhooks.
+
+
+---
+
+## Big quantities in production — what is guarded and what is not
+
+Production will carry large quantities on ordinary items, so it matters exactly where
+a big number turns into a big amount of WORK.
+
+**A big quantity is cheap.** It is one `NUMERIC(16,3)` column on the line and one
+`stk_balance` row. 300,000 of something is the same cost to store as 3.
+
+**A big quantity becomes expensive in three specific places**, all of which turn one
+number into one row (or one lock) PER UNIT:
+
+| where | what it does per unit | guarded? |
+|---|---|---|
+| `_place_unit_codes` (GRN / putaway of a countable, code-tracked item at a warehouse) | inserts a `whs_serial_numbers` row, then names and updates it | **yes** — `MAX_UNITS_PER_CODE_MINT` (10,000), chunked flush |
+| `_claim_units` / `_land_units` / `_ship_units` (issue, dispatch, receipt of coded units) | `SELECT ... FOR UPDATE` over that many rows | **no** — bounded only by how many coded units exist |
+| serial/IMEI lists posted by the client | one row per string | **yes** — `MAX_SERIALS_PER_LINE`, `MAX_SERIALS_PER_REQUEST` |
+
+Two real defects were fixed in the minting path while adding the guard:
+
+* the "which codes are already taken" query was `id NOT IN (<every row just
+  inserted>)`, which renders the whole id list into a single SQL statement — a few
+  hundred bytes for a line of 30, megabytes for a large one, and unindexable at any
+  size. It now excludes them by their `~PENDING-` placeholder;
+* every row was held in one Python list until a single flush at the end, so peak
+  memory scaled with the line quantity. It flushes per `UNIT_MINT_CHUNK`.
+
+**Still open, and it is the same answer as everything else here:** `_claim_units` and
+its siblings can still lock a very large number of unit rows in one transaction if
+that many coded units genuinely exist. Capping it would refuse a legitimate issue of
+goods that are physically present, which is worse than slow. The right fix is the
+chunked background job, not a limit — until then, the practical protection is
+`MAX_UNITS_PER_CODE_MINT`, because units can only be claimed if they were minted
+first.
+
+**A decision is owed on `MAX_UNITS_PER_CODE_MINT = 10,000.** It refuses, rather than
+quietly falling back to a lot-level code, because silently not coding units somebody
+asked to have coded is a traceability change and that is the business's call, not a
+size limit's. If sites routinely receive more than 10,000 individually-coded units in
+one putaway, the number should move — or unit coding should be switched off for those
+items on the item master, which is what it is for.

@@ -63,6 +63,7 @@ from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
+from app.shared.limits import MAX_UNITS_PER_CODE_MINT, UNIT_MINT_CHUNK
 
 logger = logging.getLogger(__name__)
 
@@ -3543,8 +3544,32 @@ async def _place_unit_codes(
     # code, so with no code there is nothing to record.
     if not codeformat.is_code_tracked(item, config):
         return
+    # A LARGE QUANTITY IS FINE. Coding that many units individually, in one request,
+    # is not (2026-09-03).
+    #
+    # This loop mints one `whs_serial_numbers` row per whole unit, driven by the
+    # QUANTITY -- so it is not covered by any of the request-list caps in
+    # `shared/limits.py`. At 300,000 units it builds 300,000 ORM objects, inserts
+    # them, re-reads every serial for the item, names them and updates them, all
+    # inside one transaction holding one pooled connection, under an nginx that gives
+    # up at 60 seconds. It does not finish: the proxy returns 504 while the work
+    # carries on holding its locks, or the worker is recycled and the whole thing
+    # rolls back -- and either way the storekeeper has no idea which happened.
+    #
+    # Refused rather than silently degraded to a lot code: quietly not coding units
+    # somebody asked to have coded is a traceability change, and that is a decision
+    # for the business, not for a size limit. The way out is a smaller receipt today
+    # and a chunked background job once the queue exists.
+    if int(units) > MAX_UNITS_PER_CODE_MINT:
+        raise ValidationError(
+            f"This line would give individual codes to {int(units):,} units, and one "
+            f"request may code at most {MAX_UNITS_PER_CODE_MINT:,}. The quantity "
+            "itself is not the problem -- receive it in smaller putaways, or turn "
+            "unit coding off for this item if its units are not tracked individually."
+        )
+
     rows: list[m.SerialNumber] = []
-    for _ in range(int(units)):
+    for index in range(int(units)):
         row = m.SerialNumber(
             # `whs_serial_numbers.serial_number` is UNIQUE in the live database (the
             # ORM does not declare it, so nothing here warned about it). Every unit of
@@ -3560,6 +3585,11 @@ async def _place_unit_codes(
         )
         db.add(row)
         rows.append(row)
+        # Flushed in chunks so peak memory is bounded by UNIT_MINT_CHUNK rather than
+        # by the line quantity. The ids are needed before the codes can be built
+        # either way -- see below.
+        if (index + 1) % UNIT_MINT_CHUNK == 0:
+            await db.flush()
     # Flushed first: the code formula runs off the row id when there is no serial to
     # build on, so the rows must exist before they can be named.
     await db.flush()
@@ -3568,12 +3598,18 @@ async def _place_unit_codes(
     # collide either. Read once, and only for this item: `{seq}` makes the default
     # shape unique on its own, but the format is a SETTING and a shape without it
     # renders the same string for all 30 units of a line.
+    # Excluded by their PLACEHOLDER, not by an id list (2026-09-03). This was
+    # `id NOT IN (<every row just inserted>)`, which renders the whole id list into
+    # one SQL statement: fine for a line of 30, megabytes of SQL for a line of
+    # 300,000, and a query the planner cannot use an index for either way. The rows
+    # being excluded are exactly the ones still holding the `~PENDING-` placeholder,
+    # so saying that directly is both cheaper and clearer.
     taken = {
         code.strip().lower()
         for code in (await db.execute(
             select(m.SerialNumber.serial_number)
             .where(m.SerialNumber.item_id == item_id,
-                   m.SerialNumber.id.notin_([row.id for row in rows]))
+                   ~m.SerialNumber.serial_number.startswith("~PENDING-"))
         )).scalars()
         if code
     }
