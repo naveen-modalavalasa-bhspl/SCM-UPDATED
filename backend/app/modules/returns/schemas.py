@@ -5,6 +5,9 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .enums import Disposition, ReturnIntent, ReturnKind, ReturnReason
+from app.shared.limits import (  # request-size guards, see the module
+    MAX_DOCUMENT_LINES,
+)
 
 
 class ReturnLineIn(BaseModel):
@@ -38,7 +41,7 @@ class ReturnWrite(BaseModel):
     # Whether the branch still needs the material. Changes nothing about how the stock
     # moves and everything about what the decision desk decides.
     intent: ReturnIntent = ReturnIntent.RETURN
-    items: list[ReturnLineIn] = Field(min_length=1)
+    items: list[ReturnLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
     @field_validator("reason_note")
     @classmethod

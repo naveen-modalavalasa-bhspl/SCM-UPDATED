@@ -131,3 +131,37 @@ Measured effect of #19 alone, from `npm run build`: the 2.72 MB main chunk and
   (DB_POOL_SIZE + DB_MAX_OVERFLOW)` must stay under the server's `max_connections`.
 - **`PERMISSION_CACHE_SECONDS` is a security parameter**, not a performance one: it is
   the lag on a revoked grant. Keep it under 15 minutes.
+
+
+---
+
+## Resilience review (2026-09-03) — durable jobs
+
+A separate whole-application review rated resilience MODERATE with critical gaps. Its
+finding is one architecture, not a list of fixes: **long-running work runs inside the
+web process with no durable record**, so a restart, deploy or crash silently drops
+work the user has already clicked, and nobody can tell what remains.
+
+Closed by the capacity work above: the single-process bottleneck, scheduled jobs
+running in every replica, exports blocking the event loop, and the absence of any
+backup. Closed by `app/shared/limits.py`: unbounded request lists.
+
+**Still open, and it is the next architecture:**
+
+1. **Transactional outbox + durable job table in MySQL.** A command commits its
+   business change and its outbox event in ONE transaction and returns a job id.
+2. **A broker and separate worker processes.** The `worker` container already exists
+   from the capacity work; it runs APScheduler, not a queue.
+3. **Move `asyncio.create_task` off the request path.** HCM "Sync now" is fire and
+   forget today — a restart loses it with no record that it was ever asked for.
+4. **Client idempotency keys.** A timed-out click must be resolvable to its original
+   operation, not retried blindly into a duplicate document.
+5. **Parent/child batch jobs** for monthly allocations, bulk approvals, issue posting
+   and procurement consolidation, with per-document keys and partial-success UI.
+6. **Queue the exports and imports.** They are off the event loop now (threads), which
+   is not the same as durable.
+7. **Backups are not yet a recovery plan.** Binary logs / PITR, off-host storage
+   (`BACKUP_HOST_DIR`), an agreed RPO/RTO and a quarterly restore drill.
+
+Suggested order: limits (done) → job/outbox foundation + move HCM sync and reminders
+onto it → batch orchestration → outbox for mail, notifications and webhooks.

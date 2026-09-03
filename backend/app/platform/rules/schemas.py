@@ -2,6 +2,9 @@
 from datetime import date
 
 from pydantic import BaseModel, Field
+from app.shared.limits import (  # request-size guards, see the module
+    MAX_CONFIG_ENTRIES,
+)
 
 
 class ConditionIn(BaseModel):
@@ -26,8 +29,8 @@ class RuleIn(BaseModel):
     is_active: bool = True
     effective_from: date | None = None
     effective_to: date | None = None
-    conditions: list[ConditionIn] = Field(default_factory=list)
-    actions: list[ActionIn] = Field(default_factory=list)
+    conditions: list[ConditionIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
+    actions: list[ActionIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
     # Saving with a same-priority conflict is refused unless this is set, so the
     # override is a deliberate choice rather than a dialog someone clicked past.
     force: bool = False

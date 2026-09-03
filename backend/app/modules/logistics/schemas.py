@@ -1,6 +1,9 @@
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS,
+)
 
 
 class GRNLineIn(BaseModel):
@@ -18,7 +21,7 @@ class GRNCreate(BaseModel):
     vehicle_no: str | None = None
     transporter: str | None = None
     remarks: str | None = None
-    lines: list[GRNLineIn]
+    lines: Annotated[list[GRNLineIn], DocumentLines]
 
 
 class GRNItemOut(BaseModel):
@@ -74,7 +77,7 @@ class IssueCreate(BaseModel):
     facility_id: int
     department_id: int | None = None
     remarks: str | None = None
-    lines: list[IssueLineIn]
+    lines: Annotated[list[IssueLineIn], DocumentLines]
 
 
 class IssueOut(BaseModel):
@@ -163,7 +166,7 @@ class TRCreate(BaseModel):
     handed_over_aadhaar: str | None = None
     handed_over_phone: str | None = None
 
-    lines: list[TRLineIn] = []
+    lines: Annotated[list[TRLineIn], DocumentLines] = []
 
 
 class TRUpdate(TRCreate):
@@ -171,7 +174,7 @@ class TRUpdate(TRCreate):
     mode: str | None = None
     #: `None` means the provider picker was not part of this edit. An empty list is
     #: intentional for a mode that does not travel with an external provider.
-    carrier_ids: list[int] | None = None
+    carrier_ids: Annotated[list[int], BatchIds] | None = None
     evaluation_method: str | None = None
 
 
@@ -189,7 +192,7 @@ class QuickDispatchIn(TRCreate):
     #: comparison is the thing the three-quote norm exists to prevent — so the plural
     #: is the real field and `carrier_id` above is the singular case of it, kept for
     #: the modes that book one provider outright (a courier's published rate).
-    carrier_ids: list[int] = []
+    carrier_ids: Annotated[list[int], BatchIds] = []
     #: Which lens the comparison ranks under. Chosen when the tender goes out rather
     #: than when it comes back, so the rule the quotes are judged by is fixed before
     #: anybody has seen a price.
@@ -435,7 +438,7 @@ class ActionIn(BaseModel):
 
 
 class InviteIn(BaseModel):
-    carrier_ids: list[int] = Field(min_length=1)
+    carrier_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
     evaluation_method: str | None = None
 
 

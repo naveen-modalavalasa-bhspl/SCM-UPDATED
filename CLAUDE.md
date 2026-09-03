@@ -399,6 +399,32 @@ dataset — the numbers above are derived from code, not measured.
 
 ---
 
+## How much one request may carry (2026-09-03)
+
+`app/shared/limits.py`. Ninety-five request-body list fields had no maximum length —
+indent lines, allocation and issue batches, serial and IMEI lists, workflow stages,
+every `*_ids` selection. A resilience review traced a crash to it: a quantity of
+200,000–300,000 is one harmless `NUMERIC(16,3)` write, but a SERIAL-TRACKED line
+expands it into that many individual unit records (`_claim_units`, `_land_units`,
+`_ship_units`, `_mark_serials` all call `int(quantity)` and work per unit), so one
+document locks hundreds of thousands of rows in a single request, holds the pool and
+runs past nginx's 60-second read timeout. The screen dies and the user cannot tell
+whether it worked.
+
+The caps: 500 document lines, 500 batch ids, 200 whole documents in one batch, 1,000
+serials per line, **5,000 serials per request** and 100 configuration entries. The
+last one is the load-bearing check — the per-line cap alone still permits 500 × 1,000
+with every individual line legal, so `assert_serial_budget` counts the whole request
+in a `model_validator` on the six warehouse schemas that nest serial lines.
+
+**These are REQUEST limits, not business limits.** A site that genuinely needs to
+issue 50,000 serials uploads a manifest and lets a worker process it in chunks.
+Raising a number in `limits.py` to make a screen work is almost always the wrong fix —
+the right one is the durable job queue that is still outstanding
+(`docs/09_CAPACITY_BACKLOG.md`).
+
+---
+
 ## Non-negotiable rules
 
 1. Every module = same 5 files: `models.py schemas.py service.py router.py tests/`.

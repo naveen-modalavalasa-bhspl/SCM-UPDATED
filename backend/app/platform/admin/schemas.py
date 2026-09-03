@@ -2,6 +2,9 @@
 from pydantic import BaseModel, Field
 
 from app.shared.enums import NotificationChannel, ResetPolicy
+from app.shared.limits import (  # request-size guards, see the module
+    MAX_BATCH_IDS,
+)
 
 
 class UserGroupIn(BaseModel):
@@ -18,13 +21,13 @@ class UserGroupIn(BaseModel):
 
 class GrantAccessIn(BaseModel):
     employee_id: int
-    role_ids: list[int] = Field(default_factory=list)
+    role_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
     # Omit to have one generated and returned once.
     password: str | None = None
 
 
 class SetRolesIn(BaseModel):
-    role_ids: list[int] = Field(default_factory=list)
+    role_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
 
 
 class DocSeriesIn(BaseModel):

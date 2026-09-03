@@ -4,6 +4,9 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.shared.time import not_in_past
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
+)
 
 
 class POLineIn(BaseModel):
@@ -43,7 +46,7 @@ class POHeaderIn(BaseModel):
 class POCreate(POHeaderIn):
     vendor_id: int
     expected_date: date | None = None
-    lines: list[POLineIn]
+    lines: Annotated[list[POLineIn], DocumentLines]
 
     _no_past_expected_date = field_validator("expected_date")(
         lambda cls, v: not_in_past(v, "Expected date"))
@@ -85,7 +88,7 @@ class POAmendIn(POHeaderIn):
     """
     reason: str
     expected_date: date | None = None
-    lines: list[POAmendLineIn] | None = None
+    lines: Annotated[list[POAmendLineIn], DocumentLines] | None = None
 
 
 class POVendorResponseIn(BaseModel):
@@ -284,7 +287,7 @@ class ReqCreate(BaseModel):
     required_date: date | None = None
     priority: str | None = None
     remarks: str | None = None
-    lines: list[ReqLineIn] = Field(min_length=1)
+    lines: list[ReqLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 class ReqFromMRsIn(BaseModel):
@@ -293,7 +296,7 @@ class ReqFromMRsIn(BaseModel):
     Item-wise: the same item on five requests becomes one line. Every request stays on
     the requisition's sources, and none of them can be consolidated twice.
     """
-    mr_ids: list[int] = Field(min_length=1)
+    mr_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
     warehouse_id: int | None = None
     project_id: int | None = None
     department_id: int | None = None
@@ -411,8 +414,8 @@ class RFQCreate(BaseModel):
     # None means "use the default" — see shared/evaluation.method_of. Validated in the
     # service against the shared catalogue, never against a list kept here.
     evaluation_method: str | None = None
-    vendor_ids: list[int] = []
-    lines: list[RFQLineIn] = Field(min_length=1)
+    vendor_ids: Annotated[list[int], BatchIds] = []
+    lines: list[RFQLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 class RFQQuantityIn(BaseModel):
@@ -430,7 +433,7 @@ class RFQQuantitiesIn(BaseModel):
     person signing a tender genuinely needs to change is HOW MUCH, and that is all
     this carries.
     """
-    lines: list[RFQQuantityIn] = Field(min_length=1)
+    lines: list[RFQQuantityIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     comments: str = ""
 
 
@@ -446,8 +449,8 @@ class RFQUpdate(BaseModel):
     department_id: int | None = None
     company_name: str | None = None
     evaluation_method: str | None = None
-    vendor_ids: list[int] | None = None
-    lines: list[RFQLineIn] | None = None
+    vendor_ids: Annotated[list[int], BatchIds] | None = None
+    lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
 
 
 class RFQItemOut(BaseModel):
@@ -539,7 +542,7 @@ class RFQOut(RFQListRow):
 # --------------------------------------------------------------------------- #
 
 class ConsolidationCreate(BaseModel):
-    requisition_ids: list[int] = Field(min_length=1)
+    requisition_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
     title: str | None = None
     period_label: str | None = None
     cons_date: date | None = None
@@ -557,7 +560,7 @@ class ConsolidationLineEdit(BaseModel):
 
 
 class ConsolidationLinesIn(BaseModel):
-    lines: list[ConsolidationLineEdit] = Field(min_length=1)
+    lines: list[ConsolidationLineEdit] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 class ConsolidationItemOut(BaseModel):
@@ -823,7 +826,7 @@ class DespatchNoteIn(BaseModel):
     lr_no: str | None = None
     expected_date: date | None = None
     remarks: str | None = None
-    lines: list[DespatchLineIn] = Field(min_length=1)
+    lines: list[DespatchLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
 class DespatchItemOut(BaseModel):

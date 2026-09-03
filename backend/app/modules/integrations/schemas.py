@@ -13,6 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.modules.integrations.enums import (
     IDENTIFIER_PATTERN, MAX_EXT_PAGE_SIZE, SLUG_PATTERN,
 )
+from app.shared.limits import (  # request-size guards, see the module
+    MAX_CONFIG_ENTRIES,
+)
 
 CODE_PATTERN = r"^[A-Z][A-Z0-9_]{1,29}$"
 
@@ -93,7 +96,7 @@ class KeyWrite(BaseModel):
     # Endpoint slugs this key may call. EMPTY MEANS EVERY ENDPOINT OF ITS CLIENT — the
     # common case, and a list that has to be edited every time an endpoint is added is
     # a list that ends up stale and wrong.
-    scopes: list[str] = Field(default_factory=list)
+    scopes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
     rate_limit_per_min: int = Field(default=120, ge=0, le=10_000)
     expires_at: datetime | None = None
 
@@ -189,7 +192,7 @@ class JoinIn(BaseModel):
     # `<from>.base_column = <table>.join_column`. Both sides checked against the schema.
     base_column: str
     join_column: str
-    fields: list[FieldIn] = Field(default_factory=list)
+    fields: list[FieldIn] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
 
     @field_validator("table")
     @classmethod
@@ -288,15 +291,15 @@ class EndpointWrite(BaseModel):
     name: str = Field(min_length=2, max_length=200)
     client_code: str = ""
     table: str
-    fields: list[FieldIn] = Field(min_length=1)
+    fields: list[FieldIn] = Field(min_length=1, max_length=MAX_CONFIG_ENTRIES)
     joins: list[JoinIn] = Field(default_factory=list, max_length=8)
     # Always applied, whatever the caller sends. Keyed by the name the column comes
     # back under, so a joined column filters exactly like one of the base table's.
     filters: dict[str, str] = Field(default_factory=dict)
     # What a CALLER may narrow by at request time. A column not in this list is
     # ignored when it arrives as a query param — the endpoint decides its own surface.
-    filterable: list[str] = Field(default_factory=list)
-    searchable: list[str] = Field(default_factory=list)
+    filterable: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
+    searchable: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
     order_by: str = "id"
     order_dir: str = "asc"
     # The column `?updated_since=` applies to. Blank means the endpoint cannot be
