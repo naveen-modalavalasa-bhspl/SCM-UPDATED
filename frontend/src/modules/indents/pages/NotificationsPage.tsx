@@ -36,6 +36,7 @@ import {
 import { formatIndentDateTime } from "../dateTime";
 import { useIndentNotificationReads } from "../notificationReads";
 import type { IndentNotification } from "../types";
+import { NOTIFICATION_SUBNAV_PASTEL, TONE_BLUE } from "../buttonTones";
 
 /**
  * Alert & Notification.
@@ -227,11 +228,12 @@ function IndentNotificationsContent({
         title="Alert & Notification"
         showCreate={false}
         actions={unreadOnPage > 0 ? (
-          <Button onClick={reads.markAllRead}>
+          <Button className={TONE_BLUE} onClick={reads.markAllRead}>
             <CheckCheck className="h-4 w-4" /> Mark all read
           </Button>
         ) : undefined}
-        subNav={<SubNav label="Notifications" items={TABS} value={tab} onChange={changeTab} />}
+        subNav={<SubNav label="Notifications" items={TABS} value={tab} onChange={changeTab}
+                        className={NOTIFICATION_SUBNAV_PASTEL} />}
         filterMode="notifications"
         statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
         statusFilterLabel="Status"

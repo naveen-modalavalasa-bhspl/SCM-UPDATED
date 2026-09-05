@@ -202,8 +202,11 @@ export function IndentPrintPage() {
           <button
             type="button"
             onClick={() => window.print()}
-            className="inline-flex min-h-11 items-center gap-2 rounded-lg px-4 text-sm font-semibold text-white shadow-sm"
-            style={{ backgroundImage: SWEEP }}
+            /* Pastel yellow, matching every other PDF button in the module. This
+               sheet paints with inline styles rather than Tailwind (it is printed),
+               so the tone is written out instead of imported from buttonTones. */
+            className="inline-flex min-h-11 items-center gap-2 rounded-lg border px-4 text-sm font-semibold shadow-sm"
+            style={{ background: "#fdf4d3", color: "#8a6d0b", borderColor: "#d9b40b" }}
           >
             <Printer className="h-4 w-4" /> Download PDF
           </button>

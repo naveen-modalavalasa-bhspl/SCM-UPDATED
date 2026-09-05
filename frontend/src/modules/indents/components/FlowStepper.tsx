@@ -411,7 +411,7 @@ function accessibleState(state: StepState) {
 function FlowStepperSkeleton() {
   return (
     <div
-      className="-mx-1 min-h-20 overflow-hidden px-1 pb-1"
+      className="-mx-1 min-h-20 overflow-hidden px-1 pb-1 pt-1"
       role="status"
       aria-label="Loading approval progress"
     >
@@ -477,7 +477,7 @@ export function FlowStepper({
   return (
     <div
       role="group"
-      className="-mx-1 overflow-hidden px-1 pb-1"
+      className="-mx-1 overflow-hidden px-1 pb-1 pt-1"
       aria-label="Compact indent progress"
     >
       <ol

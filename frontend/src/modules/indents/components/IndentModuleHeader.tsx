@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Plus } from "lucide-react";
 import { PageHeader, Button, Can } from "@/shared/components";
 import { IndentFilterBar } from "./IndentFilterBar";
+import { TONE_MINT } from "../buttonTones";
 
 type FilterMode = "indents" | "activity" | "notifications";
 
@@ -70,7 +71,7 @@ export function IndentModuleHeader({
         actions={
           showCreate ? (
             <Can do="indent.create">
-              <Button onClick={() => nav("/indents/new")}>
+              <Button onClick={() => nav("/indents/new")} className={TONE_MINT}>
                 <Plus className="h-4 w-4" /> New indent
               </Button>
             </Can>

@@ -25,6 +25,7 @@ import { cancelIndentDecisionReads } from "../approvalRefresh";
 import { INDENT_STATUS, indentTypeLabel } from "../constants";
 import { displayUom, splitDeliveryOffice } from "../displayFormat";
 import type { Indent } from "../types";
+import { TONE_DEEP_MINT, TONE_MINT, TONE_RED, TONE_YELLOW } from "../buttonTones";
 
 function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -272,6 +273,7 @@ export function IndentDetailPage() {
             <Can do="indent.view">
               <Button
                 variant="secondary"
+                className={TONE_YELLOW}
                 onClick={() => window.open(`/indents/${indent.id}/print`, "_blank", "noopener")}
               >
                 <FileText className="h-4 w-4" /> PDF
@@ -281,6 +283,7 @@ export function IndentDetailPage() {
               <Can do="indent.edit">
                 <Button
                   variant="primary"
+                  className={TONE_MINT}
                   disabled={actionPending}
                   onClick={() => nav(`/indents/new?edit=${indent.id}`)}
                 >
@@ -291,6 +294,7 @@ export function IndentDetailPage() {
             {!decisionView && isReturnedForCorrection && indent.can_edit_correction && (
               <Button
                 variant="primary"
+                className={TONE_MINT}
                 disabled={actionPending}
                 onClick={() => nav(`/indents/new?edit=${indent.id}`)}
               >
@@ -300,6 +304,7 @@ export function IndentDetailPage() {
             {showDeleteDraft && (
               <Button
                 variant="danger"
+                className={TONE_RED}
                 disabled={actionPending}
                 onClick={async () => {
                   // The catalog's own copy (`indent.delete`), so this reads the same
@@ -428,7 +433,7 @@ export function IndentDetailPage() {
       {showActions && (
         <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
           {indent.can_submit && (
-            <Button className="flex-1 md:flex-none" disabled={actionPending} onClick={() => !actionPending && submit.mutate()}>
+            <Button className={`flex-1 md:flex-none ${TONE_DEEP_MINT}`} disabled={actionPending} onClick={() => !actionPending && submit.mutate()}>
               {submit.isPending ? <InlineSpinner /> : <Send className="h-4 w-4" />} {submit.isPending ? "Submitting..." : "Submit for approval"}
             </Button>
           )}
