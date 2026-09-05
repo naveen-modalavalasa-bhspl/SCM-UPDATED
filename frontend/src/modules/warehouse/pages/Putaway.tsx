@@ -7,7 +7,6 @@ import { DocumentList } from "../components/DocumentList";
 import { NewPutawayModal } from "../components/NewPutawayModal";
 import { listPutaways, deletePutaway, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtQty, humanise, normaliseStatus } from "../format";
-import { fmtCount, volume, weight } from "../components/CapacityMeter";
 import type { Putaway as PutawayTask } from "../types";
 
 /**
@@ -65,30 +64,6 @@ export default function Putaway() {
         <span className="tabular text-sm text-ink">
           {fmtQty(r.qty)} {r.uom_code ?? ""}
         </span>
-      ),
-    },
-    {
-      // The queue is worked a pallet at a time, and the quantity beside it does not say
-      // how many of those there are. `1500 EA` is thirty cartons or three pallets
-      // depending only on the rung it arrived in, and which one it is decides whether
-      // the suggested bay can take it — so the pack is on the row, not one click in.
-      key: "load",
-      header: "Load",
-      hideOnNarrow: true,
-      render: (r) => (
-        r.package_name ? (
-          <div className="min-w-0">
-            <div className="tabular truncate text-xs font-semibold text-ink">
-              {fmtCount(r.handling_units)} × {r.package_name}
-            </div>
-            <div className="tabular truncate text-[11px] text-muted">
-              {r.line_volume_cbm == null ? "not measured" : volume(r.line_volume_cbm)}
-              {r.line_weight_kg == null ? "" : ` · ${weight(r.line_weight_kg)}`}
-            </div>
-          </div>
-        ) : (
-          <span className="text-[11px] text-warn">No pack configured</span>
-        )
       ),
     },
     {

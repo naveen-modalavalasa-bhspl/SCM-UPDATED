@@ -33,9 +33,13 @@ export interface PickerUnit {
 export interface PickerScope {
   batchNo?: string | null;
   binCode?: string | null;
+  /** The whole walk down to that location — `F1 / F1-A1 / F1-A1-R1 / …`. A picker
+   *  being told the list is confined to `F1-A1-R1-B2` has been told nothing he can
+   *  act on unless he is also told where that is. */
+  binPath?: string | null;
   /** What that exact batch-and-bin holds, from the served sources. */
   available?: number | null;
-  /** Which split of the item this is, when the line was split over locations. */
+  /** Which pick of the item this is, when the ask was served from several locations. */
   splitLabel?: string | null;
 }
 
@@ -288,7 +292,23 @@ export function SerialNumbersModal({
                 </span>
                 <span className="flex items-center gap-1.5 text-muted">
                   <MapPin className="h-3.5 w-3.5 text-brand" aria-hidden />
-                  <b className="font-mono text-ink">{scope.binCode || "no bin"}</b>
+                  {/* The route, then the bay. Everything but the last rung stays
+                    * muted: one of them is the label on the shelf, the rest is how
+                    * you get there. */}
+                  {scope.binPath
+                    ? scope.binPath.split("/").map((rung, position, all) => (
+                        <span key={`${rung}-${position}`}>
+                          <b className={position === all.length - 1
+                            ? "font-mono text-ink"
+                            : "font-mono font-normal text-muted"}>
+                            {rung.trim()}
+                          </b>
+                          {position < all.length - 1 && (
+                            <span className="px-0.5 text-muted/60">›</span>
+                          )}
+                        </span>
+                      ))
+                    : <b className="font-mono text-ink">{scope.binCode || "no bin"}</b>}
                 </span>
                 {scope.available != null && (
                   <span className="text-muted">
@@ -344,18 +364,6 @@ export function SerialNumbersModal({
                 {/* `disabled`, not `isDisabled`: the shared Button forwards only the
                   * former (see shared/components/ui.tsx), so the latter would be
                   * dropped and the button would stay pressable at the ceiling. */}
-                <Button
-                  variant="soft"
-                  disabled={willAdd <= 0}
-                  onClick={selectAll}
-                >
-                  {/* Says what the press will actually do. "Select all" on a bin holding
-                    * more units than the line asks for would be a promise it cannot
-                    * keep, and the ceiling is the reason it stops short. */}
-                  {willAdd > 0 && willAdd < addable.length
-                    ? `Select first ${willAdd}`
-                    : `Select all${entry.trim() ? " shown" : ""}`}
-                </Button>
                 <Button
                   variant="subtle"
                   disabled={selected.size === 0}

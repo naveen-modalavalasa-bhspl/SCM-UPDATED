@@ -274,6 +274,57 @@ async def _ancestry(db: AsyncSession, bin_id: int | None) -> list[Bin]:
     return chain
 
 
+async def _location_index(db: AsyncSession, warehouse_id: int) -> dict[int, dict]:
+    """Every storage location in one warehouse, each carrying its whole ancestry.
+
+    `_ancestry` walks `parent_id` with one `db.get` per rung, which is right for a
+    single document and wrong for a picker: a warehouse with 900 bins five levels deep
+    is 4,500 round trips to label a dropdown. This reads the tree once — the whole
+    table for the warehouse is a few hundred rows — and derives every path in memory.
+
+    Still derived, never stored, for the reason `bin_tree` gives: a path column goes
+    stale the day somebody re-parents a rack, and nothing tells you it has.
+    """
+    rows = (await db.execute(
+        select(Bin.id, Bin.code, Bin.name, Bin.bin_type, Bin.parent_id)
+        .where(Bin.warehouse_id == warehouse_id)
+    )).all()
+    nodes = {
+        row.id: {"id": row.id, "code": row.code, "name": row.name or row.code,
+                 "bin_type": row.bin_type, "parent_id": row.parent_id}
+        for row in rows
+    }
+
+    cache: dict[int, list[dict]] = {}
+
+    def chain(node_id: int) -> list[dict]:
+        if node_id in cache:
+            return cache[node_id]
+        cache[node_id] = []          # cycle guard: a re-entrant walk sees an empty path
+        node = nodes.get(node_id)
+        if node is None:
+            return []
+        parent = node["parent_id"]
+        built = ([*chain(parent), node] if parent and parent in nodes else [node])
+        cache[node_id] = built
+        return built
+
+    out: dict[int, dict] = {}
+    for node_id, node in nodes.items():
+        steps = chain(node_id)
+        out[node_id] = {
+            **node,
+            "steps": [{"id": step["id"], "code": step["code"], "name": step["name"],
+                       "bin_type": step["bin_type"]} for step in steps],
+            # Two renderings, because a screen wants both: the codes are what is
+            # printed on the bay labels, the names are what people say out loud.
+            "path": " / ".join(step["code"] for step in steps),
+            "path_names": " / ".join(step["name"] for step in steps),
+            "is_pickable": (node["bin_type"] or "").upper() in m.BIN_TYPES,
+        }
+    return out
+
+
 # Enough of a code to recognise the level by, short enough that six of them still read
 # as one lot number.
 _LOT_TOKEN = re.compile(r"[A-Za-z0-9]+")
@@ -548,6 +599,203 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
     return roots
 
 
+# --------------------------------------------------------------------------- #
+#  A location has to physically contain the locations inside it
+# --------------------------------------------------------------------------- #
+#
+# Every rung of the tree is measured, not just the bays: a floor has a cube, a lane
+# has a cube, a rack has a cube. That was already true of the columns — `length_cm`,
+# `width_cm`, `height_cm` and `capacity_volume` have always been on
+# `whs_warehouse_locations`, which is one table for the whole tree — and nothing had
+# ever checked them against each other. So a 2 m3 rack could be given four 1 m3
+# shelves, every screen would report each of them as having room, and the building
+# would be described as holding twice what it can.
+#
+# The rule: **a location's cube is at least the sum of the cubes directly inside it.**
+# Enforced on every write, at every edge, which is what makes it hold for N levels —
+# if every parent contains its own children and each of those contains theirs, the
+# floor contains everything under it by induction. Checking the whole subtree on each
+# write would re-read the building to prove something the edge already proves.
+#
+# `>=`, not `>`: three 1 m3 shelves in a 3 m3 rack is how racking is actually built,
+# and refusing it would mean nobody could describe a real rack.
+#
+# An UNMEASURED location is not a zero-volume one. Nobody has measured it, so it is
+# left out of the arithmetic and counted separately, and the screens say how many were
+# left out — a budget that silently treats four unmeasured shelves as taking no space
+# is worse than one that admits it cannot answer.
+
+
+async def _volume_budget(db: AsyncSession, parent: Bin | None, *,
+                         exclude_id: int | None = None,
+                         override: tuple[int | None, Decimal | None] | None = None,
+                         ) -> dict:
+    """What the locations directly inside `parent` come to, against what it holds.
+
+    `exclude_id` drops one child from the sum — used when that child is being moved
+    out or is about to be restated. `override` substitutes one child's cube for the
+    value being saved, so a form is checked against what it is about to write rather
+    than against what is still in the table.
+    """
+    if parent is None:
+        return {"gross_volume": None, "children_volume": ZERO, "free_volume": None,
+                "child_count": 0, "unmeasured_children": 0, "children": []}
+
+    rows = (await db.execute(
+        select(Bin).where(Bin.parent_id == parent.id).order_by(Bin.code)
+    )).scalars().all()
+
+    override_id, override_volume = override or (None, None)
+    used, unmeasured, children = ZERO, 0, []
+    for row in rows:
+        if exclude_id is not None and row.id == exclude_id:
+            continue
+        volume = (override_volume if row.id == override_id
+                  else capacity.gross_volume(row))
+        if volume is None:
+            unmeasured += 1
+        else:
+            used += volume
+        children.append({
+            "id": row.id, "code": row.code, "name": row.name or row.code,
+            "bin_type": row.bin_type, "volume": volume,
+            "is_active": bool(row.is_active),
+        })
+    # A child being ADDED is not in the table yet, so it arrives only as an override.
+    if override_id is None and override_volume is not None:
+        used += override_volume
+
+    gross = capacity.gross_volume(parent)
+    return {
+        "gross_volume": gross,
+        "volume_source": capacity.volume_source(parent),
+        "children_volume": used,
+        "free_volume": None if gross is None else gross - used,
+        "child_count": len(children),
+        "unmeasured_children": unmeasured,
+        "children": children,
+    }
+
+
+def _m3(value) -> str:
+    """A cube in the words every one of these messages uses."""
+    return f"{_d(value).quantize(Decimal('0.001')).normalize():f} m3"
+
+
+class _Measured:
+    """Just the four columns `capacity.gross_volume` reads.
+
+    A form is checked against the values it is ABOUT to write, and the row in the
+    table still holds the old ones. Building a transient `Bin` to carry them would put
+    a half-built ORM object in reach of the session for the sake of four numbers.
+    """
+
+    __slots__ = ("capacity_volume", "length_cm", "width_cm", "height_cm")
+
+    def __init__(self, data):
+        self.capacity_volume = data.capacity_volume
+        self.length_cm = data.length_cm
+        self.width_cm = data.width_cm
+        self.height_cm = data.height_cm
+
+
+async def _assert_volume_contains(db: AsyncSession, *, code: str,
+                                  node_id: int | None, parent_id: int | None,
+                                  own_volume) -> None:
+    """Refuse a location that does not fit its parent, or that its own contents burst.
+
+    Two checks, because one write can break the rule in either direction: shrinking a
+    rack can make it too small for the shelves already in it, and growing a shelf can
+    make it too big for the rack it sits in.
+    """
+    own = None if own_volume is None else _d(own_volume)
+
+    # 1. Does what is already inside this location still fit it?
+    if node_id is not None and own is not None:
+        node = await db.get(Bin, node_id)
+        inside = await _volume_budget(db, node)
+        if inside["children_volume"] > own:
+            raise ValidationError(
+                f"{code} is {_m3(own)} and the {inside['child_count']} locations "
+                f"inside it come to {_m3(inside['children_volume'])}. Make it at least "
+                f"that big, or make the locations inside it smaller."
+                + (f" ({inside['unmeasured_children']} of them are unmeasured and are "
+                   f"not counted here.)" if inside["unmeasured_children"] else "")
+            )
+
+    # 2. Does this location still fit its parent?
+    if not parent_id:
+        return
+    parent = await db.get(Bin, parent_id)
+    if parent is None:
+        return
+    budget = await _volume_budget(
+        db, parent,
+        # The row being saved is replaced by what is being saved, whether it is already
+        # a child of this parent, is moving into it, or does not exist yet.
+        exclude_id=node_id,
+        override=(None, own),
+    )
+    gross = budget["gross_volume"]
+    if gross is None or own is None:
+        return
+    if budget["children_volume"] > gross:
+        siblings = budget["child_count"]
+        spare = gross - (budget["children_volume"] - own)
+        raise ValidationError(
+            f"{code} does not fit inside {parent.code}. {parent.code} holds "
+            f"{_m3(gross)}, the other {siblings} location"
+            f"{'' if siblings == 1 else 's'} inside it already take "
+            f"{_m3(budget['children_volume'] - own)}, so there is "
+            f"{_m3(max(spare, ZERO))} left and this needs {_m3(own)}."
+            + (f" ({budget['unmeasured_children']} unmeasured location"
+               f"{'' if budget['unmeasured_children'] == 1 else 's'} inside "
+               f"{parent.code} are not counted.)"
+               if budget["unmeasured_children"] else "")
+        )
+
+
+async def location_volume_budget(db: AsyncSession, bin_id: int) -> dict:
+    """How much of a location's cube the locations inside it have already claimed.
+
+    Served rather than worked out in the form, for the reason every other verdict in
+    this module is served: the sentence a screen shows and the rule the save enforces
+    have to be the same arithmetic, or the form will happily let somebody type a
+    number the server then refuses.
+    """
+    row = await _get(db, Bin, bin_id, "Storage location")
+    budget = await _volume_budget(db, row)
+    gross, used = budget["gross_volume"], budget["children_volume"]
+    unmeasured = budget["unmeasured_children"]
+
+    if gross is None:
+        headline = f"{row.code} has no measurement"
+        detail = ("Give it a volume, or a length, width and height, and the locations "
+                  "inside it can be checked against it.")
+    elif budget["child_count"] == 0:
+        headline = f"{row.code} holds {_m3(gross)}"
+        detail = "Nothing sits inside it yet, so all of it is free."
+    elif used > gross:
+        headline = f"{row.code} is over-filled by {_m3(used - gross)}"
+        detail = (f"The {budget['child_count']} locations inside it come to "
+                  f"{_m3(used)} and it only holds {_m3(gross)}.")
+    else:
+        headline = f"{_m3(gross - used)} of {_m3(gross)} still free inside {row.code}"
+        detail = (f"{budget['child_count']} location"
+                  f"{'' if budget['child_count'] == 1 else 's'} inside it take "
+                  f"{_m3(used)}.")
+    if unmeasured:
+        detail += (f" {unmeasured} of them {'is' if unmeasured == 1 else 'are'} "
+                   f"unmeasured and not counted.")
+
+    return {
+        "location_id": row.id, "code": row.code, "name": row.name or row.code,
+        "bin_type": row.bin_type,
+        "headline": headline, "detail": detail,
+        **budget,
+    }
+
+
 async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
     wh = await _warehouse(db, data.warehouse_id)
     if not wh.is_bin_managed:
@@ -562,6 +810,14 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
         parent = await _get(db, Bin, data.parent_id, "Parent bin")
         if parent.warehouse_id != data.warehouse_id:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
+
+    # A location has to fit inside the one it hangs off. Checked before the insert, so
+    # a warehouse can never be described as holding more than it does — see the note
+    # above `_volume_budget`.
+    await _assert_volume_contains(
+        db, code=data.code, node_id=None, parent_id=data.parent_id,
+        own_volume=capacity.gross_volume(_Measured(data)),
+    )
 
     # `name` is NOT NULL in the table but optional on the form — a location that is only
     # ever referred to by its code needs no second label. Fall back to the code rather
@@ -583,6 +839,14 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
 
     if data.parent_id == bin_id:
         raise ValidationError("A bin cannot be its own parent")
+
+    # Both directions, before anything is written: shrinking a rack can make it too
+    # small for the shelves already in it, and growing a shelf can make it too big for
+    # the rack it sits in. Read off the values being SAVED, not the ones in the table.
+    await _assert_volume_contains(
+        db, code=data.code, node_id=bin_id, parent_id=data.parent_id,
+        own_volume=capacity.gross_volume(_Measured(data)),
+    )
 
     for field, value in data.model_dump().items():
         setattr(row, field, value)
@@ -2349,8 +2613,6 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
                               user) -> m.PutawayTask:
     """Creates the task itself. Split from `_raise_putaway_task` so the manual route
     can apply its own rules about what may be re-raised before building one."""
-    suggested = await _suggest_bin(db, receipt.warehouse_id, line.item_id,
-                                   _d(line.accepted_qty))
     item = await _item_snapshot(db, line.item_id)
     task = m.PutawayTask(
         # From the receipt it belongs to — see the note on the GRN number.
@@ -2365,9 +2627,11 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         # so an item without a unit still gets a task rather than blocking the putaway.
         uom_id=item.uom_id or 0,
         qty=_d(line.accepted_qty),
-        suggested_bin_id=suggested.id if suggested else None,
-        putaway_type=(PutawayType.SYSTEM_DIRECTED if suggested
-                      else PutawayType.MANUAL).value,
+        # No suggestion, and therefore not system-directed: the storekeeper decides
+        # where this goes, at any rung of the tree. See the note where `_suggest_bin`
+        # stood.
+        suggested_bin_id=None,
+        putaway_type=PutawayType.MANUAL.value,
         status=PutawayStatus.PENDING.value,
         assigned_to=getattr(user, "id", None),
         is_active=True,
@@ -2377,79 +2641,12 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
     return task
 
 
-#: How many candidates a suggestion is chosen from. Enough that a run of full bays does
-#: not exhaust the list, small enough that raising a GRN's worth of tasks stays two
-#: queries per line rather than a scan of the building.
-_SUGGESTION_POOL = 12
-
-
-async def _suggest_bin(db: AsyncSession, warehouse_id: int, item_id: int,
-                       qty=None) -> Bin | None:
-    """Picks a bin for an incoming line.
-
-    Preference is a bin that already holds this item — keeping one item in one place is
-    what makes picking fast — falling back to any active bin stock can sit in.
-
-    But preference is not the whole answer, and the comment that used to stand here
-    ("capacity is not modelled per item, so this suggests rather than decides") stopped
-    being true when capacity became a question about HANDLING UNITS. It is now perfectly
-    answerable whether this pallet enters that bay, so a suggestion that ignores it is
-    just a wrong suggestion made confidently: the storekeeper walks to the shelf named on
-    their task, finds the pallet does not go in, and overrides — every time, for that
-    item, until somebody re-slots it by hand.
-
-    So the candidates are ranked on the SAME verdict the putaway screen's chips use
-    (`capacity.suggestion_fit`), and the consolidation preference survives as the tie-
-    break it should always have been: stable sort, bins already holding the item first.
-    A bin is still only suggested — the storekeeper overrides and the override is
-    recorded — and a warehouse with nothing measured ranks every candidate equal and
-    lands on the same bin it always did.
-    """
-    from app.modules.inventory.models import Stock
-
-    held_ids = [row[0] for row in (await db.execute(
-        select(Stock.bin_id).where(
-            Stock.warehouse_id == warehouse_id, Stock.item_id == item_id,
-            Stock.bin_id != m.NO_BIN, Stock.total_qty > 0)
-        .order_by(Stock.total_qty.desc()).limit(_SUGGESTION_POOL)
-    )).all()]
-
-    preferred = []
-    if held_ids:
-        preferred = (await db.execute(
-            select(Bin).where(Bin.id.in_(held_ids), Bin.is_active.is_(True))
-        )).scalars().all()
-        # Keep the "holds the most of it" order the query asked for; `IN` does not.
-        rank = {bin_id: index for index, bin_id in enumerate(held_ids)}
-        preferred = sorted(preferred, key=lambda b: rank.get(b.id, len(rank)))
-
-    others = (await db.execute(
-        select(Bin).where(
-            Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True),
-            Bin.bin_type.in_(m.BIN_TYPES), Bin.id.notin_([b.id for b in preferred] or [0]))
-        .order_by(Bin.code).limit(_SUGGESTION_POOL)
-    )).scalars().all()
-
-    candidates = [*preferred, *others]
-    if not candidates:
-        return None
-
-    packs = (await capacity.pack_ladders(db, [item_id])).get(item_id, [])
-    pack = capacity.choose_pack(packs)
-    room = await capacity.bin_occupancy_map(db, candidates)
-    return min(
-        # `enumerate` keeps the consolidation order as the tie-break: `min` is stable in
-        # the sense that follows from comparing the index last, and nothing else here
-        # distinguishes two equally-good bins.
-        enumerate(candidates),
-        key=lambda pair: (
-            capacity.SUGGESTION_RANK.get(
-                capacity.suggestion_fit(pack, pair[1], room[pair[1].id], qty)["fit_status"],
-                2),
-            pair[0],
-        ),
-    )[1]
-
+# `_suggest_bin` and `_SUGGESTION_POOL` were here. See the note where
+# `suggested_bins` stood: nothing suggests a location any more, so a task is raised
+# with no bin on it and the storekeeper places it where the goods actually go.
+# `whs_warehouse_items.suggested_bin_id` stays on the table and is still read back
+# for tasks raised before this, which would otherwise lose the only record of where
+# they were sent.
 
 async def _po_number(db: AsyncSession, po_id: int | None) -> str | None:
     """Selects `po_no` and nothing else.
@@ -3562,10 +3759,12 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
         raise ValidationError(f"Bin {target.code} is not in this warehouse")
     if not target.is_active:
         raise ValidationError(f"Bin {target.code} is inactive")
-    if target.bin_type not in m.BIN_TYPES:
-        raise ValidationError(
-            f"{target.code} is a {target.bin_type.lower()}, not a stock-holding bin"
-        )
+    # Any rung of the tree, on purpose. A pallet of cable drums goes on the floor of
+    # lane A, not into a bin, and a delivery that arrives before its bay is built has
+    # to be put down somewhere; refusing anything above a BIN meant the goods were
+    # placed anyway and the system was told nothing. A location is a location — the
+    # capacity gates already say whether the load fits the one that was chosen, and
+    # they warn rather than block for exactly the same reason.
 
     qty = _d(data.qty) if data.qty is not None else _d(task.qty)
     if qty <= ZERO:
@@ -4158,8 +4357,8 @@ async def create_stock_movement(
         raise ValidationError("Source and destination bins must be different")
     if source.warehouse_id != wh.id or destination.warehouse_id != wh.id:
         raise ValidationError("Both bins must belong to the selected warehouse")
-    if not source.is_pickable or not destination.is_pickable:
-        raise ValidationError("Stock can move only between stock-holding bins")
+    # See the note in the movement-order path: stock lives wherever it was put away,
+    # and a rung that can hold it must be able to give it up.
     if not source.is_active or not destination.is_active:
         raise ValidationError("Source and destination bins must be active")
 
@@ -4597,8 +4796,9 @@ async def create_stock_movement_order(
             raise ValidationError("Source and destination bins must be different")
         if source.warehouse_id != wh.id or destination.warehouse_id != wh.id:
             raise ValidationError("Both bins must belong to the selected warehouse")
-        if not source.is_pickable or not destination.is_pickable:
-            raise ValidationError("Stock can move only between stock-holding bins")
+        # Not restricted to BIN rungs: putaway may place stock on a lane or a rack
+        # (see `confirm_putaway`), and stock that can be put somewhere has to be
+        # movable off it again or it is stranded there for good.
         if not source.is_active or not destination.is_active:
             raise ValidationError("Source and destination bins must be active")
 
@@ -4825,114 +5025,21 @@ async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) 
     return page
 
 
-async def suggested_bins(db: AsyncSession, task_id: int, limit: int = 8, *,
-                         item_packaging_id: int | None = None) -> list[dict]:
-    """Bins worth offering for a task, best first: the ones already holding this item,
-    then any active pickable bin.
-
-    Each one carries how much room it has left, so the chip a storekeeper taps says
-    what it is going to cost them. Dicts rather than ORM rows because free space is
-    computed, not a column."""
-    from app.modules.inventory.models import Stock
-
-    task = await _get(db, m.PutawayTask, task_id, "Putaway task")
-
-    held_ids = [row[0] for row in (await db.execute(
-        select(Stock.bin_id).where(
-            Stock.warehouse_id == task.warehouse_id, Stock.item_id == task.item_id,
-            Stock.bin_id != m.NO_BIN, Stock.total_qty > 0)
-        .order_by(Stock.total_qty.desc()).limit(limit)
-    )).all()]
-
-    preferred = []
-    if held_ids:
-        preferred = (await db.execute(
-            select(Bin).where(Bin.id.in_(held_ids), Bin.is_active.is_(True))
-        )).scalars().all()
-
-    remaining = limit - len(preferred)
-    others = []
-    if remaining > 0:
-        others = (await db.execute(
-            select(Bin).where(
-                Bin.warehouse_id == task.warehouse_id, Bin.is_active.is_(True),
-                Bin.bin_type.in_(m.BIN_TYPES), Bin.id.notin_(held_ids or [0]))
-            .order_by(Bin.code).limit(remaining)
-        )).scalars().all()
-    rows = [*preferred, *others]
-
-    # How much room each one has left, in two queries for the whole list rather than a
-    # request per chip. "The bin that already holds this item" is only the best
-    # suggestion while it still has space, and until this the screen could not say.
-    room = await capacity.bin_occupancy_map(db, rows)
-
-    # Which pack is going onto the shelf. Every ranking below is about THIS pack: "is
-    # there room" is not a question about a bin on its own, and a bay that takes four
-    # totes takes no pallets at all.
-    packs = (await capacity.pack_ladders(db, [task.item_id])).get(task.item_id, [])
-    # The rung the SCREEN has selected wins over the one the task was raised with: a
-    # storekeeper who changes the pack is telling us what is actually on the trolley,
-    # and the ranking is only worth anything if it follows that.
-    pack = capacity.choose_pack(packs, item_packaging_id or task.item_packaging_id)
-    fit = {b.id: capacity.suggestion_fit(pack, b, room[b.id], task.qty) for b in rows}
-
-    # Re-sort so bins that will actually take this load come first. The preferred list
-    # is the strongest signal and Python's sort is stable, so a bin already holding the
-    # item stays ahead of a stranger at the same rank — but a "preferred" bin that is
-    # full, or that this pallet does not physically enter, must not sit above an empty
-    # one: a storekeeper trusting the order would keep walking toward a shelf they
-    # cannot use. WONT_FIT ranks below FULL for that reason — a full bay is one to come
-    # back to, a bay the pack does not enter is never the answer.
-    from decimal import Decimal as _Dec
-    rows = sorted(
-        rows,
-        key=lambda b: (
-            capacity.SUGGESTION_RANK.get(fit[b.id]["fit_status"], 2),
-            # More slots left beats more air left: the floor works in whole packs, and
-            # cube is the tie-break for bins nobody has slotted.
-            -(fit[b.id]["slots_free"] if fit[b.id]["slots_free"] is not None else 0),
-            -float(room[b.id]["free_volume"] or _Dec("0")),
-        ),
-    )
-
-    return [
-        {
-            "id": b.id, "warehouse_id": b.warehouse_id, "code": b.code, "name": b.name,
-            "description": b.description, "parent_id": b.parent_id,
-            "bin_type": b.bin_type, "storage_type_id": b.storage_type_id,
-            "barcode": b.barcode, "floor_level": b.floor_level,
-            "shelf_level": b.shelf_level, "path": None, "level": None,
-            "capacity_qty": b.capacity_qty,
-            "capacity_volume": room[b.id]["capacity_volume"],
-            "max_weight_capacity": b.max_weight_capacity,
-            "length_cm": b.length_cm, "width_cm": b.width_cm, "height_cm": b.height_cm,
-            "max_handling_units": b.max_handling_units,
-            "fill_efficiency_pct": b.fill_efficiency_pct,
-            "aisle_width_meters": b.aisle_width_meters,
-            "temperature_controlled": b.temperature_controlled,
-            "humidity_percentage": b.humidity_percentage,
-            "target_temperature_celsius": b.target_temperature_celsius,
-            "min_temperature_celsius": b.min_temperature_celsius,
-            "max_temperature_celsius": b.max_temperature_celsius,
-            "is_pickable": b.is_pickable, "is_active": b.is_active,
-            "occupied_qty": None,
-            "occupied_volume": room[b.id]["occupied_volume"],
-            "free_volume": room[b.id]["free_volume"],
-            "utilisation_pct": room[b.id]["utilisation_pct"],
-            "capacity_status": room[b.id]["status"],
-            "is_partial": room[b.id]["is_partial"],
-            "capacity_units": room[b.id]["capacity_units"],
-            "occupied_units": room[b.id]["occupied_units"],
-            "capacity_weight_kg": room[b.id]["capacity_weight_kg"],
-            "occupied_weight_kg": room[b.id]["occupied_weight_kg"],
-            # What this bin says about THIS load, as opposed to how full it is in
-            # general. `capacity_status` is the shelf; `fit_status` is the decision.
-            **fit[b.id],
-            "children": [],
-        }
-        for b in rows
-    ]
-
+# `suggested_bins` was here, and the putaway screen's chips with it.
+#
+# A suggestion is a system telling a storekeeper where the goods ought to go. That
+# was the right shape while a putaway could only be confirmed into a BIN — the
+# screen had to narrow a thousand bays down to eight, and the ranking (does THIS
+# pack go into that bay, never free cube) was the whole of the value. Placement is
+# not narrow any more: `confirm_putaway` takes any rung of the tree, because a
+# pallet of drums stands at the end of a lane and a delivery can land before its
+# bay is built. A shortlist of eight bays in front of a person who may legitimately
+# choose any of nine hundred locations is not advice, it is a wrong answer with a
+# ranking on it.
+#
+# What replaced it is the location picker walking the hierarchy, and the capacity
+# meter measuring whatever was chosen. The meter was always the part that told the
+# truth; the chips only chose which truths to show first.
 
 # ---------------------------------------------------------------------------
 # Picking
@@ -6280,6 +6387,9 @@ async def issue_stock_sources(
         ))
 
     rows = (await db.execute(stmt)).all()
+    # One read of the warehouse's tree for the whole answer, so every source can name
+    # the floor / lane / rack it sits on rather than a bare bin code.
+    index = await _location_index(db, warehouse_id)
     out = []
     for (item_id, bin_id, batch_id, available_qty, reserved_qty, total_qty,
          own_qty, bin_code, bin_name, batch_no, expiry_date, mfg_date) in rows:
@@ -6295,6 +6405,8 @@ async def issue_stock_sources(
             "bin_id": bin_id or None,
             "bin_code": bin_code or (None if not bin_id else f"Bin {bin_id}"),
             "bin_name": bin_name or bin_code,
+            "bin_path": (index.get(bin_id) or {}).get("path") if bin_id else None,
+            "bin_steps": (index.get(bin_id) or {}).get("steps", []) if bin_id else [],
             "batch_id": batch_id or None,
             "batch_no": batch_no,
             "expiry_date": expiry_date,
@@ -6312,6 +6424,32 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
                              lines: list[s.IssueItemWrite]) -> None:
     issue.items.clear()
     await db.flush()
+
+    # Every location named on the document, checked once for the whole document.
+    #
+    # The line's `bin_id` used to be written through unread — any integer at all became
+    # a location, including one belonging to another warehouse or one that had been
+    # deactivated, and the mistake only surfaced at posting when `stk_balance` had no
+    # such row. It is checked here instead, and checked as a LOCATION rather than as a
+    # bin: stock is allowed to sit on a lane, a rack or a whole floor (see
+    # `confirm_putaway`), so demanding a BIN rung would refuse exactly the documents
+    # that placement change exists to allow.
+    named = {int(line.bin_id) for line in lines if line.bin_id}
+    known: dict[int, Bin] = {}
+    if named:
+        known = {row.id: row for row in (await db.execute(
+            select(Bin).where(Bin.id.in_(named))
+        )).scalars().all()}
+    for bin_id in sorted(named):
+        location = known.get(bin_id)
+        if location is None:
+            raise ValidationError(f"Storage location {bin_id} does not exist")
+        if location.warehouse_id != issue.warehouse_id:
+            raise ValidationError(
+                f"{location.code} is not in {issue.warehouse_name or 'this warehouse'}")
+        if not location.is_active:
+            raise ValidationError(
+                f"{location.code} is inactive and cannot be issued from")
 
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
@@ -11913,10 +12051,23 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
                       all_locations: bool = False,
                       exclude_bin_id: int | None = None,
                       indent_id: int | None = None) -> list[dict]:
-    # A picker chooses somewhere to put stock, so offer bins and not the lanes and
-    # racks they hang from, unless all_locations is True.
+    """Somewhere in this warehouse to take stock from, or put it.
+
+    Every row carries its WHOLE ancestry — `path`, `path_names`, `steps` — not just a
+    bin code. `F1-A1-R1-B2` on its own tells a storekeeper nothing about which end of
+    which floor he is being sent to, and the codes are near-identical by design; the
+    picker has to say Ground Floor / Aisle 1 / Rack 1 / Bin 2 or it is asking him to
+    memorise the warehouse.
+
+    Structure — floors, lanes, racks, shelves — is offered too when `all_locations` is
+    set, and ALWAYS when the query is narrowed to stock that is actually there: a
+    location holding goods is a location they can be picked from, whatever rung of the
+    tree it sits on. Stock lands outside a bin whenever a putaway is confirmed against
+    a rung above one, which the floor is now allowed to do.
+    """
+    holding = bool(item_id or batch_id)
     stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
-    if not all_locations:
+    if not all_locations and not holding:
         stmt = stmt.where(Bin.bin_type.in_(m.BIN_TYPES))
     # A destination that is also the source is not a movement. Excluded here rather
     # than only in the form, so the offer and the rule the service enforces agree.
@@ -11941,7 +12092,28 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
         like = f"%{search}%"
         stmt = stmt.where(or_(Bin.code.ilike(like), Bin.name.ilike(like)))
     rows = (await db.execute(stmt.distinct().order_by(Bin.code).limit(LOOKUP_LIMIT))).scalars().all()
-    return [{"id": r.id, "code": r.code, "name": r.name or r.code} for r in rows]
+    index = await _location_index(db, warehouse_id)
+    out = []
+    for r in rows:
+        node = index.get(r.id, {})
+        parents = (node.get("steps") or [])[:-1]
+        out.append({
+            "id": r.id,
+            "code": r.code,
+            # What the dropdown reads out. The bin's own name first, then the walk to
+            # it, so the label is "Bin 1 · Ground Floor / Aisle 1 / Rack 1" and a
+            # storekeeper can find it without opening a second screen.
+            "name": " · ".join(filter(None, [
+                r.name or r.code,
+                " / ".join(step["name"] for step in parents) or None,
+            ])),
+            "bin_type": r.bin_type,
+            "is_pickable": r.is_pickable,
+            "path": node.get("path") or r.code,
+            "path_names": node.get("path_names") or (r.name or r.code),
+            "steps": node.get("steps") or [],
+        })
+    return out
 
 
 async def batch_options(

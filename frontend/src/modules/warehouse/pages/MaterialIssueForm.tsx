@@ -1,38 +1,25 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Info, MapPin, FileText, Split } from "lucide-react";
+import { ArrowLeft, Info, ScanLine, FileText } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
-import { QtyInput } from "../components/LinesEditor";
+import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
-import { IssueSplitEditor } from "../components/IssueSplitEditor";
-import { TrackingBadge, useTrackingMeta } from "../components/TrackingBadge";
-import {
-  groupIssueLines, normalizeSplits, replaceGroup, round, sourceKey, splitProblems,
-  trackingOf, autoSplit,
-} from "../issueSplits";
-import type { IssueGroup, IssueSplit } from "../issueSplits";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components/Timeline";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
-  acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
+  acknowledgeIssue, approveIssue, batchOptions, binOptions, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory, itemOptions, listSerials, postIssue, projectOptions,
-  occupancyPreview,
-  itemHandlingUnits,
   returnableIssueOptions, rejectIssue, setIssueSerials, submitIssue, updateIssue,
   warehouseOptions,
-  issueStockSources,
 } from "../api";
-import { fmtCount, volume } from "../components/CapacityMeter";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type {
-  HandlingUnit,
-  Issue, IssueItemWrite, IssueStockSource, IssueWrite, ItemOption, OccupancyMove,
-  SerialNumber, TrackingType, UnitMode,
+  Issue, IssueItemWrite, IssueWrite, ItemOption, SerialNumber, UnitMode,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 
@@ -114,25 +101,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
   const [issuedToName, setIssuedToName] = useState<string | null>(null);
-  const [departmentName, setDepartmentName] = useState<string | null>(null);
-  const [projectName, setProjectName] = useState<string | null>(null);
   // Some of the reserved stock was received for another project, or for none.
   // Worth saying out loud — the issue still goes through.
   const [mixedProjects, setMixedProjects] = useState(false);
   const [isBinManaged, setIsBinManaged] = useState(true);
-  /**
-   * A draft whose lines have just arrived from an indent or a fulfilment, and which
-   * has not been spread over the shelf yet.
-   *
-   * Those lines arrive one per indent line, each pointed at a single source, because
-   * that is all an allocation knows. Whether the shelf can actually serve them from
-   * one place is not known until `issueStockSources` answers, so the split cannot
-   * happen at the moment of the pull - it happens once, when the answer lands.
-   *
-   * Only on a FRESH pull. Re-splitting a saved document would rebuild its lines and
-   * throw away their ids, and after approval the batch and bin are the approver's.
-   */
-  const [autoSplitPending, setAutoSplitPending] = useState(false);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-issue", id],
@@ -158,8 +130,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
-    setDepartmentName(doc.department_name ?? null);
-    setProjectName(doc.project_name ?? null);
     if (doc.warehouse_id) {
       warehouseOptions().then((opts) => {
         const w = opts.find(o => o.id === doc.warehouse_id);
@@ -189,13 +159,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         is_serial_tracked: l.is_serial_tracked,
         is_imei_tracked: l.is_imei_tracked,
         unit_mode: l.unit_mode,
-        // What the badge says, and what the parity message calls one unit. Served
-        // per line, so it has to be carried onto the editable copy — without it the
-        // screen falls back to guessing from the item flags, and every asset-coded
-        // item read as a consumable lot.
-        tracking_type: l.tracking_type,
         has_units: l.has_units,
-        units_available: l.units_available,
         bin_id: l.bin_id,
         batch_id: l.batch_id,
         requested_qty: num(l.requested_qty),
@@ -214,10 +178,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     if (!pickingSource.data) return;
     const source = pickingSource.data;
     setMixedProjects(!!source.mixed_projects);
-    setAutoSplitPending(true);
     if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
-    if (source.department_id) setDepartmentName((source as any).department_name ?? null);
-    if (source.project_id) setProjectName((source as any).project_name ?? null);
     setForm((current) => ({
       ...current,
       picking_id: source.picking_id,
@@ -246,7 +207,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       activeSerialLine?.item_id ?? 0,
       activeSerialLine?.batch_id ?? 0,
       activeSerialLine?.bin_id ?? 0,
-      activeSerialLine?.id ?? 0,
       serialLine,
     ],
     queryFn: () =>
@@ -255,11 +215,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         batch_id: sourceId(activeSerialLine!.batch_id),
         warehouse_id: form.warehouse_id,
         bin_id: isBinManaged ? sourceId(activeSerialLine!.bin_id) : undefined,
-        // Scoped to THIS line. Two lines of the same item — the normal shape of a
-        // consolidated issue — were both offered the whole item's units, so the same
-        // serial could be picked twice and the clash only surfaced at the shelf.
-        issue_id: editing ? Number(id) : undefined,
-        issue_line_id: activeSerialLine?.id,
         status: "available",
         size: 500,
       }),
@@ -285,31 +240,17 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     (row) => !!unitKey(row, activeUnitMode),
   );
   const unitOptions = unitRows.map((row) => unitKey(row, activeUnitMode));
-  /**
-   * The whole unit behind each offered value, keyed by that value.
-   *
-   * The picker used to get one column of monospace strings and nothing else, so a
-   * serial, an IMEI, an asset tag and a consumable lot code were indistinguishable
-   * on screen — and the batch and bin the list was scoped to were invisible, which
-   * made a correctly short list look like missing stock. Every one of those is on
-   * the row now, and the type is named rather than inferred.
-   */
-  const activeTracking: TrackingType = activeSerialLine
-    ? trackingOf(activeSerialLine)
-    : "NONE";
-  const unitDetail = Object.fromEntries(
-    unitRows.map((row) => [
-      unitKey(row, activeUnitMode),
-      {
-        value: unitKey(row, activeUnitMode),
-        type: activeTracking,
-        serial: row.serial_number,
-        imei: row.imei,
-        code: row.asset_code ?? row.consumable_code ?? null,
-        batchNo: row.batch_no,
-        binCode: row.bin_code,
-      },
-    ]),
+  // The rest of the matched unit, under the value being validated.
+  const unitMeta = Object.fromEntries(
+    unitRows.map((row) => {
+      const code = row.asset_code ?? row.consumable_code ?? null;
+      const parts = [
+        activeUnitMode !== "SERIAL" && row.serial_number ? `SN ${row.serial_number}` : null,
+        activeUnitMode !== "IMEI" && row.imei ? `IMEI ${row.imei}` : null,
+        activeUnitMode !== "CODE" && code ? `Code ${code}` : null,
+      ].filter(Boolean);
+      return [unitKey(row, activeUnitMode), parts.join("  ·  ")];
+    }),
   );
 
   const set = <K extends keyof IssueWrite>(key: K, value: IssueWrite[K]) =>
@@ -320,102 +261,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       ...f,
       items: f.items.map((l, i) => (i === index ? { ...l, ...patch } : l)),
     }));
-
-  const setLines = (items: IssueItemWrite[]) => setForm((f) => ({ ...f, items }));
-
-  /* ----------------------------------------------- where the stock actually is --
-   *
-   * A line names ONE batch and ONE bin; the shelf regularly holds the quantity in
-   * two. Read once for every item on the document, so a group can be SPLIT over the
-   * locations that can serve it instead of being written against one that cannot —
-   * and so each split can say what its own location holds, beside the quantity being
-   * taken out of it.
-   *
-   * Off `stk_balance`, not the unit table: see `issue_stock_sources`.
-   */
-  const itemIds = useMemo(
-    () => Array.from(new Set(form.items.map((l) => l.item_id).filter(Boolean))),
-    [form.items],
-  );
-  const { data: sources = [] } = useQuery({
-    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, itemIds],
-    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id),
-    // Only while the picks are still open. Once the stock is posted the balances
-    // have already moved, and drawing "available" against a document that has gone
-    // out would report every split as over-issued.
-    enabled: !!form.warehouse_id && itemIds.length > 0 && !doc?.is_stock_posted,
-    staleTime: 30_000,
-  });
-  const sourcesByItem = useMemo(() => {
-    const map: Record<number, IssueStockSource[]> = {};
-    for (const row of sources) (map[row.item_id] ??= []).push(row);
-    return map;
-  }, [sources]);
-
-  const trackingMeta = useTrackingMeta();
-  /** One group's identifier, named in the plural the server chose. */
-  const unitLabel = useCallback(
-    (type: TrackingType, count: number) => {
-      const unit = trackingMeta(type)?.unit ?? "unit";
-      return count === 1 ? unit : `${unit}s`;
-    },
-    [trackingMeta],
-  );
-
-  const groups = useMemo(
-    () => groupIssueLines(form.items, sourcesByItem),
-    [form.items, sourcesByItem],
-  );
-
-  /**
-   * Everything wrong with the allocation, and where.
-   *
-   * Errors block Save and Submit; warnings are documents that save but cannot be
-   * posted — an unassigned identifier is the commonest, and it has to be said BEFORE
-   * approval, because approval freezes the batch and bin the units would come from.
-   */
-  const problems = useMemo(
-    () => splitProblems(groups, {
-      binManaged: isBinManaged,
-      unitLabel,
-      requireUnits: doc?.status === "APPROVED" && !doc?.is_stock_posted,
-    }),
-    [groups, isBinManaged, unitLabel, doc?.status, doc?.is_stock_posted],
-  );
-  const blocking = problems.filter((p) => p.level === "error");
-  const problemAt = useMemo(() => {
-    const map = new Map<number, { level: "error" | "warn"; message: string }>();
-    for (const problem of problems) {
-      if (problem.index === undefined) continue;
-      // An error outranks a warning on the same row: fix what blocks first.
-      const held = map.get(problem.index);
-      if (!held || (held.level === "warn" && problem.level === "error")) {
-        map.set(problem.index, { level: problem.level, message: problem.message });
-      }
-    }
-    return map;
-  }, [problems]);
-
-  /** Which split the picker is open on, and what that exact location holds. */
-  const activeScope = (() => {
-    if (serialLine === null || !activeSerialLine) return undefined;
-    const group = groups.find((g) => g.splits.some((s) => s.index === serialLine));
-    const split = group?.splits.find((s) => s.index === serialLine);
-    const source = (sourcesByItem[activeSerialLine.item_id] ?? []).find(
-      (row) => sourceKey(row.batch_id, row.bin_id)
-        === sourceKey(activeSerialLine.batch_id, activeSerialLine.bin_id),
-    );
-    return {
-      batchNo: source?.batch_no ?? savedLine(serialLine)?.batch_no ?? null,
-      binCode: source?.bin_code ?? savedLine(serialLine)?.bin_code ?? null,
-      available: split?.available ?? null,
-      splitLabel:
-        group && group.splits.length > 1
-          ? `Split ${group.splits.findIndex((s) => s.index === serialLine) + 1} of ${group.splits.length}`
-          : null,
-    };
-  })();
-
 
   const totals = useMemo(
     () => ({
@@ -429,87 +274,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
 
   const short = totals.requested - totals.issued;
   const locked = !!doc && doc.status !== "DRAFT";
-
-  /**
-   * The space this issue gives back, per location it draws from.
-   *
-   * Only lines that name a bin, an item and a quantity count — a line whose bin has
-   * not been chosen yet is not yet a claim on anybody's shelf. The moves are sent as
-   * one request and netted per location on the server, because two lines out of the
-   * same bin free their sum and adding volumes up in a screen is how that goes subtly
-   * wrong.
-   */
-  const outwardMoves = useMemo<OccupancyMove[]>(
-    () => form.items
-      .filter((l) => l.bin_id && l.item_id && num(l.issued_qty) > 0)
-      .map((l) => ({
-        location_id: Number(l.bin_id),
-        item_id: Number(l.item_id),
-        qty: num(l.issued_qty),
-        direction: "OUT" as const,
-      })),
-    [form.items],
-  );
-
-
-  // Typing "1", "1 3", "1 3 0" in an Issued box rewrites every move, and each
-  // rewrite refired both the occupancy preview and the pack lookup — three round
-  // trips per digit, on the field a storekeeper touches most. The shelf's answer is
-  // only worth asking for once he has stopped typing.
-  const [settledMoves, setSettledMoves] = useState<OccupancyMove[]>(outwardMoves);
-  useEffect(() => {
-    const timer = setTimeout(() => setSettledMoves(outwardMoves), 400);
-    return () => clearTimeout(timer);
-  }, [outwardMoves]);
-
-  const uniqueItemIds = useMemo(() => {
-    return Array.from(new Set(settledMoves.map(m => m.item_id)));
-  }, [settledMoves]);
-
-  const { data: itemPackagings = {} } = useQuery({
-    queryKey: ["wh-issue-item-packs", uniqueItemIds],
-    queryFn: async () => {
-      const packs: Record<number, HandlingUnit> = {};
-      await Promise.all(uniqueItemIds.map(async (id) => {
-        try {
-          const units = await itemHandlingUnits(id);
-          const base = units.find((u: HandlingUnit) => num(u.base_qty) === 1) || units.find((u: HandlingUnit) => u.is_default) || units[0];
-          if (base) packs[id] = base;
-        } catch (e) {
-          // ignore
-        }
-      }));
-      return packs;
-    },
-    enabled: uniqueItemIds.length > 0,
-  });
-
-  const { data: freed = [] } = useQuery({
-    queryKey: ["wh-issue-occupancy", settledMoves],
-    queryFn: () => occupancyPreview(settledMoves),
-    // Bin-managed warehouses only (bulk stock has no location to free), and only
-    // while the stock is still on the shelf. Occupancy is READ from stock, so once the
-    // issue is posted the location already reports the lower figure — subtracting the
-    // same lines again would show a shelf emptier than it is.
-    enabled: isBinManaged && settledMoves.length > 0 && !doc?.is_stock_posted,
-    placeholderData: (previous) => previous,
-  });
-
-  /** What the whole document takes off the shelves, for the lines footer. */
-  // Both, because they answer different questions: the cube is what the shelf gets
-  // back, and the pack count is what a storekeeper actually carries off it.
-  const freedUnits = useMemo(
-    () => freed.reduce((sum, row) => sum + Number(row.move_units ?? 0), 0),
-    [freed],
-  );
-  const freedVolume = useMemo(
-    () => freed.reduce((sum, row) => sum + Number(row.move_volume ?? 0), 0),
-    [freed],
-  );
-  const freedUnmeasured = useMemo(
-    () => freed.reduce((sum, row) => sum + row.unmeasured_lines, 0),
-    [freed],
-  );
   // Serials are the one thing still open after approval: the approver signed off on
   // quantities, but which physical units go out is decided at the shelf, and
   // "Issue from stock" refuses an incomplete set. Saved straight away through the
@@ -517,34 +281,11 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const serialsLocked = locked && !(doc?.status === "APPROVED" && !doc?.is_stock_posted);
   const payload = (): IssueWrite => ({
     ...form,
-    // `normalizeSplits` first: the splits of one ask share its requested quantity
-    // between them, and the server refuses a line requesting nothing or issuing more
-    // than it asked for. Done once here rather than on every keystroke, so the number
-    // in the Issue qty box stays the storekeeper's until he saves. See issueSplits.ts.
-    items: normalizeSplits(form.items).map(
+    items: form.items.map(
       ({ item_code, item_name, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
-         tracking_type, has_units, units_available, ...line }) => line,
+         has_units, ...line }) => line,
     ),
   });
-
-  // What each line's own batch and bin can actually give it, straight from the
-  // backend. A serial-tracked line short of units is a document that cannot be
-  // posted, and once it is approved the batch is frozen — so it is said here, on the
-  // draft, where the batch can still be changed.
-  const unitShort = (doc?.items ?? [])
-    .map((l) => ({
-      // Named by its SOURCE, not by its position. With one ask spread over several
-      // picks, "line 3" no longer identifies anything a storekeeper can point at;
-      // the batch and the bin do.
-      key: l.id,
-      code: l.item_code,
-      batch: l.batch_no,
-      bin: l.bin_code,
-      need: Math.trunc(num(l.issued_qty)),
-      have: l.units_available ?? null,
-      serial: !!l.is_serial_tracked,
-    }))
-    .filter((r) => r.serial && r.need > 0 && r.have !== null && r.have < r.need);
 
   const save = useMutation({
     mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
@@ -569,10 +310,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       setDestination(source.destination_office_name ?? "");
       setDestinationSac(source.destination_office_sac ?? null);
       setMixedProjects(!!source.mixed_projects);
-      setAutoSplitPending(true);
       if (source.issued_to_id) setIssuedToName(source.issued_to_name ?? null);
-      if (source.department_id) setDepartmentName((source as any).department_name ?? null);
-      if (source.project_id) setProjectName((source as any).project_name ?? null);
       setForm((current) => ({
         ...current,
         indent_id: source.indent_id,
@@ -678,115 +416,198 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       ].filter(Boolean) as TimelineEntry[]
     : [];
 
-  /* ------------------------------------------------------ what the grid renders --
-   *
-   * The grid is one row per ITEM with its picks under it (see IssueSplitEditor).
-   * These three are the cells the form still owns, because they depend on the
-   * document rather than on the split: which item a brand-new group is for, what the
-   * goods cost, and which line the identifier picker is being opened for.
-   */
-  const renderItemPicker = (split: IssueSplit) => (
-    <Lookup
-      name="items"
-      load={itemOptions}
-      value={split.line.item_id || ""}
-      onChange={(v, option) => {
-        const item = option as ItemOption | undefined;
-        patchLine(split.index, {
-          item_id: v === "" ? 0 : v,
-          item_code: item?.code ?? null,
-          item_name: item?.name ?? null,
-          is_serial_tracked: !!item?.is_serial_tracked,
-          is_imei_tracked: !!item?.is_imei_tracked,
-          is_batch_tracked: !!item?.is_batch_tracked,
-          // Unknown until the backend reads the line back; undefined means "offer the
-          // picker", which is right for a line just picked.
-          unit_mode: null,
-          tracking_type: null,
-          has_units: undefined,
-          batch_id: null,
-          bin_id: null,
-          serial_numbers: [],
-        });
-      }}
-      placeholder="Pick an item"
-      serverSearch=""
-    />
-  );
-
-
-  const removeGroup = (group: IssueGroup) => {
-    const owned = new Set(group.splits.map((s) => s.index));
-    setLines(form.items.filter((_, i) => !owned.has(i)));
-  };
-
-  /** Spread every group over the stock that can serve it, oldest first. One press
-   *  for a whole indent, which is the shape of the problem — an issue drafted from an
-   *  allocation arrives with every line pointed at a single source. */
-  const autoSplitAll = () => {
-    let next = form.items;
-    // Re-grouped each round: replacing one group shifts every later index.
-    for (let guard = 0; guard < groups.length; guard += 1) {
-      const current = groupIssueLines(next, sourcesByItem);
-      const group = current[guard];
-      if (!group || !group.itemId) continue;
-      const rows = sourcesByItem[group.itemId] ?? [];
-      if (rows.length === 0) continue;
-      next = replaceGroup(next, group, autoSplit(group, rows, { binManaged: isBinManaged }));
-    }
-    setLines(next);
-  };
-
-  /** Groups whose ask does not fit the single location they name, but which the
-   *  shelf could still cover elsewhere. The one case Auto-split is for, so it is
-   *  offered by name rather than left as a button nobody knows to press. */
-  const splittable = groups.filter(
-    (g) => g.itemId
-      && g.splits.length === 1
-      && g.splits[0].drawable !== null
-      && round(g.requested - g.splits[0].drawable) > 0
-      && g.spare.length > 0,
-  );
-
-  /**
-   * Spread a freshly pulled draft over the shelf, once, as soon as the shelf answers.
-   *
-   * An indent or a fulfilment hands over one line per indent line, each pointed at a
-   * single source, because that is all an allocation knows. Whether one bay can
-   * actually serve it is `issueStockSources`' answer, and it arrives a request later
-   * - so the split runs here rather than in the pull.
-   *
-   * Only groups that NEED it are touched. A group its one source can serve is left
-   * exactly as the allocation wrote it: re-deriving it would rebuild the line for no
-   * gain, and on a document that has been saved that would discard its id. The flag
-   * is cleared whatever happens, so this never runs twice over the storekeeper's own
-   * subsequent edits.
-   */
-  useEffect(() => {
-    if (!autoSplitPending || locked) return;
-    if (form.items.length === 0) return;
-    // Nothing to split against yet. The flag stays raised until the sources land.
-    if (sources.length === 0) return;
-
-    let next = form.items;
-    let changed = false;
-    for (let round_ = 0; round_ < groups.length; round_ += 1) {
-      const group = groupIssueLines(next, sourcesByItem)[round_];
-      if (!group || !group.itemId || group.splits.length > 1) continue;
-      const only = group.splits[0];
-      const rows = sourcesByItem[group.itemId] ?? [];
-      // Serviceable where it stands: leave it alone.
-      if (rows.length === 0) continue;
-      if (only.available !== null && round(group.issued - only.available) <= 0) continue;
-      next = replaceGroup(next, group, autoSplit(group, rows, { binManaged: isBinManaged }));
-      changed = true;
-    }
-    setAutoSplitPending(false);
-    if (changed) setLines(next);
-    // Driven by the arrival of the sources, not by every edit to the lines.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSplitPending, sources, locked]);
-
+  const columns: LineColumn<IssueItemWrite>[] = [
+    {
+      key: "item",
+      header: "Item",
+      width: "w-96",
+      render: (l, i) => {
+        const saved = savedLine(i);
+        if (saved || l.item_code || l.item_name) {
+          const code = saved?.item_code ?? l.item_code;
+          const name = saved?.item_name ?? l.item_name;
+          return (
+            <div className="min-w-80 max-w-[28rem]">
+              <div className="break-words font-mono text-xs font-semibold leading-5 text-ink">{code ?? "—"}</div>
+              <div className="break-words text-xs leading-5 text-muted">{name ?? "—"}</div>
+            </div>
+          );
+        }
+        return (
+          <Lookup
+            name="items"
+            load={itemOptions}
+            value={l.item_id || ""}
+            onChange={(v, option) => {
+              const item = option as ItemOption | undefined;
+              patchLine(i, {
+                item_id: v === "" ? 0 : v,
+                item_code: item?.code ?? null,
+                item_name: item?.name ?? null,
+                is_serial_tracked: !!item?.is_serial_tracked,
+                is_imei_tracked: !!item?.is_imei_tracked,
+                is_batch_tracked: !!item?.is_batch_tracked,
+                // Unknown until the backend reads the line back; undefined means
+                // "offer the picker", which is right for a line just picked.
+                unit_mode: null,
+                has_units: undefined,
+                batch_id: null,
+                bin_id: null,
+                serial_numbers: [],
+              });
+            }}
+            placeholder="Pick an item"
+            serverSearch=""
+          />
+        );
+      },
+    },
+    {
+      key: "batch",
+      header: "Batch",
+      width: "w-64",
+      hideOnNarrow: true,
+      render: (line, index) => (
+        <Lookup
+          name={`issue-batches-${line.item_id}-${form.warehouse_id}-${form.indent_id ?? 0}`}
+          load={() => batchOptions(line.item_id, form.warehouse_id, null, form.indent_id)}
+          value={line.batch_id ?? ""}
+          isDisabled={locked || !line.item_id || !form.warehouse_id}
+          onChange={(value) => patchLine(index, {
+            batch_id: value === "" ? null : value,
+            bin_id: null,
+            serial_numbers: [],
+          })}
+          placeholder="Batch"
+        />
+      ),
+    },
+    ...(isBinManaged ? [{
+      key: "bin",
+      header: "From bin",
+      width: "w-64",
+      hideOnNarrow: true,
+      render: (l: IssueItemWrite, i: number) => (
+        <Lookup
+          name={`bins-${form.warehouse_id}-${l.batch_id ?? 0}-${form.indent_id ?? 0}`}
+          load={(s) => binOptions(form.warehouse_id, s, l.item_id, l.batch_id,
+                                  undefined, undefined, undefined, form.indent_id)}
+          value={l.bin_id ?? ""}
+          isDisabled={locked || !form.warehouse_id || !l.batch_id}
+          onChange={(v) => patchLine(i, { bin_id: v === "" ? null : v, serial_numbers: [] })}
+          placeholder={l.batch_id ? "From bin" : "Pick batch first"}
+        />
+      ),
+    } as LineColumn<IssueItemWrite>] : []),
+    {
+      key: "requested",
+      header: "Requested",
+      numeric: true,
+      width: "w-36",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Requested quantity, line ${i + 1}`}
+          value={l.requested_qty}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { requested_qty: v, issued_qty: num(l.issued_qty) || v })}
+        />
+      ),
+    },
+    {
+      key: "issued",
+      header: "Issued",
+      numeric: true,
+      width: "w-36",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Issued quantity, line ${i + 1}`}
+          value={l.issued_qty ?? 0}
+          max={num(l.requested_qty)}
+          disabled={locked && doc?.is_stock_posted}
+          invalid={num(l.issued_qty) > num(l.requested_qty)}
+          onChange={(v) => patchLine(i, { issued_qty: v })}
+        />
+      ),
+    },
+    {
+      key: "short",
+      header: "Short",
+      numeric: true,
+      width: "w-32",
+      hideOnNarrow: true,
+      render: (l) => {
+        const gap = num(l.requested_qty) - num(l.issued_qty);
+        return (
+          <span className={`tabular ${gap > 0 ? "font-semibold text-warn" : "text-muted"}`}>{fmtQty(gap)}</span>
+        );
+      },
+    },
+    {
+      key: "rate",
+      header: "Rate",
+      numeric: true,
+      width: "w-36",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Rate, line ${i + 1}`}
+          value={l.rate ?? 0}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { rate: v })}
+        />
+      ),
+    },
+    {
+      key: "serials",
+      header: "Units",
+      width: "w-32",
+      hideOnNarrow: true,
+      render: (line, index) => {
+        // Not serial-only any more: an item tracked by IMEI, or one whose units carry
+        // asset/consumable codes, is named the same way. `has_units` is only known
+        // once the backend has read the line, so an unsaved draft still offers it.
+        const pickable =
+          line.is_serial_tracked || line.is_imei_tracked || line.has_units !== false;
+        if (!pickable) return <span className="text-xs text-muted">—</span>;
+        const needsBatch = (line as any).is_batch_tracked && !line.batch_id;
+        const needsBin = isBinManaged && !line.bin_id;
+        // Only while the line is still editable. After approval the batch and bin
+        // pickers are locked, so demanding them here would leave the storekeeper
+        // with no way to name the units — and the serial he picks carries its own
+        // bin and batch anyway.
+        const needsSource = !locked && (needsBatch || needsBin);
+        return (
+          <Button
+            variant="ghost"
+            onClick={() => setSerialLine(index)}
+            disabled={serialsLocked || needsSource}
+            title={
+              needsSource
+                ? "Pick batch and from bin first"
+                : `Select ${unitNoun(unitMode(line))}s`
+            }
+          >
+            <ScanLine className="h-4 w-4" />
+            {line.serial_numbers?.length ?? 0}
+          </Button>
+        );
+      },
+    },
+    {
+      key: "remarks",
+      header: "Remarks",
+      width: "w-56",
+      hideOnNarrow: true,
+      render: (l, i) => (
+        <TextInput
+          ariaLabel={`Remarks, line ${i + 1}`}
+          value={l.remarks}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { remarks: v })}
+        />
+      ),
+    },
+  ];
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
@@ -804,20 +625,13 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             </Button>
             {!locked && (
               <Can do="issue.create">
-                {/* Refused here rather than by the server, because the server can
-                  * only say which LINE it rejected, and after normalisation a line is
-                  * no longer the thing the storekeeper edited. The banner over the
-                  * grid names the item and the split. */}
                 <Button
                   variant="subtle"
                   onClick={() => {
                     setTouched(true);
-                    if (form.warehouse_id && form.items.length && blocking.length === 0) {
-                      save.mutate();
-                    }
+                    if (form.warehouse_id && form.items.length) save.mutate();
                   }}
-                  disabled={save.isPending || blocking.length > 0}
-                  title={blocking.length > 0 ? blocking[0].message : undefined}
+                  disabled={save.isPending}
                 >
                   {save.isPending ? "Saving…" : "Save"}
                 </Button>
@@ -825,13 +639,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             )}
             {editing && doc?.status === "DRAFT" && (
               <Can do="issue.create">
-                <Button
-                  onClick={() => setConfirming("submit")}
-                  disabled={blocking.length > 0}
-                  title={blocking.length > 0 ? blocking[0].message : undefined}
-                >
-                  Submit for approval
-                </Button>
+                <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
             {/* can_approve, not just the permission: the whole warehouse shares one
@@ -846,13 +654,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             )}
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted && (
               <Can do="issue.issue">
-                <Button
-                  onClick={() => setConfirming("post")}
-                  disabled={problems.length > 0}
-                  title={problems.length > 0 ? problems[0].message : undefined}
-                >
-                  Issue from stock
-                </Button>
+                <Button onClick={() => setConfirming("post")}>Issue from stock</Button>
               </Can>
             )}
             {/* Only once the raiser has confirmed what reached them. Until then the
@@ -956,25 +758,12 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           </Field>
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}
-                    isDisabled={locked}
-                    fallback={form.department_id
-                      ? [{ id: form.department_id, name: departmentName ?? String(form.department_id) }]
-                      : []}
-                    onChange={(v, option) => {
-                      set("department_id", v === "" ? null : v);
-                      setDepartmentName(option?.name ?? null);
-                    }}
+                    isDisabled={locked} onChange={(v) => set("department_id", v === "" ? null : v)}
                     placeholder="Department" />
           </Field>
           <Field label="Project">
             <Lookup name="projects" load={projectOptions} value={form.project_id ?? ""} isDisabled={locked}
-                    fallback={form.project_id
-                      ? [{ id: form.project_id, name: projectName ?? String(form.project_id) }]
-                      : []}
-                    onChange={(v, option) => {
-                      set("project_id", v === "" ? null : v);
-                      setProjectName(option?.name ?? null);
-                    }} placeholder="Project" />
+                    onChange={(v) => set("project_id", v === "" ? null : v)} placeholder="Project" />
           </Field>
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
@@ -1008,219 +797,27 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         </div>
       </Section>
 
-      <Section
-        title="Lines"
-        hint="One row per item, one split per batch and storage location it is picked from. Issuing below the request leaves the item short — that is recorded, not hidden."
-      >
-        {unitShort.length > 0 && (
-          <div className="mb-3 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-ink">
-            <b>These picks cannot be posted as they stand.</b> Approval freezes the
-            batch, and issuing from stock needs one serial per unit — change the batch,
-            split the quantity onto another location, or reduce it now.
-            <ul className="mt-1 list-disc pl-5">
-              {unitShort.map((row) => (
-                <li key={row.key}>
-                  {row.code} — the pick from{" "}
-                  {row.batch ? <b>batch {row.batch}</b> : "the unbatched stock"}
-                  {row.bin ? <> in <b>{row.bin}</b></> : null} needs{" "}
-                  <b className="tabular">{row.need}</b> and holds{" "}
-                  <b className="tabular">{row.have}</b>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-
-        {/* The one repair that is a single press. Offered by name, with the numbers
-          * that make the case, rather than as a button nobody knows to look for. */}
-        {!locked && splittable.length > 0 && (
-          <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-info/30 bg-info-bg px-3 py-2.5 text-sm text-info">
-            <Split className="h-4 w-4 shrink-0" />
-            <span className="min-w-0 flex-1">
-              {splittable.length === 1
-                ? `${splittable[0].itemCode ?? "One item"} asks for more than the location it names holds, and the rest is on other shelves here.`
-                : `${splittable.length} items ask for more than the single location they name holds, and the rest is on other shelves here.`}
-            </span>
-            <Button variant="soft" onClick={autoSplitAll}>
-              <Split className="h-4 w-4" /> Auto-split all
-            </Button>
-          </div>
-        )}
-
-        <IssueSplitEditor
-          groups={groups}
-          lines={form.items}
-          onChange={setLines}
-          sourcesByItem={sourcesByItem}
-          warehouseId={form.warehouse_id}
-          indentId={form.indent_id}
-          binManaged={isBinManaged}
-          locked={locked}
-          unitsLocked={serialsLocked}
-          onPickUnits={setSerialLine}
-          meta={trackingMeta}
-          problemAt={problemAt}
-          renderItemPicker={renderItemPicker}
-          onRemoveGroup={locked ? undefined : removeGroup}
+      <Section title="Lines" hint="Issued below requested leaves the line short — that is recorded, not hidden.">
+        <LinesEditor
+          rows={form.items}
+          columns={columns}
+          keyOf={(_, i) => i}
+          onAdd={locked ? undefined : () => set("items", [...form.items, emptyLine()])}
+          onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
+          rowTone={(l) => (num(l.requested_qty) > num(l.issued_qty) ? "bg-warn-bg/30" : undefined)}
+          empty="Add the items leaving the store."
+          minTableWidth="min-w-[1600px]"
+          footer={
+            <div className="flex flex-wrap justify-end gap-x-6 gap-y-1 text-sm">
+              <span className="text-muted">{totals.lines} lines</span>
+              <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+              <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
+              {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
+              <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
+            </div>
+          }
         />
-
-        <div className="mt-3 flex flex-wrap justify-end gap-x-6 gap-y-1 rounded-2xl border border-line/70 bg-content2/50 px-3 py-2 text-sm">
-          <span className="text-muted">
-            {groups.length} item{groups.length === 1 ? "" : "s"}
-            {totals.lines > groups.length && ` · ${totals.lines} picks`}
-          </span>
-          <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
-          <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
-          {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
-          {/* What leaving the shelves gives back. Only shown once it is knowable —
-            * a zero here would claim the issue frees nothing, when the truth is
-            * usually that the items have not been measured. */}
-          {freedUnits > 0 && (
-            <span className="mr-3">
-              Frees <b className="tabular">{fmtCount(freedUnits)}</b> handling
-              unit{freedUnits === 1 ? "" : "s"}
-            </span>
-          )}
-          {freedVolume > 0 && (
-            <span className="text-ok">
-              Frees <b className="tabular">{volume(freedVolume)}</b>
-            </span>
-          )}
-          <span className="text-ink">Value <b className="tabular">₹ {fmtMoney(totals.value)}</b></span>
-        </div>
       </Section>
-
-      {/* The space this document gives back, per location it actually draws from.
-        * Grouped exactly as the grid above is - one block per item, one row per pick
-        * - because the two describe the same picks, and a breakdown showing one bin
-        * for a quantity taken out of two was the same defect one screen further down.
-        * An item's subtotal is a sum of its own rows, never a separately computed
-        * figure that could disagree with them. */}
-      {isBinManaged && outwardMoves.length > 0 && !doc?.is_stock_posted && (
-        <Section
-          title="Calculation breakdown"
-          hint="What each pick takes off its shelf. Volumes come from the item's default putaway pack."
-        >
-          <div className="overflow-x-auto rounded-2xl border border-line/70 bg-content1">
-            <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="bg-content2 text-xs uppercase tracking-wider text-muted">
-                <tr>
-                  <th className="px-4 py-2.5 font-semibold">Item</th>
-                  <th className="px-4 py-2.5 font-semibold">Batch</th>
-                  <th className="px-4 py-2.5 font-semibold">Storage location</th>
-                  <th className="px-4 py-2.5 text-right font-semibold">Issued qty</th>
-                  <th className="px-4 py-2.5 text-right font-semibold">Unit volume</th>
-                  <th className="px-4 py-2.5 text-right font-semibold">Space freed</th>
-                </tr>
-              </thead>
-              {groups
-                .map((group) => ({
-                  group,
-                  picks: group.splits.filter(
-                    (split) => split.line.bin_id && split.line.item_id && split.issued > 0,
-                  ),
-                }))
-                .filter(({ picks }) => picks.length > 0)
-                .map(({ group, picks }) => {
-                  const pack = itemPackagings[group.itemId];
-                  const unitVol = num(pack?.volume_cbm || 0);
-                  const qty = picks.reduce((sum, split) => sum + split.issued, 0);
-                  return (
-                    <tbody key={group.key} className="divide-y divide-line/70 border-t border-line/70">
-                      {picks.map((split, position) => {
-                        const location = freed.find((f) => f.location_id === split.line.bin_id);
-                        const binCode = location
-                          ? location.location_code
-                          : savedLine(split.index)?.bin_code ?? `Bin ${split.line.bin_id}`;
-                        const source = (sourcesByItem[group.itemId] ?? []).find(
-                          (row) => sourceKey(row.batch_id, row.bin_id)
-                            === sourceKey(split.line.batch_id, split.line.bin_id),
-                        );
-                        return (
-                          <tr key={split.index} className="transition-colors hover:bg-content2/50">
-                            <td className="px-4 py-3 align-top">
-                              {/* Named once per item, not once per pick: repeating the
-                                * code down every split is what made the old table read
-                                * as several unrelated lines. */}
-                              {position === 0 ? (
-                                <>
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <span className="font-mono text-xs font-semibold text-ink">
-                                      {group.itemCode}
-                                    </span>
-                                    <TrackingBadge
-                                      type={group.trackingType}
-                                      meta={trackingMeta(group.trackingType)}
-                                      size="sm"
-                                    />
-                                  </div>
-                                  <div
-                                    className="max-w-[220px] truncate text-xs text-muted"
-                                    title={group.itemName || ""}
-                                  >
-                                    {group.itemName}
-                                  </div>
-                                </>
-                              ) : (
-                                <span className="text-xs text-muted">
-                                  split {position + 1} of {picks.length}
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3 align-top font-mono text-xs text-body">
-                              {source?.batch_no ?? savedLine(split.index)?.batch_no ?? "—"}
-                            </td>
-                            <td className="px-4 py-3 align-top font-mono text-xs font-semibold text-body">
-                              <span className="flex items-center gap-1.5">
-                                <MapPin className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
-                                {binCode}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-right align-top tabular font-medium text-body">
-                              {fmtQty(split.issued)}
-                            </td>
-                            <td className="px-4 py-3 text-right align-top tabular text-muted">
-                              {unitVol > 0 ? volume(unitVol) : (
-                                <span className="rounded-full bg-warn-bg px-2 py-0.5 text-xs text-warn">
-                                  Unmeasured
-                                </span>
-                              )}
-                            </td>
-                            <td className="px-4 py-3 text-right align-top tabular font-bold text-ok">
-                              {unitVol > 0 ? volume(split.issued * unitVol) : "—"}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      {picks.length > 1 && (
-                        <tr className="bg-content2/40">
-                          <td
-                            className="px-4 py-2 text-xs font-semibold uppercase tracking-wider text-muted"
-                            colSpan={3}
-                          >
-                            {group.itemCode} · {picks.length} locations
-                          </td>
-                          <td className="px-4 py-2 text-right tabular font-bold text-ink">{fmtQty(qty)}</td>
-                          <td />
-                          <td className="px-4 py-2 text-right tabular font-bold text-ok">
-                            {unitVol > 0 ? volume(qty * unitVol) : "—"}
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  );
-                })}
-            </table>
-          </div>
-          {freedUnmeasured > 0 && (
-            <p className="mt-2 text-xs text-muted">
-              {freedUnmeasured} pick{freedUnmeasured === 1 ? " has" : "s have"} no measured
-              putaway pack, so the space they free is not counted here.
-            </p>
-          )}
-        </Section>
-      )}
 
       <Section title="Remarks">
         <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />
@@ -1242,13 +839,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         quantity={serialLine === null ? 0 : num(form.items[serialLine]?.issued_qty)}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
         available={unitOptions}
-        unitByValue={unitDetail}
-        trackingType={activeTracking}
-        trackingMeta={trackingMeta(activeTracking)}
-        // Where this pick is confined to. The list holds only the units in this
-        // batch and this bin — the scope has to be visible, or a short list reads
-        // as missing stock rather than as a split that draws elsewhere.
-        scope={activeScope}
+        metaByValue={unitMeta}
         noun={unitNoun(activeUnitMode)}
         pickMode="select"
         itemLabel={
@@ -1278,25 +869,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         error={act.error}
         onConfirm={() => act.mutate("submit")}
         onClose={() => setConfirming(null)}
-      >
-        {/* Approval freezes the batch and the bin, and issuing from stock needs one
-          * named unit per issued unit - so an identifier still unassigned here is a
-          * document that can be approved and then never posted. Said before the
-          * press, not after it. */}
-        {problems.length > 0 && (
-          <div className="mt-3 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-ink">
-            <b>Still unfinished:</b>
-            <ul className="mt-1 list-disc space-y-0.5 pl-5">
-              {problems.slice(0, 5).map((problem, i) => (
-                <li key={i}>{problem.message}</li>
-              ))}
-            </ul>
-            <p className="mt-1 text-xs text-muted">
-              Approval freezes the batch and storage location these units come from.
-            </p>
-          </div>
-        )}
-      </ConfirmModal>
+      />
 
       <ConfirmModal
         isOpen={confirming === "approve" || confirming === "reject"}

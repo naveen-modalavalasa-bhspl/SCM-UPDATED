@@ -46,6 +46,20 @@ class _Read(BaseModel):
 # Warehouse master
 # ---------------------------------------------------------------------------
 
+class LocationStep(BaseModel):
+    """One rung of the walk down to a storage location.
+
+    Declared up here because two very different responses carry it — the location
+    picker's options and an issue's stock sources — and both need to draw the same
+    breadcrumb.
+    """
+    id: int
+    code: str
+    name: str | None = None
+    bin_type: str | None = None
+
+
+
 class WarehouseRead(_Read):
     id: int
     code: str
@@ -138,6 +152,41 @@ class BinRead(_Read):
     slots_free: int | None = None
     slot_capacity: int | None = None
     children: list["BinRead"] = Field(default_factory=list)
+
+
+class VolumeBudgetChild(BaseModel):
+    """One location sitting directly inside another, and the cube it claims."""
+    id: int
+    code: str
+    name: str | None = None
+    bin_type: str | None = None
+    #: None means nobody measured it — NOT zero, which would read as "takes no space".
+    volume: Decimal | None = None
+    is_active: bool = True
+
+
+class VolumeBudget(BaseModel):
+    """How much of a location's cube the locations inside it have already claimed.
+
+    Served rather than worked out in the form: the sentence the screen shows and the
+    rule the save enforces have to be the same arithmetic, or a form will happily
+    accept a number the server then refuses.
+    """
+    location_id: int
+    code: str
+    name: str | None = None
+    bin_type: str | None = None
+    #: The location's own physical cube — stated, else worked out from its three sides.
+    gross_volume: Decimal | None = None
+    #: "stated" | "derived" | null, so a screen knows which number to send somebody to.
+    volume_source: str | None = None
+    children_volume: Decimal = Decimal("0")
+    free_volume: Decimal | None = None
+    child_count: int = 0
+    unmeasured_children: int = 0
+    headline: str
+    detail: str
+    children: list[VolumeBudgetChild] = []
 
 
 class BinWrite(BaseModel):
@@ -1325,6 +1374,10 @@ class IssueStockSource(_Read):
     bin_id: int | None = None
     bin_code: str | None = None
     bin_name: str | None = None
+    # The whole walk down to it. A bin code is not a location a person can find: the
+    # picker has to be able to say Ground Floor / Aisle 1 / Rack 1 / Bin 2.
+    bin_path: str | None = None
+    bin_steps: list[LocationStep] = []
     batch_id: int | None = None
     batch_no: str | None = None
     expiry_date: date | None = None
@@ -1882,6 +1935,22 @@ class Option(BaseModel):
     # Only warehouse options carry this. It tells a form whether it is standing at a
     # main store or at an MDP / LIP, which is what decides the shape of the GRN.
     warehouse_type: str | None = None
+
+
+class LocationOption(Option):
+    """A storage location, offered with the whole route to it.
+
+    A bin code alone is unusable on a floor: `F1-A1-R1-B2` and `F1-A1-R2-B2` are one
+    character apart and thirty metres apart. `steps` is the walk — floor, lane, rack,
+    shelf, bin — so a picker can draw the hierarchy instead of asking somebody to
+    decode it, and `path` / `path_names` are the same thing already joined for the
+    places that only have room for a line of text.
+    """
+    bin_type: str | None = None
+    is_pickable: bool = True
+    path: str | None = None
+    path_names: str | None = None
+    steps: list[LocationStep] = []
 
 
 class ItemOption(Option):

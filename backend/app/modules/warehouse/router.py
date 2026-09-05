@@ -91,6 +91,17 @@ async def bin_tree(warehouse_id: int, db: AsyncSession = Depends(get_db),
     return await service.bin_tree(db, warehouse_id)
 
 
+@router.get("/bins/{bin_id}/volume-budget", response_model=s.VolumeBudget)
+async def location_volume_budget(bin_id: int, db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(STOCK_VIEW))):
+    """What the locations inside this one already claim of its cube.
+
+    The form asks before it saves, so a storekeeper sees "1.4 m3 of 4 m3 still free
+    inside RACK-1" while typing rather than a refusal after pressing Save.
+    """
+    return await service.location_volume_budget(db, bin_id)
+
+
 @router.get("/warehouses/{warehouse_id}/locations", response_model=list[s.LocationRead])
 async def list_locations(warehouse_id: int, db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(STOCK_VIEW))):
@@ -357,17 +368,11 @@ async def putaway_code_units(task_id: int, params: PageParams = Depends(),
                                             user=user)
 
 
-@router.get("/putaways/{task_id}/suggested-bins", response_model=list[s.BinRead])
-async def suggested_bins(task_id: int, item_packaging_id: int | None = None,
-                         db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(PUTAWAY_VIEW))):
-    """Bins worth offering for this task, ranked on whether the pack in hand goes in.
-
-    `item_packaging_id` is the rung the storekeeper picked on the screen, which need not
-    be the one the task was raised with — change the pack and the answer changes, since
-    a bay that takes four totes takes no pallets at all."""
-    return await service.suggested_bins(db, task_id,
-                                        item_packaging_id=item_packaging_id)
+# `GET /putaways/{id}/suggested-bins` was here. Nothing suggests a location any more:
+# a putaway may be confirmed into any rung of the tree, so a shortlist of eight bays in
+# front of somebody who may legitimately choose any of nine hundred locations is a
+# wrong answer with a ranking on it. The location picker walks the hierarchy and the
+# capacity meter measures whatever was chosen — see `service.confirm_putaway`.
 
 
 @router.post("/putaways/{task_id}/start", response_model=s.PutawayRead)
@@ -1038,7 +1043,7 @@ async def warehouse_options(search: str | None = None, mine_only: bool = False, 
         db, search=search, mine_only=mine_only, all_points=all_points, user=user)
 
 
-@router.get("/options/bins", response_model=list[s.Option])
+@router.get("/options/bins", response_model=list[s.LocationOption])
 async def bin_options(warehouse_id: int, search: str | None = None,
                       item_id: int | None = None, batch_id: int | None = None,
                       storage_type_id: str | None = None,

@@ -1093,6 +1093,10 @@ export interface IssueStockSource {
   bin_id?: number | null;
   bin_code?: string | null;
   bin_name?: string | null;
+  /** The whole walk down to it — `F1 / F1-A1 / F1-A1-R1 / F1-A1-R1-B2`. Served, not
+   *  composed in a screen: only the backend holds the tree. */
+  bin_path?: string | null;
+  bin_steps?: LocationStep[];
   batch_id?: number | null;
   batch_no?: string | null;
   expiry_date?: string | null;
@@ -1128,6 +1132,11 @@ export interface IssueItemWrite {
   is_batch_tracked?: boolean;
   is_imei_tracked?: boolean;
   bin_id?: number | null;
+  /** Snapshot labels, carried so a saved pick still reads as a place and a batch
+   *  while the stock sources are still in flight. Stripped before the write. */
+  bin_code?: string | null;
+  bin_path?: string | null;
+  batch_no?: string | null;
   batch_id?: number | null;
   requested_qty: number;
   issued_qty?: number;
@@ -1690,6 +1699,65 @@ export interface Option {
   id: number;
   code?: string | null;
   name: string;
+}
+
+/** One location sitting directly inside another, and the cube it claims. */
+export interface VolumeBudgetChild {
+  id: number;
+  code: string;
+  name?: string | null;
+  bin_type?: string | null;
+  /** `null` means nobody measured it — NOT zero, which reads as "takes no space". */
+  volume?: number | null;
+  is_active?: boolean;
+}
+
+/**
+ * How much of a storage location's cube the locations inside it already claim.
+ *
+ * Served, never worked out in the form: the sentence the screen shows and the rule the
+ * save enforces have to be the same arithmetic, or a form will happily accept a number
+ * the server then refuses.
+ */
+export interface VolumeBudget {
+  location_id: number;
+  code: string;
+  name?: string | null;
+  bin_type?: string | null;
+  /** The location's own physical cube — stated, else worked out from its three sides. */
+  gross_volume?: number | null;
+  /** "stated" | "derived" | null — which number to send somebody to correct. */
+  volume_source?: string | null;
+  children_volume: number;
+  free_volume?: number | null;
+  child_count: number;
+  unmeasured_children: number;
+  headline: string;
+  detail: string;
+  children: VolumeBudgetChild[];
+}
+
+/** One rung of the walk down to a storage location. */
+export interface LocationStep {
+  id: number;
+  code: string;
+  name?: string | null;
+  bin_type?: string | null;
+}
+
+/**
+ * A storage location offered by a picker, WITH the route to it.
+ *
+ * `F1-A1-R1-B2` and `F1-A1-R2-B2` are one character apart and thirty metres apart, so
+ * a dropdown of bare codes is a memory test. Every location option carries its
+ * ancestry — the backend owns the tree, the screen only draws it.
+ */
+export interface LocationOption extends Option {
+  bin_type?: string | null;
+  is_pickable?: boolean;
+  path?: string | null;
+  path_names?: string | null;
+  steps?: LocationStep[];
 }
 
 /** A stocking point in a picker. `is_bin_managed` decides whether the screen asks

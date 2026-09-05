@@ -4,17 +4,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, ScanLine } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
-import { PackSelector } from "../components/PackSelector";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
-import { UnitCodeLabels } from "../components/UnitCodeLabels";
-import { binOptions, confirmPutaway, getPutaway, locationOccupancy, startPutaway, suggestBins } from "../api";
-import { CapacityBadge, CapacityMeter, fmtCount, volume, weight } from "../components/CapacityMeter";
+import { binOptions, confirmPutaway, getPutaway, startPutaway, suggestBins } from "../api";
 import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 import { alerts } from "@/modules/alerts";
 import { usePointLabel } from "../usePointLabel";
-import type { Bin } from "../types";
 
 /**
  * One putaway task: take this quantity to this bin and confirm it.
@@ -35,10 +31,6 @@ export default function PutawayForm() {
 
   const [binId, setBinId] = useState<number | "">("");
   const [qty, setQty] = useState<number>(0);
-  // WHICH pack is being put away. A bin is checked against handling units, so "3 cases"
-  // and "1500 eaches" are different questions about the same quantity — and only the
-  // person holding the goods knows which one landed on the dock.
-  const [packId, setPackId] = useState<number | null>(null);
   const [remarks, setRemarks] = useState("");
   const [serials, setSerials] = useState<string[]>([]);
   const [scan, setScan] = useState("");
@@ -51,35 +43,10 @@ export default function PutawayForm() {
     queryFn: () => getPutaway(taskId),
   });
 
-  // Keyed on the pack as well as the task: the suggestions are ranked on whether THIS
-  // pack goes into each bin, so picking a different rung is a different question and
-  // has to produce a different answer.
   const { data: suggested = [] } = useQuery({
-    queryKey: ["wh-putaway-bins", id, packId],
-    queryFn: () => suggestBins(taskId, packId),
+    queryKey: ["wh-putaway-bins", id],
+    queryFn: () => suggestBins(taskId),
     enabled: !!task && task.status !== "completed",
-    placeholderData: (previous) => previous,
-  });
-
-  /**
-   * What this putaway does to the chosen location. Keyed on the bin AND the quantity
-   * because both change the answer — a short putaway into a tight bin fits where the
-   * full one does not, and the storekeeper is entitled to see that before they press.
-   *
-   * `placeholderData` keeps the previous panel on screen while the next one loads, so
-   * typing in the quantity box does not make the meter flicker in and out.
-   */
-  const { data: room, isFetching: roomLoading } = useQuery({
-    queryKey: ["wh-location-occupancy", binId, qty, packId, task?.item_id],
-    queryFn: () =>
-      locationOccupancy(Number(binId), {
-        item_id: task!.item_id,
-        qty: qty > 0 ? qty : undefined,
-        direction: "IN",
-        item_packaging_id: packId,
-      }),
-    enabled: !!task && binId !== "" && task.status !== "completed",
-    placeholderData: (previous) => previous,
   });
 
   useEffect(() => {
@@ -87,9 +54,6 @@ export default function PutawayForm() {
     setQty(Number(task.qty ?? 0));
     setBinId(task.actual_bin_id ?? task.suggested_bin_id ?? "");
     setSerials(task.serial_numbers ?? []);
-    // Whatever the task was raised with, else the item's default putaway unit — both
-    // already resolved by the server, so the screen never picks a rung of its own.
-    setPackId(task.item_packaging_id ?? null);
   }, [task]);
 
   const invalidate = () => {
@@ -104,29 +68,14 @@ export default function PutawayForm() {
       confirmPutaway(taskId, {
         actual_bin_id: Number(binId),
         qty,
-        item_packaging_id: packId,
         remarks: remarks || null,
         serial_numbers: serials,
       }),
-    onSuccess: (placed) => {
-      // The stock is in the bin either way — capacity never blocks a putaway. What
-      // changes is which of the two things we tell them, and the overflow one stays on
-      // screen until it is dismissed. Both codes come from the alert catalog.
-      const verdict = placed?.capacity?.status;
-      const bin = placed?.actual_bin_code ?? task?.actual_bin_code
-        ?? task?.suggested_bin_code ?? "the chosen bin";
-      const item = task?.item_name ?? task?.item_code ?? "The item";
-      // `reason` is the sentence the server wrote for the gate that actually failed —
-      // cube, payload, unit limit or doorway. Composing one here would mean writing
-      // those four sentences a second time and letting them drift from the meter's.
-      const reason = placed?.capacity?.detail ?? "";
-      if (verdict === "WONT_FIT") {
-        void alerts.warning("putaway.wont_fit", { item, bin, reason });
-      } else if (verdict === "OVER") {
-        void alerts.warning("putaway.over_capacity", { item, bin, reason });
-      } else {
-        void alerts.success("putaway.completed", { item, bin });
-      }
+    onSuccess: () => {
+      void alerts.success("putaway.completed", {
+        item: task?.item_name ?? task?.item_code ?? "The item",
+        bin: task?.actual_bin_code ?? task?.suggested_bin_code ?? "the chosen bin",
+      });
       invalidate();
       setConfirming(false);
       nav("/warehouse/putaway", { replace: true });
@@ -214,28 +163,6 @@ export default function PutawayForm() {
         <MetaRow label="Batch" value={task.batch_no} />
         <MetaRow label={task.is_asset ? "Warranty" : "Expiry"} value={fmtDate(task.expiry_date)} />
         <MetaRow label="Quantity" value={<span className="tabular">{fmtQty(task.qty)} {task.uom_code ?? ""}</span>} />
-        <MetaRow
-          label="Received as"
-          value={
-            task.package_name
-              ? <span className="tabular">
-                  {fmtCount(task.handling_units)} × {task.package_name}
-                  {task.pack_base_qty ? ` (${fmtCount(task.pack_base_qty)} ${task.uom_code ?? "units"} each)` : ""}
-                </span>
-              : "No pack configured"
-          }
-        />
-        <MetaRow
-          label="Space needed"
-          value={
-            task.line_volume_cbm == null
-              ? "Not measured"
-              : <span className="tabular">
-                  {volume(task.line_volume_cbm)}
-                  {task.line_weight_kg != null ? ` · ${weight(task.line_weight_kg)}` : ""}
-                </span>
-          }
-        />
         <MetaRow label="Directed" value={humanise(task.putaway_type)} />
         <MetaRow label="Assigned to" value={task.assigned_to_name} />
         <MetaRow label="Started" value={fmtDateTime(task.started_at)} />
@@ -246,7 +173,6 @@ export default function PutawayForm() {
       </MetaCard>
 
       {done ? (
-        <>
         <Card className="px-6 py-10 text-center">
           <div className="mb-1 font-display text-lg font-bold text-ok">Put away</div>
           <p className="text-sm text-muted">
@@ -268,16 +194,6 @@ export default function PutawayForm() {
             </p>
           )}
         </Card>
-
-        {/* The codes this putaway minted, ready to go onto the goods.
-          *
-          * Only once it is COMPLETED, because that is when they exist: a unit becomes
-          * an asset by being physically somewhere, so the code is generated at confirm
-          * and there is nothing to print before the press. Fetched by the panel itself
-          * rather than carried on the task — a line of 500 units is 500 codes, and the
-          * queue screen that also loads a task has no use for them. */}
-        <UnitCodeLabels taskId={taskId} />
-        </>
       ) : (
         <Section
           title="Place it"
@@ -315,20 +231,6 @@ export default function PutawayForm() {
             </Field>
           </div>
 
-          {/* WHICH pack. Chosen before the bin, because it changes what "does this fit"
-            * even means: the same 1500 eaches are three pallets or thirty cartons, and
-            * a bay that takes one takes neither of the others. */}
-          <div className="mt-4">
-            <PackSelector
-              packs={task.packs ?? []}
-              value={packId}
-              onChange={setPackId}
-              qty={qty}
-              uom={task.uom_code}
-              itemLabel={task.item_name ?? task.item_code ?? "This item"}
-            />
-          </div>
-
           {/* The whole hierarchy this warehouse was configured with, one dropdown per
             * level. A scan or a suggested-bin chip drives it too, so there is one
             * answer to "where is this going" however it was chosen. */}
@@ -340,38 +242,6 @@ export default function PutawayForm() {
             />
           </div>
 
-          {/* What this does to the shelf. Advice, never a gate: the goods are on the
-            * floor whether or not the master data says they fit, so a full location is
-            * announced loudly and the Confirm button stays live. */}
-          {binId !== "" && (
-            <CapacityMeter
-              className="mt-4"
-              data={room}
-              loading={roomLoading && !room}
-            />
-          )}
-
-          {/* An item with no measured pack cannot have a share of anything, and the meter
-            * says so — but it says it about the location. This says it about the item,
-            * beside the item, which is where the fix is. */}
-          {task.line_volume_cbm == null && (
-            <div className="mt-3 rounded-lg border border-line bg-content2 px-3 py-2 text-xs text-muted">
-              {(task.packs ?? []).length === 0
-                ? <>
-                    {task.item_name ?? task.item_code} has no packaging ladder, so there is
-                    no handling unit to measure. Add one under Masters &gt; Items on the
-                    item&rsquo;s Packaging tab — a level, a container type and how many
-                    fit in it.
-                  </>
-                : <>
-                    None of {task.item_name ?? task.item_code}&rsquo;s packaging levels
-                    carry a length, width and height, so the space this takes cannot be
-                    worked out. Measure the container type under Masters &gt; Packages, or
-                    override the sides on the rung itself.
-                  </>}
-            </div>
-          )}
-
           {overriding && (
             <div className="mt-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-xs text-warn">
               This is not the suggested bin ({task.suggested_bin_code ?? "—"}). The override is recorded.
@@ -380,23 +250,21 @@ export default function PutawayForm() {
 
           {suggested.length > 0 && (
             <div className="mt-4">
-              <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-                  Suggested bins, best first
-                </span>
-                <span className="text-[11px] text-muted">
-                  Ranked on whether {room?.pack_name ?? task.package_name ?? "this pack"}{" "}
-                  goes in — not on free space.
-                </span>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                Suggested bins, best first
               </div>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="flex flex-wrap gap-2">
                 {suggested.map((b) => (
-                  <SuggestionChip
-                    key={b.id}
-                    bin={b}
-                    selected={Number(binId) === b.id}
-                    onPick={() => setBinId(b.id)}
-                  />
+                  <button key={b.id} type="button" onClick={() => setBinId(b.id)}>
+                    <Chip
+                      size="sm"
+                      variant={Number(binId) === b.id ? "solid" : "flat"}
+                      color={Number(binId) === b.id ? "primary" : "default"}
+                    >
+                      {b.code}
+                      {b.capacity_qty ? ` · cap ${fmtQty(b.capacity_qty)}` : ""}
+                    </Chip>
+                  </button>
                 ))}
               </div>
             </div>
@@ -445,29 +313,8 @@ export default function PutawayForm() {
 
       <ConfirmModal
         isOpen={confirming}
-        title={
-          room?.status === "WONT_FIT"
-            ? "Confirm putaway into a location it does not fit?"
-            : room?.status === "OVER"
-              ? "Confirm putaway over capacity?"
-              : "Confirm putaway?"
-        }
-        message={[
-          `${fmtQty(qty)} ${task.uom_code ?? ""} of ${task.item_name ?? task.item_code}` +
-            (room?.move_units != null
-              ? ` — ${fmtCount(room.move_units)} × ${room.pack_name ?? "handling unit"} —`
-              : "") +
-            " moves into the chosen bin.",
-          // Said again here on purpose: this is the last screen before the press, and
-          // the meter is behind the modal by then. The server's own sentence for the
-          // gate that failed, so the modal and the meter cannot disagree. It warns, it
-          // does not refuse.
-          room && (room.status === "OVER" || room.status === "WONT_FIT"
-                   || room.status === "FULL")
-            ? room.detail
-            : "",
-          "This writes a stock movement and cannot be undone — a mistake is corrected with a transfer, not a delete.",
-        ].filter(Boolean).join(" ")}
+        title="Confirm putaway?"
+        message={`${fmtQty(qty)} ${task.uom_code ?? ""} of ${task.item_name ?? task.item_code} moves into the chosen bin. This writes a stock movement and cannot be undone — a mistake is corrected with a transfer, not a delete.`}
         confirmLabel="Confirm putaway"
         danger
         busy={confirm.isPending}
@@ -485,79 +332,5 @@ export default function PutawayForm() {
         onSave={setSerials}
       />
     </div>
-  );
-}
-
-/**
- * One suggested bin, as a card rather than a chip.
- *
- * The old chip said the bin's code and how much cube it had left, which is the one
- * thing that does not decide the question: a bay can be nine-tenths empty and still be
- * the wrong answer because the pallet does not enter it, or because its single pallet
- * slot is taken. So the headline here is `fit_status` — the server's verdict about
- * THIS pack in THIS bin, the same four gates the meter below applies — and the free
- * space is the supporting detail it always should have been.
- *
- * Ordering is the server's (`suggestion_fit` / `SUGGESTION_RANK`); this only draws it.
- */
-function SuggestionChip({ bin, selected, onPick }: {
-  bin: Bin; selected: boolean; onPick: () => void;
-}) {
-  const verdict = bin.fit_status ?? bin.capacity_status ?? null;
-  const bad = verdict === "WONT_FIT" || verdict === "OVER";
-  const tight = verdict === "FULL" || verdict === "TIGHT";
-
-  // What the card leads with. One line, and it is the reason this bin is where it is
-  // in the list — an ordering nobody can read is an ordering nobody trusts.
-  const lead =
-    verdict === "WONT_FIT" ? "This pack does not go in"
-      : verdict === "OVER" ? "Would go over its limit"
-        : verdict === "FULL" ? "Exactly full afterwards"
-          : bin.slots_free != null
-            ? `Takes ${fmtCount(bin.slots_free)} more`
-            : verdict === "TIGHT" ? "Room, but not much"
-              : verdict === "OK" ? "Has room"
-                : "Nothing measured here";
-
-  return (
-    <button
-      type="button"
-      onClick={onPick}
-      aria-pressed={selected}
-      className={`rounded-xl border px-3 py-2 text-left transition-colors ${
-        selected
-          ? "border-brand bg-brand/[0.06] ring-1 ring-brand/30"
-          : bad
-            ? "border-bad/30 bg-bad-bg/20 hover:border-bad/50"
-            : "border-line bg-content1 hover:border-brand/40 hover:bg-content2"
-      }`}
-    >
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="truncate font-mono text-xs font-bold text-ink">{bin.code}</span>
-        <span className={`shrink-0 text-[10px] font-semibold uppercase tracking-wide ${
-          bad ? "text-bad" : tight ? "text-warn" : "text-muted"
-        }`}>
-          {lead}
-        </span>
-      </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        {/* Still shown, still useful — just no longer the thing being decided on. */}
-        <CapacityBadge
-          capacity={bin.capacity_volume}
-          occupied={bin.occupied_volume}
-          status={bin.capacity_status}
-          units={bin.occupied_units}
-          capacityUnits={bin.capacity_units}
-        />
-        {bin.slot_capacity != null && (
-          <span className="text-[11px] text-muted">
-            · {fmtCount(bin.occupied_units)}/{fmtCount(bin.slot_capacity)} slots
-          </span>
-        )}
-        {bin.capacity_volume == null && bin.capacity_qty ? (
-          <span className="text-[11px] text-muted">cap {fmtQty(bin.capacity_qty)}</span>
-        ) : null}
-      </div>
-    </button>
   );
 }

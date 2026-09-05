@@ -438,16 +438,20 @@ function MovementLineEditor({
         </Field>
 
         {isBinManaged && (
-          /* Stock-holding bins only (never `all_locations`, which offered racks and
-           * floors the service refuses), narrowed to the chosen storage type, and never
-           * the source bin — a move to where it already is is not a move. All three are
-           * in the cache name for the same reason the source's are. */
+          /* Every storage location, narrowed to the chosen storage type, and never the
+           * source bin — a move to where it already is is not a move. All three are in
+           * the cache name for the same reason the source's are.
+           *
+           * `all_locations` because putaway may now place stock on a lane or a rack
+           * rather than in a bay (see `confirm_putaway`), and a destination the service
+           * accepts has to be one the picker offers — otherwise stock that CAN be put
+           * on a rack can never be moved onto one. */
           <Field label="Destination location">
             <Lookup
               name={`line-dest-${index}-${warehouseId}-${storageType || "any"}-${line.source_bin_id}`}
               load={(search) => binOptions(
                 warehouseId, search, undefined, undefined, String(storageType) || undefined,
-                false, line.source_bin_id || undefined,
+                true, line.source_bin_id || undefined,
               )}
               value={line.destination_bin_id || ""}
               isDisabled={!warehouseId}

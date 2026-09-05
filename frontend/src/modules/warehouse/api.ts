@@ -21,6 +21,8 @@ import type {
   IssueStockSource,
   IssueWrite,
   ItemOption,
+  LocationOption,
+  VolumeBudget,
   ItemLocationsOut,
   ListParams,
   LocationOccupancy,
@@ -113,6 +115,18 @@ export const createWarehouse = (body: WarehouseWrite) =>
 
 export const updateWarehouse = (id: number, body: WarehouseWrite) =>
   put<Warehouse>(`${BASE}/warehouses/${id}`, body);
+
+/**
+ * How much of a storage location's cube the locations inside it already claim.
+ *
+ * Every rung of the tree is measured, not just the bays, and a location has to be at
+ * least as big as everything directly inside it. The form asks for this while it is
+ * being filled in so the answer is "1.4 m³ of 4 m³ still free inside RACK-1" rather
+ * than a refusal after Save — and it is SERVED, so the sentence on screen and the rule
+ * the server enforces are the same arithmetic.
+ */
+export const locationVolumeBudget = (binId: number) =>
+  get<VolumeBudget>(`${BASE}/bins/${binId}/volume-budget`);
 
 /** The bin tree for one warehouse — zones, racks and shelves nested by `parent_id`. */
 export const getBinTree = (warehouseId: number) =>
@@ -306,14 +320,19 @@ export const confirmPutaway = (id: number, body: PutawayConfirm) =>
 /**
  * Bins worth offering for this task, best first.
  *
- * Ranked on whether the pack in hand actually goes in — not on free cube, which puts an
- * empty bay the pallet cannot enter at the very top. Pass the rung the screen has
- * selected: change the pack and the order changes, because a bay that takes four totes
- * takes no pallets at all.
+ * **The endpoint behind this is gone**, and deliberately: nothing suggests a location
+ * any more. A putaway may be confirmed into any rung of the tree, so a shortlist of
+ * eight bays in front of somebody who may legitimately choose any of nine hundred is a
+ * wrong answer with a ranking on it. The location picker walks the hierarchy and the
+ * capacity meter measures whatever was chosen.
+ *
+ * The declaration survives only because this branch carries the qa version of
+ * `PutawayForm`, which still imports it. The call 404s, the query falls back to its
+ * empty default, and the suggestion strip simply does not render. Delete this the
+ * moment that screen is reconciled — it is a compile-time stub, not an API.
  */
-export const suggestBins = (id: number, itemPackagingId?: number | null) =>
-  get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`,
-             itemPackagingId ? { item_packaging_id: itemPackagingId } : {});
+export const suggestBins = (id: number) =>
+  get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`);
 
 export const listStockMovements = (params: ListParams = {}) =>
   get<Page<StockMovement>>(`${BASE}/stock-movements`, params);
@@ -694,6 +713,15 @@ export const dispatchReceiptSource = (dispatch_id: number, warehouse_id: number)
     dispatch_id, warehouse_id,
   });
 
+/**
+ * Storage locations in one warehouse, each carrying the whole walk down to it.
+ *
+ * `all_locations` offers the structure as well as the bins — floors, lanes, racks,
+ * shelves. Stock is allowed to sit on any of them (a pallet of drums goes on the
+ * floor of a lane, not into a bin), so putaway and the movement screens ask for the
+ * whole tree; a query already narrowed to an item or a batch gets the whole tree too,
+ * because a location holding goods is by definition one they can be picked from.
+ */
 export const binOptions = (
   warehouse_id: number,
   search?: string,
@@ -706,7 +734,7 @@ export const binOptions = (
    *  the line is issuing from — see warehouse service `_stock_offerable`. */
   indent_id?: number | null,
 ) =>
-  get<Option[]>(`${BASE}/options/bins`, {
+  get<LocationOption[]>(`${BASE}/options/bins`, {
     warehouse_id, search, item_id, batch_id, storage_type_id, all_locations,
     exclude_bin_id, indent_id,
   });

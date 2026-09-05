@@ -389,6 +389,34 @@ class BinSpec:
                           if location.max_handling_units else None)
 
 
+def gross_volume(location: Bin) -> Decimal | None:
+    """A location's own physical cube — stated, else worked out from its three sides.
+
+    Deliberately NOT the same number as `BinSpec.usable_volume`, and deliberately not
+    derated. `usable_volume` answers "how much stock will go in here", which is a
+    question about gangway, reach and dunnage. This answers "does this box physically
+    contain those boxes", which is a question about geometry: a rack derated to 80%
+    still encloses all of its shelves, and derating the parent while not derating the
+    children would refuse a warehouse that is laid out correctly.
+
+    `None` means nobody has measured it. That is NOT zero — zero would read as "this
+    location has no room", and every containment check below treats the two apart.
+    """
+    stated = _pos(location.capacity_volume)
+    if stated is not None:
+        return stated
+    return _cube(_box(location.length_cm, location.width_cm, location.height_cm))
+
+
+def volume_source(location: Bin) -> str | None:
+    """Where `gross_volume` came from, so a screen can say which number to correct."""
+    if _pos(location.capacity_volume) is not None:
+        return "stated"
+    if _box(location.length_cm, location.width_cm, location.height_cm) is not None:
+        return "derived"
+    return None
+
+
 def fits_inside(pack: Pack, box: tuple[Decimal, Decimal, Decimal] | None) -> bool | None:
     """Does ONE of these physically enter that opening? None when either is unmeasured.
 
@@ -1054,73 +1082,21 @@ async def bin_occupancy_map(db: AsyncSession, bins: list[Bin]) -> dict[int, dict
     return out
 
 
-def suggestion_fit(pack: Pack | None, location: Bin, room: dict, qty) -> dict:
-    """Would THIS load go into THIS bin — the verdict the suggestion chips are ranked on.
-
-    `bin_occupancy_map` answers "how full is it", which is a different question and the
-    only one the chips used to ask. A bay can be nine-tenths empty and still be the
-    wrong answer: the pallet does not enter it, or the one pallet slot it has is taken.
-    Ranking on free cube alone sends a storekeeper walking to a bay they cannot use, and
-    the emptier the bay the higher it ranks — so the mistake is worst exactly where it
-    is most confident.
-
-    So this asks the same four gates `location_occupancy` asks, against the pack in
-    hand, and is deliberately built from the SAME helpers (`fits_inside`,
-    `slot_capacity`, `space_for`, `fill_status`) rather than a cheaper approximation:
-    a chip that ranks a bin differently from the meter that opens when you tap it is a
-    screen arguing with itself.
-
-    Returns the verdict, plus the two figures worth putting on the chip — how many of
-    these it would still take, and whether one physically enters.
-    """
-    spec = BinSpec(location)
-    space = space_for(pack, qty)
-    moving = space["units"] or ZERO
-
-    fits = fits_inside(pack, spec.box) if pack is not None else None
-    # The discrete gate, stated or slotted — the same fallback the UNITS gate uses, so
-    # a bay with sides and no stated limit is still counted in pallets, not in air.
-    limit = spec.max_units
-    if limit is None and pack is not None:
-        limit = slot_capacity(pack, spec)
-    held_units = _d(room.get("occupied_units"))
-    # Rounded UP: a slot holding part of a pack is a slot, and rounding it down would
-    # offer a bay one more pallet than it has room for. `occupied_units` is a sum of
-    # whole packs today, so this changes nothing now and stays right if that changes.
-    slots_free = None if limit is None else max(0, int(limit) - int(_ceil(held_units)))
-
-    verdicts = []
-    if spec.usable_volume is not None and space["volume"] is not None:
-        verdicts.append(fill_status(spec.usable_volume,
-                                    _d(room.get("occupied_volume")) + space["volume"]))
-    if spec.max_weight is not None and space["weight"] is not None:
-        verdicts.append(fill_status(spec.max_weight,
-                                    _d(room.get("occupied_weight_kg")) + space["weight"]))
-    if limit is not None and moving > ZERO:
-        verdicts.append(fill_status(_d(limit), held_units + moving))
-    # A bin that one unit does not enter is not a bin with a lot of it free, whatever
-    # the other three say — this is the whole reason a seventh status exists.
-    if fits is False:
-        verdicts.append(STATUS_WONT_FIT)
-    if not verdicts:
-        verdicts.append(room.get("status") or STATUS_NO_CAPACITY)
-
-    return {
-        "fit_status": min(verdicts, key=lambda v: SEVERITY[v]),
-        "fits_pack": fits,
-        "slots_free": slots_free,
-        "slot_capacity": None if limit is None else int(limit),
-    }
-
-
-#: How a suggestion chip is ordered. Distinct from `SEVERITY`, which ranks what to TELL
-#: somebody: there, "nobody measured this" is milder news than "this is full". Here it
-#: is worse advice — a bin known to have room beats one nothing is known about, and both
-#: beat one the load provably does not go into.
-SUGGESTION_RANK = {
-    STATUS_OK: 0, STATUS_TIGHT: 1, STATUS_NO_CAPACITY: 2, STATUS_UNMEASURED: 2,
-    STATUS_FULL: 3, STATUS_OVER: 4, STATUS_WONT_FIT: 5,
-}
+# `suggestion_fit` and `SUGGESTION_RANK` were here.
+#
+# They ranked a shortlist of bins for the putaway screen on whether the pack in
+# hand actually went in, rather than on free cube — which was the right answer to
+# the wrong question. A suggestion only makes sense while a putaway can be confirmed
+# into a BIN and nothing else, so the screen HAS to narrow nine hundred bays down to
+# eight. Placement is not narrow any more: a putaway lands on any rung of the tree,
+# because a pallet of drums stands at the end of a lane and a delivery can arrive
+# before its bay is built. Eight ranked bays in front of somebody who may correctly
+# choose any of nine hundred locations is a wrong answer with an ordering on it.
+#
+# What the ranking was genuinely good at — saying "this pack does not go in" rather
+# than "this bay looks empty" — is what `location_occupancy` says about whichever
+# location was actually chosen, through the same four gates. Nothing was lost but
+# the shortlist.
 
 
 async def handling_units(db: AsyncSession, item_id: int) -> list[dict]:
@@ -1146,7 +1122,7 @@ __all__ = [
     "ADVERSE", "BIN_TYPES", "BinSpec", "GATE_FOOTPRINT", "GATE_UNITS", "GATE_VOLUME",
     "GATE_WEIGHT", "IN", "OUT", "Pack", "SEVERITY", "STATUS_FULL", "STATUS_NO_CAPACITY",
     "STATUS_OK", "STATUS_OVER", "STATUS_TIGHT", "STATUS_UNMEASURED", "STATUS_WONT_FIT",
-    "bin_occupancy_map", "choose_pack", "fill_status", "fits_inside", "handling_units",
-    "location_occupancy", "occupancy_preview", "occupied_space", "pack_ladders",
-    "slot_capacity", "space_for", "subtree_ids", "suggestion_fit", "SUGGESTION_RANK",
+    "bin_occupancy_map", "choose_pack", "fill_status", "fits_inside", "gross_volume",
+    "handling_units", "location_occupancy", "occupancy_preview", "occupied_space",
+    "pack_ladders", "slot_capacity", "space_for", "subtree_ids", "volume_source",
 ]

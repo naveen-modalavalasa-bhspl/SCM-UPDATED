@@ -549,17 +549,44 @@ the right one is the durable job queue that is still outstanding
     a bin nobody wrote down. Every verdict's wording is SERVED (`status`, `headline`,
     `detail`, and each gate's own sentence), never composed in a screen.
     An unmeasured pack has NO volume, not zero — zero reads as "there is room".
-    **A bin suggestion is ranked on the PACK, never on free space.** `_suggest_bin`
-    (the task's prefilled bin) and `suggested_bins` (the chips) both score candidates
-    with `capacity.suggestion_fit` and order them by `capacity.SUGGESTION_RANK`, which
-    is deliberately NOT `SEVERITY`: severity ranks what to tell somebody, so "nobody
-    measured this" is mild news, while a ranking has to treat a bin known to have room
-    as better advice than one nothing is known about, and both as better than one the
-    load provably does not enter. `WONT_FIT` therefore sorts below `FULL` — a full bay
-    is one to come back to, a bay the pack does not fit is never the answer. Ranking on
-    free cube put an empty bay the pallet cannot enter at the very top, most confidently
-    exactly where it was most wrong. Consolidation (the bin already holding the item)
-    survives as the tie-break, via a stable sort.
+    **Stock sits wherever it was put down, at any rung of the tree** (2026-09-04).
+    `confirm_putaway` takes a floor, a lane, a rack, a shelf or a bay; only `is_active`
+    and "in this warehouse" are checked. Refusing anything above a BIN never stopped a
+    pallet of drums standing at the end of a lane, or a delivery landing before its bay
+    was built — it only stopped the system being told, and stock nobody wrote down is
+    worse than stock in the wrong shape of location. The four gates still measure
+    whatever was chosen, and still warn rather than block. Movement and material-issue
+    locations follow the same rule, or stock that CAN be put on a rack could never be
+    taken off one; `_apply_issue_lines` validates the LOCATION (exists, this warehouse,
+    active) and never its rung.
+    **Nothing suggests a location.** `_suggest_bin`, `suggested_bins`,
+    `GET /putaways/{id}/suggested-bins`, `capacity.suggestion_fit` and
+    `SUGGESTION_RANK` are gone, and a task is raised with no bin on it
+    (`putaway_type` MANUAL, `suggested_bin_id` NULL). A shortlist of eight ranked bays
+    only makes sense while a putaway can go nowhere else; in front of somebody who may
+    correctly choose any of nine hundred locations it is a wrong answer with an
+    ordering on it. `whs_warehouse_items.suggested_bin_id` stays on the table and is
+    still read back, so tasks raised before this keep the only record of where they
+    were sent.
+    **Every storage location carries a cube, and contains what is inside it.**
+    `length_cm`, `width_cm`, `height_cm` and `capacity_volume` are on
+    `whs_warehouse_locations`, which is ONE table for the whole tree — so a floor, a
+    lane and a rack are each measured exactly as a bay is. `capacity.gross_volume` is
+    that cube: stated, else derived from the three sides, and **never derated** — the
+    void factor answers "how much stock goes in here", containment answers "does this
+    box enclose those boxes", and a rack derated to 80% still physically encloses all
+    of its shelves.
+    The rule: **a location is at least as big as the sum of the locations directly
+    inside it**, enforced by `_assert_volume_contains` on every `create_bin` and
+    `update_bin`, in both directions — shrinking a rack below its shelves is refused as
+    well as growing a shelf beyond its rack. Checking each EDGE on each write is what
+    makes it hold for N levels; a floor contains everything under it by induction, and
+    no write re-reads the building to prove it. `>=`, not `>`: three 1 m3 shelves in a
+    3 m3 rack is how racking is built. An **unmeasured** location claims nothing rather
+    than zero, is counted separately, and is said out loud — a budget that silently
+    treats four unmeasured shelves as taking no space is worse than one that admits it
+    cannot answer. `GET /bins/{id}/volume-budget` serves that arithmetic to the form,
+    so the sentence on screen and the rule the save enforces cannot drift apart.
 
 ### A 500 on a screen that worked yesterday is usually an UNAPPLIED MIGRATION
 
