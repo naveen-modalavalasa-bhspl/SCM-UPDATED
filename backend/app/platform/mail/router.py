@@ -23,7 +23,7 @@ from app.core.pagination import Page, PageParams
 from app.platform.mail import service
 from app.platform.mail.schemas import (
     EmailClaimDecisionIn, EmailClaimOut, ForgotPasswordIn, InboxMessageOut,
-    MailMessageOut, MailSendIn, MailboxStatusOut, ResetPasswordIn,
+    MailComposeIn, MailMessageOut, MailboxStatusOut, ResetPasswordIn,
 )
 from app.platform.rbac import permissions as perms
 
@@ -57,7 +57,7 @@ async def sent(params: PageParams = Depends(), search: str | None = None,
 
 
 @router.post("", response_model=MailMessageOut, status_code=201)
-async def send(body: MailSendIn, db: AsyncSession = Depends(get_db),
+async def send(body: MailComposeIn, db: AsyncSession = Depends(get_db),
                user=Depends(require_permission(perms.MAIL_SEND))):
     return await service.send_mail(db, body, user)
 

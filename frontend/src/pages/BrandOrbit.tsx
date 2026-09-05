@@ -2,7 +2,11 @@ import {
   Boxes, ClipboardCheck, FileText, ShoppingCart, Truck, Users, Warehouse,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import courier from "@/assets/courier.png";
+import { BrandMark } from "./BrandMark";
+// SWAP THE CENTRE — step 1 of 2. Uncomment this line and comment the one
+// above to put the courier back; then do the same to the two blocks marked
+// "step 2" in the JSX below. Nothing else changes.
+// import courier from "@/assets/courier.png";
 import scmMark from "@/assets/scm-mark.png";
 import bavyaLogo from "@/assets/bavya-logo.png";
 
@@ -21,20 +25,13 @@ import bavyaLogo from "@/assets/bavya-logo.png";
  * resolution-independent, takes its colour from the brand sweep rather than from
  * baked-in pixels, and costs nothing to download.
  *
- * The centre is the courier ALONE, cut out of the artwork and standing free —
- * no disc, no globe, no crimson ring, none of the "ANY WHERE / ANY TIME" type
- * that a circular crop could only ever slice through. `courier.png` is that
- * cut-out: the pale map flood-filled away from the border (so his shirt and the
- * clipboard face, which the border cannot reach, survive), then every detached
- * scrap — map pins, dashed routes, stray label glyphs — dropped by keeping only
- * the largest connected island. He keeps the clipboard and the box because he
- * is holding them, so they are the same island he is.
+ * The centre is `BrandMark` — one stocked carton, drawn. It replaced a cut-out
+ * of the artwork's courier, which was a picture of a person doing supply chain
+ * rather than a picture of supply chain, and which could never be sharper than
+ * the 226 pixels the source had of him.
  *
- * He never turns. Only the world around him does, which is the right way round:
- * the person is the fixed point the chain moves through.
- *
- * He is 226px wide, which is all the source artwork has of him. Do not scale
- * him much past that — there is no more detail to recover.
+ * It never turns. Only the world around it does, which is the right way round:
+ * the goods are the fixed point the chain moves through.
  *
  * The rotation is one continuous, very slow revolution (a full turn per minute),
  * not an entrance animation that plays once and stops. Every badge counter-turns
@@ -131,9 +128,23 @@ export function BrandOrbit({ className = "" }: { className?: string }) {
           ))}
         </div>
 
-        {/* The courier, standing free at the centre. Never turns. */}
+        {/* What the ring is for, at the centre of it. Never turns. */}
         <div className="orbit-core">
-          <img src={courier} alt="" aria-hidden draggable={false} />
+          {/* SWAP THE CENTRE — step 2 of 2. Comment this line out... */}
+          <BrandMark />
+          {/* ...and uncomment this one to bring the courier back. He is a
+              cut-out of the original artwork: the pale map flood-filled away
+              from the border (so his shirt and the clipboard face, which the
+              border cannot reach, survive), then every detached scrap dropped
+              by keeping only the largest connected island. `courier.png` is
+              still in assets and still committed.
+              With the courier, set --core back to 0.44 in the CSS below — he is
+              square where the mark is tall, so the same value sizes them very
+              differently.
+
+          <img src={courier} alt="" aria-hidden draggable={false}
+               className="orbit-core-photo" />
+          */}
         </div>
       </div>
 
@@ -166,7 +177,11 @@ const ORBIT_CSS = `
      reason: a badge on a fixed rem clamp grows relative to a shrinking ring and
      eats the gap back on a narrow screen. */
   --r: calc(var(--o) * 0.415);          /* orbit radius: the badges and the track */
-  --core: calc(var(--o) * 0.44);        /* the cut-out courier, not a disc */
+  /* The mark is TALLER than it is wide (a box plus its shadow), where the
+     courier was square, so the same --core made it reach much further and it
+     crowded the badges. At 0.33 its far corner sits at 0.27 of --o against the
+     0.357 the badges reach in to. */
+  --core: calc(var(--o) * 0.33);        /* the drawn mark, not a disc */
   --badge: calc(var(--o) * 0.115);
   --spin: 60s;
   width: var(--o);
@@ -256,24 +271,27 @@ const ORBIT_CSS = `
   opacity: .95;
 }
 
-/* No disc any more. He is a cut-out standing on the ground, so all this has to
-   do is size him and sit him a little below the ring's centre — his weight is
-   in his shoulders, so centring the BOX makes him look like he is floating. */
+/* No disc. The mark stands on the ground at the centre of the ring, and its own
+   contact shadow is part of the drawing, so all this has to do is size it. */
 .orbit-core {
   position: relative;
   width: var(--core);
   display: grid;
   place-items: end center;
-  transform: translateY(calc(var(--core) * 0.06));
   pointer-events: none;
 }
-.orbit-core img {
+.orbit-core svg {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+/* Used only by the commented-out courier above. Kept here rather than deleted
+   so that putting him back is two uncomments and nothing else. */
+.orbit-core-photo {
   width: 100%;
   height: auto;
   max-width: none;
   user-select: none;
-  /* A soft contact shadow so he stands on the ground rather than hovering over
-     it. Cast from the sweep's violet, not from grey. */
   filter: drop-shadow(0 18px 26px #4D148C24);
 }
 
