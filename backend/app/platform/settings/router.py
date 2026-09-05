@@ -3,10 +3,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import get_current_user, require_permission
 from app.platform.rbac import permissions as perms
 from app.platform.settings import codeformat, service
-from app.platform.settings.schemas import CodeFormatSettings, SettingsIn, SettingsOut
+from app.platform.settings.schemas import (
+    CodeFormatSettings, CompanySettings, SettingsIn, SettingsOut,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -15,6 +17,17 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 async def get_settings(db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.ADMIN_SETTINGS_MANAGE))):
     return await service.get_app_settings(db)
+
+
+# The letterhead, and only the letterhead. Authenticated, with no permission code
+# on purpose: it is what every printed document already carries out of the building,
+# and gating it on admin.settings.manage meant a storekeeper's printed indent came
+# out under a blank header while an admin's carried the company. Read-only, and it
+# exposes no other group of sys_settings.
+@router.get("/company", response_model=CompanySettings)
+async def get_company_letterhead(db: AsyncSession = Depends(get_db),
+                                 user=Depends(get_current_user)):
+    return await service.get_company_letterhead(db)
 
 
 @router.put("", response_model=SettingsOut)

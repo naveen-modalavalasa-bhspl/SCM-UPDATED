@@ -4,12 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0e1424" />
-    <!-- Inline SVG, so there is no /favicon.ico round trip to 404 on. Same glyph as
-         the brand mark in the sidebar. -->
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230e1424'/%3E%3Cg fill='none' stroke='%23ffffff' stroke-width='2' stroke-linejoin='round' stroke-linecap='round'%3E%3Cpath d='M16 7l7 4v10l-7 4-7-4V11z'/%3E%3Cpath d='M9 11l7 4 7-4M16 15v10'/%3E%3C/g%3E%3C/svg%3E"
-    />
+    <!-- The SCM mark, cut from the sign-in artwork (the same source the sidebar
+         wordmark comes from). It is the S ALONE, not "SCM": the full wordmark is a
+         3.5:1 shape, and fitted to a 32px square it becomes a nine-pixel-tall orange
+         smear with no letterforms left in it. The S fills the tile and survives 16px,
+         which is the only size that actually has to work.
+         Transparent, deliberately — an orange letterform reads on a light tab strip
+         and on a dark one, where a white tile would be a lit box. The apple-touch
+         icon is the exception and carries white, because iOS composites it onto the
+         home screen with no background of its own. -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" type="image/png" href="/favicon-32.png" sizes="32x32" />
+    <link rel="icon" type="image/png" href="/favicon-16.png" sizes="16x16" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>SCM ERP</title>
   </head>
   <body>

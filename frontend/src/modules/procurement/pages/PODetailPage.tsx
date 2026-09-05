@@ -625,7 +625,7 @@ export function PODetailPage() {
         <div className="p-3 sm:p-4"><ApprovalTrail docType="PO" docId={po.data.id} /></div>
       </div>
 
-      {po.data.status === "PENDING_APPROVAL" && (po.data.pending_with?.length > 0 || po.data.current_approver_name) && !canDecide && (
+      {po.data.status === "PENDING_APPROVAL" && ((po.data.pending_with?.length ?? 0) > 0 || po.data.current_approver_name) && !canDecide && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm p-4 text-sm font-medium text-ink flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-amber-500" />
           Waiting on {po.data.pending_with?.length ? po.data.pending_with.join(", ") : po.data.current_approver_name} for approval

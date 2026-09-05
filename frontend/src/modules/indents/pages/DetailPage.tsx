@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, ChevronRight, Loader2, Pencil, RefreshCw, Send, Trash2,
+  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Send, Trash2,
 } from "lucide-react";
 import {
   CardBody, Skeleton,
@@ -266,6 +266,17 @@ export function IndentDetailPage() {
         actions={(
           <div className="flex flex-wrap items-center justify-end gap-2">
             <IndentStatusBadge status={indent.status} journey={journey} />
+            {/* The indent as a document. A new tab, so the screen the user is working
+                keeps its place; the print route re-reads the indent under the same
+                token, so nothing here decides what a viewer may print. */}
+            <Can do="indent.view">
+              <Button
+                variant="secondary"
+                onClick={() => window.open(`/indents/${indent.id}/print`, "_blank", "noopener")}
+              >
+                <FileText className="h-4 w-4" /> PDF
+              </Button>
+            </Can>
             {isDraftOwner && (
               <Can do="indent.edit">
                 <Button

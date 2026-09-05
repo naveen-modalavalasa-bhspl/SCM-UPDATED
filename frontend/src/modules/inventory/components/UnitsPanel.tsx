@@ -69,10 +69,20 @@ function CopyDownload({ values, filename, disabled }: {
   );
 }
 
+/** How many chips are DRAWN. Copy and Download still carry every value.
+ *
+ *  One `<span>` per unit was fine at the 108 units this panel was written for and is
+ *  not at 10,000: the popover mounts ten thousand nodes into a box that shows eight
+ *  rows of them, which locks the tab for seconds after the data has already arrived.
+ *  The list is scanned by eye or taken away as a file; nobody scrolls to unit 7,000. */
+const CHIPS_DRAWN = 300;
+
 function Group({ title, values, filename }: {
   title: string; values: string[]; filename: string;
 }) {
   if (!values.length) return null;
+  const drawn = values.slice(0, CHIPS_DRAWN);
+  const hidden = values.length - drawn.length;
   return (
     <div className="rounded-lg border border-line/70 p-2">
       <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -85,7 +95,7 @@ function Group({ title, values, filename }: {
           the panel does not swallow the screen when a lot holds a hundred units. */}
       <div className="max-h-44 overflow-y-auto">
         <div className="flex flex-wrap gap-1">
-          {values.map((v) => (
+          {drawn.map((v) => (
             <span
               key={v}
               className="select-all rounded bg-content2 px-2 py-0.5 font-mono text-[11px] text-body"
@@ -94,6 +104,12 @@ function Group({ title, values, filename }: {
             </span>
           ))}
         </div>
+        {hidden > 0 && (
+          <p className="mt-1.5 text-[11px] text-muted">
+            {hidden.toLocaleString("en-IN")} more not shown — Copy and Download carry
+            all {values.length.toLocaleString("en-IN")}.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -255,7 +271,10 @@ export function UnitsPanel({
     .map((u) => u.asset_code || u.consumable_code)
     .filter(Boolean) as string[];
 
-  const everything = [
+  /** Built on the press, not on every render: a lot of 10,000 units is 10,000 rows of
+   *  CSV, and rebuilding that string on each re-render of the popover cost more than
+   *  the download it exists for. */
+  const everything = () => [
     ["Serial", "IMEI", "Asset code", "Consumable code", "Batch", "Bin", "Status"],
     ...units.map((u: UnitRow) => [
       // Blank, not the code: the export has an Asset code column of its own, and
@@ -285,11 +304,19 @@ export function UnitsPanel({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs text-muted">{units.length} units here</span>
+        {/* "of N" only when the two disagree. `getUnits` walks the whole lot now, so
+            they normally match; a lot past its page ceiling is the one case where the
+            panel must say it is showing a subset rather than let Copy and Download
+            hand over part of a lot as if it were all of it. */}
+        <span className="text-xs text-muted">
+          {expected && expected > units.length
+            ? `${units.length} of ${expected} units here`
+            : `${units.length} units here`}
+        </span>
         <button
           type="button"
           className="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[11px] font-medium text-body transition-colors hover:bg-content2"
-          onClick={() => download(`${stem}-units.csv`, everything)}
+          onClick={() => download(`${stem}-units.csv`, everything())}
         >
           <Download size={12} /> Download all (CSV)
         </button>

@@ -253,24 +253,48 @@ export const indexSerials = (rows: SerialSummaryRow[]) => {
   return byKey;
 };
 
-/** The units standing at one item + point (+ bin + batch when known). Paged at 500:
- * the panel that shows them offers Copy-all and Download, so it must hold the whole
- * lot, and the largest lot in the live data is 108 units. */
-export const getUnits = (params: {
+/** The server's own ceiling (`core.pagination.MAX_PAGE_SIZE`), so one request asks for
+ *  as much as one request may carry. */
+const UNITS_PAGE_SIZE = 500;
+
+/** How many of those pages this panel will walk. 10,000 is `MAX_UNITS_PER_CODE_MINT`
+ *  — the most units one receipt can ever be coded into — so a lot built by a single
+ *  inward is always shown whole. Past that the panel says what it is showing rather
+ *  than pulling an unbounded list into the browser. */
+const UNITS_MAX_PAGES = 20;
+
+/** The units standing at one item + point (+ bin + batch when known).
+ *
+ *  PAGED THROUGH, not asked for once (2026-09-03). This requested `size: 500` and took
+ *  the first page, on the reasoning that "the largest lot in the live data is 108
+ *  units" — true when it was written, and no longer: `_place_unit_codes` mints one
+ *  coded unit per whole unit received, so a 10,000-unit inward is one lot of 10,000.
+ *  500 is also the server's `MAX_PAGE_SIZE`, so raising the number did nothing; the
+ *  panel simply showed 500 codes over a caption reading "10000 units in lot" and
+ *  offered Copy-all and Download that quietly held 5% of the lot.
+ */
+export const getUnits = async (params: {
   item_id: number; warehouse_id?: number | null;
   bin_id?: number | null; batch_id?: number | null;
-}) =>
-  api
-    .get<Page<UnitRow>>("/api/warehouse/serials", {
+}) => {
+  const rows: UnitRow[] = [];
+  for (let page = 1; page <= UNITS_MAX_PAGES; page += 1) {
+    const { data } = await api.get<Page<UnitRow>>("/api/warehouse/serials", {
       params: {
         item_id: params.item_id,
         warehouse_id: params.warehouse_id || undefined,
         bin_id: params.bin_id || undefined,
         batch_id: params.batch_id || undefined,
-        size: 500,
+        page,
+        size: UNITS_PAGE_SIZE,
       },
-    })
-    .then((r) => r.data.items);
+    });
+    rows.push(...data.items);
+    // Short page or the whole count in hand: there is nothing after this one.
+    if (data.items.length < UNITS_PAGE_SIZE || rows.length >= (data.total ?? rows.length)) break;
+  }
+  return rows;
+};
 
 /** Find ONE unit by whatever identity is printed on its label — serial, IMEI, asset
  * code or consumable code. Resolves to null when nothing matches: "no unit carries

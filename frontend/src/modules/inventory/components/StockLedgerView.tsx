@@ -217,11 +217,25 @@ export function StockLedgerView() {
   const serialOf = (r: StockLedgerItem) =>
     (r.asset_code || r.consumable_code) ? undefined : r.serial_number;
 
-  /** Which lot a cell's popover should list the units of. A ledger row names an item
-   *  at a point, not a bin, so the popover shows everything standing there. */
+  /** Which lot a cell's popover should list the units of.
+   *
+   *  DOWN TO THE BIN AND THE BATCH (2026-09-03). This asked for item + point only, on
+   *  the reasoning that "a ledger row names an item at a point, not a bin" — but the
+   *  row carries `bin_id` and `batch_id` and has since 2026-08-21, and the count beside
+   *  the cell is already keyed on them by `lotOfRow`. Two putaways of one GRN into two
+   *  bins therefore opened the SAME query: both panels listed every unit of that item
+   *  at that warehouse, newest first, so both showed the second putaway's units and the
+   *  first putaway's 10,000 could not be reached from the row that made them. The count
+   *  said 10,000 and the list was somebody else's 10,000.
+   *
+   *  Narrowed on the same rule `unplaced` uses, because it has to agree with the count
+   *  beside it: `NO_BIN` and `NO_BATCH` are both 0, so a falsy value means "this row
+   *  names no bin / no batch" and must be left OFF the query rather than sent as 0. */
   const lotOf = (r: StockLedgerItem) => ({
     itemId: r.item_id,
     warehouseId: r.warehouse_id,
+    binId: r.bin_id || undefined,
+    batchId: r.batch_id || undefined,
     itemCode: r.item_code,
     expected: unitsOf(r)?.count,
     label: r.warehouse_name,

@@ -17,14 +17,45 @@
   --color-ink: #0e1424;
   --color-ink-700: #1b2438;
   --color-ink-500: #2c3852;
-  --color-surface: #f3f4f8;
+  /* The page ground. Warm greige, and deliberately almost colourless.
+     It carries no information: every card on it is white and every status on those
+     cards is a colour that MEANS something, so chroma here competes with the only
+     colour on the page a reader has to act on. The old #f3f4f8 was cool enough to
+     fight an orange-crimson brand; a pastel of the brand itself was worse, because
+     the ground then shared a family with the pills sitting on it. This is warm enough
+     to belong to the mark and quiet enough to disappear. */
+  --color-surface: #F6F4F1;
+
+  /* Chrome — the rail, the sticky header, the mobile bar. Translucent white rather
+     than a colour of its own, so each module's ground reads THROUGH it and the chrome
+     re-tints itself per module with no palette to maintain. That also builds the only
+     hierarchy that matters here: solid white cards on top, chrome a step behind them,
+     the ground furthest back. Three surfaces all at #ffffff is what made the rail read
+     as a lit slab beside a tinted page.
+     `-strong` is for the mobile bar, which has scrolling CONTENT passing under it —
+     the rail and header only ever have the page ground behind them. */
+  --color-chrome: #FFFFFF9E;
+  --color-chrome-strong: #FFFFFFEF;
+  --wash-1: #FDF6F0;
+  --wash-2: #FBF7F3;
   --color-line: #e5e8ef;
   --color-body: #141a2a;
   --color-muted: #697187;
 
-  --color-brand: #3e63dd;
-  --color-brand-600: #3452c8;
-  --color-brand-050: #eef1fd;
+  /* The Bavya sweep. A gradient is an IMAGE, not a colour — it cannot live in
+     --color-brand, because `text-brand`, `border-brand`, `ring-brand` and
+     `bg-brand/25` all need a value a colour function can take. So it is declared
+     separately and painted as a background-image; the solid below is what everything
+     else resolves to, sampled from the sweep's 65% stop so the two read as one brand. */
+  --grad-1: #FABC41;
+  --grad-2: #FB8B00;
+  --grad-3: #CC004C;
+  --grad-4: #4D148C;
+  --brand-gradient: linear-gradient(90deg, var(--grad-1) 0%, var(--grad-2) 30%, var(--grad-3) 65%, var(--grad-4) 100%);
+
+  --color-brand: #CC004C;
+  --color-brand-600: #A80040;
+  --color-brand-050: #fdeef3;
 
   --color-signal: #f0872b; /* warm accent, used sparingly */
 
@@ -72,13 +103,24 @@
   --color-ink-700: #d6dded;
   --color-ink-500: #b7c1d8;
   --color-surface: #0a0e18;
+  --color-chrome: #121828B8;
+  --color-chrome-strong: #121828F2;
+  --wash-1: #171d33;
+  --wash-2: #101a26;
   --color-line: #272e42;
   --color-body: #c3ccdf;
   --color-muted: #808ba7;
 
-  --color-brand: #7d97ff;
-  --color-brand-600: #96abff;
-  --color-brand-050: #1b2444;
+  /* Same sweep, lifted off the dark ground: the 65% crimson and the 100% violet both
+     sit below the dark lightness band and turn to mud on #0a0e18. */
+  --grad-1: #FFCE6B;
+  --grad-2: #FFA53D;
+  --grad-3: #F4487F;
+  --grad-4: #8B5BD6;
+
+  --color-brand: #FF7BA8;
+  --color-brand-600: #FF9BBF;
+  --color-brand-050: #2e0f1b;
 
   --color-ok: #2fc487;
   --color-ok-bg: #10281f;
@@ -102,6 +144,53 @@
   --color-cat-4: #9370e8;
   --color-cat-5: #e0559b;
   --color-cat-6: #7a9830;
+}
+
+/* Every solid brand fill wears the sweep.
+ *
+ * One selector rather than 201 edits: `bg-brand` compiles to `background-color`, and
+ * a `background-image` painted over it wins without the colour having to change — so
+ * anything that reads the token for a border or a shadow still matches. The alpha
+ * variants (`bg-brand/25`) compile to their OWN class and are deliberately not caught:
+ * they are progress-bar troughs and hover washes, where a four-colour sweep at 25%
+ * opacity is just a smear.
+ *
+ * KNOWN, and the reason this is a look to judge rather than a finished theme: the
+ * sweep's first third is amber, and white on #FABC41 measures 1.9:1. Any fill here
+ * that carries a white LABEL fails AA on its left edge. Decorative fills — the mark,
+ * icon tiles, bars, the active rail pill — are fine. Fixing it means either starting
+ * text-bearing fills at the crimson stop or setting their labels dark, and that is a
+ * decision about the buttons, not about the gradient. */
+.bg-brand {
+  background-image: var(--brand-gradient);
+}
+
+/* The rail's module list scrolls with no visible bar (see AppLayout). Something has
+ * to say so: a short fade on the bottom edge of the list's box.
+ *
+ * The fade is always ON — CSS cannot ask whether an element overflows. It is
+ * invisible in the normal case anyway: the nav is `flex-1`, so its box runs to the
+ * profile card while the twelve rows end well above that, and a mask over empty space
+ * fades nothing. It only bites when rows reach the bottom edge, which is the same
+ * moment the list starts scrolling. */
+.nav-rail-scroll {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+}
+
+/* Rail module icons, stroked with the brand sweep.
+ *
+ * `background-image` + `background-clip` cannot do this — that paints TEXT, and these
+ * are stroked SVG paths. An SVG paint server can: `stroke: url(#rail-gradient)` points
+ * at the <linearGradient> AppLayout renders once. The gradient uses the default
+ * objectBoundingBox units, so each icon gets the whole sweep across its own 18px
+ * rather than its slice of a rail-length one — twelve icons each amber-to-violet,
+ * not one icon per colour.
+ *
+ * The stops are `var(--grad-*)`, the same four the CSS gradient is built from, so the
+ * icons re-step with the theme instead of staying light-mode orange on a dark rail. */
+.icon-gradient {
+  stroke: url(#rail-gradient);
 }
 
 * {
@@ -132,8 +221,12 @@ body,
 body {
   margin: 0;
   background:
-    radial-gradient(1200px 480px at 100% -10%, #eceafb 0%, transparent 55%),
-    radial-gradient(900px 420px at -10% 0%, #eaf3f7 0%, transparent 50%),
+    /* Variables, not literals: a module re-tints its ground by setting these three
+       together (see the module grounds below). Setting only the base leaves two warm
+       washes glowing over somebody else's hue, which reads as a colour cast rather
+       than as light. */
+    radial-gradient(1200px 480px at 100% -10%, var(--wash-1) 0%, transparent 55%),
+    radial-gradient(900px 420px at -10% 0%, var(--wash-2) 0%, transparent 50%),
     var(--color-surface);
   background-attachment: fixed;
   color: var(--color-body);
@@ -144,10 +237,74 @@ body {
 
 .dark body {
   background:
-    radial-gradient(1100px 460px at 100% -10%, #171d33 0%, transparent 55%),
-    radial-gradient(900px 420px at -10% 0%, #101a26 0%, transparent 50%),
+    radial-gradient(1100px 460px at 100% -10%, var(--wash-1) 0%, transparent 55%),
+    radial-gradient(900px 420px at -10% 0%, var(--wash-2) 0%, transparent 50%),
     var(--color-surface);
 }
+
+/* ---- Module grounds ----------------------------------------------------------
+ *
+ * Each module may tint the page it owns. `AppLayout` stamps the active module's code
+ * on <body>; everything else is here, so the palette is one block to read rather than
+ * a colour inlined in the layout.
+ *
+ * Three rules, learned on the ones that did not work:
+ *   1. Barely there. The ground carries NO information — the cards are white and the
+ *      statuses on them are the only colours that mean anything. Every value here
+ *      sits within a couple of percent of the neutral, which is enough to feel on
+ *      arrival and not enough to argue with a pill.
+ *   2. Base and both washes move together, or the glow becomes a second hue.
+ *   3. `html:not(.dark)` on every rule. `--color-surface` is set on `.dark` (the html
+ *      element) and body is its descendant, so an unscoped `body[data-module]` would
+ *      win in dark mode too and paint a near-black page pastel mint.
+ *
+ * Modules with no rule fall through to the warm greige default, which is deliberate:
+ * a module gets a ground when there is a reason for one, not to complete a set. */
+/* NOTE the code: `approvals`, not `grp_approvals`. The menu's top-level codes are not
+ * uniform — `grp_indents`, `grp_purchasing`, `grp_warehouse`, `grp_inventory`,
+ * `grp_logistics`, `grp_returns`, `grp_reports`, `grp_rbac` and `grp_settings` carry
+ * the prefix; `home`, `approvals` and `masters` do not. They come from `PAGE_TREE` in
+ * `scripts/seed.py`, which is the list to check before adding a module here — a
+ * selector that guesses wrong fails SILENTLY, as a page that simply keeps the default
+ * ground. */
+html:not(.dark) body[data-module="approvals"] {
+  /* Approvals   · pastel mint */
+  --color-surface: #EFF8F4;
+  --wash-1: #F5FBF9;
+  --wash-2: #FAFDFC;
+}
+html:not(.dark) body[data-module="grp_purchasing"] {
+  /* Procurement · pastel blue */
+  --color-surface: #EDF3FA;
+  --wash-1: #F4F8FC;
+  --wash-2: #FAFCFE;
+}
+html:not(.dark) body[data-module="grp_inventory"] {
+  /* Inventory   · pastel purple */
+  --color-surface: #F6EDFA;
+  --wash-1: #FAF4FC;
+  --wash-2: #FCFAFE;
+}
+html:not(.dark) body[data-module="grp_warehouse"] {
+  /* Warehouse   · pastel yellow */
+  --color-surface: #FCF7E7;
+  --wash-1: #FDFAF1;
+  --wash-2: #FEFDF8;
+}
+html:not(.dark) body[data-module="grp_logistics"] {
+  /* Logistics   · pastel orange */
+  --color-surface: #FDF0E7;
+  --wash-1: #FEF6F1;
+  --wash-2: #FEFBF8;
+}
+html:not(.dark) body[data-module="grp_reports"] {
+  /* Reports     · pastel violet */
+  --color-surface: #F1EFFA;
+  --wash-1: #F7F5FC;
+  --wash-2: #FBFBFE;
+}
+
+
 
 h1,
 h2,
@@ -273,4 +430,156 @@ h3,
   .lt-marquee:hover .lt-marquee-track,
   .lt-marquee:focus-visible .lt-marquee-track,
   .lt-marquee:focus-within .lt-marquee-track { animation: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   The cold-open splash (AppSplash).
+
+   Four layers, all of them the SAME four gradient stops the rest of the product
+   is painted with (--grad-1..4 / --brand-gradient), so the wait belongs to the
+   app rather than being a spinner borrowed from somewhere:
+
+     .splash-aurora        a slow warm/violet drift behind everything
+     .splash-stack::before a halo breathing under the mark
+     .splash-mark          the SCM letterforms, masked, with a light passing through
+     .splash-track/-comet  a hairline that says work is still happening
+
+   The mark is a mask so the brand sweep paints THROUGH the letters; that also
+   makes it theme-aware for free, because the dark theme redefines the same stops.
+   Nothing animates layout: transform, opacity and background-position only. */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.splash-aurora {
+  position: absolute;
+  inset: -25%;
+  pointer-events: none;
+  background:
+    radial-gradient(40% 48% at 24% 34%, color-mix(in oklab, var(--grad-2) 17%, transparent) 0%, transparent 72%),
+    radial-gradient(38% 46% at 78% 66%, color-mix(in oklab, var(--grad-4) 14%, transparent) 0%, transparent 74%),
+    radial-gradient(32% 40% at 58% 18%, color-mix(in oklab, var(--grad-3) 9%, transparent) 0%, transparent 72%);
+  filter: blur(60px);
+  will-change: transform, opacity;
+  animation: splash-drift 16s ease-in-out infinite alternate;
+}
+
+@keyframes splash-drift {
+  0%   { transform: translate3d(-2%, -1%, 0) scale(1);    opacity: 0.7; }
+  50%  { transform: translate3d(2%, 1.5%, 0) scale(1.07); opacity: 1; }
+  100% { transform: translate3d(-1%, 2%, 0) scale(1.03);  opacity: 0.8; }
+}
+
+.splash-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.9rem;
+  animation: splash-rise 0.75s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@keyframes splash-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.965); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* The halo. Sits on the MARK, not on the stack's centre — the progress hairline
+   below would otherwise pull the glow off the letterforms it belongs to. */
+.splash-stack::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 28%;
+  width: clamp(240px, 42vw, 400px);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle,
+    color-mix(in oklab, var(--grad-2) 17%, transparent) 0%,
+    color-mix(in oklab, var(--grad-3) 7%, transparent) 40%,
+    transparent 72%);
+  filter: blur(36px);
+  will-change: transform, opacity;
+  animation: splash-breathe 3.6s ease-in-out infinite;
+}
+
+@keyframes splash-breathe {
+  0%, 100% { opacity: 0.5;  transform: translate(-50%, -50%) scale(0.93); }
+  50%      { opacity: 0.95; transform: translate(-50%, -50%) scale(1.07); }
+}
+
+/* 255x72 is the artwork's own ratio; hard-coded so the box never reflows while
+   the PNG is still arriving. */
+.splash-mark {
+  position: relative;
+  width: clamp(176px, 32vw, 280px);
+  aspect-ratio: 255 / 72;
+  -webkit-mask-image: var(--splash-mark-src);
+          mask-image: var(--splash-mark-src);
+  -webkit-mask-size: contain;
+          mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+          mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+          mask-position: center;
+  background-image:
+    linear-gradient(100deg, transparent 38%, rgb(255 255 255 / 0.92) 50%, transparent 62%),
+    var(--brand-gradient);
+  background-repeat: no-repeat;
+  background-size: 260% 100%, 100% 100%;
+  background-position: -90% 0, 0 0;
+  filter: drop-shadow(0 8px 22px color-mix(in oklab, var(--grad-3) 24%, transparent));
+  will-change: background-position;
+  animation: splash-sheen 2.8s cubic-bezier(0.45, 0, 0.5, 1) infinite;
+}
+
+/* The light crosses, then waits. A sheen that never rests reads as a loading bar
+   wearing a logo; one that pauses reads as a mark catching the light. */
+@keyframes splash-sheen {
+  0%        { background-position: -90% 0, 0 0; }
+  60%, 100% { background-position: 190% 0, 0 0; }
+}
+
+.splash-track {
+  position: relative;
+  width: clamp(148px, 26vw, 216px);
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--color-body) 12%, transparent);
+}
+
+.splash-comet {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--brand-gradient);
+  transform-origin: left center;
+  will-change: transform;
+  animation: splash-comet 1.6s cubic-bezier(0.65, 0.05, 0.36, 1) infinite;
+}
+
+@keyframes splash-comet {
+  0%   { transform: translateX(-105%) scaleX(0.4); }
+  50%  { transform: translateX(0)     scaleX(0.8); }
+  100% { transform: translateX(105%)  scaleX(0.4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-aurora,
+  .splash-stack,
+  .splash-stack::before,
+  .splash-mark,
+  .splash-comet { animation: none; }
+  /* Park the sheen past the letterforms so the mark reads as its plain self. */
+  .splash-mark  { background-position: 190% 0, 0 0; }
+  .splash-comet { transform: scaleX(0.6); opacity: 0.6; }
 }

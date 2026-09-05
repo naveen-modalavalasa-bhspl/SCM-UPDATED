@@ -184,27 +184,31 @@ document being unable to say what was happening.
 `indent_item_id`, already allows several rows per item, and every downstream reader is
 already per line — the reservation stamp, `_issue_unit_supply`, `move_stock_out`, the
 occupancy preview, `stk_ledger`. So two bins are two lines against one indent line and
-nothing behind the screen changed. The grid groups them (`frontend/src/modules/
-warehouse/issueSplits.ts`): a parent row per item states the ask, a child row per pick
-states its (batch, bin), what that location holds, what is taken from it, and how many
-identifiers are named against THAT pick.
+nothing behind the screen changed.
 
 **The invariant, which fails silently if narrowed:** `requested_qty` is DISTRIBUTED
 across a group's splits, never repeated. `_apply_issue_lines` refuses a line requesting
 nothing and refuses a line issuing more than it requests, and `out_issues.total_qty` is
 a plain SUM over lines — so a group asking for 15 must have splits whose requested
-quantities add to 15. `redistribute` is the only thing that writes them: adding or
-removing a pick measures the ask FIRST and puts it back over the new set, and
-`normalizeSplits` does the same on the way to the server. Put the full ask on each
-split instead and the document silently asks for double.
+quantities add to 15. Put the full ask on each split instead and the document silently
+asks for double, and nothing downstream will say so.
+
+**What has NOT been built is the SCREEN half** (as of 2026-09-05). The backend accepts
+splits, the source list is served, and `MaterialIssueForm` can already carry several
+lines for one item — but there is no grouped grid: no parent row per item over child
+rows per pick, no `issueSplits.ts`, and no auto-split off `stock-sources`. `api.ts`
+exports `issueStockSources` and nothing calls it yet. Until that lands a storekeeper
+splits a pick by adding the second line by hand, and the arithmetic above is enforced
+only by the server. Do not describe the grid as present, and do not assume a client
+normalises the ask before it arrives — `_apply_issue_lines` is the only thing standing
+between a mistyped split and a document that asks for double.
 
 `GET /api/warehouse/issues/stock-sources` is where the splits come from — every
 (batch, bin) an item can be drawn from, ordered expiry-then-batch-then-bin, so a screen
 taking them in order is doing FIFO without knowing what FIFO is. Read off `stk_balance`
 alone, NEVER off `whs_serial_numbers`: that table is one row per physical unit and holds
 773k of them. It honours `_stock_offerable(indent_id)` for the same reason `bin_options`
-does. Auto-split runs once on a freshly pulled draft, when that answer lands, and only
-on groups whose single source cannot serve them.
+does.
 
 **Which identifier is being asked for is SERVED, never inferred in a screen.**
 `enums.TRACKING_META` (`GET /api/warehouse/tracking-types`) names each kind, and

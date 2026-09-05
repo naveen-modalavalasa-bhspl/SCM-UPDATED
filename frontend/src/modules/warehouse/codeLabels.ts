@@ -3,10 +3,9 @@ import type { PutawayCodes, PutawayUnitCode } from "./types";
 /**
  * The arithmetic and the file building behind the code label sheet.
  *
- * Pure functions, kept out of the component for the reason `issueSplits.ts` is: the
- * interesting part is not the markup, it is whether a barcode of a 36-character asset
- * code can physically be scanned off a 38mm sticker. That is a number, and a number
- * can be pinned by a test.
+ * Pure functions, kept out of the component on purpose: the interesting part is not
+ * the markup, it is whether a barcode of a 36-character asset code can physically be
+ * scanned off a 38mm sticker. That is a number, and a number can be pinned by a test.
  */
 
 /** CSS millimetres at the 96dpi the browser lays out in. */

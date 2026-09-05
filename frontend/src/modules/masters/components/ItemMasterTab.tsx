@@ -18,7 +18,7 @@ import type {
 } from "../types";
 
 export const ITEM_SECTIONS = [
-  "Basic", "Kit Components", "Attributes", "Specs", "Features", "Units",
+  "Basic", "Kit Components", "Attributes", "Specifications", "Features", "Units",
   "Identification", "Tracking", "Packaging", "Additional",
 ] as const;
 type ItemSection = (typeof ITEM_SECTIONS)[number];
@@ -423,8 +423,14 @@ export function ItemMasterTab() {
         onRowClick={canManage ? openEdit : undefined}
         empty="No items found." renderCard={(row) => <div><b>{row.code}</b><div>{row.name}</div></div>} />
 
+      {/* The dialog keeps ONE height across all ten tabs. Sized to its content it
+          collapsed to a two-line box on Kit Components and jumped back to full height
+          on Basic, so the tab strip, the Save button and the validation message all
+          moved under the cursor between one tab and the next. `scrollBehavior="inside"`
+          already scrolls the body; the fixed base is what stops the frame moving. */}
       <Modal isOpen={editing !== undefined} onOpenChange={() => setEditing(undefined)}
-             size="5xl" scrollBehavior="inside">
+             size="5xl" scrollBehavior="inside"
+             classNames={{ base: "h-[85vh] max-h-[85vh]" }}>
         <ModalContent>
           <ModalHeader>{editing ? "Edit Item" : "Create Item"}</ModalHeader>
           <ModalBody>
@@ -516,7 +522,7 @@ export function ItemMasterTab() {
                   : <TagFields tags={attributeTags} values={tagValues} onChange={setTagValues} />
             )}
 
-            {tab === "Specs" && (
+            {tab === "Specifications" && (
               !form.category_id
                 ? <Empty>Pick a Level 3 category on the Basic tab. Its specs appear here.</Empty>
                 : categoryTags.isLoading
@@ -1174,7 +1180,10 @@ export function ItemSectionTabs({
   return (
     <div
       aria-label="Item form sections"
-      className="flex flex-wrap gap-2 border-b border-line pb-3"
+      /* Sticky, because the strip lives inside the body that scrolls: on a long tab
+         it slid out of view and the only way back to another section was scrolling
+         up. The opaque background is what keeps the fields from showing through. */
+      className="sticky top-0 z-10 -mt-1 flex flex-wrap gap-2 border-b border-line bg-content1 pb-3 pt-1"
     >
       {ITEM_SECTIONS.map((name) => (
         <button

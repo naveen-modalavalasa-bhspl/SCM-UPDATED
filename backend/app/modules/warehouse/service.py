@@ -2542,6 +2542,37 @@ async def _prepare_receipt_line(
         await _raise_putaway_task(db, receipt, line, user)
         return
 
+    # The units are named BEFORE the stock moves (2026-09-03), so the ledger row this
+    # leg writes can say which ones it carried. Nothing here needs the balance row:
+    # `_register_serials` reads the receipt line and `_place_unit_codes` is keyed on
+    # item + point + batch, exactly as `confirm_putaway` already resolves its serials
+    # ahead of its own `move_stock`. Only `_code_lot` needs the row, and it still runs
+    # after one exists.
+    #
+    # A unit's identity is minted HERE too, not only at putaway. The asset/consumable
+    # code used to be stamped exclusively in `confirm_putaway`, so on a site with no
+    # bins — which is every stocking point but two — goods were banked into stock
+    # carrying no code at all and nothing downstream could quote them. There is no
+    # bin and no lot on this path; the code does not depend on either.
+    item = await _item_snapshot(db, line.item_id)
+    units = await _register_serials(db, receipt, line)
+    countable = await _is_countable(db, item)
+    moved_units: list[str] = []
+    if units:
+        await _code_serial_rows(db, units, item=item,
+                                warehouse_id=receipt.warehouse_id)
+        moved_units = [row.serial_number for row in units if row.serial_number]
+    elif countable:
+        moved_units = await _place_unit_codes(
+            db,
+            item_id=line.item_id,
+            warehouse_id=receipt.warehouse_id,
+            batch_id=line.batch_id or None,
+            bin_id=None,
+            lot_no=None,
+            qty=_d(line.accepted_qty),
+        )
+
     stock = await move_stock(
         db,
         item_id=line.item_id,
@@ -2558,32 +2589,15 @@ async def _prepare_receipt_line(
         # What the goods cost, carried onto the balance they become. The GRN has
         # captured this rate all along; it just never reached stk_balance.
         rate=line.rate,
+        # What THIS receipt brought in — never the lot as it stands afterwards. Empty
+        # stays None so a leg that genuinely named no units keeps the old fallback.
+        serial_numbers=_ledger_units(moved_units),
     )
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
-    units = await _register_serials(db, receipt, line)
 
-    # A unit's identity is minted HERE too, not only at putaway. The asset/consumable
-    # code used to be stamped exclusively in `confirm_putaway`, so on a site with no
-    # bins — which is every stocking point but two — goods were banked into stock
-    # carrying no code at all and nothing downstream could quote them. There is no
-    # bin and no lot on this path; the code does not depend on either.
-    item = await _item_snapshot(db, line.item_id)
-    if units:
-        await _code_serial_rows(db, units, item=item,
-                                warehouse_id=receipt.warehouse_id)
-    elif await _is_countable(db, item):
-        await _place_unit_codes(
-            db,
-            item_id=line.item_id,
-            warehouse_id=receipt.warehouse_id,
-            batch_id=line.batch_id or None,
-            bin_id=None,
-            lot_no=None,
-            qty=_d(line.accepted_qty),
-        )
-    else:
+    if not units and not countable:
         await _code_lot(db, stock, item=item, warehouse_id=receipt.warehouse_id)
 
 
@@ -3819,6 +3833,22 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                 "A serialized putaway cannot be split; place all selected units together"
             )
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
+
+    # The lot is stamped here and only here: it names the storage path, so it cannot
+    # be known before a bin is chosen. A split putaway leaves the remainder without
+    # one until it is itself confirmed into a bin, which may be a different one.
+    task.lot_no = await _next_lot_no(db, await db.get(Warehouse, task.warehouse_id), target)
+
+    # Placed BEFORE the stock moves (2026-09-03) so the units it placed can be named on
+    # the ledger row below. An UNSERIALISED putaway mints its codes in here, which is
+    # after `move_stock` had already been called — so `stk_ledger.serial_numbers` was
+    # left NULL for exactly the legs that had just minted a code per unit, and the
+    # ledger screen fell back to the units standing in that lot TODAY: every movement
+    # that ever touched the lot drew the same first code. Nothing in here needs the
+    # balance row; it is keyed on the task, the bin and the lot, all settled above.
+    moved_units = await _place_serials(db, task, target, serials, receipt, receipt_item,
+                                       qty=qty)
+
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
                              ref_type=InventoryRefType.RECEIPT.value,
                              ref_id=receipt.id if receipt else task.id,
@@ -3830,7 +3860,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                              # carries the same cost the batch was received at.
                              rate=batch.rate if batch else None,
                              # FIXED 2026-08-21 — the units this leg carried were never
-                             # handed to the ledger. `_place_serials` below names each
+                             # handed to the ledger. `_place_serials` above names each
                              # one on `whs_serial_numbers` and stamps its asset code, so
                              # the data was right; but `stk_balance.serial_number` and
                              # `stk_ledger.serial_numbers` stayed NULL, and the Stock
@@ -3839,18 +3869,17 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                              # Serial / IMEI and Asset Code while its 30 units sat
                              # correctly coded one table away. WITHOUT this the ledger
                              # cannot say which physical units a movement moved.
-                             serial_numbers=serials or None)
+                             #
+                             # `moved_units` rather than `serials` since 2026-09-03: for
+                             # a serial-tracked line the two are the same list, and for
+                             # an unserialised one it is the codes just minted, which
+                             # `serials` never held.
+                             serial_numbers=_ledger_units(moved_units))
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
     stock.bin_code = target.code
 
-    # The lot is stamped here and only here: it names the storage path, so it cannot
-    # be known before a bin is chosen. A split putaway leaves the remainder without
-    # one until it is itself confirmed into a bin, which may be a different one.
-    task.lot_no = await _next_lot_no(db, await db.get(Warehouse, task.warehouse_id), target)
-
-    await _place_serials(db, task, target, serials, receipt, receipt_item, qty=qty)
     # A continuous item has no unit to name, so its identity goes on the LOT — the same
     # rule the bulk-receipt path applies. Without this a bin-managed putaway of grams or
     # litres produced no unit rows AND no lot code, and the stock screens, which read
@@ -3956,8 +3985,11 @@ async def _place_serials(
     receipt: m.Receipt | None,
     receipt_item: m.ReceiptItem | None,
     qty=None,
-) -> None:
+) -> list[str]:
     """Puts the line's serials in the bin and gives each its asset/consumable code.
+
+    Returns what it placed, so `confirm_putaway` can name those units on the ledger
+    row rather than leaving the screen to guess them off the lot.
 
     The code is generated here rather than in masters (CLAUDE.md, masters overhaul):
     a unit only becomes an asset once it is physically somewhere.
@@ -3968,7 +4000,7 @@ async def _place_serials(
     new/old flag plus an 8-digit serial the next — and each change was a code change.
     """
     if not serial_numbers:
-        await _place_unit_codes(
+        return await _place_unit_codes(
             db,
             item_id=task.item_id,
             warehouse_id=task.warehouse_id,
@@ -3977,7 +4009,6 @@ async def _place_serials(
             lot_no=task.lot_no,
             qty=qty if qty is not None else task.qty,
         )
-        return
     if receipt is None or receipt_item is None:
         raise ValidationError("Serialized putaway is missing its GRN line")
     serials = await _register_serials(
@@ -3997,6 +4028,7 @@ async def _place_serials(
         serial.status = SerialStatus.AVAILABLE.value
         serial.lot_no = task.lot_no
     await _code_serial_rows(db, serials, item=item, warehouse_id=task.warehouse_id)
+    return [row.serial_number for row in serials if row.serial_number]
 
 
 async def _is_countable(db: AsyncSession, item) -> bool:
@@ -4104,6 +4136,26 @@ async def _code_serial_rows(
     await db.flush()
 
 
+#: How many unit identities one ledger row will carry in `stk_ledger.serial_numbers`.
+#:
+#: The column is JSON on the row, so a 10,000-unit receipt would write roughly 400 KB
+#: into a single cell and read it back on EVERY page of the ledger. A sample is what
+#: the screen actually asks for — "which units did THIS leg bring", against a movement
+#: that already states its own quantity — and the whole list is one click away in the
+#: lot panel, which is the screen built to page through it. Kept small on purpose: a
+#: hundred-row ledger page carries this many strings per row.
+LEDGER_UNIT_SAMPLE = 25
+
+
+def _ledger_units(codes: list[str]) -> list[str] | None:
+    """The units a movement names, trimmed to what a ledger row should carry.
+
+    `None` for a leg that named none, because `move_stock` reads `is not None` as the
+    caller stating something and would otherwise fall back to the lot's own code.
+    """
+    return codes[:LEDGER_UNIT_SAMPLE] or None
+
+
 async def _place_unit_codes(
     db: AsyncSession,
     *,
@@ -4113,7 +4165,7 @@ async def _place_unit_codes(
     bin_id: int | None,
     lot_no: str | None,
     qty,
-) -> None:
+) -> list[str]:
     """Gives every UNIT of an unserialised receipt its own asset/consumable code.
 
     A code names one physical thing. Before this, a line of 30 produced one row in
@@ -4140,19 +4192,19 @@ async def _place_unit_codes(
     """
     item = await db.get(Item, item_id)
     if item is None or bool(getattr(item, "is_serial_tracked", False)):
-        return
+        return []
     # Grams and litres have no unit to name. Guarded here as well as at the caller so
     # the putaway route cannot mint 30 rows for 30 grams of cotton either.
     if not await _is_countable(db, item):
-        return
+        return []
     units = _d(qty)
     if units <= ZERO or units != units.to_integral_value():
-        return
+        return []
 
     warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
     tier = stock_locations.tier_of(getattr(warehouse, "warehouse_type", None))
     if tier is not stock_locations.LocationTier.WAREHOUSE:
-        return
+        return []
     is_asset = bool(getattr(item, "is_asset", False))
     # Read once for the whole putaway: the formula cannot change between two units of
     # the same lorry, and it costs five queries every time it is read.
@@ -4161,7 +4213,7 @@ async def _place_unit_codes(
     # minted for this item at all — an unserialised unit exists here ONLY to carry a
     # code, so with no code there is nothing to record.
     if not codeformat.is_code_tracked(item, config):
-        return
+        return []
     # A LARGE QUANTITY IS FINE. Coding that many units individually, in one request,
     # is not (2026-09-03).
     #
@@ -4248,6 +4300,12 @@ async def _place_unit_codes(
         else:
             row.consumable_code = code
     await db.flush()
+    # Handed back so the CALLER can name them on the ledger row (2026-09-03). Minting
+    # the codes was never the gap: `stk_ledger.serial_numbers` was left NULL for an
+    # unserialised leg, so the ledger screen fell back to the units standing in that
+    # lot today and drew the SAME first code against every movement that ever touched
+    # it. Two receipts of the same item read as one code, twice.
+    return [row.serial_number for row in rows]
 
 
 async def skip_putaway(db: AsyncSession, task_id: int, reason: str | None, user) -> dict:
@@ -10628,7 +10686,7 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
             m.SerialNumber.consumable_code.ilike(like)))
 
     page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
-    page["items"] = [await _decorate_serial(db, row) for row in page["items"]]
+    page["items"] = await _decorate_serials(db, page["items"])
     return page
 
 
@@ -10815,26 +10873,63 @@ async def unit_lookup(db: AsyncSession, code: str, user=None) -> dict:
     return unit
 
 
+async def _decorate_serials(db: AsyncSession, rows: list[m.SerialNumber]) -> list[dict]:
+    """`_decorate_serial` for a whole page, with the lookups done once.
+
+    NOT a micro-optimisation (2026-09-03). The per-row version awaits five times, and
+    on a lot standing in ONE bin under ONE batch every one of those is an identity-map
+    hit that still pays a full `greenlet_spawn` — about 0.8 ms each. A page of 500 unit
+    rows spent 2.09 of its 2.31 seconds in here doing no database work whatsoever, and
+    the units panel walks twenty of those pages to show a lot of 10,000. The live table
+    holds 324,368 rows with single lots of 100,000, so this is the difference between a
+    panel that opens and one the storekeeper gives up on.
+
+    Four queries for the whole page, then a plain synchronous loop.
+    """
+    if not rows:
+        return []
+
+    async def by_id(model, ids: set[int]) -> dict:
+        ids = {i for i in ids if i}
+        if not ids:
+            return {}
+        return {r.id: r for r in (await db.execute(
+            select(model).where(model.id.in_(ids))
+        )).scalars()}
+
+    items = await by_id(Item, {r.item_id for r in rows})
+    warehouses = await by_id(Warehouse, {r.warehouse_id for r in rows})
+    batches = await by_id(m.Batch, {r.batch_id for r in rows})
+    bins = await by_id(Bin, {r.bin_id for r in rows})
+
+    out: list[dict] = []
+    for row in rows:
+        item = items.get(row.item_id)
+        wh = warehouses.get(row.warehouse_id)
+        batch = batches.get(row.batch_id)
+        b = bins.get(row.bin_id)
+        out.append({
+            "id": row.id, "item_id": row.item_id,
+            "item_code": item.code if item else None,
+            "item_name": item.name if item else None,
+            "is_asset": bool(getattr(item, "is_asset", False)) if item else False,
+            "serial_number": row.serial_number,
+            "imei": row.imei,
+            "batch_id": row.batch_id, "batch_no": batch.batch_no if batch else None,
+            "mfg_date": batch.mfg_date if batch else None,
+            "expiry_date": batch.expiry_date if batch else None,
+            "warehouse_id": row.warehouse_id, "warehouse_name": wh.name if wh else None,
+            "bin_id": row.bin_id, "bin_code": b.code if b else None,
+            "bin_floor_level": getattr(b, "floor_level", None) if b else None,
+            "asset_code": row.asset_code, "consumable_code": row.consumable_code,
+            "status": row.status, "remarks": row.remarks, "is_active": row.is_active,
+        })
+    return out
+
+
 async def _decorate_serial(db: AsyncSession, row: m.SerialNumber) -> dict:
-    item = await db.get(Item, row.item_id)
-    wh = await db.get(Warehouse, row.warehouse_id) if row.warehouse_id else None
-    batch = await db.get(m.Batch, row.batch_id) if row.batch_id else None
-    return {
-        "id": row.id, "item_id": row.item_id,
-        "item_code": item.code if item else None,
-        "item_name": item.name if item else None,
-        "is_asset": bool(getattr(item, "is_asset", False)) if item else False,
-        "serial_number": row.serial_number,
-        "imei": row.imei,
-        "batch_id": row.batch_id, "batch_no": batch.batch_no if batch else None,
-        "mfg_date": batch.mfg_date if batch else None,
-        "expiry_date": batch.expiry_date if batch else None,
-        "warehouse_id": row.warehouse_id, "warehouse_name": wh.name if wh else None,
-        "bin_id": row.bin_id, "bin_code": await _bin_code(db, row.bin_id),
-        "bin_floor_level": await _bin_floor(db, row.bin_id),
-        "asset_code": row.asset_code, "consumable_code": row.consumable_code,
-        "status": row.status, "remarks": row.remarks, "is_active": row.is_active,
-    }
+    """One unit. The page-at-a-time version above is what list endpoints use."""
+    return (await _decorate_serials(db, [row]))[0]
 
 
 async def list_batches(db: AsyncSession, params: PageParams, *, item_id: int | None = None,

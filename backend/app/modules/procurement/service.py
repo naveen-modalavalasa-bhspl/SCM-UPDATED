@@ -1439,6 +1439,26 @@ async def update_po_approval_quantities(
                 f"{original.item_code or pid}: quantity cannot go below already received {received}"
             )
 
+    trimmed = {pid: qty for pid, qty in incoming.items()
+               if qty != _d(by_id[pid].quantity)}
+    if not trimmed:
+        return await get_po_detail(db, po.id, user)
+
+    # File what the numbers were BEFORE the approver touched them. Rule 9: a state
+    # change writes an audit row, and here the module already owns the right one —
+    # `pro_po_revisions` is what `amend_po` files and what `/pos/{id}/revisions`
+    # already serves, so a trim shows up on the same trail the screen already draws.
+    # `revision_no` is NOT bumped: that number means "a new version went to the
+    # vendor", and this order has not left the building yet.
+    db.add(PORevision(
+        po_id=po.id, revision_no=po.revision_no or 0,
+        reason="Quantities trimmed during approval",
+        status=po.status, vendor_status=po.vendor_status,
+        snapshot=_po_snapshot(po),
+        changed_by_id=getattr(user, "id", None),
+        changed_by_name=getattr(user, "full_name", None),
+    ))
+
     # apply
     for pid, new_qty in incoming.items():
         line = by_id[pid]
@@ -1456,7 +1476,7 @@ async def update_po_approval_quantities(
 
     await db.commit()
     logger.info("PO %s quantities trimmed during approval by %s: %s",
-                po.po_no, getattr(user, "full_name", user), incoming)
+                po.po_no, getattr(user, "full_name", user), trimmed)
     return await get_po_detail(db, po.id, user)
 
 

@@ -832,9 +832,16 @@ export interface ApprovalTrail {
 /** One order line as it stood in a filed revision, read back out of the snapshot. */
 export interface PORevisionLine {
   item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
   quantity?: number;
   rate?: number;
   tax_percent?: number;
+  /** Line value as it stood. Filed by `_po_snapshot`, which is the only writer of
+   *  this shape — every key here exists because that function emits it. */
+  amount?: number;
+  received_quantity?: number;
 }
 
 /** The lines of a filed revision. Empty when there is no revision to compare against,
