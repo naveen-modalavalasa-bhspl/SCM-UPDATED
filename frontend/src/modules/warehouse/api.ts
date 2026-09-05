@@ -317,22 +317,11 @@ export const startPutaway = (id: number) => post<Putaway>(`${BASE}/putaways/${id
 export const confirmPutaway = (id: number, body: PutawayConfirm) =>
   post<Putaway>(`${BASE}/putaways/${id}/confirm`, body);
 
-/**
- * Bins worth offering for this task, best first.
- *
- * **The endpoint behind this is gone**, and deliberately: nothing suggests a location
- * any more. A putaway may be confirmed into any rung of the tree, so a shortlist of
- * eight bays in front of somebody who may legitimately choose any of nine hundred is a
- * wrong answer with a ranking on it. The location picker walks the hierarchy and the
- * capacity meter measures whatever was chosen.
- *
- * The declaration survives only because this branch carries the qa version of
- * `PutawayForm`, which still imports it. The call 404s, the query falls back to its
- * empty default, and the suggestion strip simply does not render. Delete this the
- * moment that screen is reconciled — it is a compile-time stub, not an API.
- */
-export const suggestBins = (id: number) =>
-  get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`);
+/* `suggestBins` was here. Nothing suggests a location any more — a putaway may be
+ * confirmed into any rung of the tree, so a shortlist of eight bays in front of
+ * somebody who may legitimately choose any of nine hundred is a wrong answer with a
+ * ranking on it. The location picker walks the hierarchy; the capacity meter measures
+ * whatever was chosen. */
 
 export const listStockMovements = (params: ListParams = {}) =>
   get<Page<StockMovement>>(`${BASE}/stock-movements`, params);

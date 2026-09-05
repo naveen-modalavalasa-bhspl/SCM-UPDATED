@@ -6420,6 +6420,98 @@ async def issue_stock_sources(
     return out
 
 
+async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
+                                      user) -> list[dict]:
+    """Follow the document when it changes where the goods are coming from.
+
+    An indent-linked issue is drafted from an approved allocation, and that allocation
+    holds CONCRETE stock rows — `inv_reservations`, one per (bin, batch) it drew on.
+    The storekeeper who then walks the floor regularly finds the goods somewhere else
+    and changes the batch or the storage location on the line.
+
+    Until this ran, that edit was cosmetic. The hold stayed on the rows inventory
+    picked, `post_issue` consumed those exact rows (it consumes the reservation, not
+    the line), and so the stock left a bay the document did not name — while the bay
+    it DID name stayed reserved for a document that had already gone. Two wrong
+    balances from one honest correction.
+
+    So: what the document has stopped naming is **released back to `available_qty`,
+    free for anybody**, and the same quantity is taken where it now points.
+    `allocation.relocate` owns the arithmetic — reservation columns are its to move
+    (rule 7) — and it never changes the total held, so an issue drawing less than was
+    allocated leaves the rest of the allocation exactly where it was.
+
+    Per indent LINE, because that is what a reservation is keyed on, and summed over
+    the issue's own lines first: one ask served out of two bays is two issue lines
+    against one indent line, and looking at either alone would read the other's bay
+    as abandoned.
+    """
+    if issue.direction != IssueDirection.OUT.value:
+        return []
+
+    line_indents = await _line_indent_ids(db, issue)
+    # {(indent, indent line, item): {(bin, batch): quantity}}
+    wanted: dict[tuple[int, int, int], dict[tuple[int, int], Decimal]] = defaultdict(dict)
+    labels: dict[tuple[int, int, int], str] = {}
+    for line in issue.items:
+        if not line.indent_item_id:
+            continue
+        indent_id = line_indents.get(line.id) or issue.indent_id
+        if not indent_id:
+            continue
+        qty = _d(line.issued_qty)
+        if qty <= ZERO:
+            continue
+        key = (indent_id, line.indent_item_id, line.item_id)
+        slot = (int(line.bin_id or 0), int(line.batch_id or 0))
+        wanted[key][slot] = wanted[key].get(slot, ZERO) + qty
+        labels[key] = line.item_code or line.item_name or f"item {line.item_id}"
+
+    moved: list[dict] = []
+    for (indent_id, indent_item_id, item_id), slots in wanted.items():
+        # A document that names no location and no batch is not saying where the goods
+        # are — it is saying nothing. Two shapes arrive like that and neither is a
+        # correction to follow: a point that stocks in bulk (`bin_id` 0 on every line
+        # by design), and `_split_by_reservations` falling back to one unsplit line
+        # when the holds do not add up. Reading either as "move everything to bin 0"
+        # would try to relocate onto a balance row that does not exist, and would fail
+        # the allocation-approval transaction that drafts these issues in the first
+        # place.
+        if all(slot == (0, 0) for slot in slots):
+            continue
+        for move in await stock_allocation.relocate(
+            db,
+            InventoryRefType.RESERVATION.value,
+            indent_id,
+            wanted=slots,
+            ref_line_id=indent_item_id,
+            item_id=item_id,
+            warehouse_id=issue.warehouse_id,
+            ref_no=issue.issue_no,
+            user=user,
+            label=labels[(indent_id, indent_item_id, item_id)],
+        ):
+            moved.append({
+                "item_id": move.item_id,
+                "quantity": str(move.quantity),
+                "from_bin": await _bin_code(db, move.from_bin_id or None),
+                "to_bin": await _bin_code(db, move.to_bin_id or None),
+                "from_batch_id": move.from_batch_id or None,
+                "to_batch_id": move.to_batch_id or None,
+            })
+
+    if moved:
+        # Worth an audit row of its own: a hold silently leaving one bay for another is
+        # exactly the kind of change somebody comes back asking about a month later.
+        await write_audit(
+            db, entity="inv_reservations", entity_id=issue.id,
+            entity_no=issue.issue_no, action=AuditAction.UPDATE, actor=user,
+            before={"reason": "material issue moved off the allocated location"},
+            after={"moves": moved},
+        )
+    return moved
+
+
 async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
                              lines: list[s.IssueItemWrite]) -> None:
     issue.items.clear()
@@ -7042,6 +7134,10 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
     await db.flush()
 
     await _apply_issue_lines(db, issue, data.items)
+    # Before the units are stamped: a relocation changes which balance rows this
+    # document is holding, and `_reserve_issue_serials` validates the units it names
+    # against the line's own bin and batch.
+    await _realign_issue_reservations(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
     if original:
         _validate_issue_return(issue, original)
@@ -7359,6 +7455,10 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
 
     await _clear_issue_serial_reservations(db, issue.id)
     await _apply_issue_lines(db, issue, data.items)
+    # The edit that matters most on this screen: a storekeeper who moves a line onto
+    # the bay the goods are actually in moves inventory's hold with it, and frees the
+    # bay he has left. See `_realign_issue_reservations`.
+    await _realign_issue_reservations(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
     if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
@@ -8026,6 +8126,12 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                         f"{held_here} is reserved in {issue.warehouse_name or 'this warehouse'}."
                     )
 
+                # The hold standing where THIS line says the goods are, first. One
+                # allocation held in two bays is served by two issue lines, and an
+                # unscoped consume let the first line eat the second line's bay — so
+                # the stock left a location the document did not name. Whatever the
+                # named location cannot cover falls back to the document's other
+                # holds, which is what every unbinned and legacy line relies on.
                 slices = await stock_allocation.consume_for_issue(
                     db,
                     InventoryRefType.RESERVATION.value,
@@ -8034,7 +8140,20 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     ref_line_id=line.indent_item_id,
                     item_id=line.item_id,
                     warehouse_id=issue.warehouse_id,
+                    bin_id=line.bin_id or None,
+                    batch_id=line.batch_id or None,
                 )
+                taken = sum((row.quantity for row in slices), ZERO)
+                if taken < qty:
+                    slices = slices + await stock_allocation.consume_for_issue(
+                        db,
+                        InventoryRefType.RESERVATION.value,
+                        line_indent_id,
+                        quantity=qty - taken,
+                        ref_line_id=line.indent_item_id,
+                        item_id=line.item_id,
+                        warehouse_id=issue.warehouse_id,
+                    )
                 for stock in slices:
                     await move_stock(
                         db, item_id=line.item_id, qty=stock.quantity,

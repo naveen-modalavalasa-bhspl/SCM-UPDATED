@@ -72,10 +72,10 @@ async def _item(db, code="IT-1", batch_tracked=False):
     return item
 
 
-async def _stock(db, item, warehouse, qty, batch_id=0, expiry=None):
+async def _stock(db, item, warehouse, qty, batch_id=0, expiry=None, bin_id=NO_BIN):
     row = Stock(item_id=item.id, item_code=item.code, item_name=item.name,
                 warehouse_id=warehouse.id, warehouse_name=warehouse.name,
-                bin_id=NO_BIN, batch_id=batch_id, project_id=NO_PROJECT,
+                bin_id=bin_id, batch_id=batch_id, project_id=NO_PROJECT,
                 expiry_date=expiry, available_qty=Decimal(str(qty)),
                 reserved_qty=Decimal("0"), total_qty=Decimal(str(qty)))
     db.add(row)
@@ -188,3 +188,160 @@ async def test_released_rows_are_kept_not_deleted(db, actor):
     assert len(rows) == 1
     assert rows[0].status == ReservationStatus.RELEASED.value
     assert rows[0].released_at is not None
+
+
+# ---------------- relocation: the storekeeper found the goods somewhere else ------
+#
+# Inventory allocates against the rows that were free when it signed. The person who
+# then walks the floor regularly finds the stock in another bay, and changes the
+# location on the issue. Before `relocate` that edit was cosmetic — the hold stayed
+# where it was, `consume_for_issue` consumed it there, and the goods left a bay the
+# document did not name while the bay it DID name stayed reserved.
+
+
+async def _at(db, item, warehouse, bin_id, batch_id=0):
+    return (await db.execute(select(Stock).where(
+        Stock.item_id == item.id, Stock.warehouse_id == warehouse.id,
+        Stock.bin_id == bin_id, Stock.batch_id == batch_id,
+    ))).scalar_one()
+
+
+async def test_relocate_frees_the_bay_the_document_stopped_naming(db, actor):
+    """The whole point: what is no longer named goes back to `available_qty`, free for
+    anybody, and the same quantity is taken where the picks now point."""
+    wh = await _warehouse(db, "WH-REL1")
+    item = await _item(db, "IT-REL1")
+    await _stock(db, item, wh, 10, bin_id=101)
+    await _stock(db, item, wh, 10, bin_id=202)
+
+    # Inventory reserved all ten out of bay 101 (FIFO takes the first row it finds).
+    await allocation.reserve(db, item.id, Decimal("10"), RefType.RESERVATION.value,
+                             41, "IND-41", actor, ref_line_id=411, item=item)
+    assert (await _at(db, item, wh, 101)).reserved_qty == Decimal("10")
+
+    moves = await allocation.relocate(
+        db, RefType.RESERVATION.value, 41,
+        wanted={(202, 0): Decimal("10")},
+        ref_line_id=411, item_id=item.id, warehouse_id=wh.id, user=actor,
+    )
+
+    left, taken = await _at(db, item, wh, 101), await _at(db, item, wh, 202)
+    assert (left.reserved_qty, left.available_qty) == (Decimal("0"), Decimal("10"))
+    assert (taken.reserved_qty, taken.available_qty) == (Decimal("10"), Decimal("0"))
+    # Nothing physically moved — a reservation is not a movement (rule 7).
+    assert left.total_qty == taken.total_qty == Decimal("10")
+    assert [(m.from_bin_id, m.to_bin_id, m.quantity) for m in moves] \
+        == [(101, 202, Decimal("10"))]
+
+
+async def test_relocate_keeps_the_total_held_exactly_the_same(db, actor):
+    """An issue drawing less than was allocated is not a change of mind about the
+    rest. Only `min(surplus, deficit)` moves; the remainder stays where inventory put
+    it, still held for the indent."""
+    wh = await _warehouse(db, "WH-REL2")
+    item = await _item(db, "IT-REL2")
+    await _stock(db, item, wh, 10, bin_id=101)
+    await _stock(db, item, wh, 10, bin_id=202)
+
+    await allocation.reserve(db, item.id, Decimal("10"), RefType.RESERVATION.value,
+                             42, "IND-42", actor, ref_line_id=421, item=item)
+
+    # The document now issues four, out of the other bay.
+    await allocation.relocate(
+        db, RefType.RESERVATION.value, 42,
+        wanted={(202, 0): Decimal("4")},
+        ref_line_id=421, item_id=item.id, warehouse_id=wh.id, user=actor,
+    )
+
+    left, taken = await _at(db, item, wh, 101), await _at(db, item, wh, 202)
+    assert left.reserved_qty == Decimal("6")     # the untouched balance of the hold
+    assert taken.reserved_qty == Decimal("4")
+    assert await allocation.reserved_quantity(
+        db, RefType.RESERVATION.value, 42, ref_line_id=421) == Decimal("10")
+
+
+async def test_relocate_splits_one_hold_over_the_two_bays_it_is_picked_from(db, actor):
+    """The shape this screen exists for: one ask, two picks. Fifteen monitors sitting
+    five in one bay and ten in another are two picks of one allocation."""
+    wh = await _warehouse(db, "WH-REL3")
+    item = await _item(db, "IT-REL3")
+    await _stock(db, item, wh, 15, bin_id=101)
+    await _stock(db, item, wh, 15, bin_id=202)
+
+    await allocation.reserve(db, item.id, Decimal("15"), RefType.RESERVATION.value,
+                             43, "IND-43", actor, ref_line_id=431, item=item)
+
+    await allocation.relocate(
+        db, RefType.RESERVATION.value, 43,
+        wanted={(101, 0): Decimal("5"), (202, 0): Decimal("10")},
+        ref_line_id=431, item_id=item.id, warehouse_id=wh.id, user=actor,
+    )
+
+    assert (await _at(db, item, wh, 101)).reserved_qty == Decimal("5")
+    assert (await _at(db, item, wh, 202)).reserved_qty == Decimal("10")
+
+
+async def test_relocate_refuses_rather_than_losing_the_hold(db, actor):
+    """Nothing is released until the whole move is known to be placeable. A half-done
+    relocation is a hold this document has given up and cannot get back."""
+    wh = await _warehouse(db, "WH-REL4")
+    item = await _item(db, "IT-REL4")
+    await _stock(db, item, wh, 10, bin_id=101)
+    # Bay 202 holds three, and somebody else is already holding all of them.
+    other = await _stock(db, item, wh, 3, bin_id=202)
+    other.available_qty, other.reserved_qty = Decimal("0"), Decimal("3")
+    await db.flush()
+
+    await allocation.reserve(db, item.id, Decimal("10"), RefType.RESERVATION.value,
+                             44, "IND-44", actor, ref_line_id=441, item=item)
+
+    with pytest.raises(Exception):
+        await allocation.relocate(
+            db, RefType.RESERVATION.value, 44,
+            wanted={(202, 0): Decimal("10")},
+            ref_line_id=441, item_id=item.id, warehouse_id=wh.id, user=actor,
+            label="IT-REL4",
+        )
+
+    # The original hold is untouched.
+    assert (await _at(db, item, wh, 101)).reserved_qty == Decimal("10")
+
+
+async def test_relocate_does_nothing_when_the_picks_agree_with_the_allocation(db, actor):
+    """The overwhelmingly common case — a document issued exactly where it was told
+    to. It must not churn reservation rows for nothing."""
+    wh = await _warehouse(db, "WH-REL5")
+    item = await _item(db, "IT-REL5")
+    await _stock(db, item, wh, 10, bin_id=101)
+
+    await allocation.reserve(db, item.id, Decimal("10"), RefType.RESERVATION.value,
+                             45, "IND-45", actor, ref_line_id=451, item=item)
+
+    moves = await allocation.relocate(
+        db, RefType.RESERVATION.value, 45,
+        wanted={(101, 0): Decimal("10")},
+        ref_line_id=451, item_id=item.id, warehouse_id=wh.id, user=actor,
+    )
+    assert moves == []
+    assert (await _at(db, item, wh, 101)).reserved_qty == Decimal("10")
+
+
+async def test_consume_for_issue_takes_the_hold_at_the_location_it_is_told_to(db, actor):
+    """One allocation held in two bays is served by two issue LINES. Without the
+    (bin, batch) narrowing the first line ate the second line's bay, and the stock
+    left a location the document did not name."""
+    wh = await _warehouse(db, "WH-REL6")
+    item = await _item(db, "IT-REL6")
+    await _stock(db, item, wh, 5, bin_id=101)
+    await _stock(db, item, wh, 10, bin_id=202)
+
+    await allocation.reserve(db, item.id, Decimal("15"), RefType.RESERVATION.value,
+                             46, "IND-46", actor, ref_line_id=461, item=item)
+
+    slices = await allocation.consume_for_issue(
+        db, RefType.RESERVATION.value, 46, quantity=Decimal("10"),
+        ref_line_id=461, item_id=item.id, warehouse_id=wh.id, bin_id=202,
+    )
+    assert [(s.bin_id, s.quantity) for s in slices] == [(202, Decimal("10"))]
+    # Bay 101's hold is still standing, for the line that names it.
+    assert (await _at(db, item, wh, 101)).reserved_qty == Decimal("5")

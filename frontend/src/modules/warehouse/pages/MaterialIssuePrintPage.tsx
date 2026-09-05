@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/shared/api/client";
 import { getIssue, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
+import { MapPin } from "lucide-react";
 
 export function MaterialIssuePrintPage() {
   const { id } = useParams();
@@ -140,6 +141,12 @@ export function MaterialIssuePrintPage() {
               <td className="py-3 pl-2 pr-2 text-neutral-500">{index + 1}</td>
               <td className="py-3 pr-2">
                 <div className="font-bold text-neutral-900">{line.item_name ?? "—"}</div>
+                {line.bin_code && (
+                  <div className="mt-1 flex items-center gap-1 font-mono text-[11px] text-neutral-500">
+                    <MapPin className="h-3 w-3 shrink-0" />
+                    {line.bin_code}
+                  </div>
+                )}
               </td>
               <td className="py-3 pr-2">
                 <div className="font-mono text-[11px] text-neutral-700">{line.item_code ?? "—"}</div>
