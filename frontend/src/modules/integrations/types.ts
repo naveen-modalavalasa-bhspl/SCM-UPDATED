@@ -368,6 +368,16 @@ export interface WebhookDocs {
 
 /** Whether B-CAMS is wired up and what has landed. Carries no secret: the key itself
  *  is kept server-side because verifying an HMAC needs it, and nothing reads it out. */
+/** One hand-written integration, as the server enumerates them. `key` is both the URL
+ *  segment its feeds answer on and the scope an API key must carry to reach them. */
+export interface Adapter {
+  key: string;
+  name: string;
+  description: string;
+  scope: string;
+  base_path: string;
+}
+
 export interface CamsStatus {
   configured: boolean;
   rotated_at: string | null;

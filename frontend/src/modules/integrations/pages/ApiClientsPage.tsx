@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity, Columns3, MonitorSmartphone, Plug, Plus, Radio, Server, ShieldCheck,
+  Stethoscope,
 } from "lucide-react";
 import {
   Button, EmptyState, ErrorBanner, FilterBar, PageHeader, ResponsiveList,
@@ -11,6 +12,7 @@ import {
 import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { integrationsApi } from "../api";
 import { ActivityLog } from "../components/ActivityLog";
+import { CamsPanel } from "../components/CamsPanel";
 import { ClientFormModal } from "../components/ClientFormModal";
 import { FlowExplainer } from "../components/Explain";
 import { HealthPill, healthOf } from "../components/Health";
@@ -21,13 +23,20 @@ import type { ApiClient } from "../types";
  *  systems that PUSH into it. Same screen because they are the same question — who is
  *  connected, and on what terms.
  *
- *  The third tab is the answer to the question the first two raise and never settle:
- *  it is connected, but is it WORKING. It spans both, because a partner going live
- *  reads from us and pushes to us on the same afternoon and the two halves of that
+ *  B-CAMS is the third answer to that question and cannot be either of the first two:
+ *  it pushes AND pulls, and two of the five things it pushes deduct stock, which no
+ *  registered webhook may ever do. It is a hand-written adapter, so it gets its own
+ *  tab rather than a row on one of theirs — but the same furniture, in the same order,
+ *  because it is still "who is connected, and on what terms".
+ *
+ *  The last tab is the answer to the question the other three raise and never settle:
+ *  it is connected, but is it WORKING. It spans all of them, because a partner going
+ *  live reads from us and pushes to us on the same afternoon and the halves of that
  *  story were on different screens. */
 const TABS = [
   { key: "clients", label: "Applications", icon: Plug },
   { key: "webhooks", label: "Webhooks", icon: Radio },
+  { key: "cams", label: "B-CAMS", icon: Stethoscope },
   { key: "activity", label: "Activity log", icon: Activity },
 ];
 
@@ -65,6 +74,18 @@ const WEBHOOK_SETUP: { title: string; note: string }[] = [
     note: "Connection details writes out the URL, the headers and a worked example." },
 ];
 
+/** And the third, which is three moves for the same reason — except that step one is
+ *  already done for you here. The adapter is code, so there is nothing to register:
+ *  what is left is the key, the secret and the address. */
+const CAMS_SETUP: { title: string; note: string }[] = [
+  { title: "Issue them an API key",
+    note: "On the Applications tab, against their application. Its scopes must be empty or include `cams`." },
+  { title: "Issue the shared secret",
+    note: "They sign every body with it. It is shown once and never again." },
+  { title: "Send them the address",
+    note: "Connection details writes out the five endpoints, the headers and a worked example." },
+];
+
 /**
  * The applications SCM serves. One row each, with enough on the row to answer "is this
  * integration alive?" without opening it — which is a different question from whether
@@ -78,9 +99,7 @@ export default function ApiClientsPage() {
   // screen the reader left — otherwise closing a webhook drops them on Applications.
   const [params, setParams] = useSearchParams();
   const requestedTab = params.get("tab") ?? "clients";
-  const tab = requestedTab === "cams"
-    ? "webhooks"
-    : TABS.some((item) => item.key === requestedTab) ? requestedTab : "clients";
+  const tab = TABS.some((item) => item.key === requestedTab) ? requestedTab : "clients";
   const setTab = (next: string) => setParams(
     next === "clients" ? {} : { tab: next }, { replace: true },
   );
@@ -212,6 +231,40 @@ export default function ApiClientsPage() {
 
       {tab === "activity" ? (
         <ActivityLog />
+      ) : tab === "cams" ? (
+        <>
+          {/* The same diagram as the webhook tab's, pointing the same way, with the
+              one difference stated where a reader will meet it: what crosses this wire
+              can change our stock. */}
+          <FlowExplainer
+            icon={Stethoscope}
+            title="B-CAMS"
+            // Brand, not a status tone: `ok` and `warn` are what the health pills two
+            // inches below mean, and a green title chip beside them reads as a verdict
+            // on the integration rather than as its colour.
+            from={SCM_END}
+            to={{
+              icon: Stethoscope, label: "B-CAMS",
+              note: "the clinic app, out in the field",
+            }}
+            forward={false}
+            gate={{
+              icon: ShieldCheck,
+              label: "A signed body, on one of five endpoints",
+            }}
+            plainly="It is the clinic app telling us what the field actually used — and unlike a webhook, two of the things it says move our stock."
+            steps={CAMS_SETUP}
+          >
+            B-CAMS pushes five events and reads fourteen feeds back, in shapes the
+            endpoint builder cannot compose — so it is a hand-written adapter rather
+            than a registration on either tab beside this one. Consumption and wastage
+            DEDUCT what the field reported, through the same movement every other
+            issue goes through; the other three record and change nothing. There is
+            nothing to register here: give them a key, a secret and the address.
+          </FlowExplainer>
+
+          <CamsPanel />
+        </>
       ) : tab === "webhooks" ? (
         <>
           {/* SCM stays on the LEFT in both diagrams and the packets run the other way

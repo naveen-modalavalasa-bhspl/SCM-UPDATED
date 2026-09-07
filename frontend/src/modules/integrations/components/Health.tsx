@@ -1,6 +1,6 @@
 import { TONES, type Tone } from "@/shared/components";
 import { fmtRelative } from "@/shared/datetime";
-import type { ApiClient, Webhook } from "../types";
+import type { ApiClient, CamsStatus, Webhook } from "../types";
 
 /**
  * Is this integration actually working?
@@ -117,5 +117,36 @@ export function healthOfWebhook(hook: Pick<Webhook,
   return {
     label: "Live", tone: "ok",
     note: `Last push ${fmtRelative(hook.last_received_at)}.`,
+  };
+}
+
+/**
+ * And of a hand-written adapter. The same four words, chosen the same way, so a reader
+ * crossing from the Webhooks tab to this one is not learning a second vocabulary.
+ *
+ * Two rungs of the webhook ladder are missing here on purpose rather than by omission:
+ * an adapter cannot be switched off (it is code, not a registration) and it cannot be
+ * unsigned (`require_signature` is answered by the receiver, not by an admin). What is
+ * left is the one thing that genuinely stops a write from landing — no shared secret —
+ * and then whether anything has ever actually arrived.
+ */
+export function healthOfAdapter(status: Pick<CamsStatus,
+  "configured" | "last_received_at">): Health {
+  if (!status.configured) {
+    return {
+      label: "Not usable yet", tone: "warn",
+      note: "Still needs a shared secret. Every write is refused until one is issued.",
+    };
+  }
+  if (!status.last_received_at) {
+    // Stored, like a webhook's and unlike an application's, so the absence is evidence.
+    return {
+      label: "Ready", tone: "info",
+      note: "Set up. Nothing has been pushed to it yet.",
+    };
+  }
+  return {
+    label: "Live", tone: "ok",
+    note: `Last push ${fmtRelative(status.last_received_at)}.`,
   };
 }
