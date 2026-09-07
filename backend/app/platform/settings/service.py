@@ -152,6 +152,11 @@ async def get_app_settings(db: AsyncSession) -> SettingsOut:
     return settings
 
 
+async def get_company_letterhead(db: AsyncSession) -> CompanySettings:
+    """The company block alone, for the print templates every module renders."""
+    return (await get_app_settings(db)).company
+
+
 async def update_app_settings(db: AsyncSession, data: SettingsIn, user) -> SettingsOut:
     before = (await get_app_settings(db)).model_dump()
     for group, (_model, fields) in SETTINGS_SPEC.items():

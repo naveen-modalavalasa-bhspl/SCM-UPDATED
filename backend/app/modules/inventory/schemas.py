@@ -84,6 +84,11 @@ class MovementRow(BaseModel):
     serial_numbers: list[str] | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
+    # Every unit code this movement carried, for an item that is not serial-tracked —
+    # where the code IS the unit's identity. A list, because the screen's code column
+    # lists and copies them one per line; `asset_code` / `consumable_code` above stay
+    # the single code they have always been.
+    unit_codes: list[str] | None = None
     # FIXED 2026-08-21 — the lot a movement touched. `stk_ledger` has carried both
     # since it was written and `list_movements` already reads them to look the codes
     # up, but neither was on the wire: the screen could only ask the unit lookup for

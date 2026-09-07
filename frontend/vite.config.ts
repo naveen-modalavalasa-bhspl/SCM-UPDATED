@@ -18,6 +18,19 @@ export default defineConfig({
     host: true,
     port: 5173,
     strictPort: true,
+    // Compile the screens BEFORE they are clicked (2026-09-04).
+    //
+    // App.tsx moved every route behind `React.lazy` so a deployed user downloads one
+    // screen instead of all 120. The dev server has no bundle, so the same change
+    // moved each screen's transform to the moment it is first navigated to — the
+    // route and its whole import tree (HeroUI, recharts, xlsx) compiled on the click.
+    // Warmup does that work at startup instead, while the login screen is up.
+    //
+    // Dev server only. `vite build` is Rollup and never reads `server.*`, so the
+    // deployed bundle is byte-identical with or without this.
+    warmup: {
+      clientFiles: ["./src/pages/*.tsx", "./src/modules/*/pages/**/*.tsx"],
+    },
     // Accept any Host header. Vite's DNS-rebinding guard rejects tunnel hostnames
     // (ngrok, Cloudflare) it was not told about, which is what blocks demoing the
     // dev server over a share link. Dev and preview only — `vite build` output is
@@ -49,6 +62,19 @@ export default defineConfig({
     proxy: {
       "/api": { target: apiTarget, changeOrigin: true },
     },
+  },
+  // The heavy dependencies, prebundled at boot rather than mid-navigation.
+  //
+  // Vite discovers dependencies by crawling from the entry. Behind lazy routes these
+  // five are not reachable until the screen that uses them is opened, and meeting a
+  // new dependency then triggers a re-optimisation AND A FULL PAGE RELOAD — which is
+  // the worst of what a lazy dev server feels like, because it throws away the state
+  // of the screen you just opened. Naming them makes that happen once, at startup.
+  //
+  // Dev server only, exactly like `server.warmup`: the production build prebundles
+  // nothing and ignores this key.
+  optimizeDeps: {
+    include: ["recharts", "xlsx", "qrcode.react", "react-barcode", "react-to-print"],
   },
   build: {
     chunkSizeWarningLimit: 1000,

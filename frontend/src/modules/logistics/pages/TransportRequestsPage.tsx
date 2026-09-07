@@ -14,6 +14,7 @@ import {
   load, modeLabel, modeTint, money, nextMove, TR_STATUSES,
 } from "../components/modeCopy";
 import type { TransportSummary, TRListRow } from "../transportTypes";
+import { TONE_MINT } from "@/shared/components/tones";
 
 const SIZE = 20;
 
@@ -209,7 +210,7 @@ export function TransportRequestsPage() {
               onClick={() => nav("/logistics/shipments/new?direction=return")}>
               Return leg
             </Button>
-            <Button onClick={() => nav("/logistics/shipments/new")}>
+            <Button className={TONE_MINT} onClick={() => nav("/logistics/shipments/new")}>
               New shipment
             </Button>
           </Can>

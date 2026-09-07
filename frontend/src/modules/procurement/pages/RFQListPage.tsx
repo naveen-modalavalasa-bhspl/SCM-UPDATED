@@ -1,9 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Button, Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList,
-  StatusPill, type Column,
-} from "@/shared/components";
+import { Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import type { RFQListRow } from "../types";

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Award, Check, Search, Trophy, ChevronDown, ChevronRight, Star } from "lucide-react";
-import { Button, Can, Card, ScrollBox, StatusPill } from "@/shared/components";
+import { Can, Card, ScrollBox, StatusPill } from "@/shared/components";
+import { Button } from "./ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { money } from "../pages/RequisitionListPage";
 import type { Comparison, ComparisonCell, ComparisonTotal } from "../types";

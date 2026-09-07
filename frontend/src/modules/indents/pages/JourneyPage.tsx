@@ -41,7 +41,11 @@ function stageTone(stage: IndentJourneyStage) {
   if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return "border-warn bg-warn-bg text-warn";
   if (status === "CANCELLED") return "border-neutral bg-neutral-bg text-neutral";
   if (stage.is_current) return "border-brand bg-brand/5 text-brand";
-  if (["APPROVED", "SUBMITTED", "COMPLETED", "ACKNOWLEDGED"].includes(status)) return "border-ok bg-ok text-white";
+  // The brand sweep, matching the compact stepper and the shipment one: `.bg-brand`
+  // carries the gradient as a background IMAGE, so the dot is the four-stop Bavya
+  // fill rather than green. Rejected/returned/cancelled above keep their semantic
+  // colours — only a finished stage wears the brand.
+  if (["APPROVED", "SUBMITTED", "COMPLETED", "ACKNOWLEDGED"].includes(status)) return "border-transparent bg-brand text-white";
   if (status === "NOT_REQUIRED") return "border-line bg-content2 text-muted";
   return "border-line bg-white text-muted";
 }
@@ -107,7 +111,9 @@ function StageIcon({ stage }: { stage: IndentJourneyStage }) {
 /** The leg's colour, carried by its edge alone — never by a second tick mark. */
 function trackAccent(state: JourneyTrackState) {
   const accents: Record<JourneyTrackState, string> = {
-    COMPLETED: "border-l-ok",
+    // Flat crimson, not the sweep: this is a 4px BORDER, and a border takes a colour,
+    // never a gradient.
+    COMPLETED: "border-l-[var(--grad-3)]",
     CURRENT: "border-l-brand",
     PENDING: "border-l-line",
     REJECTED: "border-l-bad",

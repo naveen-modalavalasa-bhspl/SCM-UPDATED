@@ -20,8 +20,8 @@ class MailboxStatusOut(BaseModel):
     from_name: str = ""
 
 
-class MailSendIn(BaseModel):
-    """One outgoing message.
+class MailComposeIn(BaseModel):
+    """One outgoing message as the Compose form posts it. THE WIRE SHAPE.
 
     `to` is a list, not the comma-separated string the form types: splitting is the
     SCREEN's job, and a list is the only shape that cannot silently send to an address
@@ -30,7 +30,23 @@ class MailSendIn(BaseModel):
     to: list[EmailStr] = Field(min_length=1, max_length=50)
     cc: list[EmailStr] = Field(default_factory=list, max_length=50)
     subject: str = Field(min_length=1, max_length=500)
+    #: The plain-text half, always: what a person types, and — for an internal caller
+    #: that also supplies html — the fallback a text-only reader and half the spam
+    #: filters will see. `service.send_mail` wraps it in the house template.
     body: str = Field(min_length=1)
+
+
+class MailSendIn(MailComposeIn):
+    """The same message, plus an already-built html half. INTERNAL ONLY.
+
+    Kept off `MailComposeIn`, which is what the route binds, so the field cannot
+    arrive from the wire: a caller able to post arbitrary html is a caller able to
+    dress a message up as any letterhead they like, and `mail.send` is a permission a
+    good many desks hold. Procurement's order copy is the one user of it — it builds
+    its own table of lines and passes it here rather than typing markup into `body`
+    and hoping the transport renders it (which is exactly what used to happen).
+    """
+    html: str | None = None
 
 
 class MailMessageOut(BaseModel):
@@ -61,6 +77,10 @@ class InboxMessageOut(BaseModel):
     date: datetime | None = None
     preview: str
     body: str
+    #: The sender's `text/html`, empty when they sent none. UNTRUSTED markup from an
+    #: outside mailbox: the screen renders it in a sandboxed, script-less frame on a
+    #: null origin and never inside our own document.
+    body_html: str = ""
     seen: bool
 
 

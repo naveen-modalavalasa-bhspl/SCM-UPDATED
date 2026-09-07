@@ -97,8 +97,8 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="PENDING_APPROVAL" journey={runtime} />);
 
-    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-ok");
-    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-ok");
+    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-brand");
     expect(screen.getByText("Stage 3 of 7 · Approvals")).toBeInTheDocument();
     expect(screen.getByText("Waiting for OE review")).toBeInTheDocument();
@@ -173,8 +173,8 @@ describe("FlowStepper", () => {
       6: phase(6, "Delivery", "PENDING", true),
     }))} />);
 
-    expect(screen.getByLabelText("Allocation, completed")).toHaveClass("bg-ok");
-    expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-ok");
+    expect(screen.getByLabelText("Allocation, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("In-Transit, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Acknowledgement, pending")).toHaveClass("border-line");
   });
@@ -310,8 +310,8 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="PENDING_APPROVAL" journey={stale} />);
 
-    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-ok");
-    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-ok");
+    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
     expect(screen.getAllByRole("listitem")).toHaveLength(7);

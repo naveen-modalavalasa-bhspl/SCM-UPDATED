@@ -44,3 +44,8 @@ export type { KpiTileSpec, ContextStatSpec, Tone } from "./KpiStrip";
 // list already held in its data and none of them drew, so tracing a row to its origin
 // meant opening rows one at a time.
 export { SourceRef, SourceRefLine, type SourceRefCandidate } from "./SourceRef";
+
+// The cold-open splash: the SCM mark lit with the brand sweep, shown while the
+// session is being resolved. Not for in-page waits — those stay quiet.
+export { AppSplash } from "./AppSplash";
+export * from "./tones";

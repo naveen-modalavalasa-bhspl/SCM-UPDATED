@@ -21,6 +21,7 @@ import type {
   OutboundInspection as Inspection, OutboundInspectionItemWrite as InspectionItemWrite, InspectionParameter, OutboundInspectionWrite as InspectionWrite, Issue as Receipt,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 /**
  * Inspect a receipt line by line.
@@ -476,11 +477,11 @@ export default function OutboundQualityInspectionForm({
             )}
             {editing && doc?.status === "PENDING_APPROVAL" && (
               <Can do="qc_outward.approve">
-                <Button variant="dangerSoft" onClick={() => decide.mutate("REJECT")}
+                <Button className={TONE_REJECT} variant="dangerSoft" onClick={() => decide.mutate("REJECT")}
                         disabled={decide.isPending}>
                   Reject
                 </Button>
-                <Button onClick={() => decide.mutate("APPROVE")} disabled={decide.isPending}>
+                <Button className={TONE_APPROVE} onClick={() => decide.mutate("APPROVE")} disabled={decide.isPending}>
                   {decide.isPending ? "Working…" : "Approve"}
                 </Button>
               </Can>

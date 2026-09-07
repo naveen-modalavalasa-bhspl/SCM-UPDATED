@@ -1,9 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button, Card, ErrorBanner, Input, PageHeader, ResponsiveList, StatusPill,
-  useToast, type Column,
-} from "@/shared/components";
+import { Card, ErrorBanner, Input, PageHeader, ResponsiveList, StatusPill, useToast, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { api } from "@/shared/api/client";
 import { supplierAccountApi } from "../api";

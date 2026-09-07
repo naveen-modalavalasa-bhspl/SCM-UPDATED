@@ -13,6 +13,7 @@ import {
   listReplenishmentRules, saveReplenishmentRule,
 } from "../api";
 import type { ReplenishmentRule } from "../types";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /**
  * Items whose available quantity has fallen under their reorder level.
@@ -382,7 +383,7 @@ export function StockReplenishmentView() {
       key: "action",
       header: "",
       render: (r) => (
-        <Button variant="subtle" onClick={() => raiseIndent(r)}>
+        <Button className={TONE_MINT} variant="subtle" onClick={() => raiseIndent(r)}>
           <FilePlus2 size={14} /> Raise request
         </Button>
       ),
@@ -478,7 +479,7 @@ export function StockReplenishmentView() {
                 <span className="text-muted">Reorder at {r.reorder_level}</span>
               </div>
               <div className="text-sm">Suggested order: <strong>{r.suggested_order_qty} {r.uom_code}</strong></div>
-              <Button variant="subtle" onClick={() => raiseIndent(r)}>
+              <Button className={TONE_MINT} variant="subtle" onClick={() => raiseIndent(r)}>
                 <FilePlus2 size={14} /> Raise request
               </Button>
             </div>

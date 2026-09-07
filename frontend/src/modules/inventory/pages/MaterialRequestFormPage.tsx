@@ -6,6 +6,7 @@ import { Button, Card, Field, Input, PageHeader, Select } from "@/shared/compone
 import { todayIst } from "@/shared/datetime";
 import { createMaterialRequest, getCatalogItems } from "../api";
 import { alerts } from "@/modules/alerts";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /** One row of the request being typed. Kept as strings — a half-typed quantity is a
  *  string, and coercing on every keystroke fights the person entering it. */
@@ -85,7 +86,7 @@ export function MaterialRequestFormPage() {
             <Button variant="subtle" onClick={() => nav("/inventory/material-requests")}>
               Back
             </Button>
-            <Button
+            <Button className={TONE_MINT}
               disabled={!ready.length || duplicated.size > 0 || save.isPending}
               onClick={() => save.mutate()}
             >
@@ -197,7 +198,7 @@ export function MaterialRequestFormPage() {
         <Button variant="subtle" onClick={() => nav("/inventory/material-requests")}>
           Cancel
         </Button>
-        <Button
+        <Button className={TONE_MINT}
           disabled={!ready.length || duplicated.size > 0 || save.isPending}
           onClick={() => save.mutate()}
         >

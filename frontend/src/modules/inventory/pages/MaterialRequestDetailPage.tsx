@@ -22,6 +22,7 @@ import { HistoryTimeline } from "@/modules/approvals/components/HistoryTimeline"
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { MaterialRequestItem } from "../types";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 /**
  * One material request: the shortfall an allocation could not cover, and the buttons
@@ -422,7 +423,7 @@ export function MaterialRequestDetailPage() {
           {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
           <div className="flex flex-wrap gap-2">
             <Can do="mr.approve">
-              <Button
+              <Button className={TONE_APPROVE}
                 onClick={() => void decide(true)}
                 disabled={act.isPending || save.isPending || problems.length > 0}
               >
@@ -430,7 +431,7 @@ export function MaterialRequestDetailPage() {
               </Button>
             </Can>
             <Can do="mr.reject">
-              <Button variant="subtle" onClick={() => void decide(false)} disabled={act.isPending}>
+              <Button className={TONE_REJECT} variant="subtle" onClick={() => void decide(false)} disabled={act.isPending}>
                 Reject
               </Button>
             </Can>

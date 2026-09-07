@@ -20,6 +20,7 @@ import {
 } from "../reportAnalytics";
 import type { ApprovalReportRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 const COLORS = ["#4169e1", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2"];
 const TYPE_LABELS: Record<string, string> = {
@@ -157,7 +158,7 @@ export function ApprovalReportsPage() {
     <PageHeader
       eyebrow="Approvals"
       title="Approval reports"
-      actions={<Button variant="ghost" disabled={!rows.length} onClick={exportExcel}><Download className="h-4 w-4" /> Export Excel</Button>}
+      actions={<Button className={TONE_BLUE} variant="ghost" disabled={!rows.length} onClick={exportExcel}><Download className="h-4 w-4" /> Export Excel</Button>}
     />
     {error && <p className="mb-4 rounded-lg bg-danger/10 p-3 text-sm text-danger">{(error as Error).message}</p>}
 

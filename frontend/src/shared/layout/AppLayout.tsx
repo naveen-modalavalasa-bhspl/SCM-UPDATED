@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type React from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LogOut, Boxes, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react";
+import { LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react";
 import { getTheme, setTheme, type ThemeChoice } from "@/shared/theme";
 import {
   Avatar,
@@ -13,6 +13,9 @@ import {
   SelectItem,
 } from "@heroui/react";
 import { useAuth } from "@/shared/auth/AuthContext";
+import scmMark from "@/assets/scm-mark.png";
+import bavyaLogo from "@/assets/bavya-logo.png";
+import bavyaGlyph from "@/assets/bavya-glyph.png";
 import { MenuIcon } from "@/shared/layout/icons";
 import { ModuleTabs } from "@/shared/layout/ModuleTabs";
 import { ForbiddenPage } from "@/pages/NotFoundPage";
@@ -134,17 +137,51 @@ function wheelToScroll(e: React.WheelEvent<HTMLDivElement>) {
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
-      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand text-white shadow-sm">
-        <Boxes className="h-5 w-5" strokeWidth={2.2} />
+      {/* The SCM wordmark, lifted from the sign-in artwork so the rail and the door
+          the user just came through carry the same mark. It is a picture of the word
+          "SCM", which is why it is `alt=""` and hidden from the reader: the name is
+          already spelled out beside it, and a screen reader announcing "SCM logo,
+          SCM ERP" says it twice. Collapsed, the text is gone and the alt comes back. */}
+      {/* The mark alone. It was set beside "ERP / SUPPLY CHAIN", and between the
+          wordmark, three stacked words and the collapse button there was not 236px to
+          go round — the label wrapped to three lines and ran under the button. The
+          artwork's mark already says SCM; the name lives in `alt` for anyone who
+          cannot see it. */}
+      <img
+        src={scmMark}
+        alt="SCM ERP — Supply Chain"
+        className={`w-auto shrink-0 object-contain ${compact ? "h-5" : "h-9"}`}
+      />
+    </div>
+  );
+}
+
+/** Who made this.
+ *
+ *  Drawn in the two places that carry identity rather than navigation: under the
+ *  profile card in the rail, and under the same person's name in the account menu,
+ *  which is the ONLY one of the two a phone has — the rail does not exist below md
+ *  and the bottom bar is the module list, already scrolling horizontally with a dozen
+ *  items in it. Putting it there would have cost a module its place.
+ *
+ *  `Powered by` wears the brand sweep through background-clip, which is the only way
+ *  a gradient becomes TEXT. The solid `text-brand` under it is what shows if a
+ *  browser refuses `-webkit-text-fill-color` — never an invisible word. */
+function PoweredBy({ className = "", compact = false }: { className?: string; compact?: boolean }) {
+  return (
+    <div className={`flex items-center ${compact ? "gap-1.5" : "justify-center gap-2"} ${className}`}>
+      <span
+        className={`bg-clip-text font-semibold uppercase text-brand [background-image:var(--brand-gradient)] [-webkit-text-fill-color:transparent] ${
+          compact ? "text-[7px] tracking-[0.12em]" : "text-[9px] tracking-[0.14em]"
+        }`}
+      >
+        Powered by
       </span>
-      {!compact && (
-        <div className="leading-tight">
-          <div className="font-display text-[15px] font-bold text-ink">
-            SCM<span className="text-signal">·</span>ERP
-          </div>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-muted">Supply Chain</div>
-        </div>
-      )}
+      <img
+        src={bavyaLogo}
+        alt="Bavya"
+        className={`w-auto object-contain ${compact ? "h-[11px]" : "h-[15px]"}`}
+      />
     </div>
   );
 }
@@ -281,6 +318,22 @@ export function AppLayout() {
   const blocked = owner !== null && !allowedPaths.has(owner);
   // `compact` = the header copy. 208px of dropdown does not fit there beside a brand,
   // a bell and an avatar on a 360px screen — it pushed the avatar half off the edge.
+  /* Stamp the module on <body> so it can tint the page ground (`html:not(.dark)
+     body[data-module=…]` in index.css). It goes on the BODY, not on a wrapper div:
+     the ground is painted by the body's own background, and a div can only cover the
+     area its content happens to fill — a short page then showed the module's tint
+     down to the fold and the default below it.
+
+     A caution for the modules still to come: the tint has to stay near-neutral, and
+     green needs more care than the rest. Green MEANS approved here (`--color-ok`),
+     and Approvals is also where things get rejected — painting that page in the
+     approval colour is the one hue on this palette that can state an outcome the
+     documents have not reached. Kept to ~2% saturation for exactly that reason. */
+  useEffect(() => {
+    document.body.dataset.module = activeRoot?.code ?? "";
+    return () => { delete document.body.dataset.module; };
+  }, [activeRoot?.code]);
+
   const positionSelector = (compact = false) => me?.positions.length ? (
     <Select
       aria-label="Working position"
@@ -309,8 +362,22 @@ export function AppLayout() {
   return (
     <div className="flex min-h-full">
       {/* Sidebar — module names only */}
+      {/* The gradient the rail icons are stroked with. An SVG paint server has to
+          exist in the document to be referenced by `url(#…)`, so it is rendered once,
+          here, at zero size — `display:none` would take the definition with it. The
+          stops read the same --grad-* variables the CSS sweep is built from. */}
+      <svg width="0" height="0" aria-hidden focusable="false" className="absolute">
+        <defs>
+          <linearGradient id="rail-gradient" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="var(--grad-1)" />
+            <stop offset="30%" stopColor="var(--grad-2)" />
+            <stop offset="65%" stopColor="var(--grad-3)" />
+            <stop offset="100%" stopColor="var(--grad-4)" />
+          </linearGradient>
+        </defs>
+      </svg>
       <aside
-        className={`fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-line bg-content1/80 px-3 py-5 backdrop-blur transition-[width] duration-200 md:flex ${
+        className={`fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-line bg-[var(--color-chrome)] px-3 py-5 backdrop-blur-xl transition-[width] duration-200 md:flex ${
           collapsed ? "w-[72px]" : "w-[236px]"
         }`}
       >
@@ -337,7 +404,19 @@ export function AppLayout() {
             <PanelLeftOpen className="h-[18px] w-[18px]" />
           </button>
         )}
-        <nav className={`flex-1 space-y-1 ${collapsed ? "mt-4" : "mt-7"}`}>
+        {/* `min-h-0` + `overflow-y-auto`: a flex child will not shrink below its
+            content without the first, so twelve modules on a short viewport grew the
+            rail instead of scrolling and shoved the profile card and everything under
+            it out of sight. The list scrolls; the footer keeps its place.
+            The bar itself is hidden — the same three declarations the mobile module
+            bar below uses. A native scrollbar is ~15px of chrome taken out of a 72px
+            rail, and it comes out of the CONTENT box, so every icon shifted off its
+            centre the moment the list grew long enough to scroll. */}
+        <nav
+          className={`nav-rail-scroll min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+            collapsed ? "mt-4" : "mt-7"
+          }`}
+        >
           {menu.map((root) => {
             const active = root === activeRoot;
             return (
@@ -355,14 +434,14 @@ export function AppLayout() {
                   active ? "bg-brand-050 text-brand" : "text-muted hover:bg-default hover:text-ink"
                 }`}
               >
-                <MenuIcon name={root.icon} className="h-[18px] w-[18px] shrink-0" />
+                <MenuIcon name={root.icon} className="icon-gradient h-[18px] w-[18px] shrink-0" />
                 {!collapsed && root.name}
               </button>
             );
           })}
         </nav>
         <div
-          className={`mt-2 flex items-center rounded-xl border border-line bg-content1 ${
+          className={`mt-2 flex shrink-0 items-center rounded-xl border border-line bg-content1 ${
             collapsed ? "flex-col gap-2 p-2" : "gap-3 p-2.5"
           }`}
         >
@@ -385,6 +464,24 @@ export function AppLayout() {
             <LogOut className="h-4 w-4" />
           </button>
         </div>
+        {/* Directly under the profile card, not at the foot of the rail: as the last
+            child it was the first thing the overflow ate, and on a short viewport the
+            logo was pushed off the bottom edge with only the words left showing.
+            Collapsed, the rail is 72px — the wordmark and the words both go and the
+            glyph stands in for them, which is the whole reason a mark exists apart
+            from its wordmark. It keeps the full name on `title`/`alt`, because at
+            18px the squares alone name nothing to somebody who has not seen the
+            logo before. */}
+        {collapsed ? (
+          <img
+            src={bavyaGlyph}
+            alt="Powered by Bavya"
+            title="Powered by Bavya"
+            className="mt-2.5 h-[18px] w-auto shrink-0 self-center object-contain"
+          />
+        ) : (
+          <PoweredBy className="mt-2.5 shrink-0" />
+        )}
         {!collapsed && positionSelector()}
       </aside>
 
@@ -399,7 +496,7 @@ export function AppLayout() {
           collapsed ? "md:pl-[72px]" : "md:pl-[236px]"
         }`}
       >
-        <header className="sticky top-0 z-20 border-b border-line bg-content1/80 backdrop-blur">
+        <header className="sticky top-0 z-20 border-b border-line bg-[var(--color-chrome)] backdrop-blur-xl">
           {/* One header row, every module (2026-08-22). The module name and its tab
               strip used to be two stacked rows — ~108px of chrome before a screen's
               own header even started. Wide enough, they share one line: name, a rule,
@@ -409,8 +506,14 @@ export function AppLayout() {
             {/* Phone: the mark only. The wordmark plus a position dropdown plus the
                 bell and avatar do not fit on 360px, and the avatar — the only way to
                 sign out down here — is what fell off the edge. */}
-            <div className="shrink-0 md:hidden">
+            {/* The two marks stacked, sized to fit the header AS IT WAS. The row's
+                height is set by the bell and the avatar (~40px), not by the brand, so
+                20px of wordmark + 11px of Bavya + the gap still clears underneath and
+                the bar does not grow by a pixel. The wordmark comes down from 28px to
+                pay for the line below it. */}
+            <div className="flex shrink-0 flex-col gap-0.5 md:hidden">
               <Brand compact />
+              <PoweredBy compact />
             </div>
             <div className="hidden shrink-0 items-center gap-2 md:flex">
               <MenuIcon name={activeRoot?.icon} className="h-4 w-4 text-brand" />
@@ -457,7 +560,13 @@ export function AppLayout() {
                 </DropdownTrigger>
                 <DropdownMenu
                   aria-label="Account"
-                  onAction={(key) => (key === "logout" ? logout() : nav("/profile"))}
+                  /* Named rather than "anything that is not logout": the menu now ends
+                     in read-only rows, and a stray action on one of those would have
+                     navigated to the profile from a tap on the Bavya mark. */
+                  onAction={(key) => {
+                    if (key === "logout") logout();
+                    else if (key === "profile") nav("/profile");
+                  }}
                 >
                   <DropdownItem key="who" isReadOnly className="opacity-100">
                     <div className="text-sm font-semibold text-ink">{me?.employee.name}</div>
@@ -503,7 +612,7 @@ export function AppLayout() {
           across the viewport and lets the sixth onward scroll — without it the flex
           items compress to fit and nothing ever overflows, which is why swiping did
           nothing. `snap` so a flick lands on a whole item. */}
-      <nav className="fixed inset-x-0 bottom-0 z-30 flex snap-x snap-mandatory overflow-x-auto border-t border-line bg-content1/95 pb-[env(safe-area-inset-bottom)] backdrop-blur [-ms-overflow-style:none] [scrollbar-width:none] md:hidden [&::-webkit-scrollbar]:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-30 flex snap-x snap-mandatory overflow-x-auto border-t border-line bg-[var(--color-chrome-strong)] pb-[env(safe-area-inset-bottom)] backdrop-blur-xl [-ms-overflow-style:none] [scrollbar-width:none] md:hidden [&::-webkit-scrollbar]:hidden">
         {menu.map((root) => (
           <NavLink
             key={root.code}

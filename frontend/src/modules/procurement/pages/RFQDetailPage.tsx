@@ -2,10 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
-import {
-  Button, Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
-  StatusPill, useToast, type Column,
-} from "@/shared/components";
+import { Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, poApi, rfqApi } from "../api";
@@ -15,6 +13,7 @@ import {
 } from "../components/DetailKit";
 import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * One RFQ: its lines, who was asked, and — once quotes are in — the comparison.
@@ -278,7 +277,7 @@ export function RFQDetailPage() {
                 <Button variant="subtle" onClick={() => nav(`/procurement/rfqs/${rfqId}/edit`)}>
                   Edit
                 </Button>
-                <Button disabled={busy} onClick={() => submit.mutate()}>
+                <Button className={TONE_SUBMIT} disabled={busy} onClick={() => submit.mutate()}>
                   Send for approval
                 </Button>
               </Can>
@@ -292,10 +291,10 @@ export function RFQDetailPage() {
               * sufficient. */}
             {canDecide && (
               <Can do="rfq.approve">
-                <Button variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
+                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject
                 </Button>
-                <Button disabled={busy} onClick={() => approve.mutate()}>
+                <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
                   Approve &amp; publish
                 </Button>
               </Can>

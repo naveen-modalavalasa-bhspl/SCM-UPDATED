@@ -16,6 +16,7 @@ import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../recei
 import type {
   Acknowledgement, AcknowledgementLine, RaiserTracking, ReceiptAttachment,
 } from "../types";
+import { FILTER_PILL_COUNT_OFF, FILTER_PILL_COUNT_ON, FILTER_PILL_ON } from "../buttonTones";
 
 /**
  * What the requester is still owed, and acknowledging it arrived.
@@ -727,7 +728,7 @@ export default function AcknowledgementsPage() {
           onClick={() => setOnlyActionable((current) => !current)}
           className={`inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl border px-4 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 ${
             onlyActionable
-              ? "border-brand bg-brand/10 text-brand"
+              ? FILTER_PILL_ON
               : "border-line bg-content1 text-body hover:border-brand/40 hover:bg-content2"
           }`}
         >
@@ -736,7 +737,7 @@ export default function AcknowledgementsPage() {
           {readyCount > 0 && (
             <span
               className={`min-w-5 rounded-full px-1.5 py-0.5 text-[11px] font-semibold tabular-nums ${
-                onlyActionable ? "bg-brand text-white" : "bg-brand-050 text-brand"
+                onlyActionable ? FILTER_PILL_COUNT_ON : FILTER_PILL_COUNT_OFF
               }`}
             >
               {readyCount}

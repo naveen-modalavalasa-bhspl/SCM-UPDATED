@@ -41,7 +41,9 @@ export const FILTER_TRIGGER = "inline-flex h-full min-w-0 items-center gap-2 rou
 export const FILTER_CLEAR = "mr-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-bad-bg hover:text-bad focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-bad/60";
 
 /** How many values a multi-select is holding. */
-export const FILTER_BADGE = "grid h-[18px] min-w-[18px] place-items-center rounded-md bg-brand px-1 text-[10px] font-bold leading-none text-white";
+/* Orange, matching FILTER_TOGGLE_ON below: `bg-brand` painted the sweep into an
+ * 18px square, which is four colours in eighteen pixels. */
+export const FILTER_BADGE = "grid h-[18px] min-w-[18px] place-items-center rounded-md border border-[#e8a34a] bg-[#fdefdc] px-1 text-[10px] font-bold leading-none text-[#9a5b12]";
 
 /** The chevron. Rotates when the control is open. */
 export const FILTER_CHEVRON = "h-4 w-4 shrink-0 opacity-50 transition-transform duration-150";
@@ -55,7 +57,18 @@ export const FILTER_SELECT = `${FILTER_H} shrink-0 cursor-pointer rounded-xl bor
 
 /** A pill that is on or off rather than holding a value — a type, a toggle. */
 export const FILTER_TOGGLE = `inline-flex ${FILTER_H} shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border-2 px-3.5 text-sm font-medium transition-colors`;
-export const FILTER_TOGGLE_ON = "border-brand bg-brand text-white shadow-sm";
+/* Flat brand tint, NOT `bg-brand` (2026-09-05). `.bg-brand` carries the four-stop
+ * sweep as a background IMAGE, so every active filter chip was the whole gradient
+ * crushed into a 60px pill — the loudest thing on a screen whose real actions are
+ * quieter than it. A filter says "selected", which a tint, brand text and a brand
+ * border say perfectly well.
+ *
+ * Pastel ORANGE rather than the brand pink, asked for on Approvals: the chips sit
+ * directly under a header full of brand pink, and a pink-on-pink strip made the
+ * selection hard to pick out of its own surroundings. Orange is already the first
+ * stop of the brand sweep, so it belongs to the palette rather than arriving from
+ * outside it. Written out because there is no --color-signal-050 token. */
+export const FILTER_TOGGLE_ON = "border-[#e8a34a] bg-[#fdefdc] text-[#9a5b12]";
 export const FILTER_TOGGLE_OFF = "border-line bg-content1 text-muted hover:border-ink/30 hover:text-ink";
 
 /** The search / text field that sits beside the filters. */

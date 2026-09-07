@@ -14,6 +14,7 @@ import { DecisionPanel } from "../components/DecisionPanel";
 import { ReturnStepper } from "../components/ReturnStepper";
 import { money } from "../constants";
 import type { ReturnLine } from "../types";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
 
@@ -185,8 +186,8 @@ export default function ReturnDetailPage() {
             )}
             {doc.can_act && (
               <>
-                <Button onClick={() => setConfirming("approve")}>Approve</Button>
-                <Button variant="dangerSoft" onClick={() => setConfirming("reject")}>
+                <Button className={TONE_APPROVE} onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button className={TONE_REJECT} variant="dangerSoft" onClick={() => setConfirming("reject")}>
                   Reject
                 </Button>
               </>
@@ -383,8 +384,8 @@ export default function ReturnDetailPage() {
                 aria-label="Approval comments"
               />
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button onClick={() => setConfirming("approve")}>Approve</Button>
-                <Button variant="dangerSoft" onClick={() => setConfirming("reject")}>
+                <Button className={TONE_APPROVE} onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button className={TONE_REJECT} variant="dangerSoft" onClick={() => setConfirming("reject")}>
                   Reject
                 </Button>
               </div>

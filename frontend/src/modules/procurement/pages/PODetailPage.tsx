@@ -5,7 +5,8 @@ import {
   ShoppingCart, Package, Building2, Calendar, Coins, MapPin, FileText, ShieldCheck, History, Sparkles, TrendingDown, Save,
 } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Button, Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
+import { Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
 import { revisionLines } from "../types";
@@ -16,6 +17,7 @@ import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -276,7 +278,7 @@ export function PODetailPage() {
               )}
               {po.data.status === "DRAFT" && (
                 <Can do="po.submit">
-                  <Button disabled={busy} onClick={() => submit.mutate()} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
+                  <Button disabled={busy} onClick={() => submit.mutate()} className={`shadow-sm ${TONE_SUBMIT}`}>
                     <Send className="h-4 w-4" /> {submit.isPending ? "Sending…" : "Send for approval"}
                   </Button>
                 </Can>
@@ -625,7 +627,7 @@ export function PODetailPage() {
         <div className="p-3 sm:p-4"><ApprovalTrail docType="PO" docId={po.data.id} /></div>
       </div>
 
-      {po.data.status === "PENDING_APPROVAL" && (po.data.pending_with?.length > 0 || po.data.current_approver_name) && !canDecide && (
+      {po.data.status === "PENDING_APPROVAL" && ((po.data.pending_with?.length ?? 0) > 0 || po.data.current_approver_name) && !canDecide && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm p-4 text-sm font-medium text-ink flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-amber-500" />
           Waiting on {po.data.pending_with?.length ? po.data.pending_with.join(", ") : po.data.current_approver_name} for approval
@@ -652,10 +654,10 @@ export function PODetailPage() {
             {decide.error && <p className="mt-2 text-sm font-semibold text-red-600">{(decide.error as Error).message}</p>}
             <div className="mt-3 flex justify-end gap-2">
               <Can do="po.reject">
-                <Button variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
+                <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
               </Can>
               <Can do="po.approve">
-                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className="!bg-emerald-600 hover:!bg-emerald-700"><Check className="h-4 w-4"/> Approve</Button>
+                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className={TONE_APPROVE}><Check className="h-4 w-4"/> Approve</Button>
               </Can>
             </div>
           </div>

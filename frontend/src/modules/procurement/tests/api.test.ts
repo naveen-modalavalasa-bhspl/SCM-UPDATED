@@ -7,7 +7,12 @@ describe("procurement api", () => {
     expect(Object.keys(poApi).sort()).toEqual(
       ["amend", "approve", "create", "createFromIndent", "createFromQuotation",
        "export", "get", "list", "openForGrn", "reject", "revisions", "sendToVendor",
-       "submit", "update"].sort(),
+       "submit", "update",
+       // The approval desk's own two: the approver asks the raiser a question on the
+       // document instead of over a side channel the audit never sees, and trims the
+       // quantities they are signing for. Both are gated per document by the engine,
+       // not by the screen — see `update_po_approval_quantities`.
+       "comments", "postComment", "updateApprovalQuantities"].sort(),
     );
     expect(typeof poApi.createFromIndent).toBe("function");
     // Raised by hand, alongside the two derived paths: an order that begins as a

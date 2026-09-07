@@ -1,15 +1,14 @@
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button, Can, ErrorBanner, PageHeader, ResponsiveList, StatusPill,
-  useToast, type Column,
-} from "@/shared/components";
+import { Can, ErrorBanner, PageHeader, ResponsiveList, StatusPill, useToast, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, requisitionApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { DetailShell, SectionCard, FactGrid, RefChips, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
 import type { ReqItem } from "../types";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * One requisition, and everything that can be done to it.
@@ -133,17 +132,17 @@ export function RequisitionDetailPage() {
                 >
                   Edit
                 </Button>
-                <Button disabled={busy} onClick={() => submit.mutate()}>
+                <Button className={TONE_SUBMIT} disabled={busy} onClick={() => submit.mutate()}>
                   Send for approval
                 </Button>
               </Can>
             )}
             {canDecide && (
               <Can do="requisition.approve">
-                <Button variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
+                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject
                 </Button>
-                <Button disabled={busy} onClick={() => approve.mutate()}>
+                <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
                   Approve
                 </Button>
               </Can>

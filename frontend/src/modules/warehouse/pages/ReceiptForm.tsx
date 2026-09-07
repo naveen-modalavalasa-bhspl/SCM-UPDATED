@@ -373,8 +373,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           // What the vendor says is on the vehicle, as the count to CONFIRM. The
           // storekeeper overwrites it with what is physically there, and the gap is
           // exactly the shortage the GRN exists to record.
-          received_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
-          accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
+          received_qty: line.despatched_qty != null ? num(line.despatched_qty) as any : num(line.ordered_qty) as any,
+          accepted_qty: line.despatched_qty != null ? num(line.despatched_qty) as any : num(line.ordered_qty) as any,
           rate: line.rate ?? null,
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,

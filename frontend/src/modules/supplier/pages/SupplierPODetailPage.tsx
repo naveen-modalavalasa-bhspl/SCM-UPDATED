@@ -380,8 +380,8 @@ export function SupplierPODetailPage() {
         </p>
       )}
 
-      <Accordion variant="splitted" className="mb-5 px-0">
-        {(po.payment_terms || po.delivery_terms || po.material_terms || po.logistics_terms) ? (
+      {(po.payment_terms || po.delivery_terms || po.material_terms || po.logistics_terms) && (
+        <Accordion variant="splitted" className="mb-5 px-0">
           <AccordionItem key="terms" aria-label="Terms and Conditions" title={<h2 className="text-base font-semibold text-ink">Terms and Conditions</h2>}>
             <div className="flex flex-col gap-4 pb-4">
               {([
@@ -403,8 +403,10 @@ export function SupplierPODetailPage() {
               ))}
             </div>
           </AccordionItem>
-        ) : []}
-        {(po.billing_address || po.shipping_address) ? (
+        </Accordion>
+      )}
+      {(po.billing_address || po.shipping_address) && (
+        <Accordion variant="splitted" className="mb-5 px-0">
           <AccordionItem key="addresses" aria-label="Addresses" title={<h2 className="text-base font-semibold text-ink">Addresses</h2>}>
             <div className="flex flex-col gap-4 pb-4">
               {([
@@ -424,8 +426,8 @@ export function SupplierPODetailPage() {
               ))}
             </div>
           </AccordionItem>
-        ) : []}
-      </Accordion>
+        </Accordion>
+      )}
 
       <h2 className="mb-2 text-sm font-semibold text-ink">Ordered</h2>
       <Card className="mb-5 overflow-x-auto p-0">

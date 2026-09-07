@@ -9,6 +9,7 @@ import {
   getPendingInventoryApprovals, rejectAllocation,
 } from "../api";
 import { alerts } from "@/modules/alerts";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 const fmt = (value: number) =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(value);
@@ -356,7 +357,7 @@ export function AllocationApprovalDetailPage() {
                 {revisions.length > 0 && (
                   <Button variant="subtle" onClick={() => setEdits({})}>Undo edits</Button>
                 )}
-                <Button variant="danger" disabled={act.isPending} onClick={() => act.mutate({ approve: false })}>
+                <Button className={TONE_REJECT} variant="danger" disabled={act.isPending} onClick={() => act.mutate({ approve: false })}>
                   <XCircle className="h-4 w-4" /> Reject
                 </Button>
                 {/* `waitingOnMe` above is the approval config talking — the ladder
@@ -365,6 +366,7 @@ export function AllocationApprovalDetailPage() {
                     document they can neither sign nor refuse. */}
                 <Can do="allocation.approve_reserve">
                   <Button
+                    className={TONE_APPROVE}
                     disabled={act.isPending || overCap}
                     onClick={() => void (async () => {
                       // See `givingNothingWithStock`.

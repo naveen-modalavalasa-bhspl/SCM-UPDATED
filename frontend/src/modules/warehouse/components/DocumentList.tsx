@@ -12,6 +12,7 @@ import { FilterBar, FilterSelect } from "./FilterBar";
 import { allWarehouseOptions, warehouseOptions } from "../api";
 import type { ListParams, Page } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /** What each warehouse type is called on screen. LIP and MDP are rungs on the
  *  distribution chain, not warehouses, and the people holding them do not call them
@@ -377,7 +378,11 @@ export function DocumentList<T>({
     : renderCard;
 
   const create = (onCreate || createTo) && (
-    <Button onClick={onCreate ?? (() => nav(createTo!))}>
+    /* Mint, like New indent: this ONE button is every warehouse register's
+       "raise a new document" — gate entry, GRN, putaway, inspection, issue,
+       fulfilment, consignment, movement — so the colour is decided here rather
+       than nine times. */
+    <Button className={TONE_MINT} onClick={onCreate ?? (() => nav(createTo!))}>
       <Plus className="h-4 w-4" /> {createLabel}
     </Button>
   );

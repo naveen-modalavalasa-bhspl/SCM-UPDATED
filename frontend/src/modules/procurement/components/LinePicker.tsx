@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
-import { Button, Field, Input } from "@/shared/components";
+import { Field, Input } from "@/shared/components";
+import { Button } from "./ActionButton";
 import { useToast } from "@/shared/components/Toast";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import { api } from "@/shared/api/client";

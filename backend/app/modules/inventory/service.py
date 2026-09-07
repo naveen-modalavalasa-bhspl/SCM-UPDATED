@@ -944,8 +944,20 @@ async def list_movements(db: AsyncSession, params: PageParams,
         if serial_tracked:
             row.serial_numbers = units
         else:
+            # NOT a serial: the string IS the unit's minted code, so it belongs in the
+            # asset / consumable column and never under Serial / IMEI.
+            #
+            # As a LIST (2026-09-05). This joined them into one comma-separated string,
+            # which cost the screen the only thing that made the column useful: a code
+            # cell renders its interactive list — every unit, with copy — off an array,
+            # and falls back to flat truncated text when it has only a string. A GRN of
+            # 400 consumables therefore arrived as one unreadable line nobody could
+            # click or copy a single code out of. `unit_codes` carries the array;
+            # `asset_code` / `consumable_code` keep naming ONE code, as their names say,
+            # so nothing already reading them changed meaning.
             row.serial_numbers = None
-            code = ", ".join(units) if units else None
+            row.unit_codes = units or None
+            code = units[0] if units else None
             if is_asset:
                 row.asset_code = code or asset
             else:

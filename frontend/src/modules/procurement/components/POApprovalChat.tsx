@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MessageCircle, Send, Sparkles } from "lucide-react";
-import { Button, Input, useToast } from "@/shared/components";
+import { Input, useToast } from "@/shared/components";
+import { Button } from "./ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { poApi } from "../api";
 import type { POComment } from "../types";

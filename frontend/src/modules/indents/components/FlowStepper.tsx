@@ -362,10 +362,22 @@ function iconFor(state: StepState, index: number) {
   return index + 1;
 }
 
+/* The brand sweep, the same fill the shipment stepper uses (`logistics/components/
+ * FlowStepper`): `.bg-brand` carries `background-image: var(--brand-gradient)`, so a
+ * dot or a rail painted with it gets the four-stop Bavya gradient rather than a flat
+ * crimson. Progress reads as one continuous track this way, which green dots on a
+ * grey rail never did.
+ *
+ * Only completed and current take it. Rejected, returned, cancelled and skipped keep
+ * their semantic colours — a stopped indent must never wear the same fill as one that
+ * finished. A completed step is the check, a current step the ring; that is the same
+ * pair the shipment stepper distinguishes them by. */
+const BRAND_FILL = "border-transparent bg-brand text-white";
+
 function stateClasses(state: StepState) {
   const classes: Record<StepState, string> = {
-    completed: "border-ok bg-ok text-white",
-    current: "border-brand bg-brand text-white shadow-sm shadow-brand/20",
+    completed: BRAND_FILL,
+    current: `${BRAND_FILL} ring-4 ring-brand/20`,
     pending: "border-line bg-white text-muted",
     rejected: "border-bad bg-bad text-white",
     // Returned is recoverable and must never read as a rejection.
@@ -377,8 +389,16 @@ function stateClasses(state: StepState) {
   return classes[state];
 }
 
-function connectorClass(left: StepState, right: StepState) {
-  if (left === "completed" && !isHalted(right)) return "bg-ok";
+/**
+ * The rail between two dots. Horizontal rails take the sweep; the vertical rail of the
+ * mobile layout takes flat crimson, because the gradient runs at 90deg and a 2px-wide
+ * column of it is all four stops compressed into two pixels — a brown smear, not a
+ * gradient.
+ */
+function connectorClass(left: StepState, right: StepState, vertical = false) {
+  if (left === "completed" && !isHalted(right)) {
+    return vertical ? "bg-[var(--grad-3)]" : "bg-brand";
+  }
   return "bg-line";
 }
 
@@ -391,7 +411,7 @@ function accessibleState(state: StepState) {
 function FlowStepperSkeleton() {
   return (
     <div
-      className="-mx-1 min-h-20 overflow-hidden px-1 pb-1"
+      className="-mx-1 min-h-20 overflow-hidden px-1 pb-1 pt-1"
       role="status"
       aria-label="Loading approval progress"
     >
@@ -457,7 +477,7 @@ export function FlowStepper({
   return (
     <div
       role="group"
-      className="-mx-1 overflow-hidden px-1 pb-1"
+      className="-mx-1 overflow-hidden px-1 pb-1 pt-1"
       aria-label="Compact indent progress"
     >
       <ol
@@ -482,7 +502,7 @@ export function FlowStepper({
                   aria-hidden="true"
                 />
                 <span
-                  className={`absolute left-5 top-8 h-[calc(100%+0.5rem)] w-0.5 -translate-x-1/2 lg:hidden ${connectorClass(step.state, steps[index + 1].state)}`}
+                  className={`absolute left-5 top-8 h-[calc(100%+0.5rem)] w-0.5 -translate-x-1/2 lg:hidden ${connectorClass(step.state, steps[index + 1].state, true)}`}
                   aria-hidden="true"
                 />
               </>

@@ -366,6 +366,13 @@ export function SerialNumbersModal({
                   * dropped and the button would stay pressable at the ceiling. */}
                 <Button
                   variant="subtle"
+                  disabled={willAdd <= 0}
+                  onClick={selectAll}
+                >
+                  Select {willAdd > 0 ? willAdd : "all"}
+                </Button>
+                <Button
+                  variant="subtle"
                   disabled={selected.size === 0}
                   onClick={clearAll}
                 >

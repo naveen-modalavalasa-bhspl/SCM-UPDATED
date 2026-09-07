@@ -39,10 +39,13 @@ from app.modules.procurement.schemas import (
 from app.modules.procurement import consolidation, ledger
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.mail import service as mail_service
+from app.platform.mail import template as mail_template
 from app.platform.mail.schemas import MailSendIn
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_permissions
-from app.platform.settings.service import get_setting, write_audit
+from app.platform.settings.service import (
+    get_company_letterhead, get_setting, write_audit,
+)
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance as WorkflowInstance
 from app.shared import evaluation
@@ -1196,16 +1199,27 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
     return await get_po(db, po.id, user)
 
 
-def _po_copy_html(po: PurchaseOrder) -> str:
-    """The order, as the supplier's own copy of it.
+def _po_copy_parts(po: PurchaseOrder,
+                   company: mail_template.Company) -> tuple[str, str]:
+    """The order as the supplier's own copy of it: (plain text, html).
 
     Built from the stored document and nothing else, so the email cannot say something
-    the PO does not. Plain inline-styled HTML rather than a PDF: there is no
-    server-side renderer (the print view is a React route, `/pos/:id/print`, which only
-    exists behind a login the vendor does not have) and the mail client attaches
-    nothing today. A copy they can read in their inbox is the thing that was asked for;
-    a PDF attachment is a bigger change and can replace this body later without moving
-    anything else.
+    the PO does not. Not a PDF: there is no server-side renderer (the print view is a
+    React route, `/pos/:id/print`, which only exists behind a login the vendor does not
+    have) and the mail client attaches nothing today. A copy they can read in their
+    inbox is the thing that was asked for; a PDF attachment can replace this body later
+    without moving anything else.
+
+    Both halves are returned, and the html rides inside `platform.mail.template` — the
+    same letterhead a password reset carries. Before this the html was handed to
+    `send_mail` as `body`, which the transport sent as `text/plain`: every supplier
+    received the markup itself, tags and all. A bare fragment is easy to build and easy
+    to send down the wrong pipe, so it is never built bare here.
+
+    Every style attribute below is DOUBLE-quoted, deliberately: the font stack contains
+    `'Segoe UI'`, so a single-quoted `style='...'` ends at that inner quote and the rest
+    of the declaration is discarded — which renders the lines and the totals in the
+    reader's serif default while every other block on the page is correct.
     """
     def esc(value) -> str:
         return (str(value if value is not None else "")
@@ -1214,59 +1228,134 @@ def _po_copy_html(po: PurchaseOrder) -> str:
     def money(value) -> str:
         return f"{float(value or 0):,.2f}"
 
+    brand = mail_template.BRAND
+    font = mail_template.FONT_STACK
+    cell = (f'padding:9px 10px;border-bottom:1px solid {brand["line"]};'
+            f'font-family:{font};font-size:12.5px;color:{brand["ink"]};')
+    head = (f'padding:9px 10px;font-family:{font};font-size:10px;font-weight:700;'
+            f'letter-spacing:0.7px;text-transform:uppercase;color:{brand["muted"]};'
+            f'border-bottom:2px solid {brand["line"]};')
+
     rows = "".join(
-        f"<tr>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee'>{esc(line.item_code)}</td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee'>{esc(line.item_name)}</td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
-        f"{money(line.quantity)} {esc(line.uom_code)}</td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
-        f"{money(line.rate)}</td>"
-        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
-        f"{money(line.amount)}</td>"
-        f"</tr>"
-        for line in po.items
+        f'<tr>'
+        f'<td style="{cell}white-space:nowrap;">{esc(item.item_code)}</td>'
+        f'<td style="{cell}">{esc(item.item_name)}</td>'
+        f'<td style="{cell}text-align:right;white-space:nowrap;">'
+        f'{money(item.quantity)} {esc(item.uom_code)}</td>'
+        f'<td style="{cell}text-align:right;">{money(item.rate)}</td>'
+        f'<td style="{cell}text-align:right;font-weight:700;">{money(item.amount)}</td>'
+        f'</tr>'
+        for item in po.items
     )
-    terms = "".join(
-        f"<p style='margin:2px 0'><b>{esc(label)}:</b> {esc(text)}</p>"
-        for label, text in (
-            ("Payment terms", po.payment_terms),
-            ("Delivery terms", po.delivery_terms),
-            ("Material terms", po.material_terms),
-            ("Logistics terms", po.logistics_terms),
-            ("Bill to", po.billing_address),
-            ("Ship to", po.shipping_address),
-        ) if text
+    table = (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'border="0" style="border-collapse:collapse;margin:6px 0 14px;">'
+        f'<thead><tr>'
+        f'<th align="left" style="{head}">Code</th>'
+        f'<th align="left" style="{head}">Item</th>'
+        f'<th align="right" style="{head}">Qty</th>'
+        f'<th align="right" style="{head}">Rate</th>'
+        f'<th align="right" style="{head}">Amount</th>'
+        f'</tr></thead><tbody>{rows}</tbody></table>'
     )
-    revised = (f"<p style='color:#b45309'><b>Revision {po.revision_no}</b>"
-               f"{' — ' + esc(po.amendment_reason) if po.amendment_reason else ''}</p>"
-               if (po.revision_no or 0) > 0 else "")
-    return (
-        f"<div style='font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111'>"
-        f"<h2 style='margin:0 0 4px'>Purchase order {esc(po.po_no)}</h2>"
-        f"{revised}"
-        f"<p style='margin:2px 0'><b>Date:</b> {esc(po.po_date)}"
-        f"{f' &nbsp;·&nbsp; <b>Expected:</b> {esc(po.expected_date)}' if po.expected_date else ''}</p>"
-        f"<p style='margin:2px 0'><b>To:</b> {esc(po.vendor_name)}</p>"
-        f"{terms}"
-        f"<table style='border-collapse:collapse;width:100%;margin-top:12px'>"
-        f"<thead><tr style='background:#f5f5f5'>"
-        f"<th style='padding:6px 8px;text-align:left'>Code</th>"
-        f"<th style='padding:6px 8px;text-align:left'>Item</th>"
-        f"<th style='padding:6px 8px;text-align:right'>Qty</th>"
-        f"<th style='padding:6px 8px;text-align:right'>Rate</th>"
-        f"<th style='padding:6px 8px;text-align:right'>Amount</th>"
-        f"</tr></thead><tbody>{rows}</tbody></table>"
-        f"<p style='margin-top:12px;text-align:right'>"
-        f"Sub-total {money(po.sub_total)}<br>"
-        f"Discount {money(po.discount_amount)}<br>"
-        f"Tax {money(po.tax_amount)}<br>"
-        f"Freight {money(po.freight_amount)}<br>"
-        f"<b style='font-size:16px'>Total {money(po.total_amount)}</b></p>"
-        f"{f'<p><b>Remarks:</b> {esc(po.remarks)}</p>' if po.remarks else ''}"
-        f"<p style='color:#666;font-size:12px;margin-top:16px'>"
-        f"Accept or decline this order in your supplier portal.</p></div>"
+
+    # The money column, right-aligned in its own table. The total is the one number
+    # the reader is looking for, so it is the one thing set larger than the body.
+    money_row = (f'padding:3px 16px 3px 0;font-family:{font};font-size:12.5px;'
+                 f'text-align:right;')
+    totals = "".join(
+        f'<tr><td style="{money_row}color:{brand["muted"]};">{label}</td>'
+        f'<td style="{money_row}padding-right:0;color:{brand["ink"]};'
+        f'white-space:nowrap;">{money(value)}</td></tr>'
+        for label, value in (("Sub-total", po.sub_total),
+                             ("Discount", po.discount_amount),
+                             ("Tax", po.tax_amount),
+                             ("Freight", po.freight_amount))
+    ) + (
+        f'<tr>'
+        f'<td style="padding:10px 16px 0 0;font-family:{font};font-size:11px;'
+        f'font-weight:700;text-transform:uppercase;letter-spacing:0.8px;'
+        f'color:{brand["ink"]};text-align:right;border-top:1px solid {brand["line"]};">'
+        f'Total</td>'
+        f'<td style="padding:10px 0 0;font-family:{font};font-size:17px;'
+        f'font-weight:800;color:{brand["brand"]};text-align:right;white-space:nowrap;'
+        f'border-top:1px solid {brand["line"]};">{money(po.total_amount)}</td>'
+        f'</tr>'
     )
+    totals_block = (
+        f'<table role="presentation" align="right" cellpadding="0" cellspacing="0" '
+        f'border="0" style="margin:0 0 20px auto;">{totals}</table>'
+        f'<div style="clear:both;font-size:0;line-height:0;">&nbsp;</div>'
+    )
+
+    terms = [(label, str(text)) for label, text in (
+        ("Payment terms", po.payment_terms),
+        ("Delivery terms", po.delivery_terms),
+        ("Material terms", po.material_terms),
+        ("Logistics terms", po.logistics_terms),
+        ("Bill to", po.billing_address),
+        ("Ship to", po.shipping_address),
+    ) if text]
+
+    heading = f"Purchase order {po.po_no}"
+    revised = (po.revision_no or 0) > 0
+    blocks = [mail_template.paragraph(f"Dear {po.vendor_name or 'Supplier'},")]
+    if revised:
+        blocks.append(mail_template.paragraph(
+            f"This is revision {po.revision_no} of the order below"
+            + (f" — {po.amendment_reason}" if po.amendment_reason else "")
+            + ". It replaces every earlier copy."))
+    else:
+        blocks.append(mail_template.paragraph(
+            "Your copy of the order below. Accept or decline it in your supplier "
+            "portal."))
+    blocks.append(mail_template.facts(
+        [("Order no", str(po.po_no)), ("Order date", str(po.po_date or ""))]
+        + ([("Expected", str(po.expected_date))] if po.expected_date else [])
+        + ([("Revision", str(po.revision_no))] if revised else [])))
+    blocks += [table, totals_block]
+    if terms:
+        blocks.append(mail_template.facts(terms))
+    if po.remarks:
+        blocks.append(mail_template.paragraph(f"Remarks: {po.remarks}", muted=True))
+
+    html = mail_template.render(
+        subject=heading,
+        eyebrow="Revised purchase order" if revised else "Purchase order",
+        heading=heading,
+        preheader=f"{po.vendor_name or ''} — {len(po.items)} line(s), "
+                  f"total {money(po.total_amount)}",
+        blocks=blocks,
+        company=company,
+        footer_note="Accept or decline this order in your supplier portal.",
+    )
+
+    lines = [
+        heading + (f" (revision {po.revision_no})" if revised else ""),
+        f"Date: {po.po_date}" + (f"   Expected: {po.expected_date}"
+                                 if po.expected_date else ""),
+        f"To: {po.vendor_name}",
+        "",
+    ]
+    lines += [
+        f"  {item.item_code}  {item.item_name}  "
+        f"{money(item.quantity)} {item.uom_code} x {money(item.rate)} "
+        f"= {money(item.amount)}"
+        for item in po.items
+    ]
+    lines += [
+        "",
+        f"Sub-total {money(po.sub_total)}   Discount {money(po.discount_amount)}   "
+        f"Tax {money(po.tax_amount)}   Freight {money(po.freight_amount)}",
+        f"TOTAL {money(po.total_amount)}",
+        "",
+    ]
+    lines += [f"{label}: {text}" for label, text in terms]
+    if po.remarks:
+        lines.append(f"Remarks: {po.remarks}")
+    lines += ["", "Accept or decline this order in your supplier portal.",
+              f"— {company.legal_name or company.name}"]
+    return "\n".join(lines), html
 
 
 async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
@@ -1291,9 +1380,10 @@ async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
         subject = f"Purchase order {po.po_no}"
         if (po.revision_no or 0) > 0:
             subject += f" — revision {po.revision_no}"
+        company = mail_template.Company.of(await get_company_letterhead(db))
+        text, html = _po_copy_parts(po, company)
         await mail_service.send_mail(
-            db, MailSendIn(to=[address], subject=subject,
-                           body=_po_copy_html(po)), user)
+            db, MailSendIn(to=[address], subject=subject, body=text, html=html), user)
         logger.info("%s emailed to %s", po.po_no, address)
         return True
     except Exception as exc:  # noqa: BLE001 - a courtesy must not cost the order
@@ -1439,6 +1529,26 @@ async def update_po_approval_quantities(
                 f"{original.item_code or pid}: quantity cannot go below already received {received}"
             )
 
+    trimmed = {pid: qty for pid, qty in incoming.items()
+               if qty != _d(by_id[pid].quantity)}
+    if not trimmed:
+        return await get_po_detail(db, po.id, user)
+
+    # File what the numbers were BEFORE the approver touched them. Rule 9: a state
+    # change writes an audit row, and here the module already owns the right one —
+    # `pro_po_revisions` is what `amend_po` files and what `/pos/{id}/revisions`
+    # already serves, so a trim shows up on the same trail the screen already draws.
+    # `revision_no` is NOT bumped: that number means "a new version went to the
+    # vendor", and this order has not left the building yet.
+    db.add(PORevision(
+        po_id=po.id, revision_no=po.revision_no or 0,
+        reason="Quantities trimmed during approval",
+        status=po.status, vendor_status=po.vendor_status,
+        snapshot=_po_snapshot(po),
+        changed_by_id=getattr(user, "id", None),
+        changed_by_name=getattr(user, "full_name", None),
+    ))
+
     # apply
     for pid, new_qty in incoming.items():
         line = by_id[pid]
@@ -1456,7 +1566,7 @@ async def update_po_approval_quantities(
 
     await db.commit()
     logger.info("PO %s quantities trimmed during approval by %s: %s",
-                po.po_no, getattr(user, "full_name", user), incoming)
+                po.po_no, getattr(user, "full_name", user), trimmed)
     return await get_po_detail(db, po.id, user)
 
 

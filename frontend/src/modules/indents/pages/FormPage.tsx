@@ -16,6 +16,7 @@ import {
   comparableVehicleNumber, displayUom, splitDeliveryOffice,
 } from "../displayFormat";
 import type { IndentCreate, IndentType, IndentUpdate, TemplateLineItem } from "../types";
+import { TONE_AMBER, TONE_MINT, TONE_PINK } from "../buttonTones";
 
 interface Line {
   item_id: number | "";
@@ -358,7 +359,7 @@ export function IndentFormPage() {
           ? `Edit correction ${draft?.indent_no ?? "indent"}`
           : isEditing ? `Edit ${draft?.indent_no ?? "indent"}` : "New request"}
         actions={!isEditing ? (
-          <Button variant="primary" onClick={() => setBomPickerOpen(true)}>
+          <Button variant="primary" onClick={() => setBomPickerOpen(true)} className={TONE_AMBER}>
             <LibraryBig className="h-4 w-4" /> Choose BOM
           </Button>
         ) : undefined}
@@ -546,14 +547,14 @@ export function IndentFormPage() {
 
       <div className="fixed inset-x-0 bottom-0 z-10 flex gap-3 border-t border-line bg-content1 p-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] md:static md:mt-6 md:justify-end md:border-0 md:bg-transparent md:p-0">
         <Button
-          variant="subtle"
-          className="flex-1 md:flex-none"
+          variant="soft"
+          className={`flex-1 md:flex-none ${TONE_PINK}`}
           onClick={() => nav(isEditing ? `/indents/${editId}` : "/indents")}
         >
           Cancel
         </Button>
         <Button
-          className="flex-1 md:flex-none"
+          className={`flex-1 md:flex-none ${TONE_MINT}`}
           disabled={
             !hasSelectedItems
             || hasDuplicateError
