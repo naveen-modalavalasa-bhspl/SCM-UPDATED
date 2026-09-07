@@ -7,7 +7,7 @@ import type {
   MRCandidate, POAmend, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
   PurchaseOrder, VendorPO,
   VendorPOListRow,
-  Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
+  Quotation, QuoteListRow, QuoteOtpSent, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   ProcurementLedgerFilters, ProcurementLedgerRow,
   VendorNotification, VendorToken,
@@ -288,6 +288,12 @@ export const supplierApi = {
     api.get<Quotation>(`/api/supplier/rfqs/${rfqId}/quotation`).then((r) => r.data),
   submitQuotation: (rfqId: number, data: QuoteSubmit) =>
     api.post<Quotation>(`/api/supplier/rfqs/${rfqId}/quotation`, data).then((r) => r.data),
+  /** Email this vendor the code they need to submit. Answers with the MASKED address
+   *  and the window — never the digits, or the mail would be decorative and anyone
+   *  holding the portal link could read the code out of the network tab. */
+  requestQuoteOtp: (rfqId: number) =>
+    api.post<QuoteOtpSent>(`/api/supplier/rfqs/${rfqId}/quotation/request-otp`)
+      .then((r) => r.data),
 };
 
 

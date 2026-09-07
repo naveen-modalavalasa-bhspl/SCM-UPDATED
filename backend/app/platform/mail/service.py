@@ -142,6 +142,29 @@ async def send_mail(db: AsyncSession, data: MailComposeIn | MailSendIn,
     )
 
 
+async def _reset_minutes(db: AsyncSession) -> int:
+    """How long a reset link lives, as the admin has set it.
+
+    Settings first, `config.PASSWORD_RESET_MINUTES` behind it. The env value stays the
+    DEFAULT rather than being deleted: it is what shipped, it is what an unconfigured
+    deployment and every test still get, and rule 13 keeps deployment-time values in
+    `.env`. What changed is only that an admin no longer needs a redeploy to move it.
+
+    Never fatal. An unreadable settings row must not stop somebody getting back into
+    their account — the fallback is a working window, not zero.
+    """
+    try:
+        from app.platform.settings.service import get_setting
+        raw = await get_setting(db, "security.password_reset_minutes")
+        # Floored at 5: a link that dies before the mail is opened is a support call,
+        # and a nought typed into the box must not lock everybody out of recovery.
+        return max(5, int(raw)) if raw else settings.PASSWORD_RESET_MINUTES
+    except Exception as exc:  # noqa: BLE001 - a setting is not worth a locked-out user
+        log.warning("reset expiry setting unreadable, using the configured default: %s",
+                    exc)
+        return settings.PASSWORD_RESET_MINUTES
+
+
 async def _company(db: AsyncSession) -> template.Company:
     """The letterhead the footer prints. Never fatal: an unreadable settings row must
     not stop a password reset, and `Company()` is the registered particulars."""
@@ -371,17 +394,21 @@ async def _send_reset_link(db: AsyncSession, employee: HcmEmployee,
         stale.used_at = now
 
     token = secrets.token_urlsafe(32)
+    # Read once and used for BOTH the stamp and the sentence in the mail. Reading it
+    # twice would let a setting changed between the two lines put a link on the wire
+    # that promises one window and dies at another.
+    minutes = await _reset_minutes(db)
     db.add(PasswordReset(
         employee_id=employee.id,
         token_hash=_digest(token),
-        expires_at=now + timedelta(minutes=settings.PASSWORD_RESET_MINUTES),
+        expires_at=now + timedelta(minutes=minutes),
         requested_ip=ip_address,
     ))
     await db.flush()
 
     link = f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={token}"
     subject, body, html = _reset_email(
-        employee.full_name or "there", link, settings.PASSWORD_RESET_MINUTES,
+        employee.full_name or "there", link, minutes,
         await _company(db))
     try:
         await _log_and_send(

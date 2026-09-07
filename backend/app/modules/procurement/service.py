@@ -36,7 +36,7 @@ from app.modules.procurement.schemas import (
     AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, POHeaderUpdate, QuoteSubmit,
     ReqCreate, RFQCreate, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
 )
-from app.modules.procurement import consolidation, ledger
+from app.modules.procurement import consolidation, ledger, quote_otp
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.mail import service as mail_service
 from app.platform.mail import template as mail_template
@@ -3559,6 +3559,12 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
     if rfq.due_date and rfq.due_date < utcnow().date():
         raise ValidationError("The submission deadline for this RFQ has passed")
 
+    # The emailed code, checked BEFORE anything is written. Whoever holds the portal
+    # link can reach this endpoint; the code is what proves they are also reading the
+    # address the vendor is registered under. Spending it here rather than after the
+    # save means a replay cannot ride in behind a submission that failed validation.
+    await quote_otp.verify(db, rfq_id, vendor_id, data.otp_code)
+
     quote = await vendor_get_quotation(db, vendor_id, rfq_id)
     # The same two rules the form was drawn with, enforced here because the form is not
     # the guard: this endpoint is reachable by anyone holding a vendor token.
@@ -4106,24 +4112,62 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     return await vendor_get_despatch_note(db, vendor_id, note.id)
 
 
+def _assert_eway_bill_format(value: str | None) -> None:
+    """An e-way bill number is TWELVE DIGITS. Checked only when one is given.
+
+    This is the other half of making the field optional. Leaving it out entirely is
+    now fine; what must not happen is the box being used as somewhere to park a word.
+    Before this, "NA" and a copy of the invoice number were the two commonest ways
+    past a mandatory field, and the gate then read a number that is not an e-way bill
+    and cannot be looked up on the portal — worse than an empty column, because an
+    empty column is honest about not knowing.
+
+    Digits only, and exactly twelve: that is the format the NIC portal issues, so
+    anything else is a typo or a stand-in, and the vendor is told which.
+    """
+    text = (value or "").strip()
+    if not text:
+        return
+    if not (text.isdigit() and len(text) == 12):
+        raise ValidationError(
+            f"{text!r} is not an e-way bill number — those are 12 digits. Leave it "
+            f"empty if there is no e-way bill for this consignment, and give the "
+            f"vehicle or LR number instead.")
+
+
 async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
                                       note_id: int) -> DespatchNote:
-    """File it. Invoice and e-way bill are required HERE, not on the draft.
+    """File it. The invoice is required HERE, not on the draft — checked at submit so a
+    note can be started while the invoice is still being raised.
 
-    Doc B12 makes both mandatory before dispatch, and this is the moment the vendor
-    says the vehicle has left. Checked at submit rather than at save so a note can be
-    started while the invoice is still being raised.
+    THE E-WAY BILL IS NO LONGER MANDATORY (requirement 8, 2026-09-07). Doc B12 made it
+    so, and that was wrong for a large part of the supply base: an e-way bill is only
+    raised above a consignment value threshold, and for an intra-state delivery of a
+    few boxes of gloves there is no bill to quote. Vendors were typing "NA", "0" and
+    their own invoice number into the box to get past it — which is worse than leaving
+    it empty, because the gate then reads a number that is not an e-way bill.
+
+    WHAT IS STILL REQUIRED is that the note says HOW the goods travel, in one of two
+    ways: the e-way bill, or an ordinary transport reference — a vehicle number, an LR
+    number, or the transporter's name. That is not the old rule wearing a hat: the
+    warehouse has to be able to match an arriving lorry to a document, and a note
+    carrying an invoice and nothing else cannot be matched to anything at the gate.
     """
     note = await vendor_get_despatch_note(db, vendor_id, note_id)
     if note.status != DespatchNoteStatus.DRAFT.value:
         raise ValidationError(f"{note.dn_no} is already {note.status}")
-    missing = [label for label, value in (
-        ("invoice number", note.invoice_no),
-        ("e-way bill number", note.eway_bill_no),
-    ) if not (value or "").strip()]
-    if missing:
+    if not (note.invoice_no or "").strip():
+        raise ValidationError("Invoice number is required before despatch")
+
+    _assert_eway_bill_format(note.eway_bill_no)
+
+    # Either mode satisfies this. Named in the order a vendor would reach for them.
+    if not any((value or "").strip() for value in (
+        note.eway_bill_no, note.vehicle_no, note.lr_no, note.transporter_name,
+    )):
         raise ValidationError(
-            f"{' and '.join(missing).capitalize()} is required before despatch")
+            "Say how this consignment travels before despatching it: an e-way bill "
+            "number, or a vehicle number, LR number or transporter name.")
 
     note.status = DespatchNoteStatus.SUBMITTED.value
     note.submitted_at = utcnow()

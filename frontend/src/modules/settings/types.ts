@@ -38,6 +38,15 @@ export interface AppSettings {
      *  answered for itself. The per-point flag on the warehouse master wins. */
     requires_inward_default: boolean;
   };
+  security: {
+    /** How long a vendor's one-time code stays good for, in seconds. Enforced by the
+     *  server at verification time — the vendor's screen shows the window but never
+     *  decides it, so a client that ignores the number gets no longer a life. */
+    vendor_quote_otp_seconds: number;
+    /** How long a "forgot password" link stays live, in minutes. Rejected server-side
+     *  on redemption, so the number here is the rule and not a hint. */
+    password_reset_minutes: number;
+  };
 }
 
 /** GET/PUT /api/settings/code-formats — the asset & consumable code formula.

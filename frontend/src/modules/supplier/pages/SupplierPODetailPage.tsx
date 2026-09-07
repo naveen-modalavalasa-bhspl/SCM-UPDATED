@@ -196,9 +196,25 @@ export function SupplierPODetailPage() {
   // no invoice and no e-way bill, which are the two papers the gate checks the vehicle
   // against. A draft is still allowed to be incomplete — that is what a draft is for —
   // so "Save draft" is untouched.
+  //
+  // THE E-WAY BILL IS NO LONGER ONE OF THEM (2026-09-07). It is only raised above a
+  // consignment value threshold, so for a small intra-state delivery there is no bill
+  // to quote — and vendors were typing "NA" or their invoice number to get past a
+  // mandatory field, which left the gate reading a number that is not an e-way bill.
+  //
+  // What the note must still say is HOW the goods travel, either way round: the e-way
+  // bill, or an ordinary transport reference. The warehouse has to be able to match an
+  // arriving lorry to a document. Same rule server-side, worded the same.
+  const hasTransportRef = [
+    header.eway_bill_no, header.vehicle_no, header.lr_no, header.transporter_name,
+  ].some((value) => value?.trim());
+  // Twelve digits, checked only when one is given — see `_assert_eway_bill_format`.
+  const ewayTyped = header.eway_bill_no?.trim() ?? "";
+  const ewayMalformed = ewayTyped !== "" && !/^\d{12}$/.test(ewayTyped);
   const missingPapers = [
     !header.invoice_no?.trim() ? "invoice number" : null,
-    !header.eway_bill_no?.trim() ? "e-way bill number" : null,
+    !hasTransportRef ? "an e-way bill, vehicle, LR or transporter" : null,
+    ewayMalformed ? "a valid 12-digit e-way bill number (or none at all)" : null,
   ].filter(Boolean) as string[];
 
   // An order is an offer to buy. Until it is answered nothing can be despatched
@@ -524,9 +540,16 @@ export function SupplierPODetailPage() {
                 }))}
               />
             </Field>
-            <Field label="E-way bill no" required>
+            <Field
+              label="E-way bill no"
+              hint={ewayMalformed
+                ? "12 digits, or leave it empty and give the vehicle or LR number."
+                : "Only where one was raised. Leave it empty otherwise."}
+            >
               <Input
+                inputMode="numeric"
                 value={header.eway_bill_no ?? ""}
+                isInvalid={ewayMalformed}
                 onChange={(e) => setHeader((h) => ({ ...h, eway_bill_no: e.target.value }))}
               />
             </Field>

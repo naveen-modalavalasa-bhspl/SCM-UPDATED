@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.procurement import service, stats, suppliers
+from app.modules.procurement import quote_otp, service, stats, suppliers
 from app.modules.procurement.schemas import (
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
@@ -32,7 +32,7 @@ from app.modules.procurement.schemas import (
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
     POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
     PORevisionOut, POVendorResponseIn, QuoteListRow,
-    QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
+    QuoteOtpOut, QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate,
     SupplierCreate, SupplierLoginIn, SupplierOut, SupplierUpdate, VendorAccountIn,
     LedgerRow,
@@ -759,6 +759,20 @@ async def vendor_submit_despatch_note(note_id: int, db: AsyncSession = Depends(g
 async def vendor_cancel_despatch_note(note_id: int, db: AsyncSession = Depends(get_db),
                                       account=Depends(get_current_vendor)):
     return await service.vendor_cancel_despatch_note(db, account.vendor_id, note_id)
+
+
+@supplier.post("/rfqs/{rfq_id}/quotation/request-otp", response_model=QuoteOtpOut)
+async def vendor_request_quote_otp(rfq_id: int, request: Request,
+                                   db: AsyncSession = Depends(get_db),
+                                   account=Depends(get_current_vendor)):
+    """Email the code this vendor needs to submit. Answers with the masked address.
+
+    Scoped through `vendor_get_rfq` first: a vendor may only raise a code for a tender
+    they were actually invited to, or this becomes a way to probe which RFQ ids exist.
+    """
+    await service.vendor_get_rfq(db, account.vendor_id, rfq_id)
+    return await quote_otp.issue(db, rfq_id, account.vendor_id,
+                                 ip_address=getattr(request.client, "host", None))
 
 
 @supplier.post("/rfqs/{rfq_id}/quotation", response_model=QuoteOut)

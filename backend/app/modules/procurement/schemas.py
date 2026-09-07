@@ -699,7 +699,23 @@ class QuoteLineIn(BaseModel):
     delivery_days: int | None = None
 
 
+class QuoteOtpOut(BaseModel):
+    """What the vendor's screen may know about the code that was just sent.
+
+    The masked address and the window, never the digits. A response carrying the code
+    would make the email decorative and the whole gate meaningless — anyone holding
+    the portal link could read it straight out of the network tab.
+    """
+    sent_to: str
+    expires_in_seconds: int
+
+
 class QuoteSubmit(BaseModel):
+    #: The six digits emailed by `POST .../quotation/request-otp`. Optional on the
+    #: SCHEMA so a missing code fails with the sentence `quote_otp.verify` writes —
+    #: "Enter the code emailed to you" — rather than a 422 naming a field the vendor
+    #: has never heard of.
+    otp_code: str | None = None
     vendor_ref_no: str | None = None
     valid_till: date | None = None
     expected_delivery_date: date | None = None
