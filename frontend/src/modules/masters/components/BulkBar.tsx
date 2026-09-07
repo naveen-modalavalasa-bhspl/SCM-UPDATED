@@ -4,6 +4,7 @@ import { Download, FileUp, Loader2, Sheet } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button, Can } from "@/shared/components";
 import type { BulkApi, ImportResult } from "../api";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /** `Can` requires a permission code. A few masters (the UOM conversions, the vendor
  *  rates) are declared without one, and those should stay visible rather than
@@ -71,7 +72,7 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
                 onClick={() => run("template", api.template)}>
           {spin("template") ?? <Sheet className="h-4 w-4" />} Template
         </Button>
-        <Button variant="ghost" disabled={busy !== null}
+        <Button className={TONE_BLUE} variant="ghost" disabled={busy !== null}
                 onClick={() => run("export", () => api.export())}>
           {spin("export") ?? <Download className="h-4 w-4" />} Export
         </Button>

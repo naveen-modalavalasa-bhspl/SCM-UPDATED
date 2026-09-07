@@ -14,6 +14,7 @@ import {
 import { fmtQty, humanise, num, percent, today } from "../format";
 import type { Picking, PickingItem, PickingWrite } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /**
  * A picklist: build it, release it, then pick it line by line.
@@ -183,7 +184,7 @@ export default function PicklistForm() {
                 <ArrowLeft className="h-4 w-4" /> Back
               </Button>
               <Can do="issue.create">
-                <Button
+                <Button className={TONE_MINT}
                   onClick={() => create.mutate()}
                   disabled={create.isPending || !form.warehouse_id || form.items.length === 0}
                 >

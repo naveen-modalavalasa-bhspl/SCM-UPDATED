@@ -8,6 +8,7 @@ import { actOnStockMovementOrder, getStockMovementOrder } from "../api";
 import { Section } from "../components/DocumentMeta";
 import { fmtDateTime, fmtQty } from "../format";
 import type { StockMovementOrderItem } from "../types";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 export default function StockMovementDetail() {
   const [params] = useSearchParams();
@@ -73,14 +74,14 @@ export default function StockMovementDetail() {
                 button is not security, the backend is. */}
             {data.status === "PENDING_APPROVAL" && data.id > 0 && (
               <Can do="movement.approve">
-                <Button
+                <Button className={TONE_REJECT}
                   variant="secondary"
                   disabled={act.isPending}
                   onClick={() => act.mutate("REJECTED")}
                 >
                   <X className="h-4 w-4" /> Reject
                 </Button>
-                <Button
+                <Button className={TONE_APPROVE}
                   disabled={act.isPending}
                   onClick={() => act.mutate("APPROVED")}
                 >

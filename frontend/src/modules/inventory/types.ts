@@ -202,6 +202,10 @@ export interface StockLedgerItem {
   serial_numbers?: string[];
   asset_code?: string;
   consumable_code?: string;
+  /** The unit codes this movement carried, when the item is not serial-tracked and
+   *  the minted code IS the unit's identity. `serial_numbers` stays empty for those
+   *  rows on purpose — the codes are not serials and must not surface as any. */
+  unit_codes?: string[];
   reference_no?: string;
   performed_by?: string;
   remarks?: string;

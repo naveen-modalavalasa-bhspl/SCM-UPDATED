@@ -5,6 +5,7 @@ import { Button, ErrorBanner, Field } from "@/shared/components";
 import { Lookup } from "./Lookup";
 import { createPutaway, grnOptions, putawayCandidates } from "../api";
 import { fmtQty } from "../format";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /**
  * Raise a putaway task by hand.
@@ -171,7 +172,7 @@ export function NewPutawayModal({
           </span>
           <div className="flex gap-2">
             <Button variant="subtle" onClick={onClose}>Cancel</Button>
-            <Button
+            <Button className={TONE_MINT}
               onClick={() => create.mutate()}
               disabled={picked.length === 0 || create.isPending}
             >

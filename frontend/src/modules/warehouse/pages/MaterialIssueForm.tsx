@@ -22,6 +22,7 @@ import type {
   Issue, IssueItemWrite, IssueWrite, ItemOption, SerialNumber, UnitMode,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * Raise, approve and post a material issue.
@@ -639,7 +640,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             )}
             {editing && doc?.status === "DRAFT" && (
               <Can do="issue.create">
-                <Button onClick={() => setConfirming("submit")}>Submit for approval</Button>
+                <Button className={TONE_SUBMIT} onClick={() => setConfirming("submit")}>Submit for approval</Button>
               </Can>
             )}
             {/* can_approve, not just the permission: the whole warehouse shares one
@@ -648,8 +649,8 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 "You are not a valid approver" error after clicking. */}
             {editing && doc?.status === "PENDING_APPROVAL" && doc?.can_approve && (
               <Can do="issue.issue">
-                <Button onClick={() => setConfirming("approve")}>Approve</Button>
-                <Button variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
+                <Button className={TONE_APPROVE} onClick={() => setConfirming("approve")}>Approve</Button>
+                <Button className={TONE_REJECT} variant="danger" onClick={() => setConfirming("reject")}>Reject</Button>
               </Can>
             )}
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted && (

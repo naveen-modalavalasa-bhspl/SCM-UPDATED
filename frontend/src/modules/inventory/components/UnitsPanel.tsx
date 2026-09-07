@@ -4,6 +4,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@heroui/react";
 import { Check, Copy, Download } from "lucide-react";
 import { getUnits } from "../api";
 import type { UnitRow } from "../types";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /**
  * The units standing in one lot, by name.
@@ -315,7 +316,7 @@ export function UnitsPanel({
         </span>
         <button
           type="button"
-          className="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[11px] font-medium text-body transition-colors hover:bg-content2"
+          className={`inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[11px] font-medium text-body transition-colors hover:bg-content2 ${TONE_BLUE}`}
           onClick={() => download(`${stem}-units.csv`, everything())}
         >
           <Download size={12} /> Download all (CSV)

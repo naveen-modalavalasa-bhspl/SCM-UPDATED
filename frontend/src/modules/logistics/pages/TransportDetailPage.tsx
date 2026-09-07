@@ -17,6 +17,7 @@ import {
 } from "../components/modeCopy";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
 import { manifestLines } from "../components/consignmentToLines";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * One consignment's transport leg, from planning to the signature at the far end.
@@ -178,7 +179,7 @@ export function TransportDetailPage() {
                 <Button variant="ghost" onClick={() => nav(`/logistics/shipments/${doc.id}/edit`)}>
                   Edit
                 </Button>
-                <Button onClick={() => submit.mutate()} disabled={submit.isPending}>
+                <Button className={TONE_SUBMIT} onClick={() => submit.mutate()} disabled={submit.isPending}>
                   Send for approval
                 </Button>
               </Can>
@@ -186,8 +187,8 @@ export function TransportDetailPage() {
 
             {doc.status === "PENDING_APPROVAL" && (
               <Can do="transport.approve">
-                <Button variant="ghost" onClick={() => setReject(true)}>Reject</Button>
-                <Button onClick={() => approve.mutate()} disabled={approve.isPending}>
+                <Button className={TONE_REJECT} variant="ghost" onClick={() => setReject(true)}>Reject</Button>
+                <Button className={TONE_APPROVE} onClick={() => approve.mutate()} disabled={approve.isPending}>
                   Approve
                 </Button>
               </Can>
@@ -197,7 +198,7 @@ export function TransportDetailPage() {
                 is pressed, so it is the press the whole rung waits on. */}
             {awardPending && (
               <Can do="transport.approve">
-                <Button variant="ghost" onClick={() => setAwardReject(true)}>
+                <Button className={TONE_REJECT} variant="ghost" onClick={() => setAwardReject(true)}>
                   Reject award
                 </Button>
                 <Button onClick={() => approveAward.mutate()}

@@ -17,6 +17,7 @@ import type {
   ConsolidationBatch, ConsolidationDimension, ConsolidationFilterOptions,
   ConsolidationQuery,
 } from "../types";
+import { TONE_APPROVE } from "@/shared/components/tones";
 
 /** Indents per approve request. Small on purpose: the bar only moves when a chunk
  *  comes back, so 25 meant an approver watched "0 of 41" for minutes and assumed the
@@ -744,7 +745,7 @@ export function BatchCard({ batch, onBack }: {
           >
             <PackageCheck className="h-4 w-4" /> Serve from own stock
           </Button>
-          <Button
+          <Button className={TONE_APPROVE}
             disabled={blocked || approve.isPending || sending === 0}
             onClick={() => approve.mutate()}
           >

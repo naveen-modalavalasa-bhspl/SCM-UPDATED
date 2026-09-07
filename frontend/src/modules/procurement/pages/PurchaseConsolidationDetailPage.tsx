@@ -1,15 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
-  StatusPill, useAction,
-} from "@/shared/components";
+import { Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill, useAction } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { DetailShell, SectionCard, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 const EDITABLE = ["DRAFT"];
 
@@ -97,7 +96,7 @@ export function PurchaseConsolidationDetailPage() {
                   disabled={saveLines.isPending}>
                   Save quantities
                 </Button>
-                <Button onClick={() => submit.mutate()} disabled={submit.isPending}>
+                <Button className={TONE_SUBMIT} onClick={() => submit.mutate()} disabled={submit.isPending}>
                   Send for approval
                 </Button>
               </Can>
@@ -105,8 +104,8 @@ export function PurchaseConsolidationDetailPage() {
             {/* FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. */}
             {(doc.awaiting_me ?? doc.status === "PENDING_APPROVAL") && (
               <Can do="consolidation.approve">
-                <Button variant="ghost" onClick={() => setReject(true)}>Reject</Button>
-                <Button onClick={() => approve.mutate()} disabled={approve.isPending}>
+                <Button className={TONE_REJECT} variant="ghost" onClick={() => setReject(true)}>Reject</Button>
+                <Button className={TONE_APPROVE} onClick={() => approve.mutate()} disabled={approve.isPending}>
                   Approve
                 </Button>
               </Can>

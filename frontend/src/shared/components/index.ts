@@ -48,3 +48,4 @@ export { SourceRef, SourceRefLine, type SourceRefCandidate } from "./SourceRef";
 // The cold-open splash: the SCM mark lit with the brand sweep, shown while the
 // session is being resolved. Not for in-page waits — those stay quiet.
 export { AppSplash } from "./AppSplash";
+export * from "./tones";

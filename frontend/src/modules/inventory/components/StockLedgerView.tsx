@@ -16,6 +16,7 @@ import {
 import type { SerialSummaryRow, StockLedgerItem, UnitCodeRow } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { fmtDate, fmtTime } from "@/shared/datetime";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /**
  * stk_ledger.ref_type — every value that actually reaches the table.
@@ -263,8 +264,10 @@ export function StockLedgerView() {
       (namesOwnUnits(r) ? movedUnits(r).join(" | ") : "")
         || serialOf(r) || unitsOf(r)?.serials.join(" | ") || unitsOf(r)?.imeis.join(" | "),
       movedCodes(r, (u) => u.asset_code).join(" | ")
+        || (r.asset_code && r.unit_codes?.join(" | "))
         || r.asset_code || unitsOf(r)?.asset_codes?.join(" | "),
       movedCodes(r, (u) => u.consumable_code).join(" | ")
+        || (r.consumable_code && r.unit_codes?.join(" | "))
         || r.consumable_code || unitsOf(r)?.consumable_codes?.join(" | "),
       r.in_qty, r.out_qty, r.balance_qty, r.unit_rate, r.total_value, r.performed_by,
     ]);
@@ -296,7 +299,11 @@ export function StockLedgerView() {
     hideOnNarrow: true,
     render: (r) => {
       // The units this movement carried, if it named any: their codes, and no others.
-      const moved = movedCodes(r, mine);
+      // `ownCodes` is the same answer for an item that is not serial-tracked, where
+      // the unit code is the identity and arrives on the row itself — the column that
+      // owns them is the one whose single code the row filled in.
+      const moved = movedCodes(r, mine).length ? movedCodes(r, mine)
+        : (ownOf(r) && r.unit_codes?.length ? r.unit_codes : []);
       if (moved.length) {
         return (
           <UnitCell
@@ -466,7 +473,7 @@ export function StockLedgerView() {
         title="Stock Ledger"
         // ghost + 16px icon, the app-wide header-action shape. See StockBalanceView.
         actions={
-          <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
+          <Button className={TONE_BLUE} variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
             <Download className="h-4 w-4" /> Export CSV
           </Button>
         }
@@ -617,12 +624,14 @@ export function StockLedgerView() {
               <SheetRow
                 label="Asset code"
                 value={movedCodes(selected, (u) => u.asset_code).join(", ")
+                  || (selected.asset_code && selected.unit_codes?.join(", "))
                   || selected.asset_code
                   || unitsOf(selected)?.asset_codes?.join(", ")}
               />
               <SheetRow
                 label="Consumable code"
                 value={movedCodes(selected, (u) => u.consumable_code).join(", ")
+                  || (selected.consumable_code && selected.unit_codes?.join(", "))
                   || selected.consumable_code
                   || unitsOf(selected)?.consumable_codes?.join(", ")}
               />

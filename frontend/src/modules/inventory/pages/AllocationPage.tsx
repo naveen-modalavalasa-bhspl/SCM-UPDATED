@@ -11,6 +11,8 @@ import { ClaimsPanel } from "../components/ClaimsPanel";
 import { LoadingRows } from "../components/PageStates";
 import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
+import { TONE_SUBMIT } from "@/shared/components/tones";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /** One "give this much, out of this warehouse" row. A line can carry several. */
 type Split = { qty: string; wh: string };
@@ -404,7 +406,7 @@ export function AllocationPage() {
                         Requested on {raised[line.indent_item_id]}
                       </span>
                     ) : (
-                      <Button
+                      <Button className={TONE_MINT}
                         variant="secondary"
                         disabled={raise.isPending}
                         onClick={() => raise.mutate({ line, quantity: short })}
@@ -446,7 +448,7 @@ export function AllocationPage() {
               is the job profile — is this person one of the people who decides. */}
           {data.allocatable && (
             <Can do="allocation.submit">
-              <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
+              <Button className={TONE_SUBMIT} onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
                 {save.isPending ? "Submitting…" : "Submit for approval"}
               </Button>
             </Can>

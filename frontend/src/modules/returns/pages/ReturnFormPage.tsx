@@ -14,6 +14,7 @@ import {
   PHOTO_CATEGORY, type ReturnIntent, type ReturnLineWrite, type ReturnWrite,
   type StagedAttachment,
 } from "../types";
+import { TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * Raise or edit a return — laid out like the New indent screen: LINE ITEMS on the left,
@@ -225,7 +226,7 @@ export default function ReturnFormPage() {
                 <Button variant="soft" disabled={!canSave || busy} onClick={() => save.mutate()}>
                   {save.isPending ? "Saving…" : "Save draft"}
                 </Button>
-                <Button disabled={!canSubmit || busy} onClick={() => submit.mutate()}>
+                <Button className={TONE_SUBMIT} disabled={!canSubmit || busy} onClick={() => submit.mutate()}>
                   {submit.isPending ? "Submitting…" : "Submit for approval"}
                 </Button>
               </>

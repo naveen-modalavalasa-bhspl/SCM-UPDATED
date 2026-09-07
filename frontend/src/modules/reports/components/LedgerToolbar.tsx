@@ -1,6 +1,7 @@
 import { Download, RotateCcw } from "lucide-react";
 import { Button, Can, Card, Field, Input, Select } from "@/shared/components";
 import type { ReportColumn, ReportFilter } from "../types";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /** The filter strip. Every control writes to the URL (the page owns that), so an
  *  auditor can send somebody the exact view they are looking at, and the export
@@ -107,11 +108,11 @@ export function LedgerToolbar({
             <RotateCcw className="mr-1.5 h-4 w-4" /> Reset filters
           </Button>
           <Can do="report.export">
-            <Button variant="subtle" onClick={() => onExport("csv")}
+            <Button variant="subtle" className={TONE_BLUE} onClick={() => onExport("csv")}
                     disabled={exporting || total === 0}>
               <Download className="mr-1.5 h-4 w-4" /> CSV
             </Button>
-            <Button onClick={() => onExport("xlsx")} disabled={exporting || total === 0}>
+            <Button className={TONE_BLUE} onClick={() => onExport("xlsx")} disabled={exporting || total === 0}>
               <Download className="mr-1.5 h-4 w-4" />
               {exporting ? "Preparing…" : "Export Excel"}
             </Button>

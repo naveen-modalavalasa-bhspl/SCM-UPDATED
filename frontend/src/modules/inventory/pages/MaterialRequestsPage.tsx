@@ -11,6 +11,7 @@ import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { listMaterialRequests } from "../api";
 import type { MaterialRequestListRow } from "../types";
 import { fmtDate } from "@/shared/datetime";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /**
  * Material requests raised when an approved indent could not be filled from stock.
@@ -141,7 +142,7 @@ export function MaterialRequestsPage() {
         title="Material Requests"
         actions={
           <Can do="mr.create">
-            <Button onClick={() => nav("/inventory/material-requests/new")}>
+            <Button className={TONE_MINT} onClick={() => nav("/inventory/material-requests/new")}>
               <Plus size={16} /> Create MR
             </Button>
           </Can>

@@ -1,10 +1,8 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Download } from "lucide-react";
-import {
-  Button, Can, Card, ErrorBanner, FilterBar, FilterDateRange, FilterMenu, PageHeader,
-  ResponsiveList, StatusPill, type Column,
-} from "@/shared/components";
+import { Can, Card, ErrorBanner, FilterBar, FilterDateRange, FilterMenu, PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { poApi } from "../api";
 import type { POListRow } from "../types";
 import { fmtDate } from "@/shared/datetime";
@@ -12,6 +10,7 @@ import { formatPONo } from "@/shared/format";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { POKpis } from "../components/ProcurementKpis";
 import { useUrlFilters } from "../urlFilters";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /** POStatus, as the backend enum spells it. */
 const STATUSES = [
@@ -149,7 +148,7 @@ export function POListPage() {
         title="Purchase Orders"
         actions={
           <div className="flex items-center gap-2">
-            <Button variant="secondary" onClick={handleExport} className="flex items-center gap-1.5">
+            <Button variant="secondary" onClick={handleExport} className={`flex items-center gap-1.5 ${TONE_BLUE}`}>
               <Download size={16} /> Export
             </Button>
             <Can do="po.create">

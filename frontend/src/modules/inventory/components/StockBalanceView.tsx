@@ -17,6 +17,7 @@ import {
 } from "../api";
 import type { StockBalanceItem, StockDetail, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /** Value columns read off stk_balance.valuation_rate / stock_value. Both are 0 across
  *  the live data, so an uncosted row says so rather than printing a confident ₹0.00. */
@@ -483,7 +484,7 @@ export function StockBalanceView() {
                 read them as three different levels of importance. Approvals' Export
                 is the reference; a solid fill in the header competes with the one
                 button on the page that CREATES something. */}
-            <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
+            <Button className={TONE_BLUE} variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
               <Download className="h-4 w-4" /> Export CSV
             </Button>
             <Button variant="ghost" onClick={() => navigate("/inventory/labels")}>
