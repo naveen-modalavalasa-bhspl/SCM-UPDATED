@@ -71,6 +71,7 @@ from app.shared import evaluation
 from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatus
 from app.shared.models.base import utcnow
 from app.shared.models.master import Vendor
+from app.shared.money import round_money
 from app.shared.numbering import next_number
 from app.shared.scope import scope_condition
 
@@ -1266,7 +1267,10 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
             # A vehicle already going that way costs the shipment nothing.
             doc.freight_amount = ZERO
         elif data.freight_amount is not None:
-            doc.freight_amount = _d(data.freight_amount)
+            # The settled-on-the-spot price, and a payable like any other — a figure
+            # agreed at the gate rounds by the same rule as one that came off a tender,
+            # or the register holds two kinds of money.
+            doc.freight_amount = round_money(data.freight_amount)
         _check_mode_fields(doc)
         settled_summary = (
             f"Sent {doc.tr_no} to {doc.carrier_name} for acknowledgement"
@@ -1746,8 +1750,18 @@ async def record_quote(db: AsyncSession, tr_id: int, carrier_id: int, data,
 
 
 def _landed_cost(quote: CarrierQuote) -> Decimal:
+    """What this quote actually costs the company, rounded to the payable figure.
+
+    Rounded HERE, at the one place the number is derived, rather than wherever it is
+    drawn. Tax on a fractional base is what produces the paise nobody wants —
+    4,830.51 at 18% is 5,700.0018 — and every reader of this figure is a reader of
+    this function: the register's cheapest-quote column, the comparison ranking, the
+    award that writes `freight_amount`, and everything exported from those. Round at
+    the display instead and the page, the export and the stored column each hold a
+    slightly different answer to what we owe.
+    """
     base = _d(quote.freight_amount) + _d(quote.other_charges)
-    return base * (Decimal("1") + _d(quote.tax_percent) / Decimal("100"))
+    return round_money(base * (Decimal("1") + _d(quote.tax_percent) / Decimal("100")))
 
 
 def _rank_quotes(quotes: list[CarrierQuote], method: str) -> list[dict]:

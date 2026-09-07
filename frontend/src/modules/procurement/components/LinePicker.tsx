@@ -78,13 +78,29 @@ export function LinePicker({
   /** The loaded page, plus the line's own item where that page does not hold it.
    *  `/api/items` is fetched 50 rows at a time, so a requisition line pointing at
    *  item 80 of 87 found nothing to render and the box came up empty — the value was
-   *  saved and sent correctly all along. Same seeding OrgFields does for warehouses. */
-  const optionsFor = (line: DraftLine) =>
-    line.item_id !== "" && !items.some((item) => item.id === line.item_id)
-      ? [{ value: line.item_id,
-           label: label(line.item_code, line.item_name) || "Selected item" },
-         ...options]
-      : options;
+   *  saved and sent correctly all along. Same seeding OrgFields does for warehouses.
+   *
+   *  An item already on ANOTHER line is greyed out rather than left looking available
+   *  (2026-09-07). Picking it was already refused, but only after the press, by a
+   *  toast — so the list showed a choice, took the click, and then said no. The rule
+   *  was invisible until you broke it. `ItemCombobox` already draws a disabled option
+   *  at half opacity and routes the press to `onDisabledSelect`, so the same toast
+   *  still explains WHY; it is now the second line of defence rather than the first.
+   *  The line's own item stays selectable — that is the value it is showing. */
+  const optionsFor = (line: DraftLine) => {
+    const takenElsewhere = new Set(
+      lines.filter((other) => other !== line && other.item_id !== "")
+        .map((other) => other.item_id),
+    );
+    const withSeed =
+      line.item_id !== "" && !items.some((item) => item.id === line.item_id)
+        ? [{ value: line.item_id,
+             label: label(line.item_code, line.item_name) || "Selected item" },
+           ...options]
+        : options;
+    return withSeed.map((option) =>
+      takenElsewhere.has(option.value) ? { ...option, isDisabled: true } : option);
+  };
 
   const set = (index: number, patch: Partial<DraftLine>) =>
     onChange(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
@@ -107,7 +123,12 @@ export function LinePicker({
                 isLoading={isLoading}
                 onQueryChange={setSearch}
                 isDisabled={disabled || !!line.id}
+                // Pressing a greyed-out row says why rather than doing nothing at all.
+                onDisabledSelect={() =>
+                  toast.error("Item already exists, just update the quantity.")}
                 onChange={(value) => {
+                  // Kept as the backstop: the greying is computed from `lines`, and a
+                  // duplicate could still arrive from a prefill or a stale render.
                   if (lines.some((l, i) => i !== index && l.item_id === value)) {
                     toast.error("Item already exists, just update the quantity.");
                     return;

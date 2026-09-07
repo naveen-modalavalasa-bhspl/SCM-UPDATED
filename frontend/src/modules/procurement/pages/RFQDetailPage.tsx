@@ -345,7 +345,7 @@ export function RFQDetailPage() {
                     },
                     { label: "Priority", value: rfq.priority ?? "Normal" },
                     { label: "Department", value: rfq.department_name ?? "\u2014" },
-                    { label: "Warehouse", value: rfq.warehouse_name ?? "\u2014" },
+                    { label: "Shipment Address", value: rfq.warehouse_name ?? "\u2014" },
                     { label: "Project", value: rfq.project_name ?? "\u2014" },
                     { label: "Company", value: rfq.company_name ?? "\u2014" },
                   ]}
