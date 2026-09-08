@@ -506,6 +506,29 @@ class PositionLocation(Base):
 Index("ix_inv_position_locations_active", PositionLocation.position_id,
       PositionLocation.is_active)
 
+
+class PositionLocationAccess(Base):
+    """Additional warehouse floors a position may operate, granted by SCM RBAC admin.
+
+    The HCM section remains the automatic/default floor on PositionLocation.  These
+    rows only widen that scope, so an HCM resync cannot accidentally erase an approved
+    cross-floor exception.
+    """
+    __tablename__ = "inv_position_location_access"
+    __table_args__ = (
+        UniqueConstraint("position_id", "location_id",
+                         name="uq_inv_position_location_access"),
+    )
+
+    id = pk()
+    position_id = soft_fk()
+    warehouse_id = Column(ForeignKey("whs_warehouses.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    location_id = Column(BigInteger, nullable=False, index=True)
+    granted_by_id = soft_fk()
+    is_active = Column(Integer, nullable=False, default=1)
+    created_at = created_at_col()
+
 # --------------------------------------------------------------------------- #
 # Where these documents keep their "waiting on" snapshot.
 #

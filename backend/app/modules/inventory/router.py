@@ -18,7 +18,7 @@ from app.modules.inventory.schemas import (
     STOIn, STOOut, STOListRow, CycleCountIn, CycleCountUpdateIn,
     CycleCountOut, CycleCountListRow, StockOverviewKPIs,
     StockDetailOut, ReplenishmentRuleIn, ReplenishmentRuleRow,
-    PositionLocationIn, PositionLocationOut, MovementClassificationOut,
+    PositionLocationIn, PositionLocationOut, FloorAccessIn, MovementClassificationOut,
     StockSummaryOut, MovementSummaryOut,
 )
 from app.platform.rbac import permissions as perms
@@ -399,6 +399,31 @@ async def untag_position_location(tag_id: int, db: AsyncSession = Depends(get_db
     return {"success": True}
 
 
+@points_router.post("/floor-access")
+async def grant_floor_access(body: FloorAccessIn,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_POINTS_MANAGE))):
+    row = await locations.grant_floor_access(
+        db, body.position_id, body.location_id, user)
+    return {"id": row.id, "position_id": row.position_id,
+            "warehouse_id": row.warehouse_id, "location_id": row.location_id}
+
+
+@points_router.get("/floor-access/{position_id}")
+async def get_floor_access(position_id: int,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(perms.STOCK_POINTS_MANAGE))):
+    return await locations.list_floor_access(db, position_id)
+
+
+@points_router.delete("/floor-access/{access_id}")
+async def revoke_floor_access(access_id: int,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.STOCK_POINTS_MANAGE))):
+    await locations.revoke_floor_access(db, access_id)
+    return {"success": True}
+
+
 @points_router.get("/classify", response_model=MovementClassificationOut)
 async def classify_move(from_warehouse_id: int | None = None,
                         to_warehouse_id: int | None = None,
@@ -418,6 +443,7 @@ async def my_stocking_points(db: AsyncSession = Depends(get_db),
     return {
         "primary_warehouse_id": primary,
         "warehouse_ids": sorted(await locations.location_ids_for_user(db, user)),
+        "floor_ids": sorted(await locations.floor_ids_for_user(db, user) or []),
         "tags": await locations.list_tags(db, position_id),
         # What this person's own point IS. The warehouse screens call themselves by it,
         # because somebody who holds an MDP does not call the place a warehouse.

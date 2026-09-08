@@ -1,6 +1,6 @@
 import { api } from "@/shared/api/client";
 import type {
-  PositionLocationTag, PositionLocationWrite, MovementClassification,
+  PositionLocationTag, PositionLocationWrite, FloorOption, FloorAccess, MovementClassification,
   MyStockingPoints, PositionSearchHit, StockingPointQuery, StockingPointTagPage,
   AllocationDecision,
   AllocationHistoryRow,
@@ -696,6 +696,22 @@ export const tagStockingPoint = (body: PositionLocationWrite) =>
 
 export const untagStockingPoint = (tagId: number) =>
   api.delete(`/api/stocking-points/tags/${tagId}`).then((r) => r.data);
+
+export const listWarehouseFloors = (warehouseId: number) =>
+  api.get<FloorOption[]>(`/api/warehouse/warehouses/${warehouseId}/locations`)
+    .then((r) => r.data);
+
+export const listFloorAccess = (positionId: number) =>
+  api.get<FloorAccess[]>(`/api/stocking-points/floor-access/${positionId}`)
+    .then((r) => r.data);
+
+export const grantFloorAccess = (positionId: number, locationId: number) =>
+  api.post<FloorAccess>("/api/stocking-points/floor-access", {
+    position_id: positionId, location_id: locationId,
+  }).then((r) => r.data);
+
+export const revokeFloorAccess = (accessId: number) =>
+  api.delete(`/api/stocking-points/floor-access/${accessId}`).then((r) => r.data);
 
 /** What a move between two points would be — shown read-only beside the pickers. */
 export const classifyMove = (fromWarehouseId?: number | null, toWarehouseId?: number | null) =>

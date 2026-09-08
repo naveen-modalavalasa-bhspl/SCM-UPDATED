@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react";
@@ -199,12 +199,42 @@ const RAIL_STORAGE_KEY = "scm.sidebar.collapsed";
 export function ScrollingName({ name, className = "" }: {
   name: string; className?: string;
 }) {
+  // ONLY SCROLLS WHEN IT HAS TO (2026-09-07). The second copy is what makes the loop
+  // seamless — the track slides -50% and the duplicate takes the first one's place —
+  // but it was rendered unconditionally, and the animation runs on `:focus-within`,
+  // which an open dropdown always satisfies. So a name that fits perfectly well, like
+  // DIRECTOR, drew itself twice and slid them past each other for no reason: the list
+  // read "ECTOR   DIRECTOR" and looked like the position was in there twice.
+  //
+  // Overflow cannot be asked in CSS, so it is measured. The measurement compares the
+  // FIRST copy against the box, which is why the 2rem gap between copies is applied
+  // only once scrolling is on — with the gap always present the text was 2rem wider
+  // than itself and short names measured as overflowing.
+  const box = useRef<HTMLSpanElement>(null);
+  const first = useRef<HTMLSpanElement>(null);
+  const [scrolls, setScrolls] = useState(false);
+
+  useEffect(() => {
+    const measure = () => {
+      if (!box.current || !first.current) return;
+      setScrolls(first.current.scrollWidth > box.current.clientWidth + 1);
+    };
+    measure();
+    // The rail collapses and the header shrinks with the viewport, so what fits is not
+    // decided once at mount.
+    const observer = new ResizeObserver(measure);
+    if (box.current) observer.observe(box.current);
+    return () => observer.disconnect();
+  }, [name]);
+
   return (
     <span title={name}
+          ref={box}
+          data-scroll={scrolls || undefined}
           className={`lt-marquee overflow-hidden whitespace-nowrap ${className}`}>
       <span className="lt-marquee-track">
-        <span className="lt-marquee-item">{name}</span>
-        <span className="lt-marquee-item" aria-hidden>{name}</span>
+        <span className="lt-marquee-item" ref={first}>{name}</span>
+        {scrolls && <span className="lt-marquee-item" aria-hidden>{name}</span>}
       </span>
     </span>
   );

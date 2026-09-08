@@ -21,6 +21,7 @@
  * shape of an access bug, so the two now move together, under one name.
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Tooltip } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, BarChart3, Boxes, Check, CheckCircle, ChevronRight, ClipboardPaste,
@@ -475,7 +476,7 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
   "stock.view.subtree":
     "See stock at locations that report under the user's position.",
   "stock.points.manage":
-    "Choose which positions are responsible for each stocking point.",
+    "Tag positions to stocking points and grant or revoke additional floor access.",
   "stock.transfer.approve":
     "Approve stock transfers that move goods between different projects.",
   "allocation.view":
@@ -628,6 +629,35 @@ export const featureHint = (feature: MatrixFeature) =>
   ?? `${feature.description}. Grants "${feature.code}" — the backend checks this on every `
     + "request, so it is the real permission, not just a visible button.";
 
+export function featureGroup(code: string): string {
+  if (/(^|\.)view([._]|$)/.test(code)) return "Visibility and data access";
+  if (/(^|\.)(approve|reject)([._]|$)/.test(code)) return "Approval decisions";
+  return "Actions and settings";
+}
+
+// Only name controls verified in their screens; a scope has no matching button.
+const ACTION_LOCATIONS: Record<string, { button: string; where: string }> = {
+  "indent.create": { button: "New indent", where: "Indents > Overview or All Requests" },
+  "indent.edit": { button: "Edit Indent", where: "Indents > All Requests > Open an editable indent" },
+  "po.create": { button: "New purchase order", where: "Procurement > Purchase Orders" },
+  "po.approve": { button: "Approve", where: "Procurement > Purchase Orders > Open an order > Approve this order" },
+  "po.reject": { button: "Reject", where: "Procurement > Purchase Orders > Open an order > Approve this order" },
+  "issue.post": { button: "Issue from stock", where: "Warehouse > Material Issues > Open an approved issue" },
+  "po.send_vendor": { button: "Send to vendor", where: "Procurement > Purchase Orders > Open an approved order" },
+  "stock.points.manage": { button: "Tag / Access / Grant access", where: "Inventory > Stocking Points > Position row > Access" },
+};
+
+export function featureGuidance(feature: MatrixFeature): string {
+  const location = ACTION_LOCATIONS[feature.code];
+  const group = featureGroup(feature.code);
+  const detail = PLAIN_FEATURE_HELP[feature.code] ?? feature.description;
+  if (group === "Visibility and data access")
+    return `${detail} This controls readable data; it has no separate action button. Other access rules still apply.`;
+  if (group === "Approval decisions")
+    return `${detail}${location ? ` Find it: ${location.where}. Button: [${location.button}].` : ""} The person must also be eligible at the document's current approval step. This permission does not bypass the approval flow.`;
+  return `${detail}${location ? ` Find it: ${location.where}. Button: [${location.button}].` : " Availability also depends on the document status and assigned access."}`;
+}
+
 /* --------------------------------------------------------------------------- *
  *  Small local controls. Nothing here restyles a shared primitive — they are
  *  compositions of tokens the kit does not carry a component for.
@@ -640,6 +670,7 @@ function Tick({
   onChange: () => void; label: ReactNode; hint?: string;
 }) {
   return (
+    <Tooltip content={<div className="max-w-sm whitespace-normal p-1 text-sm">{hint}</div>} isDisabled={!hint}>
     <label
       title={hint}
       className={`flex min-h-9 items-start gap-2.5 rounded-lg px-2 py-1.5 text-sm
@@ -652,9 +683,11 @@ function Tick({
         checked={checked}
         ref={(el) => { if (el) el.indeterminate = !!indeterminate && !checked; }}
         onChange={onChange}
+        aria-description={hint}
       />
       <span className={disabled ? "text-muted" : "text-body"}>{label}</span>
     </label>
+    </Tooltip>
   );
 }
 
@@ -1475,15 +1508,24 @@ export function JobProfilesPage() {
                                   Nothing to switch on beyond the screens.
                                 </p>
                               )}
-                              {section.features.map((feature) => (
+                              {["Actions and settings", "Approval decisions", "Visibility and data access"].map((group) => (
+                                <div key={group}>
+                                {section.features.some((feature) => featureGroup(feature.code) === group) &&
+                                  <p className="mt-3 px-2 text-xs font-semibold text-muted">{group}</p>}
+                              {section.features.filter((feature) => featureGroup(feature.code) === group).map((feature) => (
                                 <Tick
                                   key={feature.code}
-                                  hint={featureHint(feature)}
+                                  hint={featureGuidance(feature)}
                                   checked={featureCodes.has(feature.code)}
                                   onChange={() =>
                                     toggle(featureCodes, feature.code, setFeatureCodes)}
-                                  label={feature.description}
+                                  label={<span>{feature.description}
+                                    {ACTION_LOCATIONS[feature.code] && <span className="ml-1 text-xs text-brand">[{ACTION_LOCATIONS[feature.code].button}]</span>}
+                                    <span className="mt-0.5 block text-xs text-muted">{PLAIN_FEATURE_HELP[feature.code] ?? feature.description}</span>
+                                  </span>}
                                 />
+                              ))}
+                                </div>
                               ))}
                             </div>
                           </div>

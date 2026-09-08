@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Boxes, Building2, MapPin, Star, Trash2 } from "lucide-react";
+import { Boxes, Building2, Layers, MapPin, Plus, Star, Trash2, X } from "lucide-react";
 import {
   Button, Card, KpiTiles, PageHeader, ResponsiveList, Select, StatusPill,
   type Column, type KpiTileSpec,
@@ -9,8 +9,10 @@ import {
 import {
   listStockingPointTags, tagStockingPoint, untagStockingPoint, classifyMove,
   getWarehouses, searchPositions,
+  listWarehouseFloors, listFloorAccess, grantFloorAccess, revokeFloorAccess,
 } from "../api";
 import type { PositionLocationTag, PositionSearchHit } from "../types";
+import { DetailSheet } from "../components/DetailSheet";
 
 /** Tier colouring, so the chain reads at a glance rather than by reading numbers. */
 const TIER_TONE: Record<number, string> = {
@@ -51,6 +53,8 @@ export function StockingPointsPage() {
   const [projectId, setProjectId] = useState("");
   const [projectName, setProjectName] = useState("");
   const [isPrimary, setIsPrimary] = useState(false);
+  const [floorRow, setFloorRow] = useState<PositionLocationTag | null>(null);
+  const [extraFloorId, setExtraFloorId] = useState("");
 
   // Only asks once there are two characters to go on — a one-letter search returns
   // half the org and is slower than typing the rest.
@@ -112,6 +116,28 @@ export function StockingPointsPage() {
   const remove = useMutation({
     mutationFn: (tagId: number) => untagStockingPoint(tagId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["inventory", "stocking-points"] }),
+  });
+
+  const floors = useQuery({
+    queryKey: ["warehouse", "floors", floorRow?.warehouse_id],
+    queryFn: () => listWarehouseFloors(floorRow!.warehouse_id),
+    enabled: Boolean(floorRow),
+  });
+  const floorAccess = useQuery({
+    queryKey: ["inventory", "floor-access", floorRow?.position_id],
+    queryFn: () => listFloorAccess(floorRow!.position_id),
+    enabled: Boolean(floorRow),
+  });
+  const grantFloor = useMutation({
+    mutationFn: () => grantFloorAccess(floorRow!.position_id, Number(extraFloorId)),
+    onSuccess: () => {
+      setExtraFloorId("");
+      queryClient.invalidateQueries({ queryKey: ["inventory", "floor-access", floorRow?.position_id] });
+    },
+  });
+  const revokeFloor = useMutation({
+    mutationFn: revokeFloorAccess,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["inventory", "floor-access", floorRow?.position_id] }),
   });
 
   const rows = tags.data?.items ?? [];
@@ -189,6 +215,13 @@ export function StockingPointsPage() {
     },
     { key: "tier", header: "Tier", render: (row) => <TierBadge tier={row.tier} label={row.tier_label} /> },
     {
+      key: "floor",
+      header: "HCM section / floor",
+      render: (row) => row.location_id
+        ? <div><strong className="text-ink">{row.section_name ?? `Floor ${row.location_id}`}</strong><p className="text-xs text-success">Auto mapped</p></div>
+        : <span className="text-sm text-muted">Warehouse-wide</span>,
+    },
+    {
       key: "project",
       header: "Project",
       hideOnNarrow: true,
@@ -197,13 +230,14 @@ export function StockingPointsPage() {
     {
       key: "action",
       header: "",
-      render: (row) => <Button
-        variant="ghost"
-        disabled={remove.isPending}
-        onClick={() => remove.mutate(row.id)}
-      >
-        <Trash2 className="h-4 w-4" /> Remove
-      </Button>,
+      render: (row) => <div className="flex gap-1">
+        <Button variant="ghost" onClick={() => { setFloorRow(row); setExtraFloorId(""); }}>
+          <Layers className="h-4 w-4" /> Access
+        </Button>
+        <Button variant="ghost" disabled={remove.isPending} onClick={() => remove.mutate(row.id)}>
+          <Trash2 className="h-4 w-4" /> Remove
+        </Button>
+      </div>,
     },
   ];
 
@@ -362,6 +396,52 @@ export function StockingPointsPage() {
       </p>
     </Card>
 
+    {floorRow && <DetailSheet open onClose={() => setFloorRow(null)} title="Floor access" subtitle={floorRow.warehouse_name}>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted">Floor access</p>
+          <h3 className="text-base font-semibold text-ink">{floorRow.position_name}</h3>
+          <p className="text-sm text-body">
+            Default from HCM: {floorRow.section_name ?? "Not mapped"}. Extra access widens stock visibility and material issue rights without changing approvals.
+          </p>
+        </div>
+        <Button variant="ghost" onClick={() => setFloorRow(null)}><X className="h-4 w-4" /> Close</Button>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
+        <Select label="Add warehouse location" placeholder="Select floor, block or location" value={extraFloorId}
+          onChange={setExtraFloorId}
+          options={(floors.data ?? []).filter((floor) => floor.is_active !== false && floor.id !== floorRow.location_id
+            && !(floorAccess.data ?? []).some((access) => access.location_id === floor.id)
+            && (!floor.code.startsWith("HCM-") || /warehouse|floor|block/i.test(floor.name ?? "")))
+            .map((floor) => {
+              const path: string[] = [];
+              const seen = new Set<number>();
+              let node: typeof floor | undefined = floor;
+              while (node && !seen.has(node.id)) {
+                seen.add(node.id);
+                path.unshift(`${node.name ?? node.code} (${node.code})`);
+                node = (floors.data ?? []).find((parent) => parent.id === node?.parent_id);
+              }
+              return { value: String(floor.id), label: `${floorRow.warehouse_name} / ${path.join(" / ")}` };
+            })} />
+        <div className="flex items-end"><Button disabled={!extraFloorId || grantFloor.isPending} onClick={() => grantFloor.mutate()}>
+          <Plus className="h-4 w-4" /> Grant access
+        </Button></div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <span className="rounded-full bg-success/10 px-3 py-1 text-xs text-success">
+          Default: {floorRow.location_id ? (floorRow.section_name ?? `Floor ${floorRow.location_id}`) : "Not mapped yet"}
+        </span>
+        {(floorAccess.data ?? []).map((access) => <span key={access.id} className="inline-flex items-center gap-1 rounded-full bg-brand-050 px-3 py-1 text-xs text-brand-700">
+          {access.location_name ?? access.location_code ?? `Floor ${access.location_id}`}
+          <button type="button" aria-label="Revoke floor access" onClick={() => revokeFloor.mutate(access.id)}><X className="h-3 w-3" /></button>
+        </span>)}
+      </div>
+      {(floors.error || floorAccess.error || grantFloor.error || revokeFloor.error) && <p role="alert" className="mt-3 text-sm text-danger">
+        {(floors.error || floorAccess.error || grantFloor.error || revokeFloor.error)?.message}
+      </p>}
+    </DetailSheet>}
+
     {/* Find a tagging. Everything here narrows on the server, on top of the scope
         this login already has — a filter can only ever show LESS than the rung does,
         never more, so clearing one cannot reveal another project's tagging. */}
@@ -436,6 +516,9 @@ export function StockingPointsPage() {
             : <span className="text-muted">Nothing on hand</span>}
         </p>
         <p className="text-xs text-muted">{row.project_name ?? "No project"}</p>
+        <Button variant="ghost" onClick={() => { setFloorRow(row); setExtraFloorId(""); }}>
+          <Layers className="h-4 w-4" /> Access
+        </Button>
         <Button variant="ghost" onClick={() => remove.mutate(row.id)}>
           <Trash2 className="h-4 w-4" /> Remove
         </Button>

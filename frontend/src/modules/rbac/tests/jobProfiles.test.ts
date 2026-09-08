@@ -1,13 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAccessSections, buildClip, featureHint, pageDisplayName, pageHint,
-  parseClip, sectionSummary,
+  parseClip, sectionSummary, featureGroup, featureGuidance,
 } from "../pages/JobProfilesPage";
 import type { JobProfileMatrix } from "../types";
 
 type MatrixPage = JobProfileMatrix["pages"][number];
 
 let nextId = 1;
+describe("permission guidance", () => {
+  it("keeps visibility permissions separate from buttons", () => {
+    for (const code of ["stock.view.all", "indent.view.fulfilment", "stock.valuation.view"])
+      expect(featureGroup(code)).toBe("Visibility and data access");
+    expect(featureGroup("po.approve")).toBe("Approval decisions");
+    expect(featureGroup("stock.points.manage")).toBe("Actions and settings");
+  });
+  it("explains approval eligibility alongside the verified button location", () => {
+    const help = featureGuidance({ code: "po.approve", module: "procurement", description: "Approve orders" });
+    expect(help).toContain("[Approve]");
+    expect(help).toContain("current approval step");
+  });
+});
 const page = (
   code: string, name: string, parent_id: number | null,
   required_permission: string | null = `page.${code}.view`,

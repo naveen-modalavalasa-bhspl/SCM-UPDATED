@@ -785,6 +785,11 @@ class PositionLocationIn(BaseModel):
     is_primary: bool = False
 
 
+class FloorAccessIn(BaseModel):
+    position_id: int = Field(gt=0)
+    location_id: int = Field(gt=0)
+
+
 class PositionLocationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -800,6 +805,8 @@ class PositionLocationOut(BaseModel):
     tier_label: str
     project_id: int = 0
     project_name: str | None = None
+    location_id: int | None = None
+    section_name: str | None = None
     is_primary: bool = False
 
 

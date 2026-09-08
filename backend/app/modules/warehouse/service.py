@@ -7371,8 +7371,35 @@ async def forward_dispatch(db: AsyncSession, dispatch_id: int, user) -> list[m.M
                                  user=user)
 
 
+async def _assert_issue_floor_access(db: AsyncSession, issue: m.MaterialIssue, user) -> None:
+    """Hard write gate: floor in-charges may draw only from their assigned floors."""
+    roots = await stock_locations.floor_ids_for_user(db, user)
+    if roots is None:
+        return
+    if not roots:
+        raise ValidationError("No warehouse floor is assigned to your HCM position")
+
+    allowed = set(roots)
+    frontier = set(roots)
+    while frontier:
+        children = set((await db.execute(select(m.WarehouseLocation.id).where(
+            m.WarehouseLocation.parent_id.in_(frontier),
+            m.WarehouseLocation.is_active.is_(True),
+        ))).scalars().all())
+        frontier = children - allowed
+        allowed |= children
+
+    invalid = [line.bin_code or str(line.bin_id) for line in issue.items
+               if not line.bin_id or line.bin_id not in allowed]
+    if invalid:
+        raise ValidationError(
+            "Material issue contains stock outside your assigned floor(s): "
+            + ", ".join(invalid))
+
+
 async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.MaterialIssue:
     issue = await _build_issue(db, data, user)
+    await _assert_issue_floor_access(db, issue, user)
     await db.commit()
     return await get_issue(db, issue.id)
 
@@ -7417,6 +7444,7 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
 
     await _clear_issue_serial_reservations(db, issue.id)
     await _apply_issue_lines(db, issue, data.items)
+    await _assert_issue_floor_access(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
     if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
@@ -7983,6 +8011,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     _guard(issue.status, {IssueStatus.APPROVED.value}, "issue stock against", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
+    await _assert_issue_floor_access(db, issue, user)
 
     outward = issue.direction == IssueDirection.OUT.value
     direction = StockDirection.OUT.value if outward else StockDirection.IN.value
