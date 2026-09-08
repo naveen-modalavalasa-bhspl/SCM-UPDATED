@@ -48,6 +48,45 @@ export interface ImportResult {
   unchanged: number;
 }
 
+/** One cell the server could not turn into a row of the master it points at, and
+ *  what it might have meant. `field` is null for a plain validation failure — a
+ *  missing required value has no candidates to offer, only a message. */
+export interface ImportProblem {
+  row: number;
+  field: string | null;
+  label: string | null;
+  raw: string | null;
+  message: string;
+  candidates: { id: number; label: string; code: string }[];
+}
+
+export interface ImportColumn {
+  field: string;
+  label: string;
+  required: boolean;
+  lookup: boolean;
+  choices: string[];
+  type: "lookup" | "boolean" | "text";
+}
+
+export interface ImportRow {
+  row: number;
+  values: Record<string, unknown>;
+  problems: ImportProblem[];
+}
+
+/** What `/import/preview` answers: the sheet as the server read it, with nothing
+ *  written. The screen fixes the unmatched cells against `options` and posts the
+ *  rows back to `/import/commit`. */
+export interface ImportPreview {
+  success: boolean;
+  columns: ImportColumn[];
+  rows: ImportRow[];
+  options: Record<string, { id: number; label: string; code: string }[]>;
+  file_errors: string[];
+  summary: { total: number; ready: number; blocked: number };
+}
+
 export interface MasterUsage {
   id: number; total: number; used_by: { label: string; count: number }[];
 }
@@ -58,6 +97,8 @@ export interface BulkApi {
   template: () => Promise<void>;
   export: (p?: ListParams) => Promise<void>;
   import: (file: File) => Promise<ImportResult>;
+  preview: (file: File) => Promise<ImportPreview>;
+  commit: (rows: ImportRow[]) => Promise<ImportResult>;
 }
 
 function crud<T>(path: string) {
@@ -81,6 +122,20 @@ function crud<T>(path: string) {
       body.append("file", file);
       return api.post<ImportResult>(`${path}/import`, body).then((r) => r.data);
     },
+    /** Parse and resolve without writing, so the unmatched cells can be fixed on
+     *  screen instead of back in Excel. */
+    preview: (file: File) => {
+      const body = new FormData();
+      body.append("file", file);
+      return api.post<ImportPreview>(`${path}/import/preview`, body)
+        .then((r) => r.data);
+    },
+    /** The reviewed rows. Validated again server-side — the screen is a convenience,
+     *  never the check. */
+    commit: (rows: ImportRow[]) =>
+      api.post<ImportResult>(`${path}/import/commit`, { rows: rows.map((r) => ({
+        ...r.values, __row__: r.row,
+      })) }).then((r) => r.data),
   };
 }
 

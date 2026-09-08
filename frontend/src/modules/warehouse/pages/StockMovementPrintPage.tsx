@@ -1,10 +1,8 @@
-import { useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/shared/api/client";
 import { getStockMovementOrder, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
-import { PrintTemplate } from "@/shared/components";
+import { PrintTemplate, type PrintColumn } from "@/shared/components";
 
 export function StockMovementPrintPage() {
   const [params] = useSearchParams();
@@ -16,29 +14,17 @@ export function StockMovementPrintPage() {
     enabled: !!orderNo,
   });
 
-  const { data: company } = useQuery({
-    queryKey: ["print-company"],
-    queryFn: () =>
-      api.get<{ company?: Record<string, string> }>("/api/settings")
-        .then((r) => r.data.company ?? {})
-        .catch(() => ({} as Record<string, string>)),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  });
-
-  const { data: warehouses } = useQuery({
+  const warehousesQuery = useQuery({
     queryKey: ["print-warehouses"],
     queryFn: () => warehouseOptions(),
     staleTime: 5 * 60 * 1000,
   });
+  const warehouses = warehousesQuery.data;
 
-  useEffect(() => {
-    if (!query.data) return;
-    const timer = setTimeout(() => window.print(), 250);
-    return () => clearTimeout(timer);
-  }, [query.data]);
-
-  if (query.isLoading) return <p className="p-8 text-sm">Loading the document…</p>;
+  // The sheet opens the print dialog on its own once it is mounted, so a warehouse
+  // name still in flight would go to paper as "WH-3". Hold until it has answered.
+  if (query.isLoading || warehousesQuery.isLoading)
+    return <p className="p-8 text-sm">Loading the document…</p>;
   if (query.error) return <p className="p-8 text-sm">{(query.error as Error).message}</p>;
   if (!query.data) return <p className="p-8 text-sm">Document not found.</p>;
 
@@ -53,11 +39,11 @@ export function StockMovementPrintPage() {
     { label: "Created By", value: order.created_by_name || "—" },
   ];
 
-  const columns = [
+  const columns: PrintColumn[] = [
     { header: "Item" },
     { header: "From" },
     { header: "To" },
-    { header: "Quantity", className: "text-right w-[15%]" },
+    { header: "Quantity", align: "right", width: "15%" },
   ];
 
   const items = (order.items || []).map((line: any) => [
@@ -84,9 +70,6 @@ export function StockMovementPrintPage() {
       documentNo={order.order_no}
       date={fmtDate(order.created_at)}
       status={order.status}
-      companyName={company?.name}
-      companyLegalName={company?.legal_name}
-      companyAddress={company?.address}
       metadata={metadata}
       columns={columns}
       items={items}

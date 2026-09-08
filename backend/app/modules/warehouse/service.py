@@ -473,7 +473,7 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     return wh
 
 
-async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
+async def bin_tree(db: AsyncSession, warehouse_id: int, user=None) -> list[dict]:
     """The whole tree in one query, nested in Python.
 
     `whs_warehouse_locations` nests through `parent_id` with no depth limit, so a
@@ -488,9 +488,17 @@ async def bin_tree(db: AsyncSession, warehouse_id: int) -> list[dict]:
     # A bulk warehouse stocks at warehouse level, so there is no tree to walk.
     if not wh.is_bin_managed:
         return []
-    rows = (await db.execute(
-        select(Bin).where(Bin.warehouse_id == warehouse_id).order_by(Bin.code)
-    )).scalars().all()
+    stmt = select(Bin).where(Bin.warehouse_id == warehouse_id).order_by(Bin.code)
+    if user is not None:
+        # Narrowed to the caller's own floors, the same set `floor_scope_ids` gates the
+        # writes with. The putaway picker reads the TREE rather than `bin_options`, so
+        # scoping only the flat list left a floor in-charge still being offered every
+        # floor in the building — the dropdown they actually use was the one that was
+        # not narrowed.
+        allowed = await floor_scope_ids(db, user)
+        if allowed is not None:
+            stmt = stmt.where(Bin.id.in_(allowed) if allowed else false())
+    rows = (await db.execute(stmt)).scalars().all()
 
     nodes: dict[int, dict] = {}
     for b in rows:
@@ -3779,6 +3787,13 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     # placed anyway and the system was told nothing. A location is a location — the
     # capacity gates already say whether the load fits the one that was chosen, and
     # they warn rather than block for exactly the same reason.
+    #
+    # WHICH floor, though, is a different question from which rung. A floor in-charge
+    # may put stock down anywhere on the floors they hold and nowhere else. The picker
+    # is already narrowed to those, but narrowing a dropdown is not the check: this
+    # route took any bin in the warehouse, so a hand-built request put stock on a floor
+    # its sender does not work (rule 6).
+    await _assert_floor_access(db, target.id, user, "Putaway")
 
     qty = _d(data.qty) if data.qty is not None else _d(task.qty)
     if qty <= ZERO:
@@ -6443,6 +6458,14 @@ async def issue_stock_sources(
             warehouse_col=Stock.warehouse_id,
             warehouse_ids=await warehouse_ids_for_user(db, user),
         ))
+        # And within the warehouse, the caller's own floors. The warehouse scope above
+        # answers "which building"; this answers "which floor of it", which is the
+        # question a floor in-charge is bound by. Without it the splits this list
+        # builds pointed at bins `_assert_issue_floor_access` then refused, so the
+        # storekeeper filled in a form that could not be saved.
+        allowed = await floor_scope_ids(db, user)
+        if allowed is not None:
+            stmt = stmt.where(Stock.bin_id.in_(allowed) if allowed else false())
 
     rows = (await db.execute(stmt)).all()
     # One read of the warehouse's tree for the whole answer, so every source can name
@@ -6571,6 +6594,15 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
             owner_col=m.MaterialIssue.created_by_id,
             project_col=m.MaterialIssue.project_id,
         ))
+        # A floor in-charge is given the pieces of work addressed to their floors and
+        # nothing else — not the generic parents, which belong to the warehouse
+        # manager and would only be documents they cannot act on. Everybody else is
+        # unrestricted (`floor_scope_ids` answers None), so the manager still sees the
+        # parents, the children and the unsplit issues together.
+        floors = await floor_scope_ids(db, user)
+        if floors is not None:
+            stmt = stmt.where(m.MaterialIssue.floor_location_id.in_(floors)
+                              if floors else false())
     if direction:
         stmt = stmt.where(m.MaterialIssue.direction == direction)
     if status:
@@ -7371,13 +7403,27 @@ async def forward_dispatch(db: AsyncSession, dispatch_id: int, user) -> list[m.M
                                  user=user)
 
 
-async def _assert_issue_floor_access(db: AsyncSession, issue: m.MaterialIssue, user) -> None:
-    """Hard write gate: floor in-charges may draw only from their assigned floors."""
+async def floor_scope_ids(db: AsyncSession, user) -> set[int] | None:
+    """Every location a floor in-charge may touch, or None for warehouse-wide.
+
+    `floor_ids_for_user` answers with the ROOTS — the floors the position is assigned
+    and the ones an admin has granted on top. A floor is not where stock sits, though:
+    it sits in a bay on a rack in a lane on that floor, so the roots have to be walked
+    down before they can be compared with a `bin_id`.
+
+    The walk is here, once, because the answer is needed in two different shapes and
+    they must not disagree: as a filter on what the picker OFFERS, and as the gate on
+    what the service ACCEPTS. Offering a location the write would refuse is a
+    storekeeper filling in a form that cannot be saved; accepting one the picker never
+    showed is the gate not being there at all (rule 6 — hiding the option is not the
+    security, the server check is).
+
+    An empty set is NOT the same as None: it means this position is a floor in-charge
+    with no floor assigned, which must refuse everything rather than allow everything.
+    """
     roots = await stock_locations.floor_ids_for_user(db, user)
     if roots is None:
-        return
-    if not roots:
-        raise ValidationError("No warehouse floor is assigned to your HCM position")
+        return None
 
     allowed = set(roots)
     frontier = set(roots)
@@ -7388,6 +7434,34 @@ async def _assert_issue_floor_access(db: AsyncSession, issue: m.MaterialIssue, u
         ))).scalars().all())
         frontier = children - allowed
         allowed |= children
+    return allowed
+
+
+async def _assert_floor_access(db: AsyncSession, location_id: int | None, user,
+                               what: str) -> None:
+    """The same gate as `_assert_issue_floor_access`, for a document with ONE location.
+
+    A putaway, a movement and an issue all end with stock sitting somewhere, so they
+    all have to answer the same question about who may put it there. The issue asks it
+    per line because an issue has many; everything else asks it once.
+    """
+    allowed = await floor_scope_ids(db, user)
+    if allowed is None:
+        return
+    if not allowed:
+        raise ValidationError("No warehouse floor is assigned to your HCM position")
+    if location_id not in allowed:
+        raise ValidationError(
+            f"{what} location is outside your assigned floor(s).")
+
+
+async def _assert_issue_floor_access(db: AsyncSession, issue: m.MaterialIssue, user) -> None:
+    """Hard write gate: floor in-charges may draw only from their assigned floors."""
+    allowed = await floor_scope_ids(db, user)
+    if allowed is None:
+        return
+    if not allowed:
+        raise ValidationError("No warehouse floor is assigned to your HCM position")
 
     invalid = [line.bin_code or str(line.bin_id) for line in issue.items
                if not line.bin_id or line.bin_id not in allowed]
@@ -7641,6 +7715,233 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
                              "current_approver": issue.current_approver_name})
     await db.commit()
     return await get_issue(db, issue_id)
+
+
+def _floor_of(index: dict, bin_id: int | None) -> tuple[int | None, str | None]:
+    """Which FLOOR a location sits on — the outermost rung of its own ancestry.
+
+    Read off `_location_index`, which already carries every node's whole chain, so
+    this is a dictionary lookup rather than a walk per bin. A location whose ancestry
+    is a single node IS the floor.
+    """
+    node = index.get(bin_id) if bin_id else None
+    steps = (node or {}).get("steps") or []
+    if not steps:
+        return None, None
+    return steps[0]["id"], steps[0]["name"]
+
+
+async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
+    """Break one approved issue into a child per floor that actually holds the stock.
+
+    **The issue itself is never tagged to a floor, and must not be.** It is raised by
+    an allocation against a WAREHOUSE and belongs to nobody in particular; writing a
+    floor onto it would be storing an answer that stops being true the moment the
+    goods are moved. So the generic issue is broken UP instead: each child names the
+    floor it was handed to — a fact about who was given the work, which moving stock
+    does not change — and carries only what that floor was holding when the manager
+    pressed the button.
+
+    Quantities are DISTRIBUTED, never repeated. Ask for 100 with 40 on the third floor
+    and 60 on the ground floor and you get two children, for 40 and 60. Ask for 100
+    with only 70 anywhere and you get 70 — the missing 30 stays UNFULFILLED on the
+    parent and is reported back, because a shortage belongs to the indent and rounding
+    it away silently is how a site waits for goods nobody is buying.
+
+    Splitting is OPTIONAL. A warehouse manager is not floor-restricted
+    (`floor_scope_ids` answers None for them), so they can post the whole issue
+    themselves and never press this. It exists for handing the work down, not for
+    taking it away.
+
+    Ordered expiry-then-batch, the same order `issue_stock_sources` uses, so the
+    children come out FIFO without this function knowing what FIFO is.
+    """
+    from app.modules.inventory.models import Reservation, Stock
+
+    parent = await get_issue(db, issue_id)
+    _guard(parent.status, {IssueStatus.APPROVED.value}, "split", "issue")
+    if parent.parent_issue_id:
+        raise ValidationError(
+            f"{parent.issue_no} is already a split of {parent.parent_issue_no}.")
+    existing = await db.scalar(
+        select(func.count()).select_from(m.MaterialIssue).where(
+            m.MaterialIssue.parent_issue_id == parent.id,
+            m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+        )
+    )
+    if existing:
+        raise ValidationError(
+            f"{parent.issue_no} has already been split into {existing} issue(s). "
+            "Cancel those before splitting again.")
+
+    index = await _location_index(db, parent.warehouse_id)
+
+    # Every (bin, batch) the parent's items can be drawn from in this warehouse,
+    # oldest stock first. Read off stk_balance, never off the unit tables — those hold
+    # one row per physical thing and there are hundreds of thousands of them.
+    #
+    # **`available_qty` ALONE IS WRONG HERE**, and getting it wrong looks exactly like
+    # an empty warehouse. Approving the allocation behind this issue RESERVED the very
+    # stock the issue is about to move, so the balance row it is going to draw from
+    # reads `available_qty = 0` — the goods are on the shelf, spoken for, by this
+    # document. Splitting on that number refused every real issue with "no floor is
+    # holding stock for these items" while the pallet was standing on the third floor.
+    # So this adds the parent's OWN reservations back, exactly as
+    # `issue_stock_sources` does for the same reason; another indent's reservation
+    # stays subtracted, because that stock genuinely is not ours to hand out.
+    item_ids = [line.item_id for line in parent.items]
+    if parent.indent_id:
+        mine = (
+            select(Reservation.stock_id.label("stock_id"),
+                   func.sum(Reservation.quantity).label("qty"))
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.ref_id == parent.indent_id,
+                   Reservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(Reservation.stock_id)
+            .subquery()
+        )
+        drawable = func.sum(Stock.available_qty) + func.coalesce(func.sum(mine.c.qty), 0)
+    else:
+        mine = None
+        drawable = func.sum(Stock.available_qty)
+
+    stmt = (
+        select(Stock.item_id, Stock.bin_id, Stock.batch_id,
+               drawable.label("qty"),
+               m.Batch.batch_no, m.Batch.expiry_date)
+        .select_from(Stock)
+        .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
+    )
+    if mine is not None:
+        stmt = stmt.outerjoin(mine, mine.c.stock_id == Stock.id)
+    rows = (await db.execute(
+        stmt.where(Stock.warehouse_id == parent.warehouse_id,
+                   Stock.item_id.in_(item_ids),
+                   _stock_offerable(parent.indent_id))
+        .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
+                  m.Batch.batch_no, m.Batch.expiry_date)
+        .order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date, Stock.batch_id)
+    )).all() if item_ids else []
+
+    # floor id -> {name, lines: [...]}, and what could not be placed anywhere.
+    by_floor: dict[int, dict] = {}
+    shortfall: list[dict] = []
+
+    for line in parent.items:
+        outstanding = _d(line.requested_qty)
+        if outstanding <= ZERO:
+            continue
+        for row in rows:
+            if outstanding <= ZERO:
+                break
+            if row.item_id != line.item_id:
+                continue
+            available = _d(row.qty)
+            if available <= ZERO:
+                continue
+            floor_id, floor_name = _floor_of(index, row.bin_id)
+            if floor_id is None:
+                continue          # stock at warehouse level, not on any floor
+            take = min(outstanding, available)
+            node = index.get(row.bin_id) or {}
+            bucket = by_floor.setdefault(floor_id, {"name": floor_name, "lines": []})
+            bucket["lines"].append({
+                "indent_item_id": line.indent_item_id,
+                "item_id": line.item_id, "item_code": line.item_code,
+                "item_name": line.item_name, "uom_code": line.uom_code,
+                "bin_id": row.bin_id, "bin_code": node.get("code"),
+                "batch_id": row.batch_id, "batch_no": row.batch_no,
+                "expiry_date": row.expiry_date,
+                "qty": take,
+            })
+            outstanding -= take
+        if outstanding > ZERO:
+            shortfall.append({
+                "item_id": line.item_id, "item_code": line.item_code,
+                "item_name": line.item_name, "qty": str(outstanding),
+            })
+
+    if not by_floor:
+        raise ValidationError(
+            "No floor in this warehouse is holding stock for these items, so there "
+            "is nothing to split. Post the issue yourself, or put the stock away "
+            "first.")
+
+    created: list[m.MaterialIssue] = []
+    for floor_id, bucket in by_floor.items():
+        child = m.MaterialIssue(
+            items=[],
+            issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
+                                       project=parent.project_name),
+            issue_type=parent.issue_type,
+            issue_date=parent.issue_date,
+            indent_id=parent.indent_id, indent_no=parent.indent_no,
+            picking_id=parent.picking_id, pick_no=parent.pick_no,
+            warehouse_id=parent.warehouse_id,
+            warehouse_name=parent.warehouse_name,
+            department_id=parent.department_id,
+            department_name=parent.department_name,
+            project_id=parent.project_id, project_name=parent.project_name,
+            vehicle_id=parent.vehicle_id, vehicle_number=parent.vehicle_number,
+            issued_to_id=parent.issued_to_id,
+            issued_to_name=parent.issued_to_name,
+            direction=parent.direction,
+            parent_issue_id=parent.id, parent_issue_no=parent.issue_no,
+            floor_location_id=floor_id, floor_location_name=bucket["name"],
+            # A child starts where a hand-written issue starts. It does NOT inherit the
+            # parent's approval: the parent said this stock may leave, and the ladder
+            # still decides who signs each piece. Copying APPROVED down here would be a
+            # way of approving a document nobody has looked at (rule 8).
+            status=IssueStatus.DRAFT.value,
+            created_by_id=getattr(user, "id", None),
+            created_by_name=getattr(user, "full_name", None),
+        )
+        for number, spec in enumerate(bucket["lines"], start=1):
+            child.items.append(m.MaterialIssueLine(
+                line_no=number,
+                indent_item_id=spec["indent_item_id"],
+                item_id=spec["item_id"], item_code=spec["item_code"],
+                item_name=spec["item_name"], uom_code=spec["uom_code"],
+                bin_id=spec["bin_id"], bin_code=spec["bin_code"],
+                batch_id=spec["batch_id"], batch_no=spec["batch_no"],
+                expiry_date=spec["expiry_date"],
+                # `issued_qty` is PREFILLED, exactly as `_allocation_lines_by_batch`
+                # prefills the draft this split replaces. Leaving it at zero is not the
+                # harmless "the storekeeper will type it" it looks like: `post_issue`
+                # skips a line with nothing on it, so the document posted as ISSUED
+                # while `move_stock` was never called and no `stk_ledger` row was
+                # written — the paper said six went out and the shelf still held them.
+                # It also silently turned QC off: `needs_qc` reads `requires_qi` only
+                # for lines with a quantity, so an item that must be inspected went
+                # out as NOT_REQUIRED and never reached the Outward QC queue.
+                requested_qty=spec["qty"], issued_qty=spec["qty"],
+            ))
+        child.total_items = len(child.items)
+        child.total_qty = sum((_d(i.requested_qty) for i in child.items), ZERO)
+        db.add(child)
+        created.append(child)
+
+    await db.flush()
+    for child in created:
+        await write_audit(db, entity="out_issues", entity_id=child.id,
+                          action=AuditAction.CREATE, actor=user,
+                          after={"issue_no": child.issue_no,
+                                 "parent_issue_no": parent.issue_no,
+                                 "floor": child.floor_location_name,
+                                 "total_qty": str(child.total_qty)})
+    await db.commit()
+
+    return {
+        "parent_issue_id": parent.id,
+        "parent_issue_no": parent.issue_no,
+        "children": [{"id": c.id, "issue_no": c.issue_no,
+                      "floor_location_id": c.floor_location_id,
+                      "floor_location_name": c.floor_location_name,
+                      "total_items": c.total_items,
+                      "total_qty": str(c.total_qty)} for c in created],
+        # Said out loud, never rounded away — see the docstring.
+        "unfulfilled": shortfall,
+    }
 
 
 async def act_on_issue(
@@ -12174,7 +12475,8 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
                       storage_type_id: str | None = None,
                       all_locations: bool = False,
                       exclude_bin_id: int | None = None,
-                      indent_id: int | None = None) -> list[dict]:
+                      indent_id: int | None = None,
+                      user=None) -> list[dict]:
     """Somewhere in this warehouse to take stock from, or put it.
 
     Every row carries its WHOLE ancestry — `path`, `path_names`, `steps` — not just a
@@ -12188,9 +12490,23 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
     location holding goods is a location they can be picked from, whatever rung of the
     tree it sits on. Stock lands outside a bin whenever a putaway is confirmed against
     a rung above one, which the floor is now allowed to do.
+
+    Narrowed to the caller's own floors when they have any. `user` is optional so the
+    internal callers that are not answering a request keep working, but every ROUTE
+    passes it: this list is what a putaway, a movement and a material issue all pick
+    their location from, and offering a floor the write gate would refuse is a form
+    that cannot be saved. The picker and `floor_scope_ids` read the same set — the
+    dropdown is the courtesy, the gate is the rule.
     """
     holding = bool(item_id or batch_id)
     stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
+    if user is not None:
+        allowed = await floor_scope_ids(db, user)
+        if allowed is not None:
+            # An empty set is a floor in-charge with no floor assigned. Offer nothing
+            # rather than everything — the write gate refuses them either way, and a
+            # full dropdown would only send them to a form that cannot be saved.
+            stmt = stmt.where(Bin.id.in_(allowed) if allowed else false())
     if not all_locations and not holding:
         stmt = stmt.where(Bin.bin_type.in_(m.BIN_TYPES))
     # A destination that is also the source is not a movement. Excluded here rather

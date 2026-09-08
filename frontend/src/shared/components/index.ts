@@ -24,7 +24,12 @@ export { ToastProvider, useToast, type ToastInput, type ToastContent } from "./T
 export { describeError, errorMessage, isAnnouncedGlobally } from "@/shared/api/errors";
 export type { Notice, NoticeLevel } from "@/shared/api/errors";
 export { useAction } from "./useAction";
-export { PrintTemplate } from "./PrintTemplate";
+export { PrintTemplate, PrintPanel, SectionTitle } from "./PrintTemplate";
+export type { PrintTemplateProps, PrintField, PrintBlock, PrintColumn } from "./PrintTemplate";
+export {
+  COMPANY_FALLBACK, resolveCompany, useCompanyProfile, companyProfileKey,
+} from "./companyProfile";
+export type { CompanyProfile } from "./companyProfile";
 export { FilterMenu, type FilterOption } from "./FilterMenu";
 export * from "./filterChrome";
 export { FilterBar, SearchField, FilterToggle, FilterDateRange } from "./FilterBar";

@@ -433,6 +433,24 @@ export const rejectIssue = (id: number, comments = "") =>
 /** Posts the movement — this is the point stock actually leaves the shelf. */
 export const postIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue`);
 
+/** One child issue per warehouse floor holding stock for the parent's items. */
+export interface IssueSplitResult {
+  parent_issue_id: number;
+  parent_issue_no: string;
+  children: {
+    id: number; issue_no: string;
+    floor_location_id: number | null; floor_location_name: string | null;
+    total_items: number; total_qty: string;
+  }[];
+  /** What no floor was holding. Reported, never rounded away — the shortage belongs
+   *  to the indent and hiding it is how a site waits for goods nobody is buying. */
+  unfulfilled: { item_id: number; item_code: string | null; item_name: string | null; qty: string }[];
+}
+
+/** Hand an approved issue down to the floors that are actually holding the stock. */
+export const splitIssue = (id: number) =>
+  post<IssueSplitResult>(`${BASE}/issues/${id}/split`);
+
 /** Names the physical units after approval — the rest of the issue stays frozen. */
 export const setIssueSerials = (
   id: number,

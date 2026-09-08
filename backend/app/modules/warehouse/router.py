@@ -34,6 +34,7 @@ from app.modules.warehouse.enums import (
     MOVEMENT_APPROVE, MOVEMENT_CREATE, MOVEMENT_VIEW,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
+    ISSUE_SPLIT,
     ISSUE_VIEW,
     MASTER_LOCATION_MANAGE, PICKING_PICK, PICKING_VIEW, PUTAWAY_EXECUTE, PUTAWAY_VIEW,
     QC_OUTWARD_VIEW, QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE, QC_OUTWARD_APPROVE, QC_OUTWARD_DELETE,
@@ -88,7 +89,9 @@ async def update_warehouse(warehouse_id: int, data: s.WarehouseWrite,
 @router.get("/warehouses/{warehouse_id}/bins", response_model=list[s.BinRead])
 async def bin_tree(warehouse_id: int, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(STOCK_VIEW))):
-    return await service.bin_tree(db, warehouse_id)
+    """The caller is passed on: a floor in-charge is shown the floors they hold, which
+    is the same set the putaway and issue write gates enforce."""
+    return await service.bin_tree(db, warehouse_id, user=user)
 
 
 @router.get("/bins/{bin_id}/volume-budget", response_model=s.VolumeBudget)
@@ -597,6 +600,17 @@ async def approve_issue(issue_id: int, body: s.ApprovalIn,
     )
 
 
+@router.post("/issues/{issue_id}/split")
+async def split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(ISSUE_SPLIT))):
+    """Hand an approved issue down to the floors that are holding the stock.
+
+    Behind its own code rather than ISSUE_POST, so a site can let a manager split
+    without letting them post — but the code inherits ISSUE_POST's grants, so nobody
+    who could work this screen yesterday has to be re-granted anything."""
+    return await service.split_issue_by_floor(db, issue_id, user)
+
+
 @router.post("/issues/{issue_id}/reject", response_model=s.IssueDetail)
 async def reject_issue(issue_id: int, body: s.ApprovalIn,
                        db: AsyncSession = Depends(get_db),
@@ -1051,13 +1065,16 @@ async def bin_options(warehouse_id: int, search: str | None = None,
                       exclude_bin_id: int | None = None,
                       indent_id: int | None = None,
                       db: AsyncSession = Depends(get_db),
-                      _=Depends(require_permission(STOCK_VIEW))):
+                      user=Depends(require_permission(STOCK_VIEW))):
     """`indent_id` adds back the stock this indent already holds — see
-    `service._stock_offerable`."""
+    `service._stock_offerable`.
+
+    The CALLER is passed on, not discarded: a floor in-charge is offered the floors
+    they hold and nothing else, which is the same set the write gate enforces."""
     return await service.bin_options(
         db, warehouse_id, search, item_id=item_id, batch_id=batch_id,
         storage_type_id=storage_type_id, all_locations=all_locations,
-        exclude_bin_id=exclude_bin_id, indent_id=indent_id,
+        exclude_bin_id=exclude_bin_id, indent_id=indent_id, user=user,
     )
 
 

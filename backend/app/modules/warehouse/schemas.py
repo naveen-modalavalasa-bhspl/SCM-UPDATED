@@ -1426,6 +1426,12 @@ class IssueRead(_Read):
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
+    # Set on a CHILD of a split. The parent stays generic and carries neither, which is
+    # how a screen tells the two apart without asking a second question.
+    parent_issue_id: int | None = None
+    parent_issue_no: str | None = None
+    floor_location_id: int | None = None
+    floor_location_name: str | None = None
     status: str
     total_items: int
     total_qty: Decimal

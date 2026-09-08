@@ -1,10 +1,8 @@
-import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/shared/api/client";
 import { getConsignment, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
-import { PrintTemplate } from "@/shared/components";
+import { PrintTemplate, type PrintColumn } from "@/shared/components";
 
 export function ConsignmentPrintPage() {
   const { id } = useParams();
@@ -16,29 +14,17 @@ export function ConsignmentPrintPage() {
     enabled: Number.isFinite(consignmentId) && consignmentId > 0,
   });
 
-  const { data: company } = useQuery({
-    queryKey: ["print-company"],
-    queryFn: () =>
-      api.get<{ company?: Record<string, string> }>("/api/settings")
-        .then((r) => r.data.company ?? {})
-        .catch(() => ({} as Record<string, string>)),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  });
-
-  const { data: warehouses } = useQuery({
+  const warehousesQuery = useQuery({
     queryKey: ["print-warehouses"],
     queryFn: () => warehouseOptions(),
     staleTime: 5 * 60 * 1000,
   });
+  const warehouses = warehousesQuery.data;
 
-  useEffect(() => {
-    if (!query.data) return;
-    const timer = setTimeout(() => window.print(), 250);
-    return () => clearTimeout(timer);
-  }, [query.data]);
-
-  if (query.isLoading) return <p className="p-8 text-sm">Loading the document…</p>;
+  // The sheet opens the print dialog on its own once it is mounted, so a warehouse
+  // name still in flight would go to paper as "WH-3". Hold until it has answered.
+  if (query.isLoading || warehousesQuery.isLoading)
+    return <p className="p-8 text-sm">Loading the document…</p>;
   if (query.error) return <p className="p-8 text-sm">{(query.error as Error).message}</p>;
   if (!query.data) return <p className="p-8 text-sm">Document not found.</p>;
 
@@ -57,11 +43,11 @@ export function ConsignmentPrintPage() {
     { label: "Delivery Address", value: consignment.delivery_address || "—", fullWidth: true },
   ];
 
-  const columns = [
-    { header: "Package No", className: "w-[15%]" },
-    { header: "Type", className: "w-[10%]" },
-    { header: "Items", className: "w-[50%]" },
-    { header: "Weight (kg)", className: "text-right w-[10%]" },
+  const columns: PrintColumn[] = [
+    { header: "Package No", width: "15%" },
+    { header: "Type", width: "10%" },
+    { header: "Items", width: "50%" },
+    { header: "Weight (kg)", align: "right", width: "10%" },
   ];
 
   const items = (consignment.packages || []).map((pkg: any) => {
@@ -103,9 +89,6 @@ export function ConsignmentPrintPage() {
       documentNo={consignment.dispatch_no}
       date={fmtDate(consignment.dispatch_date)}
       status={consignment.status}
-      companyName={company?.name}
-      companyLegalName={company?.legal_name}
-      companyAddress={company?.address}
       metadata={metadata}
       columns={columns}
       items={items}

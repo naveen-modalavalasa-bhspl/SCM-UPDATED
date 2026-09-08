@@ -13,9 +13,10 @@ import {
   acknowledgeIssue, approveIssue, batchOptions, binOptions, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory, itemOptions, listSerials, postIssue, projectOptions,
-  returnableIssueOptions, rejectIssue, setIssueSerials, submitIssue, updateIssue,
+  returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
   warehouseOptions,
 } from "../api";
+import type { IssueSplitResult } from "../api";
 import { fmtDateTime, fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type {
@@ -89,7 +90,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   });
   const [touched, setTouched] = useState(false);
   const [confirming, setConfirming] = useState<
-    "submit" | "approve" | "reject" | "post" | "ack" | "cancel" | null
+    "submit" | "approve" | "reject" | "post" | "split" | "ack" | "cancel" | null
   >(null);
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
@@ -351,6 +352,16 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           })
           .filter((line) => line.requested_qty > 0),
       }));
+    },
+  });
+
+  const [splitResult, setSplitResult] = useState<IssueSplitResult | null>(null);
+  const split = useMutation({
+    mutationFn: () => splitIssue(Number(id)),
+    onSuccess: (result) => {
+      setSplitResult(result);
+      qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
     },
   });
 
@@ -658,6 +669,18 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 <Button onClick={() => setConfirming("post")}>Issue from stock</Button>
               </Can>
             )}
+            {/* The manager's other option on the same approved issue: hand it to the
+                floors instead of doing it themselves. Only on a parent — a child is
+                already one floor's share and splitting it again means nothing. */}
+            {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted
+              && !doc?.parent_issue_id && (
+              <Can do="issue.split">
+                <Button variant="ghost" disabled={split.isPending}
+                        onClick={() => setConfirming("split")}>
+                  {split.isPending ? "Splitting…" : "Split across floors"}
+                </Button>
+              </Can>
+            )}
             {/* Only once the raiser has confirmed what reached them. Until then the
                 store that shipped the goods would be signing for its own delivery. */}
             {editing && ["ISSUED", "DISPATCHED"].includes(doc?.status ?? "") && (
@@ -690,6 +713,48 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       />
 
       <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pickingSource.error} />
+
+      {/* What the split actually handed out. Shown here rather than as a toast: the
+          shortfall is the half that matters and it must not scroll away — a quantity
+          no floor was holding is a shortage on the indent, and the manager is the
+          only person who sees this screen at the moment it is known. */}
+      {splitResult && (
+        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-semibold">
+              {splitResult.parent_issue_no} split into {splitResult.children.length}{" "}
+              issue{splitResult.children.length === 1 ? "" : "s"}
+            </span>
+            <Button variant="ghost" onClick={() => setSplitResult(null)}>Dismiss</Button>
+          </div>
+          <ul className="mt-2 space-y-1">
+            {splitResult.children.map((child) => (
+              <li key={child.id} className="flex flex-wrap items-baseline gap-2">
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`/warehouse/material-issues/${child.id}`)}>
+                  {child.issue_no}
+                </button>
+                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>· {child.total_items} line{child.total_items === 1 ? "" : "s"}</span>
+                <span>· {fmtQty(Number(child.total_qty))}</span>
+              </li>
+            ))}
+          </ul>
+          {splitResult.unfulfilled.length > 0 && (
+            <div className="mt-3 rounded-lg bg-bad-bg px-3 py-2 text-bad">
+              <div className="font-semibold">No floor is holding these — still outstanding</div>
+              <ul className="mt-1 space-y-0.5">
+                {splitResult.unfulfilled.map((row) => (
+                  <li key={row.item_id}>
+                    {row.item_name ?? row.item_code ?? `#${row.item_id}`} ·{" "}
+                    {fmtQty(Number(row.qty))}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
       {mixedProjects && (
         <div className="mb-4 flex items-start gap-2 rounded-xl border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
           <Info className="mt-0.5 h-4 w-4 shrink-0" />
@@ -905,6 +970,20 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           )}
         </div>
       </ConfirmModal>
+
+      <ConfirmModal
+        isOpen={confirming === "split"}
+        title="Split this issue across the floors?"
+        message={"One issue is created per floor that is holding stock for these items, "
+          + "each for the quantity that floor actually has. The floor in-charges see "
+          + "their own and nobody else's. Anything no floor is holding stays unfulfilled "
+          + "and is listed for you. Nothing leaves the warehouse yet."}
+        confirmLabel="Split across floors"
+        busy={split.isPending}
+        error={split.error}
+        onConfirm={() => { split.mutate(); setConfirming(null); }}
+        onClose={() => setConfirming(null)}
+      />
 
       <ConfirmModal
         isOpen={confirming === "post"}

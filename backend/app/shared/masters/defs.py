@@ -22,7 +22,7 @@ from app.shared.enums import (
     AttributeDataType, BinType, CategoryTagType, UomClass,
     WarehouseType,
 )
-from app.shared.masters.crud import MasterDef
+from app.shared.masters.crud import Lookup, MasterDef
 from app.platform.rbac.models import Role
 from app.shared.models.master import (
     ItemEligibility,
@@ -1854,6 +1854,32 @@ async def apply_item_eligibility(db: AsyncSession, row: ItemEligibility,
             f"{item.code} is already tagged to {found}.")
 
 
+# The item sheet's nine foreign keys, stated by name rather than by id. Six of them
+# are required, so before this an item could not be added to the spreadsheet at all
+# without six lookups into six other exports — which is why the item master is the
+# one this started with.
+#
+# The chain the item form enforces (a general name narrows the brands, a brand
+# narrows the manufacturers) is NOT re-stated here: `apply_item` already checks it on
+# the way in and rejects a combination that does not hold, so a second copy in the
+# sheet would only be a second opinion to keep in step.
+ITEM_LOOKUPS = (
+    Lookup("category_id", ItemCategory, "Category"),
+    Lookup("general_name_id", GeneralName, "General name"),
+    Lookup("brand_id", Brand, "Brand"),
+    Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
+    Lookup("item_class_id", ItemClass, "Item class"),
+    Lookup("item_sub_class_id", ItemSubClass, "Item sub class"),
+    Lookup("uom_id", Uom, "Unit of measure"),
+    # An HSN row has no `name` — it is a code and a description, and the code is
+    # what is written on an invoice, so that is what the sheet asks for and matches
+    # on first.
+    Lookup("hsn_id", HsnCode, "HSN code",
+           match=("code", "description"), display=("code",)),
+    Lookup("dosage_form_id", DosageForm, "Dosage form"),
+)
+
+
 MASTERS: list[MasterDef] = [
     # Which items a role or a region may raise an indent for. Empty by default, and
     # an untagged item stays open to everyone — so this screen NARROWS, and can never
@@ -1872,6 +1898,7 @@ MASTERS: list[MasterDef] = [
               default_active_only=True,
               scope_to_user=restrict_items_to_my_groups,
               filters=("category_id", "item_class_id", "brand_id", "hsn_id"),
+              lookups=ITEM_LOOKUPS,
               usage=ITEM_USAGE),
 
     MasterDef(path="item-categories", name="Category", model=ItemCategory,

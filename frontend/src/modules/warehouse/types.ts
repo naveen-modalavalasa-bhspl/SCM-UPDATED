@@ -972,6 +972,12 @@ export interface Issue {
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
+  /** Set on a CHILD of a split; the generic parent carries neither, which is how a
+   *  screen tells the two apart without asking a second question. */
+  parent_issue_id?: number | null;
+  parent_issue_no?: string | null;
+  floor_location_id?: number | null;
+  floor_location_name?: string | null;
   status: IssueStatus;
   total_items: number;
   total_qty: number;
