@@ -209,6 +209,19 @@ const DOCUMENT_REFERENCE_EVENTS = new Set([
 
 function formatQuantity(row: ActivityRow) {
   const quantity = decimalText(row.quantity);
+  // A header event — created, submitted, approved — is one row for the whole document,
+  // so its quantity is the request's total and `line_count` says what it covers. Blank
+  // here used to read as "no quantity was recorded", when it only meant nothing had
+  // moved yet. A mixed-unit request sends no total at all (3 CAN + 1100 NOS is not a
+  // number), so it reports its lines and nothing else.
+  const lineCount = row.line_count ?? null;
+  if (lineCount !== null && lineCount > 0) {
+    const items = `${lineCount} item${lineCount === 1 ? "" : "s"}`;
+    if (quantity === null) return items;
+    const headerUom = displayUom(row.uom_code) || null;
+    const total = `${quantity}${headerUom ? ` ${headerUom}` : ""}`;
+    return lineCount > 1 ? `${total} · ${items}` : total;
+  }
   if (quantity === null) return "—";
   const requestedQuantity = decimalText(row.requested_quantity);
   const uomCode = displayUom(row.uom_code) || null;

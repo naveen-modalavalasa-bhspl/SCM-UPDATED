@@ -100,8 +100,12 @@ def _and_list(names: list[str]) -> str:
 #  Reads
 # --------------------------------------------------------------------------- #
 
-async def get_tr(db: AsyncSession, tr_id: int) -> TransportRequest:
-    doc = await db.get(TransportRequest, tr_id)
+async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
+    """Load one shipment, applying the same scope as the transport register."""
+    stmt = select(TransportRequest).where(TransportRequest.id == tr_id)
+    if user is not None:
+        stmt = stmt.where(await _tr_scope(db, user))
+    doc = (await db.execute(stmt)).scalar_one_or_none()
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
     return doc
@@ -1616,7 +1620,7 @@ def _advance_after_approval(doc: TransportRequest) -> None:
 
 async def act_on_tr(db: AsyncSession, tr_id: int, action: str, user,
                     comments: str = "") -> TransportRequest:
-    doc = await get_tr(db, tr_id)
+    doc = await get_tr(db, tr_id, user=user)
     if doc.status != TransportStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"{doc.tr_no} is not waiting for approval")
     action = (action or "").upper()
@@ -2033,7 +2037,7 @@ async def act_on_award(db: AsyncSession, tr_id: int, action: str, user,
     acknowledged. Whether it also carried a signature is `_award_in_approval`'s
     question; the outcome for the shipment is the same either way.
     """
-    doc = await get_tr(db, tr_id)
+    doc = await get_tr(db, tr_id, user=user)
     action = (action or "").upper()
     if action not in {ApprovalAction.APPROVED.value, ApprovalAction.REJECTED.value}:
         raise ValidationError("An award can only be approved or rejected")

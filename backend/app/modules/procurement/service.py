@@ -1736,8 +1736,17 @@ async def _attach_pending_one(db: AsyncSession, doc_type: str, doc, user=None):
 
 
 async def get_po_detail(db: AsyncSession, po_id: int, user=None):
-    return await _attach_pending_one(
-        db, DocType.PO.value, await get_po(db, po_id, user), user)
+    po = await get_po(db, po_id, user)
+    # A submitted despatch locks the PO before a GRN necessarily changes its status.
+    po.amendment_allowed = (
+        po.status not in _UNAMENDABLE
+        and not await _vendor_has_dispatched(db, po.id)
+        and (
+            po.vendor_status == POVendorStatus.ACCEPTED.value
+            or (po.vendor_status is None and po.status == POStatus.SENT_TO_VENDOR.value)
+        )
+    )
+    return await _attach_pending_one(db, DocType.PO.value, po, user)
 
 
 async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):

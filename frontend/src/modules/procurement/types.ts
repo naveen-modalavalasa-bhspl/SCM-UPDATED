@@ -61,6 +61,8 @@ export interface PurchaseOrder {
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** Server-calculated: accepted and not yet despatched. */
+  amendment_allowed?: boolean;
   /** 0 is the original order; every amendment adds one. */
   revision_no: number;
   amended_at?: string | null;

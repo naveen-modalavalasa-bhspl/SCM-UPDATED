@@ -492,6 +492,7 @@ export interface MasterBomGroup {
 /** A job profile as the BOM-group screen needs it: named, counted, nothing else. */
 export interface JobProfileOption {
   key: string;
+  role_id?: number | null;
   job: string;
   name: string;
   project_id: number;
@@ -534,6 +535,8 @@ export interface ItemEligibilityScopes {
   /** `code` tells three identically-named "Store Keeper" rows apart, and `holders`
    *  says how many people actually hold the role — a tag on a 0-holder role restricts
    *  the item to nobody, which is how the whole catalogue once ended up invisible. */
-  roles: { id: number; name: string; code?: string; holders?: number }[];
+  projects: { id: number; name: string }[];
+  roles: { id: number; name: string; code?: string; holders?: number;
+           project_id?: number | null; project_name?: string | null }[];
   regions: { id: number; name: string }[];
 }

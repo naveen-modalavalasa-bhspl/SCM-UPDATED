@@ -204,7 +204,7 @@ export function PODetailPage() {
 
   const canDecide = po.data.awaiting_me ?? po.data.status === "PENDING_APPROVAL";
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
-  const canAmend = po.data.vendor_status === "ACCEPTED" || (po.data.vendor_status == null && po.data.status === "SENT_TO_VENDOR");
+  const canAmend = po.data.amendment_allowed === true;
   const isDraft = po.data.status === "DRAFT";
   const isFinished = ["RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
@@ -606,15 +606,15 @@ export function PODetailPage() {
           <p className="text-xs text-muted">
             The current version is filed away and the order goes back to draft: it is approved again, and {po.data.vendor_status === "ACCEPTED" ? "the vendor has to accept the new version before anything can be delivered." : "sent to the vendor again for their answer."}
           </p>
-          <Field label="Why is it being amended?">
-            <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
-          </Field>
           <POHeaderFields value={header} disabled={true} onChange={(patch) => setHeader({ ...header, ...patch })} />
           <div className="border-t border-line pt-2">
             <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
             <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} freezeRateAndTax={true} />
           </div>
           {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
+          <Field label="Reason for amendment" required>
+            <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
+          </Field>
           <div className="flex justify-end gap-2">
             <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>Cancel</Button>
             <Button disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0} onClick={() => amend.mutate()}>{amend.isPending ? "Amending…" : "Save as a new revision"}</Button>

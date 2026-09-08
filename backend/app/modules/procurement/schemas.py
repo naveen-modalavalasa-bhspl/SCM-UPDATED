@@ -268,6 +268,8 @@ class POOut(BaseModel):
     vendor_status: str | None = None
     vendor_responded_at: datetime | None = None
     vendor_response_note: str | None = None
+    # Calculated at read time from the accepted/dispatch state.
+    amendment_allowed: bool = False
     revision_no: int = 0
     amended_at: datetime | None = None
     amendment_reason: str | None = None

@@ -192,6 +192,9 @@ class ActivityRow(BaseModel):
     quantity: float | None = None
     requested_quantity: float | None = None
     uom_code: str | None = None
+    #: Set only on the header events (created/submitted/approved/…), where `quantity`
+    #: is the whole request rather than one line. NULL on the per-item events.
+    line_count: int | None = None
     department_name: str | None = None
     office_name: str | None = None
     region_id: int | None = None

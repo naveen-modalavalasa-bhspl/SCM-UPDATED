@@ -246,6 +246,13 @@ async def eligible_items(search: str | None = None, limit: int = 500,
                                         limit=min(max(limit, 1), 1000))
 
 
+@indent_router.get("/eligible-bom-items")
+async def eligible_bom_items(bom_id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.INDENT_CREATE))):
+    """BOM lines this requester may add to an indent."""
+    return await service.eligible_bom_items(db, user, bom_id)
+
+
 @indent_router.get("/{indent_id}", response_model=IndentOut)
 async def get_one(indent_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.INDENT_VIEW))):
