@@ -1989,22 +1989,6 @@ async def get_item_locations(
         )).scalars().all()
     }
     
-    descendant_ids = None
-    if location_id is not None:
-        found: list[int] = [location_id]
-        seen: set[int] = {location_id}
-        frontier = [location_id]
-        while frontier:
-            children = [
-                row[0] for row in (await db.execute(
-                    select(WarehouseLocation.id).where(WarehouseLocation.parent_id.in_(frontier))
-                )).all()
-            ]
-            frontier = [cid for cid in children if cid not in seen]
-            seen.update(frontier)
-            found.extend(frontier)
-        descendant_ids = found
-
     def path_to(bin_id: int) -> list[str]:
         trail, current, guard = [], locations.get(bin_id), 0
         while current is not None and guard < 20:
@@ -2015,8 +1999,8 @@ async def get_item_locations(
     query = select(Stock).where(Stock.warehouse_id == warehouse_id, Stock.available_qty > 0)
     if item_id is not None:
         query = query.where(Stock.item_id == item_id)
-    if descendant_ids is not None:
-        query = query.where(Stock.bin_id.in_(descendant_ids))
+    if location_id is not None:
+        query = query.where(Stock.bin_id == location_id)
         
     rows = (await db.execute(
         query.order_by(Stock.item_id, Stock.bin_id, Stock.expiry_date.is_(None), Stock.expiry_date.asc())

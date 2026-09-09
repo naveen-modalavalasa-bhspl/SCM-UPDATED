@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 from uuid import uuid4
 
-from sqlalchemy import String, and_, false, func, literal, or_, select
+from sqlalchemy import String, and_, case, delete, false, func, literal, or_, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -37,6 +37,7 @@ from app.modules.inventory.service import move_stock, move_stock_out, take_units
 from app.modules.warehouse import capacity
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
+from app.modules.warehouse import storage_types
 from app.modules.warehouse.enums import (
     DEAD_ISSUE_STATUSES,
     DispatchEventType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
@@ -294,6 +295,9 @@ async def _location_index(db: AsyncSession, warehouse_id: int) -> dict[int, dict
                  "bin_type": row.bin_type, "parent_id": row.parent_id}
         for row in rows
     }
+    # Which kinds hold stock is the storage-type master's answer, read once for the
+    # whole index rather than compared against a tuple compiled into this file.
+    pickable = {c.upper() for c in await storage_types.pickable_codes(db)}
 
     cache: dict[int, list[dict]] = {}
 
@@ -320,7 +324,7 @@ async def _location_index(db: AsyncSession, warehouse_id: int) -> dict[int, dict
             # printed on the bay labels, the names are what people say out loud.
             "path": " / ".join(step["code"] for step in steps),
             "path_names": " / ".join(step["name"] for step in steps),
-            "is_pickable": (node["bin_type"] or "").upper() in m.BIN_TYPES,
+            "is_pickable": (node["bin_type"] or "").upper() in pickable,
         }
     return out
 
@@ -499,6 +503,11 @@ async def bin_tree(db: AsyncSession, warehouse_id: int, user=None) -> list[dict]
         if allowed is not None:
             stmt = stmt.where(Bin.id.in_(allowed) if allowed else false())
     rows = (await db.execute(stmt)).scalars().all()
+    # Which kind each location is, named off the master in one query — see
+    # `storage_types.labeller`. The tree used to send only the code and every screen
+    # kept its own copy of the code-to-label map.
+    label = await storage_types.labeller(db)
+    await storage_types.pickable_codes(db)   # keeps `is_pickable` reading the master
 
     nodes: dict[int, dict] = {}
     for b in rows:
@@ -507,6 +516,7 @@ async def bin_tree(db: AsyncSession, warehouse_id: int, user=None) -> list[dict]
             "description": b.description,
             "parent_id": b.parent_id, "bin_type": b.bin_type,
             "storage_type_id": b.storage_type_id,
+            "storage_type_name": label(b.storage_type_id, b.bin_type),
             "barcode": b.barcode,
             "floor_level": b.floor_level,
             "shelf_level": b.shelf_level,
@@ -804,6 +814,29 @@ async def location_volume_budget(db: AsyncSession, bin_id: int) -> dict:
     }
 
 
+async def _resolved_kind(db: AsyncSession, data: s.BinWrite,
+                         parent: Bin | None) -> dict:
+    """The storage type this write means, checked against the rung it is being filed on.
+
+    Returns the two columns to write: `storage_type_id` (the master row — a location's
+    kind IS a row now) and `bin_type` (that row's code, denormalised so every query
+    already reading the code keeps working). Only this function writes the pair, which
+    is what stops them drifting.
+    """
+    kind = await storage_types.resolve(
+        db, storage_type_id=data.storage_type_id, code=data.bin_type)
+    if kind is None:
+        # The master has no rows at all — a database created but never seeded. Keep the
+        # bare code rather than refusing every location the site tries to describe.
+        return {"storage_type_id": None, "bin_type": data.bin_type or "BIN"}
+    if not kind.is_active:
+        raise ValidationError(
+            f"{kind.name} is switched off. Turn it back on under Warehouse > Masters > "
+            f"Storage types, or pick another kind for {data.code}.")
+    await storage_types.assert_can_sit_under(db, kind, parent)
+    return {"storage_type_id": int(kind.id), "bin_type": kind.code}
+
+
 async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
     wh = await _warehouse(db, data.warehouse_id)
     if not wh.is_bin_managed:
@@ -814,10 +847,13 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
     if clash:
         raise ValidationError(f"Bin {data.code} already exists in {wh.code}")
 
+    parent = None
     if data.parent_id:
         parent = await _get(db, Bin, data.parent_id, "Parent bin")
         if parent.warehouse_id != data.warehouse_id:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
+
+    kind = await _resolved_kind(db, data, parent)
 
     # A location has to fit inside the one it hangs off. Checked before the insert, so
     # a warehouse can never be described as holding more than it does — see the note
@@ -830,7 +866,7 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
     # `name` is NOT NULL in the table but optional on the form — a location that is only
     # ever referred to by its code needs no second label. Fall back to the code rather
     # than sending an explicit NULL, which the database rejects with 1048.
-    row = Bin(**{**data.model_dump(), "name": data.name or data.code})
+    row = Bin(**{**data.model_dump(), **kind, "name": data.name or data.code})
     db.add(row)
     await db.flush()
     await write_audit(db, entity="whs_warehouse_locations", entity_id=row.id,
@@ -848,17 +884,7 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
     if data.parent_id == bin_id:
         raise ValidationError("A bin cannot be its own parent")
 
-    # Both directions, before anything is written: shrinking a rack can make it too
-    # small for the shelves already in it, and growing a shelf can make it too big for
-    # the rack it sits in. Read off the values being SAVED, not the ones in the table.
-    await _assert_volume_contains(
-        db, code=data.code, node_id=bin_id, parent_id=data.parent_id,
-        own_volume=capacity.gross_volume(_Measured(data)),
-    )
-
-    for field, value in data.model_dump().items():
-        setattr(row, field, value)
-    row.name = data.name or data.code          # NOT NULL — see create_bin.
+    parent = None
     if data.parent_id:
         # Validates the parent exists; depth is derived when the tree is built.
         parent = await _get(db, Bin, data.parent_id, "Parent bin")
@@ -867,6 +893,38 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
         # its own — which is exactly how BIN1 ended up under a lane in warehouse 10.
         if parent.warehouse_id != row.warehouse_id:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
+        # Filing a location under one of its own descendants closes a ring: neither it
+        # nor anything under it has a root any more, so the whole branch drops out of
+        # every tree that walks down from one. Walked here rather than trusted to the
+        # storage-type rule, which would only catch it where the two kinds happen to
+        # disagree — a rack under a rack is a legal shape and still a cycle.
+        seen: set[int] = set()
+        walk = parent
+        while walk is not None:
+            if walk.id == bin_id:
+                raise ValidationError(
+                    f"{data.code} cannot sit inside {parent.code} — {parent.code} is "
+                    f"already inside {data.code}.")
+            if walk.id in seen:      # a ring that predates this write; stop walking it
+                break
+            seen.add(walk.id)
+            walk = await db.get(Bin, walk.parent_id) if walk.parent_id else None
+
+    # Checked BEFORE the columns are set, like every other rule here: a refusal must
+    # leave the row exactly as it was.
+    kind = await _resolved_kind(db, data, parent)
+
+    # Both directions, before anything is written: shrinking a rack can make it too
+    # small for the shelves already in it, and growing a shelf can make it too big for
+    # the rack it sits in. Read off the values being SAVED, not the ones in the table.
+    await _assert_volume_contains(
+        db, code=data.code, node_id=bin_id, parent_id=data.parent_id,
+        own_volume=capacity.gross_volume(_Measured(data)),
+    )
+
+    for field, value in {**data.model_dump(), **kind}.items():
+        setattr(row, field, value)
+    row.name = data.name or data.code          # NOT NULL — see create_bin.
 
     await db.flush()
     await write_audit(db, entity="whs_warehouse_locations", entity_id=row.id,
@@ -902,12 +960,82 @@ async def delete_bin(db: AsyncSession, bin_id: int, user) -> None:
     await db.commit()
 
 
-async def list_locations(db: AsyncSession, warehouse_id: int) -> list[m.WarehouseLocation]:
-    return (await db.execute(
+async def list_locations(db: AsyncSession, warehouse_id: int) -> list[dict]:
+    """Every storage location of one warehouse, each carrying where it SITS.
+
+    The floor plan draws this as the tree it is, so a flat row is not enough: the walk
+    down to a location (`path`, `path_names`), how deep it is, what its parent is called
+    and what KIND it is are all sent with it. Every one of them is derived here from the
+    parent links and the storage-type master rather than stored, so none of them can
+    disagree with the tree they describe — the same rule `bin_tree` follows.
+    """
+    rows = (await db.execute(
         select(m.WarehouseLocation)
         .where(m.WarehouseLocation.warehouse_id == warehouse_id)
         .order_by(m.WarehouseLocation.code)
     )).scalars().all()
+
+    label = await storage_types.labeller(db)
+    pickable = {c.upper() for c in await storage_types.pickable_codes(db)}
+    by_id = {r.id: r for r in rows}
+    children: dict[int, int] = {}
+    for r in rows:
+        if r.parent_id:
+            children[r.parent_id] = children.get(r.parent_id, 0) + 1
+
+    def walk(row) -> list:
+        """Root-first ancestry. The seen set stops a ring in the data from becoming an
+        infinite loop here, exactly as it does in `_location_index`."""
+        chain, seen = [], set()
+        node = row
+        while node is not None and node.id not in seen:
+            seen.add(node.id)
+            chain.append(node)
+            node = by_id.get(node.parent_id) if node.parent_id else None
+        chain.reverse()
+        return chain
+
+    out = []
+    for r in rows:
+        chain = walk(r)
+        parent = by_id.get(r.parent_id) if r.parent_id else None
+        out.append({
+            "id": r.id,
+            "warehouse_id": r.warehouse_id,
+            "parent_location_id": r.parent_id,
+            "storage_type": r.bin_type,
+            "storage_type_id": int(r.storage_type_id) if r.storage_type_id else None,
+            "storage_type_name": label(r.storage_type_id, r.bin_type),
+            "parent_code": parent.code if parent else None,
+            "parent_name": (parent.name or parent.code) if parent else None,
+            "path": " / ".join(step.code for step in chain),
+            "path_names": " / ".join((step.name or step.code) for step in chain),
+            "level": len(chain),
+            "child_count": children.get(r.id, 0),
+            "is_pickable": (r.bin_type or "").upper() in pickable,
+            "code": r.code,
+            "name": r.name,
+            "description": r.description,
+            "barcode": r.barcode,
+            "floor_level": r.floor_level,
+            "shelf_level": r.shelf_level,
+            "capacity_weight": r.capacity_weight,
+            "capacity_volume": r.capacity_volume,
+            "max_weight_capacity": r.max_weight_capacity,
+            "length_cm": r.length_cm,
+            "width_cm": r.width_cm,
+            "height_cm": r.height_cm,
+            "max_handling_units": r.max_handling_units,
+            "fill_efficiency_pct": r.fill_efficiency_pct,
+            "aisle_width_meters": r.aisle_width_meters,
+            "temperature_controlled": bool(r.temperature_controlled),
+            "humidity_percentage": r.humidity_percentage,
+            "target_temperature_celsius": r.target_temperature_celsius,
+            "min_temperature_celsius": r.min_temperature_celsius,
+            "max_temperature_celsius": r.max_temperature_celsius,
+            "is_active": bool(r.is_active),
+        })
+    return out
 
 
 async def location_occupancy(db: AsyncSession, location_id: int, *,
@@ -936,21 +1064,119 @@ async def occupancy_preview(db: AsyncSession, data: s.OccupancyPreviewIn) -> lis
         db, [mv.model_dump() for mv in data.moves])
 
 
-async def list_storage_types(db: AsyncSession) -> list[m.StorageType]:
-    return (await db.execute(
-        select(m.StorageType).order_by(m.StorageType.name)
-    )).scalars().all()
+# --------------------------------------------------------------------------- #
+#  The storage-type master — what kinds of location this company builds out of
+# --------------------------------------------------------------------------- #
+#
+# See `modules/warehouse/storage_types.py` for why the kinds are rows rather than the
+# enum they used to be. Everything below is ordinary master CRUD over two tables: the
+# kind itself and the kinds it may sit inside.
+
+
+async def _decorate_storage_types(db: AsyncSession,
+                                  rows: list[m.StorageType]) -> list[dict]:
+    """Each kind with the kinds it may sit inside, and how many locations use it.
+
+    Three queries for the whole master, not three per row: the screen shows the ladder
+    all at once, and a per-row lookup here is the loop that makes a 14-row master feel
+    like a report.
+    """
+    parents = await storage_types.parents_by_type(db)
+    by_id = {int(r.id): r for r in rows}
+    counts = {
+        (code or "").upper(): int(n)
+        for code, n in (await db.execute(
+            select(Bin.bin_type, func.count()).group_by(Bin.bin_type)
+        )).all()
+    }
+    out = []
+    for row in sorted(rows, key=lambda r: (r.sort_order or 0, r.name or "")):
+        allowed = [by_id[i] for i in parents.get(int(row.id), []) if i in by_id]
+        allowed.sort(key=lambda r: (r.sort_order or 0, r.name or ""))
+        out.append({
+            "id": row.id,
+            "code": row.code,
+            "name": row.name,
+            "description": row.description,
+            "sort_order": row.sort_order or 0,
+            "is_pickable": bool(row.is_pickable),
+            "is_temperature_controlled": bool(row.is_temperature_controlled),
+            "allow_top_level": bool(row.allow_top_level),
+            "is_active": bool(row.is_active),
+            "parent_type_ids": [int(r.id) for r in allowed],
+            "parent_type_codes": [r.code for r in allowed],
+            "parent_type_names": [r.name for r in allowed],
+            "location_count": counts.get((row.code or "").upper(), 0),
+        })
+    return out
+
+
+async def list_storage_types(db: AsyncSession) -> list[dict]:
+    rows = (await db.execute(select(m.StorageType))).scalars().all()
+    # Reading the master is also the moment the pickable registry is refreshed — the
+    # location form and every screen that draws a tree ask for this list.
+    await storage_types.pickable_codes(db)
+    return await _decorate_storage_types(db, rows)
+
+
+async def seed_storage_types(db: AsyncSession) -> int:
+    """Create the standard rungs if they are missing. Idempotent — see `ensure_defaults`."""
+    created = await storage_types.ensure_defaults(db)
+    if created:
+        await db.commit()
+    return created
 
 
 def _storage_type_code(data: s.StorageTypeWrite) -> str:
-    return ((data.code or re.sub(r"[^A-Z0-9]+", "_", data.name.upper())).strip("_") or "COLD")[:50]
+    return ((data.code or re.sub(r"[^A-Z0-9]+", "_", data.name.upper())).strip("_")
+            or "STORAGE")[:50].upper()
+
+
+async def _write_parent_links(db: AsyncSession, row: m.StorageType,
+                              parent_type_ids: list[int]) -> None:
+    """Replace the kinds this one may sit inside.
+
+    Replaced wholesale rather than diffed: the form sends the complete list, and a
+    parent that was removed has to stop being offered. A kind may not be its own
+    parent — that is not a shape, it is a ring the location tree would inherit.
+    """
+    wanted = {int(i) for i in parent_type_ids or []}
+    if int(row.id) in wanted:
+        raise ValidationError(f"{row.name} cannot sit inside itself.")
+    if wanted:
+        known = {int(i) for i in (await db.execute(
+            select(m.StorageType.id).where(m.StorageType.id.in_(wanted))
+        )).scalars().all()}
+        missing = wanted - known
+        if missing:
+            raise ValidationError(
+                "One of the parent types you chose no longer exists. Reload the "
+                "storage types and try again.")
+
+    existing = (await db.execute(
+        select(m.StorageTypeParent).where(m.StorageTypeParent.storage_type_id == row.id)
+    )).scalars().all()
+    for link in existing:
+        if int(link.parent_storage_type_id) not in wanted:
+            await db.delete(link)
+    held = {int(l.parent_storage_type_id) for l in existing}
+    for parent_id in wanted - held:
+        db.add(m.StorageTypeParent(storage_type_id=row.id,
+                                   parent_storage_type_id=parent_id))
+    await db.flush()
+
+
+async def _one_storage_type(db: AsyncSession, row: m.StorageType) -> dict:
+    rows = (await db.execute(select(m.StorageType))).scalars().all()
+    decorated = await _decorate_storage_types(db, rows)
+    return next(d for d in decorated if d["id"] == row.id)
 
 
 async def create_storage_type(
     db: AsyncSession,
     data: s.StorageTypeWrite,
     user,
-) -> m.StorageType:
+) -> dict:
     code = _storage_type_code(data)
     existing = await db.scalar(select(m.StorageType).where(
         or_(
@@ -964,10 +1190,15 @@ async def create_storage_type(
         code=code,
         name=data.name.strip(),
         description=data.description or None,
+        sort_order=data.sort_order,
+        is_pickable=data.is_pickable,
+        is_temperature_controlled=data.is_temperature_controlled,
+        allow_top_level=data.allow_top_level,
         is_active=data.is_active,
     )
     db.add(row)
     await db.flush()
+    await _write_parent_links(db, row, data.parent_type_ids)
     await write_audit(
         db,
         entity="whs_warehouse_storage_types",
@@ -979,7 +1210,8 @@ async def create_storage_type(
     )
     await db.commit()
     await db.refresh(row)
-    return row
+    await storage_types.pickable_codes(db)
+    return await _one_storage_type(db, row)
 
 
 async def update_storage_type(
@@ -987,18 +1219,46 @@ async def update_storage_type(
     storage_type_id: int,
     data: s.StorageTypeWrite,
     user,
-) -> m.StorageType:
+) -> dict:
     row = await _get(db, m.StorageType, storage_type_id, "Storage type")
     before = {
         "code": row.code,
         "name": row.name,
         "description": row.description,
+        "sort_order": row.sort_order,
+        "is_pickable": row.is_pickable,
+        "is_temperature_controlled": row.is_temperature_controlled,
+        "allow_top_level": row.allow_top_level,
         "is_active": row.is_active,
     }
-    row.code = _storage_type_code(data)
+    code = _storage_type_code(data)
+    clash = await db.scalar(select(m.StorageType).where(
+        m.StorageType.id != row.id,
+        or_(
+            func.lower(m.StorageType.name) == data.name.strip().lower(),
+            func.lower(m.StorageType.code) == code.lower(),
+        )
+    ))
+    if clash:
+        raise ValidationError(f"Storage type {data.name} already exists")
+
+    # The code is stamped on every location of this kind (`whs_warehouse_locations.
+    # storage_type`), so renaming the code renames it there too — otherwise the rows
+    # would keep pointing at a code the master no longer answers to.
+    if code != row.code:
+        await db.execute(
+            update(Bin).where(Bin.storage_type_id == row.id).values(bin_type=code))
+
+    row.code = code
     row.name = data.name.strip()
     row.description = data.description or None
+    row.sort_order = data.sort_order
+    row.is_pickable = data.is_pickable
+    row.is_temperature_controlled = data.is_temperature_controlled
+    row.allow_top_level = data.allow_top_level
     row.is_active = data.is_active
+    await db.flush()
+    await _write_parent_links(db, row, data.parent_type_ids)
     await write_audit(
         db,
         entity="whs_warehouse_storage_types",
@@ -1011,7 +1271,41 @@ async def update_storage_type(
     )
     await db.commit()
     await db.refresh(row)
-    return row
+    await storage_types.pickable_codes(db)
+    return await _one_storage_type(db, row)
+
+
+async def delete_storage_type(db: AsyncSession, storage_type_id: int, user) -> None:
+    """Only a kind nothing is built out of. A kind in use is switched off instead —
+    deleting it would leave every location of that kind naming a row that is gone."""
+    row = await _get(db, m.StorageType, storage_type_id, "Storage type")
+    used = await db.scalar(select(func.count()).select_from(Bin).where(
+        or_(Bin.storage_type_id == row.id,
+            func.upper(Bin.bin_type) == (row.code or "").upper())))
+    if used:
+        raise ValidationError(
+            f"{used} storage location{'' if used == 1 else 's'} are a {row.name}. "
+            f"Switch the type off instead — the locations keep working and nothing "
+            f"new can be filed under it.")
+    child_of = await db.scalar(select(func.count()).select_from(m.StorageTypeParent)
+                               .where(m.StorageTypeParent.parent_storage_type_id == row.id))
+    if child_of:
+        raise ValidationError(
+            f"{row.name} is named as the parent of {child_of} other type"
+            f"{'' if child_of == 1 else 's'}. Take it off those first.")
+    await db.execute(delete(m.StorageTypeParent)
+                     .where(m.StorageTypeParent.storage_type_id == row.id))
+    await write_audit(
+        db,
+        entity="whs_warehouse_storage_types",
+        entity_id=row.id,
+        entity_no=row.name,
+        action=AuditAction.DEACTIVATE,
+        actor=user,
+        before={"code": row.code, "name": row.name},
+    )
+    await db.delete(row)
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1321,80 @@ def _receipt_totals(receipt: m.Receipt) -> None:
     receipt.total_accepted_qty = sum((_d(l.accepted_qty) for l in lines), ZERO)
     receipt.total_rejected_qty = sum((_d(l.rejected_qty) for l in lines), ZERO)
     receipt.total_value = sum((_d(l.amount) for l in lines), ZERO)
+
+
+async def _assert_po_fulfilment(db: AsyncSession, receipt: m.Receipt,
+                                lines: list[s.ReceiptItemWrite]) -> None:
+    """Refuse a receipt that takes more off an order than the order still owes.
+
+    Nothing checked this. `_apply_receipt_lines` wrote `ordered_qty` straight through
+    from the client and never asked the order about it, and the prefill it came from
+    was reading a column no receipt maintains — so the second delivery against
+    BHS/104/2026-27/PO0013 arrived pre-filled with the whole order for a second time
+    and saved without complaint. Two receipts, nineteen lines each, every one at the
+    full ordered quantity, for goods that were ordered once.
+
+    Per LINE, not per order: a part delivery is normal and a line already settled must
+    not stop the rest of the order from arriving. Counted across every receipt against
+    the order except this one and the cancelled ones — see `po_received_by_line` — and
+    accumulated across the lines of THIS receipt too, because the same PO line entered
+    twice on one GRN is the same over-receipt in one document.
+
+    The message names what is left and which receipts took the rest. "Already
+    received" on its own sends a storekeeper hunting through a list of GRNs for a
+    number he cannot see.
+    """
+    if not receipt.po_id:
+        return
+    from app.modules.procurement.models import POItem
+
+    ordered = {
+        int(row.id): (_d(row.quantity), row.item_code or f"item {row.item_id}")
+        for row in (await db.execute(
+            select(POItem.id, POItem.item_id, POItem.item_code, POItem.quantity)
+            .where(POItem.po_id == receipt.po_id))).all()
+    }
+    if not ordered:
+        return
+    # What was already claimed when THIS receipt was raised. Not what has been
+    # claimed since: a duplicate written today must not block an edit to the receipt
+    # that legitimately took the goods last week.
+    already = await po_received_by_line(db, receipt.po_id,
+                                        exclude_receipt_id=receipt.id,
+                                        only_before=receipt.id)
+
+    taken: dict[int, Decimal] = {}
+    for index, line in enumerate(lines, start=1):
+        po_item_id = int(line.po_item_id) if line.po_item_id else None
+        if po_item_id is None or po_item_id not in ordered:
+            # A delivery can carry something the order does not name — a replacement,
+            # a sample, goods the vendor added — and refusing it would stop real goods
+            # at the gate over a paperwork mismatch. It is simply not capped by an
+            # order line, because there is none.
+            continue
+        cap, label = ordered[po_item_id]
+        running = taken.get(po_item_id, ZERO) + _d(line.received_qty)
+        outstanding = cap - already.get(po_item_id, ZERO)
+        if running > outstanding:
+            who = await _po_receipts_naming(db, receipt.po_id, po_item_id,
+                                            exclude_receipt_id=receipt.id,
+                                            only_before=receipt.id)
+            if outstanding <= ZERO:
+                raise ValidationError(
+                    f"Line {index}: {label} is already fully received against "
+                    f"{receipt.po_no or 'this order'} — all {cap} of it"
+                    + (f", by {who}" if who else "")
+                    + ". There is nothing left to receive on this line."
+                )
+            raise ValidationError(
+                f"Line {index}: {receipt.po_no or 'this order'} has {outstanding} of "
+                f"{label} still to come and this receipt takes {running}"
+                + (f". {already.get(po_item_id, ZERO)} was already received by {who}"
+                   if who else "")
+                + ". Receive what actually arrived, or raise the shortfall against a "
+                "new order."
+            )
+        taken[po_item_id] = running
 
 
 async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
@@ -1099,6 +1467,11 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
     # storekeeper is filling in the GRN behind it.
     inbound_transfer = (receipt.transfer_id is not None
                         or receipt.receipt_type == ReceiptType.DISPATCH.value)
+
+    # Does the order still owe what this receipt claims to be taking off it? Checked
+    # before a single line is written, so an over-receipt is refused whole rather than
+    # half-applied. See `_assert_po_fulfilment`.
+    await _assert_po_fulfilment(db, receipt, lines)
 
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
@@ -2064,6 +2437,11 @@ async def _process_submitted_receipt(db: AsyncSession, receipt: m.Receipt,
         await _raise_inspection_for(db, receipt, user, qc_lines)
         if qc_lines else None
     )
+    # The order has had its goods. Said HERE, on submit, and not left to posting:
+    # a delivery booked in and waiting on QC or put-away is not a delivery still to
+    # come, and until this ran the order went on offering itself for a second receipt
+    # for as long as the first one sat in QC. See `_sync_po_receipt_status`.
+    await _sync_po_receipt_status(db, receipt.po_id)
     wh = await _warehouse(db, receipt.warehouse_id)
     if qc_lines:
         receipt.status = ReceiptStatus.PENDING_QC.value
@@ -2180,8 +2558,87 @@ async def convert_gate_entry(db: AsyncSession, receipt_id: int, user) -> m.Recei
     return await get_receipt(db, receipt_id)
 
 
+#: Receipts that have DECLARED the goods received — the gate has counted them and the
+#: storekeeper has submitted the document. Everything after that (QC, put-away,
+#: posting) is what happens to goods that have already arrived.
+#:
+#: Posting used to be the test, and it is the wrong one for an ORDER: a delivery
+#: booked in and waiting on QC is not a delivery still to come, so the order stayed
+#: ACCEPTED_BY_SUPPLIER and went on offering itself for a second receipt. Posting is
+#: about STOCK, and stock has its own record.
+RECEIVED_RECEIPT_STATUSES = (
+    ReceiptStatus.SUBMITTED.value,
+    ReceiptStatus.PENDING_QC.value,
+    ReceiptStatus.QC_PASSED.value,
+    ReceiptStatus.QC_FAILED.value,
+    ReceiptStatus.PARTIALLY_RECEIVED.value,
+    ReceiptStatus.RECEIVED.value,
+    ReceiptStatus.COMPLETED.value,
+)
+
+
+#: Statuses a receipt may move an order between. Everything else was put there by a
+#: person — a cancelled or closed order is not reopened by a delivery landing against
+#: it, and an order still in approval is not dragged forward by one either.
+_PO_RECEIPT_MOVABLE = (
+    POStatus.SENT_TO_VENDOR.value,
+    POStatus.ACCEPTED_BY_SUPPLIER.value,
+    POStatus.PARTIALLY_RECEIVED.value,
+    POStatus.RECEIVED.value,
+)
+
+
+def _po_status_after(current: str, *, complete: bool, received: Decimal) -> str | None:
+    """Where a purchase order stands once the warehouse has received what it has.
+
+    `None` means leave it alone, which is the answer far more often than it looks:
+
+    * an order nothing has arrived against keeps the status it has. The old code set
+      PARTIALLY_RECEIVED on a zero total, which tells a buyer a delivery has started
+      when none has;
+    * an order somebody cancelled or closed stays that way.
+
+    And the way back matters as much as the way forward: cancel the only receipt and an
+    order returns to ACCEPTED_BY_SUPPLIER rather than sitting at RECEIVED for good,
+    which would leave the delivery that actually turns up with nowhere to be booked in.
+
+    Pure, so the rule can be read and tested without a database.
+    """
+    if current not in _PO_RECEIPT_MOVABLE:
+        return None
+    if complete:
+        return POStatus.RECEIVED.value
+    if received > ZERO:
+        return POStatus.PARTIALLY_RECEIVED.value
+    if current in (POStatus.PARTIALLY_RECEIVED.value, POStatus.RECEIVED.value):
+        return POStatus.ACCEPTED_BY_SUPPLIER.value
+    return None
+
+
 async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
-    """Reflect posted warehouse receipts back onto the purchase order."""
+    """Reflect what the warehouse has received back onto the purchase order.
+
+    Two things, both DERIVED from the receipts and neither of them incremented:
+
+    * `pro_po_items.received_quantity` per line. It is a cache of the same sum
+      `po_received_by_line` reads, recomputed from scratch every time, so it cannot
+      drift the way an incremented counter does. Before this it was written by exactly
+      one path — `logistics.receive_grn`, the original build's rival GRN table — and by
+      nothing here, so procurement's own screens read 0.000 against orders the
+      warehouse had fully received.
+    * The order's status: RECEIVED when every line is covered, PARTIALLY_RECEIVED when
+      some of it is.
+
+    **An order nothing has arrived against is left alone.** Setting PARTIALLY_RECEIVED
+    on a zero total is what the old code did when called with nothing posted, and it
+    tells the buyer a delivery has started when none has. Same on the way back: cancel
+    the only receipt and the order returns to ACCEPTED_BY_SUPPLIER rather than sitting
+    at PARTIALLY_RECEIVED forever.
+
+    Only an order that is actually open is moved. A CANCELLED or CLOSED order is not
+    reopened by a receipt landing against it — that is a question for a buyer, not a
+    side effect of a gate entry.
+    """
     if not po_id:
         return
 
@@ -2193,8 +2650,6 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
     lines = (await db.execute(
         select(POItem).where(POItem.po_id == po_id)
     )).scalars().all()
-
-
     if not lines:
         return
 
@@ -2206,20 +2661,25 @@ async def _sync_po_receipt_status(db: AsyncSession, po_id: int | None) -> None:
         .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
         .where(
             m.Receipt.po_id == po_id,
-            m.Receipt.is_stock_posted.is_(True),
-            m.Receipt.status != ReceiptStatus.CANCELLED.value,
+            m.Receipt.status.in_(RECEIVED_RECEIPT_STATUSES),
         )
         .group_by(m.ReceiptItem.po_item_id)
     )).all()
-    received = {line_id: _d(qty) for line_id, qty in received_rows}
-    complete = all(
-        received.get(line.id, ZERO)
-        >= _d(getattr(line, "quantity", None) or getattr(line, "qty", None))
-        for line in lines
-    )
-    po.status = (
-        POStatus.RECEIVED.value if complete else POStatus.PARTIALLY_RECEIVED.value
-    )
+    received = {line_id: _d(qty) for line_id, qty in received_rows if line_id}
+
+    total = ZERO
+    complete = True
+    for line in lines:
+        got = received.get(line.id, ZERO)
+        # The column procurement reads. Set, never added to: this IS the sum.
+        line.received_quantity = got
+        total += got
+        if got < _d(getattr(line, "quantity", None) or getattr(line, "qty", None)):
+            complete = False
+
+    moved = _po_status_after(po.status, complete=complete, received=total)
+    if moved is not None:
+        po.status = moved
 
     # The receipt also settles the material requests this order was raised for. Without
     # it "on order" never stops counting: the goods reach the shelf, and the indent
@@ -2422,6 +2882,11 @@ async def cancel_receipt(db: AsyncSession, receipt_id: int, reason: str | None,
     before = {"status": receipt.status}
     receipt.status = ReceiptStatus.CANCELLED.value
     receipt.remarks = f"{receipt.remarks or ''}\nCancelled: {reason or 'no reason given'}".strip()
+
+    # The order is owed these goods again. Without this a cancelled receipt kept its
+    # claim on the line for good: the order stayed RECEIVED, left the Material Inward
+    # dropdown, and the delivery that actually turned up could not be booked in.
+    await _sync_po_receipt_status(db, receipt.po_id)
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
@@ -2724,7 +3189,8 @@ async def despatch_note_options(db: AsyncSession, po_id: int) -> list[dict]:
     } for row in rows]
 
 
-async def despatch_note_prefill(db: AsyncSession, note_id: int) -> s.DespatchPrefill:
+async def despatch_note_prefill(db: AsyncSession, note_id: int,
+                                *, receipt_id: int | None = None) -> s.DespatchPrefill:
     """Everything a receipt would otherwise be typed from.
 
     Header and lines in one call, because they are one act at the gate — the paperwork
@@ -2753,25 +3219,63 @@ async def despatch_note_prefill(db: AsyncSession, note_id: int) -> s.DespatchPre
     rates = {row[0]: row[1] for row in (await db.execute(
         select(POItem.id, POItem.rate).where(POItem.po_id == note.po_id)))
         .all()} if note.po_id else {}
+    # What the ORDER still owes, which is not what the note says was sent. This is the
+    # second door onto the same duplicate: a note is a complete statement of one
+    # delivery and this prefill REPLACES the lines with it, so re-opening the same note
+    # against an order already received filled a whole second receipt with it. The
+    # note's own figure is still what is offered where the order can take it; it is
+    # capped at the outstanding quantity, and a line with nothing outstanding is not
+    # offered at all. See `po_received_by_line`.
+    already = (await po_received_by_line(db, note.po_id,
+                                        exclude_receipt_id=receipt_id)
+               if note.po_id else {})
+
+    po_total = None
+    if note.po_id:
+        from app.modules.procurement.models import PurchaseOrder
+        po_total = (await db.execute(
+            select(PurchaseOrder.total_amount).where(PurchaseOrder.id == note.po_id)
+        )).scalar_one_or_none()
 
     return s.DespatchPrefill(
         despatch_note_id=note.id, despatch_note_no=note.dn_no,
         po_id=note.po_id, po_no=note.po_no,
         vendor_id=note.vendor_id, vendor_name=note.vendor_name,
         invoice_no=note.invoice_no, invoice_date=note.invoice_date,
-        invoice_amount=note.invoice_amount, eway_bill_no=note.eway_bill_no,
+        invoice_amount=note.invoice_amount if note.invoice_amount is not None else po_total, eway_bill_no=note.eway_bill_no,
         vehicle_no=note.vehicle_no, transporter_name=note.transporter_name,
         lr_no=note.lr_no,
-        lines=[s.DespatchPrefillLine(
-            po_item_id=line.po_item_id, item_id=line.item_id,
-            item_code=line.item_code, item_name=line.item_name,
-            uom_code=line.uom_code,
-            ordered_qty=ordered.get(line.po_item_id or 0, ZERO),
-            despatched_qty=_d(line.despatched_qty),
-            rate=rates.get(line.po_item_id or 0),
-            batch_no=line.batch_no, mfg_date=line.mfg_date,
-            expiry_date=line.expiry_date,
-        ) for line in lines],
+        lines=[row for row in (_despatch_prefill_line(
+            line, ordered=ordered, rates=rates, already=already) for line in lines)
+            if row is not None],
+    )
+
+
+def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
+                           already: dict) -> "s.DespatchPrefillLine | None":
+    """One note line, capped at what its order line still owes.
+
+    `None` where the order owes nothing: the goods on that line are already on a
+    receipt, and offering them again — prefilled, as a complete delivery — is how the
+    same order gets received twice. A note line with no PO line behind it is not capped
+    by anything, because there is no order to measure it against.
+    """
+    key = line.po_item_id or 0
+    sent = _d(line.despatched_qty)
+    if key:
+        outstanding = max(ordered.get(key, ZERO) - already.get(key, ZERO), ZERO)
+        if outstanding <= ZERO:
+            return None
+        sent = min(sent, outstanding)
+    return s.DespatchPrefillLine(
+        po_item_id=line.po_item_id, item_id=line.item_id,
+        item_code=line.item_code, item_name=line.item_name,
+        uom_code=line.uom_code,
+        ordered_qty=ordered.get(key, ZERO),
+        despatched_qty=sent,
+        rate=rates.get(key),
+        batch_no=line.batch_no, mfg_date=line.mfg_date,
+        expiry_date=line.expiry_date,
     )
 
 
@@ -2801,54 +3305,156 @@ async def _receipt_vendor(db: AsyncSession, data) -> tuple[int | None, str | Non
     return vendor_id, po_vendor_name, None
 
 
-async def po_lines(db: AsyncSession, po_id: int) -> list[s.PoLineOption]:
-    """Open lines of a PO, so a GRN fills itself from the order.
+async def po_received_by_line(
+    db: AsyncSession,
+    po_id: int,
+    *,
+    exclude_receipt_id: int | None = None,
+    only_before: int | None = None,
+) -> dict[int, Decimal]:
+    """`{po line id: how much has already been received against it}`.
 
-    Already-received quantity is summed from the receipts against this PO rather than
-    trusted from a column, because a line can be received across several deliveries.
+    **Summed from the receipts, never read off `pro_po_items.received_quantity`.** That
+    column is written by exactly one path — `logistics.receive_grn`, the original
+    build's rival GRN table — and by nothing in this module, so on every order received
+    through Material Inward it still reads 0.000 after the goods are on the shelf. A
+    prefill trusting it offered the whole order again on the second delivery, and
+    nothing at the save disagreed: BHS/104/2026-27/PO0013 was received in full twice,
+    by REC0031 and then by REC0033, every line at the full ordered quantity.
+
+    So this is the one definition of "what has this order already had", and both the
+    prefill and the guard read it. Two answers that could disagree is how the first one
+    came to be wrong.
+
+    **Drafts count.** A receipt being written is a claim on the order — two
+    storekeepers working the same delivery must not each be offered the whole of it —
+    and the way to release that claim is to cancel the receipt, which is the one status
+    left out. `exclude_receipt_id` leaves the document being edited out of its own
+    total, or saving a receipt would refuse itself.
+
+    `only_before` counts just the receipts raised BEFORE this one, which is how the
+    guard uses it. **A document is measured against what was already claimed when it
+    was raised**, never against what somebody claimed afterwards: without that, a
+    duplicate draft written today would block an edit to the submitted receipt that
+    legitimately took the goods last week, and the wrong one of the two would be the
+    one that could not be saved.
     """
-    from app.modules.procurement.models import POItem
+    stmt = (
+        select(m.ReceiptItem.po_item_id,
+               func.coalesce(func.sum(m.ReceiptItem.received_qty), 0))
+        .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
+        .where(m.Receipt.po_id == po_id,
+               m.Receipt.status != ReceiptStatus.CANCELLED.value,
+               m.ReceiptItem.po_item_id.is_not(None))
+        .group_by(m.ReceiptItem.po_item_id)
+    )
+    if exclude_receipt_id:
+        stmt = stmt.where(m.Receipt.id != exclude_receipt_id)
+    if only_before:
+        stmt = stmt.where(m.Receipt.id < only_before)
+    return {int(row[0]): _d(row[1]) for row in (await db.execute(stmt)).all() if row[0]}
 
-    # Named columns on both tables — the mapped rows carry columns the live schema does
-    # not have (see _po_number), and the GRN form only needs what a line orders.
-    if await _po_number(db, po_id) is None:
+
+async def _po_receipts_naming(db: AsyncSession, po_id: int, po_item_id: int,
+                              *, exclude_receipt_id: int | None = None,
+                              only_before: int | None = None) -> str:
+    """Which receipts already took this PO line, named. A refusal that says only
+    "already received" sends the storekeeper hunting through a list of GRNs."""
+    stmt = (
+        select(m.Receipt.grn_no, m.Receipt.status, m.ReceiptItem.received_qty)
+        .join(m.ReceiptItem, m.ReceiptItem.receipt_id == m.Receipt.id)
+        .where(m.Receipt.po_id == po_id,
+               m.ReceiptItem.po_item_id == po_item_id,
+               m.Receipt.status != ReceiptStatus.CANCELLED.value,
+               m.ReceiptItem.received_qty > ZERO)
+        .order_by(m.Receipt.id)
+        .limit(5)
+    )
+    if exclude_receipt_id:
+        stmt = stmt.where(m.Receipt.id != exclude_receipt_id)
+    if only_before:
+        stmt = stmt.where(m.Receipt.id < only_before)
+    rows = (await db.execute(stmt)).all()
+    return ", ".join(f"{grn_no} ({_d(qty)}, {status.lower()})"
+                     for grn_no, status, qty in rows)
+
+
+async def po_lines(db: AsyncSession, po_id: int,
+                   *, receipt_id: int | None = None) -> dict:
+    """What is still OWED on a purchase order, so a GRN fills itself from the order.
+
+    Only the lines with something outstanding. A fully received line is not a line to
+    receive again, and offering it — prefilled with the whole ordered quantity, which
+    is what the shadowed copy of this function did — is how one order came to be
+    received twice. The form already knows what to say when nothing is left
+    (`receipt.po_nothing_pending`); it simply never got the chance.
+
+    `receipt_id` is the document being filled, when there is one. Its own lines must
+    not count against it: a saved receipt re-filling from its order would otherwise be
+    told the order owes nothing, by itself.
+    """
+    from app.modules.procurement.models import POItem, PurchaseOrder
+
+    po = (await db.execute(
+        select(PurchaseOrder).where(PurchaseOrder.id == po_id))).scalars().first()
+    if po is None:
         raise NotFoundError(f"Purchase order {po_id} not found")
+
+    vendor_name = po.vendor_name
+    if not vendor_name and po.vendor_id:
+        from app.shared.models.master import Vendor
+        vendor_name = await db.scalar(
+            select(Vendor.name).where(Vendor.id == po.vendor_id))
 
     items = (await db.execute(
         select(POItem.id, POItem.item_id, POItem.item_code, POItem.item_name,
-               POItem.uom_code, POItem.quantity, POItem.rate)
+               POItem.uom_code, POItem.quantity, POItem.rate, POItem.indent_item_id)
         .where(POItem.po_id == po_id).order_by(POItem.id))).all()
+    received = await po_received_by_line(db, po_id, exclude_receipt_id=receipt_id)
+    # Who has already had it. An empty line list is only useful with this beside it:
+    # "nothing pending" and "REC0031 took all nineteen lines on 7 September" are the
+    # same fact, and only the second one tells the storekeeper what to do next.
+    taken_by = [
+        f"{grn_no} ({status.replace('_', ' ').lower()})"
+        for grn_no, status in (await db.execute(
+            select(m.Receipt.grn_no, m.Receipt.status)
+            .where(m.Receipt.po_id == po_id,
+                   m.Receipt.status != ReceiptStatus.CANCELLED.value,
+                   m.Receipt.id != (receipt_id or 0))
+            .order_by(m.Receipt.id).limit(10))).all()
+    ]
 
-    received_rows = (await db.execute(
-        select(m.ReceiptItem.po_item_id, func.coalesce(func.sum(m.ReceiptItem.received_qty), 0))
-        .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
-        .where(m.Receipt.po_id == po_id,
-               m.Receipt.status != ReceiptStatus.CANCELLED.value)
-        .group_by(m.ReceiptItem.po_item_id)
-    )).all()
-    received = {row[0]: _d(row[1]) for row in received_rows if row[0]}
-
-    out: list[s.PoLineOption] = []
+    lines = []
     for line in items:
-        ordered = _d(getattr(line, "quantity", None) or getattr(line, "qty", None))
-        already = received.get(line.id, ZERO)
+        ordered = _d(line.quantity)
+        already = received.get(int(line.id), ZERO)
         pending = max(ordered - already, ZERO)
         if pending <= ZERO:
             continue
-        out.append(s.PoLineOption(
-            po_item_id=line.id,
-            item_id=line.item_id,
-            item_code=getattr(line, "item_code", None),
-            item_name=getattr(line, "item_name", None),
-            uom_code=getattr(line, "uom_code", None),
-            ordered_qty=ordered,
-            received_qty=already,
-            pending_qty=pending,
-            rate=getattr(line, "rate", None),
-            indent_id=getattr(line, "indent_id", None),
-            indent_no=getattr(line, "indent_no", None),
-        ))
-    return out
+        lines.append({
+            "po_item_id": line.id,
+            "indent_id": None,
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "ordered_qty": ordered,
+            "received_qty": already,
+            "pending_qty": pending,
+            "rate": line.rate,
+        })
+
+    return {
+        "vendor_id": po.vendor_id,
+        "vendor_name": vendor_name,
+        "vendor_gstin": po.vendor_gstin,
+        "project_id": po.project_id,
+        "project_name": po.project_name,
+        "total_amount": po.total_amount,
+        "lines": lines,
+        "total_lines": len(items),
+        "received_by": taken_by,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3421,7 +4027,16 @@ async def list_putaways(db: AsyncSession, params: PageParams, *, status: str | N
         stmt = stmt.where(or_(
             m.PutawayTask.putaway_no.ilike(like), m.PutawayTask.lot_no.ilike(like)))
 
-    page = await paginate(db, stmt.order_by(m.PutawayTask.id.desc()), params)
+    order_expr = case(
+        (m.PutawayTask.status == PutawayStatus.DRAFT.value, 1),
+        (m.PutawayTask.status == PutawayStatus.PENDING.value, 2),
+        (m.PutawayTask.status == PutawayStatus.IN_PROGRESS.value, 3),
+        (m.PutawayTask.status == PutawayStatus.SKIPPED.value, 4),
+        (m.PutawayTask.status == PutawayStatus.CANCELLED.value, 5),
+        (m.PutawayTask.status == PutawayStatus.COMPLETED.value, 6),
+        else_=7
+    )
+    page = await paginate(db, stmt.order_by(order_expr, m.PutawayTask.id.desc()), params)
     # Every item on the page in one pair of queries, rather than a pair per row.
     ladders = await capacity.pack_ladders(
         db, {t.item_id for t in page["items"] if t.item_id})
@@ -4514,9 +5129,10 @@ async def create_stock_movement(
         batch_id=batch_id,
         project_id=0,
     )
-    for row in serial_rows:
-        row.bin_id = destination.id
-        row.remarks = f"Moved by {movement_no}"
+    # One statement for the units this movement carries, whatever its size.
+    await _set_unit_fields(db, [row.id for row in serial_rows],
+                           bin_id=destination.id,
+                           remarks=f"Moved by {movement_no}")
 
     await write_audit(
         db,
@@ -4703,9 +5319,10 @@ async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
             ref_id=0, ref_no=order_no, user=user,
             warehouse_id=wh.id, bin_id=bin_row.id, batch_id=batch_id, project_id=0,
         )
-    for row in serial_rows:
-        row.bin_id = destination.id
-        row.remarks = f"Moved by {order_no}"
+    # One statement for the units this order carries, whatever its size.
+    await _set_unit_fields(db, [row.id for row in serial_rows],
+                           bin_id=destination.id,
+                           remarks=f"Moved by {order_no}")
 
 
 async def _perform_movement_order(db: AsyncSession, order, user) -> None:
@@ -5853,6 +6470,49 @@ async def _issue_snapshot_values(
     }
 
 
+#: How many unit ids travel in one `IN (...)`. MySQL parses a far longer list, but the
+#: statement grows with every element and `max_allowed_packet` is a real ceiling, so a
+#: 10,000-unit document is written as ten statements rather than one enormous one.
+UNIT_WRITE_CHUNK = 1_000
+
+
+def _in_chunks(values, size: int = UNIT_WRITE_CHUNK):
+    """The ids of one document, in packets a single statement can carry."""
+    values = list(values)
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+async def _set_unit_fields(db: AsyncSession, ids, **values) -> None:
+    """Write the same columns onto many units in one statement per chunk.
+
+    THE reason a 10,000-serial document is affordable (2026-09-09). Every one of these
+    paths used to assign to `row.remarks` / `row.status` inside a Python loop over
+    loaded ORM rows, and SQLAlchemy turns that into one UPDATE per unit at flush —
+    10,000 round trips inside one transaction, holding row locks and the connection
+    for the whole of it. That is the timeout `limits.py` was capping around rather
+    than fixing.
+
+    `synchronize_session="fetch"` is deliberate and is NOT free: it costs one extra
+    SELECT of the matched primary keys per statement. It buys correctness that a bulk
+    UPDATE otherwise silently loses — SQLAlchemy does not, by default, overwrite
+    already-loaded attributes of an object it hands back from the identity map, so a
+    row this statement changed would keep reading with its OLD `remarks` for the rest
+    of the transaction. `_reserve_issue_serials` decides "is this unit already claimed"
+    off exactly that attribute, one call after `_clear_issue_serial_reservations`
+    releases it, and would have refused units it had just freed itself.
+    """
+    for chunk in _in_chunks(ids):
+        if not chunk:
+            continue
+        await db.execute(
+            update(m.SerialNumber)
+            .where(m.SerialNumber.id.in_(chunk))
+            .values(**values)
+            .execution_options(synchronize_session="fetch")
+        )
+
+
 async def _clear_issue_serial_reservations(
     db: AsyncSession,
     issue_id: int,
@@ -5865,19 +6525,26 @@ async def _clear_issue_serial_reservations(
     reservations the storekeeper already made on the others; clearing the document
     wholesale and re-reserving everything is what used to shuffle units between lines
     of the same item.
+
+    One UPDATE for the whole document, whatever it holds. The rows are never loaded:
+    releasing a hold needs no per-unit decision, so there is nothing to read first.
     """
-    stmt = select(m.SerialNumber).where(
-        _issue_reservation_clause(issue_id),
-        m.SerialNumber.status.in_(
-            (SerialStatus.AVAILABLE.value, SerialStatus.ISSUED.value)
-        ),
+    stmt = (
+        update(m.SerialNumber)
+        .where(
+            _issue_reservation_clause(issue_id),
+            m.SerialNumber.status.in_(
+                (SerialStatus.AVAILABLE.value, SerialStatus.ISSUED.value)
+            ),
+        )
+        .values(remarks=None)
+        .execution_options(synchronize_session="fetch")
     )
     if line_ids is not None:
         stmt = stmt.where(m.SerialNumber.remarks.in_(
             [_issue_line_serial_marker(issue_id, line_id) for line_id in line_ids]
         ))
-    for row in (await db.execute(stmt)).scalars().all():
-        row.remarks = None
+    await db.execute(stmt)
 
 
 UNIT_MODE_SERIAL = "SERIAL"
@@ -6019,16 +6686,27 @@ async def _reserve_issue_serials(
         )
         # The one place the ladder is applied to the lookup itself: the same row is
         # found by whichever column this item names its units with.
-        if mode == UNIT_MODE_SERIAL:
-            stmt = stmt.where(m.SerialNumber.serial_number.in_(serials))
-        elif mode == UNIT_MODE_IMEI:
-            stmt = stmt.where(m.SerialNumber.imei.in_(serials))
-        else:
-            stmt = stmt.where(or_(
-                m.SerialNumber.asset_code.in_(serials),
-                m.SerialNumber.consumable_code.in_(serials),
-                m.SerialNumber.serial_number.in_(serials)))
-        rows = (await db.execute(stmt.with_for_update())).scalars().all()
+        #
+        # Read in chunks of the NAMES, not in one clause: a line may now carry 10,000
+        # of them (`limits.MAX_SERIALS_PER_LINE`), and a single `IN` of that length is
+        # a statement MySQL re-plans per element and can refuse outright on
+        # `max_allowed_packet`. Each chunk still takes `FOR UPDATE`, so the whole set
+        # is locked by the time the loop below decides anything about it.
+        def _named(values):
+            if mode == UNIT_MODE_SERIAL:
+                return m.SerialNumber.serial_number.in_(values)
+            if mode == UNIT_MODE_IMEI:
+                return m.SerialNumber.imei.in_(values)
+            return or_(
+                m.SerialNumber.asset_code.in_(values),
+                m.SerialNumber.consumable_code.in_(values),
+                m.SerialNumber.serial_number.in_(values))
+
+        rows = []
+        for names in _in_chunks(serials):
+            rows.extend((await db.execute(
+                stmt.where(_named(names)).with_for_update()
+            )).scalars().all())
 
         by_key: dict[str, m.SerialNumber] = {}
         for row in rows:
@@ -6055,7 +6733,11 @@ async def _reserve_issue_serials(
                 raise ValidationError(
                     f"{value} is already named on line {other} of this issue"
                     if other else f"{value} is reserved by another issue")
-            row.remarks = marker
+        # Stamped as a SET, once every unit on the line has passed its checks. The
+        # per-row assignment this replaces was one UPDATE per serial at flush; it also
+        # means nothing is written until the whole line validates, which is the
+        # behaviour the ValidationErrors above already relied on.
+        await _set_unit_fields(db, [row.id for row in chosen], remarks=marker)
         # The document always keeps the canonical serial — in code mode that IS the
         # code — while `unit_keys` echoes back what the storekeeper actually validated.
         setattr(line, "serial_numbers", [row.serial_number for row in chosen])
@@ -6243,6 +6925,110 @@ async def _issue_unit_supply(
     return supply
 
 
+async def issue_unit_supply(
+    db: AsyncSession,
+    *,
+    warehouse_id: int,
+    picks: list[s.UnitSupplyPick],
+    issue_id: int | None = None,
+    direction: str = IssueDirection.OUT.value,
+    user=None,
+) -> list[dict]:
+    """How many identified units each (item, batch, location) could name, right now.
+
+    The same question `_issue_unit_supply` answers per SAVED line, asked about a pick
+    the storekeeper has just repointed and not saved. It matters because the two
+    numbers on that row come off two different tables: `drawable_qty` is a quantity on
+    `stk_balance`, and this is how many physical units at that spot carry an
+    identifier the line could name. Stock put away before the item was coded has the
+    first and not the second, so a pick can be perfectly sound on quantity and
+    impossible to post — and until this endpoint existed the screen could only say so
+    after a save, by which time the storekeeper had moved on.
+
+    **Bounded exactly as the per-line probe is** (see `_issue_unit_supply`): the count
+    stops at `need + 1`, so a returned figure equal to `need + 1` means "at least that
+    many" and every smaller one is exact. `whs_serial_numbers` is one row per physical
+    unit and holds 773k of them; an unbounded COUNT over a well-stocked item takes the
+    better part of a second, and this is called while somebody is typing.
+
+    Units this document is already holding count as available to it — they are stamped
+    with its own line's marker, not somebody else's — which is why `issue_id` is taken.
+    """
+    ids = [pick for pick in picks if pick.item_id]
+    if not warehouse_id or not ids:
+        return []
+
+    outward = direction == IssueDirection.OUT.value
+    expected_status = (
+        SerialStatus.AVAILABLE.value if outward else SerialStatus.ISSUED.value
+    )
+    scope = None
+    if user is not None:
+        scope = await scope_condition(
+            db, user,
+            warehouse_col=m.SerialNumber.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        )
+
+    # Which of these items carry a per-unit identity at this point at all. One read for
+    # the whole document, and the answer a screen needs before it draws a unit picker:
+    # an item with no coded units has nothing to pick and is not short of anything.
+    coded = set((await db.execute(
+        select(m.SerialNumber.item_id)
+        .where(m.SerialNumber.item_id.in_({pick.item_id for pick in ids}),
+               m.SerialNumber.warehouse_id == warehouse_id,
+               m.SerialNumber.is_active == 1)
+        .distinct()
+    )).scalars().all())
+
+    out: list[dict] = []
+    for pick in ids:
+        need = max(int(_d(pick.need)), 0)
+        row = {
+            "item_id": pick.item_id,
+            "batch_id": pick.batch_id or None,
+            "bin_id": pick.bin_id or None,
+            "need": need,
+            "has_units": pick.item_id in coded,
+            "available": None,
+        }
+        if pick.item_id not in coded or need > _SUPPLY_PROBE_CEILING:
+            # No answer rather than a slow one. A line asking for a hundred thousand
+            # units is not one a screen can usefully warn about, and `post_issue` still
+            # refuses an incomplete set at the shelf.
+            out.append(row)
+            continue
+        probe = (
+            select(literal(1))
+            .select_from(m.SerialNumber)
+            .where(m.SerialNumber.item_id == pick.item_id,
+                   m.SerialNumber.warehouse_id == warehouse_id,
+                   m.SerialNumber.status == expected_status,
+                   # `== 1`, not `.is_(True)`: MySQL will not resolve `IS true` through
+                   # the index and falls back to reading rows.
+                   m.SerialNumber.is_active == 1)
+        )
+        # NO_BATCH / NO_BIN mean "the pick names none" — no narrowing, not a lookup for
+        # id 0. Same reading as `_claim_units` and `move_stock_out`.
+        if pick.batch_id and pick.batch_id != m.NO_BATCH:
+            probe = probe.where(m.SerialNumber.batch_id == pick.batch_id)
+        if pick.bin_id and pick.bin_id != m.NO_BIN:
+            probe = probe.where(m.SerialNumber.bin_id == pick.bin_id)
+        if scope is not None:
+            probe = probe.where(scope)
+        if outward:
+            probe = probe.where(_unit_claim_free_clause(
+                _issue_line_serial_marker(issue_id, pick.line_id)
+                # "" matches no stamp — a pick with no saved line of its own holds
+                # nothing yet, so only genuinely unclaimed units count for it.
+                if issue_id and pick.line_id else ""))
+        row["available"] = int((await db.execute(
+            select(func.count()).select_from(probe.limit(need + 1).subquery())
+        )).scalar() or 0)
+        out.append(row)
+    return out
+
+
 async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> None:
     """Refuse to submit an issue that could never be posted.
 
@@ -6395,6 +7181,14 @@ async def issue_stock_sources(
     Ordered the way stock should leave: expiry first, then the older batch, then the
     bin code, so the default split a screen builds from this list is FIFO without the
     screen knowing what FIFO is.
+
+    Each row also carries the two OUTER quantities its own numbers sit inside — the
+    item's whole position in this warehouse (`item_total_qty` / `item_available_qty`)
+    and this batch's (`batch_total_qty` / `batch_available_qty`), both denormalised
+    onto every row of the item. A storekeeper asked to take 10 out of a bay needs to
+    know whether the warehouse holds 12 of the thing or 1,200, and neither figure can
+    be summed out of the list itself: rows another document has entirely reserved are
+    not in it.
     """
     from app.modules.inventory.models import Reservation, Stock
 
@@ -6468,6 +7262,34 @@ async def issue_stock_sources(
             stmt = stmt.where(Stock.bin_id.in_(allowed) if allowed else false())
 
     rows = (await db.execute(stmt)).all()
+
+    # What the warehouse holds for these items ALTOGETHER — every batch, every
+    # location, and deliberately NOT filtered by `_stock_offerable`. A screen shows
+    # three nested quantities, warehouse then batch then location, and the two outer
+    # ones cannot be summed out of the rows above: a row every other document has
+    # reserved is dropped from that list, so summing it would quietly report a
+    # half-empty shelf as empty. Read once here, denormalised onto each row of the
+    # item, because the answer is per (item, batch) and the caller reads it per source.
+    totals = (
+        select(Stock.item_id, Stock.batch_id,
+               func.sum(Stock.total_qty).label("total_qty"),
+               func.sum(Stock.available_qty).label("available_qty"))
+        .where(Stock.warehouse_id == warehouse_id, Stock.item_id.in_(ids))
+        .group_by(Stock.item_id, Stock.batch_id)
+    )
+    if user is not None:
+        totals = totals.where(await scope_condition(
+            db, user,
+            warehouse_col=Stock.warehouse_id,
+            warehouse_ids=await warehouse_ids_for_user(db, user),
+        ))
+    by_batch: dict[tuple[int, int], tuple[Decimal, Decimal]] = {}
+    by_item: dict[int, tuple[Decimal, Decimal]] = {}
+    for t_item, t_batch, t_total, t_available in (await db.execute(totals)).all():
+        by_batch[(t_item, t_batch or 0)] = (_d(t_total), _d(t_available))
+        held = by_item.get(t_item, (ZERO, ZERO))
+        by_item[t_item] = (held[0] + _d(t_total), held[1] + _d(t_available))
+
     # One read of the warehouse's tree for the whole answer, so every source can name
     # the floor / lane / rack it sits on rather than a bare bin code.
     index = await _location_index(db, warehouse_id)
@@ -6497,6 +7319,10 @@ async def issue_stock_sources(
             "own_reserved_qty": own_reserved,
             "total_qty": _d(total_qty),
             "drawable_qty": drawable,
+            "batch_total_qty": by_batch.get((item_id, batch_id or 0), (ZERO, ZERO))[0],
+            "batch_available_qty": by_batch.get((item_id, batch_id or 0), (ZERO, ZERO))[1],
+            "item_total_qty": by_item.get(item_id, (ZERO, ZERO))[0],
+            "item_available_qty": by_item.get(item_id, (ZERO, ZERO))[1],
         })
     return out
 
@@ -6593,6 +7419,228 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
     return moved
 
 
+#: What a write line actually issues. `issued_qty` omitted means "all of it" — the
+#: same reading `_apply_issue_lines` gives it a few lines further down, and a guard
+#: reading it as zero would wave through exactly the lines that take the most.
+def _line_issued(line) -> Decimal:
+    return (_d(line.requested_qty) if getattr(line, "issued_qty", None) is None
+            else _d(line.issued_qty))
+
+
+#: Which (bin, batch) a write line names, in the module's own 0-means-none currency.
+def _line_slot(line) -> tuple[int, int]:
+    return (int(getattr(line, "bin_id", None) or 0),
+            int(getattr(line, "batch_id", None) or 0))
+
+
+def _fefo_swap_allowed(wanted, allocated: list) -> bool:
+    """May a pick be moved off the batch that was allocated, onto this one?
+
+    **Only onto a batch expiring on the same day**, which is the single swap FEFO
+    cannot tell apart. Inventory allocated earliest-expiry-first; reaching past that
+    batch onto a later one leaves the earlier stock on the shelf to expire, and does it
+    invisibly — nothing downstream would ever say so.
+
+    A batch with no recorded expiry matches only another with none. "No expiry" is
+    nobody having written one down, not "never expires", and treating it as a distant
+    date would let an undated batch be swapped for anything.
+
+    Nothing allocated (`allocated` empty) is no constraint at all — a manual issue has
+    nothing signed behind it to depart from. Pure, so the rule can be read and tested
+    without a database; `_assert_issue_sources` is what applies it.
+    """
+    if not allocated:
+        return True
+    return any(row is not None and row.expiry_date == wanted.expiry_date
+               for row in allocated)
+
+
+def _fefo_expiry(batch) -> str:
+    """A batch's expiry, said the way a refusal has to say it.
+
+    An undated batch is not "expires never" — it is nobody having recorded one, and a
+    message must not invent a date for it to be compared against.
+    """
+    if batch is None or batch.expiry_date is None:
+        return "no expiry recorded"
+    return f"expires {batch.expiry_date.isoformat()}"
+
+
+async def _write_line_indents(db: AsyncSession,
+                              lines: list[s.IssueItemWrite]) -> dict[int, int]:
+    """`{indent line id: the indent it belongs to}` for the lines being written.
+
+    One query for the document. `_indent_id_for_line` answers the same question per
+    line, and a consolidated issue serving a monthly cycle has hundreds of them.
+    """
+    from app.modules.indents.models import IndentItem
+
+    wanted = {int(line.indent_item_id) for line in lines if line.indent_item_id}
+    if not wanted:
+        return {}
+    rows = (await db.execute(
+        select(IndentItem.id, IndentItem.indent_id).where(IndentItem.id.in_(wanted))
+    )).all()
+    return {int(row[0]): int(row[1]) for row in rows if row[1]}
+
+
+async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
+                                lines: list[s.IssueItemWrite]) -> None:
+    """Is every pick on this document one the shelf can actually serve?
+
+    Two questions, asked together because they are answered off the same two reads and
+    a document that passes one and fails the other is a document that fails.
+
+    **Does the stock exist?** A line may take what is free at its (batch, location)
+    plus what THIS indent already holds there — the same `drawable_qty` the screen
+    shows, and the same rule `_stock_offerable` applies to which rows are offered at
+    all. Nothing checked it before: a manual issue could promise a hundred units of an
+    item the point holds none of, and the mistake surfaced at `post_issue`, against a
+    document that had by then been through the whole approval ladder. Summed across
+    the picks per (item, batch, location), because two picks on one bay each passing
+    on their own is how a bay gets over-drawn.
+
+    **May the batch be swapped?** A line drafted from an approved allocation names the
+    batch inventory reserved, and that batch was chosen FEFO — earliest expiry first.
+    The storekeeper standing at the shelf may well find it behind a pallet, so the swap
+    has to be possible; what it must never do is quietly reach past an earlier-expiring
+    batch. So it is allowed **only onto a batch expiring on the same day**, which is
+    the one swap FEFO cannot tell apart. An unallocated line — a manual issue, with
+    nothing signed behind it — is not held to this: it is offered its batches
+    oldest-first and there is no allocation to depart from.
+
+    The storage LOCATION is deliberately not constrained beyond the stock check. One
+    batch sitting in two bays is one batch, FEFO cannot tell those apart either, and
+    which bay a picker walks to is his call — the check that the bay actually holds
+    that batch of that item falls out of the first question.
+    """
+    if issue.direction != IssueDirection.OUT.value:
+        return
+    outward = [line for line in lines if _line_issued(line) > ZERO]
+    if not outward:
+        return
+
+    from app.modules.inventory.models import Reservation, Stock
+
+    item_ids = {int(line.item_id) for line in outward}
+    line_indents = await _write_line_indents(db, outward)
+
+    # What is on the shelf here, per (item, location, batch). One read for the whole
+    # document — the alternative is a query per line.
+    on_hand: dict[tuple[int, int, int], Decimal] = {}
+    for item_id, bin_id, batch_id, available in (await db.execute(
+        select(Stock.item_id, Stock.bin_id, Stock.batch_id,
+               func.sum(Stock.available_qty))
+        .where(Stock.warehouse_id == issue.warehouse_id, Stock.item_id.in_(item_ids))
+        .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id)
+    )).all():
+        on_hand[(int(item_id), int(bin_id or 0), int(batch_id or 0))] = _d(available)
+
+    # What this document's own indent lines are already holding, and where. That hold
+    # is stock this issue may draw on — an approved allocation reserves exactly what it
+    # is about to issue, so counting only what is free would refuse every correct
+    # indent-linked document.
+    own: dict[tuple[int, int, int], Decimal] = {}
+    allocated_batches: dict[tuple[int, int], set[int]] = {}
+    pairs = {(line_indents[int(line.indent_item_id)], int(line.indent_item_id))
+             for line in outward
+             if line.indent_item_id and int(line.indent_item_id) in line_indents}
+    if pairs:
+        for item_id, bin_id, batch_id, ref_id, ref_line_id, qty in (await db.execute(
+            select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                   Reservation.ref_id, Reservation.ref_line_id,
+                   func.sum(Reservation.quantity))
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.status == ReservationStatus.ACTIVE.value,
+                   Reservation.warehouse_id == issue.warehouse_id,
+                   Reservation.ref_id.in_({pair[0] for pair in pairs}),
+                   Reservation.ref_line_id.in_({pair[1] for pair in pairs}))
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                      Reservation.ref_id, Reservation.ref_line_id)
+        )).all():
+            # The two `IN`s above are a cross product; only the pairs the document
+            # actually carries count.
+            if (int(ref_id), int(ref_line_id or 0)) not in pairs:
+                continue
+            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+            own[slot] = own.get(slot, ZERO) + _d(qty)
+            if batch_id:
+                allocated_batches.setdefault(
+                    (int(ref_line_id or 0), int(item_id)), set()).add(int(batch_id))
+
+    # Every batch either named or allocated, read once: expiry is the whole of the
+    # FEFO question.
+    batch_ids = {int(line.batch_id) for line in outward if line.batch_id}
+    for signed in allocated_batches.values():
+        batch_ids |= signed
+    batches: dict[int, m.Batch] = {}
+    if batch_ids:
+        batches = {row.id: row for row in (await db.execute(
+            select(m.Batch).where(m.Batch.id.in_(batch_ids))
+        )).scalars().all()}
+
+    def named(batch_id: int) -> str:
+        row = batches.get(batch_id)
+        return row.batch_no if row is not None and row.batch_no else f"batch {batch_id}"
+
+    taken: dict[tuple[int, int, int], Decimal] = {}
+    for index, line in enumerate(outward, start=1):
+        item_id = int(line.item_id)
+        bin_id, batch_id = _line_slot(line)
+        label = line.item_code or f"item {item_id}"
+
+        # --- the batch swap, against what inventory actually allocated ------------
+        signed = allocated_batches.get((int(line.indent_item_id or 0), item_id), set())
+        if signed and batch_id and batch_id not in signed:
+            wanted = batches.get(batch_id)
+            if wanted is None:
+                raise ValidationError(f"{label}: batch {batch_id} does not exist")
+            # Same DAY, not "no later than": two batches expiring on the same date are
+            # interchangeable to FEFO and everything else is a queue-jump. A batch with
+            # no expiry matches only another with none.
+            if not _fefo_swap_allowed(
+                    wanted, [batches.get(other) for other in signed]):
+                raise ValidationError(
+                    f"{label}: {named(batch_id)} ({_fefo_expiry(wanted)}) cannot be "
+                    f"issued in place of "
+                    + ", ".join(sorted(
+                        f"{named(other)} ({_fefo_expiry(batches.get(other))})"
+                        for other in signed))
+                    + ". Stock leaves oldest first, so an allocated batch may only be "
+                    "swapped for one expiring on the same day. Change the storage "
+                    "location instead, or send the allocation back to inventory."
+                )
+
+        # --- and the stock itself ------------------------------------------------
+        slot = (item_id, bin_id, batch_id)
+        want = taken.get(slot, ZERO) + _line_issued(line)
+        # A line naming no location (a point that stocks in bulk) or no batch is asking
+        # about everything under that heading, exactly as `_issue_unit_supply` and
+        # `move_stock_out` read the same zeros.
+        def under(source: dict[tuple[int, int, int], Decimal]) -> Decimal:
+            return sum((qty for key, qty in source.items()
+                        if key[0] == item_id
+                        and (not bin_id or key[1] == bin_id)
+                        and (not batch_id or key[2] == batch_id)), ZERO)
+
+        mine = under(own)
+        drawable = under(on_hand) + mine
+        if want > drawable:
+            where = []
+            if batch_id:
+                where.append(f"batch {named(batch_id)}")
+            if bin_id:
+                where.append(await _bin_code(db, bin_id) or f"location {bin_id}")
+            place = " in ".join(where) if where else "this warehouse"
+            raise ValidationError(
+                f"Line {index}: {label} takes {want} from {place}, which can give "
+                f"{drawable}."
+                + (f" {mine} of that is this indent's own reservation." if mine else "")
+                + " Split the rest onto another location, or reduce the quantity."
+            )
+        taken[slot] = want
+
+
 async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
                              lines: list[s.IssueItemWrite]) -> None:
     issue.items.clear()
@@ -6623,6 +7671,12 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
         if not location.is_active:
             raise ValidationError(
                 f"{location.code} is inactive and cannot be issued from")
+
+    # Does the shelf actually hold what every pick claims, and is a swapped batch one
+    # FEFO cannot tell apart from the one that was allocated? Both refused here, on
+    # the draft, while the batch and the location are still the storekeeper's to
+    # change — after approval they are frozen. See `_assert_issue_sources`.
+    await _assert_issue_sources(db, issue, lines)
 
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
@@ -7197,7 +8251,7 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         items=[],
         # From the indent it serves — see the note on the GRN above.
         issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
-                                   project=getattr(indent, "project_name", None)),
+                                   project=getattr(indent, "project_name", None) or snapshots["project_name"]),
         issue_type=data.issue_type.value,
         issue_date=data.issue_date,
         indent_id=data.indent_id,
@@ -8761,9 +9815,9 @@ async def _claim_units(
         .limit(wanted - len(mine))
         .with_for_update()
     )).scalars().all()
-    for row in free:
-        row.remarks = marker
-        mine.append(row)
+    # One statement for the whole top-up, not one per unit claimed.
+    await _set_unit_fields(db, [row.id for row in free], remarks=marker)
+    mine.extend(free)
     return mine
 
 
@@ -8809,13 +9863,17 @@ async def _land_units(
     mode = _unit_mode(item)
     codes: list[str] = []
     for row in rows:
-        row.warehouse_id = to_warehouse_id
-        row.bin_id = None
-        row.status = SerialStatus.AVAILABLE.value
-        row.remarks = f"Received by {ref_no}" if ref_no else None
         keys = _unit_keys(row, mode)
         if keys:
             codes.append(keys[0])
+    # Same four columns for every unit on the consignment, so one statement per chunk.
+    await _set_unit_fields(
+        db, [row.id for row in rows],
+        warehouse_id=to_warehouse_id,
+        bin_id=None,
+        status=SerialStatus.AVAILABLE.value,
+        remarks=(f"Received by {ref_no}" if ref_no else None),
+    )
     await db.flush()
     return codes
 
@@ -8843,11 +9901,13 @@ async def _ship_units(
     mode = _unit_mode(item)
     codes: list[str] = []
     for row in rows:
-        row.status = SerialStatus.ISSUED.value
-        row.remarks = marker
         keys = _unit_keys(row, mode)
         if keys:
             codes.append(keys[0])
+    # Reading the codes is per row because each unit's is its own; WRITING is one
+    # statement per chunk, because the status and the stamp are the same for all.
+    await _set_unit_fields(db, [row.id for row in rows],
+                           status=SerialStatus.ISSUED.value, remarks=marker)
     await db.flush()
     return codes
 
@@ -8923,8 +9983,8 @@ async def _adopt_legacy_issue_reservations(
         if not rows:
             continue
         room = int(_d(line.issued_qty))
-        for row in rows[:room]:
-            row.remarks = _issue_line_serial_marker(issue.id, line.id)
+        await _set_unit_fields(db, [row.id for row in rows[:room]],
+                               remarks=_issue_line_serial_marker(issue.id, line.id))
         del rows[:room]
     await db.flush()
 
@@ -8966,13 +10026,16 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
                 f"{line.item_code or line.item_id}: {wanted} serials are required, "
                 f"but {len(rows)} are reserved for this issue"
             )
-        for row in rows[:wanted]:
-            row.status = new_status
-            row.remarks = (
-                _shipped_unit_marker("issue", issue.id)
-                if outward
-                else f"Returned by issue {issue.id}"
-            )
+        # The flip is the same two columns for every unit on the line, so it is one
+        # statement per chunk rather than one per unit. This is the path a 10,000-unit
+        # issue actually posts through.
+        await _set_unit_fields(
+            db,
+            [row.id for row in rows[:wanted]],
+            status=new_status,
+            remarks=(_shipped_unit_marker("issue", issue.id) if outward
+                     else f"Returned by issue {issue.id}"),
+        )
     await db.flush()
 
 
@@ -12371,7 +13434,9 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
         from app.modules.inventory.models import Stock
         # Only real bins hold stock, so only real bins have a utilisation. A lane or a
         # rack appearing at 0% would read as an empty bin rather than as scaffolding.
-        stmt = select(Bin).where(Bin.is_active.is_(True), Bin.bin_type.in_(m.BIN_TYPES))
+        stmt = select(Bin).where(
+            Bin.is_active.is_(True),
+            Bin.bin_type.in_(await storage_types.pickable_codes(db)))
         if warehouse_id:
             stmt = stmt.where(Bin.warehouse_id == warehouse_id)
         bins = (await db.execute(stmt.order_by(Bin.code))).scalars().all()
@@ -12492,12 +13557,96 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
 LOOKUP_LIMIT = 200
 
 
-async def item_options(db: AsyncSession, search: str | None = None) -> list[dict]:
+async def item_options(db: AsyncSession, search: str | None = None, *,
+                       warehouse_id: int | None = None,
+                       in_stock: bool = False,
+                       indent_id: int | None = None,
+                       user=None) -> list[dict]:
+    """Items for a picker — and, when a point is named, what that point actually holds.
+
+    The plain catalogue is right for a GRN (goods arrive for items the shelf has never
+    seen) and wrong for an ISSUE. A material issue raised without an indent asked the
+    storekeeper to choose from the whole item master, several thousand rows, of which
+    a given point stocks a few hundred; he picked one, and the batch and location
+    pickers below then dead-ended on "nothing on the shelf" with nothing said about
+    why. The item was never issuable — that fact simply arrived two decisions too late.
+
+    So `warehouse_id` decorates every row with what is there — `on_hand`, and how many
+    batches and locations it is spread over — and `in_stock` narrows the list to the
+    items a picker can actually be sent for. Both are opt-in: every existing caller
+    (GRN, put-away, inspection) passes neither and gets exactly the list it had.
+
+    `on_hand` is DRAWABLE, not `available_qty`: an approved allocation reserves the
+    stock it is about to issue, so a document issuing what was reserved for it sees its
+    own rows at zero free. Same rule as `issue_stock_sources`, applied a level up, so
+    the item list and the batch list underneath it can never disagree about whether
+    there is anything to take.
+    """
+    from app.modules.inventory.models import Reservation, Stock
+
     stmt = select(Item).where(Item.is_active.is_(True)) if hasattr(Item, "is_active") \
         else select(Item)
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(Item.code.ilike(like), Item.name.ilike(like)))
+
+    held: dict[int, dict] = {}
+    if warehouse_id:
+        # What this warehouse can give of each item, and how far it is spread. Read
+        # once for the whole list rather than per row — `stk_balance` is one row per
+        # (item, bin, batch) and a well-stocked point has thousands.
+        if indent_id:
+            mine = (
+                select(Reservation.stock_id.label("stock_id"),
+                       func.sum(Reservation.quantity).label("qty"))
+                .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                       Reservation.ref_id == indent_id,
+                       Reservation.status == ReservationStatus.ACTIVE.value)
+                .group_by(Reservation.stock_id)
+                .subquery()
+            )
+            own = func.coalesce(func.sum(mine.c.qty), 0)
+        else:
+            mine = None
+            own = literal(0)
+
+        counts = (
+            select(Stock.item_id,
+                   func.sum(Stock.available_qty).label("available_qty"),
+                   own.label("own_reserved_qty"),
+                   func.count(func.distinct(Stock.batch_id)).label("batches"),
+                   func.count(func.distinct(Stock.bin_id)).label("locations"))
+            .select_from(Stock)
+        )
+        if mine is not None:
+            counts = counts.outerjoin(mine, mine.c.stock_id == Stock.id)
+        counts = counts.where(Stock.warehouse_id == warehouse_id,
+                              _stock_offerable(indent_id)).group_by(Stock.item_id)
+        if user is not None:
+            counts = counts.where(await scope_condition(
+                db, user,
+                warehouse_col=Stock.warehouse_id,
+                warehouse_ids=await warehouse_ids_for_user(db, user),
+            ))
+        for item_id, available, own_qty, batches, locations in (
+                await db.execute(counts)).all():
+            drawable = _d(available) + _d(own_qty)
+            if drawable <= ZERO:
+                continue
+            held[int(item_id)] = {
+                "on_hand": drawable,
+                # NO_BATCH / NO_BIN are 0, not a real id — bulk stock is one "batch"
+                # and one "location" by this count, which is what it looks like on the
+                # floor too.
+                "batch_count": int(batches or 0),
+                "location_count": int(locations or 0),
+            }
+        if in_stock:
+            # Nothing here is nothing to offer. An empty `held` narrows to an empty
+            # list rather than falling back to the catalogue, because a silent
+            # widening is how the picker got misleading in the first place.
+            stmt = stmt.where(Item.id.in_(held.keys() or {0}))
+
     rows = (await db.execute(stmt.order_by(Item.code).limit(LOOKUP_LIMIT))).scalars().all()
     return [{
         "id": r.id,
@@ -12512,6 +13661,10 @@ async def item_options(db: AsyncSession, search: str | None = None) -> list[dict
         "has_expiry": bool(r.has_expiry),
         "is_asset": bool(r.is_asset),
         "requires_qi": bool(r.requires_qi),
+        # `None` when no point was named — "nobody asked", which a screen must not
+        # draw as "this point holds none".
+        **(held.get(r.id, {"on_hand": ZERO, "batch_count": 0, "location_count": 0})
+           if warehouse_id else {}),
     } for r in rows]
 
 
@@ -12629,7 +13782,7 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
             # full dropdown would only send them to a form that cannot be saved.
             stmt = stmt.where(Bin.id.in_(allowed) if allowed else false())
     if not all_locations and not holding:
-        stmt = stmt.where(Bin.bin_type.in_(m.BIN_TYPES))
+        stmt = stmt.where(Bin.bin_type.in_(await storage_types.pickable_codes(db)))
     # A destination that is also the source is not a movement. Excluded here rather
     # than only in the form, so the offer and the rule the service enforces agree.
     if exclude_bin_id:
@@ -12728,6 +13881,41 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
     from sqlalchemy import or_
     stmt = stmt.where(PurchaseOrder.vendor_status == POVendorStatus.ACCEPTED.value)
 
+    # And only orders with something still to come.
+    #
+    # The status filter above is not enough on its own, for two reasons. An order
+    # received before `_sync_po_receipt_status` learned to run on submit still reads
+    # ACCEPTED_BY_SUPPLIER — BHS/104/2026-27/PO0013 does, with every one of its
+    # nineteen lines on a receipt — and no migration is going to walk history. And a
+    # DRAFT receipt claims goods without moving the order at all, which is right: a
+    # draft is a claim, not a delivery.
+    #
+    # So this is derived, off the same rows `po_received_by_line` and
+    # `_assert_po_fulfilment` read, and it holds the one property that matters: **the
+    # dropdown offers exactly the orders the save would accept.** A picker that offers
+    # what the server refuses is a picker nobody trusts twice.
+    from app.modules.procurement.models import POItem
+    taken = (
+        select(m.ReceiptItem.po_item_id.label("po_item_id"),
+               func.sum(m.ReceiptItem.received_qty).label("qty"))
+        .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
+        .where(m.Receipt.status != ReceiptStatus.CANCELLED.value,
+               m.ReceiptItem.po_item_id.is_not(None))
+        .group_by(m.ReceiptItem.po_item_id)
+        .subquery()
+    )
+    open_orders = (
+        select(POItem.po_id)
+        .outerjoin(taken, taken.c.po_item_id == POItem.id)
+        .group_by(POItem.po_id)
+        # Per LINE, then summed: an order over-received on one line and short on
+        # another is still short, and netting the two would hide the line that is
+        # actually still coming.
+        .having(func.sum(func.greatest(
+            POItem.quantity - func.coalesce(taken.c.qty, 0), 0)) > 0)
+    )
+    stmt = stmt.where(PurchaseOrder.id.in_(open_orders))
+
     # Narrow to the orders this warehouse could actually receive, when the warehouse
     # says which office or facility it belongs to. A warehouse that says neither is
     # not filtered at all — an empty dropdown is worse than a long one.
@@ -12750,48 +13938,6 @@ async def po_options(db: AsyncSession, search: str | None = None, warehouse_id: 
         stmt.order_by(PurchaseOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
     return [{"id": po_id, "code": po_no, "name": vendor_name or po_no}
             for po_id, po_no, vendor_name in rows]
-
-
-async def po_lines(db: AsyncSession, po_id: int) -> dict:
-    from app.modules.procurement.models import PurchaseOrder, POItem
-    from app.modules.master.models import Vendor
-    
-    stmt = select(PurchaseOrder).where(PurchaseOrder.id == po_id)
-    po = (await db.execute(stmt)).scalars().first()
-    if not po:
-        return {"lines": []}
-        
-    vendor_name = po.vendor_name
-    if not vendor_name and po.vendor_id:
-        vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
-        
-    stmt_lines = select(POItem).where(POItem.po_id == po_id)
-    rows = (await db.execute(stmt_lines.order_by(POItem.id))).scalars().all()
-    
-    lines = [
-        {
-            "po_item_id": row.id,
-            "indent_id": getattr(row, "indent_id", None),
-            "item_id": row.item_id,
-            "item_code": row.item_code,
-            "item_name": row.item_name,
-            "uom_code": row.uom_code,
-            "ordered_qty": row.quantity,
-            "received_qty": row.received_quantity,
-            "pending_qty": row.quantity - row.received_quantity,
-            "rate": row.rate,
-        }
-        for row in rows
-    ]
-    
-    return {
-        "vendor_id": po.vendor_id,
-        "vendor_name": vendor_name,
-        "vendor_gstin": po.vendor_gstin,
-        "project_id": po.project_id,
-        "project_name": po.project_name,
-        "lines": lines
-    }
 
 
 async def receipt_options(
@@ -13139,12 +14285,26 @@ async def indent_issue_source(
         for item in (await db.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
     } if item_ids else {}
 
+    bin_ids = {row.bin_id for row in rows if row.bin_id}
+    bin_by_id = {
+        b.id: b
+        for b in (await db.execute(select(m.Bin).where(m.Bin.id.in_(bin_ids)))).scalars().all()
+    } if bin_ids else {}
+
+    batch_ids = {row.batch_id for row in rows if row.batch_id}
+    batch_by_id = {
+        b.id: b
+        for b in (await db.execute(select(m.Batch).where(m.Batch.id.in_(batch_ids)))).scalars().all()
+    } if batch_ids else {}
+
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
         "warehouse_id": warehouse_id,
         "department_id": getattr(indent, "department_id", None),
+        "department_name": getattr(indent, "department_name", None),
         "project_id": getattr(indent, "project_id", None) or None,
+        "project_name": getattr(indent, "project_name", None) or None,
         "mixed_projects": mixed_projects,
         "issued_to_id": requested_by_id,
         "issued_to_name": requested_by.full_name if requested_by else None,
@@ -13171,7 +14331,10 @@ async def indent_issue_source(
                     if row.item_id in item_by_id else False
                 ),
                 "bin_id": row.bin_id or None,
+                "bin_code": bin_by_id[row.bin_id].code if row.bin_id and row.bin_id in bin_by_id else None,
+                "bin_path": getattr(bin_by_id[row.bin_id], "path", None) if row.bin_id and row.bin_id in bin_by_id else None,
                 "batch_id": row.batch_id or None,
+                "batch_no": batch_by_id[row.batch_id].batch_no if row.batch_id and row.batch_id in batch_by_id else None,
                 "requested_qty": _d(row[5]),
                 "issued_qty": _d(row[5]),
             }
@@ -13219,6 +14382,19 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
         item.id: item
         for item in (await db.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
     } if item_ids else {}
+
+    bin_ids = {line.bin_id for line in picking.items if line.bin_id}
+    bin_by_id = {
+        b.id: b
+        for b in (await db.execute(select(m.Bin).where(m.Bin.id.in_(bin_ids)))).scalars().all()
+    } if bin_ids else {}
+
+    batch_ids = {line.batch_id for line in picking.items if line.batch_id}
+    batch_by_id = {
+        b.id: b
+        for b in (await db.execute(select(m.Batch).where(m.Batch.id.in_(batch_ids)))).scalars().all()
+    } if batch_ids else {}
+
     for line in picking.items:
         qty = _d(line.picked_qty)
         if qty <= ZERO:
@@ -13242,7 +14418,10 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
                 if line.item_id in item_by_id else False
             ),
             "bin_id": line.bin_id,
+            "bin_code": bin_by_id[line.bin_id].code if line.bin_id and line.bin_id in bin_by_id else None,
+            "bin_path": getattr(bin_by_id[line.bin_id], "path", None) if line.bin_id and line.bin_id in bin_by_id else None,
             "batch_id": line.batch_id,
+            "batch_no": batch_by_id[line.batch_id].batch_no if line.batch_id and line.batch_id in batch_by_id else None,
             "requested_qty": _d(line.required_qty),
             "issued_qty": qty,
         })
@@ -13254,7 +14433,9 @@ async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
         "warehouse_id": picking.warehouse_id,
         "indent_id": indent_id,
         "department_id": getattr(indent, "department_id", None) if indent else None,
+        "department_name": getattr(indent, "department_name", None) if indent else None,
         "project_id": indent_project or None,
+        "project_name": getattr(indent, "project_name", None) if indent else None,
         "mixed_projects": mixed_projects,
         # Same default as indent_issue_source: whoever raised the request.
         "issued_to_id": requested_by_id,

@@ -426,12 +426,7 @@ export function SupplierRFQDetailPage() {
       <Card className="space-y-5 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-white">
         <h2 className="text-sm font-semibold text-ink">Terms and totals</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Field label="Your reference">
-            <Input
-              value={header.vendor_ref_no} disabled={!open}
-              onChange={(e) => setHeader({ ...header, vendor_ref_no: e.target.value })}
-            />
-          </Field>
+
           <Field label="Valid until" required>
             <Input
               type="date" min={todayIst()} value={header.valid_till} disabled={!open}
@@ -444,12 +439,7 @@ export function SupplierRFQDetailPage() {
               onChange={(e) => setHeader({ ...header, expected_delivery_date: e.target.value })}
             />
           </Field>
-          <Field label="Payment terms">
-            <Input
-              value={header.payment_terms} disabled={!open}
-              onChange={(e) => setHeader({ ...header, payment_terms: e.target.value })}
-            />
-          </Field>
+
           <Field label="Freight">
             <Input
               type="number" min="0" step="0.01" value={header.freight_amount} disabled={!open}

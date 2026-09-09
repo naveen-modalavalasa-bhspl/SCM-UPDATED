@@ -269,7 +269,13 @@ export function SupplierPODetailPage() {
           <div className="flex flex-wrap items-center gap-2">
             {/* Vendor-facing wording; the status itself is untouched. */}
             <StatusPill status={po.status} label={vendorPoLabel(po.status)} />
-            {po.vendor_status && <StatusPill status={po.vendor_status} />}
+            {/* ACCEPTED is left off: it says the same word as the order's own pill
+              * beside it, and where the two DO diverge — a vendor who accepted at a
+              * changed rate leaves the order at PENDING_APPROVAL — the answer is
+              * already stated in full by the "You accepted this order on ..." line
+              * below. PENDING and REJECTED still show; neither is said anywhere else. */}
+            {po.vendor_status && po.vendor_status !== "ACCEPTED"
+              && <StatusPill status={po.vendor_status} />}
             {/* Not offered until the order has been accepted: a despatch note is a
               * claim against an agreement, so there has to be one. The server refuses
               * it too — this only stops the vendor filling in a form for nothing. */}

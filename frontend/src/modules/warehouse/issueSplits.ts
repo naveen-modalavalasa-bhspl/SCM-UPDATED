@@ -70,6 +70,22 @@ export interface IssueSplit {
   reserved: number | null;
   total: number | null;
 
+  /* --- the same shelf, read one step wider. A pick is one location inside one
+   * batch inside one warehouse, and a storekeeper deciding how to split fifteen
+   * monitors needs all three: what is at this bay, what the rest of the batch holds,
+   * and what the warehouse holds altogether. Served on the source row rather than
+   * summed here — see `IssueStockSource`. */
+
+  /** When this pick's batch expires. The whole of the FEFO question, and the one
+   *  fact a batch code does not carry — `batch-25aug` and `batch-02sep` are six weeks
+   *  apart and one character apart to read. `null` is "nobody recorded one", which is
+   *  not "never expires". */
+  batchExpiry: string | null;
+  /** Everything of this item, in this pick's batch, anywhere in the warehouse. */
+  batchTotal: number | null;
+  /** What this document could still take out of that batch, wherever it sits. */
+  batchDrawable: number | null;
+
   /** How many CODED units this pick could name, served per line by
    *  `_issue_unit_supply`. A different number off a different table from `drawable`
    *  — a quantity is not an identity — and the screen shows both because a
@@ -105,6 +121,14 @@ export interface IssueGroup {
   remaining: number;
   /** Sources this group has not drawn on yet, oldest first. */
   spare: IssueStockSource[];
+
+  /** Everything of this item in the warehouse — every batch, every location, the
+   *  rows other documents have reserved included. The outermost of the three
+   *  quantities the grid states. `null` until the sources have been read. */
+  warehouseTotal: number | null;
+  /** What THIS document could take of it altogether, summed over the locations it is
+   *  allowed to draw on. Never larger than `warehouseTotal`. */
+  warehouseDrawable: number | null;
 
   /** Where INVENTORY put the hold for this ask — the sources carrying a reservation
    *  belonging to this document's own indent. */
@@ -169,6 +193,8 @@ export function groupIssueLines(
         codes: 0,
         remaining: 0,
         spare: [],
+        warehouseTotal: null,
+        warehouseDrawable: null,
         allocated: [],
         releasing: [],
       };
@@ -178,6 +204,12 @@ export function groupIssueLines(
     const sources = sourcesByItem[line.item_id] ?? [];
     const match = sources.find(
       (row) => sourceKey(row.batch_id, row.bin_id) === sourceKey(line.batch_id, line.bin_id),
+    );
+    // The batch this pick names, wherever in the warehouse it sits — a different
+    // question from the (batch, bin) row above, and the reason the batch cell can
+    // say "another 40 of this batch, elsewhere" while this bay holds five.
+    const batchRows = sources.filter(
+      (row) => sourceKey(row.batch_id, null) === sourceKey(line.batch_id, null),
     );
     const issued = num(line.issued_qty);
     const codes = line.serial_numbers?.length ?? 0;
@@ -192,6 +224,11 @@ export function groupIssueLines(
       ownReserved: unread ? null : num(match?.own_reserved_qty),
       reserved: unread ? null : num(match?.reserved_qty),
       total: unread ? null : num(match?.total_qty),
+      batchExpiry: batchRows[0]?.expiry_date ?? null,
+      batchTotal: unread || !batchRows.length ? null : num(batchRows[0].batch_total_qty),
+      batchDrawable: unread || !batchRows.length
+        ? null
+        : round(batchRows.reduce((sum, row) => sum + num(row.drawable_qty), 0)),
       unitsAvailable: line.units_available ?? null,
       binPath: match?.bin_path ?? null,
       binCode: match?.bin_code ?? line.bin_code ?? null,
@@ -212,13 +249,31 @@ export function groupIssueLines(
 
   for (const group of groups) {
     group.remaining = Math.max(round(group.requested - group.issued), 0);
+    const all = sourcesByItem[group.itemId] ?? [];
+    // `item_total_qty` is the same number on every row of the item, so the first row
+    // carries the answer; the drawable side IS a sum, because it is only ever over
+    // the locations this document may use.
+    group.warehouseTotal = all.length ? num(all[0].item_total_qty) : null;
+    group.warehouseDrawable = all.length
+      ? round(all.reduce((sum, row) => sum + num(row.drawable_qty), 0))
+      : null;
     const taken = new Set(group.splits.map((s) => sourceKey(s.line.batch_id, s.line.bin_id)));
     const rows = sourcesByItem[group.itemId] ?? [];
-    group.spare = rows.filter((row) => !taken.has(sourceKey(row.batch_id, row.bin_id)));
     // Where inventory put the hold. `own_reserved_qty` is this document's own indent's
     // reservation on that balance row — served by `issue_stock_sources` precisely so a
     // screen never has to guess which stock is spoken for by itself.
     group.allocated = rows.filter((row) => num(row.own_reserved_qty) > 0);
+    // Somewhere this ask may ACTUALLY go next, which is not simply "a source it is not
+    // already on". A pick drafted from an allocation may only move onto a batch
+    // expiring on the same day (see `allowedExpiries`), so a spare row on a later
+    // batch is one the server would refuse — and this list is what prefills the next
+    // pick and what the "more available elsewhere" hint names. Offering stock nobody
+    // may take is worse than saying the item is short.
+    const allow = allowedExpiries(group.allocated);
+    group.spare = rows.filter(
+      (row) => !taken.has(sourceKey(row.batch_id, row.bin_id))
+        && (!allow || allow.has(row.expiry_date ?? "")),
+    );
     group.releasing = group.allocated.filter(
       (row) => !taken.has(sourceKey(row.batch_id, row.bin_id)),
     );
@@ -302,6 +357,160 @@ export function redistribute(lines: IssueItemWrite[], ask: number): IssueItemWri
   }));
 }
 
+/* ------------------------------------------------ what a pick may be moved onto -- */
+
+/**
+ * One batch this item can be picked from here, and everything a storekeeper needs to
+ * decide whether to walk to it.
+ *
+ * Built from the SAME rows the server validates against (`issue_stock_sources`), so a
+ * batch the screen offers is a batch the save accepts. A dropdown that offers what the
+ * server refuses is a dropdown nobody trusts twice.
+ */
+export interface BatchChoice {
+  batchId: number | null;
+  batchNo: string | null;
+  /** ISO date, or null when nobody recorded one — which is NOT "never expires". */
+  expiry: string | null;
+  mfg: string | null;
+  /** What this document may take from the batch, across every location here. */
+  drawable: number;
+  /** What the batch holds in this warehouse altogether, other holds included. */
+  total: number;
+  /** How many storage locations it is spread over. */
+  locations: number;
+  /** Is any of it reserved for this document's own indent? */
+  allocated: boolean;
+  /** May this line be moved onto it — see `allowedBatchIds`. */
+  allowed: boolean;
+  /** Why not, said in full, because a disabled row with no reason is a dead end. */
+  blocked: string | null;
+}
+
+/** One storage location a chosen batch of this item sits in. */
+export interface LocationChoice {
+  binId: number | null;
+  binCode: string | null;
+  binPath: string | null;
+  drawable: number;
+  total: number;
+  ownReserved: number;
+  /** Held by everybody else — the gap between what is there and what may be taken. */
+  othersHold: number;
+  allocated: boolean;
+}
+
+/** Oldest first, undated last: the order stock should leave in, which is the order a
+ *  picker should be offered it in. Ties break on the batch number so the list is
+ *  stable between renders. */
+const byExpiry = (a: BatchChoice, b: BatchChoice): number => {
+  if (a.expiry !== b.expiry) {
+    if (!a.expiry) return 1;
+    if (!b.expiry) return -1;
+    return a.expiry < b.expiry ? -1 : 1;
+  }
+  return (a.batchNo ?? "").localeCompare(b.batchNo ?? "");
+};
+
+/**
+ * Every batch of one item this point can serve, FEFO order.
+ *
+ * `allowedExpiries` is the FEFO rule, and it is a rule about DATES rather than about
+ * batches. A line drafted from an approved allocation names the batch inventory
+ * reserved, and that batch was picked earliest-expiry-first. The storekeeper standing
+ * at the shelf may well find it behind a pallet, so the swap has to be possible — but
+ * it must never quietly reach past an earlier-expiring batch, so it is allowed only
+ * onto one expiring on the SAME DAY, which is the single swap FEFO cannot tell apart.
+ * `null` means nothing was allocated (a manual issue) and every batch is open; the
+ * order alone then carries the FEFO advice.
+ */
+export function batchChoices(
+  sources: IssueStockSource[],
+  allowedExpiries: Set<string> | null = null,
+): BatchChoice[] {
+  const by = new Map<number, BatchChoice>();
+  for (const row of sources) {
+    const key = src(row.batch_id) ?? 0;
+    let choice = by.get(key);
+    if (!choice) {
+      choice = {
+        batchId: src(row.batch_id),
+        batchNo: row.batch_no ?? null,
+        expiry: row.expiry_date ?? null,
+        mfg: row.mfg_date ?? null,
+        drawable: 0,
+        total: num(row.batch_total_qty),
+        locations: 0,
+        allocated: false,
+        allowed: true,
+        blocked: null,
+      };
+      by.set(key, choice);
+    }
+    choice.drawable = round(choice.drawable + num(row.drawable_qty));
+    choice.locations += 1;
+    if (num(row.own_reserved_qty) > 0) choice.allocated = true;
+  }
+  const out = [...by.values()].sort(byExpiry);
+  if (allowedExpiries) {
+    for (const choice of out) {
+      choice.allowed = allowedExpiries.has(choice.expiry ?? "");
+      choice.blocked = choice.allowed
+        ? null
+        : "Stock leaves oldest first, so an allocated batch may only be swapped for "
+          + "one expiring on the same day.";
+    }
+  }
+  return out;
+}
+
+/** The expiry dates a pick may be moved onto, given where inventory allocated it.
+ *  `null` — nothing allocated — is "no constraint", never "nothing allowed". */
+export function allowedExpiries(allocated: IssueStockSource[]): Set<string> | null {
+  const rows = allocated.filter((row) => src(row.batch_id));
+  if (rows.length === 0) return null;
+  return new Set(rows.map((row) => row.expiry_date ?? ""));
+}
+
+/** Every location one batch of this item sits in, fullest first — the bay that can
+ *  serve the whole ask in one walk is the one to offer first. */
+export function locationChoices(
+  sources: IssueStockSource[],
+  batchId: number | null | undefined,
+): LocationChoice[] {
+  const wanted = sourceKey(batchId, null);
+  return sources
+    .filter((row) => sourceKey(row.batch_id, null) === wanted)
+    .map((row) => ({
+      binId: src(row.bin_id),
+      binCode: row.bin_code ?? null,
+      binPath: row.bin_path ?? null,
+      drawable: num(row.drawable_qty),
+      total: num(row.total_qty),
+      ownReserved: num(row.own_reserved_qty),
+      othersHold: Math.max(
+        round(num(row.reserved_qty) - num(row.own_reserved_qty)), 0),
+      allocated: num(row.own_reserved_qty) > 0,
+    }))
+    .sort((a, b) => b.drawable - a.drawable);
+}
+
+/**
+ * Drop the identifiers a pick can no longer carry when its quantity comes down.
+ *
+ * Lowering an issue quantity below the number of units already scanned leaves a pick
+ * naming more goods than it takes, which `_reserve_issue_serials` refuses outright —
+ * so the storekeeper who corrects 10 to 6 was met with "10 asset tags for 6 units" and
+ * had to go back into the picker to unpick four. The tail goes, because the codes were
+ * scanned in the order they came off the shelf and the last ones scanned are the ones
+ * still in his hand.
+ */
+export function trimUnits(line: IssueItemWrite, issued: number): string[] {
+  const keep = Math.max(Math.trunc(issued), 0);
+  const codes = line.serial_numbers ?? [];
+  return codes.length > keep ? codes.slice(0, keep) : codes;
+}
+
 export type ProblemLevel = "error" | "warn";
 
 export interface SplitProblem {
@@ -327,17 +536,25 @@ export function splitProblems(
     binManaged,
     unitLabel,
     requireUnits = true,
+    unitsAt = (split) => split.unitsAvailable,
   }: {
     binManaged: boolean;
     /** Plural noun for one group's identifier, from the served catalogue. */
     unitLabel: (type: TrackingType, count: number) => string;
     /** False once the document is posted — nothing is left to fix. */
     requireUnits?: boolean;
+    /** How many identified units a pick can name. Defaults to the answer saved on the
+     *  line, which is the one for the bay it named when it was last SAVED — a screen
+     *  holding a live probe passes that instead. */
+    unitsAt?: (split: IssueSplit) => number | null;
   },
 ): SplitProblem[] {
   const problems: SplitProblem[] = [];
   for (const group of groups) {
     const label = group.itemCode || group.itemName || "This item";
+    // Which expiry dates this item's picks may sit on, given where inventory
+    // allocated them. `null` — nothing allocated — is no constraint at all.
+    const allowed = allowedExpiries(group.allocated);
     if (round(group.issued - group.requested) > 0) {
       problems.push({
         level: "error",
@@ -372,6 +589,24 @@ export function splitProblems(
           message: `${label}: name the batch this is picked from.`,
         });
       }
+      // FEFO, checked against the ALLOCATION rather than against the shelf. The batch
+      // inventory reserved was picked earliest-expiry-first; swapping onto one that
+      // expires later leaves the earlier batch behind to expire, so it is allowed only
+      // onto a batch expiring on the same day — the one swap FEFO cannot tell apart.
+      // `_assert_issue_sources` refuses exactly this at the save; stated here so it is
+      // seen while it can still be corrected, and never only after a failed save.
+      if (allowed && split.line.batch_id && split.batchTotal !== null
+          && !allowed.has(split.batchExpiry ?? "")) {
+        problems.push({
+          level: "error", groupKey: group.key, index: split.index,
+          message: `${label}: ${split.batchNo ?? "this batch"} expires `
+            + `${split.batchExpiry ?? "on no recorded date"}, and the batch allocated `
+            + `for this indent expires `
+            + `${[...allowed].map((date) => date || "on no recorded date").join(" or ")}`
+            + `. Stock leaves oldest first, so an allocated batch may only be swapped `
+            + `for one expiring on the same day — change the storage location instead.`,
+        });
+      }
       // Against DRAWABLE. Against `available` this fired on every correct document
       // drawn from an approved allocation, because the allocation had already
       // reserved exactly what the line was about to issue.
@@ -395,13 +630,14 @@ export function splitProblems(
       // stock put away before the item was coded has quantity and no identity — and a
       // pick can be fine on one and short on the other, so neither is allowed to
       // stand in for the other.
+      const nameable = unitsAt(split);
       if (group.pickable && group.trackingType !== "NONE"
-          && split.unitsAvailable !== null && split.issued > 0
-          && split.unitsAvailable < Math.trunc(split.issued)) {
+          && nameable !== null && split.issued > 0
+          && nameable < Math.trunc(split.issued)) {
         problems.push({
           level: "warn", groupKey: group.key, index: split.index,
-          message: `${label}: the quantity is here, but only ${split.unitsAvailable} `
-            + `${unitLabel(group.trackingType, split.unitsAvailable)} can be named `
+          message: `${label}: the quantity is here, but only ${nameable} `
+            + `${unitLabel(group.trackingType, nameable)} can be named `
             + `for ${Math.trunc(split.issued)} units. The rest have no identifier on `
             + `the shelf.`,
         });

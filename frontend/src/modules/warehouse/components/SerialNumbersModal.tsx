@@ -82,6 +82,7 @@ export function SerialNumbersModal({
   trackingMeta,
   pickMode = "reject",
   noun = "serial",
+  paging = null,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -119,6 +120,32 @@ export function SerialNumbersModal({
   trackingMeta?: TrackingTypeMeta | null;
   /** `reject` is QC semantics; `select` is used when issuing stock from a bin. */
   pickMode?: "reject" | "select";
+  /**
+   * Server-side paging for the offered list. Absent = the caller handed over the whole
+   * pool and the modal filters it in the browser, which is what the GRN and QC do.
+   *
+   * A material issue cannot work that way any more: one bin can hold 10,000 coded
+   * units, and `MAX_PAGE_SIZE` is 500, so the picker silently offered the first 500
+   * and called the rest missing stock. With this present `available` is ONE PAGE, the
+   * search box narrows the whole pool at the server rather than the page in the
+   * browser, and `onResolve` finds a scanned unit that is not on the page in hand.
+   *
+   * Selection is held by value and survives paging: `serials` is the modal's own
+   * state and nothing here rewrites it, so a unit ticked on page 1 is still ticked
+   * after a walk to page 14 and back.
+   */
+  paging?: {
+    page: number;
+    pageSize: number;
+    total: number;
+    loading?: boolean;
+    onPageChange: (page: number) => void;
+    /** Debounced by the caller; drives the server query. */
+    onSearchChange: (value: string) => void;
+    /** Look one exact identifier up across the WHOLE pool, for a scan that lands on
+     *  a unit the current page does not carry. Returns the value to select, or null. */
+    onResolve?: (value: string) => Promise<string | null>;
+  } | null;
 }) {
   const [serials, setSerials] = useState<string[]>([]);
   // "a serial" but "an IMEI": the article follows the sound, not the spelling.
@@ -127,6 +154,8 @@ export function SerialNumbersModal({
   const [entry, setEntry] = useState("");
   const [bulkEntry, setBulkEntry] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** Draw the whole captured list rather than the tail of it. See CAPTURE_WINDOW. */
+  const [showEveryCapture, setShowEveryCapture] = useState(false);
 
   const picking = available !== null && available !== undefined;
 
@@ -138,11 +167,29 @@ export function SerialNumbersModal({
       setEntry("");
       setBulkEntry("");
       setError(null);
+      setShowEveryCapture(false);
     }
     // `initial` is a fresh array on every render of the parent grid; keying the reset
     // off `isOpen` runs it once per open instead of wiping input on each keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  /**
+   * Hand the search box to the server, 300 ms after the storekeeper stops typing.
+   *
+   * Only when the list is paged: unpaged callers already hold the whole pool and
+   * filter it in the browser, which is instant and costs nothing. 300 ms is chosen
+   * against a scanner gun rather than a typist — a gun delivers its whole payload in
+   * one burst and fires Enter, so the debounce must not be short enough to launch a
+   * query per character of a barcode.
+   */
+  const onSearchChange = paging?.onSearchChange;
+  useEffect(() => {
+    if (!isOpen || !onSearchChange) return;
+    const value = entry.trim();
+    const timer = setTimeout(() => onSearchChange(value), 300);
+    return () => clearTimeout(timer);
+  }, [entry, isOpen, onSearchChange]);
 
   const required = Math.floor(quantity);
 
@@ -174,9 +221,15 @@ export function SerialNumbersModal({
     };
 
     const needle = entry.trim().toLowerCase();
-    const visible = (available ?? []).filter((s) =>
-      needle ? aliases(s).some((token) => token.toLowerCase().includes(needle)) : true,
-    );
+    // With paging on, the server has already narrowed the pool to the needle and the
+    // page in hand IS the answer. Filtering it again in the browser would hide rows
+    // the server matched on a column this alias list does not reproduce, and would
+    // blank the list for the moment between the keystroke and the debounced refetch.
+    const visible = paging
+      ? (available ?? [])
+      : (available ?? []).filter((s) =>
+          needle ? aliases(s).some((token) => token.toLowerCase().includes(needle)) : true,
+        );
     const rejected = (available ?? []).filter((s) => !selected.has(s));
     const toggle = (serial: string) =>
       setSerials((rows) =>
@@ -200,11 +253,6 @@ export function SerialNumbersModal({
     const addable = visible.filter((s) => !selected.has(s));
     const room = required - selected.size;
     const willAdd = Math.max(0, Math.min(room, addable.length));
-    const selectAll = () => {
-      if (willAdd <= 0) return;
-      setError(null);
-      setSerials((rows) => [...rows, ...addable.slice(0, willAdd)]);
-    };
     const clearAll = () => {
       setError(null);
       setSerials([]);
@@ -234,6 +282,35 @@ export function SerialNumbersModal({
         ?? rows.find((s) => aliases(s).some((token) => same(token, value)));
       setEntry("");
       if (!hit) {
+        // Paged: the gun fires faster than the debounce, so the unit it just read is
+        // routinely on a page that has not been fetched. Ask the server for that one
+        // identifier before calling it missing — telling a storekeeper the unit in his
+        // hand does not exist, because of where it happens to sort, is the worst
+        // answer this box can give.
+        if (paging?.onResolve) {
+          setError(null);
+          void paging.onResolve(value).then((found) => {
+            if (!found) {
+              setError(
+                `${value} is not among the units in this batch and location.`
+                + (selectMode ? " Check the split it belongs to." : ""),
+              );
+              return;
+            }
+            setSerials((rows2) => {
+              if (rows2.includes(found)) {
+                setError(`${found} is already on this pick.`);
+                return rows2;
+              }
+              if (selectMode && rows2.length >= required) {
+                setError(`This pick is for ${required}; remove one before scanning another.`);
+                return rows2;
+              }
+              return [...rows2, found];
+            });
+          });
+          return;
+        }
         setError(
           `${value} is not among the units in this batch and location.`
           + (selectMode ? " Check the split it belongs to." : ""),
@@ -361,16 +438,6 @@ export function SerialNumbersModal({
 
             {selectMode && !readOnly && (available ?? []).length > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-2">
-                {/* `disabled`, not `isDisabled`: the shared Button forwards only the
-                  * former (see shared/components/ui.tsx), so the latter would be
-                  * dropped and the button would stay pressable at the ceiling. */}
-                <Button
-                  variant="subtle"
-                  disabled={willAdd <= 0}
-                  onClick={selectAll}
-                >
-                  Select {willAdd > 0 ? willAdd : "all"}
-                </Button>
                 <Button
                   variant="subtle"
                   disabled={selected.size === 0}
@@ -378,7 +445,7 @@ export function SerialNumbersModal({
                 >
                   Clear
                 </Button>
-                {willAdd <= 0 && selected.size >= required && (
+                {selected.size >= required && (
                   <span className="text-xs text-muted">
                     This pick is full at {required}.
                   </span>
@@ -386,11 +453,20 @@ export function SerialNumbersModal({
               </div>
             )}
 
-            {(available ?? []).length === 0 ? (
+            {paging?.loading && (available ?? []).length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
-                {selectMode
-                  ? `No ${plural(2)} are available in this batch and location.`
-                  : "No serials were captured on the GRN for this line."}
+                Loading {plural(2)}…
+              </div>
+            ) : (available ?? []).length === 0 ? (
+              <div className="py-8 text-center text-sm text-muted">
+                {/* Paged and searched: the pool is not empty, this needle just does not
+                  * match anything in it. Saying "none are available" there sends a
+                  * storekeeper to look for stock that is sitting on the shelf. */}
+                {paging && entry.trim()
+                  ? "Nothing in this batch and location matches the search."
+                  : selectMode
+                    ? `No ${plural(2)} are available in this batch and location.`
+                    : "No serials were captured on the GRN for this line."}
               </div>
             ) : visible.length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
@@ -522,6 +598,46 @@ export function SerialNumbersModal({
                 })}
               </ul>
             )}
+
+            {/* The pager. Present only for a paged caller, and deliberately BELOW the
+              * list: it is where a storekeeper's eye ends up after reading the rows.
+              *
+              * It states the size of the whole pool, not of the page, because the
+              * count is the thing that tells him the short list in front of him is a
+              * window and not the whole shelf. Selections made on other pages are
+              * still held — that is why the "N / required selected" line above counts
+              * the document rather than the page. */}
+            {paging && (paging.total > paging.pageSize || paging.page > 1) && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line/70 pt-3 text-sm">
+                <span className="text-muted">
+                  {(paging.page - 1) * paging.pageSize + 1}
+                  –
+                  {Math.min(paging.page * paging.pageSize, paging.total)}
+                  {" of "}
+                  <b className="tabular text-ink">{paging.total}</b> {plural(paging.total)}
+                  {paging.loading && <span className="ml-2 text-muted">loading…</span>}
+                </span>
+                <span className="flex items-center gap-2">
+                  <Button
+                    variant="subtle"
+                    disabled={paging.page <= 1 || !!paging.loading}
+                    onClick={() => paging.onPageChange(paging.page - 1)}
+                  >
+                    Previous
+                  </Button>
+                  <span className="tabular text-muted">
+                    Page {paging.page} of {Math.max(1, Math.ceil(paging.total / paging.pageSize))}
+                  </span>
+                  <Button
+                    variant="subtle"
+                    disabled={paging.page >= Math.ceil(paging.total / paging.pageSize) || !!paging.loading}
+                    onClick={() => paging.onPageChange(paging.page + 1)}
+                  >
+                    Next
+                  </Button>
+                </span>
+              </div>
+            )}
           </ModalBody>
 
           <ModalFooter>
@@ -576,9 +692,18 @@ export function SerialNumbersModal({
     const incoming = parseBulk(raw);
     if (!incoming.length) return;
 
-    const duplicatesInPaste = incoming.filter((value, index) => incoming.indexOf(value) !== index);
-    if (duplicatesInPaste.length) {
-      setError(`${duplicatesInPaste[0]} appears more than once in the pasted list.`);
+    // One pass with a Set, not `indexOf` inside a filter. That was O(n^2): a carton
+    // of 10,000 scans — which `limits.MAX_SERIALS_PER_LINE` now allows — is a hundred
+    // million comparisons on the main thread, and the tab stops responding for long
+    // enough to look like a crash. The first repeat is still the one named.
+    const seen = new Set<string>();
+    const repeated = incoming.find((value) => {
+      if (seen.has(value)) return true;
+      seen.add(value);
+      return false;
+    });
+    if (repeated) {
+      setError(`${repeated} appears more than once in the pasted list.`);
       return;
     }
 
@@ -598,6 +723,24 @@ export function SerialNumbersModal({
     setBulkEntry("");
     setError(null);
   };
+
+  /**
+   * How many captured rows are DRAWN. The line may now hold 10,000
+   * (`limits.MAX_SERIALS_PER_LINE`), and each one renders a list item with a delete
+   * button — 10,000 of those is tens of thousands of DOM nodes, built on the main
+   * thread while a scanner gun is still firing into the box above them.
+   *
+   * The tail, not the head: a storekeeper watching this list is checking that the
+   * scan he just made landed, and that is always at the bottom. The whole set is
+   * still captured, still saved, and still counted on the line above — only the
+   * drawing is bounded, and "Show all" is one press away for anyone who needs to
+   * hunt down a specific row.
+   */
+  const CAPTURE_WINDOW = 300;
+  const captureHidden = showEveryCapture ? 0 : Math.max(0, serials.length - CAPTURE_WINDOW);
+  const captureWindow = serials
+    .map((value, index) => ({ value, index }))
+    .slice(captureHidden);
 
   // A plain expression, not a useMemo: pick mode returns before this point, and a hook
   // that only runs on one branch breaks the rules of hooks.
@@ -684,7 +827,19 @@ export function SerialNumbersModal({
             <div className="py-8 text-center text-sm text-muted">Nothing captured yet.</div>
           ) : (
             <ul className="space-y-1.5">
-              {serials.map((s, i) => (
+              {captureHidden > 0 && (
+                <li className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-line bg-content2/40 px-3 py-2 text-xs text-muted">
+                  <span>
+                    Showing the last <b className="tabular text-ink">{CAPTURE_WINDOW}</b> of{" "}
+                    <b className="tabular text-ink">{serials.length}</b>. All of them are
+                    captured and will be saved.
+                  </span>
+                  <Button variant="subtle" onClick={() => setShowEveryCapture(true)}>
+                    Show all
+                  </Button>
+                </li>
+              )}
+              {captureWindow.map(({ value: s, index: i }) => (
                 <li
                   key={s}
                   className="flex min-h-11 items-center justify-between gap-2 rounded-lg border border-line/70 bg-content1 px-3"

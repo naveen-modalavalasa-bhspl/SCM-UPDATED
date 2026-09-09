@@ -9,7 +9,7 @@ from app.shared.models.master import (
     Brand, BrandManufacturer, GeneralName, HsnCode, Item, ItemCategory, ItemClass,
     Manufacturer, Project, Uom,
 )
-from app.shared.enums import BinType, WarehouseType
+from app.shared.enums import WarehouseType
 
 MANAGE_ALL = [perms.MASTER_ITEM_MANAGE, perms.MASTER_CATEGORY_MANAGE,
               perms.MASTER_UOM_MANAGE, perms.MASTER_LOCATION_MANAGE,
@@ -441,10 +441,10 @@ async def test_bin_path_and_level_derive_from_the_parent(client, admin):
     wh = await warehouse(client, admin)
     zone = (await client.post("/api/bins", json={
         "warehouse_id": wh["id"], "code": "A", "name": "Zone A",
-        "bin_type": BinType.ZONE.value}, headers=admin)).json()
+        "bin_type": "ZONE"}, headers=admin)).json()
     rack = (await client.post("/api/bins", json={
         "warehouse_id": wh["id"], "code": "A-01", "name": "Rack 1",
-        "bin_type": BinType.RACK.value, "parent_id": zone["id"]}, headers=admin)).json()
+        "bin_type": "RACK", "parent_id": zone["id"]}, headers=admin)).json()
 
     assert (zone["path"], zone["level"]) == ("A", 1)
     assert (rack["path"], rack["level"]) == ("A/A-01", 2)
@@ -462,10 +462,10 @@ async def test_bin_parent_must_be_in_the_same_warehouse(client, admin):
     second = await warehouse(client, admin, "WH2", "Two")
     zone = (await client.post("/api/bins", json={
         "warehouse_id": first["id"], "code": "A",
-        "bin_type": BinType.ZONE.value}, headers=admin)).json()
+        "bin_type": "ZONE"}, headers=admin)).json()
 
     r = await client.post("/api/bins", json={
-        "warehouse_id": second["id"], "code": "B", "bin_type": BinType.RACK.value,
+        "warehouse_id": second["id"], "code": "B", "bin_type": "RACK",
         "parent_id": zone["id"]}, headers=admin)
     assert r.status_code == 422
 
@@ -474,14 +474,14 @@ async def test_bin_loop_is_rejected(client, admin):
     wh = await warehouse(client, admin)
     a = (await client.post("/api/bins", json={
         "warehouse_id": wh["id"], "code": "A",
-        "bin_type": BinType.ZONE.value}, headers=admin)).json()
+        "bin_type": "ZONE"}, headers=admin)).json()
     b = (await client.post("/api/bins", json={
-        "warehouse_id": wh["id"], "code": "B", "bin_type": BinType.RACK.value,
+        "warehouse_id": wh["id"], "code": "B", "bin_type": "RACK",
         "parent_id": a["id"]}, headers=admin)).json()
 
     # Making A a child of B would close the loop A -> B -> A.
     r = await client.put(f"/api/bins/{a['id']}", json={
-        "warehouse_id": wh["id"], "code": "A", "bin_type": BinType.ZONE.value,
+        "warehouse_id": wh["id"], "code": "A", "bin_type": "ZONE",
         "parent_id": b["id"]}, headers=admin)
     assert r.status_code == 422
 

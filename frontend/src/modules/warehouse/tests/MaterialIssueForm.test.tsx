@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -72,6 +72,29 @@ vi.mock("../api", async (importOriginal) => {
       { code: "ASSET", label: "Asset tag", unit: "asset tag",
         hint: "Scan the asset tag stamped on the unit at putaway." },
     ]),
+    // What the POINT holds, which is what an issue picks from — not the whole item
+    // master. The point stocks one of the two vacutainers; the other is in the
+    // catalogue and nowhere on this floor.
+    itemOptions: vi.fn().mockImplementation(
+      (_search?: string, _wh?: number, inStock?: boolean) => Promise.resolve(
+        inStock
+          ? [{ id: 1, code: "303010-MONITOR-HP-HP-0001", name: "All-in-One Monitor",
+               is_batch_tracked: true, on_hand: 15, batch_count: 2,
+               location_count: 2 }]
+          : [{ id: 1, code: "303010-MONITOR-HP-HP-0001", name: "All-in-One Monitor",
+               is_batch_tracked: true, on_hand: 15, batch_count: 2,
+               location_count: 2 },
+             { id: 2, code: "101010-VAC-CIT-VACUTAINER-BD-0001",
+               name: "Sodium Citrate Vacutainer", is_batch_tracked: true,
+               on_hand: 0, batch_count: 0, location_count: 0 }],
+      ),
+    ),
+    // The live probe behind the "N codes here" line on each pick. Both picks can name
+    // every unit they take, so nothing on this document is short of identifiers.
+    issueUnitSupply: vi.fn().mockResolvedValue([
+      { item_id: 1, batch_id: 11, bin_id: 10, need: 5, has_units: true, available: 6 },
+      { item_id: 1, batch_id: 12, bin_id: 20, need: 10, has_units: true, available: 11 },
+    ]),
     issueStockSources: vi.fn().mockResolvedValue([
       {
         item_id: 1, bin_id: 10, bin_code: "F1-A1-R1-B1",
@@ -79,6 +102,8 @@ vi.mock("../api", async (importOriginal) => {
         batch_id: 11, batch_no: "AUG-26",
         available_qty: 0, reserved_qty: 5, own_reserved_qty: 5,
         total_qty: 5, drawable_qty: 5,
+        batch_total_qty: 5, batch_available_qty: 0,
+        item_total_qty: 15, item_available_qty: 0,
       },
       {
         item_id: 1, bin_id: 20, bin_code: "F1-A2-R3-B2",
@@ -86,6 +111,8 @@ vi.mock("../api", async (importOriginal) => {
         batch_id: 12, batch_no: "SEP-26",
         available_qty: 0, reserved_qty: 10, own_reserved_qty: 10,
         total_qty: 10, drawable_qty: 10,
+        batch_total_qty: 10, batch_available_qty: 0,
+        item_total_qty: 15, item_available_qty: 0,
       },
     ]),
   };
@@ -156,6 +183,50 @@ describe("MaterialIssueForm", () => {
     await waitFor(() => {
       expect(screen.getAllByText(/allocated here/).length).toBe(2);
     });
+  });
+
+  it("states the same shelf at three widths, each one saying which it is", async () => {
+    open();
+    // The warehouse holds 15 of the item, across two batches of 5 and 10, each in one
+    // bay. A bare number beside a dropdown is the thing that gets read as the wrong
+    // quantity, so every figure carries the scope it measures.
+    await waitFor(() => {
+      expect(screen.getByText("In this warehouse")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("in this batch").length).toBe(2);
+    expect(screen.getAllByText("at this location").length).toBe(2);
+  });
+
+  it("offers a new item row, so an issue can be raised without an indent", async () => {
+    open();
+    // A main store issues to departments, writes off scrap and moves stock for reasons
+    // no indent covers — `_build_issue` has always allowed it, and only a LIP is
+    // refused. The grid simply never rendered the button, so the item picker existed
+    // with no way of creating the empty line it picks into.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /add item/i })).toBeEnabled();
+    });
+  });
+
+  it("picks items from what the point holds, with the quantity on the option", async () => {
+    open();
+    // The item picker only stands on a row that has not named one yet — on a saved
+    // line the item is the line, and changing it is removing the row and adding
+    // another.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /add item/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add item/i }));
+
+    // The catalogue is several thousand rows and the point stocks a couple of dozen
+    // of them. Offering the whole master sent the storekeeper down two more dropdowns
+    // before anything told him the shelf was empty.
+    await waitFor(() => {
+      expect(screen.getAllByText(/On the shelf here/).length).toBeGreaterThan(0);
+    });
+    // And the way to the rest of the catalogue is stated, not hidden: naming an item
+    // the system does not think is there is a real thing a storekeeper has to do.
+    expect(screen.getAllByText("Show every item").length).toBeGreaterThan(0);
   });
 
   it("counts identifiers per pick, so a pick with none is called out on its own row", async () => {

@@ -19,6 +19,7 @@ import type {
   Issue,
   IssueDispatchSource,
   IssueStockSource,
+  UnitSupply,
   IssueWrite,
   ItemOption,
   LocationOption,
@@ -187,6 +188,13 @@ export const createStorageType = (body: StorageTypeWrite) =>
 export const updateStorageType = (id: number, body: StorageTypeWrite) =>
   put<StorageType>(`${BASE}/storage-types/${id}`, body);
 
+export const deleteStorageType = (id: number) => del(`${BASE}/storage-types/${id}`);
+
+/** Put the standard rungs back on a site whose master is empty. Idempotent — a kind
+ *  that is already there is left exactly as it has been edited. */
+export const seedStorageTypes = () =>
+  post<StorageType[]>(`${BASE}/storage-types/seed-defaults`, {});
+
 /* ------------------------------------------------------------------ inward -- */
 
 /** `gate_register` lists every row that was ever a gate entry, converted or not. */
@@ -218,9 +226,18 @@ export const completeReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/$
 export const cancelReceipt = (id: number, reason?: string) =>
   post<Receipt>(`${BASE}/receipts/${id}/cancel`, { reason });
 
-/** Open PO lines, so the GRN form fills itself from the order. */
-export const getPoLines = (poId: number) =>
-  get<PoPrefill>(`${BASE}/options/po-lines`, { po_id: poId });
+/**
+ * What the order still OWES, so the GRN form fills itself from it.
+ *
+ * Only the lines with something outstanding — a fully received line is not one to
+ * receive again. `receiptId` is the receipt being filled, whose own lines must not
+ * count against it, or a saved receipt re-filling from its order would be told the
+ * order owes nothing, by itself.
+ */
+export const getPoLines = (poId: number, receiptId?: number | null) =>
+  get<PoPrefill>(`${BASE}/options/po-lines`, {
+    po_id: poId, receipt_id: receiptId ?? undefined,
+  });
 
 /** Despatch notes the vendor has filed against an order — only SUBMITTED ones, since
  *  a draft is the vendor still typing. */
@@ -229,8 +246,10 @@ export const despatchNoteOptions = (poId: number) =>
 
 /** The vendor's paperwork and per-line batch/expiry, in the shape this form needs.
  *  Header and lines in one call — at the gate they are one act. */
-export const getDespatchPrefill = (noteId: number) =>
-  get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, { note_id: noteId });
+export const getDespatchPrefill = (noteId: number, receiptId?: number | null) =>
+  get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, {
+    note_id: noteId, receipt_id: receiptId ?? undefined,
+  });
 
 /* ----------------------------------------------------------- quality (in) -- */
 
@@ -361,11 +380,37 @@ export const issueStockSources = (
   item_ids: number[],
   indent_id?: number | null,
 ) =>
-  get<IssueStockSource[]>(`${BASE}/issues/stock-sources`, {
+  post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
     warehouse_id,
-    item_ids: item_ids.join(","),
+    item_ids,
     indent_id,
   });
+
+/**
+ * How many identified units each (item, batch, location) could name, right now.
+ *
+ * Asked for the whole grid in one call rather than per row — a fifty-pick issue
+ * re-probing on every batch change would otherwise be fifty requests a keystroke
+ * apart. The count is bounded at `need + 1` on the server, so it stays cheap over a
+ * table holding 773k unit rows.
+ */
+export const issueUnitSupply = (
+  warehouse_id: number,
+  picks: UnitSupplyPick[],
+  issue_id?: number | null,
+  direction: "OUT" | "IN" = "OUT",
+) =>
+  post<UnitSupply[]>(`${BASE}/issues/unit-supply`, {
+    warehouse_id, picks, issue_id, direction,
+  });
+
+export interface UnitSupplyPick {
+  item_id: number;
+  batch_id?: number | null;
+  bin_id?: number | null;
+  need: number;
+  line_id?: number | null;
+}
 
 /** What each kind of unit identifier is called. Served so no screen writes the
  *  words "asset tag" or "IMEI" itself — see the backend's `TRACKING_META`. */
@@ -687,8 +732,23 @@ export const runReport = (key: ReportKey, params: Record<string, unknown> = {}) 
 
 /* ----------------------------------------------------------------- options -- */
 
-export const itemOptions = (search?: string) =>
-  get<ItemOption[]>(`${BASE}/options/items`, { search });
+/**
+ * Items for a picker, and — when a stocking point is named — what that point holds.
+ *
+ * `in_stock` narrows the list to what can actually be issued from there. The plain
+ * catalogue is right for a GRN (goods arrive for items the shelf has never seen) and
+ * wrong for an issue, where offering the whole master sends the storekeeper down two
+ * more dropdowns before anything tells him the shelf is empty.
+ */
+export const itemOptions = (
+  search?: string,
+  warehouse_id?: number | null,
+  in_stock?: boolean,
+  indent_id?: number | null,
+) =>
+  get<ItemOption[]>(`${BASE}/options/items`, {
+    search, warehouse_id, in_stock, indent_id,
+  });
 
 export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options/vendors`, { search });
 

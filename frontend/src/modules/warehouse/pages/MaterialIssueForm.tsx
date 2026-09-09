@@ -6,11 +6,13 @@ import { Accordion, AccordionItem } from "@heroui/react";
 import { ArrowLeft, Info, MapPin, FileText, ChevronRight, ChevronDown } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
+import { ItemPicker } from "../components/ItemPicker";
 import { IssueSplitEditor } from "../components/IssueSplitEditor";
 import { TrackingBadge, useTrackingMeta } from "../components/TrackingBadge";
 import {
   groupIssueLines, normalizeSplits, round, sourceKey, splitProblems, trackingOf,
 } from "../issueSplits";
+import { unitSupplyKey } from "../components/IssueSplitEditor";
 import type { IssueGroup, IssueSplit } from "../issueSplits";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components/Timeline";
@@ -18,12 +20,13 @@ import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
-  issueApprovalHistory, itemOptions, listSerials, postIssue, projectOptions,
+  issueApprovalHistory, listSerials, postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
   returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
   warehouseOptions,
   issueStockSources,
+  issueUnitSupply,
 } from "../api";
 import type { IssueSplitResult } from "../api";
 import { fmtCount, volume } from "../components/CapacityMeter";
@@ -32,7 +35,7 @@ import { alerts } from "@/modules/alerts";
 import type {
   HandlingUnit,
   Issue, IssueItemWrite, IssueStockSource, IssueWrite, ItemOption, OccupancyMove,
-  SerialNumber, TrackingType, UnitMode,
+  SerialNumber, TrackingType, UnitMode, UnitSupply,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
@@ -243,6 +246,21 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   >(null);
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
+  /**
+   * Which page of this pick's units the picker is showing, and what it is searching
+   * for. Both are SERVER state: one bin can hold 10,000 coded units and the page
+   * ceiling is 500, so the old single `size: 500` read offered the first 500 and
+   * called the other 9,500 missing stock.
+   *
+   * Reset together whenever the modal opens on a different pick — page 14 of the
+   * last line's units is not a sensible place to open the next line's list.
+   */
+  const [serialPage, setSerialPage] = useState(1);
+  const [serialSearch, setSerialSearch] = useState("");
+  useEffect(() => {
+    setSerialPage(1);
+    setSerialSearch("");
+  }, [serialLine]);
   const [destination, setDestination] = useState("");
   // The destination office's service area code. Held beside the destination name and
   // filled from the same answer, because it belongs to the office the goods are going
@@ -376,6 +394,8 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       activeSerialLine?.bin_id ?? 0,
       activeSerialLine?.id ?? 0,
       serialLine,
+      serialPage,
+      serialSearch,
     ],
     queryFn: () =>
       listSerials({
@@ -389,9 +409,16 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         issue_id: editing ? Number(id) : undefined,
         issue_line_id: activeSerialLine?.id,
         status: "available",
-        size: 500,
+        // One page at a time, and the needle goes to the server with it. `size` is
+        // MAX_PAGE_SIZE; the pool behind it is whatever the bay holds.
+        page: serialPage,
+        size: 200,
+        search: serialSearch || undefined,
       }),
     enabled: serialLine !== null && activeSerialLineReady,
+    // The page a storekeeper is looking at should not blank out while the next one
+    // loads — a list that empties and refills reads as stock disappearing.
+    placeholderData: (previous) => previous,
   });
 
   // Serial -> IMEI -> code. A unit is one row in whs_serial_numbers; which of its
@@ -465,7 +492,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     () => Array.from(new Set(form.items.map((l) => l.item_id).filter(Boolean))),
     [form.items],
   );
-  const { data: sources = [] } = useQuery({
+  const { data: sources = [], isSuccess: sourcesReady } = useQuery({
     queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, itemIds],
     queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id),
     // Only while the picks are still open. Once the stock is posted the balances
@@ -479,6 +506,66 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     for (const row of sources) (map[row.item_id] ??= []).push(row);
     return map;
   }, [sources]);
+
+  /* ------------------------------------------- how many units each pick can name --
+   *
+   * A SECOND question about the same pick, with a different answer off a different
+   * table: `stock-sources` says how much quantity is at a (batch, location), this
+   * says how many physical units there carry an identifier the line could put on the
+   * document. Stock put away before the item was coded has the first and not the
+   * second.
+   *
+   * The saved line carries an answer already (`units_available`), but it is the
+   * answer for the bay the line named when it was last SAVED — so the moment a
+   * storekeeper repoints a pick, the number beside it belongs to somewhere he is no
+   * longer standing. Probed live, for the whole grid in one call, and debounced with
+   * the same 400 ms the occupancy preview uses: typing "1", "1 5" in an Issue qty box
+   * must not fire a probe a digit.
+   */
+  const supplyPicks = useMemo(
+    () => form.items
+      .filter((line) => line.item_id && num(line.issued_qty) > 0)
+      .map((line) => ({
+        item_id: line.item_id,
+        batch_id: line.batch_id ?? null,
+        bin_id: isBinManaged ? line.bin_id ?? null : null,
+        need: Math.trunc(num(line.issued_qty)),
+        line_id: line.id ?? null,
+      })),
+    [form.items, isBinManaged],
+  );
+  const [settledPicks, setSettledPicks] = useState(supplyPicks);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettledPicks(supplyPicks), 400);
+    return () => clearTimeout(timer);
+  }, [supplyPicks]);
+
+  const { data: supplyRows = [] } = useQuery({
+    queryKey: ["wh-issue-unit-supply", form.warehouse_id, id ?? 0, settledPicks],
+    queryFn: () => issueUnitSupply(
+      form.warehouse_id,
+      // Deduplicated per (item, batch, location), keeping the largest need: the probe
+      // answers per combination, so two picks on one bay would otherwise ask twice and
+      // the second answer — bounded to a smaller need — would overwrite the first.
+      Object.values(settledPicks.reduce((all, pick) => {
+        const key = unitSupplyKey(pick.item_id, pick.batch_id, pick.bin_id);
+        if (!all[key] || all[key].need < pick.need) all[key] = pick;
+        return all;
+      }, {} as Record<string, (typeof settledPicks)[number]>)),
+      editing ? Number(id) : null,
+      direction,
+    ),
+    enabled: !!form.warehouse_id && settledPicks.length > 0 && !doc?.is_stock_posted,
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
+  });
+  const unitSupply = useMemo(() => {
+    const map: Record<string, UnitSupply> = {};
+    for (const row of supplyRows) {
+      map[unitSupplyKey(row.item_id, row.batch_id, row.bin_id)] = row;
+    }
+    return map;
+  }, [supplyRows]);
 
   const trackingMeta = useTrackingMeta();
   /** One group's identifier, named in the plural the server chose. */
@@ -507,8 +594,19 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       binManaged: isBinManaged,
       unitLabel,
       requireUnits: doc?.status === "APPROVED" && !doc?.is_stock_posted,
+      // The LIVE count, not the one saved on the line: that one describes the bay the
+      // pick named when it was last saved, so a storekeeper who has just repointed it
+      // would be warned about stock he is no longer taking. Falls back to the saved
+      // answer while the probe is in flight.
+      unitsAt: (split) => {
+        const supply = unitSupply[unitSupplyKey(
+          split.line.item_id, split.line.batch_id,
+          isBinManaged ? split.line.bin_id : null,
+        )];
+        return supply ? supply.available : split.unitsAvailable;
+      },
     }),
-    [groups, isBinManaged, unitLabel, doc?.status, doc?.is_stock_posted],
+    [groups, isBinManaged, unitLabel, unitSupply, doc?.status, doc?.is_stock_posted],
   );
   const blocking = problems.filter((p) => p.level === "error");
   const problemAt = useMemo(() => {
@@ -825,10 +923,17 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
    * goods cost, and which line the identifier picker is being opened for.
    */
   const renderItemPicker = (split: IssueSplit) => (
-    <Lookup
-      name="items"
-      load={itemOptions}
+    <ItemPicker
+      warehouseId={form.warehouse_id}
+      indentId={form.indent_id}
       value={split.line.item_id || ""}
+      isDisabled={locked}
+      // A saved line whose item the point no longer stocks still has to render as
+      // itself. The list it came from cannot be relied on to contain it.
+      fallback={split.line.item_id
+        ? { id: split.line.item_id, code: split.line.item_code ?? null,
+            name: split.line.item_name ?? `Item ${split.line.item_id}` }
+        : null}
       onChange={(v, option) => {
         const item = option as ItemOption | undefined;
         patchLine(split.index, {
@@ -848,8 +953,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           serial_numbers: [],
         });
       }}
-      placeholder="Pick an item"
-      serverSearch=""
     />
   );
 
@@ -858,6 +961,19 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
     const owned = new Set(group.splits.map((s) => s.index));
     setLines(form.items.filter((_, i) => !owned.has(i)));
   };
+
+  /**
+   * One more item on an issue nobody raised an indent for.
+   *
+   * A main store issues to departments, writes off scrap and moves stock for reasons
+   * no indent covers — `_build_issue` has always allowed it, and only a LIP (the
+   * bottom of the chain, where everything held arrived against a request) is refused.
+   * The grid simply never offered the button, so the only way to raise an issue was to
+   * pull an indent in: the item picker existed, the empty line it needed had no way of
+   * being created. The ask starts at zero and is the storekeeper's to type, because
+   * there is no indent line to inherit it from.
+   */
+  const addItem = () => setLines([...form.items, emptyLine()]);
 
   /**
    * Items whose single location cannot serve the whole ask, and where the rest of it
@@ -1235,7 +1351,10 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
           onPickUnits={setSerialLine}
           meta={trackingMeta}
           problemAt={problemAt}
+          unitSupply={unitSupply}
+          sourcesReady={sourcesReady}
           renderItemPicker={renderItemPicker}
+          onAddItem={locked ? undefined : addItem}
           onRemoveGroup={locked ? undefined : removeGroup}
         />
 
@@ -1357,6 +1476,54 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         scope={activeScope}
         noun={unitNoun(activeUnitMode)}
         pickMode="select"
+        paging={{
+          page: serialPage,
+          pageSize: 200,
+          total: availableSerials.data?.total ?? 0,
+          loading: availableSerials.isFetching,
+          onPageChange: setSerialPage,
+          // A new needle always restarts at page 1: staying on page 7 of the old
+          // result set lands on an empty page of the new one.
+          onSearchChange: (value) => {
+            setSerialSearch(value);
+            setSerialPage(1);
+          },
+          /**
+           * One identifier, looked up across the whole pool rather than the page.
+           *
+           * A scanner gun fires its payload and Enter in one burst, well inside the
+           * search debounce, so the unit it just read is routinely on a page that has
+           * not been fetched. Without this the picker told the storekeeper the handset
+           * in his hand was not in this bay.
+           *
+           * Bounded to one row and scoped exactly as the list is — same line, same
+           * batch, same bin, same `available` status — so it can never select a unit
+           * the list itself would not have offered.
+           */
+          onResolve: async (value) => {
+            if (!activeSerialLine?.item_id || !form.warehouse_id) return null;
+            const found = await listSerials({
+              item_id: activeSerialLine.item_id,
+              batch_id: sourceId(activeSerialLine.batch_id),
+              warehouse_id: form.warehouse_id,
+              bin_id: isBinManaged ? sourceId(activeSerialLine.bin_id) : undefined,
+              issue_id: editing ? Number(id) : undefined,
+              issue_line_id: activeSerialLine.id,
+              status: "available",
+              search: value,
+              page: 1,
+              size: 25,
+            });
+            const rows = (found.items ?? []).filter((row) => !!unitKey(row, activeUnitMode));
+            const match = rows.find(
+              (row) => unitKey(row, activeUnitMode).trim().toLowerCase() === value.trim().toLowerCase(),
+            ) ?? rows.find((row) =>
+              [row.serial_number, row.imei, row.asset_code, row.consumable_code]
+                .some((token) => (token ?? "").trim().toLowerCase() === value.trim().toLowerCase()),
+            );
+            return match ? unitKey(match, activeUnitMode) : null;
+          },
+        }}
         itemLabel={
           serialLine === null
             ? ""
