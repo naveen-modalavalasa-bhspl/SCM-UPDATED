@@ -174,6 +174,13 @@ async def delete_bin(bin_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/storage-types", response_model=list[s.StorageTypeRead])
 async def list_storage_types(db: AsyncSession = Depends(get_db),
                              user=Depends(require_permission(STOCK_VIEW))):
+    """What KINDS of storage location this company builds out of — floor, lane, rack,
+    shelf, bin, cold room — each with the kinds it may sit inside.
+
+    Behind `stock.view` rather than the master permission because every screen that
+    draws a location reads it: the kinds used to be an enum compiled into the code and
+    a matching array in the browser, and both are gone.
+    """
     return await service.list_storage_types(db)
 
 
@@ -189,6 +196,23 @@ async def update_storage_type(storage_type_id: int, data: s.StorageTypeWrite,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
     return await service.update_storage_type(db, storage_type_id, data, user)
+
+
+@router.delete("/storage-types/{storage_type_id}", status_code=204)
+async def delete_storage_type(storage_type_id: int,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    await service.delete_storage_type(db, storage_type_id, user)
+
+
+@router.post("/storage-types/seed-defaults", response_model=list[s.StorageTypeRead])
+async def seed_storage_types(db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    """Put the standard rungs back — floor, lane, rack, shelf, bin, cold room and the
+    rest — on a site whose master is empty. Idempotent: a kind that is already there is
+    left exactly as it has been edited."""
+    await service.seed_storage_types(db)
+    return await service.list_storage_types(db)
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +581,41 @@ async def issue_stock_sources(warehouse_id: int, item_ids: str,
         warehouse_id=warehouse_id,
         item_ids=[int(value) for value in item_ids.split(",") if value.strip().isdigit()],
         indent_id=indent_id,
+        user=user,
+    )
+
+
+@router.post("/issues/stock-sources/fetch", response_model=list[s.IssueStockSource])
+async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(ISSUE_VIEW))):
+    """Every (batch, bin) the given items can be drawn from, oldest stock first.
+    Accepts item_ids in the request body to avoid URI length limits."""
+    return await service.issue_stock_sources(
+        db,
+        warehouse_id=body.warehouse_id,
+        item_ids=body.item_ids,
+        indent_id=body.indent_id,
+        user=user,
+    )
+
+
+@router.post("/issues/unit-supply", response_model=list[s.UnitSupplyRead])
+async def issue_unit_supply(body: s.UnitSupplyQuery,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(ISSUE_VIEW))):
+    """How many identified units each (item, batch, location) could name right now.
+
+    A different question from `stock-sources`, off a different table: that one is a
+    quantity on `stk_balance`, this is how many physical units at the spot carry a
+    serial, IMEI or code the line could put on the document. A pick can be sound on
+    one and impossible on the other."""
+    return await service.issue_unit_supply(
+        db,
+        warehouse_id=body.warehouse_id,
+        picks=body.picks,
+        issue_id=body.issue_id,
+        direction=body.direction,
         user=user,
     )
 
@@ -1038,9 +1097,18 @@ async def run_report(key: str, warehouse_id: int | None = None, date_from: date 
 # ---------------------------------------------------------------------------
 
 @router.get("/options/items", response_model=list[s.ItemOption])
-async def item_options(search: str | None = None, db: AsyncSession = Depends(get_db),
-                       _=Depends(require_permission(STOCK_VIEW))):
-    return await service.item_options(db, search)
+async def item_options(search: str | None = None, warehouse_id: int | None = None,
+                       in_stock: bool = False, indent_id: int | None = None,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(STOCK_VIEW))):
+    """The item catalogue, and — when a point is named — what that point holds of each.
+
+    `in_stock` narrows it to the items something can actually be issued from. A picker
+    that offers the whole master on an outward document sends the storekeeper down two
+    more dropdowns before telling him the shelf is empty."""
+    return await service.item_options(db, search, warehouse_id=warehouse_id,
+                                      in_stock=in_stock, indent_id=indent_id,
+                                      user=user)
 
 
 @router.get("/options/vendors", response_model=list[s.Option])
@@ -1099,9 +1167,12 @@ async def po_options(search: str | None = None, warehouse_id: int | None = None,
 
 
 @router.get("/options/po-lines", response_model=s.PoPrefill)
-async def po_lines(po_id: int = Query(...), db: AsyncSession = Depends(get_db),
+async def po_lines(po_id: int = Query(...), receipt_id: int | None = None,
+                   db: AsyncSession = Depends(get_db),
                    _=Depends(require_permission(RECEIPT_VIEW))):
-    return await service.po_lines(db, po_id)
+    """What the order still owes. `receipt_id` is the receipt being filled, whose own
+    lines must not count against it."""
+    return await service.po_lines(db, po_id, receipt_id=receipt_id)
 
 
 @router.get("/options/despatch-notes", response_model=list[s.Option])
@@ -1112,13 +1183,13 @@ async def despatch_note_options(po_id: int = Query(...),
 
 
 @router.get("/options/despatch-prefill", response_model=s.DespatchPrefill)
-async def despatch_prefill(note_id: int = Query(...),
+async def despatch_prefill(note_id: int = Query(...), receipt_id: int | None = None,
                            db: AsyncSession = Depends(get_db),
                            _=Depends(require_permission(RECEIPT_VIEW))):
     """The vendor's paperwork and per-line batch/expiry, so the gate confirms rather
     than transcribes. Behind `receipt.view` like the PO options — a storekeeper reads
     a supplier's despatch note without being handed procurement."""
-    return await service.despatch_note_prefill(db, note_id)
+    return await service.despatch_note_prefill(db, note_id, receipt_id=receipt_id)
 
 
 @router.get("/options/receipts", response_model=list[s.Option])

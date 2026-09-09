@@ -328,31 +328,18 @@ class WarehouseType(str, Enum):
     SCRAP = "SCRAP"
 
 
-class BinType(str, Enum):
-    """`whs_warehouse_locations.storage_type`. Locations nest through
-    `parent_location_id`, so the whole Block → Floor → Lane → Rack → Shelf → Bin
-    hierarchy of flow doc §1 is one table at different levels rather than six tables,
-    and there is no separate bins table.
-
-    Only BIN and COLD_STORAGE_BIN hold stock (`shared/models/warehouse.BIN_TYPES`);
-    the rest are the structure you walk past to reach one. BLOCK, LANE, REFRIGERATOR
-    and COLD_STORAGE_BIN are here because the live data uses them — a type the
-    database contains but the enum rejects makes those rows uneditable.
-    """
-    BLOCK = "BLOCK"
-    FLOOR = "FLOOR"
-    LINE = "LINE"
-    LANE = "LANE"
-    ZONE = "ZONE"
-    RACK = "RACK"
-    SHELF = "SHELF"
-    BIN = "BIN"
-    LOT = "LOT"
-    COLD_ROOM = "COLD_ROOM"
-    COLD_STORAGE_BIN = "COLD_STORAGE_BIN"
-    REFRIGERATOR = "REFRIGERATOR"
-    STORAGE = "STORAGE"
-    STAGING = "STAGING"
+# `BinType` was here: a fixed enum of the kinds a storage location can be.
+#
+# It is gone because the kinds are DATA. `whs_warehouse_storage_types` (the storage-type
+# master, owned by the warehouse module) carries them, along with the rungs each kind may
+# sit under, whether stock is held in it and whether it is temperature controlled. A site
+# that racks its goods in "carton bays" adds the rung on Warehouse > Masters > Storage
+# types; it does not wait for a release. The enum was also quietly wrong — the live data
+# has always used STAGING, which the write schema rejected, so those rows could be read
+# and never saved.
+#
+# `whs_warehouse_locations.storage_type` still holds the code (denormalised from the
+# master, written only by the warehouse service); `storage_type_id` is the master row.
 
 
 # ---- Inventory: reservations and material requests ----

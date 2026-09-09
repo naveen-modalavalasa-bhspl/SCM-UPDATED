@@ -7,6 +7,7 @@ import { DocumentList } from "../components/DocumentList";
 import { NewPutawayModal } from "../components/NewPutawayModal";
 import { listPutaways, deletePutaway, DRAFT_DELETE_PERMISSION } from "../api";
 import { fmtQty, humanise, normaliseStatus } from "../format";
+import { fmtCount, volume, weight } from "../components/CapacityMeter";
 import type { Putaway as PutawayTask } from "../types";
 
 /**
@@ -67,17 +68,39 @@ export default function Putaway() {
       ),
     },
     {
-      key: "bin",
-      header: "Bin",
+      // The queue is worked a pallet at a time, and the quantity beside it does not say
+      // how many of those there are. `1500 EA` is thirty cartons or three pallets
+      // depending only on the rung it arrived in, and which one it is decides whether
+      // the suggested bay can take it — so the pack is on the row, not one click in.
+      key: "load",
+      header: "Load",
+      hideOnNarrow: true,
       render: (r) => (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Chip size="sm" variant="flat" color={r.actual_bin_code ? "success" : "default"}>
-            {r.actual_bin_code ?? r.suggested_bin_code ?? "unassigned"}
-          </Chip>
-          {r.actual_bin_code && r.suggested_bin_code && r.actual_bin_code !== r.suggested_bin_code && (
-            <span className="text-[11px] text-warn">overridden</span>
-          )}
-        </div>
+        r.package_name ? (
+          <div className="min-w-0">
+            <div className="tabular truncate text-xs font-semibold text-ink">
+              {fmtCount(r.handling_units)} × {r.package_name}
+            </div>
+            <div className="tabular truncate text-[11px] text-muted">
+              {r.line_volume_cbm == null ? "not measured" : volume(r.line_volume_cbm)}
+              {r.line_weight_kg == null ? "" : ` · ${weight(r.line_weight_kg)}`}
+            </div>
+          </div>
+        ) : (
+          <span className="text-[11px] text-warn">No pack configured</span>
+        )
+      ),
+    },
+    {
+      key: "bin",
+      header: "Placed at",
+      // Where the goods actually went, or nothing. Nothing suggests a location any
+      // more, so a task waiting to be done has no bin on it — and printing a
+      // suggestion here would have read as a placement that had already happened.
+      render: (r) => (
+        <Chip size="sm" variant="flat" color={r.actual_bin_code ? "success" : "default"}>
+          {r.actual_bin_code ?? "not placed yet"}
+        </Chip>
       ),
     },
     {
@@ -122,8 +145,8 @@ export default function Putaway() {
       onCreate={() => setRaising(true)}
       createLabel="New putaway"
       createPermission="putaway.execute"
-      searchIn={(r) => [r.putaway_no, r.grn_no, r.item_code, r.item_name, r.batch_no, r.suggested_bin_code]}
-      searchPlaceholder="Search task, GRN, item or bin…"
+      searchIn={(r) => [r.putaway_no, r.grn_no, r.item_code, r.item_name, r.batch_no, r.actual_bin_code]}
+      searchPlaceholder="Search task, GRN, item or location…"
       statuses={STATUSES}
       onRowClick={(r) => nav(String(r.id))}
       empty="Nothing waiting to be put away."
@@ -169,7 +192,7 @@ export default function Putaway() {
           </div>
           <div className="truncate text-sm text-body">{r.item_name ?? r.item_code ?? "—"}</div>
           <div className="text-[11px] text-muted">
-            {fmtQty(r.qty)} {r.uom_code ?? ""} → {r.actual_bin_code ?? r.suggested_bin_code ?? "unassigned"}
+            {fmtQty(r.qty)} {r.uom_code ?? ""} → {r.actual_bin_code ?? "not placed yet"}
           </div>
         </div>
       )}

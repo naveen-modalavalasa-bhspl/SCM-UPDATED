@@ -206,7 +206,7 @@ export function PODetailPage() {
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
   const canAmend = po.data.amendment_allowed === true;
   const isDraft = po.data.status === "DRAFT";
-  const isFinished = ["RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
+  const isFinished = ["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
 
@@ -611,11 +611,13 @@ export function PODetailPage() {
             <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
             <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} freezeRateAndTax={true} />
           </div>
-          {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
-          <Field label="Reason for amendment" required>
-            <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
-          </Field>
-          <div className="flex justify-end gap-2">
+          <div className="border-t border-line pt-4">
+            {amend.error && <p className="mb-3 text-sm text-danger">{(amend.error as Error).message}</p>}
+            <Field label="Reason for amendment" required>
+              <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
+            </Field>
+          </div>
+          <div className="flex justify-end gap-2 mt-4">
             <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>Cancel</Button>
             <Button disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0} onClick={() => amend.mutate()}>{amend.isPending ? "Amending…" : "Save as a new revision"}</Button>
           </div>

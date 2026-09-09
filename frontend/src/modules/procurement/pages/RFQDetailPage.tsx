@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
-import { Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
+import { Can, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";

@@ -2,7 +2,7 @@ import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Selec
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ScanLine, Send } from "lucide-react";
+import { AlertTriangle, ArrowLeft, FileText, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -14,7 +14,7 @@ import {
   getPoLines, getReceipt, incomingDispatchOptions, itemOptions, poOptions,
   submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
 } from "../api";
-import { poApi } from "@/modules/procurement/api";
+
 import { fmtMoney, fmtQty, num, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
@@ -239,8 +239,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
    * because they then identified the order; the pending lines are appended to what is
    * there, minus any already on the form.
    */
+  /** An order with nothing left on it, and who took it. Cleared when the order is. */
+  const [poSettled, setPoSettled] = useState<
+    { lines: number; by: string[] } | null
+  >(null);
+
   const fillFromPo = useMutation({
-    mutationFn: (poId: number) => getPoLines(poId),
+    // The receipt being filled is left out of its own order's running total, or a
+    // saved receipt re-filling from its order would be told the order owes nothing.
+    mutationFn: (poId: number) => getPoLines(poId, doc?.id),
     onSuccess: (prefill) => {
       const already = new Set(
         form.items.map((line) => line.po_item_id).filter(Boolean) as number[],
@@ -260,6 +267,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         rate: line.rate ?? null,
       }));
+      // Nothing outstanding is an ANSWER, and a toast that scrolls away is not where
+      // it belongs: the storekeeper is standing at a delivery and needs to know the
+      // order has already been received, by whom, before he starts counting. Held on
+      // the form until the order is changed.
+      setPoSettled(
+        added.length === 0 && (prefill.total_lines ?? 0) > 0
+          ? { lines: prefill.total_lines ?? 0, by: prefill.received_by ?? [] }
+          : null,
+      );
       if (!added.length) {
         void alerts.info("receipt.po_nothing_pending");
       }
@@ -267,6 +283,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         ...current,
         vendor_id: current.vendor_id || prefill.vendor_id || undefined,
         project_id: current.project_id || prefill.project_id || undefined,
+        invoice_amount: current.invoice_amount ?? prefill.total_amount ?? null,
         items: [...current.items, ...added],
       }));
       if (prefill.vendor_name) setVendorName(prefill.vendor_name);
@@ -274,17 +291,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   });
 
-  const fillPoDetails = useMutation({
-    mutationFn: (poId: number) => poApi.get(poId),
-    onSuccess: (po: any) => {
-      setForm((current) => ({
-        ...current,
-        vendor_id: po.vendor_id ?? po.data?.vendor_id ?? current.vendor_id,
-        project_id: po.project_id ?? po.data?.project_id ?? current.project_id,
-      }));
-      setVendorName(po.vendor_name ?? po.data?.vendor_name ?? "");
-    }
-  });
+
 
   /** The vendor is left to the server, which reads it off the order itself rather
    *  than trusting a field the gate could contradict.
@@ -303,6 +310,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     setForm((current) => ({
       ...current, po_id: poId, po_no: poNo, despatch_note_id: null,
     }));
+    // Whatever the last order said about itself belonged to the last order.
+    setPoSettled(null);
     setTouched(true);
     if (poId) fillFromOrder.mutate(poId);
   };
@@ -319,13 +328,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       return notes.length ? { noteId: Number(notes[0].id) } : { noteId: null };
     },
     onSuccess: ({ noteId }, poId) => {
-      fillPoDetails.mutate(poId);
       if (noteId) fillFromDespatch.mutate(noteId);
       else fillFromPo.mutate(poId);
     },
     // A lookup that fails must not cost the storekeeper the order they just picked.
     onError: (_error, poId) => {
-      fillPoDetails.mutate(poId);
       fillFromPo.mutate(poId);
     },
   });
@@ -345,13 +352,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
    * matches neither.
    */
   const fillFromDespatch = useMutation({
-    mutationFn: (noteId: number) => getDespatchPrefill(noteId),
+    mutationFn: (noteId: number) => getDespatchPrefill(noteId, doc?.id),
     onSuccess: (prefill) => {
       setForm((current) => ({
         ...current,
         despatch_note_id: prefill.despatch_note_id,
         po_id: prefill.po_id ?? current.po_id,
         po_no: prefill.po_no ?? current.po_no,
+        vendor_id: prefill.vendor_id ?? current.vendor_id ?? undefined,
         // Only where the gate has not already written something: a storekeeper who
         // typed the invoice off the paper in their hand is looking at the real
         // document, and must not be overruled by what the vendor filed earlier.
@@ -381,6 +389,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           expiry_date: line.expiry_date,
         })),
       }));
+      if (prefill.vendor_name) setVendorName(prefill.vendor_name);
       setTouched(true);
     },
   });
@@ -761,6 +770,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     save.mutate();
   };
 
+  const todayDateStr = new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().split("T")[0];
+
   const allColumns: LineColumn<ReceiptItemWrite>[] = [
     {
       key: "item",
@@ -911,6 +922,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         <DateInput
           ariaLabel={`Manufacturing date, line ${i + 1}`}
           value={l.mfg_date}
+          max={todayDateStr}
           disabled={locked || !isGrn}
           onChange={(v) => patchLine(i, { mfg_date: v || null })}
         />
@@ -925,6 +937,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         <DateInput
           ariaLabel={`${lifeDateLabel(l)} date, line ${i + 1}`}
           value={l.expiry_date}
+          min={todayDateStr}
           disabled={locked || !isGrn}
           onChange={(v) => patchLine(i, { expiry_date: v || null })}
         />
@@ -1029,6 +1042,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             <Button variant="ghost" onClick={() => nav(isGrn ? "/warehouse/grn" : "/warehouse/material-inward")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
+            {editing && isGrn && (
+              <Button
+                variant="ghost"
+                onClick={() => window.open(`/warehouse/grn/${id}/print`, "_blank")}
+                title="Download PDF"
+              >
+                <FileText className="h-4 w-4" /> Download PDF
+              </Button>
+            )}
             {!locked && (
               <Can do="receipt.create">
                 <Button variant="soft" onClick={submitSave} disabled={save.isPending}>
@@ -1194,6 +1216,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                     ? "Loading the delivery…" : "Purchase order"}
                 />
               </Field>
+              {poSettled && (
+                <div className="sm:col-span-2 lg:col-span-3 flex items-start gap-2 rounded-xl border border-warn/40 bg-warn-bg/50 px-3 py-2.5 text-sm text-ink">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
+                  <div className="min-w-0 flex-1">
+                    <b>
+                      {form.po_no ?? "This order"} has already been received in full —
+                      all {poSettled.lines} line{poSettled.lines === 1 ? "" : "s"}.
+                    </b>{" "}
+                    {poSettled.by.length > 0 && (
+                      <>Taken by <b>{poSettled.by.join(", ")}</b>. </>
+                    )}
+                    Nothing was filled in, and a line entered by hand against it will
+                    be refused at save. If these are different goods, they need their
+                    own order.
+                  </div>
+                </div>
+              )}
               {!form.po_id && (
                 <Field label="PO number (not in this system)"
                        hint="Only for an order raised outside SCM.">

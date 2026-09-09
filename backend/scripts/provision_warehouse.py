@@ -18,6 +18,7 @@ from app.core.database import SessionLocal
 from app.platform.rbac import permissions as P
 from app.platform.rbac.models import Page, Permission, Role, RolePermission
 from app.platform.rbac.page_registry import RETIRED_PAGES
+from app.modules.warehouse import storage_types
 from app.shared.enums import UserRole
 
 # The permission rows the module's endpoints check. Sourced from ALL_PERMISSIONS so
@@ -134,7 +135,15 @@ async def provision() -> None:
             page.module, page.parent_id, page.sort_order = WAREHOUSE_MODULE, group.id, order
             page.required_permission, page.is_active = perm, True
 
+        # The kinds of storage location this company builds out of. They were an enum
+        # until 2026-09-05; a database with an empty master would open the location
+        # form with an empty Type dropdown, so every provisioned warehouse gets the
+        # standard ladder. Idempotent, and it never corrects an edited row.
+        kinds = await storage_types.ensure_defaults(db)
+
         await db.commit()
+        print(f"Storage types: {kinds} added, "
+              f"{len(storage_types.DEFAULTS) - kinds} already present.")
         print(f"Permissions: {added_perms} added, {len(wanted) - added_perms} already present.")
         print(f"Role grants: {granted} added (admin = all, store = all but "
               f"{', '.join(sorted(STORE_EXCLUDES))}).")

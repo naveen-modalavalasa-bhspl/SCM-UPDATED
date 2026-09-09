@@ -73,7 +73,9 @@ export function MaterialIssuePrintPage() {
             <div className="mt-0.5 text-[9px]" style={{ color: "#697187" }}>Batch: {line.batch_no}</div>
           )}
         </>,
-        line.location_name ?? line.bin_name ?? "—",
+        // `IssueItemRead` serves bin_code and nothing else, so it is the field that
+        // actually fills this column; the other two are kept for a line that carries them.
+        line.location_name ?? line.bin_name ?? line.bin_code ?? "—",
         <>{fmtQty(line.requested_qty)} <span style={{ color: "#697187" }}>{line.uom_code ?? ""}</span></>,
         <span className="font-semibold" style={{ color: "#141a2a" }}>
           {fmtQty(line.issued_qty)} <span className="font-normal" style={{ color: "#697187" }}>{line.uom_code ?? ""}</span>

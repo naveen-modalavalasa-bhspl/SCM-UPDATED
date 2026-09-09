@@ -118,6 +118,14 @@ async def engine():
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    # The storage-type master. A warehouse is built out of kinds of location — floor,
+    # lane, rack, shelf, bin — and those are rows now, not an enum, so a schema with an
+    # empty master is a system where no location can name its own kind. `bootstrap`
+    # seeds it for a real database (`provision_warehouse`); this is the same call.
+    async with async_sessionmaker(eng, class_=AsyncSession)() as session:
+        from app.modules.warehouse import storage_types
+        await storage_types.ensure_defaults(session)
+        await session.commit()
     yield eng
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
