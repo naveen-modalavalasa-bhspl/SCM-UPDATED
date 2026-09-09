@@ -306,7 +306,7 @@ async def item_eligibility_scope_options(
     user=Depends(require_permission(perms.MASTER_ITEM_MANAGE)),
 ):
     from app.platform.hcm.models import HcmOffice
-    from app.platform.rbac.models import Role, UserRole
+    from app.platform.rbac.profiles import profile_options
 
     # REVISED 2026-08-23 — each role now carries HOW MANY PEOPLE HOLD IT.
     #
@@ -326,12 +326,7 @@ async def item_eligibility_scope_options(
     # Eligibility resolves through `rbac_user_roles` (and a job profile where the
     # position has one), which is exactly what this counts — so a non-zero number here
     # means at least one person really does match the tag.
-    held = dict((await db.execute(
-        select(UserRole.role_id, func.count(func.distinct(UserRole.employee_id)))
-        .group_by(UserRole.role_id))).all())
-    roles = (await db.execute(
-        select(Role.id, Role.name, Role.code).where(Role.is_active.is_(True))
-        .order_by(Role.name))).all()
+    profiles = [p for p in await profile_options(db, user) if p.get("role_id")]
     offices = (await db.execute(
         select(HcmOffice.id, HcmOffice.name).where(HcmOffice.is_active.is_(True))
         .order_by(HcmOffice.name))).all()
@@ -339,8 +334,11 @@ async def item_eligibility_scope_options(
         # `code` rides along because the NAME alone cannot tell three "Store Keeper"
         # rows apart — `store_keeper`, `jp_22_store_keeper` and `storekeeper` are
         # different ids and only the code says which is which.
-        "roles": [{"id": r[0], "name": r[1], "code": r[2],
-                   "holders": int(held.get(r[0], 0))} for r in roles],
+        "projects": [{"id": p["project_id"], "name": p["project_name"]}
+                     for p in {p["project_id"]: p for p in profiles}.values()],
+        "roles": [{"id": p["role_id"], "name": p["name"], "code": p["key"],
+                   "holders": p["holder_count"], "project_id": p["project_id"],
+                   "project_name": p["project_name"]} for p in profiles],
         "regions": [{"id": o[0], "name": o[1]} for o in offices],
     }
 

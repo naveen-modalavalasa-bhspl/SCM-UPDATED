@@ -61,6 +61,8 @@ export interface PurchaseOrder {
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** Server-calculated: accepted and not yet despatched. */
+  amendment_allowed?: boolean;
   /** 0 is the original order; every amendment adds one. */
   revision_no: number;
   amended_at?: string | null;
@@ -541,7 +543,18 @@ export interface Quotation extends QuoteListRow {
   items: QuoteItem[];
 }
 
+/** What the vendor's screen learns when a code is sent: which address it went to,
+ *  masked, and how long it lives. Never the digits. */
+export interface QuoteOtpSent {
+  sent_to: string;
+  expires_in_seconds: number;
+}
+
 export interface QuoteSubmit {
+  /** The six digits emailed to the vendor. The server refuses the submission without
+   *  a live, unused, matching one — the field is optional here only so the refusal is
+   *  a sentence the vendor can read rather than a 422 about a missing field. */
+  otp_code?: string | null;
   vendor_ref_no?: string | null;
   valid_till?: string | null;
   expected_delivery_date?: string | null;

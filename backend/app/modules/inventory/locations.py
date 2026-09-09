@@ -16,11 +16,12 @@ from app.platform.hcm.models import (
     HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.hcm import sync as hcm_sync
+from app.core.exceptions import ValidationError
 from app.shared.enums import DocType, WarehouseType
 from app.shared.models.warehouse import Warehouse, WarehouseLocation
 
 from .enums import LocationTier, MovementKind
-from .models import NO_PROJECT, PositionLocation, Stock
+from .models import NO_PROJECT, PositionLocation, PositionLocationAccess, Stock
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,96 @@ async def location_ids_for_user(db: AsyncSession, user) -> set[int]:
     for position_id in await active_positions_of(db, user):
         points |= await location_ids_for_subtree(db, position_id)
     return points
+
+
+async def floor_ids_for_user(db: AsyncSession, user) -> set[int] | None:
+    """Allowed floor roots for a floor in-charge; None means warehouse-wide.
+
+    Role detection uses HCM org data, while the ability to manage exceptions remains
+    behind STOCK_POINTS_MANAGE in the router. Approval roles are not modified.
+    """
+    positions = await active_positions_of(db, user)
+    if not positions:
+        return None
+    floor_posts = set((await db.execute(
+        select(HcmPosition.id).where(
+            HcmPosition.id.in_(positions),
+            or_(HcmPosition.role_name.ilike("%FLOOR%INCHARGE%"),
+                HcmPosition.name.ilike("%FLOOR%INCHARGE%")),
+        )
+    )).scalars().all())
+    if not floor_posts:
+        return None
+    automatic = set((await db.execute(
+        select(PositionLocation.location_id).where(
+            PositionLocation.position_id.in_(floor_posts),
+            PositionLocation.is_active == 1,
+            PositionLocation.location_id.isnot(None),
+        )
+    )).scalars().all())
+    extra = set((await db.execute(
+        select(PositionLocationAccess.location_id).where(
+            PositionLocationAccess.position_id.in_(floor_posts),
+            PositionLocationAccess.is_active == 1,
+        )
+    )).scalars().all())
+    return automatic | extra
+
+
+async def floor_location_ids_for_user(db: AsyncSession, user) -> set[int] | None:
+    """Assigned floors plus every active storage node below them."""
+    roots = await floor_ids_for_user(db, user)
+    if roots is None:
+        return None
+    allowed, frontier = set(roots), set(roots)
+    while frontier:
+        children = set((await db.execute(select(WarehouseLocation.id).where(
+            WarehouseLocation.parent_id.in_(frontier),
+            WarehouseLocation.is_active.is_(True),
+        ))).scalars().all())
+        frontier = children - allowed
+        allowed |= children
+    return allowed
+
+
+async def grant_floor_access(db: AsyncSession, position_id: int, location_id: int,
+                             user) -> PositionLocationAccess:
+    location = await db.get(WarehouseLocation, location_id)
+    if location is None or not location.is_active:
+        raise ValidationError("Access can only be granted to an active warehouse location")
+    row = (await db.execute(select(PositionLocationAccess).where(
+        PositionLocationAccess.position_id == position_id,
+        PositionLocationAccess.location_id == location_id,
+    ))).scalars().first()
+    if row is None:
+        row = PositionLocationAccess(position_id=position_id,
+            warehouse_id=location.warehouse_id, location_id=location_id)
+        db.add(row)
+    row.is_active = 1
+    row.granted_by_id = getattr(user, "id", None)
+    await db.commit()
+    return row
+
+
+async def revoke_floor_access(db: AsyncSession, access_id: int) -> None:
+    await db.execute(update(PositionLocationAccess).where(
+        PositionLocationAccess.id == access_id).values(is_active=0))
+    await db.commit()
+
+
+async def list_floor_access(db: AsyncSession, position_id: int) -> list[dict]:
+    rows = (await db.execute(
+        select(PositionLocationAccess, WarehouseLocation.code, WarehouseLocation.name)
+        .join(WarehouseLocation,
+              WarehouseLocation.id == PositionLocationAccess.location_id)
+        .where(PositionLocationAccess.position_id == position_id,
+               PositionLocationAccess.is_active == 1)
+        .order_by(WarehouseLocation.name, WarehouseLocation.code)
+    )).all()
+    return [{"id": row.id, "position_id": row.position_id,
+             "warehouse_id": row.warehouse_id, "location_id": row.location_id,
+             "location_code": code, "location_name": name}
+            for row, code, name in rows]
 
 
 async def primary_location_for(db: AsyncSession, position_id: int | None) -> int | None:
@@ -397,6 +488,7 @@ async def list_tags(db: AsyncSession, position_id: int | None = None) -> list[di
             "warehouse_name": name, "warehouse_type": wh_type,
             "tier": tier.value, "tier_label": tier_label(tier),
             "project_id": tag.project_id or 0, "project_name": tag.project_name,
+            "location_id": tag.location_id, "section_name": tag.section_name,
             "is_primary": bool(tag.is_primary),
         })
     return out
@@ -412,6 +504,7 @@ def _tag_row(tag, code, name, wh_type, position_name) -> dict:
         "warehouse_name": name, "warehouse_type": wh_type,
         "tier": tier.value, "tier_label": tier_label(tier),
         "project_id": tag.project_id or 0, "project_name": tag.project_name,
+        "location_id": tag.location_id, "section_name": tag.section_name,
         "is_primary": bool(tag.is_primary),
     }
 
@@ -866,7 +959,7 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
 
 async def _rebuild_floors(db: AsyncSession, positions, warehouses: dict,
                           kinds: dict) -> dict[tuple[int, str], int]:
-    """Match each HCM section onto a floor that already exists in the warehouse.
+    """Ensure every HCM warehouse section exists as a physical floor.
 
     Deliberately MATCHES, never creates. HCM's section is the team a post works in
     ("WAREHOUSE OFFICE @1ST", "LOGISTICS-01"); a warehouse floor is a node in the
@@ -897,6 +990,9 @@ async def _rebuild_floors(db: AsyncSession, positions, warehouses: dict,
         for row in positions
         if (warehouse := multi_floor.get(row.office_id)) is not None
         and floor_key(row.section_name)
+        # Administrative teams in a warehouse office are not storage floors.
+        and any(word in (row.section_name or "").upper()
+                for word in ("WAREHOUSE", "FLOOR", "BLOCK"))
     }
     if not wanted:
         return {}
@@ -916,14 +1012,27 @@ async def _rebuild_floors(db: AsyncSession, positions, warehouses: dict,
             if key:
                 by_key.setdefault((floor.warehouse_id, key), floor.id)
 
+    # HCM is authoritative for warehouse sections. Create only the missing top-level
+    # FLOOR nodes; racks/bins remain warehouse-master data and are never fabricated.
+    for warehouse_id, key in sorted(wanted):
+        if (warehouse_id, key) in by_key:
+            continue
+        section_name = next(
+            row.section_name for row in positions
+            if warehouses.get(row.office_id)
+            and warehouses[row.office_id].id == warehouse_id
+            and floor_key(row.section_name) == key)
+        floor = WarehouseLocation(
+            warehouse_id=warehouse_id,
+            code=f"HCM-{key}"[:50], name=section_name,
+            bin_type=FLOOR_STORAGE_TYPE, is_active=True,
+        )
+        db.add(floor)
+        await db.flush()
+        by_key[(warehouse_id, key)] = floor.id
+
     matched = {key: by_key[key] for key in wanted if key in by_key}
-    unmatched = sorted(key for key in wanted if key not in by_key)
-    if unmatched:
-        # Loud, because the alternative is a floor in-charge who quietly has no floor.
-        logger.info(
-            "stocking points: %d HCM section(s) have no matching floor in their "
-            "warehouse and stay warehouse-wide: %s", len(unmatched), unmatched)
-    return matched
+    return {key: by_key[key] for key in wanted}
 
 
 async def stocking_point_link_status(db: AsyncSession) -> dict:

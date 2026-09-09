@@ -305,13 +305,16 @@ async def _derive(db: AsyncSession) -> dict[str, dict]:
             "project_id": project_id or UNASSIGNED_PROJECT,
             "project_name": project_name or "Unassigned",
             "positions": [], "position_ids": [],
-            "holders": 0, "hcm_roles": set(), "office_levels": Counter(),
+            "holders": 0, "hcm_roles": set(), "hcm_role_ids": set(),
+            "office_levels": Counter(),
         })
         level = _office_level(row.raw)
         bucket["position_ids"].append(row.id)
         bucket["holders"] += holders.get(row.id, 0)
         if row.role_name:
             bucket["hcm_roles"].add(row.role_name)
+        if row.role_id is not None:
+            bucket["hcm_role_ids"].add(int(row.role_id))
         if level:
             bucket["office_levels"][level] += 1
         # The list screen shows a handful; sending 956 position names is pointless.
@@ -779,9 +782,24 @@ async def profile_options(db: AsyncSession, user=None) -> list[dict]:
 
     derived = await _derive(db)
     saved = await _profile_roles(db)
+    # Until a job profile is saved, access resolves through its mirrored HCM role.
+    # Item Eligibility must therefore expose every HCM job profile, not only saved ones.
+    from app.platform.rbac.service import hcm_role_description
+    hcm_ids = {role_id for bucket in derived.values() for role_id in bucket["hcm_role_ids"]}
+    hcm_roles = (await db.execute(select(Role).where(
+        Role.description.in_([hcm_role_description(role_id) for role_id in hcm_ids]),
+        Role.is_active.is_(True),
+    ))).scalars().all() if hcm_ids else []
+    hcm_role_by_hcm_id = {
+        int((role.description or "").removeprefix("HCM role ID: ")): role
+        for role in hcm_roles
+    }
     options = [
         {
             "key": key,
+            "role_id": (saved[key].id if key in saved else next(
+                (hcm_role_by_hcm_id[role_id].id for role_id in bucket["hcm_role_ids"]
+                 if role_id in hcm_role_by_hcm_id), None)),
             "job": bucket["job"],
             "name": (saved[key].name if key in saved
                      else default_profile_name(key, bucket)),

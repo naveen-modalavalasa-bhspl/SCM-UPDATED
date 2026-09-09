@@ -36,7 +36,7 @@ from app.modules.procurement.schemas import (
     AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, POHeaderUpdate, QuoteSubmit,
     ReqCreate, RFQCreate, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
 )
-from app.modules.procurement import consolidation, ledger
+from app.modules.procurement import consolidation, ledger, quote_otp
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.mail import service as mail_service
 from app.platform.mail import template as mail_template
@@ -54,6 +54,7 @@ from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
+    SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AuditAction, ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus,
     InstanceStatus, MRStatus, POStatus, POVendorStatus, QuotationStatus,
     RequisitionStatus, RFQStatus,
@@ -81,12 +82,36 @@ def _d(value) -> Decimal:
 #  stored copy could only ever go stale, and reading them needs no migration.
 
 async def _place_names(db: AsyncSession, warehouse_id: int | None,
-                       project_id: int | None) -> tuple[str | None, str | None]:
-    """Snapshot the two soft FKs a requisition and an RFQ both carry.
+                       project_id: int | None, *,
+                       keep_id: int | None = None) -> tuple[str | None, str | None]:
+    """Snapshot the two soft FKs a requisition and an RFQ both carry, and refuse a
+    shipment address a purchase may not be sent to.
 
     Snapshotted, not joined, because renaming a master must not rewrite a document
-    raised against the old name (rule 10)."""
+    raised against the old name (rule 10).
+
+    THE GUARD LIVES HERE because every path that stores a `warehouse_id` — a
+    requisition by hand, a requisition off a consolidation, an edit of either, and an
+    RFQ raised from any of them — already calls this to fill the snapshot. Hanging the
+    check on the same call means a sixth path cannot be written that stores an address
+    without validating it, which is exactly how the picker and the API came to
+    disagree in the first place: narrowing a dropdown is a courtesy, and a hand-made
+    POST never sees it (requirement 2, 2026-09-07).
+
+    `keep_id` GRANDFATHERS what a document already holds. 13 live documents — 2
+    requisitions on LIP, 2 on MDP and 9 RFQs on LIP — were raised before this rule
+    existed, and an edit re-sends the stored id whether or not the user touched the
+    field. Refusing it outright would make those documents uneditable forever over a
+    value the editor never chose. So the rule is "you may not MOVE a purchase to a
+    field point", not "this document must already be clean".
+    """
     warehouse = await db.get(Warehouse, warehouse_id) if warehouse_id else None
+    if warehouse is not None and warehouse_id != keep_id:
+        kind = (warehouse.warehouse_type or "MAIN").upper()
+        if kind not in SHIPMENT_ADDRESS_WAREHOUSE_TYPES:
+            raise ValidationError(
+                f"{warehouse.name} is a {kind} stocking point, not a warehouse. "
+                f"A purchase can only be shipped to a warehouse.")
     project = await db.get(Project, project_id) if project_id else None
     return (warehouse.name if warehouse else None,
             project.name if project else None)
@@ -1711,8 +1736,17 @@ async def _attach_pending_one(db: AsyncSession, doc_type: str, doc, user=None):
 
 
 async def get_po_detail(db: AsyncSession, po_id: int, user=None):
-    return await _attach_pending_one(
-        db, DocType.PO.value, await get_po(db, po_id, user), user)
+    po = await get_po(db, po_id, user)
+    # A submitted despatch locks the PO before a GRN necessarily changes its status.
+    po.amendment_allowed = (
+        po.status not in _UNAMENDABLE
+        and not await _vendor_has_dispatched(db, po.id)
+        and (
+            po.vendor_status == POVendorStatus.ACCEPTED.value
+            or (po.vendor_status is None and po.status == POStatus.SENT_TO_VENDOR.value)
+        )
+    )
+    return await _attach_pending_one(db, DocType.PO.value, po, user)
 
 
 async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
@@ -2339,10 +2373,13 @@ async def update_requisition(db: AsyncSession, req_id: int, data: ReqCreate,
     for line in list(req.items):
         await db.delete(line)
     await db.flush()
+    # Read before it is overwritten: an edit that never touched the address still
+    # re-sends it, and this requisition may predate the warehouse-only rule.
+    kept_warehouse_id = req.warehouse_id
     req.warehouse_id = data.warehouse_id
     req.project_id = data.project_id
     req.warehouse_name, req.project_name = await _place_names(
-        db, data.warehouse_id, data.project_id)
+        db, data.warehouse_id, data.project_id, keep_id=kept_warehouse_id)
     req.department_id = data.department_id
     req.department_name = await _department_snapshot(db, data.department_id)
     req.company_name = data.company_name
@@ -2474,7 +2511,14 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     source = requisition or sheet
     warehouse_id = data.warehouse_id or (getattr(source, "warehouse_id", None))
     project_id = data.project_id or (getattr(source, "project_id", None))
-    warehouse_name, project_name = await _place_names(db, warehouse_id, project_id)
+    # An address CARRIED ACROSS from the source is grandfathered; one the caller typed
+    # is not. The buyer raising this tender did not choose the requisition's address
+    # and cannot fix it from here, and two live requisitions still sit on field points
+    # — refusing would strand them. Sending the tender somewhere else is a choice, and
+    # that choice is checked.
+    inherited = None if data.warehouse_id else getattr(source, "warehouse_id", None)
+    warehouse_name, project_name = await _place_names(
+        db, warehouse_id, project_id, keep_id=inherited)
 
     rfq = RFQ(
         # The project goes into the number (2026-08-21): a requisition now reads
@@ -2550,12 +2594,32 @@ async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids) -> None:
                     f"{row.vendor_name or vendor_id} has already quoted and cannot "
                     "be removed from this RFQ")
             await db.delete(row)
+    # Who is allowed to be asked for THESE items. Read once, and only when somebody is
+    # actually being added — an edit that touches nothing but the due date must not pay
+    # for this query, and must not fail on an invitation that predates the rule.
+    eligible: set[int] | None = None
+    if any(vendor_id not in current for vendor_id in wanted):
+        item_ids = (await db.execute(
+            select(RFQItem.item_id).where(RFQItem.rfq_id == rfq.id)
+        )).scalars().all()
+        eligible = set((await db.execute(
+            select(VendorItem.vendor_id).where(VendorItem.item_id.in_(item_ids))
+        )).scalars().all()) if item_ids else set()
+
     for vendor_id in wanted:
         if vendor_id in current:
             continue
         vendor = await db.get(Vendor, vendor_id)
         if vendor is None:
             raise ValidationError(f"Vendor {vendor_id} does not exist")
+        # The picker already narrows to these, so reaching this is either a hand-made
+        # request or an item whose vendors were unmapped after the tender was drafted.
+        # Named rather than counted: "not mapped to supply any of these items" is a
+        # sentence somebody can act on in the item master, which is where the fix is.
+        if eligible is not None and vendor_id not in eligible:
+            raise ValidationError(
+                f"{vendor.name} is not mapped to supply any of the items on this RFQ. "
+                f"Map them on the item's vendor list first.")
         db.add(RFQVendor(
             rfq_id=rfq.id, vendor_id=vendor.id, vendor_name=vendor.name,
             vendor_email=getattr(vendor, "email", None),
@@ -2661,13 +2725,16 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
             raise ValidationError(
                 f"{data.evaluation_method!r} is not an evaluation method")
         rfq.evaluation_method = data.evaluation_method.upper()
+    # Read before the loop overwrites it, for the reason `_place_names` gives about
+    # grandfathering: 9 live RFQs sit on an LIP address they were raised with.
+    kept_warehouse_id = rfq.warehouse_id
     for field in ("title", "due_date", "terms", "warehouse_id", "project_id"):
         value = getattr(data, field)
         if value is not None:
             setattr(rfq, field, value)
     if data.warehouse_id is not None or data.project_id is not None:
         rfq.warehouse_name, rfq.project_name = await _place_names(
-            db, rfq.warehouse_id, rfq.project_id)
+            db, rfq.warehouse_id, rfq.project_id, keep_id=kept_warehouse_id)
     if data.department_id is not None:
         rfq.department_id = data.department_id
         rfq.department_name = await _department_snapshot(db, data.department_id)
@@ -3501,6 +3568,12 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
     if rfq.due_date and rfq.due_date < utcnow().date():
         raise ValidationError("The submission deadline for this RFQ has passed")
 
+    # The emailed code, checked BEFORE anything is written. Whoever holds the portal
+    # link can reach this endpoint; the code is what proves they are also reading the
+    # address the vendor is registered under. Spending it here rather than after the
+    # save means a replay cannot ride in behind a submission that failed validation.
+    await quote_otp.verify(db, rfq_id, vendor_id, data.otp_code)
+
     quote = await vendor_get_quotation(db, vendor_id, rfq_id)
     # The same two rules the form was drawn with, enforced here because the form is not
     # the guard: this endpoint is reachable by anyone holding a vendor token.
@@ -4048,24 +4121,62 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     return await vendor_get_despatch_note(db, vendor_id, note.id)
 
 
+def _assert_eway_bill_format(value: str | None) -> None:
+    """An e-way bill number is TWELVE DIGITS. Checked only when one is given.
+
+    This is the other half of making the field optional. Leaving it out entirely is
+    now fine; what must not happen is the box being used as somewhere to park a word.
+    Before this, "NA" and a copy of the invoice number were the two commonest ways
+    past a mandatory field, and the gate then read a number that is not an e-way bill
+    and cannot be looked up on the portal — worse than an empty column, because an
+    empty column is honest about not knowing.
+
+    Digits only, and exactly twelve: that is the format the NIC portal issues, so
+    anything else is a typo or a stand-in, and the vendor is told which.
+    """
+    text = (value or "").strip()
+    if not text:
+        return
+    if not (text.isdigit() and len(text) == 12):
+        raise ValidationError(
+            f"{text!r} is not an e-way bill number — those are 12 digits. Leave it "
+            f"empty if there is no e-way bill for this consignment, and give the "
+            f"vehicle or LR number instead.")
+
+
 async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
                                       note_id: int) -> DespatchNote:
-    """File it. Invoice and e-way bill are required HERE, not on the draft.
+    """File it. The invoice is required HERE, not on the draft — checked at submit so a
+    note can be started while the invoice is still being raised.
 
-    Doc B12 makes both mandatory before dispatch, and this is the moment the vendor
-    says the vehicle has left. Checked at submit rather than at save so a note can be
-    started while the invoice is still being raised.
+    THE E-WAY BILL IS NO LONGER MANDATORY (requirement 8, 2026-09-07). Doc B12 made it
+    so, and that was wrong for a large part of the supply base: an e-way bill is only
+    raised above a consignment value threshold, and for an intra-state delivery of a
+    few boxes of gloves there is no bill to quote. Vendors were typing "NA", "0" and
+    their own invoice number into the box to get past it — which is worse than leaving
+    it empty, because the gate then reads a number that is not an e-way bill.
+
+    WHAT IS STILL REQUIRED is that the note says HOW the goods travel, in one of two
+    ways: the e-way bill, or an ordinary transport reference — a vehicle number, an LR
+    number, or the transporter's name. That is not the old rule wearing a hat: the
+    warehouse has to be able to match an arriving lorry to a document, and a note
+    carrying an invoice and nothing else cannot be matched to anything at the gate.
     """
     note = await vendor_get_despatch_note(db, vendor_id, note_id)
     if note.status != DespatchNoteStatus.DRAFT.value:
         raise ValidationError(f"{note.dn_no} is already {note.status}")
-    missing = [label for label, value in (
-        ("invoice number", note.invoice_no),
-        ("e-way bill number", note.eway_bill_no),
-    ) if not (value or "").strip()]
-    if missing:
+    if not (note.invoice_no or "").strip():
+        raise ValidationError("Invoice number is required before despatch")
+
+    _assert_eway_bill_format(note.eway_bill_no)
+
+    # Either mode satisfies this. Named in the order a vendor would reach for them.
+    if not any((value or "").strip() for value in (
+        note.eway_bill_no, note.vehicle_no, note.lr_no, note.transporter_name,
+    )):
         raise ValidationError(
-            f"{' and '.join(missing).capitalize()} is required before despatch")
+            "Say how this consignment travels before despatching it: an e-way bill "
+            "number, or a vehicle number, LR number or transporter name.")
 
     note.status = DespatchNoteStatus.SUBMITTED.value
     note.submitted_at = utcnow()

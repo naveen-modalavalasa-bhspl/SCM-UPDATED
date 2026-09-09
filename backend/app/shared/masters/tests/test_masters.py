@@ -1138,3 +1138,123 @@ async def test_conversion_factor_must_be_positive(client, admin):
     r = await client.post("/api/uom-conversions", json={
         "from_uom_id": a["id"], "to_uom_id": b["id"], "factor": 0}, headers=admin)
     assert r.status_code == 422
+
+
+# ------------------- the spreadsheet, as a storekeeper fills it ------------- #
+# The masters are typed in by people whose job is the goods. Six of the item
+# sheet's foreign keys are required, so a column asking for `category_id = 47`
+# meant eight other exports open on the desk. These cover the columns being names
+# instead, and the one trap that turns a readable sheet into a silent mis-link.
+
+def _items_def():
+    from app.shared.masters.defs import MASTERS
+    return next(m for m in MASTERS if m.path == "items")
+
+
+def test_the_item_sheet_asks_for_names_not_ids():
+    from app.shared.masters.bulk import columns_for, header_for
+
+    defn = _items_def()
+    headers = [header_for(defn, f) for f in columns_for(defn.schema)]
+    assert "Category" in headers and "category_id" not in headers
+    assert "HSN code" in headers and "hsn_id" not in headers
+    # Booleans keep the schema's own name on purpose: renaming all thirty columns
+    # would break every file already filled in, and a Yes/No dropdown is what makes
+    # those readable, not the header.
+    assert "is_asset" in headers
+
+
+def test_the_template_carries_a_worked_example_off_the_data_sheet():
+    """A sample row left on `Data` is a junk master record, which is why there was
+    no example at all — but somebody who has never seen the file cannot guess what
+    "Category" wants. Its own sheet answers both."""
+    import io as _io
+
+    from openpyxl import load_workbook
+
+    from app.shared.masters.bulk import build_template
+
+    book = load_workbook(_io.BytesIO(build_template(
+        _items_def(), {"category_id": [{"id": 1, "label": "Antibiotics", "code": "AB"}]})))
+    assert book.sheetnames == ["Data", "Lists", "How to fill", "Example"]
+    assert book["Data"].max_row == 1                    # headers, and nothing else
+    assert "Antibiotics" in [c.value for c in book["Example"][2]]
+
+
+def test_a_sheet_written_against_the_old_template_still_imports():
+    """The header is matched by the readable label OR the schema's own field name.
+    An export taken before this, or a file an admin has kept, must not stop working
+    because a column was renamed."""
+    import io as _io
+
+    from openpyxl import Workbook
+
+    from app.shared.masters.bulk import parse_upload
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["name", "category_id", "General name", "brand_id",
+                  "manufacturer_id", "item_class_id", "uom_id", "hsn_id"])
+    sheet.append(["Bolt", 4, "Fasteners", 5, 6, 7, 8, 9])
+    buffer = _io.BytesIO()
+    book.save(buffer)
+
+    parsed, errors = parse_upload(_items_def(), buffer.getvalue())
+    assert errors == []
+    # Both spellings land on the same schema field, and neither is read as a number
+    # here — a looked-up cell is resolved against its master afterwards.
+    assert parsed[0]["__lookup__"]["category_id"] == "4"
+    assert parsed[0]["__lookup__"]["general_name_id"] == "Fasteners"
+
+
+async def test_a_numeric_code_is_the_code_and_not_a_row_id(db):
+    """The trap this whole shape sets for itself.
+
+    An HSN code IS a number. Reading a numeric cell as the row id first — which is
+    the obvious way to keep old files working — silently linked an item to row
+    28289011, a row that does not exist. The name is matched first and the number is
+    only read as an id when nothing answered AND that id is really there.
+    """
+    from app.shared.masters.bulk import resolve_lookups
+
+    hsn = HsnCode(code="28289011", is_active=True)
+    db.add(hsn)
+    await db.flush()
+    assert hsn.id != 28289011                       # or the test proves nothing
+
+    parsed = [{"__row__": 2, "__lookup__": {"hsn_id": "28289011"}}]
+    problems = await resolve_lookups(_items_def(), db, parsed)
+    assert problems == []
+    assert parsed[0]["hsn_id"] == hsn.id
+
+
+async def test_a_name_matching_two_rows_is_refused_rather_than_guessed(db):
+    """Master data is not the place to take the closer of two answers. An item
+    filed under the wrong manufacturer is stock counted wrong for a year, and
+    nobody goes looking."""
+    from app.shared.masters.bulk import resolve_lookups
+
+    db.add_all([Manufacturer(code="CIP1", name="Cipla", is_active=True),
+                Manufacturer(code="CIP2", name="Cipla", is_active=True)])
+    await db.flush()
+
+    parsed = [{"__row__": 2, "__lookup__": {"manufacturer_id": "Cipla"}}]
+    problems = await resolve_lookups(_items_def(), db, parsed)
+    assert len(problems) == 1
+    assert "manufacturer_id" not in parsed[0]
+    # The screen offers both rather than making the choice for them.
+    assert len(problems[0]["candidates"]) == 2
+    assert {c["code"] for c in problems[0]["candidates"]} == {"CIP1", "CIP2"}
+
+
+async def test_an_unknown_name_is_reported_with_the_row_it_was_on(db):
+    from app.shared.masters.bulk import resolve_lookups
+
+    parsed = [{"__row__": 7, "__lookup__": {"manufacturer_id": "Cipla Ltd Typo"}}]
+    problems = await resolve_lookups(_items_def(), db, parsed)
+    assert len(problems) == 1
+    assert problems[0]["row"] == 7
+    assert problems[0]["label"] == "Manufacturer"
+    assert problems[0]["raw"] == "Cipla Ltd Typo"
+    assert problems[0]["candidates"] == []

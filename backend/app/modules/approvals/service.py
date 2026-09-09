@@ -471,6 +471,12 @@ async def act_on_document(
     elif normalized == "PURCHASE_RETURN":
         from app.modules.warehouse import service as warehouse_service
         await warehouse_service.act_on_return(db, doc_id, action, comments, user)
+    elif normalized == DocType.TRANSPORT_REQUEST.value:
+        from app.modules.logistics import transport
+        await transport.act_on_tr(db, doc_id, action, user, comments)
+    elif normalized == DocType.CARRIER_AWARD.value:
+        from app.modules.logistics import transport
+        await transport.act_on_award(db, doc_id, action, user, comments)
     else:
         raise ValidationError(f"Approval action is not supported for {normalized}")
     return {"doc_type": normalized, "doc_id": doc_id, "action": action}

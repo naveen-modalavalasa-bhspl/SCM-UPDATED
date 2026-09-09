@@ -11,6 +11,29 @@ const DATE_FORMATS = ["DD-MM-YYYY", "YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]
   .map((value) => ({ value, label: value }));
 const CURRENCIES = ["INR", "USD", "EUR", "GBP"].map((value) => ({ value, label: value }));
 const RESET_POLICIES = ["NEVER", "YEARLY", "MONTHLY"].map((value) => ({ value, label: value }));
+
+/** The windows an admin may pick for a vendor's one-time code. A list rather than a
+ *  free number box: the server floors at 30 seconds and caps at an hour, and a typed
+ *  "5" that comes back as 30 reads as the screen ignoring what was entered. The two
+ *  the business named — 30 seconds and 1 minute — are first. */
+const OTP_WINDOWS = [
+  { value: "30", label: "30 seconds" },
+  { value: "60", label: "1 minute" },
+  { value: "120", label: "2 minutes" },
+  { value: "300", label: "5 minutes" },
+  { value: "600", label: "10 minutes" },
+  { value: "1800", label: "30 minutes" },
+];
+
+/** And for a reset link, which is a different wait: the person is locked out and may
+ *  not be at their desk. Minutes, and none of them short. */
+const RESET_WINDOWS = [
+  { value: "15", label: "15 minutes" },
+  { value: "30", label: "30 minutes" },
+  { value: "60", label: "1 hour" },
+  { value: "240", label: "4 hours" },
+  { value: "1440", label: "24 hours" },
+];
 const TIMEZONES = ["Asia/Kolkata", "UTC", "Asia/Dubai", "Europe/London"]
   .map((value) => ({ value, label: value }));
 
@@ -183,6 +206,34 @@ export function SettingsPage() {
             the delivery and the stock is credited immediately. This is only the default
             — a stocking point that has answered for itself on the warehouse master
             overrides it.
+          </p>
+        </Section>
+
+        <Section title="Security">
+          <Field label="Vendor quotation OTP expiry">
+            <Select
+              value={String(form.security.vendor_quote_otp_seconds)}
+              options={OTP_WINDOWS}
+              onChange={(value) =>
+                set("security", "vendor_quote_otp_seconds", Number(value))}
+            />
+          </Field>
+          <Field label="Password reset link expiry">
+            <Select
+              value={String(form.security.password_reset_minutes)}
+              options={RESET_WINDOWS}
+              onChange={(value) =>
+                set("security", "password_reset_minutes", Number(value))}
+            />
+          </Field>
+          <p className="text-xs text-muted md:col-span-2">
+            How long the emailed code lasts before a vendor has to ask for another.
+            Enforced on the server when the code is checked, so a shorter window bites
+            immediately — including on a screen that is already open. Codes already
+            issued keep the window they were issued with. The reset link is a separate
+            window on purpose — somebody locked out of their account may be away from
+            their desk, and a tender code dying in 30 seconds should not force a reset
+            link to.
           </p>
         </Section>
 

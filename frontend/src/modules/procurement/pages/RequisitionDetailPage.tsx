@@ -190,7 +190,7 @@ export function RequisitionDetailPage() {
                         : "—",
                     },
                     { label: "Department", value: req.department_name ?? "—" },
-                    { label: "Warehouse", value: req.warehouse_name ?? "—" },
+                    { label: "Shipment Address", value: req.warehouse_name ?? "—" },
                     { label: "Project", value: req.project_name ?? "—" },
                     { label: "Company", value: req.company_name ?? "—" },
                   ]}

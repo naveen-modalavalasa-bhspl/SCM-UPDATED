@@ -1,19 +1,71 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  buildAccessSections, buildClip, featureHint, pageDisplayName, pageHint,
-  parseClip, sectionSummary,
+  ACTION_LOCATIONS, SHOTS, buildAccessSections, buildClip, featureHint, pageDisplayName,
+  pageHint, parseClip, sectionSummary, featureGroup, featureGuidance,
 } from "../pages/JobProfilesPage";
 import type { JobProfileMatrix } from "../types";
 
 type MatrixPage = JobProfileMatrix["pages"][number];
 
 let nextId = 1;
+describe("permission guidance", () => {
+  it("keeps visibility permissions separate from buttons", () => {
+    for (const code of ["stock.view.all", "indent.view.fulfilment", "stock.valuation.view"])
+      expect(featureGroup(code)).toBe("Visibility and data access");
+    expect(featureGroup("po.approve")).toBe("Approval decisions");
+    expect(featureGroup("stock.points.manage")).toBe("Actions and settings");
+  });
+  it("explains approval eligibility alongside the verified button location", () => {
+    const help = featureGuidance({ code: "po.approve", module: "procurement", description: "Approve orders" });
+    expect(help).toContain("[Approve]");
+    expect(help).toContain("current approval step");
+  });
+});
 const page = (
   code: string, name: string, parent_id: number | null,
   required_permission: string | null = `page.${code}.view`,
 ): MatrixPage => ({
   id: nextId++, code, name, parent_id, module: null,
   always_on: required_permission === null, required_permission,
+});
+
+describe("screenshot previews", () => {
+  /* The <img> hides itself when the file 404s, which is right in front of a user and
+     useless to us: a mistyped path would look exactly like a control we never
+     photographed. `ind_all` was such a typo — the page code is `ind_list`. */
+  it("points every preview at a file that is actually on disk", () => {
+    const shots = Object.values(SHOTS);
+    expect(shots.length).toBeGreaterThan(0);
+    for (const src of shots) {
+      expect(src.startsWith("/rbac/")).toBe(true);
+      expect(existsSync(`public${src}`)).toBe(true);
+    }
+  });
+  it("keys an action preview on a permission the button map also knows", () => {
+    for (const code of Object.keys(SHOTS)) {
+      if (code.includes(".")) expect(ACTION_LOCATIONS[code]).toBeDefined();
+    }
+  });
+});
+
+describe("verified button locations", () => {
+  /* A location keyed on a code nobody grants is invisible: the map is read by
+     code, so a typo never renders and never throws. `issue.post` sat here for
+     the whole of the first pass — the real permission is `issue.issue`. */
+  it("keys every button location on a permission code that exists", () => {
+    const REAL = new Set([
+      "indent.create", "indent.edit", "po.create", "po.approve", "po.reject",
+      "po.send_vendor", "issue.create", "issue.issue", "stock.points.manage",
+      "rfq.create", "transport.create",
+    ]);
+    for (const code of Object.keys(ACTION_LOCATIONS)) expect(REAL).toContain(code);
+  });
+  it("names the button the material issue screen actually renders", () => {
+    const help = featureGuidance({ code: "issue.issue", module: "warehouse", description: "Issue stock" });
+    expect(help).toContain("[Issue from stock]");
+    expect(help).toContain("Material Issues");
+  });
 });
 
 /**
@@ -229,6 +281,21 @@ describe("plain-language help for the remaining modules", () => {
     "admin.groups.manage", "admin.rules.manage", "admin.numbering.manage",
     "admin.audit.view", "admin.notifications.manage", "admin.settings.manage",
     "admin.code_formats.manage",
+    // The 36 that still fell through to the backend's own wording (2026-09-08):
+    // the whole procurement chain ahead of the PO, outward QC, every logistics
+    // action, returns routing, the mailbox and the integration keys.
+    "requisition.view", "requisition.create", "requisition.approve",
+    "rfq.view", "rfq.create", "rfq.approve", "rfq.compare", "rfq.award",
+    "consolidation.view", "consolidation.create", "consolidation.approve",
+    "qc_outward.view", "qc_outward.create", "qc_outward.update",
+    "qc_outward.approve", "qc_outward.export", "qc_outward.delete",
+    "transport.view", "transport.create", "transport.approve", "transport.award",
+    "transport.track", "transport.acknowledge", "transport.exception",
+    "transport.delete",
+    "logistics.partner.view", "logistics.partner.manage", "vendor.portal.manage",
+    "return.decide", "return.endorse", "return.config.manage",
+    "mail.view", "mail.send",
+    "integration.view", "integration.manage", "integration.keys.manage",
   ];
 
   it("has simple help for every screen option in the requested modules", () => {

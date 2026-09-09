@@ -618,6 +618,9 @@ async def _stock_query(db: AsyncSession, item_id: int | None = None,
     """
     warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
     stmt = _apply_warehouse_scope(select(Stock), Stock.warehouse_id, warehouse_ids)
+    floor_locations = await locations.floor_location_ids_for_user(db, user)
+    if floor_locations is not None:
+        stmt = stmt.where(Stock.bin_id.in_(floor_locations))
     if item_id is not None:
         stmt = stmt.where(Stock.item_id == item_id)
     if project_id is not None:
@@ -832,6 +835,9 @@ async def _movement_query(db: AsyncSession, item_id: int | None = None,
     stmt = _apply_warehouse_scope(
         select(StockMovement), StockMovement.warehouse_id, warehouse_ids,
     )
+    floor_locations = await locations.floor_location_ids_for_user(db, user)
+    if floor_locations is not None:
+        stmt = stmt.where(StockMovement.bin_id.in_(floor_locations))
     if item_id is not None:
         stmt = stmt.where(StockMovement.item_id == item_id)
     if direction:

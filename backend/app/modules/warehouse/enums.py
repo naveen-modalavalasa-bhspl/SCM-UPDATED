@@ -344,6 +344,7 @@ from app.platform.rbac.permissions import (  # noqa: F401  (re-exported)
     ISSUE_CREATE,
     ISSUE_DELETE,
     ISSUE_FORWARD,
+    ISSUE_SPLIT,
     ISSUE_VIEW,
     MASTER_LOCATION_MANAGE,
     MOVEMENT_APPROVE,

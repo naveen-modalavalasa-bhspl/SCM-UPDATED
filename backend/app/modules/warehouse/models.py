@@ -395,6 +395,19 @@ class MaterialIssue(Base):
     original_issue_id = Column(BigInteger, nullable=True)
     original_issue_no = Column(String(50), nullable=True)
 
+    # A split: one child per warehouse FLOOR, each capped at the stock that floor
+    # actually holds. The parent is the generic issue the allocation raised — it is
+    # not tagged to anybody and stays the header that says what was asked for.
+    #
+    # Which floor a child serves is stored HERE and nowhere else, and it is a fact
+    # about the DOCUMENT, not about the stock: it says who was handed this piece of
+    # work, which does not change if the goods are later moved. What the floor still
+    # HOLDS stays read-on-demand, the way the fulfilment remainder is.
+    parent_issue_id = Column(BigInteger, index=True, nullable=True)
+    parent_issue_no = Column(String(50), nullable=True)
+    floor_location_id = Column(BigInteger, index=True, nullable=True)
+    floor_location_name = Column(String(200), nullable=True)
+
     status = Column(String(30), nullable=False, default=IssueStatus.DRAFT.value)
     qc_status = Column(String(30), nullable=False, default=QcStatus.NOT_REQUIRED.value)
     total_items = Column(Integer, nullable=False, default=0)

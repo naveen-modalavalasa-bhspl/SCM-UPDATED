@@ -71,6 +71,7 @@ from app.shared import evaluation
 from app.shared.enums import ApprovalAction, AuditAction, DocType, InstanceStatus
 from app.shared.models.base import utcnow
 from app.shared.models.master import Vendor
+from app.shared.money import round_money
 from app.shared.numbering import next_number
 from app.shared.scope import scope_condition
 
@@ -99,8 +100,12 @@ def _and_list(names: list[str]) -> str:
 #  Reads
 # --------------------------------------------------------------------------- #
 
-async def get_tr(db: AsyncSession, tr_id: int) -> TransportRequest:
-    doc = await db.get(TransportRequest, tr_id)
+async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
+    """Load one shipment, applying the same scope as the transport register."""
+    stmt = select(TransportRequest).where(TransportRequest.id == tr_id)
+    if user is not None:
+        stmt = stmt.where(await _tr_scope(db, user))
+    doc = (await db.execute(stmt)).scalar_one_or_none()
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
     return doc
@@ -1266,7 +1271,10 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
             # A vehicle already going that way costs the shipment nothing.
             doc.freight_amount = ZERO
         elif data.freight_amount is not None:
-            doc.freight_amount = _d(data.freight_amount)
+            # The settled-on-the-spot price, and a payable like any other — a figure
+            # agreed at the gate rounds by the same rule as one that came off a tender,
+            # or the register holds two kinds of money.
+            doc.freight_amount = round_money(data.freight_amount)
         _check_mode_fields(doc)
         settled_summary = (
             f"Sent {doc.tr_no} to {doc.carrier_name} for acknowledgement"
@@ -1612,7 +1620,7 @@ def _advance_after_approval(doc: TransportRequest) -> None:
 
 async def act_on_tr(db: AsyncSession, tr_id: int, action: str, user,
                     comments: str = "") -> TransportRequest:
-    doc = await get_tr(db, tr_id)
+    doc = await get_tr(db, tr_id, user=user)
     if doc.status != TransportStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"{doc.tr_no} is not waiting for approval")
     action = (action or "").upper()
@@ -1746,8 +1754,18 @@ async def record_quote(db: AsyncSession, tr_id: int, carrier_id: int, data,
 
 
 def _landed_cost(quote: CarrierQuote) -> Decimal:
+    """What this quote actually costs the company, rounded to the payable figure.
+
+    Rounded HERE, at the one place the number is derived, rather than wherever it is
+    drawn. Tax on a fractional base is what produces the paise nobody wants —
+    4,830.51 at 18% is 5,700.0018 — and every reader of this figure is a reader of
+    this function: the register's cheapest-quote column, the comparison ranking, the
+    award that writes `freight_amount`, and everything exported from those. Round at
+    the display instead and the page, the export and the stored column each hold a
+    slightly different answer to what we owe.
+    """
     base = _d(quote.freight_amount) + _d(quote.other_charges)
-    return base * (Decimal("1") + _d(quote.tax_percent) / Decimal("100"))
+    return round_money(base * (Decimal("1") + _d(quote.tax_percent) / Decimal("100")))
 
 
 def _rank_quotes(quotes: list[CarrierQuote], method: str) -> list[dict]:
@@ -2019,7 +2037,7 @@ async def act_on_award(db: AsyncSession, tr_id: int, action: str, user,
     acknowledged. Whether it also carried a signature is `_award_in_approval`'s
     question; the outcome for the shipment is the same either way.
     """
-    doc = await get_tr(db, tr_id)
+    doc = await get_tr(db, tr_id, user=user)
     action = (action or "").upper()
     if action not in {ApprovalAction.APPROVED.value, ApprovalAction.REJECTED.value}:
         raise ValidationError("An award can only be approved or rejected")

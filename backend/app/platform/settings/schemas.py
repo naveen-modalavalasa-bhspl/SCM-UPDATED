@@ -77,6 +77,31 @@ class WarehouseSettings(BaseModel):
     requires_inward_default: bool = False
 
 
+class SecuritySettings(BaseModel):
+    """How long a one-time code stays good for.
+
+    Its own group, and its own field per flow, because the business may well want a
+    tender code to die in 30 seconds while a password-reset link lives for half an
+    hour — they are different risks. One shared "OTP expiry" would force the strictest
+    of them onto every flow, and the first person to relax it would relax all of them.
+
+    The floor is 30 seconds because that is the shortest window the business named,
+    and because a smaller one is unusable: mail takes a few seconds to arrive and a
+    person takes a few more to type six digits. The ceiling is an hour — past that a
+    code left open in an inbox stops being one-time in any useful sense.
+    """
+    vendor_quote_otp_seconds: int = Field(default=300, ge=30, le=3600)
+    #: How long a "forgot password" link stays live. MINUTES, not seconds, because it
+    #: is a different kind of wait: the person is locked out, may be away from their
+    #: desk, and a link that dies while they walk to their laptop just makes them ask
+    #: again. Floored at 5 for that reason and capped at a day — a reset link is a
+    #: full account takeover in one click, and one left live overnight is a liability.
+    #:
+    #: The DEFAULT mirrors `config.PASSWORD_RESET_MINUTES`, which is what shipped, so
+    #: an untouched deployment behaves exactly as it did before this became settable.
+    password_reset_minutes: int = Field(default=30, ge=5, le=1440)
+
+
 class CodeFormatSettings(BaseModel):
     """How an asset / consumable code is built at putaway.
 
@@ -129,6 +154,7 @@ class SettingsOut(BaseModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     fallback: FallbackSettings = Field(default_factory=FallbackSettings)
     warehouse: WarehouseSettings = Field(default_factory=WarehouseSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
     # `codes` is deliberately NOT here. It has its own endpoints and its own
     # permission, so editing the company address cannot re-shape every asset code.
 

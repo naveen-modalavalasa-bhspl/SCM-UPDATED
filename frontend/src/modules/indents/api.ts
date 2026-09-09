@@ -321,5 +321,6 @@ export const masterApi = {
       .then((items) => items.filter(
         (bom) => bom.is_active && bom.is_effective !== false)),
   bomItems: (bomId: number) =>
-    allMasterRows<BomChoiceItem>("/api/bom-items", { bom_id: bomId }),
+    api.get<BomChoiceItem[]>("/api/indents/eligible-bom-items", { params: { bom_id: bomId } })
+      .then((r) => r.data),
 };

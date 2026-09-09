@@ -413,11 +413,16 @@ h3,
    tooltip as the way to read the rest. */
 .lt-marquee { display: inline-block; max-width: 100%; vertical-align: bottom; }
 .lt-marquee-track { display: inline-flex; width: max-content; }
-.lt-marquee-item { padding-right: 2rem; }
+/* The gap between the two copies, and ONLY once there are two. Applied always, the
+   first copy measured 2rem wider than its own text and every short name looked like
+   it overflowed. `ScrollingName` sets [data-scroll] when the name genuinely does not
+   fit; without it there is one copy, no gap and no animation, which is what a name
+   like DIRECTOR should do. */
+.lt-marquee[data-scroll] .lt-marquee-item { padding-right: 2rem; }
 
-.lt-marquee:hover .lt-marquee-track,
-.lt-marquee:focus-visible .lt-marquee-track,
-.lt-marquee:focus-within .lt-marquee-track {
+.lt-marquee[data-scroll]:hover .lt-marquee-track,
+.lt-marquee[data-scroll]:focus-visible .lt-marquee-track,
+.lt-marquee[data-scroll]:focus-within .lt-marquee-track {
   animation: lt-marquee-slide 9s linear infinite;
 }
 
@@ -427,9 +432,9 @@ h3,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lt-marquee:hover .lt-marquee-track,
-  .lt-marquee:focus-visible .lt-marquee-track,
-  .lt-marquee:focus-within .lt-marquee-track { animation: none; }
+  .lt-marquee[data-scroll]:hover .lt-marquee-track,
+  .lt-marquee[data-scroll]:focus-visible .lt-marquee-track,
+  .lt-marquee[data-scroll]:focus-within .lt-marquee-track { animation: none; }
 }
 
 /* ---------------------------------------------------------------------------

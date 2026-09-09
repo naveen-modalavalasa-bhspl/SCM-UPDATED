@@ -1,10 +1,8 @@
-import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/shared/api/client";
 import { getPicking, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
-import { PrintTemplate } from "@/shared/components";
+import { PrintTemplate, type PrintColumn } from "@/shared/components";
 
 export function PicklistPrintPage() {
   const { id } = useParams();
@@ -16,29 +14,17 @@ export function PicklistPrintPage() {
     enabled: Number.isFinite(picklistId) && picklistId > 0,
   });
 
-  const { data: company } = useQuery({
-    queryKey: ["print-company"],
-    queryFn: () =>
-      api.get<{ company?: Record<string, string> }>("/api/settings")
-        .then((r) => r.data.company ?? {})
-        .catch(() => ({} as Record<string, string>)),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  });
-
-  const { data: warehouses } = useQuery({
+  const warehousesQuery = useQuery({
     queryKey: ["print-warehouses"],
     queryFn: () => warehouseOptions(),
     staleTime: 5 * 60 * 1000,
   });
+  const warehouses = warehousesQuery.data;
 
-  useEffect(() => {
-    if (!query.data) return;
-    const timer = setTimeout(() => window.print(), 250);
-    return () => clearTimeout(timer);
-  }, [query.data]);
-
-  if (query.isLoading) return <p className="p-8 text-sm">Loading the document…</p>;
+  // The sheet opens the print dialog on its own once it is mounted, so a warehouse
+  // name still in flight would go to paper as "WH-3". Hold until it has answered.
+  if (query.isLoading || warehousesQuery.isLoading)
+    return <p className="p-8 text-sm">Loading the document…</p>;
   if (query.error) return <p className="p-8 text-sm">{(query.error as Error).message}</p>;
   if (!query.data) return <p className="p-8 text-sm">Document not found.</p>;
 
@@ -54,11 +40,11 @@ export function PicklistPrintPage() {
     { label: "Pick Date", value: fmtDate(picking.pick_date) || "—" },
   ];
 
-  const columns = [
+  const columns: PrintColumn[] = [
     { header: "Item" },
     { header: "Code/Batch" },
-    { header: "Bin", className: "w-[15%]" },
-    { header: "Picked", className: "text-right w-[10%]" },
+    { header: "Bin", width: "15%" },
+    { header: "Picked", align: "right", width: "10%" },
   ];
 
   const items = (picking.items || []).map((line: any) => [
@@ -81,9 +67,6 @@ export function PicklistPrintPage() {
       documentNo={picking.pick_no}
       date={fmtDate(picking.pick_date)}
       status={picking.status}
-      companyName={company?.name}
-      companyLegalName={company?.legal_name}
-      companyAddress={company?.address}
       metadata={metadata}
       columns={columns}
       items={items}

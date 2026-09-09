@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
@@ -68,15 +68,34 @@ export function RFQFormPage() {
     enabled: Boolean(fromConsolidation) && !editing,
   });
 
+  // The items this tender is for. Vendors are offered against THESE, so the list
+  // has to move when a line is added, changed or removed.
+  const chosenItemIds = useMemo(
+    () => [...new Set(lines.map((l) => l.item_id).filter((id): id is number => id !== ""))],
+    [lines],
+  );
+
   const { data: vendors = [] } = useQuery({
-    queryKey: ["rfq-vendors", vendorSearch],
+    // Item ids are part of the key, so changing a line refetches rather than leaving
+    // the previous item's suppliers on screen looking selectable.
+    queryKey: ["rfq-vendors", vendorSearch, chosenItemIds],
     queryFn: () =>
       // Material suppliers only: the logistics partners share this master, and an
       // RFQ sent to a truck operator for gauze is a tender nobody can answer.
+      //
+      // `item_ids` narrows further, to the vendors actually mapped to supply what is
+      // being asked for. The union across the lines, not the intersection — a tender
+      // for gauze and syringes goes to whoever can supply either. The same rule is
+      // checked again on save; this only decides what is offered.
       api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { search: vendorSearch || undefined, size: 50, is_active: true,
-                  kind: "MATERIAL" },
+        params: {
+          search: vendorSearch || undefined, size: 50, is_active: true,
+          kind: "MATERIAL", item_ids: chosenItemIds.join(",") || undefined,
+        },
       }).then((r) => r.data.items),
+    // No items chosen yet means no question to ask: an unfiltered list here would be
+    // every supplier in the master, which is the thing this restriction removes.
+    enabled: chosenItemIds.length > 0,
   });
 
   const { data: methods } = useQuery({
@@ -227,7 +246,7 @@ export function RFQFormPage() {
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
             {[
               ["Department", source.department_name],
-              ["Warehouse", source.warehouse_name],
+              ["Shipment Address", source.warehouse_name],
               ["Project", source.project_name],
               ["Company", source.company_name],
               ["Priority", source.priority ?? "Normal"],
@@ -355,8 +374,36 @@ export function RFQFormPage() {
                 </span>
               </label>
             ))}
+            {/* Three different silences, and saying the wrong one sends somebody
+                looking in the wrong place. "No vendors" on an item nobody has mapped
+                reads as a broken screen; it is missing master data, and the fix is one
+                link away. */}
             {!vendors.length && (
-              <p className="px-3 py-4 text-sm text-muted">No vendors match that search.</p>
+              chosenItemIds.length === 0 ? (
+                <p className="px-3 py-4 text-sm text-muted">
+                  Add an item first — vendors are offered against what you are asking for.
+                </p>
+              ) : vendorSearch ? (
+                <p className="px-3 py-4 text-sm text-muted">
+                  No vendor matching “{vendorSearch}” is mapped to supply these items.
+                </p>
+              ) : (
+                <div className="px-3 py-4 text-sm">
+                  <p className="text-ink">
+                    No vendor is mapped to supply {chosenItemIds.length === 1
+                      ? "this item" : "any of these items"}.
+                  </p>
+                  <p className="mt-1 text-xs text-muted">
+                    A tender can only be sent to a vendor mapped to what it asks for.
+                    Add the mapping on{" "}
+                    <Link to="/masters?tab=vendor-items"
+                          className="font-semibold text-brand underline">
+                      Masters → Vendor Rates
+                    </Link>
+                    , then come back.
+                  </p>
+                </div>
+              )
             )}
           </div>
         </div>

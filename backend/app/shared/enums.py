@@ -670,6 +670,25 @@ class ScopeRung(str, Enum):
 CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")
 
 
+#: The `whs_warehouses.warehouse_type` values a purchase may be shipped TO — the
+#: Shipment Address on a requisition, an RFQ or a consolidation (2026-09-07).
+#:
+#: An ALLOW-list, not "everything except LIP and MDP", because the difference matters:
+#: TRANSIT, QUARANTINE and SCRAP are not distribution points either, and none of them
+#: is somewhere a vendor delivers to. Written as "which of these is a place goods
+#: arrive from outside", the answer stays right when a type is added.
+#:
+#: This is what makes the picker usable at all. `whs_warehouses` holds 983 rows — 948
+#: LIP and 33 MDP field points against 2 real warehouses — so the buyer was searching
+#: nine hundred delivery addresses that no purchase order has ever been shipped to,
+#: and the two that matter sorted last and never arrived.
+#:
+#: Here rather than in procurement because the vendor master's carrier split sets the
+#: precedent directly above, and because the masters list has to be able to narrow
+#: itself while shared may not import a module (rule 5).
+SHIPMENT_ADDRESS_WAREHOUSE_TYPES = ("MAIN", "CENTRAL", "REGIONAL")
+
+
 class MailStatus(str, Enum):
     """`sys_mail_messages.status`. A row is written QUEUED before the send is
     attempted, so a message lost to a crash mid-send is still visible afterwards
@@ -684,6 +703,11 @@ class MailKind(str, Enum):
     carries a live reset link and the Sent tab is readable by anyone with `mail.view`."""
     MANUAL = "MANUAL"
     PASSWORD_RESET = "PASSWORD_RESET"
+    #: The six digits a vendor needs before their quotation can be submitted. Logged
+    #: without its body for the same reason as a reset link: it is a live credential
+    #: for the few minutes it lives, and the Sent tab is readable by anyone with
+    #: `mail.view`.
+    VENDOR_QUOTE_OTP = "VENDOR_QUOTE_OTP"
 
 
 class EmailClaimStatus(str, Enum):

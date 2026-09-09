@@ -150,6 +150,13 @@ export interface ActivityRow {
   quantity?: number | string | null;
   requested_quantity?: number | string | null;
   uom_code?: string | null;
+  /**
+   * Lines on the whole request. Present ONLY on the header events, where `quantity` is
+   * the sum of the request rather than one line's own number; null on the per-item
+   * events. Optional: a backend deployed before this field omits it, and the QTY column
+   * then falls back to the per-line reading it has always used.
+   */
+  line_count?: number | null;
   department_name?: string | null;
   office_name?: string | null;
   region_id?: number | null;
