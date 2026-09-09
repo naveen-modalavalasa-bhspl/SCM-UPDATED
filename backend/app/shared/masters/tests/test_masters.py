@@ -1258,3 +1258,46 @@ async def test_an_unknown_name_is_reported_with_the_row_it_was_on(db):
     assert problems[0]["label"] == "Manufacturer"
     assert problems[0]["raw"] == "Cipla Ltd Typo"
     assert problems[0]["candidates"] == []
+
+
+def _category_workbook(rows):
+    import io
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["code", "name", "is_active"])
+    for row in rows:
+        sheet.append(row)
+    payload = io.BytesIO()
+    book.save(payload)
+    return payload.getvalue()
+
+
+async def test_import_preview_never_writes_even_when_file_is_clean(client, admin):
+    content = _category_workbook([["TOOLS", "Tools", "Yes"]])
+    preview = await client.post(
+        "/api/item-categories/import/preview", headers=admin,
+        files={"file": ("categories.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["summary"] == {"total": 1, "ready": 1, "blocked": 0}
+    assert (await client.get("/api/item-categories", headers=admin)).json()["total"] == 0
+
+
+async def test_import_preview_marks_duplicate_codes_before_commit(client, admin):
+    content = _category_workbook([
+        ["TOOLS", "Tools", "Yes"], [" tools ", "Other tools", "Yes"],
+    ])
+    preview = await client.post(
+        "/api/item-categories/import/preview", headers=admin,
+        files={"file": ("categories.xlsx", content,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["summary"] == {"total": 2, "ready": 1, "blocked": 1}
+    assert body["rows"][1]["problems"][0]["field"] == "code"
+    assert "Duplicate of row 2" in body["rows"][1]["problems"][0]["message"]

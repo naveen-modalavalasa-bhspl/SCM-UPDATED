@@ -19,6 +19,10 @@ class ApprovalQuantityIn(BaseModel):
     # allow_inf_nan: `inf` satisfies `ge=0` and would sail past the ceiling check as
     # Decimal("Infinity"). NaN already fails `ge=0`.
     approved_quantity: float = Field(ge=0, allow_inf_nan=False)
+    # DROPPED from the batch, as opposed to approved at nothing. Both send quantity 0
+    # and only this tells them apart — see `IndentItem.is_excluded`. Defaulted, so a
+    # caller that predates the flag keeps behaving exactly as it did.
+    excluded: bool = False
 
 
 class IndentApprovalActionIn(BaseModel):
@@ -169,6 +173,10 @@ class ApprovalIndentLineOut(BaseModel):
     # level below approved after that. Approvers may only reduce.
     max_quantity: float
     remarks: str | None = None
+    # Dropped by an approver below, not cut to zero. The screen shows "Excluded"
+    # instead of a quantity and offers no second Exclude button for it.
+    is_excluded: bool = False
+    excluded_by_name: str | None = None
 
 
 class ApprovalIndentOut(BaseModel):
@@ -205,6 +213,11 @@ class ConsolidatedItemAllocationOut(BaseModel):
     requested_by_name: str | None = None
     requested_quantity: float
     ceiling_quantity: float
+    # Already dropped at a rung below. The row reads "Excluded" and its Exclude button
+    # is gone: offering it again asked this approver to redo a decision that is made
+    # (BUG_SCM_0008), and the zero it carried read as an ordinary nil (BUG_SCM_0007).
+    is_excluded: bool = False
+    excluded_by_name: str | None = None
 
 
 class ConsolidatedItemOut(BaseModel):

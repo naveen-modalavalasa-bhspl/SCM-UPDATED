@@ -61,20 +61,23 @@ interface Chain {
   truncated: boolean;
 }
 
+type TrackingFilters = { kind: string; status: string; dateFrom: string; dateTo: string };
+
 const trackingApi = {
-  // `kind: "indent"` is what makes this the INDENT board rather than the Document
-  // Trail: the endpoint reads the term as a serial number against one document type,
-  // so `24` finds IND0024 instead of the twelve documents whose numbers contain a 24.
-  // Without it the same endpoint keeps its old cross-document behaviour, which is
-  // still what /reports/traceability asks for.
-  search: (q: string, limit = 25) =>
-    api.get<TrackHit[]>("/api/reports/traceability/search",
-                        { params: { q, limit, kind: "indent" } }).then((r) => r.data),
+  search: (q: string, filters: TrackingFilters, limit = 25) =>
+    api.get<TrackHit[]>("/api/reports/traceability/search", {
+      params: { q, limit, browse: true, ...(filters.kind ? { kind: filters.kind } : {}),
+        ...(filters.status ? { status: filters.status } : {}),
+        ...(filters.dateFrom ? { date_from: filters.dateFrom } : {}),
+        ...(filters.dateTo ? { date_to: filters.dateTo } : {}) },
+    }).then((r) => r.data),
+  kinds: () => api.get<{ key: string; label: string }[]>("/api/reports/traceability/kinds")
+    .then((r) => r.data),
   journey: (indentId: number) =>
     api.get<TrackJourney>(`/api/indents/${indentId}/journey`).then((r) => r.data),
-  chain: (indentId: number) =>
+  chain: (kind: string, docId: number) =>
     api.get<Chain>("/api/reports/traceability/chain",
-                   { params: { kind: "indent", doc_id: indentId } }).then((r) => r.data),
+                   { params: { kind, doc_id: docId } }).then((r) => r.data),
 };
 
 /** One glyph per rung state. PENDING gets the clock — it is the only state where the
@@ -98,31 +101,31 @@ export function LiveTrackingPage() {
   // on every poll for a reports-only reader and fill sys_app_logs with it.
   const { can } = useAuth();
   const canReadIndents = can("indent.view");
-  const [indentId, setIndentId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<TrackHit | null>(null);
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [sort, setSort] = useState<"latest" | "oldest">("latest");
+  const [filters, setFilters] = useState<TrackingFilters>({ kind: "", status: "", dateFrom: "", dateTo: "" });
+  const kinds = useQuery({ queryKey: ["live-tracking", "kinds"], queryFn: trackingApi.kinds });
 
   const results = useQuery({
-    queryKey: ["live-tracking", "search", submitted],
-    queryFn: () => trackingApi.search(submitted, LIST_LIMIT),
-    // Always on: an empty term lists every indent (the landing view), a typed term
-    // narrows to that one serial.
+    queryKey: ["live-tracking", "search", submitted, filters],
+    queryFn: () => trackingApi.search(submitted, filters, LIST_LIMIT),
     enabled: true,
   });
 
   // The two live reads share the refresh cadence, so the header and the trail can
   // never disagree about where the document is.
   const journey = useQuery({
-    queryKey: ["live-tracking", "journey", indentId],
-    queryFn: () => trackingApi.journey(indentId!),
-    enabled: Boolean(indentId) && canReadIndents,
+    queryKey: ["live-tracking", "journey", selected?.key, selected?.id],
+    queryFn: () => trackingApi.journey(selected!.id),
+    enabled: selected?.key === "indent" && canReadIndents,
     refetchInterval: REFRESH_MS,
   });
   const chain = useQuery({
-    queryKey: ["live-tracking", "chain", indentId],
-    queryFn: () => trackingApi.chain(indentId!),
-    enabled: Boolean(indentId),
+    queryKey: ["live-tracking", "chain", selected?.key, selected?.id],
+    queryFn: () => trackingApi.chain(selected!.key, selected!.id),
+    enabled: Boolean(selected),
     refetchInterval: REFRESH_MS,
   });
 
@@ -130,16 +133,16 @@ export function LiveTrackingPage() {
     event.preventDefault();
     // A new search starts from a clean board — drop the indent now showing so the
     // old journey never lingers while the new number is looked up.
-    setIndentId(null);
+    setSelected(null);
     setSubmitted(query.trim());
   }
 
   function track(hit: TrackHit) {
-    setIndentId(hit.id);
+    setSelected(hit);
   }
 
   const hits = sortHits(results.data ?? [], sort);
-  const hit = indentHit(hits);
+  const hit = selected ?? indentHit(hits);
 
   // The tracked indent's own ladder stamp — which ladder version it runs on and
   // which project it came from. The trail's root node is the canonical read for
@@ -160,8 +163,9 @@ export function LiveTrackingPage() {
   // One match and it is not the indent already on screen: open it — typing the
   // number and then being asked to click it once more is a step for nothing. This
   // also covers searching a second indent after an earlier one is still showing.
-  if (hits.length === 1 && hit && !results.isFetching && hit.id !== indentId) {
-    queueMicrotask(() => track(hit));
+  if (hits.length === 1 && !results.isFetching
+      && (hits[0]!.id !== selected?.id || hits[0]!.key !== selected?.key)) {
+    queueMicrotask(() => track(hits[0]!));
   }
 
   const live = journey.data
@@ -172,16 +176,17 @@ export function LiveTrackingPage() {
     <div>
       <PageHeader eyebrow="Reports" title="Live Tracking" />
 
-      <Card className="mb-4 p-4">
-        <form onSubmit={submit} className="flex flex-wrap items-center gap-3">
+      <Card className="mb-4 p-3">
+        <form onSubmit={submit} className="space-y-2.5">
+          <div className="flex items-center gap-2">
           <label className="relative min-w-64 flex-1">
-            <span className="sr-only">Indent number</span>
+            <span className="sr-only">Document number</span>
             <Search aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               autoFocus
-              placeholder="Indent number — IND-…"
+              placeholder="Document number — IND, PO, GRN, SHIP…"
               className="h-11 w-full rounded-lg border border-line bg-content1 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-brand focus:outline-none"
             />
           </label>
@@ -189,18 +194,42 @@ export function LiveTrackingPage() {
                   isDisabled={!query.trim()}>
             Track
           </Button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-[7rem_11rem_8rem_minmax(8rem,1fr)_minmax(8rem,1fr)_auto]">
           <Select
-            ariaLabel="Sort indents"
+            ariaLabel="Sort documents"
             value={sort}
             onChange={(value) => setSort(value === "oldest" ? "oldest" : "latest")}
-            className="w-32"
+            className="w-full"
             options={[
               { value: "latest", label: "Latest first" },
               { value: "oldest", label: "Oldest first" },
             ]}
           />
+          <Select ariaLabel="Document type" value={filters.kind} className="w-full"
+            placeholder="All document types" searchable={false}
+            onChange={(kind) => { setSelected(null); setFilters((f) => ({ ...f, kind })); }}
+            options={(kinds.data ?? []).map((kind) => ({ value: kind.key, label: kind.label }))} />
+          <Select ariaLabel="Status" value={filters.status} className="w-full"
+            placeholder="Any status" searchable={false}
+            onChange={(status) => { setSelected(null); setFilters((f) => ({ ...f, status })); }}
+            options={["DRAFT", "PENDING_APPROVAL", "APPROVED", "REJECTED", "CANCELLED"]
+              .map((status) => ({ value: status, label: status.split("_").join(" ") }))} />
+          <label className="flex h-11 min-w-0 items-center gap-1 rounded-lg border border-line bg-content1 px-2 text-xs text-muted">From <input type="date" value={filters.dateFrom}
+            onChange={(event) => { setSelected(null); setFilters((f) => ({ ...f, dateFrom: event.target.value })); }}
+            className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none" /></label>
+          <label className="flex h-11 min-w-0 items-center gap-1 rounded-lg border border-line bg-content1 px-2 text-xs text-muted">To <input type="date" value={filters.dateTo}
+            onChange={(event) => { setSelected(null); setFilters((f) => ({ ...f, dateTo: event.target.value })); }}
+            className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none" /></label>
+          {(filters.kind || filters.status || filters.dateFrom || filters.dateTo) && (
+            <Button type="button" variant="light" className="h-11 px-3 text-muted"
+              onPress={() => { setSelected(null); setFilters({ kind: "", status: "", dateFrom: "", dateTo: "" }); }}>
+              Clear
+            </Button>
+          )}
+          </div>
         </form>
-        <p className="mt-2 text-xs text-muted">
+        <p className="mt-1.5 text-xs text-muted">
           Part of the number is enough. The board refreshes itself every 15 seconds
           while it is open.
         </p>
@@ -208,17 +237,10 @@ export function LiveTrackingPage() {
 
       <ErrorBanner error={results.error ?? journey.error ?? chain.error} />
 
-      {/* A non-indent match is an answer, not an error — say what was found instead. */}
-      {submitted && !results.isLoading && !hit && hits.length > 0 && (
-        <Card className="mb-4 p-6 text-center text-sm text-muted">
-          “{submitted}” matched a {hits[0]?.label.toLowerCase()}, not an indent. This
-          board tracks indents.
-        </Card>
-      )}
       {submitted && !results.isLoading && hits.length === 0 && (
         <Card className="p-10 text-center">
           <p className="text-sm text-muted">
-            No indent carries the number “{submitted}”.
+            No document carries the number “{submitted}”.
           </p>
         </Card>
       )}
@@ -227,10 +249,10 @@ export function LiveTrackingPage() {
           that is the whole register (the landing view after a refresh); with a term
           that returns several serials it is the matches to pick from. */}
       {!results.isLoading && hits.length > 0 && (
-        (!indentId || (submitted && hits.length > 1)) && (
+          (!selected || (submitted && hits.length > 1)) && (
         <Card className="mb-4">
           <p className="px-4 pt-3 text-xs font-semibold uppercase tracking-wide text-muted">
-            {submitted ? "Matches — pick the one to track" : "All indents"}
+            {submitted ? "Matches — pick the one to track" : "All documents"}
           </p>
           <ul className="p-2">
             {hits.map((item) => (
@@ -266,7 +288,22 @@ export function LiveTrackingPage() {
           is nothing to draw. Name the missing permission rather than leaving a blank
           screen that looks like the indent does not exist — the register above is
           still readable, and that difference is the whole clue. */}
-      {indentId && !canReadIndents && (
+      {selected && selected.key !== "indent" && chain.data && (
+        <Card className="mb-4 p-5 sm:p-6">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted">Live document</p>
+              <h2 className="mt-1 text-lg font-bold text-ink">{selected.label} · {selected.doc_no ?? `#${selected.id}`}</h2>
+            </div>
+            {selected.status && <StatusPill status={selected.status} />}
+          </div>
+          <ol className="space-y-3">{chain.data.nodes.map((node) => (
+            <li key={`${node.key}:${node.id}`}><TrailNode node={node} onOpen={() => node.path && nav(node.path)} /></li>
+          ))}</ol>
+        </Card>
+      )}
+
+      {selected?.key === "indent" && !canReadIndents && (
         <Card className="mb-4 p-6 text-center text-sm text-muted">
           Tracking an indent needs the Indents view permission
           (<span className="mono">indent.view</span>) on top of Reports. The register

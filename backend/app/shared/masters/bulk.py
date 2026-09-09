@@ -853,32 +853,56 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
         ready, schema_errors = validate_rows(defn, [dict(r) for r in parsed])
         await db.rollback()
 
-        # The values the screen offers for a cell that could not be matched. Only for
-        # the columns that actually failed: the item sheet has nine looked-up columns
-        # and shipping every option of all nine is a megabyte of dropdown nobody
-        # opens. Capped the same way the template's dropdowns are.
-        failed = {p["field"] for p in unmatched if p["field"]}
-        options = {field: rows for field, rows
-                   in (await lookup_choices(defn, db)).items() if field in failed}
+        # The review is editable, so every mapped column carries its familiar names.
+        # A user can correct a blank or wrong selection without returning to Excel.
+        options = await lookup_choices(defn, db)
 
         blocked = {p["row"] for p in unmatched}
         by_row: dict[int, list[dict]] = {}
         for problem in unmatched:
             by_row.setdefault(problem["row"], []).append(problem)
-        for message in schema_errors:
+        for message in [*read_errors, *schema_errors]:
             # "Row 12, name: Field required" — the row number is the only part the
             # screen needs to attach it to a line.
             try:
-                line = int(message.split(" ", 2)[1].rstrip(","))
-            except (IndexError, ValueError):
+                head, detail = message.split(": ", 1)
+                row_part, field = head.split(", ", 1)
+                line = int(row_part.removeprefix("Row "))
+            except (ValueError, AttributeError):
                 continue
             blocked.add(line)
+            if any(p.get("field") == field for p in by_row.get(line, [])):
+                continue
             by_row.setdefault(line, []).append(
-                {"row": line, "field": None, "label": None, "raw": None,
-                 "message": message.split(": ", 1)[-1], "candidates": []})
+                {"row": line, "field": field,
+                 "label": header_for(defn, field) if field in defn.schema.model_fields else field,
+                 "raw": None, "message": detail, "candidates": []})
+
+        # Show duplicate business keys in preview instead of discovering them only
+        # after Save. The commit path still revalidates authoritatively.
+        duplicate_field = "code" if "code" in defn.schema.model_fields else (
+            "name" if "name" in defn.schema.model_fields else None)
+        if duplicate_field:
+            seen: dict[str, int] = {}
+            for record in parsed:
+                raw = record.get(duplicate_field)
+                key = _norm(raw)
+                if not key:
+                    continue
+                line = int(record["__row__"])
+                if key in seen:
+                    blocked.add(line)
+                    by_row.setdefault(line, []).append({
+                        "row": line, "field": duplicate_field,
+                        "label": header_for(defn, duplicate_field), "raw": str(raw),
+                        "message": f"Duplicate of row {seen[key]}. Enter a different value.",
+                        "candidates": [],
+                    })
+                else:
+                    seen[key] = line
 
         return {
-            "success": not (read_errors or blocked),
+            "success": not blocked,
             "columns": [
                 {"field": name,
                  "label": header_for(defn, name),
@@ -898,7 +922,7 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
                 for record in parsed
             ],
             "options": options,
-            "file_errors": read_errors,
+            "file_errors": [],
             "summary": {"total": len(parsed),
                         "ready": len(parsed) - len(blocked),
                         "blocked": len(blocked)},

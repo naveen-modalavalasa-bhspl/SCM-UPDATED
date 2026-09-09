@@ -28,7 +28,8 @@ from app.modules.inventory import hooks as inventory_hooks
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
-    PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
+    PurchaseConsolidationItem, PurchaseConsolidationSource, PurchaseOrder, Quotation,
+    QuotationItem, Requisition,
     PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
 )
@@ -394,6 +395,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     _apply_po_totals(po, sub_total, tax_total)
 
     indent.status = IndentStatus.ORDERED.value
+    await indent_service.notify_indent_followers(db, indent, indent.status)
     await db.commit()
     await db.refresh(po)
     return po
@@ -2766,9 +2768,10 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
 
     The edited numbers are what the supplier receives — `_publish_rfq` copies
     `RFQItem.quantity` into the draft `QuotationItem` at publish time, so trimming
-    here trims what the vendor is asked to price. Increase is refused: an approval
-    can trim a request, never inflate it. 0 removes the line; removing the last
-    line is refused so the RFQ never publishes empty.
+    here trims what the vendor is asked to price. The originating requisition or
+    consolidation remains the ceiling, allowing correction of an earlier saved trim
+    without exceeding the demand. 0 removes the line; removing the last line is
+    refused so the RFQ never publishes empty.
     """
     rfq = await get_rfq(db, rfq_id, user)
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
@@ -2794,6 +2797,52 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         if incoming.id not in by_id:
             raise ValidationError(f"Line {incoming.id} is not on {rfq.rfq_no}")
 
+    # The source document is the ceiling. Comparing with RFQItem.quantity made an
+    # approver's first save irreversible: 1000 -> 500 was accepted, then correcting
+    # 500 -> 600 was rejected even though the originating demand was still 1000.
+    # Aggregate by item so duplicate RFQ lines cannot each claim the full source qty.
+    source_ceilings: dict[int, Decimal] = {}
+    if rfq.requisition_id:
+        rows = (await db.execute(
+            select(RequisitionItem.item_id, func.sum(RequisitionItem.quantity))
+            .where(RequisitionItem.requisition_id == rfq.requisition_id)
+            .group_by(RequisitionItem.item_id)
+        )).all()
+        source_ceilings = {int(item_id): _d(qty) for item_id, qty in rows}
+    elif rfq.consolidation_id:
+        rows = (await db.execute(
+            select(PurchaseConsolidationItem.item_id,
+                   func.sum(PurchaseConsolidationItem.approved_qty))
+            .where(PurchaseConsolidationItem.consolidation_id == rfq.consolidation_id)
+            .group_by(PurchaseConsolidationItem.item_id)
+        )).all()
+        source_ceilings = {int(item_id): _d(qty) for item_id, qty in rows}
+
+    current_totals: dict[int, Decimal] = {}
+    proposed = {line.id: _d(line.quantity) for line in rfq.items}
+    for line in rfq.items:
+        current_totals[line.item_id] = (
+            current_totals.get(line.item_id, Decimal("0")) + _d(line.quantity))
+    for incoming in data.lines:
+        now = _d(incoming.quantity)
+        line = by_id[incoming.id]
+        if now < 0:
+            raise ValidationError(
+                f"Quantity cannot be negative (item {line.item_code or line.item_id})")
+        proposed[incoming.id] = now
+
+    proposed_totals: dict[int, Decimal] = {}
+    for line in rfq.items:
+        proposed_totals[line.item_id] = (
+            proposed_totals.get(line.item_id, Decimal("0")) + proposed[line.id])
+    for item_id, total in proposed_totals.items():
+        ceiling = source_ceilings.get(item_id, current_totals[item_id])
+        if total > ceiling:
+            line = next(row for row in rfq.items if row.item_id == item_id)
+            raise ValidationError(
+                f"Quantity cannot exceed the source document quantity "
+                f"(item {line.item_code or item_id}: maximum {ceiling}, entered {total})")
+
     changes: list[str] = []
     to_delete: list[int] = []
     for incoming in data.lines:
@@ -2804,10 +2853,6 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         now = _d(incoming.quantity)
         if was == now:
             continue
-        if now > was:
-            raise ValidationError(f"Quantities can only be decreased (item {line.item_code or line.item_id}: {was} -> {now})")
-        if now < 0:
-            raise ValidationError(f"Quantity cannot be negative (item {line.item_code or line.item_id})")
         if now == 0:
             to_delete.append(line.id)
             changes.append(f"{line.item_code or line.item_id}: {was} -> Removed")

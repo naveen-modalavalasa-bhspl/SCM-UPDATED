@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from sqlalchemy import String, cast, select
@@ -348,7 +349,9 @@ def _serial_pattern(serial: int) -> str:
 
 
 async def _search_by_serial(db: AsyncSession, node: NodeSpec, term: str,
-                            limit: int) -> list[dict]:
+                            limit: int, status: str | None = None,
+                            date_from: date | None = None,
+                            date_to: date | None = None) -> list[dict]:
     """One document kind, found by the serial number a person actually says.
 
     An empty term lists the register newest-first, which is the landing view of the
@@ -361,6 +364,9 @@ async def _search_by_serial(db: AsyncSession, node: NodeSpec, term: str,
         return []
     cols = _cols(node, table)
     stmt = select(*cols.values())
+    stmt = _with_filters(stmt, node, table, status, date_from, date_to)
+    if stmt is None:
+        return []
     if term:
         digits = re.search(r"(\d+)\s*$", term) or re.search(r"(\d+)", term)
         if digits is None:
@@ -371,8 +377,27 @@ async def _search_by_serial(db: AsyncSession, node: NodeSpec, term: str,
     return [_shape(node, cols, row) for row in rows]
 
 
+def _with_filters(stmt, node: NodeSpec, table, status: str | None,
+                  date_from: date | None, date_to: date | None):
+    """Apply filters shared by the single-type register and all-document board."""
+    if status:
+        if not node.status_col or node.status_col not in table.c:
+            return None
+        stmt = stmt.where(table.c[node.status_col] == status)
+    if date_from or date_to:
+        if not node.date_col or node.date_col not in table.c:
+            return None
+        if date_from:
+            stmt = stmt.where(table.c[node.date_col] >= date_from)
+        if date_to:
+            stmt = stmt.where(table.c[node.date_col] <= date_to)
+    return stmt
+
+
 async def search(db: AsyncSession, query: str, limit: int = 25,
-                 kind: str | None = None) -> list[dict]:
+                 kind: str | None = None, browse: bool = False,
+                 status: str | None = None, date_from: date | None = None,
+                 date_to: date | None = None) -> list[dict]:
     """Every document whose number matches, across every kind on the trail.
 
     A partial number is enough — a person reading a printed gate pass types the tail
@@ -391,29 +416,42 @@ async def search(db: AsyncSession, query: str, limit: int = 25,
     a screen of rows. A caller's `limit` only ever narrows that.
     """
     term = (query or "").strip()
-    limit = min(max(limit, 1), 500 if kind else 50)
+    limit = min(max(limit, 1), 500 if kind or browse else 50)
     if kind:
         node = BY_KEY.get(kind)
-        return [] if node is None else await _search_by_serial(db, node, term, limit)
-    if not term:
+        return [] if node is None else await _search_by_serial(
+            db, node, term, limit, status, date_from, date_to)
+    if not term and not browse:
         return []
     like = f"%{term}%"
     out: list[dict] = []
     for node in _available():
         table = _table(node)
         cols = _cols(node, table)
-        rows = (await db.execute(
-            select(*cols.values())
-            .where(cast(table.c[node.no_col], String(100)).ilike(like))
-            .limit(limit)
-        )).all()
+        stmt = select(*cols.values())
+        if term:
+            stmt = stmt.where(cast(table.c[node.no_col], String(100)).ilike(like))
+        stmt = _with_filters(stmt, node, table, status, date_from, date_to)
+        if stmt is None:
+            continue
+        rows = (await db.execute(stmt.order_by(table.c.id.desc()).limit(limit))).all()
         out.extend(_shape(node, cols, row) for row in rows)
-        if len(out) >= limit:
+        if len(out) >= limit and not browse:
             break
     # Exact matches first: somebody who typed a whole number wants that document, not
     # the twelve others that happen to contain it.
-    out.sort(key=lambda d: (str(d["doc_no"] or "").upper() != term.upper(),
-                            str(d["doc_no"] or "")))
+    if browse:
+        # Some document tables carry DATE and others DATETIME. Comparing those Python
+        # objects directly raises TypeError, so normalise both to the same ISO key.
+        out.sort(key=lambda d: (
+            d.get("date") is not None,
+            d["date"].isoformat() if d.get("date") is not None else "",
+            d["id"],
+        ), reverse=True)
+    else:
+        out.sort(key=lambda d: (
+            str(d["doc_no"] or "").upper() != term.upper(),
+            str(d["doc_no"] or "")))
     return out[:limit]
 
 

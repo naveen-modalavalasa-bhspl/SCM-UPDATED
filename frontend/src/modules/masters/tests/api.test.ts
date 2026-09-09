@@ -17,10 +17,10 @@ describe("masters api", () => {
       "attributes", "bins", "bomGroups", "bomItems", "boms",
       "brandManufacturers", "brands", "categories", "categoryTags", "departments",
       "dosageForms", "facilities", "features", "generalNames", "hsnCodes",
-      "itemClasses", "itemComponents", "itemGroups", "itemPackaging",
+      "itemClasses", "itemComponents", "itemEligibility", "itemGroups", "itemPackaging",
       "itemSpecs", "itemSubClasses", "items", "manufacturers",
-      "packaging", "projects", "specs", "uom", "uomConversions", "userGroups",
-      "vendorItems", "vendors", "warehouses",
+      "packaging", "projects", "specs", "unitCodeTracking", "uom", "uomConversions",
+      "userGroups", "vendorItems", "vendors", "warehouses",
     ]);
   });
 

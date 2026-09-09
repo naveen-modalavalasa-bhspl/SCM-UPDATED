@@ -8949,6 +8949,8 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
 
     before_status = indent.status
     indent.status = IndentStatus.CLOSED.value
+    from app.modules.indents.service import notify_indent_followers
+    await notify_indent_followers(db, indent, indent.status)
     await write_audit(db, entity="ind_indents", entity_id=indent.id,
                       entity_no=indent.indent_no, action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},

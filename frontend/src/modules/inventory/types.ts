@@ -490,6 +490,7 @@ export interface AllocationWarehouseOption {
 
 /** A line on the allocation screen: what was asked for, what is actually there. */
 export interface AllocationProposalLine {
+  on_order_qty?: number;
   indent_item_id: number;
   item_id: number;
   item_code: string | null;
