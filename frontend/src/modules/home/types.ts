@@ -1,4 +1,12 @@
-export type HomeDateRange = "week" | "month" | "quarter";
+/** "day" is a rolling 24 hours, not "since midnight"; "custom" is the only value
+ *  that carries dates with it. */
+export type HomeDateRange = "day" | "week" | "month" | "quarter" | "custom";
+
+/** The two dates a custom range needs. Empty strings mean "open at that end". */
+export interface HomeCustomRange {
+  from: string;
+  to: string;
+}
 
 export interface HomeKpi {
   key: string;

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
-import { Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
+import { Can, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
@@ -200,11 +200,11 @@ export function RFQDetailPage() {
       className: "text-right",
       render: (r) => (editableQty ? (
         <div className="flex items-center justify-end gap-2">
-          <Input
-            type="number" min="0" max={String(r.quantity)} step="0.001" className="w-28"
+          <input
+            type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
             value={qtyEdits[r.id] ?? String(r.quantity)}
-            onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
-            title="Approved quantity — decrease only, 0 removes the line. Supplier will be asked for this number."
+            onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
+            title="Approved quantity — up to the source document quantity; 0 removes the line."
             aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
           />
           <span className="text-xs text-muted w-10 text-left">{r.uom_code ?? ""}</span>
@@ -389,10 +389,11 @@ export function RFQDetailPage() {
                 <>
                   {editableQty && (
                     <p className="px-3 pb-2 text-xs text-muted">
-                      Adjust quantities before approving — decrease only, 0 removes the line. The approved number is what the vendor will be asked to quote/supply.
+                      Adjust quantities before approving — up to the source document quantity; 0 removes the line. The approved number is what the vendor will be asked to quote/supply.
                     </p>
                   )}
                   <ResponsiveList
+                    editable
                     data={rfq?.items ?? []}
                     columns={lineColumns}
                     keyOf={(r) => r.id}
@@ -404,10 +405,10 @@ export function RFQDetailPage() {
                         <div className="text-xs text-muted font-mono">{r.item_code ?? ""}</div>
                         {editableQty ? (
                           <div className="flex items-center gap-2">
-                            <Input
-                              type="number" min="0" max={String(r.quantity)} step="0.001" className="w-28"
+                            <input
+                              type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                               value={qtyEdits[r.id] ?? String(r.quantity)}
-                              onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
+                              onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
                               aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
                             />
                             <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
@@ -472,7 +473,7 @@ export function RFQDetailPage() {
               >
                 {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
                   <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-                    {comparison.responded} of 3 quotes on file.
+                    {comparison.responded} of {rfq.vendor_count} quote{rfq.vendor_count === 1 ? "" : "s"} on file.
                   </p>
                 )}
                 {/* The sheet decides nothing. It flags the cheapest cell per item and

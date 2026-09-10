@@ -869,9 +869,16 @@ raises 1054 the moment anybody opens that screen; a missing INDEX raises nothing
 all until a sort gets big enough or a JSON column widens the sort record (see the
 section below).
 
-As of 2026-09-05 the tree is back to **one head** (`c1a7d3f9b2e5`, which joins
-`92c9c40ec9d7` and `fb6b1c0ef043` as well as adding the storage-type master), so
+As of 2026-09-09 the tree is back to **one head** (`f7a1c3e5d9b2`), so
 `alembic upgrade head` moves again. Check `alembic heads` before assuming otherwise.
+Three merge revisions now stand in that lineage, each of them schema-free and each
+cut for the same reason — a branch and `qa` grew a migration apiece and neither side
+would apply while there were two heads: `c1a7d3f9b2e5` joins `92c9c40ec9d7` and
+`fb6b1c0ef043` (and adds the storage-type master), `b3e7c9a1d4f6` joins that to the
+qa floor-access lineage, and `f7a1c3e5d9b2` joins THAT to `e4f5a6b7c8d9`, the indent
+line-exclusion columns. A merge revision every time, never a re-pointed
+`down_revision`: a database already stamped at one side would treat the other side's
+revisions as ancestors it had passed and skip them in silence.
 
 As of 2026-09-03 this database has **0 missing tables and 0 missing columns**, and 54
 missing single-column indexes, all on `lgs_*` and `pro_*` tables that were created by

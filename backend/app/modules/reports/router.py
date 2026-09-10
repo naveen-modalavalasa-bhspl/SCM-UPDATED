@@ -4,6 +4,8 @@
 Filters arrive as ordinary query params and are matched against the ledger's own
 filter list in the service, which is why one route serves four ledgers.
 """
+from datetime import date
+
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,6 +79,8 @@ async def traceability_kinds(user=Depends(require_permission(perms.REPORT_VIEW))
 
 @router.get("/traceability/search")
 async def traceability_search(q: str = "", limit: int = 25, kind: str | None = None,
+                              browse: bool = False, status: str | None = None,
+                              date_from: date | None = None, date_to: date | None = None,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(perms.REPORT_VIEW))):
     """Every document whose number matches, across every kind on the trail. A partial
@@ -92,7 +96,9 @@ async def traceability_search(q: str = "", limit: int = 25, kind: str | None = N
     router): 50 for a trail lookup, 500 for the register listing.
     """
     return await traceability.attach_approval(
-        db, await traceability.search(db, q, limit=limit, kind=kind))
+        db, await traceability.search(
+            db, q, limit=limit, kind=kind, browse=browse, status=status,
+            date_from=date_from, date_to=date_to))
 
 
 @router.get("/traceability/chain")

@@ -38,6 +38,9 @@ interface ItemRow {
   requested_quantity: number;
   allocated: number;
   excluded: boolean;
+  /** Dropped at a rung BELOW this approver — read-only here, not theirs to undo. */
+  excludedBelow: boolean;
+  excludedByName: string | null;
   indent?: ConsolidationIndentSummary;
 }
 
@@ -90,7 +93,12 @@ export function ConsolidationItemPage() {
       indent_no: allocation.indent_no,
       requested_quantity: allocation.requested_quantity,
       allocated: resolved.split.get(allocation.line_id) ?? 0,
-      excluded: excluded.includes(allocation.indent_no.toUpperCase()),
+      excluded: Boolean(allocation.is_excluded)
+        || excluded.includes(allocation.indent_no.toUpperCase()),
+      // Already dropped further down the ladder. That decision is made: this approver
+      // reads it, and is not offered a button to redo or undo it (BUG_SCM_0008).
+      excludedBelow: Boolean(allocation.is_excluded),
+      excludedByName: allocation.excluded_by_name ?? null,
       indent: byId.get(allocation.indent_id),
     }));
   }, [batch, decision, item, resolved]);
@@ -197,7 +205,11 @@ export function ConsolidationItemPage() {
     {
       key: "action",
       header: "",
-      render: (row) => <button
+      render: (row) => (row.excludedBelow ? (
+        <span className="text-xs text-muted">
+          {row.excludedByName ? `Excluded by ${row.excludedByName}` : "Already excluded"}
+        </span>
+      ) : <button
         type="button"
         onClick={() => toggleExcluded(Number(itemId), row.indent_no)}
         className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors ${
@@ -207,7 +219,7 @@ export function ConsolidationItemPage() {
         }`}
       >
         {row.excluded ? <><Undo2 className="h-3.5 w-3.5" /> Include</> : <><UserX className="h-3.5 w-3.5" /> Exclude</>}
-      </button>,
+      </button>),
     },
   ];
 
@@ -484,7 +496,11 @@ export function ConsolidationItemPage() {
                         <PriorityTag priority={row.indent?.priority} />
                       </span>
                     </span>
-                    <button
+                    {row.excludedBelow ? (
+                      <span className="text-xs text-muted">
+                        {row.excludedByName ? `Excluded by ${row.excludedByName}` : "Already excluded"}
+                      </span>
+                    ) : <button
                       type="button"
                       onClick={() => toggleExcluded(Number(itemId), row.indent_no)}
                       className={`flex h-9 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold ${
@@ -492,7 +508,7 @@ export function ConsolidationItemPage() {
                       }`}
                     >
                       {row.excluded ? <><Undo2 className="h-3.5 w-3.5" /> Include</> : <><UserX className="h-3.5 w-3.5" /> Exclude</>}
-                    </button>
+                    </button>}
                   </div>
                   <p className="text-sm text-body">{row.indent?.requested_by_name ?? "—"}</p>
                   <p className="text-xs text-muted">

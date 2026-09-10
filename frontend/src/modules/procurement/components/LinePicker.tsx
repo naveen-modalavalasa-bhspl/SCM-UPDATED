@@ -149,6 +149,7 @@ export function LinePicker({
               <Input
                 type="number"
                 min="0"
+                max={line.original_quantity}
                 step="0.001"
                 value={line.quantity}
                 disabled={disabled}

@@ -69,7 +69,8 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
                         cc_addrs: list[str] | None, subject: str, body: str,
                         kind: MailKind, actor=None,
                         store_body: bool = True,
-                        html: str | None = None) -> MailMessage:
+                        html: str | None = None,
+                        attachments: list[client.MailAttachment] | None = None) -> MailMessage:
     """Write the row, attempt the send, record what happened. Commits either way.
 
     `store_body=False` for password-reset mail: that body carries a live reset link
@@ -97,7 +98,8 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
     await db.flush()
 
     try:
-        await client.send(to_addrs, subject, body, cc_addrs, html=html)
+        await client.send(to_addrs, subject, body, cc_addrs, html=html,
+                          attachments=attachments)
     except Exception as exc:  # noqa: BLE001 - recorded, then re-raised unchanged
         row.status = MailStatus.FAILED.value
         row.error = str(exc)[:2000]
@@ -112,7 +114,7 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
 
 
 async def send_mail(db: AsyncSession, data: MailComposeIn | MailSendIn,
-                    user) -> MailMessage:
+                    user, *, attachments: list[client.MailAttachment] | None = None) -> MailMessage:
     """Send one message from the Mail screen. Gated on `mail.send` in the router.
 
     Typed text is WRAPPED in the house template, never sent bare: a message from this
@@ -139,6 +141,7 @@ async def send_mail(db: AsyncSession, data: MailComposeIn | MailSendIn,
         kind=MailKind.MANUAL,
         actor=user,
         html=html,
+        attachments=attachments,
     )
 
 

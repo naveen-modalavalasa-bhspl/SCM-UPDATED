@@ -16,7 +16,9 @@ from datetime import date
 from sqlalchemy import exists, func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
+from app.core.config import settings
 from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.core.security import (
@@ -28,7 +30,8 @@ from app.modules.inventory import hooks as inventory_hooks
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
-    PurchaseConsolidationSource, PurchaseOrder, Quotation, QuotationItem, Requisition,
+    PurchaseConsolidationItem, PurchaseConsolidationSource, PurchaseOrder, Quotation,
+    QuotationItem, Requisition,
     PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
 )
@@ -36,7 +39,7 @@ from app.modules.procurement.schemas import (
     AwardIn, DespatchNoteIn, POCreate, POFromQuotationIn, POHeaderUpdate, QuoteSubmit,
     ReqCreate, RFQCreate, RFQQuantitiesIn, RFQUpdate, VendorAccountIn,
 )
-from app.modules.procurement import consolidation, ledger, quote_otp
+from app.modules.procurement import consolidation, ledger, quote_otp, vendor_documents
 from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.mail import service as mail_service
 from app.platform.mail import template as mail_template
@@ -394,6 +397,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     _apply_po_totals(po, sub_total, tax_total)
 
     indent.status = IndentStatus.ORDERED.value
+    await indent_service.notify_indent_followers(db, indent, indent.status)
     await db.commit()
     await db.refresh(po)
     return po
@@ -1224,8 +1228,8 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
     return await get_po(db, po.id, user)
 
 
-def _po_copy_parts(po: PurchaseOrder,
-                   company: mail_template.Company) -> tuple[str, str]:
+def _po_copy_parts(po: PurchaseOrder, company: mail_template.Company,
+                   portal_url: str) -> tuple[str, str]:
     """The order as the supplier's own copy of it: (plain text, html).
 
     Built from the stored document and nothing else, so the email cannot say something
@@ -1338,7 +1342,7 @@ def _po_copy_parts(po: PurchaseOrder,
         [("Order no", str(po.po_no)), ("Order date", str(po.po_date or ""))]
         + ([("Expected", str(po.expected_date))] if po.expected_date else [])
         + ([("Revision", str(po.revision_no))] if revised else [])))
-    blocks += [table, totals_block]
+    blocks += [table, totals_block, mail_template.button("Open Supplier Portal", portal_url)]
     if terms:
         blocks.append(mail_template.facts(terms))
     if po.remarks:
@@ -1380,6 +1384,7 @@ def _po_copy_parts(po: PurchaseOrder,
         lines.append(f"Remarks: {po.remarks}")
     lines += ["", "Accept or decline this order in your supplier portal.",
               f"— {company.legal_name or company.name}"]
+    lines.append(f"Supplier Portal: {portal_url}")
     return "\n".join(lines), html
 
 
@@ -1406,9 +1411,12 @@ async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
         if (po.revision_no or 0) > 0:
             subject += f" — revision {po.revision_no}"
         company = mail_template.Company.of(await get_company_letterhead(db))
-        text, html = _po_copy_parts(po, company)
+        portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
+                      f"?next=/supplier/pos/{po.id}")
+        text, html = _po_copy_parts(po, company, portal_url)
         await mail_service.send_mail(
-            db, MailSendIn(to=[address], subject=subject, body=text, html=html), user)
+            db, MailSendIn(to=[address], subject=subject, body=text, html=html), user,
+            attachments=[(f"{po.po_no}.pdf", vendor_documents.po_pdf(po, company), "application/pdf")])
         logger.info("%s emailed to %s", po.po_no, address)
         return True
     except Exception as exc:  # noqa: BLE001 - a courtesy must not cost the order
@@ -2455,6 +2463,37 @@ async def cancel_requisition(db: AsyncSession, req_id: int, user) -> Requisition
 #  RFQ
 # =========================================================================== #
 
+async def _validate_rfq_source_quantities(db: AsyncSession, lines,
+                                           requisition_id: int | None,
+                                           consolidation_id: int | None) -> None:
+    """Keep RFQ quantities within the document that authorised the purchase."""
+    if not requisition_id and not consolidation_id:
+        return
+    if requisition_id:
+        rows = (await db.execute(
+            select(RequisitionItem.item_id, func.sum(RequisitionItem.quantity))
+            .where(RequisitionItem.requisition_id == requisition_id)
+            .group_by(RequisitionItem.item_id)
+        )).all()
+    else:
+        rows = (await db.execute(
+            select(PurchaseConsolidationItem.item_id,
+                   func.sum(PurchaseConsolidationItem.approved_qty))
+            .where(PurchaseConsolidationItem.consolidation_id == consolidation_id)
+            .group_by(PurchaseConsolidationItem.item_id)
+        )).all()
+    ceilings = {int(item_id): _d(quantity) for item_id, quantity in rows}
+    totals: dict[int, Decimal] = {}
+    for line in lines:
+        totals[line.item_id] = totals.get(line.item_id, Decimal(0)) + _d(line.quantity)
+    for item_id, quantity in totals.items():
+        maximum = ceilings.get(item_id, Decimal(0))
+        if quantity > maximum:
+            raise ValidationError(
+                f"RFQ quantity for item {item_id} cannot exceed the previous "
+                f"document quantity ({maximum})")
+
+
 async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     requisition = None
     if data.requisition_id:
@@ -2502,6 +2541,9 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     if data.evaluation_method and not evaluation.is_valid(data.evaluation_method):
         raise ValidationError(
             f"{data.evaluation_method!r} is not an evaluation method")
+
+    await _validate_rfq_source_quantities(
+        db, data.lines, data.requisition_id, data.consolidation_id)
 
     # Everything the source document already said, carried across rather than retyped:
     # a tender that loses the warehouse and the project it is buying for cannot be
@@ -2555,7 +2597,8 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
     db.add(rfq)
     await db.flush()
     await _write_rfq_lines(db, rfq, data.lines)
-    await _set_rfq_vendors(db, rfq, data.vendor_ids)
+    await _set_rfq_vendors(
+        db, rfq, data.vendor_ids, data.vendor_allocations or None)
     await db.commit()
     return await get_rfq(db, rfq.id)
 
@@ -2575,7 +2618,8 @@ async def _write_rfq_lines(db: AsyncSession, rfq: RFQ, lines) -> None:
     rfq.total_items = len(lines)
 
 
-async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids) -> None:
+async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids,
+                           allocations=None) -> None:
     """Reconcile the invited list. Existing rows are KEPT, not rewritten — dropping
     and re-adding would mint a new access token and break a link already emailed.
 
@@ -2583,7 +2627,9 @@ async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids) -> None:
     flushed RFQ that collection has never been loaded, and touching it here raises
     MissingGreenlet instead of quietly returning the empty list it looks like.
     """
-    wanted = list(dict.fromkeys(vendor_ids or []))
+    wanted = list(dict.fromkeys(
+        [row.vendor_id for row in allocations] if allocations is not None
+        else (vendor_ids or [])))
     current = {row.vendor_id: row for row in (await db.execute(
         select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
     )).scalars().all()}
@@ -2594,21 +2640,52 @@ async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids) -> None:
                     f"{row.vendor_name or vendor_id} has already quoted and cannot "
                     "be removed from this RFQ")
             await db.delete(row)
-    # Who is allowed to be asked for THESE items. Read once, and only when somebody is
-    # actually being added — an edit that touches nothing but the due date must not pay
-    # for this query, and must not fail on an invitation that predates the rule.
-    eligible: set[int] | None = None
-    if any(vendor_id not in current for vendor_id in wanted):
-        item_ids = (await db.execute(
-            select(RFQItem.item_id).where(RFQItem.rfq_id == rfq.id)
-        )).scalars().all()
-        eligible = set((await db.execute(
-            select(VendorItem.vendor_id).where(VendorItem.item_id.in_(item_ids))
-        )).scalars().all()) if item_ids else set()
+    # Snapshot exactly which RFQ items each selected vendor is mapped to supply.
+    # Publication, the portal and the emailed PDF all consume this same scope.
+    rfq_lines = (await db.execute(
+        select(RFQItem).where(RFQItem.rfq_id == rfq.id)
+    )).scalars().all()
+    item_ids = {line.item_id for line in rfq_lines}
+    line_quantities = {line.item_id: _d(line.quantity) for line in rfq_lines}
+    mapped: dict[int, set[int]] = {vendor_id: set() for vendor_id in wanted}
+    if wanted and item_ids:
+        for vendor_id, item_id in (await db.execute(
+            select(VendorItem.vendor_id, VendorItem.item_id).where(
+                VendorItem.vendor_id.in_(wanted), VendorItem.item_id.in_(item_ids))
+        )).all():
+            mapped[vendor_id].add(item_id)
+
+    quantities: dict[int, dict[int, Decimal]] = {vendor_id: {} for vendor_id in wanted}
+    if allocations is not None:
+        allocated_totals: dict[int, Decimal] = {}
+        for allocation in allocations:
+            item_id, vendor_id = allocation.item_id, allocation.vendor_id
+            if item_id not in item_ids:
+                raise ValidationError(f"Item {item_id} is not on this RFQ")
+            if item_id in quantities[vendor_id]:
+                raise ValidationError(
+                    f"Vendor {vendor_id} is allocated item {item_id} more than once")
+            quantity = _d(allocation.quantity)
+            if quantity <= 0:
+                raise ValidationError("Vendor allocation quantity must be greater than zero")
+            quantities[vendor_id][item_id] = quantity
+            allocated_totals[item_id] = allocated_totals.get(item_id, Decimal(0)) + quantity
+        for item_id in item_ids:
+            total = allocated_totals.get(item_id, Decimal(0))
+            if total <= 0:
+                raise ValidationError(f"Select at least one vendor for item {item_id}")
+            if total > line_quantities[item_id]:
+                raise ValidationError(
+                    f"Vendor allocations for item {item_id} total {total}, but the "
+                    f"RFQ/source quantity is only {line_quantities[item_id]}")
+    else:
+        # Backward compatibility for older clients: every compatible selected vendor
+        # is asked for the complete RFQ line, which was the original behaviour.
+        for vendor_id in wanted:
+            quantities[vendor_id] = {
+                item_id: line_quantities[item_id] for item_id in mapped[vendor_id]}
 
     for vendor_id in wanted:
-        if vendor_id in current:
-            continue
         vendor = await db.get(Vendor, vendor_id)
         if vendor is None:
             raise ValidationError(f"Vendor {vendor_id} does not exist")
@@ -2616,14 +2693,29 @@ async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids) -> None:
         # request or an item whose vendors were unmapped after the tender was drafted.
         # Named rather than counted: "not mapped to supply any of these items" is a
         # sentence somebody can act on in the item master, which is where the fix is.
-        if eligible is not None and vendor_id not in eligible:
+        assigned = sorted(mapped[vendor_id])
+        requested = quantities[vendor_id]
+        invalid = set(requested) - mapped[vendor_id]
+        if invalid:
+            raise ValidationError(
+                f"{vendor.name} is not mapped to supply item {sorted(invalid)[0]}")
+        assigned = sorted(requested)
+        if not assigned:
             raise ValidationError(
                 f"{vendor.name} is not mapped to supply any of the items on this RFQ. "
                 f"Map them on the item's vendor list first.")
+        if vendor_id in current:
+            current[vendor_id].mapped_item_ids = assigned
+            current[vendor_id].item_quantities = {
+                str(item_id): float(quantity) for item_id, quantity in requested.items()}
+            continue
         db.add(RFQVendor(
             rfq_id=rfq.id, vendor_id=vendor.id, vendor_name=vendor.name,
             vendor_email=getattr(vendor, "email", None),
             access_token=secrets.token_urlsafe(32),
+            mapped_item_ids=assigned,
+            item_quantities={
+                str(item_id): float(quantity) for item_id, quantity in requested.items()},
         ))
     rfq.vendor_count = len(wanted)
 
@@ -2741,12 +2833,25 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
     if data.company_name is not None:
         rfq.company_name = data.company_name
     if data.lines is not None:
+        await _validate_rfq_source_quantities(
+            db, data.lines, rfq.requisition_id, rfq.consolidation_id)
         for line in list(rfq.items):
             await db.delete(line)
         await db.flush()
         await _write_rfq_lines(db, rfq, data.lines)
-    if data.vendor_ids is not None:
+    if data.vendor_allocations is not None:
+        await _set_rfq_vendors(
+            db, rfq, data.vendor_ids or [], data.vendor_allocations)
+    elif data.vendor_ids is not None:
         await _set_rfq_vendors(db, rfq, data.vendor_ids)
+    elif data.lines is not None:
+        invited = (await db.execute(
+            select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
+        )).scalars().all()
+        if any(row.item_quantities is not None for row in invited):
+            raise ValidationError(
+                "Vendor allocations are required when changing RFQ lines")
+        await _set_rfq_vendors(db, rfq, [row.vendor_id for row in invited])
     await db.commit()
     return await get_rfq(db, rfq_id)
 
@@ -2766,9 +2871,10 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
 
     The edited numbers are what the supplier receives — `_publish_rfq` copies
     `RFQItem.quantity` into the draft `QuotationItem` at publish time, so trimming
-    here trims what the vendor is asked to price. Increase is refused: an approval
-    can trim a request, never inflate it. 0 removes the line; removing the last
-    line is refused so the RFQ never publishes empty.
+    here trims what the vendor is asked to price. The originating requisition or
+    consolidation remains the ceiling, allowing correction of an earlier saved trim
+    without exceeding the demand. 0 removes the line; removing the last line is
+    refused so the RFQ never publishes empty.
     """
     rfq = await get_rfq(db, rfq_id, user)
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
@@ -2794,6 +2900,52 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         if incoming.id not in by_id:
             raise ValidationError(f"Line {incoming.id} is not on {rfq.rfq_no}")
 
+    # The source document is the ceiling. Comparing with RFQItem.quantity made an
+    # approver's first save irreversible: 1000 -> 500 was accepted, then correcting
+    # 500 -> 600 was rejected even though the originating demand was still 1000.
+    # Aggregate by item so duplicate RFQ lines cannot each claim the full source qty.
+    source_ceilings: dict[int, Decimal] = {}
+    if rfq.requisition_id:
+        rows = (await db.execute(
+            select(RequisitionItem.item_id, func.sum(RequisitionItem.quantity))
+            .where(RequisitionItem.requisition_id == rfq.requisition_id)
+            .group_by(RequisitionItem.item_id)
+        )).all()
+        source_ceilings = {int(item_id): _d(qty) for item_id, qty in rows}
+    elif rfq.consolidation_id:
+        rows = (await db.execute(
+            select(PurchaseConsolidationItem.item_id,
+                   func.sum(PurchaseConsolidationItem.approved_qty))
+            .where(PurchaseConsolidationItem.consolidation_id == rfq.consolidation_id)
+            .group_by(PurchaseConsolidationItem.item_id)
+        )).all()
+        source_ceilings = {int(item_id): _d(qty) for item_id, qty in rows}
+
+    current_totals: dict[int, Decimal] = {}
+    proposed = {line.id: _d(line.quantity) for line in rfq.items}
+    for line in rfq.items:
+        current_totals[line.item_id] = (
+            current_totals.get(line.item_id, Decimal("0")) + _d(line.quantity))
+    for incoming in data.lines:
+        now = _d(incoming.quantity)
+        line = by_id[incoming.id]
+        if now < 0:
+            raise ValidationError(
+                f"Quantity cannot be negative (item {line.item_code or line.item_id})")
+        proposed[incoming.id] = now
+
+    proposed_totals: dict[int, Decimal] = {}
+    for line in rfq.items:
+        proposed_totals[line.item_id] = (
+            proposed_totals.get(line.item_id, Decimal("0")) + proposed[line.id])
+    for item_id, total in proposed_totals.items():
+        ceiling = source_ceilings.get(item_id, current_totals[item_id])
+        if total > ceiling:
+            line = next(row for row in rfq.items if row.item_id == item_id)
+            raise ValidationError(
+                f"Quantity cannot exceed the source document quantity "
+                f"(item {line.item_code or item_id}: maximum {ceiling}, entered {total})")
+
     changes: list[str] = []
     to_delete: list[int] = []
     for incoming in data.lines:
@@ -2804,10 +2956,6 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         now = _d(incoming.quantity)
         if was == now:
             continue
-        if now > was:
-            raise ValidationError(f"Quantities can only be decreased (item {line.item_code or line.item_id}: {was} -> {now})")
-        if now < 0:
-            raise ValidationError(f"Quantity cannot be negative (item {line.item_code or line.item_id})")
         if now == 0:
             to_delete.append(line.id)
             changes.append(f"{line.item_code or line.item_id}: {was} -> Removed")
@@ -2856,6 +3004,8 @@ async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
         rfq.status = RFQStatus.PENDING_APPROVAL.value
         rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
+    if rfq.status == RFQStatus.PUBLISHED.value:
+        await email_rfq_copies(db, rfq, user)
     return await get_rfq(db, rfq_id)
 
 
@@ -2874,6 +3024,8 @@ async def act_on_rfq(db: AsyncSession, rfq_id: int, action: str, comments: str,
     else:
         rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
+    if rfq.status == RFQStatus.PUBLISHED.value:
+        await email_rfq_copies(db, rfq, user)
     return await get_rfq(db, rfq_id)
 
 
@@ -2887,7 +3039,32 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
     rfq.status = RFQStatus.PUBLISHED.value
     rfq.current_approver_name = None
     now = utcnow()
+    rfq_item_ids = {line.item_id for line in rfq.items}
     for invited in rfq.vendors:
+        mapped_item_ids = set(invited.mapped_item_ids or [])
+        if invited.mapped_item_ids is None:
+            mapped_item_ids = set((await db.execute(
+                select(VendorItem.item_id).where(
+                    VendorItem.vendor_id == invited.vendor_id,
+                    VendorItem.item_id.in_(rfq_item_ids),
+                )
+            )).scalars().all()) if rfq_item_ids else set()
+            invited.mapped_item_ids = sorted(mapped_item_ids)
+        item_quantities = invited.item_quantities
+        if item_quantities is None:
+            item_quantities = {
+                str(line.item_id): float(line.quantity)
+                for line in rfq.items if line.item_id in mapped_item_ids}
+            invited.item_quantities = item_quantities
+        if not mapped_item_ids:
+            raise ValidationError(
+                f"{invited.vendor_name or invited.vendor_id} is not mapped to any "
+                "item on this RFQ")
+        missing_quantities = [item_id for item_id in mapped_item_ids
+                              if str(item_id) not in item_quantities]
+        if missing_quantities:
+            raise ValidationError(
+                f"No vendor quantity was allocated for item {missing_quantities[0]}")
         invited.sent_at = now
         invited.status = QuotationStatus.DRAFT.value
         quote = Quotation(
@@ -2904,13 +3081,55 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
         db.add(quote)
         await db.flush()
         for line in rfq.items:
+            if line.item_id not in mapped_item_ids:
+                continue
             db.add(QuotationItem(
                 quotation_id=quote.id, line_no=line.line_no,
                 rfq_item_id=line.id, item_id=line.item_id,
                 item_code=line.item_code, item_name=line.item_name,
                 description=line.description, uom_code=line.uom_code,
-                quantity=line.quantity,
+                quantity=_d(item_quantities[str(line.item_id)]),
             ))
+
+
+async def email_rfq_copies(db: AsyncSession, rfq: RFQ, user) -> None:
+    """Email each vendor's RFQ after its approved publication is committed."""
+    for invited in rfq.vendors:
+        address = (invited.vendor_email or "").strip()
+        if not address:
+            logger.warning("%s not emailed to %s: no vendor email", rfq.rfq_no,
+                           invited.vendor_name or invited.vendor_id)
+            continue
+        portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
+                      f"?next=/supplier/rfqs/{rfq.id}")
+        subject = f"Request for quotation {rfq.rfq_no}"
+        text = (f"Hello {invited.vendor_name or 'Supplier'},\n\n"
+                f"Your RFQ copy is attached. Sign in with your supplier username and "
+                f"password to submit your quotation.\n\nSupplier Portal: {portal_url}")
+        company = await mail_service._company(db)
+        html = mail_template.render(
+            subject=subject, eyebrow="Request for quotation", heading=subject,
+            preheader=f"Quotation requested from {invited.vendor_name or 'supplier'}.",
+            blocks=[
+                mail_template.paragraph(f"Hello {invited.vendor_name or 'Supplier'},"),
+                mail_template.paragraph(
+                    "Your RFQ copy is attached. Sign in with your supplier username "
+                    "and password to submit your quotation."),
+                mail_template.facts([("RFQ", rfq.rfq_no), ("Due date", str(rfq.due_date or ""))]),
+                mail_template.button("Open Supplier Portal", portal_url),
+            ], company=company,
+            footer_note="Use your existing supplier username and password to sign in.")
+        try:
+            await mail_service.send_mail(
+                db, MailSendIn(to=[address], subject=subject, body=text, html=html), user,
+                attachments=[(f"{rfq.rfq_no}.pdf",
+                              vendor_documents.rfq_pdf(
+                                  rfq, invited.vendor_name or "Supplier", company,
+                                  invited.mapped_item_ids or [],
+                                  invited.item_quantities or {}),
+                              "application/pdf")])
+        except Exception as exc:  # delivery cannot unpublish an approved RFQ
+            logger.warning("could not email %s to %s: %s", rfq.rfq_no, address, exc)
 
 
 async def close_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
@@ -2968,6 +3187,35 @@ def _quote_totals(quote: Quotation) -> None:
                          + _d(quote.freight_amount) - _d(quote.discount_amount))
 
 
+async def _vendor_item_scope(db: AsyncSession, rfq_id: int, vendor_id: int,
+                             snapshot) -> set[int]:
+    """Return the invitation snapshot, with a live-map fallback for old RFQs."""
+    if snapshot is not None:
+        return set(snapshot)
+    return set((await db.execute(
+        select(VendorItem.item_id)
+        .join(RFQItem, RFQItem.item_id == VendorItem.item_id)
+        .where(RFQItem.rfq_id == rfq_id, VendorItem.vendor_id == vendor_id)
+    )).scalars().all())
+
+
+def _apply_vendor_quote_scope(quote: Quotation, allowed: set[int]) -> None:
+    """Hide legacy quotation lines that were never assigned to this vendor."""
+    visible = [line for line in quote.items if line.item_id in allowed]
+    set_committed_value(quote, "items", visible)
+    sub_total = tax_total = Decimal(0)
+    for line in visible:
+        gross = _d(line.quantity) * _d(line.rate)
+        net = gross - (gross * _d(line.discount_percent) / 100)
+        sub_total += net
+        tax_total += net * _d(line.tax_percent) / 100
+    set_committed_value(quote, "sub_total", sub_total)
+    set_committed_value(quote, "tax_amount", tax_total)
+    set_committed_value(
+        quote, "grand_total",
+        sub_total + tax_total + _d(quote.freight_amount) - _d(quote.discount_amount))
+
+
 async def get_quotation(db: AsyncSession, quote_id: int, user=None) -> Quotation:
     """FIXED 2026-08-20 — the list is bounded by the RFQ's rung and this was not, so a
     quotation hidden from the register opened by id and gave up the vendor's price.
@@ -2983,6 +3231,14 @@ async def get_quotation(db: AsyncSession, quote_id: int, user=None) -> Quotation
     quote = (await db.execute(stmt)).scalar_one_or_none()
     if quote is None:
         raise NotFoundError(f"Quotation {quote_id} not found")
+    invited = (await db.execute(select(RFQVendor).where(
+        RFQVendor.rfq_id == quote.rfq_id,
+        RFQVendor.vendor_id == quote.vendor_id,
+    ))).scalar_one_or_none()
+    allowed = await _vendor_item_scope(
+        db, quote.rfq_id, quote.vendor_id,
+        invited.mapped_item_ids if invited is not None else None)
+    _apply_vendor_quote_scope(quote, allowed)
     return quote
 
 
@@ -3138,6 +3394,16 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
                Quotation.status != QuotationStatus.DRAFT.value)
         .order_by(Quotation.grand_total.asc())
     )).scalars().all()
+
+    invitations = {row.vendor_id: row for row in (await db.execute(
+        select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
+    )).scalars().all()}
+    for quote in quotes:
+        invited = invitations.get(quote.vendor_id)
+        allowed = await _vendor_item_scope(
+            db, rfq.id, quote.vendor_id,
+            invited.mapped_item_ids if invited is not None else None)
+        _apply_vendor_quote_scope(quote, allowed)
 
     candidates = []
     for quote in quotes:
@@ -3432,15 +3698,25 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
 
 
 async def vendor_get_rfq(db: AsyncSession, vendor_id: int, rfq_id: int) -> RFQ:
-    rfq = (await db.execute(
-        select(RFQ)
+    row = (await db.execute(
+        select(RFQ, RFQVendor)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
         .where(RFQ.id == rfq_id, RFQVendor.vendor_id == vendor_id, _vendor_visible())
-    )).scalars().first()
+    )).first()
     # Not "you are not invited": a vendor who guesses ids should not learn which ones
     # exist. Same 404 either way.
-    if rfq is None:
+    if row is None:
         raise NotFoundError(f"RFQ {rfq_id} not found")
+    rfq, invited = row
+    allowed = await _vendor_item_scope(
+        db, rfq.id, vendor_id, invited.mapped_item_ids)
+    visible_items = [line for line in rfq.items if line.item_id in allowed]
+    quantities = invited.item_quantities or {}
+    for line in visible_items:
+        if str(line.item_id) in quantities:
+            set_committed_value(line, "quantity", _d(quantities[str(line.item_id)]))
+    set_committed_value(rfq, "items", visible_items)
+    set_committed_value(rfq, "total_items", len(visible_items))
     return rfq
 
 
@@ -3467,6 +3743,14 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
     )).scalars().first()
     if quote is None:
         raise NotFoundError("No quotation has been opened for you on this RFQ")
+
+    invited = (await db.execute(select(RFQVendor).where(
+        RFQVendor.rfq_id == rfq_id, RFQVendor.vendor_id == vendor_id
+    ))).scalar_one_or_none()
+    allowed = await _vendor_item_scope(
+        db, rfq_id, vendor_id,
+        invited.mapped_item_ids if invited is not None else None)
+    _apply_vendor_quote_scope(quote, allowed)
     
     if quote.status == QuotationStatus.DRAFT.value and not quote.payment_terms:
         vendor = await db.get(Vendor, vendor_id)

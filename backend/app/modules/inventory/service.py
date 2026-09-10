@@ -7,6 +7,7 @@ import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from sqlalchemy import String, case, cast, func, select, or_, and_, text, true
 from sqlalchemy.exc import IntegrityError
@@ -601,6 +602,70 @@ async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
 STOCK_VIEWS = ("available", "all", "zero", "reserved")
 
 
+async def _zero_stock_items_query(
+    db: AsyncSession, *, item_id: int | None = None, warehouse_id: int | None = None,
+    project_id: int | None = None, search: str | None = None,
+    category_id: int | None = None, below_reorder: bool = False, user=None,
+):
+    """Active catalogue items whose total stock in the visible scope is zero.
+
+    `stk_balance` only exists after a movement, so filtering that table can never
+    show an item that has never been received. This master-driven query is the zero
+    view's deliberate exception to the normal balance-row grid.
+    """
+    warehouse_ids = await _scoped_warehouse_ids(db, user, warehouse_id)
+    stock_conditions = [Stock.item_id == Item.id]
+    if warehouse_ids is not None:
+        stock_conditions.append(Stock.warehouse_id.in_(warehouse_ids))
+    if project_id is not None:
+        stock_conditions.append(Stock.project_id == project_id)
+    floor_locations = await locations.floor_location_ids_for_user(db, user)
+    if floor_locations is not None:
+        stock_conditions.append(Stock.bin_id.in_(floor_locations))
+    total_in_scope = select(func.coalesce(func.sum(Stock.total_qty), 0)).where(
+        *stock_conditions).scalar_subquery()
+
+    stmt = select(Item).where(Item.is_active.is_(True), total_in_scope <= 0)
+    if item_id is not None:
+        stmt = stmt.where(Item.id == item_id)
+    if category_id is not None:
+        stmt = stmt.where(Item.category_id == category_id)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(Item.code.like(like), Item.name.like(like),
+                              Item.barcode_value.like(like)))
+    if below_reorder:
+        stmt = stmt.where(Item.reorder_level > 0)
+    return stmt, warehouse_ids
+
+
+async def _zero_stock_rows(db: AsyncSession, params: PageParams, *, item_id=None,
+                           warehouse_id=None, project_id=None, search=None,
+                           category_id=None, below_reorder=False, user=None) -> dict:
+    stmt, _ = await _zero_stock_items_query(
+        db, item_id=item_id, warehouse_id=warehouse_id, project_id=project_id,
+        search=search, category_id=category_id, below_reorder=below_reorder, user=user)
+    total = int(await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    items = (await db.execute(stmt.order_by(Item.name).offset(params.offset).limit(params.size))).scalars().all()
+    warehouse_name = "All accessible warehouses"
+    if warehouse_id is not None:
+        warehouse_name = (await db.scalar(select(Warehouse.name).where(Warehouse.id == warehouse_id))
+                          or f"Warehouse {warehouse_id}")
+    rows = [SimpleNamespace(
+        # Negative IDs identify a catalogue-only row: it has no stock lot to open.
+        id=-item.id, item_id=item.id, item_code=item.code, item_name=item.name,
+        category_name=item.category_name, warehouse_id=warehouse_id or 0,
+        warehouse_name=warehouse_name, uom_code=item.uom_code, bin_id=NO_BIN,
+        bin_code=None, batch_id=NO_BATCH, batch_no=None, expiry_date=None,
+        project_id=project_id or NO_PROJECT, project_name=None, serial_number=None,
+        asset_code=None, consumable_code=None, available_qty=0, reserved_qty=0,
+        transit_qty=0, total_qty=0, valuation_rate=0, stock_value=0,
+        last_movement_at=None, updated_at=None, reorder_level=float(item.reorder_level or 0),
+        barcode_value=item.barcode_value, uom_name=None,
+    ) for item in items]
+    return {"items": rows, "total": total, "page": params.page, "size": params.size}
+
+
 async def _stock_query(db: AsyncSession, item_id: int | None = None,
                        warehouse_id: int | None = None, project_id: int | None = None,
                        bin_id: int | None = None, search: str | None = None,
@@ -701,6 +766,12 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
                      below_reorder: bool = False, *,
                      stock_view: str | None = None, user=None) -> dict:
     """The stock balance grid."""
+    if stock_view == "zero":
+        # Master-driven: includes items that have never had a stk_balance row.
+        return await _zero_stock_rows(
+            db, params, item_id=item_id, warehouse_id=warehouse_id,
+            project_id=project_id, search=search, category_id=category_id,
+            below_reorder=below_reorder, user=user)
     stmt = await _stock_query(
         db, item_id, warehouse_id, project_id, bin_id, search, category_id, batch_no,
         include_zero, expiring_in_days, expiry_status, expiry_from, expiry_to,
@@ -763,6 +834,25 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
     Same filters as `list_stock`, no LIMIT. The browser cannot do this: it only ever
     holds one page, so "Stock lines 20 / Items 11" was really "rows on this page".
     """
+    if stock_view == "zero":
+        zero_items, _ = await _zero_stock_items_query(
+            db, item_id=item_id, warehouse_id=warehouse_id, project_id=project_id,
+            search=search, category_id=category_id, below_reorder=below_reorder, user=user)
+        zero_rows = zero_items.subquery()
+        count = int(await db.scalar(select(func.count()).select_from(zero_rows)) or 0)
+        below = int(await db.scalar(
+            select(func.count()).select_from(zero_rows)
+            .where(zero_rows.c.reorder_level > 0)
+        ) or 0)
+        reorder_configured = bool(await db.scalar(
+            select(func.count()).select_from(Item).where(Item.reorder_level > 0).limit(1)
+        ))
+        return {
+            "stock_lines": count, "distinct_items": count, "total_qty": 0,
+            "total_value": 0, "expiring_30_days": 0, "below_reorder": below,
+            "reorder_configured": reorder_configured,
+        }
+
     stmt = await _stock_query(
         db, item_id, warehouse_id, project_id, bin_id, search, category_id, batch_no,
         include_zero, expiring_in_days, expiry_status, expiry_from, expiry_to,

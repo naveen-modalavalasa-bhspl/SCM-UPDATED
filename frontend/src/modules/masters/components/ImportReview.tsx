@@ -102,6 +102,10 @@ export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
   // The fixes, keyed "<row>:<field>". Held here rather than written back into the
   // preview so cancelling leaves the uploaded file untouched.
   const [picked, setPicked] = useState<Record<string, number>>({});
+  // Any cell in a problem row can be repaired here — not only a mapped lookup.
+  // This is deliberately a small spreadsheet-like editor rather than another form
+  // whose fields vary by master.
+  const [edits, setEdits] = useState<Record<string, unknown>>({});
   const [showAll, setShowAll] = useState(false);
 
   const nameField = preview.columns.find((c) => c.field === "name")?.field;
@@ -109,13 +113,23 @@ export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
   const listed = showAll ? preview.rows : troubled;
 
   /** A problem is settled when it has been given a value, or never needed one. */
+  const hasEdit = (row: number, field: string) =>
+    Object.prototype.hasOwnProperty.call(edits, `${row}:${field}`);
+  const valueFor = (row: ImportRow, field: string) =>
+    hasEdit(row.row, field) ? edits[`${row.row}:${field}`] : row.values[field];
+  const change = (row: number, field: string, value: unknown) =>
+    setEdits((current) => ({ ...current, [`${row}:${field}`]: value }));
   const outstanding = troubled.reduce((count, row) => count + row.problems.filter(
-    (p) => p.field !== null && picked[`${row.row}:${p.field}`] === undefined,
+    (p) => p.field !== null && picked[`${row.row}:${p.field}`] === undefined
+      && !hasEdit(row.row, p.field),
   ).length + row.problems.filter((p) => p.field === null).length, 0);
 
   const commit = () => {
     onCommit(preview.rows.map((row) => {
       const values = { ...row.values };
+      for (const column of preview.columns) {
+        if (hasEdit(row.row, column.field)) values[column.field] = edits[`${row.row}:${column.field}`];
+      }
       for (const problem of row.problems) {
         if (!problem.field) continue;
         const choice = picked[`${row.row}:${problem.field}`];
@@ -200,6 +214,48 @@ export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
                   />
                 ))}
               </div>
+            )}
+            {row.problems.length > 0 && (
+              <details className="mt-2 rounded-lg bg-content2 px-3 py-2">
+                <summary className="cursor-pointer text-xs font-semibold text-body">
+                  Edit this row here
+                </summary>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {preview.columns.map((column) => {
+                    const value = valueFor(row, column.field);
+                    const text = value === undefined || value === null ? "" : String(value);
+                    const choices = column.lookup
+                      ? preview.options[column.field] ?? []
+                      : column.type === "boolean" ? ["true", "false"] : column.choices;
+                    return (
+                      <label key={column.field} className="min-w-0 text-xs text-muted">
+                        {column.label}{column.required ? " *" : ""}
+                        {choices.length > 0 ? (
+                          <select
+                            value={text}
+                            onChange={(event) => change(row.row, column.field, event.target.value)}
+                            className="mt-1 min-h-10 w-full rounded-md border border-line bg-bg px-2 text-sm text-ink"
+                          >
+                            <option value="">Choose…</option>
+                            {column.lookup
+                              ? choices.map((choice) => {
+                                  const option = choice as { id: number; label: string; code: string };
+                                  return <option key={option.id} value={option.id}>{option.label}{option.code ? ` · ${option.code}` : ""}</option>;
+                                })
+                              : choices.map((choice) => <option key={String(choice)} value={String(choice)}>{String(choice)}</option>)}
+                          </select>
+                        ) : (
+                          <input
+                            value={text}
+                            onChange={(event) => change(row.row, column.field, event.target.value)}
+                            className="mt-1 min-h-10 w-full rounded-md border border-line bg-bg px-2 text-sm text-ink"
+                          />
+                        )}
+                      </label>
+                    );
+                  })}
+                </div>
+              </details>
             )}
           </div>
         ))}

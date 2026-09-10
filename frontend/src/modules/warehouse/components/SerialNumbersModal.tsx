@@ -272,14 +272,19 @@ export function SerialNumbersModal({
     /**
      * Tick the whole list in one press.
      *
-     * Issuing 200 handsets off a bin meant 200 individual clicks, or 200 scans, for a
-     * decision the storekeeper had already made — the units are all in the same bin and
-     * the line is for all of them. Bounded by the SAME ceiling a scan is: never more
-     * than the line asks for, so it fills the remaining slots and stops.
+     * Issuing 200 handsets off one bin was 200 clicks, or 200 scans, for a decision
+     * the storekeeper had already made — they are all in the same bay and the line is
+     * for all of them. Bounded exactly as a scan is: never more than the line asks
+     * for, so it fills the remaining slots and stops.
      *
-     * It follows the search box. With a filter typed, "all" means the units on screen,
-     * which is how a storekeeper picks one batch out of a mixed bin; clearing the search
-     * offers the rest. Already-selected units are left alone rather than re-added.
+     * It follows the search box, so with a filter typed "all" means the units on
+     * screen — how one batch is picked out of a mixed bin — and clearing the search
+     * offers the rest. Units already chosen are left alone rather than re-added.
+     *
+     * qa deleted this on the reasonable evidence that nothing rendered it and the
+     * build called it dead. The button exists (below, beside Clear); it was the
+     * BUTTON that had gone missing, not this arithmetic, so the fix is to keep both
+     * rather than to drop the half that was still correct.
      */
     const addable = visible.filter((s) => !selected.has(s));
     const room = required - selected.size;

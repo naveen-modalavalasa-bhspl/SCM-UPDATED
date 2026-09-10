@@ -25,12 +25,9 @@ function Gate({ perm, children }: { perm?: string; children: ReactNode }) {
  *  why the failure message is rendered whole, newlines and all, instead of being
  *  truncated to a toast.
  *
- *  A pick goes through `preview` first, which writes nothing and reports what the
- *  server made of the sheet. A file that reads cleanly is committed straight away —
- *  the person who got it right sees no extra screen. A file with unmatched cells
- *  opens `ImportReview`, because for a master filled in by storekeepers the usual
- *  failure is a name that is nearly right, and sending them back to Excel to guess
- *  again is what made a four-cell mistake cost an afternoon.
+ *  Every pick stops at `preview`, which writes nothing and reports what the server
+ *  made of the sheet. Even a clean file needs an explicit Save: upload is selection,
+ *  not permission to change master data. Problems can be corrected in `ImportReview`.
  */
 export function BulkBar({ api, managePerm, queryKey, label }: {
   api: BulkApi;
@@ -67,13 +64,7 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
     setBusy("import"); setError(null); setResult(null); setPreview(null);
     try {
       const draft = await api.preview(file);
-      if (draft.summary.blocked === 0 && draft.file_errors.length === 0) {
-        // Nothing to ask about, so do not ask: showing a review screen for a file
-        // with no problems is a click that teaches people to click past it.
-        done(await api.commit(draft.rows));
-      } else {
-        setPreview(draft);
-      }
+      setPreview(draft);
     } catch (reason) {
       setError((reason as Error).message);
     } finally {

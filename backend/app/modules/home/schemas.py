@@ -5,7 +5,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-DateRange = Literal["week", "month", "quarter"]
+#: "day" is the last 24 HOURS, rolling — the one window on this picker that is not a
+#: calendar period, because "what happened on my shift" does not reset at midnight.
+#: "custom" is the only one that carries an end date; every other value runs to now.
+DateRange = Literal["day", "week", "month", "quarter", "custom"]
 
 
 class HomeKpi(BaseModel):
