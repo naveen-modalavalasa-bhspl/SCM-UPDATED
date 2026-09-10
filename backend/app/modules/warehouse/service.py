@@ -9989,6 +9989,34 @@ async def _adopt_legacy_issue_reservations(
     await db.flush()
 
 
+async def _unit_codes_required(db: AsyncSession, item, *, config: dict | None = None) -> bool:
+    """Must an issue of this item name one identifier per unit before it may post?
+
+    Until 2026-09-10 only `is_serial_tracked` did. An asset tag and a consumable lot
+    code are the same promise — one label, one physical thing — so an asset issued
+    without its tags left the building with nothing tying the goods to the document,
+    and the gap showed up only when somebody went looking for a unit months later.
+
+    The rule MIRRORS THE MINT, deliberately: the conditions are exactly the ones
+    `_place_unit_codes` uses to decide whether to give these units codes at putaway —
+    the item master's code toggle (`codeformat.is_code_tracked`) and countability.
+    If putaway would have coded them, the issue must name them; if it would not,
+    there is nothing to name and nothing is demanded. Any other pairing has one door
+    minting labels the other never asks for, or asks for labels nothing mints.
+
+    Serial and IMEI are declared on the item master directly and are unconditional —
+    they are what the manufacturer stamped, and a countability check has no business
+    overruling that.
+    """
+    if bool(getattr(item, "is_serial_tracked", False)):
+        return True
+    if bool(getattr(item, "is_imei_tracked", False)):
+        return True
+    if not codeformat.is_code_tracked(item, config or await codeformat.code_settings(db)):
+        return False
+    return await _is_countable(db, item)
+
+
 async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool) -> None:
     """Flips the status of the units leaving or coming back with an issue.
 
@@ -10002,6 +10030,9 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
     new_status = (SerialStatus.ISSUED if outward else SerialStatus.RETURNED).value
     from_status = (SerialStatus.AVAILABLE if outward else SerialStatus.ISSUED).value
     await _adopt_legacy_issue_reservations(db, issue)
+    # Five queries, read once for the document: the toggle cannot differ between two
+    # lines of one issue.
+    code_config = await codeformat.code_settings(db)
 
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
@@ -10021,9 +10052,12 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
                 m.SerialNumber.is_active.is_(True))
             .with_for_update()
         )).scalars().all()
-        if item.is_serial_tracked and len(rows) != wanted:
+        # Every kind of identifier the master declares, not just the serial. The noun
+        # follows the kind, so an asset line is not told it is missing "serials".
+        if await _unit_codes_required(db, item, config=code_config)                 and len(rows) != wanted:
+            noun = _UNIT_NOUN[_unit_mode(item)]
             raise ValidationError(
-                f"{line.item_code or line.item_id}: {wanted} serials are required, "
+                f"{line.item_code or line.item_id}: {wanted} {noun} are required, "
                 f"but {len(rows)} are reserved for this issue"
             )
         # The flip is the same two columns for every unit on the line, so it is one

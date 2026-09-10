@@ -921,13 +921,16 @@ async def cancel_return(return_id: int, body: s.ReasonIn, db: AsyncSession = Dep
 # ---------------------------------------------------------------------------
 
 @router.get("/serials", response_model=Page[s.SerialRead])
-async def list_serials(params: PageParams = Depends(), status: str | None = None,
+async def list_serials(page: int = Query(1, ge=1),
+                       size: int = Query(20, ge=1, le=10000),
+                       status: str | None = None,
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
                        issue_line_id: int | None = None,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
+    params = PageParams(page=page, size=size)
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
                                       bin_id=bin_id, search=search, issue_id=issue_id,
