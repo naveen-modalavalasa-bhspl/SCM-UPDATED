@@ -473,7 +473,11 @@ export function RFQDetailPage() {
               >
                 {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
                   <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-                    {comparison.responded} of {rfq.vendor_count} quote{rfq.vendor_count === 1 ? "" : "s"} on file.
+                    {/* `rfq?.` like every other read of it on this page: the query
+                        behind it is not guaranteed resolved here, and the two bare
+                        reads were what stopped the branch compiling. */}
+                    {comparison.responded} of {rfq?.vendor_count ?? 0}{" "}
+                    quote{rfq?.vendor_count === 1 ? "" : "s"} on file.
                   </p>
                 )}
                 {/* The sheet decides nothing. It flags the cheapest cell per item and
