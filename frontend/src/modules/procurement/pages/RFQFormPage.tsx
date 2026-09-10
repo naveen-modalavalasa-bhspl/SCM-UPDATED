@@ -45,7 +45,7 @@ export function RFQFormPage() {
   const [org, setOrg] = useState<OrgValue>({
     departmentId: "", warehouseId: "", projectId: "", companyName: "",
   });
-  const [vendorIds, setVendorIds] = useState<number[]>([]);
+  const [allocations, setAllocations] = useState<Record<number, Record<number, string>>>({});
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
   const [problem, setProblem] = useState<string | null>(null);
@@ -75,11 +75,11 @@ export function RFQFormPage() {
     [lines],
   );
 
-  const { data: vendors = [] } = useQuery({
+  const { data: vendorsByItem = {} } = useQuery<Record<number, MasterVendor[]>>({
     // Item ids are part of the key, so changing a line refetches rather than leaving
     // the previous item's suppliers on screen looking selectable.
     queryKey: ["rfq-vendors", vendorSearch, chosenItemIds],
-    queryFn: () =>
+    queryFn: async () => Object.fromEntries(await Promise.all(chosenItemIds.map(async (itemId) => {
       // Material suppliers only: the logistics partners share this master, and an
       // RFQ sent to a truck operator for gauze is a tender nobody can answer.
       //
@@ -87,12 +87,14 @@ export function RFQFormPage() {
       // being asked for. The union across the lines, not the intersection — a tender
       // for gauze and syringes goes to whoever can supply either. The same rule is
       // checked again on save; this only decides what is offered.
-      api.get<{ items: MasterVendor[] }>("/api/vendors", {
+      const response = await api.get<{ items: MasterVendor[] }>("/api/vendors", {
         params: {
           search: vendorSearch || undefined, size: 50, is_active: true,
-          kind: "MATERIAL", item_ids: chosenItemIds.join(",") || undefined,
+          kind: "MATERIAL", item_ids: String(itemId),
         },
-      }).then((r) => r.data.items),
+      });
+      return [itemId, response.data.items] as const;
+    }))),
     // No items chosen yet means no question to ask: an unfiltered list here would be
     // every supplier in the master, which is the thing this restriction removes.
     enabled: chosenItemIds.length > 0,
@@ -116,12 +118,22 @@ export function RFQFormPage() {
       projectId: existing.project_id ?? "",
       companyName: existing.company_name ?? "",
     });
-    setVendorIds(existing.vendors.map((v) => v.vendor_id));
+    const restored: Record<number, Record<number, string>> = {};
+    existing.vendors.forEach((vendor) => {
+      (vendor.mapped_item_ids ?? []).forEach((itemId) => {
+        restored[itemId] ??= {};
+        const fullQuantity = existing.items.find((item) => item.item_id === itemId)?.quantity ?? 0;
+        restored[itemId][vendor.vendor_id] = String(
+          vendor.item_quantities?.[String(itemId)] ?? fullQuantity);
+      });
+    });
+    setAllocations(restored);
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
       item_code: item.item_code,
       item_name: item.item_name,
       quantity: String(item.quantity),
+      original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
     })));
@@ -146,6 +158,7 @@ export function RFQFormPage() {
       item_code: item.item_code,
       item_name: item.item_name,
       quantity: String(item.quantity),
+      original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
     })));
@@ -167,6 +180,7 @@ export function RFQFormPage() {
       item_code: item.item_code ?? "",
       item_name: item.item_name ?? "",
       quantity: String(item.approved_qty),
+      original_quantity: String(item.approved_qty),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
     })));
@@ -175,6 +189,13 @@ export function RFQFormPage() {
   const save = useMutation({
     mutationFn: () => {
       const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
+      const vendorAllocations = usable.flatMap((line) =>
+        Object.entries(allocations[Number(line.item_id)] ?? {})
+          .filter(([, quantity]) => Number(quantity) > 0)
+          .map(([vendorId, quantity]) => ({
+            item_id: Number(line.item_id), vendor_id: Number(vendorId),
+            quantity: Number(quantity),
+          })));
       const payload = {
         title: title || null,
         due_date: dueDate || null,
@@ -184,7 +205,8 @@ export function RFQFormPage() {
         project_id: org.projectId === "" ? null : org.projectId,
         department_id: org.departmentId === "" ? null : org.departmentId,
         company_name: org.companyName || null,
-        vendor_ids: vendorIds,
+        vendor_ids: [...new Set(vendorAllocations.map((row) => row.vendor_id))],
+        vendor_allocations: vendorAllocations,
         lines: usable.map((line) => ({
           item_id: Number(line.item_id),
           quantity: Number(line.quantity),
@@ -213,19 +235,44 @@ export function RFQFormPage() {
       setProblem("Add at least one line with an item and a quantity.");
       return;
     }
-    if (!vendorIds.length) {
-      setProblem("Pick at least one vendor to ask.");
-      return;
+    for (const line of usable) {
+      if (line.original_quantity && Number(line.quantity) > Number(line.original_quantity)) {
+        setProblem(`Quantity cannot exceed ${line.original_quantity} for ${line.item_name || line.item_code}.`);
+        return;
+      }
+      const itemAllocations = Object.values(allocations[Number(line.item_id)] ?? {})
+        .map(Number).filter((quantity) => quantity > 0);
+      if (!itemAllocations.length) {
+        setProblem(`Pick at least one vendor for ${line.item_name || line.item_code || "each item"}.`);
+        return;
+      }
+      const allocated = itemAllocations.reduce((sum, quantity) => sum + quantity, 0);
+      if (allocated > Number(line.quantity)) {
+        setProblem(`Allocated quantity cannot exceed ${line.quantity} for ${line.item_name || line.item_code}.`);
+        return;
+      }
     }
     setProblem(null);
     save.mutate();
   };
 
-  const toggleVendor = (vendorId: number) =>
-    setVendorIds((current) =>
-      current.includes(vendorId)
-        ? current.filter((v) => v !== vendorId)
-        : [...current, vendorId]);
+  const toggleVendor = (itemId: number, vendorId: number, maximum: number) =>
+    setAllocations((current) => {
+      const item = { ...(current[itemId] ?? {}) };
+      if (vendorId in item) delete item[vendorId];
+      else {
+        const used = Object.values(item).reduce((sum, quantity) => sum + (Number(quantity) || 0), 0);
+        const remaining = Math.max(0, maximum - used);
+        item[vendorId] = remaining > 0 ? String(remaining) : "";
+      }
+      return { ...current, [itemId]: item };
+    });
+
+  const setVendorQuantity = (itemId: number, vendorId: number, quantity: string) =>
+    setAllocations((current) => ({
+      ...current,
+      [itemId]: { ...(current[itemId] ?? {}), [vendorId]: quantity },
+    }));
 
   return (
     <div>
@@ -338,72 +385,73 @@ export function RFQFormPage() {
 
         <div>
           <h2 className="mb-1 text-sm font-semibold text-ink">
-            Who to ask
+            Vendors and quantities per item
             <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
-            <span className="sr-only"> (required)</span>
-            <span className="ml-2 text-xs font-normal text-muted">
-              {vendorIds.length} selected
-            </span>
           </h2>
           <p className="mb-3 text-xs text-muted">
-            Each vendor gets their own link. Removing one who has already quoted is
-            refused — their offer is part of the record.
+            Split each item between its mapped vendors. The combined allocation cannot
+            exceed the quantity carried from the previous document.
           </p>
-          <Input
-            value={vendorSearch}
-            onChange={(e) => setVendorSearch(e.target.value)}
-            placeholder="Search vendors…"
-          />
-          <div className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-xl border border-line p-2">
-            {vendors.map((vendor) => (
-              <label
-                key={vendor.id}
-                className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 hover:bg-surface-2"
-              >
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={vendorIds.includes(vendor.id)}
-                  onChange={() => toggleVendor(vendor.id)}
-                />
-                <span className="min-w-0">
-                  <span className="block truncate text-sm text-ink">{vendor.name}</span>
-                  <span className="block truncate text-[11px] text-muted">
-                    {vendor.code ?? "—"}{vendor.email ? ` · ${vendor.email}` : ""}
-                  </span>
-                </span>
-              </label>
-            ))}
-            {/* Three different silences, and saying the wrong one sends somebody
-                looking in the wrong place. "No vendors" on an item nobody has mapped
-                reads as a broken screen; it is missing master data, and the fix is one
-                link away. */}
-            {!vendors.length && (
-              chosenItemIds.length === 0 ? (
-                <p className="px-3 py-4 text-sm text-muted">
-                  Add an item first — vendors are offered against what you are asking for.
-                </p>
-              ) : vendorSearch ? (
-                <p className="px-3 py-4 text-sm text-muted">
-                  No vendor matching “{vendorSearch}” is mapped to supply these items.
-                </p>
-              ) : (
-                <div className="px-3 py-4 text-sm">
-                  <p className="text-ink">
-                    No vendor is mapped to supply {chosenItemIds.length === 1
-                      ? "this item" : "any of these items"}.
-                  </p>
-                  <p className="mt-1 text-xs text-muted">
-                    A tender can only be sent to a vendor mapped to what it asks for.
-                    Add the mapping on{" "}
-                    <Link to="/masters?tab=vendor-items"
-                          className="font-semibold text-brand underline">
-                      Masters → Vendor Rates
-                    </Link>
-                    , then come back.
-                  </p>
+          <Input value={vendorSearch} onChange={(e) => setVendorSearch(e.target.value)}
+                 placeholder="Search vendors…" />
+          <div className="mt-3 space-y-3">
+            {lines.filter((line) => line.item_id !== "").map((line) => {
+              const itemId = Number(line.item_id);
+              const maximum = Number(line.quantity) || 0;
+              const itemAllocations = allocations[itemId] ?? {};
+              const allocated = Object.values(itemAllocations)
+                .reduce((sum, quantity) => sum + (Number(quantity) || 0), 0);
+              const itemVendors = vendorsByItem[itemId] ?? [];
+              return (
+                <div key={itemId} className="rounded-xl border border-line p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">
+                        {line.item_code ? `${line.item_code} — ` : ""}{line.item_name}
+                      </p>
+                      <p className="text-xs text-muted">Maximum {maximum} {line.uom_code ?? ""}</p>
+                    </div>
+                    <p className={`text-xs font-semibold ${allocated > maximum ? "text-danger" : "text-muted"}`}>
+                      Allocated {allocated} / {maximum}
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    {itemVendors.map((vendor) => {
+                      const selected = vendor.id in itemAllocations;
+                      return (
+                        <div key={vendor.id}
+                             className="grid min-h-12 grid-cols-[auto_1fr_9rem] items-center gap-3 rounded-lg px-2 hover:bg-surface-2">
+                          <input type="checkbox" className="h-4 w-4" checked={selected}
+                                 onChange={() => toggleVendor(itemId, vendor.id, maximum)} />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm text-ink">{vendor.name}</p>
+                            <p className="truncate text-[11px] text-muted">
+                              {vendor.code ?? "—"}{vendor.email ? ` · ${vendor.email}` : ""}
+                            </p>
+                          </div>
+                          <Input type="number" min="0.001" max={String(maximum)} step="0.001"
+                                 disabled={!selected} value={selected ? itemAllocations[vendor.id] : ""}
+                                 aria-label={`Quantity for ${vendor.name}`}
+                                 onChange={(e) => setVendorQuantity(itemId, vendor.id, e.target.value)} />
+                        </div>
+                      );
+                    })}
+                    {!itemVendors.length && (
+                      <p className="px-2 py-3 text-sm text-muted">
+                        No mapped vendor found. Add one under{" "}
+                        <Link to="/masters?tab=vendor-items" className="font-semibold text-brand underline">
+                          Masters → Vendor Rates
+                        </Link>.
+                      </p>
+                    )}
+                  </div>
                 </div>
-              )
+              );
+            })}
+            {!chosenItemIds.length && (
+              <p className="rounded-xl border border-line px-3 py-4 text-sm text-muted">
+                Add an item first to choose its vendors.
+              </p>
             )}
           </div>
         </div>

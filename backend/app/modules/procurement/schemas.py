@@ -442,6 +442,12 @@ class RFQLineIn(BaseModel):
     required_date: date | None = None
 
 
+class RFQVendorAllocationIn(BaseModel):
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
 class RFQCreate(BaseModel):
     title: str | None = None
     requisition_id: int | None = None
@@ -458,6 +464,8 @@ class RFQCreate(BaseModel):
     # service against the shared catalogue, never against a list kept here.
     evaluation_method: str | None = None
     vendor_ids: Annotated[list[int], BatchIds] = []
+    vendor_allocations: list[RFQVendorAllocationIn] = Field(
+        default_factory=list, max_length=MAX_DOCUMENT_LINES * 20)
     lines: list[RFQLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
@@ -493,6 +501,7 @@ class RFQUpdate(BaseModel):
     company_name: str | None = None
     evaluation_method: str | None = None
     vendor_ids: Annotated[list[int], BatchIds] | None = None
+    vendor_allocations: list[RFQVendorAllocationIn] | None = None
     lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
 
 
@@ -520,6 +529,8 @@ class RFQVendorOut(BaseModel):
     status: str | None = None
     sent_at: datetime | None = None
     responded_at: datetime | None = None
+    mapped_item_ids: list[int] | None = None
+    item_quantities: dict[str, float] | None = None
 
 
 class RFQListRow(BaseModel):

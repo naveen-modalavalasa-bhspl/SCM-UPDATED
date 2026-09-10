@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 #: mailbox screen nobody scrolls past the first page of does not need more.
 INBOX_FETCH_LIMIT = 50
 
+# A generated document that travels with a system email.  Kept at the transport
+# boundary so business modules need not know anything about MIME construction.
+MailAttachment = tuple[str, bytes, str]
+
 
 class MailNotConfigured(AppException):
     """No mailbox is set up on this deployment. A configuration state, not a fault —
@@ -194,7 +198,8 @@ def _attach_logos(message: EmailMessage, html: str) -> None:
 def _send_sync(to_addrs: list[str], subject: str, body: str,
                cc_addrs: list[str] | None = None,
                reply_to: str | None = None,
-               html: str | None = None) -> None:
+               html: str | None = None,
+               attachments: list[MailAttachment] | None = None) -> None:
     """One connection, one message. Blocking — always called via `asyncio.to_thread`.
 
     With `html`, the message is `multipart/alternative`: `body` is the `text/plain`
@@ -217,6 +222,10 @@ def _send_sync(to_addrs: list[str], subject: str, body: str,
     if html:
         message.add_alternative(html, subtype="html")
         _attach_logos(message, html)
+    for filename, content, mime_type in attachments or []:
+        maintype, _, subtype = mime_type.partition("/")
+        message.add_attachment(content, maintype=maintype or "application",
+                               subtype=subtype or "octet-stream", filename=filename)
 
     host, port = settings.MAIL_SMTP_HOST, settings.MAIL_SMTP_PORT
     timeout = settings.MAIL_TIMEOUT_SECONDS
@@ -243,14 +252,15 @@ def _send_sync(to_addrs: list[str], subject: str, body: str,
 async def send(to_addrs: list[str], subject: str, body: str,
                cc_addrs: list[str] | None = None,
                reply_to: str | None = None,
-               html: str | None = None) -> None:
+               html: str | None = None,
+               attachments: list[MailAttachment] | None = None) -> None:
     """Send one message. Raises `MailNotConfigured` or `MailSendError`.
 
     `body` is the plain-text half and is never optional; `html` is the rich half, and
     when given the brand logos it references ride along inline (see `_attach_logos`).
     """
     await asyncio.to_thread(
-        _send_sync, to_addrs, subject, body, cc_addrs, reply_to, html)
+        _send_sync, to_addrs, subject, body, cc_addrs, reply_to, html, attachments)
 
 
 # --------------------------------------------------------------------------- #

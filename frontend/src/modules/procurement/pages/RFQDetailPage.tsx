@@ -473,7 +473,7 @@ export function RFQDetailPage() {
               >
                 {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
                   <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-                    {comparison.responded} of 3 quotes on file.
+                    {comparison.responded} of {rfq.vendor_count} quote{rfq.vendor_count === 1 ? "" : "s"} on file.
                   </p>
                 )}
                 {/* The sheet decides nothing. It flags the cheapest cell per item and

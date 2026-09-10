@@ -657,7 +657,7 @@ export function StockBalanceView() {
           onChange={setStockView}
           options={[
             { value: "all", label: "All stock" },
-            { value: "zero", label: "Zero stock" },
+            { value: "zero", label: "Zero stock items" },
             { value: "reserved", label: "Fully reserved" },
           ]}
         />
@@ -669,7 +669,7 @@ export function StockBalanceView() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
-          onRowClick={setSelected}
+          onRowClick={(row) => { if (row.id > 0) setSelected(row); }}
           page={page}
           totalPages={totalPages}
           onPageChange={setPage}

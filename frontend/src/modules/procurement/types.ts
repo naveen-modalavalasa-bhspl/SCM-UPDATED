@@ -381,6 +381,8 @@ export interface RFQVendor {
   status?: string | null;
   sent_at?: string | null;
   responded_at?: string | null;
+  mapped_item_ids?: number[] | null;
+  item_quantities?: Record<string, number> | null;
 }
 
 export interface RFQListRow {
@@ -453,6 +455,11 @@ export interface RFQCreate {
   due_date?: string | null;
   terms?: string | null;
   vendor_ids: number[];
+  vendor_allocations?: {
+    item_id: number;
+    vendor_id: number;
+    quantity: number;
+  }[];
   lines: {
     item_id: number;
     quantity: number;
@@ -464,6 +471,7 @@ export interface RFQCreate {
 
 export type RFQUpdate = Partial<Omit<RFQCreate, "requisition_id" | "vendor_ids" | "lines">> & {
   vendor_ids?: number[];
+  vendor_allocations?: RFQCreate["vendor_allocations"];
   lines?: RFQCreate["lines"];
 };
 

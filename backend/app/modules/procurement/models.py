@@ -364,6 +364,12 @@ class RFQVendor(Base):
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)      # snapshot
     vendor_email = Column(String(200), nullable=True)     # snapshot
+    # The RFQ item master IDs this vendor was tagged to supply when the buyer saved
+    # the invitation. A snapshot keeps an issued tender stable if mappings change.
+    mapped_item_ids = Column(JSON, nullable=True)
+    # Item id -> quantity this supplier is being asked to quote. Stored with the
+    # invitation so every supplier can receive a different share of one RFQ line.
+    item_quantities = Column(JSON, nullable=True)
     # Added to the DB team's columns. A single-use link is what lets a vendor who has
     # no portal account still open exactly this RFQ and nothing else — without it the
     # only way in is a password, and most vendors will never have one.
