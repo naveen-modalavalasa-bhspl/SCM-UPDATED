@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
@@ -561,6 +561,14 @@ class RFQListRow(BaseModel):
     created_at: datetime
 
 
+class RFQPoRef(BaseModel):
+    po_id: int
+    po_no: str
+    po_status: str
+    vendor_id: int
+    quotation_id: int | None
+
+
 class RFQOut(RFQListRow):
     requisition_id: int | None = None
     requisition_no: str | None = None
@@ -574,8 +582,9 @@ class RFQOut(RFQListRow):
     evaluation_method: str | None = None
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
-    # The purchase order this award became. Not stored on pro_rfqs — the PO points
-    # backward at the RFQ and this is read from there, so there is one link, not two.
+    # The purchase orders this award became.
+    pos: list[RFQPoRef] = []
+    # Backward compatibility for the single-PO logic.
     po_id: int | None = None
     po_no: str | None = None
     po_status: str | None = None
@@ -811,9 +820,36 @@ class QuoteOut(QuoteListRow):
     items: list[QuoteItemOut] = []
 
 
+class RFQAwardAllocationIn(BaseModel):
+    """One supplier's share of one item, decided against the quoted prices."""
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
 class AwardIn(BaseModel):
-    quotation_id: int
+    """Who won, and how much of it.
+
+    Two shapes, because there are two decisions. `quotation_id` alone awards the whole
+    tender to one supplier, which is what it always did and still the common case.
+    `allocations` splits it: several suppliers each take a share of each item, and each
+    winning quotation becomes its own purchase order for exactly that share.
+
+    Exactly one of the two — an award that says both "all of it to them" and "a third
+    of it to them" is not a decision anybody can act on, and silently preferring one
+    would hide half of what the buyer pressed.
+    """
+    quotation_id: int | None = None
+    allocations: Annotated[list[RFQAwardAllocationIn], BatchIds] | None = None
     comments: str = ""
+
+    @model_validator(mode="after")
+    def _one_shape(self):
+        if bool(self.quotation_id) == bool(self.allocations):
+            raise ValueError(
+                "Award either one quotation or a split across suppliers, not both "
+                "and not neither.")
+        return self
 
 
 # --------------------------------------------------------------------------- #

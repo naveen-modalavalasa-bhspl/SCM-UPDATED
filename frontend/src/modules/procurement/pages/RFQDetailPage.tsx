@@ -152,6 +152,24 @@ export function RFQDetailPage() {
     onSuccess: refresh("Awarded"),
   });
 
+  const awardSplit = useMutation({
+    mutationFn: async (allocations: { item_id: number; vendor_id: number; quantity: number }[]) => {
+      const res = await rfqApi.awardSplit(rfqId, allocations);
+      
+      const vendorIds = new Set(allocations.map((a) => a.vendor_id));
+      const winningQuotations = (comparison?.quotations ?? []).filter((q) => vendorIds.has(q.vendor_id));
+      
+      for (const quote of winningQuotations) {
+        await poApi.createFromQuotation(quote.id);
+      }
+      return res;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pos"] });
+      refresh("Shared between suppliers and POs raised")();
+    },
+  });
+
   // The offer that won. Read off the comparison rather than off the RFQ's awarded
   // vendor id: a vendor can hold more than one quotation on an RFQ (they revise), and
   // the PO is raised against the exact quote that was accepted, not against the vendor.
@@ -174,7 +192,7 @@ export function RFQDetailPage() {
   });
 
   const busy = submit.isPending || approve.isPending || reject.isPending
-    || close.isPending || award.isPending || raisePo.isPending;
+    || close.isPending || award.isPending || awardSplit.isPending || raisePo.isPending;
 
   const copyInvite = async (vendorId: number, path: string) => {
     await navigator.clipboard.writeText(`${location.origin}${path}`);
@@ -325,7 +343,7 @@ export function RFQDetailPage() {
         }
       />
 
-      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? raisePo.error ?? saveQuantities.error} />
+      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? awardSplit.error ?? raisePo.error ?? saveQuantities.error} />
 
       <DetailShell
         main={(
@@ -486,13 +504,12 @@ export function RFQDetailPage() {
                   ? (
                     <QuotationComparison
                       comparison={comparison}
-                      awardedQuotationId={awardedQuote?.id ?? null}
-                      poId={rfq?.po_id ?? null}
-                      poNo={rfq?.po_no ?? null}
+                      pos={rfq?.pos ?? []}
                       busy={busy}
                       onAward={(quotationId) => award.mutate(quotationId)}
+                      onAwardSplit={(allocations) => awardSplit.mutate(allocations)}
                       onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
-                      onOpenPo={() => nav(`/pos/${rfq?.po_id}`)}
+                      onOpenPo={(poId) => nav(`/pos/${poId}`)}
                     />
                   )
                   : <p className="py-6 text-center text-sm text-muted">Waiting on quotes.</p>}

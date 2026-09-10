@@ -521,6 +521,38 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         raise ValidationError(f"Unknown vendor {quote.vendor_id}")
 
     lines = [line for line in quote.items if _d(line.quantity) > 0]
+
+    # CUT TO WHAT THIS SUPPLIER WON, when the tender was shared out.
+    #
+    # A quotation offers the whole line — that is what every invited supplier is asked
+    # for — so ordering it as quoted would buy the full quantity from each of the
+    # winners and multiply the purchase. `awarded_quantities` is written by
+    # `_award_split` and is NULL for the ordinary whole-tender award, which is why
+    # this reads as "no split, order the offer" rather than as an exception.
+    #
+    # A share is a CEILING, never a floor: a supplier who quoted less than they were
+    # awarded is ordered what they actually offered, because that is the offer being
+    # accepted. An item they won nothing of leaves the order entirely.
+    awarded = (await db.execute(
+        select(RFQVendor.awarded_quantities).where(
+            RFQVendor.rfq_id == rfq.id, RFQVendor.vendor_id == quote.vendor_id)
+    )).scalar_one_or_none()
+    # Held BESIDE the quotation lines, never written onto them: `quote.items` are
+    # live ORM rows, so assigning to `line.quantity` here would flush the reduced
+    # figure back onto `pro_quotation_items` and quietly rewrite what the supplier
+    # offered. The order is cut down; the offer it accepts is left as it was made.
+    share: dict[str, float] = awarded or {}
+    order_qty: dict[int, Decimal] = {}
+    if share:
+        kept = []
+        for line in lines:
+            won = _d(share.get(str(line.item_id), 0))
+            if won <= 0:
+                continue
+            order_qty[line.id] = min(_d(line.quantity), won)
+            kept.append(line)
+        lines = kept
+
     if not lines:
         raise ValidationError(f"{quote.quotation_no} has no quantities to order")
 
@@ -579,7 +611,7 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
 
     sub_total = tax_total = Decimal("0")
     for index, line in enumerate(lines, start=1):
-        quantity = _d(line.quantity)
+        quantity = order_qty.get(line.id, _d(line.quantity))
         gross = quantity * _d(line.rate)
         amount = gross - gross * _d(line.discount_percent or 0) / _d(100)
         tax = amount * _d(line.tax_percent or 0) / _d(100)
@@ -2370,7 +2402,10 @@ async def list_requisitions(db: AsyncSession, params: PageParams,
             )
         )
     return await _attach_pending_with(db, DocType.REQUISITION.value, await paginate(
-        db, stmt.order_by(Requisition.created_at.desc()), params))
+        db, stmt.order_by(
+            Requisition.status != RequisitionStatus.DRAFT.value,
+            Requisition.created_at.desc()
+        ), params))
 
 
 async def update_requisition(db: AsyncSession, req_id: int, data: ReqCreate,
@@ -2735,13 +2770,18 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
     # Read here rather than derived in the screen because only the server knows — a
     # buyer coming back to an awarded RFQ was still being offered "Create purchase
     # order" for an order that exists, and only found out by pressing it.
-    row = (await db.execute(
-        select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.status)
+    # We fetch ALL purchase orders to properly handle split awards which produce multiple POs.
+    rows = (await db.execute(
+        select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.status, PurchaseOrder.vendor_id, PurchaseOrder.quotation_id)
         .where(PurchaseOrder.rfq_id == rfq.id,
                PurchaseOrder.status != POStatus.CANCELLED.value)
-        .order_by(PurchaseOrder.id).limit(1)
-    )).first()
-    rfq.po_id, rfq.po_no, rfq.po_status = row if row else (None, None, None)
+        .order_by(PurchaseOrder.id)
+    )).all()
+    rfq.pos = [{"po_id": r.id, "po_no": r.po_no, "po_status": r.status, "vendor_id": r.vendor_id, "quotation_id": r.quotation_id} for r in rows]
+    # Backward compatibility for endpoints and older UI assuming a single PO:
+    rfq.po_id = rfq.pos[0]["po_id"] if rfq.pos else None
+    rfq.po_no = rfq.pos[0]["po_no"] if rfq.pos else None
+    rfq.po_status = rfq.pos[0]["po_status"] if rfq.pos else None
 
     # What the RFQ itself says stands. Where it says nothing, the requisition behind it
     # answers — and failing that, the raiser's own HCM record. Department follows the
@@ -3506,12 +3546,95 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
     }
 
 
+async def _award_split(db: AsyncSession, rfq: RFQ, allocations) -> set[int]:
+    """Share the tender out between suppliers, and record what each one won.
+
+    The split is decided HERE and not at the invitation, because it is decided against
+    the prices — and at the moment an RFQ is raised nobody has any. Every invited
+    supplier is asked to quote the whole line; who supplies how much is this function.
+
+    Returns the vendor ids that won something, so the caller can settle the
+    quotations. What each of them won is written to `RFQVendor.awarded_quantities`,
+    which `create_po_from_quotation` then reads to cut the order down to that share.
+    """
+    line_quantities = {line.item_id: _d(line.quantity) for line in rfq.items}
+
+    wanted: dict[int, dict[str, float]] = {}
+    per_item: dict[int, Decimal] = {}
+    for row in allocations:
+        if row.item_id not in line_quantities:
+            raise ValidationError(f"Item {row.item_id} is not on {rfq.rfq_no}")
+        wanted.setdefault(row.vendor_id, {})
+        key = str(row.item_id)
+        # The same supplier named twice for one item is one share, not two. Summed
+        # rather than refused: a screen that lists an item under each supplier can
+        # legitimately send it that way.
+        wanted[row.vendor_id][key] = float(
+            _d(wanted[row.vendor_id].get(key, 0)) + _d(row.quantity))
+        per_item[row.item_id] = _d(per_item.get(row.item_id, 0)) + _d(row.quantity)
+
+    for item_id, total in per_item.items():
+        if total > line_quantities[item_id]:
+            raise ValidationError(
+                f"{total} allocated for item {item_id}, but the RFQ line is only "
+                f"{line_quantities[item_id]}")
+
+    invited = {row.vendor_id: row for row in (await db.execute(
+        select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
+    )).scalars().all()}
+    quotes = {row.vendor_id: row for row in (await db.execute(
+        select(Quotation).where(Quotation.rfq_id == rfq.id)
+    )).scalars().all()}
+
+    for vendor_id, quantities in wanted.items():
+        quote = quotes.get(vendor_id)
+        if quote is None or quote.status == QuotationStatus.DRAFT.value:
+            # Named rather than counted: a buyer splitting a tender is looking at a
+            # comparison sheet, and "supplier X has not quoted" is the one sentence
+            # that tells them which column to take the quantity off.
+            row = invited.get(vendor_id)
+            raise ValidationError(
+                f"{(row.vendor_name if row else None) or f'Vendor {vendor_id}'} has "
+                "not submitted a quotation, so nothing can be awarded to them")
+        if vendor_id in invited:
+            invited[vendor_id].awarded_quantities = quantities
+
+    return set(wanted)
+
+
 async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
-    """Pick a quotation. Does not raise the PO — that is a separate, approved act."""
+    """Pick a quotation, or share the tender out. Does not raise the PO — that is a
+    separate, approved act."""
     rfq = await get_rfq(db, rfq_id, user)
     OPEN = (RFQStatus.PUBLISHED.value, RFQStatus.CLOSED.value)
     if rfq.status not in OPEN:
         raise ValidationError(f"Cannot award an RFQ in {rfq.status} status")
+
+    if data.allocations:
+        winners = await _award_split(db, rfq, data.allocations)
+        for other in (await db.execute(
+            select(Quotation).where(Quotation.rfq_id == rfq.id)
+        )).scalars().all():
+            if other.vendor_id in winners:
+                other.status = QuotationStatus.ACCEPTED.value
+            elif other.status != QuotationStatus.DRAFT.value:
+                other.status = QuotationStatus.REJECTED.value
+        rfq.status = RFQStatus.AWARDED.value
+        # One winner keeps the single-vendor answer; a genuine split has no single
+        # winner and says so by leaving it empty, rather than naming one of several
+        # and reading, everywhere else, as though the others had lost. The two
+        # "un-awarded tender" predicates (here and in `stats.rfq_stats`) also require
+        # PUBLISHED or CLOSED, so an AWARDED row is excluded either way.
+        only = next(iter(winners)) if len(winners) == 1 else None
+        rfq.awarded_vendor_id = only
+        rfq.awarded_vendor_name = (
+            next((row.vendor_name for row in (await db.execute(
+                select(Quotation).where(Quotation.rfq_id == rfq.id,
+                                        Quotation.vendor_id == only))).scalars().all()), None)
+            if only else None)
+        await db.commit()
+        return await get_rfq(db, rfq_id)
+
     quote = await get_quotation(db, data.quotation_id)
     if quote.rfq_id != rfq.id:
         raise ValidationError("That quotation belongs to a different RFQ")

@@ -431,6 +431,7 @@ export interface RFQ extends RFQListRow {
   po_id?: number | null;
   po_no?: string | null;
   po_status?: string | null;
+  pos?: { po_id: number; po_no: string; po_status: string; vendor_id: number; quotation_id?: number | null }[];
   /** Carried across from the requisition behind it, so a tender reads on its own. */
   department_id?: number | null;
   department_name?: string | null;
