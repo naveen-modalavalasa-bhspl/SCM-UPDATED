@@ -12226,16 +12226,89 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     if bin_id:
         stmt = stmt.where(m.SerialNumber.bin_id == bin_id)
     if search:
-        like = f"%{search}%"
-        stmt = stmt.where(or_(
-            m.SerialNumber.serial_number.ilike(like),
-            m.SerialNumber.imei.ilike(like),
-            m.SerialNumber.asset_code.ilike(like),
-            m.SerialNumber.consumable_code.ilike(like)))
+        needle = search.strip()
+        # A WHOLE code is found by INDEX SEEK; only a fragment is scanned for.
+        #
+        # These are two questions wearing one box, and they cost three orders of
+        # magnitude apart. The storekeeper at the shelf has the entire code — a gun
+        # read it off the label — and `serial_number` and `imei` are indexed, so that
+        # is a seek. `asset_code` and `consumable_code` are NOT indexed, so including
+        # them in the same OR drags the whole thing back down to a scan. Measured on
+        # one live bay of 464,776 units:
+        #
+        #     probe, serial_number = '<code>'          0.01 s
+        #     probe, four columns OR-ed together       1.65 s
+        #     COUNT over that same four-column OR      8.73 s
+        #     four columns ILIKE '%<fragment>%'        9.89 s
+        #
+        # So the indexed columns are probed FIRST and separately; the unindexed pair
+        # is only reached when neither matched, which is rare — `_place_unit_codes`
+        # writes a minted asset/consumable code into `serial_number` as well, so for
+        # those items the indexed probe already hits.
+        #
+        # And a hit narrows the query to that ONE ROW BY ID. Every identity column is
+        # unique per unit, so an exact code names exactly one, and pinning it by
+        # primary key means the count and the page below cost nothing at all instead
+        # of re-deriving the same row through the unindexed OR.
+        hit = None
+        probes = (
+            m.SerialNumber.serial_number == needle,       # indexed
+            m.SerialNumber.imei == needle,                # indexed
+            or_(m.SerialNumber.asset_code == needle,      # not indexed — last resort
+                m.SerialNumber.consumable_code == needle),
+        )
+        for probe in probes:
+            hit = await db.scalar(
+                stmt.with_only_columns(m.SerialNumber.id).order_by(None)
+                .where(probe).limit(1))
+            if hit:
+                break
+        if hit:
+            stmt = stmt.where(m.SerialNumber.id == hit)
+        else:
+            like = f"%{needle}%"
+            stmt = stmt.where(or_(
+                m.SerialNumber.serial_number.ilike(like),
+                m.SerialNumber.imei.ilike(like),
+                m.SerialNumber.asset_code.ilike(like),
+                m.SerialNumber.consumable_code.ilike(like)))
 
-    page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
-    page["items"] = await _decorate_serials(db, page["items"])
-    return page
+    # PAGED ON THE ID, THEN LOADED BY IT. Not a refinement of `paginate` — a different
+    # query, for the reason `stk_ledger` taught (CLAUDE.md, "never sort a list on a
+    # non-indexed column of a JSON-bearing table"): what costs is the SORT, and a sort
+    # record is as wide as the columns the statement carries.
+    #
+    # Measured on the live floor, one bay holding 464,776 available units:
+    #
+    #     ORDER BY id DESC LIMIT 500, selecting the whole row   8.93 s
+    #     ORDER BY id DESC LIMIT 500, selecting the id alone    0.09 s
+    #     loading those 500 rows by primary key                 0.02 s
+    #
+    # Eighty times, and it is the whole of why switching a page in the unit picker
+    # took a quarter of a minute. The narrow statement is served from
+    # `ix_whs_serial_stock_lookup` — a secondary index carries the primary key, so the
+    # ids come out of it already ordered and nothing is sorted at all. Widen this
+    # statement back to `select(m.SerialNumber)` and the filesort returns in silence:
+    # the answer stays correct, only the clock moves.
+    id_stmt = stmt.with_only_columns(m.SerialNumber.id).order_by(None)
+    total = await db.scalar(select(func.count()).select_from(id_stmt.subquery()))
+    ids = list((await db.execute(
+        id_stmt.order_by(m.SerialNumber.id.desc())
+        .limit(params.size).offset(params.offset)
+    )).scalars().all())
+
+    rows: list[m.SerialNumber] = []
+    if ids:
+        found = (await db.execute(
+            select(m.SerialNumber).where(m.SerialNumber.id.in_(ids))
+        )).scalars().all()
+        # `IN` gives no order back, and the page's order is the answer's — newest
+        # first — so it is restored from the ids rather than re-sorted in the database.
+        rank = {value: index for index, value in enumerate(ids)}
+        rows = sorted(found, key=lambda row: rank[row.id])
+
+    return {"items": await _decorate_serials(db, rows), "total": total or 0,
+            "page": params.page, "size": params.size}
 
 
 async def serial_summary(db: AsyncSession, *, item_ids: list[int],

@@ -166,9 +166,27 @@ export function CodeAssignmentScreen({
     // The page being read must not blank out while the next one loads: a list that
     // empties and refills reads as stock disappearing off the shelf.
     placeholderData: (previous) => previous,
+    // A page already read is shown again instantly. Every request here pays for a
+    // COUNT over the whole filtered set — 464,981 rows on the live floor, and about
+    // a third of a second of it — so re-fetching a page the storekeeper walked back
+    // to is the single most expensive thing this screen could do for no new
+    // information. Units do not appear in a bay while one pick is being named.
+    staleTime: 5 * 60_000,
   });
 
-  const total = codes.data?.total ?? 0;
+  /**
+   * The size of the pool, carried across page changes.
+   *
+   * The pager reads `total`, and `total` arrives with each page. Moving to a page that
+   * is not in cache yet leaves it briefly undefined, which collapsed the pager and
+   * re-laid out the footer under the storekeeper's hand mid-press. It cannot change
+   * while one pick is being named, so the last known figure stands until a new one
+   * arrives; a fresh search resets it, because that genuinely is a different pool.
+   */
+  const lastTotal = useRef(0);
+  useEffect(() => { lastTotal.current = 0; }, [search, itemId, batchId, binId]);
+  if (codes.data?.total != null) lastTotal.current = codes.data.total;
+  const total = codes.data?.total ?? lastTotal.current;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   /** The value this item is validated on, for one row. */
@@ -180,15 +198,24 @@ export function CodeAssignmentScreen({
         : row.asset_code ?? row.consumable_code ?? row.serial_number;
 
   const rows = (codes.data?.items ?? []).filter((row) => !!keyOf(row));
-  // One page ahead, so Next swaps instantly instead of round-tripping. Only one:
-  // walking the whole bay to pre-read it is the unbounded query the endpoint is
-  // paginated to avoid.
+  /**
+   * The neighbouring pages, fetched while this one is being read.
+   *
+   * Both directions: a storekeeper who has walked past the unit he wanted goes BACK,
+   * and paying a round trip for that is as bad as paying one to go forward. Only the
+   * neighbours — reading the whole bay to page through it is the unbounded query this
+   * endpoint is paginated to avoid.
+   */
   useEffect(() => {
-    if (!open || !ready || page >= pageCount) return;
-    void qc.prefetchQuery({
-      queryKey: key(page + 1, search),
-      queryFn: () => listSerials(args(page + 1, search)),
-    });
+    if (!open || !ready) return;
+    for (const which of [page + 1, page - 1]) {
+      if (which < 1 || which > pageCount || which === page) continue;
+      void qc.prefetchQuery({
+        queryKey: key(which, search),
+        queryFn: () => listSerials(args(which, search)),
+        staleTime: 5 * 60_000,
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, ready, page, pageCount, search, total]);
 
