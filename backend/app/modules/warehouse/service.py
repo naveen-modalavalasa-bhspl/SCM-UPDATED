@@ -1381,16 +1381,22 @@ async def get_receipt(db: AsyncSession, receipt_id: int, user=None) -> m.Receipt
     item_ids = {line.item_id for line in receipt.items}
     if item_ids:
         rows = (await db.execute(
-            select(Item.id, Item.is_asset, Item.is_serial_tracked).where(Item.id.in_(item_ids))
+            select(Item.id, Item.is_asset, Item.is_serial_tracked, Item.is_imei_tracked)
+            .where(Item.id.in_(item_ids))
         )).all()
-        asset_by_item = {item_id: bool(is_asset) for item_id, is_asset, _ in rows}
+        asset_by_item = {item_id: bool(is_asset) for item_id, is_asset, _, _ in rows}
         serial_by_item = {
             item_id: bool(is_serial_tracked)
-            for item_id, _, is_serial_tracked in rows
+            for item_id, _, is_serial_tracked, _ in rows
+        }
+        imei_by_item = {
+            item_id: bool(is_imei_tracked)
+            for item_id, _, _, is_imei_tracked in rows
         }
         for line in receipt.items:
             line.is_asset = asset_by_item.get(line.item_id, False)
             line.is_serial_tracked = serial_by_item.get(line.item_id, False)
+            line.is_imei_tracked = imei_by_item.get(line.item_id, False)
     return receipt
 
 

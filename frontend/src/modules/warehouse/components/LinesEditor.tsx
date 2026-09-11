@@ -202,7 +202,7 @@ export function QtyInput({
       min={0}
       max={max}
       step="0.001"
-      value={value === 0 ? "0" : String(value ?? "")}
+      value={value === 0 ? "0" : value === "" || value == null ? "" : String(Number(value))}
       disabled={disabled}
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}

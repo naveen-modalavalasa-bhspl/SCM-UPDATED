@@ -138,11 +138,8 @@ DEAD_ISSUE_STATUSES = (IssueStatus.CANCELLED.value, IssueStatus.REJECTED.value)
 
 class IssueType(str, Enum):
     """`out_issues.issue_type`."""
-    DEPARTMENT = "DEPARTMENT"
-    PROJECT = "PROJECT"
-    VEHICLE = "VEHICLE"
-    CONSUMPTION = "CONSUMPTION"
-    SCRAP = "SCRAP"
+    INDENT_BASED = "INDENT_BASED"
+    DIRECT = "DIRECT"
 
 
 class IssueDirection(str, Enum):

@@ -33,8 +33,8 @@ export { todayIst as today } from "@/shared/datetime";
 /** Quantities carry 3 decimals in the schema; trailing zeros are noise on screen. */
 export const fmtQty = (value?: number | string | null) => {
   const n = Number(value ?? 0);
-  if (!Number.isFinite(n)) return "0";
-  return n.toLocaleString(undefined, { maximumFractionDigits: 3 });
+  if (!Number.isFinite(n)) return "0.00";
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
 export const fmtMoney = (value?: number | string | null) => {

@@ -1287,7 +1287,7 @@ class IssueItemWrite(BaseModel):
 
 
 class IssueWrite(BaseModel):
-    issue_type: IssueType = IssueType.DEPARTMENT
+    issue_type: IssueType = IssueType.DIRECT
     issue_date: date
     indent_id: int | None = None
     picking_id: int | None = None

@@ -38,11 +38,8 @@ import { usePointLabel } from "../usePointLabel";
  */
 
 const TYPES = [
-  { value: "DEPARTMENT", label: "To a department" },
-  { value: "PROJECT", label: "To a project" },
-  { value: "VEHICLE", label: "To a vehicle" },
-  { value: "CONSUMPTION", label: "Consumption" },
-  { value: "SCRAP", label: "Scrap" },
+  { value: "INDENT_BASED", label: "Indent based" },
+  { value: "DIRECT", label: "Direct" },
 ];
 
 const emptyLine = (): IssueItemWrite => ({
@@ -71,7 +68,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   const listPath = direction === "OUT" ? "/warehouse/material-issues" : "/warehouse/material-returns";
 
   const [form, setForm] = useState<IssueWrite>({
-    issue_type: "DEPARTMENT",
+    issue_type: "DIRECT",
     issue_date: today(),
     indent_id: null,
     picking_id: null,
@@ -314,6 +311,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
       setForm((current) => ({
         ...current,
         indent_id: source.indent_id,
+        issue_type: "INDENT_BASED",
         department_id: source.department_id ?? current.department_id,
         project_id: source.project_id ?? current.project_id,
         issued_to_id: source.issued_to_id ?? current.issued_to_id,
@@ -751,7 +749,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                     value={form.indent_id ?? ""} isDisabled={locked || !form.warehouse_id}
                     onChange={(v) => {
                 const indentId = v === "" ? null : v;
-                set("indent_id", indentId);
+                setForm(f => ({ ...f, indent_id: indentId, issue_type: indentId ? "INDENT_BASED" : "DIRECT" }));
                 if (!indentId) { setDestination(""); setDestinationSac(null); }
                 if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
               }} placeholder={form.warehouse_id ? "Indent" : "Pick warehouse first"} />
