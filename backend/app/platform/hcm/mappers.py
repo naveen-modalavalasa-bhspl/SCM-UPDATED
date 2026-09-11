@@ -96,12 +96,10 @@ def map_employee(row: dict) -> dict:
         pos = row.get("position") or {}
         off = row.get("office") or {}
         prj = row.get("project") or {}
-        return {
+        cols = {
             "id": emp.get("id"),
             "emp_code": emp.get("employee_code"),
             "full_name": emp.get("name"),
-            "email": emp.get("email"),
-            "mobile": emp.get("phone"),
             "department_id": pos.get("department_id"),   # usually absent here
             "department_name": pos.get("department"),    # name string on the position
             "section_id": pos.get("section_id"),
@@ -111,6 +109,19 @@ def map_employee(row: dict) -> dict:
             "project_name": prj.get("name"),
             "is_active": _active(emp.get("status")),
         }
+        # Omitted rather than set to None when absent, exactly as the flat branch
+        # below does — and this branch NOT doing so was a real defect, not a
+        # cosmetic asymmetry. `mail.service.decide_email_claim` writes a confirmed
+        # address onto this row (its own comment relies on the key being omitted),
+        # and a sync over the nested feed then blanked it. The reset flow reads that
+        # column to decide "send the link now" versus "queue it for an admin", so a
+        # person whose address had been confirmed silently dropped back into the
+        # approval queue on every later reset, forever, with nothing logged.
+        if emp.get("email") is not None:
+            cols["email"] = emp.get("email")
+        if emp.get("phone") is not None:
+            cols["mobile"] = emp.get("phone")
+        return cols
 
     pos = primary_position_of(row)
     loc = row.get("location_details") or {}

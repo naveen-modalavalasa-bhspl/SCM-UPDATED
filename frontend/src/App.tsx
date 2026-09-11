@@ -1,4 +1,4 @@
-import { Suspense, lazy, type ReactNode } from "react";
+import { Suspense, lazy } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useHref } from "react-router-dom";
 import { HeroUIProvider } from "@heroui/react";
@@ -22,7 +22,7 @@ import { LoginPage } from "@/pages/LoginPage";
 // The supplier portal — a second audience, on its own shell and its own token.
 // One screen serves all four report ledgers; the ledger key is a route param.
 // Mounts the alert/confirm dialog host and pulls the server's copy catalog once.
-import { ToastProvider } from "@/shared/components";
+import { ToastProvider, AppSplash } from "@/shared/components";
 
 // ---------------------------------------------------------------------------
 // Route-level code splitting (2026-09-03)
@@ -87,6 +87,7 @@ const IndentDashboardPage = lazy(() => import("@/modules/indents/pages/Dashboard
 const IndentDetailPage = lazy(() => import("@/modules/indents/pages/DetailPage").then((m) => ({ default: m.IndentDetailPage })));
 const IndentFormPage = lazy(() => import("@/modules/indents/pages/FormPage").then((m) => ({ default: m.IndentFormPage })));
 const IndentJourneyPage = lazy(() => import("@/modules/indents/pages/JourneyPage").then((m) => ({ default: m.IndentJourneyPage })));
+const IndentPrintPage = lazy(() => import("@/modules/indents/pages/PrintPage").then((m) => ({ default: m.IndentPrintPage })));
 const IndentListPage = lazy(() => import("@/modules/indents/pages/ListPage").then((m) => ({ default: m.IndentListPage })));
 const IndentNotificationsPage = lazy(() => import("@/modules/indents/pages/NotificationsPage").then((m) => ({ default: m.IndentNotificationsPage })));
 const IndentReportsPage = lazy(() => import("@/modules/indents/pages/ReportsPage").then((m) => ({ default: m.IndentReportsPage })));
@@ -173,14 +174,6 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
 });
 
-function FullScreen({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex h-screen w-screen items-center justify-center font-sans text-lg text-ink">
-      {children}
-    </div>
-  );
-}
-
 /* /logistics/transport/... -> /logistics/shipments/..., carrying whatever followed.
  * A plain <Navigate> cannot: the tail is a splat and the deep links that matter all
  * have one — the approvals inbox opens `/logistics/transport/12?approval=1`, and the
@@ -220,7 +213,7 @@ function RouteFallback() {
 
 function AppRoutes() {
   const { me, loading } = useAuth();
-  if (loading) return <FullScreen>Loading…</FullScreen>;
+  if (loading) return <AppSplash />;
 
   return (
     <Suspense fallback={<RouteFallback />}>
@@ -287,6 +280,13 @@ function AppRoutes() {
         <Route
           path="/pos/:id/print"
           element={me ? <POPrintPage /> : <Navigate to="/login" replace />}
+        />
+        {/* The indent as a document. Same rule as the order above: outside the shell,
+            signed-in only, and every field on it is fetched under the viewer's own
+            token — an indent this account cannot read prints nothing. */}
+        <Route
+          path="/indents/:id/print"
+          element={me ? <IndentPrintPage /> : <Navigate to="/login" replace />}
         />
         <Route
           path="/warehouse/material-issues/:id/print"

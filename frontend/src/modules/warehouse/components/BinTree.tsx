@@ -6,11 +6,17 @@ import { CapacityBadge, volume } from "./CapacityMeter";
 import type { Bin } from "../types";
 
 /**
- * The bin hierarchy of one warehouse.
+ * The storage-location hierarchy of one warehouse.
  *
- * `whs_bins` nests through `parent_id`, so a zone, a rack and a shelf are the same
- * row type at different levels — the tree renders one component recursively rather
- * than modelling three tiers it would then have to keep in step with the schema.
+ * `whs_warehouse_locations` nests through `parent_id`, so a lane, a rack and a shelf
+ * are the same row type at different levels — the tree renders one component
+ * recursively rather than modelling three tiers it would then have to keep in step
+ * with the schema.
+ *
+ * Each row names its KIND, off `storage_type_name` (the storage-type master). Without
+ * it `F1-A1-R1` and `F1-A1-R1-B1` are two near-identical codes one indent apart, and
+ * the reader has to infer from the indentation whether they are looking at a rack or
+ * at a bay in it.
  *
  * Occupancy is shown only when the backend sent it; a warehouse with
  * `is_bin_managed = false` has no per-bin numbers and gets no misleading 0%.
@@ -73,10 +79,17 @@ function Node({
           ) : (
             <PackageOpen className="h-4 w-4 shrink-0 text-muted" />
           )}
-          <span className="truncate font-mono text-xs font-semibold text-ink">{bin.code}</span>
+          <span className="shrink-0 font-mono text-xs font-semibold text-ink">{bin.code}</span>
           {bin.name && <span className="truncate text-xs text-muted">{bin.name}</span>}
         </button>
 
+        {/* The kind, named. A tree of codes alone cannot say whether the row three
+            indents down is a shelf or the bay on it. */}
+        {(bin.storage_type_name || bin.bin_type) && (
+          <span className="hidden shrink-0 rounded-md bg-content2 px-1.5 py-0.5 text-[11px] font-medium text-muted sm:inline">
+            {bin.storage_type_name ?? bin.bin_type}
+          </span>
+        )}
         {!bin.is_active && (
           <Chip size="sm" variant="flat" color="default">Inactive</Chip>
         )}

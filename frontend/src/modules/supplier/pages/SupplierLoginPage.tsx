@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import { Button, Card, ErrorBanner, Field, Input } from "@/shared/components";
 import { setVendorPortal, setVendorToken } from "@/shared/api/client";
@@ -12,6 +12,7 @@ import { supplierApi } from "@/modules/procurement/api";
  */
 export function SupplierLoginPage() {
   const nav = useNavigate();
+  const [searchParams] = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
@@ -23,7 +24,9 @@ export function SupplierLoginPage() {
       // shared screens come back to.
       setVendorPortal("supplier");
       // A vendor still on the shared default sees nothing but the change form.
-      nav(token.must_change_password ? "/supplier/password" : "/supplier/rfqs", {
+      const next = searchParams.get("next");
+      const destination = next?.startsWith("/supplier/") ? next : "/supplier/rfqs";
+      nav(token.must_change_password ? "/supplier/password" : destination, {
         replace: true,
       });
     },

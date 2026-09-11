@@ -117,6 +117,8 @@ export interface Bin {
   parent_id?: number | null;
   bin_type?: string | null;
   storage_type_id?: number | null;
+  /** The kind's display name, off the storage-type master. */
+  storage_type_name?: string | null;
   barcode?: string | null;
   floor_level?: number | null;
   shelf_level?: number | null;
@@ -374,7 +376,9 @@ export interface BinWrite {
   name?: string | null;
   description?: string | null;
   parent_id?: number | null;
-  bin_type: string;
+  /** The kind, by code. `storage_type_id` is what the form actually sends — see
+   *  `StorageType`; the code is kept for callers that only know one. */
+  bin_type?: string | null;
   capacity_qty?: number | null;
   storage_type_id?: number | null;
   barcode?: string | null;
@@ -402,13 +406,30 @@ export interface BinWrite {
   is_active: boolean;
 }
 
-/** `whs_locations` — the physical/3D layer, separate from the logical bin tree. */
+/** `whs_warehouse_locations` — one storage point, and where it sits in the building.
+ *
+ *  `path`, `level`, `parent_*` and `storage_type_name` are derived by the server on the
+ *  way out, never stored: a saved path goes stale the day somebody re-parents a rack
+ *  and nothing tells you it has. The floor plan draws its tree from `parent_location_id`
+ *  and reads the trail off `path_names`. */
 export interface WarehouseLocation {
   id: number;
   warehouse_id: number;
   parent_location_id?: number | null;
   storage_type?: string | null;
   storage_type_id?: number | null;
+  storage_type_name?: string | null;
+  parent_code?: string | null;
+  parent_name?: string | null;
+  path?: string | null;
+  path_names?: string | null;
+  level?: number | null;
+  child_count?: number;
+  is_pickable?: boolean;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  max_handling_units?: number | null;
+  fill_efficiency_pct?: number | null;
   code: string;
   name?: string | null;
   description?: string | null;
@@ -428,19 +449,47 @@ export interface WarehouseLocation {
   is_active: boolean;
 }
 
+/**
+ * One KIND of storage location — floor, lane, rack, shelf, bin, cold room.
+ *
+ * These were an enum in the backend and a hardcoded array in this module until
+ * 2026-09-05. They are a master now (`whs_warehouse_storage_types`), so a site that
+ * racks its goods in carton bays adds the rung itself, and the location form reads
+ * every one of its answers — which kinds exist, which may hold which, which want a
+ * temperature band — off this rather than off a constant beside it.
+ */
 export interface StorageType {
   id: number;
   code?: string | null;
   name: string;
   description?: string | null;
+  /** Depth of the rung in the building, so a list reads floor, lane, rack, shelf, bin. */
+  sort_order: number;
+  /** Is stock HELD here, or is this structure you walk past on the way to one? */
+  is_pickable: boolean;
+  /** A cold-chain kind: the location form asks for the temperature band. */
+  is_temperature_controlled: boolean;
+  /** May a location of this kind stand at the root of a warehouse? */
+  allow_top_level: boolean;
   is_active: boolean;
+  /** The kinds this one may sit inside. Ids drive the form; codes and names label it. */
+  parent_type_ids: number[];
+  parent_type_codes: string[];
+  parent_type_names: string[];
+  /** How many storage locations are of this kind — what switching it off would strand. */
+  location_count: number;
 }
 
 export interface StorageTypeWrite {
   code?: string | null;
   name: string;
   description?: string | null;
+  sort_order: number;
+  is_pickable: boolean;
+  is_temperature_controlled: boolean;
+  allow_top_level: boolean;
   is_active: boolean;
+  parent_type_ids: number[];
 }
 
 /* ------------------------------------------------------------------ inward -- */
@@ -972,6 +1021,12 @@ export interface Issue {
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
+  /** Set on a CHILD of a split; the generic parent carries neither, which is how a
+   *  screen tells the two apart without asking a second question. */
+  parent_issue_id?: number | null;
+  parent_issue_no?: string | null;
+  floor_location_id?: number | null;
+  floor_location_name?: string | null;
   status: IssueStatus;
   total_items: number;
   total_qty: number;
@@ -1113,6 +1168,41 @@ export interface IssueStockSource {
   total_qty: number;
   /** `available_qty + own_reserved_qty` — what a line here may actually take. */
   drawable_qty: number;
+
+  /* --- the two OUTER quantities this location sits inside. Served, not summed in
+   * the screen: a location another document has entirely reserved is not in this
+   * list at all, so adding the rows up would report a stocked shelf as empty. Both
+   * are repeated on every row of the same item. */
+
+  /** Everything of this item in this BATCH, across every location in the warehouse. */
+  batch_total_qty: number;
+  /** The free part of it. */
+  batch_available_qty: number;
+  /** Everything of this item in the warehouse, every batch and location. */
+  item_total_qty: number;
+  /** The free part of it. */
+  item_available_qty: number;
+}
+
+/**
+ * How many identified units one (item, batch, storage location) can name right now.
+ *
+ * A different question from `IssueStockSource.drawable_qty` and off a different table:
+ * that is a quantity on `stk_balance`, this is how many physical units at the spot
+ * carry a serial, IMEI or code the line could put on the document. Stock put away
+ * before the item was coded has the first and not the second, so a pick can be sound
+ * on quantity and impossible to post.
+ */
+export interface UnitSupply {
+  item_id: number;
+  batch_id?: number | null;
+  bin_id?: number | null;
+  need: number;
+  /** Whether the item has any identified units at this warehouse at all. */
+  has_units: boolean;
+  /** Counted only as far as `need + 1`, so a figure equal to that means "at least
+   *  that many". `null` is "no answer" — never draw it as a shortfall. */
+  available: number | null;
 }
 
 export interface IssueItemWrite {
@@ -1794,6 +1884,11 @@ export interface ItemOption extends Option {
   is_imei_tracked?: boolean;
   is_asset?: boolean;
   requires_qi?: boolean;
+  /** What the named stocking point can give of this item. `null`/undefined means no
+   *  point was named — "nobody asked", which must never be drawn as "none here". */
+  on_hand?: number | null;
+  batch_count?: number | null;
+  location_count?: number | null;
 }
 
 /** An open PO line the GRN screen pulls in when a PO is chosen. */
@@ -1851,7 +1946,16 @@ export interface PoPrefill {
   vendor_gstin?: string;
   project_id?: number;
   project_name?: string;
+  total_amount?: number;
+  /** Only the lines with something still outstanding. A fully received line is not
+   *  one to receive again — offering it prefilled with the whole ordered quantity is
+   *  how one order came to be received twice. */
   lines: PoLineOption[];
+  /** How many lines the order has altogether, so an empty `lines` can be told apart
+   *  from an empty order. */
+  total_lines?: number;
+  /** The receipts already standing against this order. */
+  received_by?: string[];
 }
 
 export interface StockMovementOrderItem {

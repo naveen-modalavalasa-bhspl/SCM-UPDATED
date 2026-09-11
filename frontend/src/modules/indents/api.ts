@@ -2,6 +2,7 @@ import { api } from "@/shared/api/client";
 import { useEffect, useMemo, useRef } from "react";
 import { useQueryClient, type Query } from "@tanstack/react-query";
 import { useAuth } from "@/shared/auth/AuthContext";
+import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
 import type {
   Acknowledgement, AcknowledgeLine, ActivityRow,
@@ -73,6 +74,8 @@ export const indentKeys = {
     [...indentKeys.all(scope), "journey", INDENT_JOURNEY_CONTRACT_VERSION, id] as const,
   shipments: (scope: IndentAccountScope, id: number) =>
     [...indentKeys.all(scope), "shipments", id] as const,
+  company: (scope: IndentAccountScope) =>
+    [...indentKeys.all(scope), "company"] as const,
   items: (scope: IndentAccountScope, context: unknown = "default") =>
     [...indentKeys.all(scope), "items", context] as const,
   bomChoices: (scope: IndentAccountScope) =>
@@ -231,6 +234,12 @@ export const indentApi = {
     api.get<Indent>(`/api/indents/${id}`, { signal }).then((r) => r.data),
   journey: (id: number, signal?: AbortSignal) =>
     api.get<IndentJourney>(`/api/indents/${id}/journey`, { signal }).then((r) => r.data),
+  /** The letterhead for the printed indent. Authenticated, not admin-gated — see
+   *  companyProfile.ts. A failure is not fatal: the fallback particulars stand. */
+  company: (signal?: AbortSignal) =>
+    api.get<Partial<CompanyProfile>>("/api/settings/company", { signal })
+      .then((r) => r.data)
+      .catch(() => ({} as Partial<CompanyProfile>)),
   /** Shipment visibility follows indent ownership, so raisers need no logistics grant. */
   shipmentsForIndent: (id: number, signal?: AbortSignal) =>
     api.get<RaiserTracking[]>(`/api/transport/for-indent/${id}`, { signal })
@@ -312,5 +321,6 @@ export const masterApi = {
       .then((items) => items.filter(
         (bom) => bom.is_active && bom.is_effective !== false)),
   bomItems: (bomId: number) =>
-    allMasterRows<BomChoiceItem>("/api/bom-items", { bom_id: bomId }),
+    api.get<BomChoiceItem[]>("/api/indents/eligible-bom-items", { params: { bom_id: bomId } })
+      .then((r) => r.data),
 };

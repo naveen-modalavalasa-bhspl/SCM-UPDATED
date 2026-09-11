@@ -12,10 +12,12 @@ import { useAuth } from "@/shared/auth/AuthContext";
  * One component because two forms ask for them (a requisition and a cold RFQ) and the
  * pickers are not trivial:
  *
- *  - **Warehouse searches the server.** There are 983 of them, 948 of which are LIP
- *    points; a plain dropdown loads one page and the two MAIN warehouses — the ones a
- *    buyer actually orders into — sort last and never arrive. `ItemCombobox` sends the
- *    query to `/api/warehouses?search=`, so "central" finds them.
+ *  - **Shipment Address searches the server, and only for warehouses.** The master
+ *    holds 983 stocking points, 948 of them LIP field points; a plain dropdown loads
+ *    one page and the two MAIN warehouses — the ones a buyer actually orders into —
+ *    sort last and never arrive. `ItemCombobox` sends the query to
+ *    `/api/warehouses?search=`, and `kind=SHIPMENT_ADDRESS` drops the field points
+ *    entirely, because no purchase is ever delivered to one.
  *  - **Departments are deduplicated by name.** HCM has 788 rows and hundreds share a
  *    name (`104` appears dozens of times, once per office). The buyer picks a name;
  *    the first id carrying it is what gets stored.
@@ -60,11 +62,18 @@ export function OrgFields({
   const [warehouseQuery, setWarehouseQuery] = useState("");
   const company = useCompanyName();
 
+  // `kind=SHIPMENT_ADDRESS` narrows 983 stocking points to the warehouses a purchase
+  // can actually be delivered to — the server decides which types those are, this
+  // screen only says what it is asking for. The same rule is enforced again on save,
+  // because a narrowed dropdown is a courtesy and a hand-made POST never sees it.
   const { data: warehouses = [], isLoading: loadingWarehouses } = useQuery({
     queryKey: ["org-warehouses", warehouseQuery],
     queryFn: () =>
       api.get<{ items: NamedRow[] }>("/api/warehouses", {
-        params: { search: warehouseQuery || undefined, size: 50, is_active: true },
+        params: {
+          search: warehouseQuery || undefined, size: 50, is_active: true,
+          kind: "SHIPMENT_ADDRESS",
+        },
       }).then((r) => r.data.items),
   });
 
@@ -116,14 +125,20 @@ export function OrgFields({
         />
       </Field>
 
-      <Field label="Warehouse" hint="Type to search all 983 stocking points.">
+      {/* "Shipment Address", not "Warehouse" (2026-09-07). The field names where the
+          goods are to be delivered, which is what a buyer and a vendor both call it;
+          "Warehouse" described the record it points at rather than the job it does on
+          the document. The LABEL is all that changed — `warehouseId` on the wire and
+          `warehouse_id` in the database are untouched, so nothing already reading
+          either has to know. */}
+      <Field label="Shipment Address" hint="Warehouses only — not LIP or MDP field points.">
         <ItemCombobox
           value={value.warehouseId}
           options={warehouseOptions}
           isLoading={loadingWarehouses}
           onQueryChange={setWarehouseQuery}
           onChange={(v) => onChange({ warehouseId: v })}
-          placeholder="Search warehouses…"
+          placeholder="Search shipment addresses…"
         />
       </Field>
 

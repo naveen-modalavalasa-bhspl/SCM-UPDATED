@@ -1,10 +1,30 @@
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight, Eye, EyeOff } from "lucide-react";
-import { Input, Button } from "@heroui/react";
+import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { Alert } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
-import loginHero from "@/assets/login-hero.png";
+import { AuthShell, authField, authLabel, authLink, authSubmit } from "./AuthShell";
+
+/**
+ * The sign-in screen.
+ *
+ * The plate, the thread, the field styling and the arrival animation all live in
+ * `AuthShell`, which "forgot password" and "choose a new password" render too — the
+ * three are one flow and used to be two different-looking ones. What is left here is
+ * only what is TRUE OF SIGNING IN: the two fields, the failure message, and the
+ * document chain at the foot.
+ *
+ * The failure message is the shared `Alert` — a rejected sign-in should look like
+ * every other failure in the app, and the sentence itself comes from the one
+ * translation in `shared/api/errors.ts`, which is deliberately the same whether the
+ * employee ID is unknown, retired, or simply typed with the wrong password, so the
+ * form never confirms that an account exists.
+ */
+
+/** The document chain the system exists to keep. Stated here because a new
+ *  employee's first screen is a fair place to say what they are signing into,
+ *  and because it makes the tagline above it concrete. */
+const CHAIN = ["Indent", "PO", "GRN", "Stock", "Issue"];
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -14,6 +34,8 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const uid = useId();
+  const errorId = `${uid}-error`;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -30,98 +52,102 @@ export function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col lg:flex-row">
-      {/* Left — brand artwork */}
-      <div className="flex items-center justify-center bg-white p-4 sm:p-6 lg:w-1/2 lg:p-10">
-        <img
-          src={loginHero}
-          alt="SCM — procurement, inventory, warehouse, logistics"
-          className="max-h-[30vh] w-auto max-w-full object-contain lg:max-h-[85vh] lg:w-full"
-        />
-      </div>
+    <AuthShell
+      title="Sign in"
+      subtitle="One thread from indent to stock."
+      foot={
+        /* What the thread actually threads. Each document points back at the
+           one before it, which is the whole shape of the system. */
+        <ol className="login-chain mt-12 flex items-center text-[11px]">
+          {CHAIN.map((step, i) => (
+            <li
+              key={step}
+              className="flex flex-1 items-center last:flex-none"
+              style={{ "--i": i } as React.CSSProperties}
+            >
+              <span className="login-chain-step whitespace-nowrap">{step}</span>
+              {i < CHAIN.length - 1 && (
+                <span aria-hidden className="login-chain-link mx-2 h-px flex-1" />
+              )}
+            </li>
+          ))}
+        </ol>
+      }
+    >
+      <form onSubmit={submit} className="mt-9 flex flex-col gap-5">
+        <div>
+          <label htmlFor={`${uid}-user`} className={authLabel}>Employee ID</label>
+          <input
+            id={`${uid}-user`}
+            /* Mono here because the value genuinely is a code — HR-EMP-00417
+               reads and checks digit by digit, and a proportional face makes
+               1/l and 0/O the reader's problem. */
+            className={`${authField} font-mono tracking-[0.04em]`}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+            autoComplete="username"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="HR-EMP-00000"
+            aria-describedby={error ? errorId : undefined}
+          />
+        </div>
 
-      {/* Right — sign in */}
-      <div className="flex flex-1 items-center justify-center px-4 py-8 sm:px-8 lg:w-1/2">
-        <div className="w-full max-w-md">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-brand">
-            Welcome back
+        <div>
+          <div className="mb-2 flex items-baseline justify-between gap-4">
+            <label
+              htmlFor={`${uid}-pass`}
+              className="text-[13px] font-medium text-[var(--plate-muted)]"
+            >
+              Password
+            </label>
+            {/* Beside the box it belongs to, which is where somebody looks
+                the moment the password they typed did not work. */}
+            <Link to="/forgot-password" className={authLink}>
+              Forgot password?
+            </Link>
           </div>
-          <h1 className="mt-1 font-display text-2xl font-bold text-ink sm:text-3xl">Sign in</h1>
-          <p className="mt-1 text-sm text-muted">One thread from indent to stock.</p>
-
-          <form onSubmit={submit} className="mt-6 flex flex-col gap-4">
-            <Input
-              label="Employee ID"
-              variant="bordered"
-              radius="md"
-              value={username}
-              onValueChange={setUsername}
-              autoFocus
-              autoComplete="username"
-              inputMode="text"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck="false"
-              placeholder="Enter your employee ID"
-            />
-            {/* aria-label as well as label: HeroUI floats the label into the field
-                until there is a value, and a screen reader landing on an empty
-                password box was told nothing at all about what it was. */}
-            <Input
-              label="Password"
-              aria-label="Password"
+          <div className="relative">
+            <input
+              id={`${uid}-pass`}
+              className={`${authField} pr-12`}
               type={showPassword ? "text" : "password"}
-              variant="bordered"
-              radius="md"
               value={password}
-              onValueChange={setPassword}
+              onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               placeholder="Enter your password"
-              endContent={
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                  title={showPassword ? "Hide password" : "Show password"}
-                  className="text-muted transition-colors hover:text-ink focus:outline-none"
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              }
+              aria-describedby={error ? errorId : undefined}
             />
-
-            {/* Under the password box, where somebody looks the moment the one they
-                typed did not work. */}
-            <div className="-mt-1 flex justify-end">
-              <Link
-                to="/forgot-password"
-                className="rounded text-sm font-medium text-brand transition-colors hover:text-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
-              >
-                Forgot password?
-              </Link>
-            </div>
-
-            {/* The shared alert, not a bespoke red box: a failed sign-in should look
-                like every other failure in the app. The sentence itself comes from
-                the one translation in shared/api/errors.ts, which for a rejected
-                sign-in is the server's own — deliberately the same words whether the
-                employee ID is unknown, retired, or simply typed with the wrong
-                password, so the form never confirms that an account exists. */}
-            {error && <Alert tone="danger" title={error} />}
-
-            <Button
-              type="submit"
-              color="primary"
-              radius="md"
-              isLoading={busy}
-              endContent={!busy && <ArrowRight className="h-4 w-4" />}
-              className="mt-1 h-11 w-full font-semibold"
+            <button
+              type="button"
+              onClick={() => setShowPassword((v) => !v)}
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              className="login-link absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-lg text-[var(--plate-faint)] transition-colors hover:text-[var(--plate-ink)]"
             >
-              {busy ? "Signing in…" : "Sign in"}
-            </Button>
-          </form>
+              {showPassword ? <EyeOff className="h-[18px] w-[18px]" /> : <Eye className="h-[18px] w-[18px]" />}
+            </button>
+          </div>
         </div>
-      </div>
-    </div>
+
+        {error && (
+          <div id={errorId}>
+            <Alert tone="danger" title={error} />
+          </div>
+        )}
+
+        <button type="submit" disabled={busy} className={authSubmit}>
+          {busy ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Signing in
+            </span>
+          ) : (
+            "Sign in"
+          )}
+        </button>
+      </form>
+    </AuthShell>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check, Globe, Search, Users } from "lucide-react";
+import { AlertTriangle, Check, Search, Users } from "lucide-react";
 import { Button } from "@heroui/react";
 import { Card, ErrorBanner, Select } from "@/shared/components";
 import { itemEligibilityAssignments, itemEligibilityScopes, mastersApi,
@@ -32,11 +32,9 @@ import type { Option } from "../components/MasterCrud";
  * never the intersection, which nobody could satisfy.
  */
 
-type ScopeKind = "ROLE" | "REGION";
-
 export function ItemEligibilityTab({ items }: { items: Option[] }) {
   const queryClient = useQueryClient();
-  const [kind, setKind] = useState<ScopeKind>("ROLE");
+  const [projectId, setProjectId] = useState<string>("");
   const [scopeId, setScopeId] = useState<string>("");
   const [search, setSearch] = useState("");
   //: The working set. Seeded from the server, edited locally, saved in one press —
@@ -70,8 +68,9 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
    * simply has not been granted yet, and would have explained none of the above.
    */
   const scopeOptions = useMemo(() => (
-    kind === "ROLE"
-      ? (scopes.data?.roles ?? []).map((row) => {
+    (scopes.data?.roles ?? [])
+      .filter((row) => String(row.project_id) === projectId)
+      .map((row) => {
           // Folded into the LABEL rather than a second line: `SelectOption` is
           // {value,label} and giving the shared control a `hint` slot means changing
           // it for all ~30 call sites, which is a bigger change than this screen has
@@ -83,19 +82,14 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
               : ` — ${row.holders} ${row.holders === 1 ? "person" : "people"}`;
           return { value: String(row.id), label: `${row.name}${code}${held}` };
         })
-      : (scopes.data?.regions ?? []).map((row) => ({
-          value: String(row.id), label: row.name,
-        }))
-  ), [kind, scopes.data]);
+  ), [projectId, scopes.data]);
 
   /** The role currently picked, so the screen can say plainly when it is a dead one. */
-  const pickedRole = kind === "ROLE"
-    ? (scopes.data?.roles ?? []).find((r) => String(r.id) === scopeId)
-    : undefined;
+  const pickedRole = (scopes.data?.roles ?? []).find((r) => String(r.id) === scopeId);
 
   const current = useQuery({
-    queryKey: ["masters", "item-eligibility", "assignments", kind, scopeId],
-    queryFn: () => itemEligibilityAssignments(kind, Number(scopeId)),
+    queryKey: ["masters", "item-eligibility", "assignments", "ROLE", scopeId],
+    queryFn: () => itemEligibilityAssignments("ROLE", Number(scopeId)),
     enabled: Boolean(scopeId),
   });
 
@@ -121,7 +115,7 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
 
   const save = useMutation({
     mutationFn: () => setItemEligibilityAssignments({
-      scope_type: kind, scope_id: Number(scopeId), item_ids: [...picked],
+      scope_type: "ROLE", scope_id: Number(scopeId), item_ids: [...picked],
     }),
     onSuccess: (result) => {
       setSaved(
@@ -180,29 +174,27 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
       <Card className="p-4">
         <div className="flex flex-wrap items-end gap-3">
           <Select
-            label="Tag by"
-            value={kind}
+            label="Project"
+            value={projectId}
             onChange={(value) => {
-              setKind(value === "REGION" ? "REGION" : "ROLE");
-              // The two are different id spaces — a role id is not an office id — so
-              // the chosen scope cannot survive the switch.
+              setProjectId(value);
               setScopeId("");
               setPicked(new Set());
               setDirty(false);
               setSaved(null);
             }}
-            options={[
-              { value: "ROLE", label: "Role" },
-              { value: "REGION", label: "Region" },
-            ]}
-            className="w-40"
+            options={(scopes.data?.projects ?? []).map((project) => ({
+              value: String(project.id), label: project.name,
+            }))}
+            placeholder="Pick a project…"
+            className="min-w-56"
           />
           <Select
-            label={kind === "ROLE" ? "Role" : "Region"}
+            label="Job profile / role"
             value={scopeId}
             onChange={(value) => { setScopeId(value); setSaved(null); }}
             options={scopeOptions}
-            placeholder={kind === "ROLE" ? "Pick a role…" : "Pick a region…"}
+            placeholder={projectId ? "Pick a role…" : "Pick a project first"}
             className="min-w-64 flex-1"
           />
           {/* Said out loud, not just implied by "— nobody holds this" in the dropdown
@@ -253,7 +245,7 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
             {newlyClosing} of these {newlyClosing === 1 ? "items is" : "items are"} not
             tagged to anyone yet. Saving makes {newlyClosing === 1 ? "it" : "them"}
             {" "}requestable <strong>only</strong> by this{" "}
-            {kind === "ROLE" ? "role" : "region"} — everyone else loses{" "}
+            role — everyone else loses{" "}
             {newlyClosing === 1 ? "it" : "them"}.
           </span>
         </div>
@@ -261,12 +253,9 @@ export function ItemEligibilityTab({ items }: { items: Option[] }) {
 
       {!scopeId ? (
         <Card className="p-10 text-center">
-          {kind === "ROLE"
-            ? <Users className="mx-auto h-6 w-6 text-muted" />
-            : <Globe className="mx-auto h-6 w-6 text-muted" />}
+          <Users className="mx-auto h-6 w-6 text-muted" />
           <p className="mt-3 text-sm text-muted">
-            Pick a {kind === "ROLE" ? "role" : "region"} to see and change what it may
-            request.
+            Pick a project, then a job profile, to see and change what it may request.
           </p>
         </Card>
       ) : (

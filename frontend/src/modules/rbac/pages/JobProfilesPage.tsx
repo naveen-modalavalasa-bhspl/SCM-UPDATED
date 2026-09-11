@@ -21,6 +21,7 @@
  * shape of an access bug, so the two now move together, under one name.
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Tooltip } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, BarChart3, Boxes, Check, CheckCircle, ChevronRight, ClipboardPaste,
@@ -475,7 +476,7 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
   "stock.view.subtree":
     "See stock at locations that report under the user's position.",
   "stock.points.manage":
-    "Choose which positions are responsible for each stocking point.",
+    "Tag positions to stocking points and grant or revoke additional floor access.",
   "stock.transfer.approve":
     "Approve stock transfers that move goods between different projects.",
   "allocation.view":
@@ -618,6 +619,78 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
     "Choose which system events create notifications and how they are handled.",
   "admin.settings.manage":
     "Update company details and general application settings.",
+  "consolidation.view":
+    "Open the consolidated purchase sheets that group requisitions together.",
+  "consolidation.create":
+    "Roll several purchase requisitions into one consolidated buying sheet.",
+  "consolidation.approve":
+    "Approve or reject a consolidated purchase sheet before buying starts.",
+  "requisition.view":
+    "Open purchase requisitions and read what has been asked for.",
+  "requisition.create":
+    "Raise a purchase requisition and send it for approval.",
+  "requisition.approve":
+    "Approve or reject a purchase requisition.",
+  "rfq.view":
+    "Open requests for quotation and read the vendor replies.",
+  "rfq.create":
+    "Create a request for quotation and send it out to vendors.",
+  "rfq.approve":
+    "Approve a request for quotation so that it reaches its vendors.",
+  "rfq.compare":
+    "Open the sheet that puts every vendor quotation side by side.",
+  "rfq.award":
+    "Choose the winning vendor for a request for quotation.",
+  "qc_outward.view":
+    "Open the quality checks made on goods before they leave the warehouse.",
+  "qc_outward.create":
+    "Start a quality check on goods that are about to be sent out.",
+  "qc_outward.update":
+    "Change an outward quality check while it is still a draft.",
+  "qc_outward.approve":
+    "Complete an outward quality check and record the result.",
+  "qc_outward.export":
+    "Download outward quality check records as a file.",
+  "qc_outward.delete":
+    "Delete an outward quality check that is still a draft.",
+  "transport.view":
+    "Open shipments and see how goods are travelling.",
+  "transport.create":
+    "Raise a shipment for a consignment that is ready to move.",
+  "transport.approve":
+    "Approve or reject a shipment before it is arranged.",
+  "transport.award":
+    "Give the job to one carrier at an agreed price. The carrier still has to accept it.",
+  "transport.track":
+    "Keep a shipment up to date while it travels: its docket number, where it has reached, and when it arrived.",
+  "transport.acknowledge":
+    "Sign at the receiving site to confirm what actually arrived.",
+  "transport.exception":
+    "Report goods that arrived damaged or short, and close the case once it is settled.",
+  "transport.delete":
+    "Delete a shipment that is still a draft.",
+  "logistics.partner.view":
+    "Open the register of transport partners the company uses.",
+  "logistics.partner.manage":
+    "Add transport partners and issue their portal logins.",
+  "vendor.portal.manage":
+    "Issue and reset the portal logins that suppliers and carriers sign in with.",
+  "return.decide":
+    "Decide where returned material should go.",
+  "return.endorse":
+    "Agree with or object to a decision made on a return.",
+  "return.config.manage":
+    "Choose which posts receive returned material.",
+  "mail.view":
+    "Read the company mailbox and the record of mail already sent.",
+  "mail.send":
+    "Send mail from the company address.",
+  "integration.view":
+    "See the outside applications connected to this system.",
+  "integration.manage":
+    "Connect outside applications and set up how they exchange data.",
+  "integration.keys.manage":
+    "Issue and withdraw the API keys outside applications sign in with.",
   "admin.code_formats.manage":
     "Set how codes are created for assets and consumable items.",
 };
@@ -628,18 +701,94 @@ export const featureHint = (feature: MatrixFeature) =>
   ?? `${feature.description}. Grants "${feature.code}" — the backend checks this on every `
     + "request, so it is the real permission, not just a visible button.";
 
+export function featureGroup(code: string): string {
+  if (/(^|\.)view([._]|$)/.test(code)) return "Visibility and data access";
+  if (/(^|\.)(approve|reject)([._]|$)/.test(code)) return "Approval decisions";
+  return "Actions and settings";
+}
+
+// Only name controls verified in their screens; a scope has no matching button.
+export const ACTION_LOCATIONS: Record<string, { button: string; where: string }> = {
+  "indent.create": { button: "New indent", where: "Indents > Overview or All Requests" },
+  "indent.edit": { button: "Edit Indent", where: "Indents > All Requests > Open an editable indent" },
+  "po.create": { button: "New purchase order", where: "Procurement > Purchase Orders" },
+  "po.approve": { button: "Approve", where: "Procurement > Purchase Orders > Open an order > Approve this order" },
+  "po.reject": { button: "Reject", where: "Procurement > Purchase Orders > Open an order > Approve this order" },
+  "issue.create": { button: "New issue", where: "Warehouse > Material Issues (the same button also submits a draft for approval)" },
+  "issue.issue": { button: "Issue from stock", where: "Warehouse > Material Issues > Open an approved issue (the same code carries Approve / Reject while the issue is pending)" },
+  "po.send_vendor": { button: "Send to vendor", where: "Procurement > Purchase Orders > Open an approved order" },
+  "rfq.create": { button: "New RFQ", where: "Procurement > RFQs (also [Create RFQ] on an approved requisition or consolidation)" },
+  "transport.create": { button: "Dispatch", where: "Logistics > Dispatch > a consignment row" },
+  "stock.points.manage": { button: "Tag / Access / Grant access", where: "Inventory > Stocking Points > Position row > Access" },
+};
+
+/* A picture of the control, for the profile builder who has never opened the screen.
+   Files live in `frontend/public/rbac/`, captured against the running app and cropped
+   to the toolbar the button sits in — a whole 1440px screen is unreadable in a hover
+   card. Keyed by permission code for an action and by page code for a screen; a code
+   with no shot simply shows the words, which is why this map may lag the other two. */
+export const SHOTS: Record<string, string> = {
+  "indent.create": "/rbac/indent.create.png",
+  "indent.edit": "/rbac/indent.edit.png",
+  "po.create": "/rbac/po.create.png",
+  "po.approve": "/rbac/po.approve.png",
+  "po.reject": "/rbac/po.reject.png",
+  "issue.create": "/rbac/issue.create.png",
+  "issue.issue": "/rbac/issue.issue.png",
+  "stock.points.manage": "/rbac/stock.points.manage.png",
+  "rfq.create": "/rbac/rfq.create.png",
+  // No transport.create shot: on this data every Dispatch row sits at "Checking…"
+  // and the button never renders, so there is nothing honest to photograph yet.
+  ind_list: "/rbac/page.ind_list.png",
+  po_list: "/rbac/page.po_list.png",
+  wh_issues: "/rbac/page.wh_issues.png",
+  inv_stocking_points: "/rbac/page.inv_stocking_points.png",
+};
+
+export const shotFor = (code: string): string | undefined => SHOTS[code];
+
+export function featureGuidance(feature: MatrixFeature): string {
+  const location = ACTION_LOCATIONS[feature.code];
+  const group = featureGroup(feature.code);
+  const detail = PLAIN_FEATURE_HELP[feature.code] ?? feature.description;
+  if (group === "Visibility and data access")
+    return `${detail} This controls readable data; it has no separate action button. Other access rules still apply.`;
+  if (group === "Approval decisions")
+    return `${detail}${location ? ` Find it: ${location.where}. Button: [${location.button}].` : ""} The person must also be eligible at the document's current approval step. This permission does not bypass the approval flow.`;
+  return `${detail}${location ? ` Find it: ${location.where}. Button: [${location.button}].` : " Availability also depends on the document status and assigned access."}`;
+}
+
 /* --------------------------------------------------------------------------- *
  *  Small local controls. Nothing here restyles a shared primitive — they are
  *  compositions of tokens the kit does not carry a component for.
  * --------------------------------------------------------------------------- */
 
 function Tick({
-  checked, indeterminate, disabled, onChange, label, hint,
+  checked, indeterminate, disabled, onChange, label, hint, shot,
 }: {
   checked: boolean; indeterminate?: boolean; disabled?: boolean;
-  onChange: () => void; label: ReactNode; hint?: string;
+  onChange: () => void; label: ReactNode; hint?: string; shot?: string;
 }) {
   return (
+    <Tooltip
+      content={
+        <div className="max-w-md whitespace-normal p-1 text-sm">
+          {hint}
+          {/* Lazy, and it fails quietly: a missing file leaves the words, which are
+              the answer. An <img> that 404s must never blank the help around it. */}
+          {shot && (
+            <img
+              src={shot}
+              alt=""
+              loading="lazy"
+              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+              className="mt-2 max-h-40 w-auto max-w-full rounded-lg border border-default bg-white object-contain p-1"
+            />
+          )}
+        </div>
+      }
+      isDisabled={!hint}
+    >
     <label
       title={hint}
       className={`flex min-h-9 items-start gap-2.5 rounded-lg px-2 py-1.5 text-sm
@@ -652,9 +801,11 @@ function Tick({
         checked={checked}
         ref={(el) => { if (el) el.indeterminate = !!indeterminate && !checked; }}
         onChange={onChange}
+        aria-description={hint}
       />
       <span className={disabled ? "text-muted" : "text-body"}>{label}</span>
     </label>
+    </Tooltip>
   );
 }
 
@@ -1432,6 +1583,7 @@ export function JobProfilesPage() {
                                 <Tick
                                   key={page.code}
                                   hint={pageHint(page)}
+                                  shot={shotFor(page.code)}
                                   disabled={page.always_on}
                                   checked={page.always_on || pageCodes.has(page.code)}
                                   onChange={() =>
@@ -1475,15 +1627,25 @@ export function JobProfilesPage() {
                                   Nothing to switch on beyond the screens.
                                 </p>
                               )}
-                              {section.features.map((feature) => (
+                              {["Actions and settings", "Approval decisions", "Visibility and data access"].map((group) => (
+                                <div key={group}>
+                                {section.features.some((feature) => featureGroup(feature.code) === group) &&
+                                  <p className="mt-3 px-2 text-xs font-semibold text-muted">{group}</p>}
+                              {section.features.filter((feature) => featureGroup(feature.code) === group).map((feature) => (
                                 <Tick
                                   key={feature.code}
-                                  hint={featureHint(feature)}
+                                  hint={featureGuidance(feature)}
+                                  shot={shotFor(feature.code)}
                                   checked={featureCodes.has(feature.code)}
                                   onChange={() =>
                                     toggle(featureCodes, feature.code, setFeatureCodes)}
-                                  label={feature.description}
+                                  label={<span>{feature.description}
+                                    {ACTION_LOCATIONS[feature.code] && <span className="ml-1 text-xs text-brand">[{ACTION_LOCATIONS[feature.code].button}]</span>}
+                                    <span className="mt-0.5 block text-xs text-muted">{PLAIN_FEATURE_HELP[feature.code] ?? feature.description}</span>
+                                  </span>}
                                 />
+                              ))}
+                                </div>
                               ))}
                             </div>
                           </div>

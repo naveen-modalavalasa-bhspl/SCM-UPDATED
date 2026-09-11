@@ -5,8 +5,9 @@ import {
   Card, ErrorBanner, Field, Input, StatusPill, useToast,
 } from "@/shared/components";
 import { fmtDate, todayIst } from "@/shared/datetime";
+import { errorMessage } from "@/shared/api/errors";
 import { supplierApi } from "@/modules/procurement/api";
-import type { QuoteSubmit } from "@/modules/procurement/types";
+import type { QuoteOtpSent, QuoteSubmit } from "@/modules/procurement/types";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -161,6 +162,7 @@ export function SupplierRFQDetailPage() {
   const save = useMutation({
     mutationFn: () => {
       const payload: QuoteSubmit = {
+        otp_code: otpCode.trim(),
         vendor_ref_no: header.vendor_ref_no || null,
         valid_till: header.valid_till || null,
         expected_delivery_date: header.expected_delivery_date || null,
@@ -190,6 +192,29 @@ export function SupplierRFQDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["supplier-rfqs"] });
       toast.success("Quotation submitted");
       nav("/supplier/rfqs");
+    },
+    onError: () => {
+      // The code is spent by the ATTEMPT, not by the outcome — the server marks it
+      // used before writing anything. Leaving the digits in the box would invite the
+      // vendor to press Submit again with a code that can no longer work, and read
+      // the second refusal as the screen being broken.
+      setOtpCode("");
+      setOtpSent(null);
+    },
+  });
+
+  /* The code that stands between a drafted price and a submitted one. It is requested
+   * here and typed here; everything that decides whether it is good — the window, the
+   * attempt cap, whether it was already spent — is the server's, so this holds no
+   * timer that could disagree with it. */
+  const [otpCode, setOtpCode] = useState("");
+  const [otpSent, setOtpSent] = useState<QuoteOtpSent | null>(null);
+
+  const requestOtp = useMutation({
+    mutationFn: () => supplierApi.requestQuoteOtp(rfqId),
+    onSuccess: (sent) => {
+      setOtpSent(sent);
+      toast.success(`Code sent to ${sent.sent_to}`);
     },
   });
 
@@ -401,12 +426,7 @@ export function SupplierRFQDetailPage() {
       <Card className="space-y-5 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-white">
         <h2 className="text-sm font-semibold text-ink">Terms and totals</h2>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Field label="Your reference">
-            <Input
-              value={header.vendor_ref_no} disabled={!open}
-              onChange={(e) => setHeader({ ...header, vendor_ref_no: e.target.value })}
-            />
-          </Field>
+
           <Field label="Valid until" required>
             <Input
               type="date" min={todayIst()} value={header.valid_till} disabled={!open}
@@ -419,12 +439,7 @@ export function SupplierRFQDetailPage() {
               onChange={(e) => setHeader({ ...header, expected_delivery_date: e.target.value })}
             />
           </Field>
-          <Field label="Payment terms">
-            <Input
-              value={header.payment_terms} disabled={!open}
-              onChange={(e) => setHeader({ ...header, payment_terms: e.target.value })}
-            />
-          </Field>
+
           <Field label="Freight">
             <Input
               type="number" min="0" step="0.01" value={header.freight_amount} disabled={!open}
@@ -476,10 +491,73 @@ export function SupplierRFQDetailPage() {
           </p>
         )}
 
+        {/* The last step, and the only one that binds this vendor to a price. The code
+            goes to the address on their account, so submitting takes something the
+            portal link alone cannot give — which is the whole point: that link may
+            have been forwarded, or left in a mailbox somebody still reads. */}
+        {open && (
+          <div className="rounded-xl border border-line bg-content2/40 p-4">
+            <h3 className="text-sm font-semibold text-ink">Confirm it is you</h3>
+            <p className="mt-1 text-xs text-muted">
+              We email a one-time code to your registered address. Enter it to submit
+              this quotation.
+            </p>
+
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <button
+                type="button"
+                className="rounded-xl border border-brand px-4 py-2.5 text-sm font-semibold text-brand transition hover:bg-brand/5 disabled:opacity-50 disabled:pointer-events-none"
+                disabled={requestOtp.isPending}
+                onClick={() => requestOtp.mutate()}
+              >
+                {requestOtp.isPending
+                  ? "Sending…"
+                  : otpSent ? "Send another code" : "Request OTP"}
+              </button>
+
+              <input
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={otpCode}
+                // Digits only: the code is six of them, and a pasted "Code: 123456"
+                // should work rather than fail on the label somebody copied with it.
+                onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="6-digit code"
+                aria-label="One-time code"
+                className="h-11 w-full rounded-xl border border-line bg-content1 px-3 text-center text-base tracking-[0.4em] text-ink outline-none focus:border-brand focus:ring-2 focus:ring-brand/20 sm:w-44"
+              />
+            </div>
+
+            {otpSent && (
+              <p className="mt-2 text-xs text-muted">
+                Sent to <span className="font-semibold text-body">{otpSent.sent_to}</span>
+                {" — good for "}
+                {otpSent.expires_in_seconds >= 60
+                  ? `${Math.round(otpSent.expires_in_seconds / 60)} minute${
+                      otpSent.expires_in_seconds >= 120 ? "s" : ""}`
+                  : `${otpSent.expires_in_seconds} seconds`}
+                . It can be used once.
+              </p>
+            )}
+            {requestOtp.isError && (
+              <p className="mt-2 text-xs text-danger">
+                {errorMessage(requestOtp.error)}
+              </p>
+            )}
+            {save.isError && (
+              <p className="mt-2 text-xs text-danger">{errorMessage(save.error)}</p>
+            )}
+          </div>
+        )}
+
         {open && (
           <button
             className="w-full sm:w-auto rounded-xl bg-gradient-to-r from-brand to-brand/80 px-6 py-3 text-sm font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl hover:from-brand/90 hover:to-brand focus:outline-none focus:ring-4 focus:ring-brand/30 disabled:opacity-50 disabled:pointer-events-none"
-            disabled={save.isPending || !lines.length || overCeiling.length > 0 || gaps.length > 0}
+            // The code is part of what makes the press legal, so it gates the button
+            // alongside the price checks. The server checks it again regardless.
+            disabled={save.isPending || !lines.length || overCeiling.length > 0
+              || gaps.length > 0 || otpCode.length !== 6}
             onClick={() => save.mutate()}
           >
             {save.isPending

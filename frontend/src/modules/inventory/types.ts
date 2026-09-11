@@ -202,6 +202,10 @@ export interface StockLedgerItem {
   serial_numbers?: string[];
   asset_code?: string;
   consumable_code?: string;
+  /** The unit codes this movement carried, when the item is not serial-tracked and
+   *  the minted code IS the unit's identity. `serial_numbers` stays empty for those
+   *  rows on purpose — the codes are not serials and must not surface as any. */
+  unit_codes?: string[];
   reference_no?: string;
   performed_by?: string;
   remarks?: string;
@@ -341,6 +345,25 @@ export interface StockRow {
   uom_name?: string | null;
 }
 
+export interface FloorOption {
+  id: number;
+  warehouse_id: number;
+  code: string;
+  name?: string | null;
+  bin_type?: string | null;
+  parent_id?: number | null;
+  is_active?: boolean;
+}
+
+export interface FloorAccess {
+  id: number;
+  position_id: number;
+  warehouse_id: number;
+  location_id: number;
+  location_code?: string | null;
+  location_name?: string | null;
+}
+
 /** Exactly what GET /api/stock/movements returns -- the live stk_ledger columns. */
 export interface MovementRow {
   id: number;
@@ -467,6 +490,7 @@ export interface AllocationWarehouseOption {
 
 /** A line on the allocation screen: what was asked for, what is actually there. */
 export interface AllocationProposalLine {
+  on_order_qty?: number;
   indent_item_id: number;
   item_id: number;
   item_code: string | null;
@@ -962,6 +986,8 @@ export interface PositionLocationTag {
   tier_label: string;
   project_id: number;
   project_name?: string | null;
+  location_id?: number | null;
+  section_name?: string | null;
   is_primary: boolean;
   /** Who stands in the post. A position carries several assignment rows, so this is a
    *  list — and it is what lets the screen be searched by employee code. */

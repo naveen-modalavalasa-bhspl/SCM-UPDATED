@@ -4,7 +4,7 @@ Every section is assembled after resolving the signed-in user's effective
 permissions for their active position. The frontend never receives cards, actions,
 modules, attention items, or activity for a capability the user cannot access.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,20 +48,49 @@ MODULE_DESCRIPTIONS = {
 }
 
 
-def _range_start(value: DateRange) -> datetime:
+def _range_bounds(
+    value: DateRange, date_from: date | None = None, date_to: date | None = None,
+) -> tuple[datetime, datetime | None]:
+    """The window a dashboard tile counts over, as (start, end). `None` end means "now".
+
+    Every value but `custom` is anchored to the present, so only `custom` has an end at
+    all — and its end is the LAST MOMENT of `date_to`, not midnight at its start, or
+    picking the same day for both would count nothing.
+    """
     now = ist_now()
+    if value == "custom":
+        # A half-filled custom range still has to answer something. A missing start
+        # falls back to the calendar month, a missing end runs to now, and reversed
+        # dates are swapped rather than returning an empty dashboard the user cannot
+        # tell apart from "genuinely nothing happened".
+        if date_from and date_to and date_to < date_from:
+            date_from, date_to = date_to, date_from
+        start = (
+            datetime.combine(date_from, time.min).replace(tzinfo=now.tzinfo)
+            if date_from
+            else now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
+        end = (
+            datetime.combine(date_to, time.max).replace(tzinfo=now.tzinfo)
+            if date_to else None
+        )
+        return start, end
+    if value == "day":
+        # Rolling 24 hours, deliberately not "since midnight": the tile is read at the
+        # end of a shift as often as the start of one.
+        return now - timedelta(hours=24), None
     if value == "month":
-        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), None
     if value == "quarter":
         first_month = ((now.month - 1) // 3) * 3 + 1
         return now.replace(
             month=first_month, day=1, hour=0, minute=0, second=0, microsecond=0,
-        )
+        ), None
     # The label on the picker says "This Week", so the week is the calendar one —
     # Monday to now — not a rolling seven days. Month and quarter already read that
     # way and a mixed reading is what makes a filter feel broken.
     return (now - timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0)
+        hour=0, minute=0, second=0, microsecond=0), None
 
 
 async def _count(db: AsyncSession, model, *conditions) -> int:
@@ -202,6 +231,7 @@ def _is_overdue(row: dict) -> bool:
 
 async def _recent_activity(
     db: AsyncSession, user, permissions: set[str], since: datetime,
+    until: datetime | None = None,
 ) -> list[dict]:
     """The feed at the foot of Home, narrowed to what this login may actually know.
 
@@ -226,6 +256,8 @@ async def _recent_activity(
     stmt = (
         select(AuditLog)
         .where(AuditLog.created_at >= since)
+        # Only a custom range closes the top end; every other window runs to now.
+        .where(*( [AuditLog.created_at <= until] if until is not None else [] ))
         .order_by(AuditLog.created_at.desc())
         .limit(40)
     )
@@ -267,7 +299,7 @@ async def _recent_activity(
 SUMMARY_CACHE_SECONDS = 60
 
 
-def _summary_cache_key(user, date_range: str) -> str:
+def _summary_cache_key(user, date_range: str, date_from=None, date_to=None) -> str:
     """Everything the answer depends on, and nothing else.
 
     The employee AND the active position, because both permissions and the visibility
@@ -276,10 +308,14 @@ def _summary_cache_key(user, date_range: str) -> str:
     permissions leak and not a stale number.
     """
     return (f"home:summary:{getattr(user, 'id', 0)}:"
-            f"{getattr(user, 'active_position_id', None)}:{date_range}")
+            f"{getattr(user, 'active_position_id', None)}:{date_range}"
+            # A custom window is part of the answer: without the dates in the key, the
+            # first custom range a user picked would be served for every later one.
+            f":{date_from or ''}:{date_to or ''}")
 
 
-async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dict:
+async def summary(db: AsyncSession, user, date_range: DateRange = "week",
+                  date_from: date | None = None, date_to: date | None = None) -> dict:
     """The Home dashboard. Cached per (employee, position, date range) for a minute.
 
     ~17 awaited calls, several of them multi-query — per-status counts per module, the
@@ -288,21 +324,28 @@ async def summary(db: AsyncSession, user, date_range: DateRange = "week") -> dic
     """
     from app.core import cache as shared_cache
 
-    cache_key = _summary_cache_key(user, date_range)
+    cache_key = _summary_cache_key(user, date_range, date_from, date_to)
     cached = await shared_cache.get_json(cache_key)
     if cached is not None:
         return cached
 
-    payload = await _build_summary(db, user, date_range)
+    payload = await _build_summary(db, user, date_range, date_from, date_to)
     await shared_cache.set_json(cache_key, payload, SUMMARY_CACHE_SECONDS)
     return payload
 
 
-async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week") -> dict:
+async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week",
+                         date_from: date | None = None,
+                         date_to: date | None = None) -> dict:
     permissions = await get_user_permissions(
         db, user, getattr(user, "active_position_id", None),
     )
-    since = _range_start(date_range)
+    since, until = _range_bounds(date_range, date_from, date_to)
+
+    def _within(column):
+        """The window as a predicate. Only a custom range has an upper bound, so for
+        every other value this is the same single `>= since` it always was."""
+        return and_(column >= since, column <= until) if until else column >= since
     menu = await get_user_menu(db, permissions, await warehouse_menu_label(
         db, user, getattr(user, "active_position_id", None)))
     # Two COUNTs, not every row. The dashboard only ever needed the total and the
@@ -323,7 +366,7 @@ async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week")
         # screen says "Date range", and a control that changes nothing on the screen
         # is worse than no control. Scope still comes first — the tile can never
         # count a document the Indents list would hide.
-        indent_range = and_(indent_scope, Indent.created_at >= since)
+        indent_range = and_(indent_scope, _within(Indent.created_at))
         indent_count = await _count(db, Indent, indent_range)
         pending_indents = await _count(
             db, Indent, indent_range,
@@ -398,7 +441,7 @@ async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week")
             owner_col=PurchaseOrder.created_by_id,
             office_col=PurchaseOrder.office_id,
         )
-        po_range = and_(po_scope, PurchaseOrder.created_at >= since)
+        po_range = and_(po_scope, _within(PurchaseOrder.created_at))
         po_count = await _count(db, PurchaseOrder, po_range)
         awaiting_po = await _count(
             db, PurchaseOrder, po_range, PurchaseOrder.status.in_([
@@ -434,7 +477,7 @@ async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week")
             owner_col=Receipt.created_by_id,
             project_col=Receipt.project_id,
         ))
-        receipt_range = and_(receipt_scope, Receipt.created_at >= since)
+        receipt_range = and_(receipt_scope, _within(Receipt.created_at))
         receipt_count = await _count(db, Receipt, receipt_range)
         pending_receipts = await _count(
             db, Receipt, receipt_range,
@@ -520,5 +563,5 @@ async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week")
         "quick_actions": actions,
         "modules": _visible_modules(menu),
         "needs_attention": attention,
-        "recent_activity": await _recent_activity(db, user, permissions, since),
+        "recent_activity": await _recent_activity(db, user, permissions, since, until),
     }

@@ -12,6 +12,9 @@ import {
 import { alerts } from "@/modules/alerts";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { ErrorNote } from "./PageStates";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
+import { TONE_MINT } from "@/shared/components/tones";
+import { TONE_BLUE } from "@/shared/components/tones";
 // offer COUNT_VARIANCE and FOUND, which are not in that enum — the reason went
 // unvalidated, so they were stored and reported on as if they were real categories.
 const REASONS = [
@@ -115,10 +118,10 @@ export function StockAdjustmentsView() {
     r.status === "PENDING_APPROVAL" ? (
       <Can do="stock.adjust">
         <div className="flex gap-2">
-          <Button onClick={() => void askThenDecide(r, true)}>
+          <Button className={TONE_APPROVE} onClick={() => void askThenDecide(r, true)}>
             <Check size={14} /> Approve
           </Button>
-          <Button variant="subtle" onClick={() => void askThenDecide(r, false)}>
+          <Button className={TONE_REJECT} variant="subtle" onClick={() => void askThenDecide(r, false)}>
             <X size={14} /> Reject
           </Button>
         </div>
@@ -166,12 +169,12 @@ export function StockAdjustmentsView() {
         actions={
           <>
             {/* ghost + 16px icon, the app-wide header-action shape. See StockBalanceView. */}
-            <Button variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
+            <Button className={TONE_BLUE} variant="ghost" disabled={rows.length === 0} onClick={exportCsv}>
               <Download className="h-4 w-4" /> Export CSV
             </Button>
             <Button variant="subtle" onClick={refresh}><RefreshCw size={14} /> Refresh</Button>
             <Can do="stock.adjust">
-              <Button onClick={() => setOpen(true)}><Plus size={14} /> New Adjustment</Button>
+              <Button className={TONE_MINT} onClick={() => setOpen(true)}><Plus size={14} /> New Adjustment</Button>
             </Can>
           </>
         }
@@ -250,7 +253,7 @@ export function StockAdjustmentsView() {
           </ModalBody>
           <ModalFooter>
             <Button variant="subtle" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button disabled={!valid || create.isPending} onClick={() => void askThenCreate()}>
+            <Button className={TONE_MINT} disabled={!valid || create.isPending} onClick={() => void askThenCreate()}>
               {create.isPending ? "Saving…" : "Create"}
             </Button>
           </ModalFooter>

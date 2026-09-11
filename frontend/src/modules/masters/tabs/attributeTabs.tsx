@@ -185,7 +185,7 @@ export function AttributesTab({ uoms }: { uoms: Option[] }) {
       <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
         An attribute is a <strong className="text-body">selectable trait</strong> —
         colour, material, grade. Something you measure, with a unit, is a
-        <strong className="text-body"> Spec</strong>. Both are attached to categories
+        <strong className="text-body"> Specification</strong>. Both are attached to categories
         on the Category Tagging tab.
       </div>
       <MasterCrud<MasterAttribute>
@@ -260,12 +260,12 @@ export function SpecsTab({ uoms }: { uoms: Option[] }) {
   return (
     <>
       <div className="mb-3 rounded-xl bg-content2 px-4 py-3 text-sm text-muted">
-        A spec is something you <strong className="text-body">measure</strong> —
+        A specification is something you <strong className="text-body">measure</strong> —
         operating voltage in volts, capacity in litres. It always carries a unit.
         Attach it to a category, and mark it required, on Category Tagging.
       </div>
       <MasterCrud<MasterSpec>
-        title="Spec" queryKey="specs" searchable managePerm="master.spec.manage"
+        title="Specification" queryKey="specs" searchable managePerm="master.spec.manage"
         columns={[
           { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
           { key: "name", header: "Name", render: (r) => r.name },
@@ -377,7 +377,7 @@ export function CategoryTaggingTab({ categories }: { categories: Option[] }) {
           { key: "tag_type", label: "Kind of field", type: "select",
             options: [
               { value: "ATTRIBUTE", label: "Attribute — a selectable trait" },
-              { value: "SPEC", label: "Spec — a measurement with a unit" },
+              { value: "SPEC", label: "Specification — a measurement with a unit" },
               { value: "FEATURE", label: "Feature — a yes/no trait" },
             ],
             clearOnChange: ["tag_id"],

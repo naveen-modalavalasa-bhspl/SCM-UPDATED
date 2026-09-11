@@ -10,6 +10,7 @@ import {
 import { returnsApi } from "../api";
 import { ReturnsNav } from "../components/ReturnsNav";
 import { STATUS_LABEL, STATUS_ORDER } from "../constants";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /**
  * The module's landing screen — the same shape as the indent Overview: KPI tiles, a
@@ -100,7 +101,7 @@ export default function ReturnsOverviewPage() {
           // the whole point of the screen, and hiding the only way in left storekeepers
           // on an empty page with nothing to do. The endpoint is still permission-gated
           // — a login without the code is refused at submit, which is the real check.
-          <Button onClick={() => navigate("/returns/new")}>
+          <Button className={TONE_MINT} onClick={() => navigate("/returns/new")}>
             <Plus className="h-4 w-4" /> New return
           </Button>
         }

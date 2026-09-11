@@ -36,7 +36,14 @@ LEGACY_FORMAT = "{item_code}-{seq:6}"
 # ("N of M serial numbers captured"). {serial} is not available here — it is the thing
 # being generated — so the running number is the identity, and validate_serial_format
 # insists on it.
-DEFAULT_SERIAL_FORMAT = "{item_code}-{seq:5}"
+#
+# Shaped like the asset and consumable codes above (2026-09-10), because on the shelf
+# it IS one of them: a minted serial is a label this system printed, not a number the
+# manufacturer stamped, and the storekeeper reading it has no way to know which of the
+# four kinds he is holding if one of them is shaped differently from the other three.
+# The `{new_flag}` segment is what makes an item code read `...-0001-1-00000042`, and
+# leaving it out of this one format was the whole of the difference.
+DEFAULT_SERIAL_FORMAT = "{item_code}-{new_flag}-{seq:8}"
 
 # Every token a format may use, and what it means on screen. The screen renders this
 # table, so a token added here is documented for the user by construction.

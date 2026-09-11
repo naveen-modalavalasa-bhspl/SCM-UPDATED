@@ -241,9 +241,12 @@ describe("CapacityBadge", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("says how much room is left", () => {
+  it("says how much room is left, in the unit it is measured in", () => {
+    // `volume()` carries the unit on purpose: a bare "40 free" beside a bay measured
+    // in cubic metres and a bay slotted in pallets is the ambiguity this whole
+    // component exists to remove.
     render(<CapacityBadge capacity={100} occupied={60} status="OK" />);
-    expect(screen.getByText("40 free")).toBeInTheDocument();
+    expect(screen.getByText("40 m³ free")).toBeInTheDocument();
   });
 
   it("says full rather than a negative number", () => {

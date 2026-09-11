@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
@@ -268,6 +268,8 @@ class POOut(BaseModel):
     vendor_status: str | None = None
     vendor_responded_at: datetime | None = None
     vendor_response_note: str | None = None
+    # Calculated at read time from the accepted/dispatch state.
+    amendment_allowed: bool = False
     revision_no: int = 0
     amended_at: datetime | None = None
     amendment_reason: str | None = None
@@ -440,6 +442,12 @@ class RFQLineIn(BaseModel):
     required_date: date | None = None
 
 
+class RFQVendorAllocationIn(BaseModel):
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
 class RFQCreate(BaseModel):
     title: str | None = None
     requisition_id: int | None = None
@@ -456,6 +464,8 @@ class RFQCreate(BaseModel):
     # service against the shared catalogue, never against a list kept here.
     evaluation_method: str | None = None
     vendor_ids: Annotated[list[int], BatchIds] = []
+    vendor_allocations: list[RFQVendorAllocationIn] = Field(
+        default_factory=list, max_length=MAX_DOCUMENT_LINES * 20)
     lines: list[RFQLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
@@ -491,6 +501,7 @@ class RFQUpdate(BaseModel):
     company_name: str | None = None
     evaluation_method: str | None = None
     vendor_ids: Annotated[list[int], BatchIds] | None = None
+    vendor_allocations: list[RFQVendorAllocationIn] | None = None
     lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
 
 
@@ -518,6 +529,8 @@ class RFQVendorOut(BaseModel):
     status: str | None = None
     sent_at: datetime | None = None
     responded_at: datetime | None = None
+    mapped_item_ids: list[int] | None = None
+    item_quantities: dict[str, float] | None = None
 
 
 class RFQListRow(BaseModel):
@@ -548,6 +561,14 @@ class RFQListRow(BaseModel):
     created_at: datetime
 
 
+class RFQPoRef(BaseModel):
+    po_id: int
+    po_no: str
+    po_status: str
+    vendor_id: int
+    quotation_id: int | None
+
+
 class RFQOut(RFQListRow):
     requisition_id: int | None = None
     requisition_no: str | None = None
@@ -561,8 +582,9 @@ class RFQOut(RFQListRow):
     evaluation_method: str | None = None
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
-    # The purchase order this award became. Not stored on pro_rfqs — the PO points
-    # backward at the RFQ and this is read from there, so there is one link, not two.
+    # The purchase orders this award became.
+    pos: list[RFQPoRef] = []
+    # Backward compatibility for the single-PO logic.
     po_id: int | None = None
     po_no: str | None = None
     po_status: str | None = None
@@ -699,7 +721,23 @@ class QuoteLineIn(BaseModel):
     delivery_days: int | None = None
 
 
+class QuoteOtpOut(BaseModel):
+    """What the vendor's screen may know about the code that was just sent.
+
+    The masked address and the window, never the digits. A response carrying the code
+    would make the email decorative and the whole gate meaningless — anyone holding
+    the portal link could read it straight out of the network tab.
+    """
+    sent_to: str
+    expires_in_seconds: int
+
+
 class QuoteSubmit(BaseModel):
+    #: The six digits emailed by `POST .../quotation/request-otp`. Optional on the
+    #: SCHEMA so a missing code fails with the sentence `quote_otp.verify` writes —
+    #: "Enter the code emailed to you" — rather than a 422 naming a field the vendor
+    #: has never heard of.
+    otp_code: str | None = None
     vendor_ref_no: str | None = None
     valid_till: date | None = None
     expected_delivery_date: date | None = None
@@ -782,9 +820,36 @@ class QuoteOut(QuoteListRow):
     items: list[QuoteItemOut] = []
 
 
+class RFQAwardAllocationIn(BaseModel):
+    """One supplier's share of one item, decided against the quoted prices."""
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
 class AwardIn(BaseModel):
-    quotation_id: int
+    """Who won, and how much of it.
+
+    Two shapes, because there are two decisions. `quotation_id` alone awards the whole
+    tender to one supplier, which is what it always did and still the common case.
+    `allocations` splits it: several suppliers each take a share of each item, and each
+    winning quotation becomes its own purchase order for exactly that share.
+
+    Exactly one of the two — an award that says both "all of it to them" and "a third
+    of it to them" is not a decision anybody can act on, and silently preferring one
+    would hide half of what the buyer pressed.
+    """
+    quotation_id: int | None = None
+    allocations: Annotated[list[RFQAwardAllocationIn], BatchIds] | None = None
     comments: str = ""
+
+    @model_validator(mode="after")
+    def _one_shape(self):
+        if bool(self.quotation_id) == bool(self.allocations):
+            raise ValueError(
+                "Award either one quotation or a split across suppliers, not both "
+                "and not neither.")
+        return self
 
 
 # --------------------------------------------------------------------------- #

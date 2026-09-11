@@ -15,7 +15,6 @@ from app.modules.warehouse.enums import (
     DispatchEventType, DispatchType, InspectionResult, InspectionType, IssueDirection,
     IssueType, PickStrategy, ReceiptType,
 )
-from app.shared.models.warehouse import STORAGE_TYPES
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, ConfigEntries, DocumentLines, SerialList,
     MAX_BATCH_IDS, MAX_DOCUMENT_LINES, MAX_SERIALS_PER_LINE,
@@ -101,6 +100,9 @@ class BinRead(_Read):
     parent_id: int | None = None
     bin_type: str | None = None
     storage_type_id: int | None = None
+    #: The kind's own name, off the storage-type master, so a tree can say "Rack"
+    #: without every screen keeping its own copy of the code-to-label map.
+    storage_type_name: str | None = None
     barcode: str | None = None
     floor_level: int | None = None
     shelf_level: int | None = None
@@ -195,8 +197,12 @@ class BinWrite(BaseModel):
     name: str | None = None
     description: str | None = None
     parent_id: int | None = None
-    # A location's kind: BIN and COLD_STORAGE_BIN hold stock, the rest are structure.
-    bin_type: str = "BIN"
+    # A location's kind, off the storage-type master. `storage_type_id` is what the
+    # form sends and what the service trusts; `bin_type` is the same row's code and is
+    # accepted for callers (and older screens) that only know the code. Neither is
+    # checked against a list in this file any more — see `storage_types.resolve`, which
+    # is why a site can add a rung without a release.
+    bin_type: str | None = None
     capacity_qty: Decimal | None = None
     # Leave blank and the cube is worked out from the three sides below, so a location
     # measured once needs nothing typed twice.
@@ -221,15 +227,12 @@ class BinWrite(BaseModel):
     shelf_level: int | None = None
     is_active: bool = True
 
-    @field_validator("bin_type")
+    @field_validator("bin_type", mode="before")
     @classmethod
-    def known_storage_type(cls, value: str) -> str:
-        value = (value or "").upper()
-        if value not in STORAGE_TYPES:
-            raise ValueError(
-                f"{value or 'blank'} is not a storage type. "
-                f"Use one of: {', '.join(STORAGE_TYPES)}")
-        return value
+    def upper_code(cls, value):
+        """Codes are upper case; whether this one EXISTS is the master's question, not
+        a tuple's — the service asks it, so the answer can change without a release."""
+        return value.strip().upper() or None if isinstance(value, str) else value
 
     @field_validator(
         "name", "description", "barcode", "floor_level", "shelf_level",
@@ -418,6 +421,19 @@ class LocationRead(_Read):
     parent_location_id: int | None = None
     storage_type: str | None = None
     storage_type_id: int | None = None
+    #: The kind's display name, and where this location sits in the building. Both are
+    #: derived on the way out (`service.list_locations`) rather than stored: the floor
+    #: plan draws the tree and names the rung, and neither answer may drift from the
+    #: parent links it is drawn from.
+    storage_type_name: str | None = None
+    parent_code: str | None = None
+    parent_name: str | None = None
+    #: `F1 / F1-A1 / F1-A1-R1`, the walk down to this location, and how deep it is.
+    path: str | None = None
+    path_names: str | None = None
+    level: int | None = None
+    child_count: int = 0
+    is_pickable: bool = False
     code: str
     name: str | None = None
     description: str | None = None
@@ -442,18 +458,40 @@ class LocationRead(_Read):
 
 
 class StorageTypeRead(_Read):
+    """One kind of storage location — see `modules/warehouse/storage_types.py`."""
     id: int
     code: str | None = None
     name: str
     description: str | None = None
+    sort_order: int = 0
+    #: Is stock HELD in this kind, or is it structure you walk past on the way to one?
+    is_pickable: bool = False
+    #: A cold-chain kind: the location form asks for the temperature band.
+    is_temperature_controlled: bool = False
+    #: May a location of this kind stand at the root of a warehouse?
+    allow_top_level: bool = False
     is_active: bool
+    #: The kinds this one may sit inside. Ids drive the form; the codes and names are
+    #: sent beside them so a list can say "inside Rack, Shelf" without a second fetch.
+    parent_type_ids: list[int] = Field(default_factory=list)
+    parent_type_codes: list[str] = Field(default_factory=list)
+    parent_type_names: list[str] = Field(default_factory=list)
+    #: How many storage locations are of this kind — what a deactivation would strand.
+    location_count: int = 0
 
 
 class StorageTypeWrite(BaseModel):
     code: str | None = Field(default=None, max_length=50)
     name: str = Field(min_length=1, max_length=50)
     description: str | None = Field(default=None, max_length=200)
+    sort_order: int = Field(default=0, ge=0, le=10_000)
+    is_pickable: bool = False
+    is_temperature_controlled: bool = False
+    allow_top_level: bool = False
     is_active: bool = True
+    #: Which kinds a location of this kind may sit inside. Empty means "nothing holds
+    #: it", which is only sane at the top of the building — hence `allow_top_level`.
+    parent_type_ids: Annotated[list[int], ConfigEntries] = []
 
     @field_validator("code", "description", mode="before")
     @classmethod
@@ -652,7 +690,16 @@ class PoPrefill(BaseModel):
     vendor_gstin: str | None = None
     project_id: int | None = None
     project_name: str | None = None
+    total_amount: float | None = None
+    #: Only the lines with something still outstanding. A fully received line is not
+    #: one to receive again — see `service.po_lines`.
     lines: list[PoLineOption] = Field(default_factory=list)
+    #: How many lines the order has altogether, so a screen can say "nothing left"
+    #: rather than drawing an empty list and leaving the storekeeper to wonder whether
+    #: the order was empty, the call failed, or the goods are already in.
+    total_lines: int = 0
+    #: The receipts already standing against this order, newest last.
+    received_by: list[str] = Field(default_factory=list)
 
 
 class TransferReceiptSource(BaseModel):
@@ -1277,7 +1324,10 @@ class IssueItemWrite(BaseModel):
     item_name: str | None = None
     is_serial_tracked: bool = False
     bin_id: int | None = None
+    bin_code: str | None = None
+    bin_path: str | None = None
     batch_id: int | None = None
+    batch_no: str | None = None
     requested_qty: Decimal
     issued_qty: Decimal | None = None
     rate: Decimal | None = None
@@ -1363,6 +1413,53 @@ class IssueItemRead(_Read):
     units_available: int | None = None
 
 
+class UnitSupplyPick(BaseModel):
+    """One (item, batch, storage location) a screen is asking about, and how many
+    identified units it needs there."""
+    item_id: int
+    batch_id: int | None = None
+    bin_id: int | None = None
+    #: How many units this pick issues. The probe stops one past it — see
+    #: `service.issue_unit_supply` — so a bigger `need` costs a bigger count.
+    need: int = 0
+    #: The saved issue line, when the pick has one. Units this line already holds are
+    #: available TO IT, and without the id they read as somebody else's claim.
+    line_id: int | None = None
+
+
+class UnitSupplyQuery(BaseModel):
+    """Ask what a set of picks could name, in one round trip.
+
+    One request for the whole grid rather than one per row: a fifty-line issue
+    re-probing on every batch change is fifty calls a keystroke apart otherwise.
+    """
+    warehouse_id: int
+    picks: Annotated[list[UnitSupplyPick], DocumentLines] = []
+    issue_id: int | None = None
+    direction: str = "OUT"
+
+
+class UnitSupplyRead(_Read):
+    """What one pick could name. `available` is `null` when there is no answer — the
+    item carries no identified units at this point, or the quantity is past the probe
+    ceiling — which is NOT the same as zero, and a screen must not draw it as a
+    shortfall."""
+    item_id: int
+    batch_id: int | None = None
+    bin_id: int | None = None
+    need: int = 0
+    #: Whether this item has any identified units at this warehouse at all.
+    has_units: bool = False
+    #: Counted only as far as `need + 1`, so a figure equal to that means "at least".
+    available: int | None = None
+
+
+class IssueStockSourceFetchIn(BaseModel):
+    warehouse_id: int
+    item_ids: list[int]
+    indent_id: int | None = None
+
+
 class IssueStockSource(_Read):
     """One (batch, bin) an issue line can draw from, with what it holds.
 
@@ -1391,6 +1488,15 @@ class IssueStockSource(_Read):
     own_reserved_qty: Decimal = Decimal("0")
     total_qty: Decimal = Decimal("0")
     drawable_qty: Decimal
+    # The two OUTER quantities this location's numbers sit inside: what the whole
+    # batch holds in this warehouse, and what the item holds altogether. Denormalised
+    # onto every row of the item — they cannot be summed out of the list, because a
+    # location another document has entirely reserved is not in it. See
+    # `service.issue_stock_sources`.
+    batch_total_qty: Decimal = Decimal("0")
+    batch_available_qty: Decimal = Decimal("0")
+    item_total_qty: Decimal = Decimal("0")
+    item_available_qty: Decimal = Decimal("0")
 
 
 class TrackingTypeRead(_Read):
@@ -1426,6 +1532,12 @@ class IssueRead(_Read):
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
+    # Set on a CHILD of a split. The parent stays generic and carries neither, which is
+    # how a screen tells the two apart without asking a second question.
+    parent_issue_id: int | None = None
+    parent_issue_no: str | None = None
+    floor_location_id: int | None = None
+    floor_location_name: str | None = None
     status: str
     total_items: int
     total_qty: Decimal
@@ -1961,6 +2073,12 @@ class ItemOption(Option):
     has_expiry: bool = False
     is_asset: bool = False
     requires_qi: bool = False
+    # What the named stocking point can give of this item, and how far it is spread —
+    # `null` on every caller that names no point, which is "nobody asked" and must not
+    # be drawn as "this point holds none". See `service.item_options`.
+    on_hand: Decimal | None = None
+    batch_count: int | None = None
+    location_count: int | None = None
 
 
 class IndentIssueSource(BaseModel):
@@ -1968,7 +2086,9 @@ class IndentIssueSource(BaseModel):
     indent_no: str
     warehouse_id: int
     department_id: int | None = None
+    department_name: str | None = None
     project_id: int | None = None
+    project_name: str | None = None
     # True when some reserved stock was received for a different project (or for
     # none). Informational: the screen says so, nothing blocks the issue.
     mixed_projects: bool = False
@@ -1989,7 +2109,9 @@ class PickingIssueSource(BaseModel):
     warehouse_id: int
     indent_id: int | None = None
     department_id: int | None = None
+    department_name: str | None = None
     project_id: int | None = None
+    project_name: str | None = None
     mixed_projects: bool = False
     issued_to_id: int | None = None
     issued_to_name: str | None = None

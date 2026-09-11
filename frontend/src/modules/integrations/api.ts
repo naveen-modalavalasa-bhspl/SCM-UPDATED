@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   ActivityEvent, ActivityFilters, ActivityQuery, ActivityRow, ActivitySummary,
+  Adapter,
   ApiClient, ApiEndpoint, ApiKey, CallLog, CamsDocs, CamsEvent, CamsSecret, CamsStatus,
   ClientWrite, EndpointClip, EndpointWrite,
   ImportResult, IntegrationSecretReveal, IntegrationSecretState, IssuedKey,
@@ -26,6 +27,13 @@ export const integrationsApi = {
   /** Every table the live database offers, grouped by module. */
   tables: async (): Promise<SourceTable[]> =>
     (await api.get(`${BASE}/tables`)).data,
+
+  /** The hand-written integrations — the ones serving a shape the endpoint builder
+   *  cannot compose. Enumerated on the server from whatever is installed under
+   *  `integrations/adapters/`, so a system added there names itself here without a
+   *  frontend release. */
+  adapters: async (): Promise<Adapter[]> =>
+    (await api.get(`${BASE}/adapters`)).data,
 
   columns: async (table: string): Promise<SourceColumn[]> =>
     (await api.get(`${BASE}/tables/${table}/columns`)).data,
@@ -202,10 +210,15 @@ export const camsApi = {
     (await api.post(`${BASE}/cams/secret`)).data,
 
   /** What arrived, newest first. Bodies are excluded from the list — one is fetched
-   *  by id — because a nightly sweep's payload is far too big to render in a table. */
-  events: async (event?: string): Promise<Page<CamsEvent>> =>
+   *  by id — because a nightly sweep's payload is far too big to render in a table.
+   *
+   *  `size` is how far back the Received tab can see: its search, event and date
+   *  filters all narrow what this brought back, so a page too small would make "this
+   *  month" mean "the last few pushes" — the same reason the webhook deliveries call
+   *  takes one. */
+  events: async (event?: string, size = 50): Promise<Page<CamsEvent>> =>
     (await api.get(`${BASE}/cams/events`, {
-      params: clean({ event, size: 50 }),
+      params: clean({ event, size }),
     })).data,
 
   event: async (eventId: string): Promise<CamsEvent> =>

@@ -9,12 +9,12 @@ Same arrangement the supplier portal already uses.
 """
 from datetime import date
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_vendor, require_permission
+from app.core.dependencies import get_current_user, get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.logistics import partners, service
 from app.modules.logistics.schemas import (
@@ -88,7 +88,18 @@ async def issue_stock(issue_id: int, db: AsyncSession = Depends(get_db),
 
 
 # ---- Transport requests ----
-transport_router = APIRouter(prefix="/api/transport")
+async def _require_transport_in_scope(request: Request,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(get_current_user)):
+    """Apply the register's row scope to every staff route carrying a shipment id."""
+    tr_id = request.path_params.get("tr_id")
+    if tr_id is not None:
+        await service.get_tr(db, int(tr_id), user=user)
+
+
+transport_router = APIRouter(
+    prefix="/api/transport", dependencies=[Depends(_require_transport_in_scope)],
+)
 
 
 # The mode rules and the evaluation methods are served, not hardcoded in the screen:
@@ -249,7 +260,7 @@ async def dispatch_consignment(body: QuickDispatchIn,
 @transport_router.get("/{tr_id:int}", response_model=TROut)
 async def get_transport(tr_id: int, db: AsyncSession = Depends(get_db),
                         user=Depends(require_permission(perms.TRANSPORT_VIEW))):
-    return await service.get_tr(db, tr_id)
+    return await service.get_tr(db, tr_id, user=user)
 
 
 @transport_router.get("/{tr_id:int}/receipt-evidence",

@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { Plus } from "lucide-react";
+import { Boxes, Layers, Plus, Warehouse as WarehouseIcon } from "lucide-react";
 import {
-  Button, Can, PageHeader, ResponsiveList, StatusPill, type Column,
+  Button, Can, KpiTiles, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
 import { ErrorBanner } from "@/shared/components";
 import { FilterBar, FilterSelect } from "../../components/FilterBar";
@@ -59,6 +59,47 @@ export default function Warehouses() {
     if (active && String(w.is_active) !== active) return false;
     return true;
   }), [data, type, active]);
+
+  // The strip counts what the SERVER returned for this search, not the whole network:
+  // the page asks for 200 rows and there are around a thousand sites. Labelled "on this
+  // page" for that reason — a tile that quietly means something narrower than it says
+  // is worse than no tile.
+  const loaded = data?.items ?? [];
+  const tiles = [
+    {
+      key: "all",
+      label: "On this page",
+      icon: WarehouseIcon,
+      tone: "brand" as const,
+      value: isLoading ? undefined : loaded.length,
+      hint: data?.total ? `of ${data.total} in the network` : undefined,
+    },
+    {
+      key: "binned",
+      label: "Bin managed",
+      icon: Layers,
+      tone: "info" as const,
+      value: isLoading ? undefined : loaded.filter((w) => w.is_bin_managed).length,
+      hint: "Stock is counted per location",
+    },
+    {
+      key: "bulk",
+      label: "Bulk",
+      icon: Boxes,
+      tone: "neutral" as const,
+      value: isLoading ? undefined : loaded.filter((w) => !w.is_bin_managed).length,
+      hint: "No location tree",
+    },
+    {
+      key: "inactive",
+      label: "Inactive",
+      icon: WarehouseIcon,
+      tone: "warn" as const,
+      value: isLoading ? undefined : loaded.filter((w) => !w.is_active).length,
+      onPress: () => setActive(active === "false" ? "" : "false"),
+      active: active === "false",
+    },
+  ];
 
   const columns: Column<Warehouse>[] = [
     {
@@ -124,6 +165,8 @@ export default function Warehouses() {
           </Can>
         }
       />
+
+      <KpiTiles label="Warehouse totals" tiles={tiles} className="mb-4" />
 
       <FilterBar
         search={search}

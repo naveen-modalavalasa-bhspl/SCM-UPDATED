@@ -6,10 +6,15 @@ from app.core.exceptions import ValidationError
 from app.modules.indents.models import Indent, IndentItem
 from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement import service
-from app.modules.procurement.schemas import POCreate, POLineIn
+from app.modules.procurement.models import RFQ, RFQItem, Requisition, RequisitionItem
+from app.modules.procurement.schemas import (
+    POCreate, POLineIn, RFQQuantitiesIn, RFQQuantityIn,
+)
 from app.platform.hcm.models import HcmEmployee
 from app.platform.workflow.models import Stage, Workflow
-from app.shared.enums import IndentStatus, MRStatus, POStatus
+from app.shared.enums import (
+    IndentStatus, MRStatus, POStatus, RFQStatus, RequisitionStatus,
+)
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
 
@@ -116,3 +121,42 @@ async def test_cannot_send_unapproved_po(db):
     po = await service.create_po_from_indent(db, indent.id, _po_data(vendor.id, item.id, ind_item.id), creator)
     with pytest.raises(ValidationError):
         await service.send_to_vendor(db, po.id, creator)
+
+
+async def test_rfq_quantity_can_be_corrected_up_to_source_quantity(db):
+    item, _vendor, _indent, _ind_item, creator, _approver = await _world(db)
+    requisition = Requisition(
+        req_no="REQ/2026/0001", status=RequisitionStatus.APPROVED.value,
+        total_items=1, created_by_id=creator.id, created_by_name=creator.full_name,
+    )
+    db.add(requisition)
+    await db.flush()
+    db.add(RequisitionItem(
+        requisition_id=requisition.id, item_id=item.id, item_code=item.code,
+        item_name=item.name, uom_code="NOS", quantity=1000,
+    ))
+    rfq = RFQ(
+        rfq_no="RFQ/2026/0001", requisition_id=requisition.id,
+        requisition_no=requisition.req_no, status=RFQStatus.DRAFT.value,
+        total_items=1, created_by_id=creator.id, created_by_name=creator.full_name,
+    )
+    db.add(rfq)
+    await db.flush()
+    line = RFQItem(
+        rfq_id=rfq.id, item_id=item.id, item_code=item.code, item_name=item.name,
+        uom_code="NOS", quantity=500,
+    )
+    db.add(line)
+    await db.commit()
+
+    updated = await service.set_rfq_quantities(
+        db, rfq.id,
+        RFQQuantitiesIn(lines=[RFQQuantityIn(id=line.id, quantity=600)]), creator,
+    )
+    assert float(updated.items[0].quantity) == 600
+
+    with pytest.raises(ValidationError, match="maximum 1000"):
+        await service.set_rfq_quantities(
+            db, rfq.id,
+            RFQQuantitiesIn(lines=[RFQQuantityIn(id=line.id, quantity=1001)]), creator,
+        )

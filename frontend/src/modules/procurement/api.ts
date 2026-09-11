@@ -7,7 +7,7 @@ import type {
   MRCandidate, POAmend, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
   PurchaseOrder, VendorPO,
   VendorPOListRow,
-  Quotation, QuoteListRow, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
+  Quotation, QuoteListRow, QuoteOtpSent, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   ProcurementLedgerFilters, ProcurementLedgerRow,
   VendorNotification, VendorToken,
@@ -215,6 +215,14 @@ export const rfqApi = {
       .then((r) => r.data),
   award: (id: number, quotation_id: number, comments = "") =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_id, comments }).then((r) => r.data),
+  /** Share one tender between suppliers. Each winner's quotation becomes its own PO
+   *  for exactly the share given here — see `_award_split` on the service. */
+  awardSplit: (
+    id: number,
+    allocations: { item_id: number; vendor_id: number; quantity: number }[],
+    comments = "",
+  ) =>
+    api.post<RFQ>(`/api/rfqs/${id}/award`, { allocations, comments }).then((r) => r.data),
   quotations: (params: {
     rfq_id?: number; vendor_id?: number; search?: string;
     /** One status or a comma-separated set, so a KPI tile counting a bucket
@@ -288,6 +296,12 @@ export const supplierApi = {
     api.get<Quotation>(`/api/supplier/rfqs/${rfqId}/quotation`).then((r) => r.data),
   submitQuotation: (rfqId: number, data: QuoteSubmit) =>
     api.post<Quotation>(`/api/supplier/rfqs/${rfqId}/quotation`, data).then((r) => r.data),
+  /** Email this vendor the code they need to submit. Answers with the MASKED address
+   *  and the window — never the digits, or the mail would be decorative and anyone
+   *  holding the portal link could read the code out of the network tab. */
+  requestQuoteOtp: (rfqId: number) =>
+    api.post<QuoteOtpSent>(`/api/supplier/rfqs/${rfqId}/quotation/request-otp`)
+      .then((r) => r.data),
 };
 
 

@@ -1,12 +1,20 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, CheckCircle2, Eye, EyeOff, MailCheck } from "lucide-react";
-import { Button, Input } from "@heroui/react";
+import {
+  AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Eye, EyeOff, Loader2, MailCheck,
+} from "lucide-react";
 import { api } from "@/shared/api/client";
-import loginHero from "@/assets/login-hero.png";
+import {
+  AuthShell, authField, authHint, authLabel, authLink, authSubmit,
+} from "./AuthShell";
 
 /**
- * The two halves of "forgot password", on the same public shell as the sign-in page.
+ * The two halves of "forgot password", on the same shell as the sign-in page —
+ * `AuthShell`, which is where the plate, the thread and the field styling now live.
+ * They used to carry a second shell of their own (a light plate, HeroUI inputs, the
+ * flat hero image), so pressing "Forgot password?" on the dark sign-in plate landed
+ * somewhere that looked like a different product. Nothing here styles a control
+ * itself; every class comes from the shell.
  *
  * Both are UNAUTHENTICATED by necessity — somebody who cannot sign in is the only
  * caller either one has. What makes that safe is on the server (see
@@ -20,45 +28,32 @@ import loginHero from "@/assets/login-hero.png";
  * from the other side.
  */
 
-/** The shell both pages share with the sign-in screen, so the flow does not change
- *  shape halfway through. */
-function AuthShell({ eyebrow, title, subtitle, children }: {
-  eyebrow: string;
-  title: string;
-  subtitle: string;
-  children: ReactNode;
-}) {
+function BackToSignIn() {
   return (
-    <div className="flex min-h-dvh flex-col lg:flex-row">
-      <div className="flex items-center justify-center bg-white p-4 sm:p-6 lg:w-1/2 lg:p-10">
-        <img
-          src={loginHero}
-          alt="SCM — procurement, inventory, warehouse, logistics"
-          className="max-h-[30vh] w-auto max-w-full object-contain lg:max-h-[85vh] lg:w-full"
-        />
-      </div>
-      <div className="flex flex-1 items-center justify-center px-4 py-8 sm:px-8 lg:w-1/2">
-        <div className="w-full max-w-md">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-brand">
-            {eyebrow}
-          </div>
-          <h1 className="mt-1 font-display text-2xl font-bold text-ink sm:text-3xl">{title}</h1>
-          <p className="mt-1 text-sm text-muted">{subtitle}</p>
-          {children}
-        </div>
-      </div>
-    </div>
+    <Link to="/login" className={`${authLink} mt-8 inline-flex items-center gap-1.5`}>
+      <ArrowLeft className="h-4 w-4" /> Back to sign in
+    </Link>
   );
 }
 
-function BackToSignIn() {
+/** A notice on the plate. `tone` only moves the icon's colour: on this ground a solid
+ *  pastel block reads as a sticker pasted onto the panel, so the card itself is the
+ *  same tinted glass whatever it is saying. */
+function PlateNote({ tone, icon: Icon, children }: {
+  tone: "ok" | "bad";
+  icon: typeof MailCheck;
+  children: React.ReactNode;
+}) {
   return (
-    <Link
-      to="/login"
-      className="mt-6 inline-flex items-center gap-1.5 rounded text-sm font-semibold text-brand transition-colors hover:text-brand-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
-    >
-      <ArrowLeft className="h-4 w-4" /> Back to sign in
-    </Link>
+    <div className="plate-note mt-6 flex items-start gap-3 rounded-xl p-4">
+      <Icon
+        className="mt-0.5 h-5 w-5 shrink-0"
+        style={{ color: tone === "ok" ? "var(--plate-ok)" : "var(--plate-bad)" }}
+      />
+      <div className="text-[13.5px] leading-relaxed text-[var(--plate-muted)]">
+        {children}
+      </div>
+    </div>
   );
 }
 
@@ -67,10 +62,11 @@ function BackToSignIn() {
 /* --------------------------------------------------------------------------- */
 
 export function ForgotPasswordPage() {
-  const [empCode, setEmpCode] = useState("");
+  const [empCode, setEmpCode] = useState("HR-EMP-");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
+  const uid = useId();
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -100,26 +96,25 @@ export function ForgotPasswordPage() {
         title="Check your inbox"
         subtitle="If that address belongs to an account, a reset link is on its way."
       >
-        <div className="mt-6 flex items-start gap-3 rounded-xl border border-line/70 bg-ok-bg/50 p-4">
-          <MailCheck className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
-          <div className="text-sm text-body">
-            <p className="font-semibold text-ink">Your request for {email} is in</p>
-            {/* Deliberately does NOT promise a mail is on its way. The first time an
-                address is used for an account it waits for an administrator to
-                confirm it is really yours, and saying "sent" would be a lie for that
-                case — but the wording cannot reveal WHICH case this was either, or it
-                becomes a way to test whether an address is already on an account. */}
-            <p className="mt-1 text-muted">
-              If it is already the address on your account, a link is on its way — it
-              works once and stops working after 30 minutes. The first time you use a
-              new address, your administrator confirms it belongs to you before the
-              link goes out.
-            </p>
-            <p className="mt-1 text-muted">
-              If nothing arrives, check the spam folder, then ask your administrator.
-            </p>
-          </div>
-        </div>
+        <PlateNote tone="ok" icon={MailCheck}>
+          <p className="font-semibold text-[var(--plate-ink)]">
+            Your request for {email} is in
+          </p>
+          {/* Deliberately does NOT promise a mail is on its way. The first time an
+              address is used for an account it waits for an administrator to
+              confirm it is really yours, and saying "sent" would be a lie for that
+              case — but the wording cannot reveal WHICH case this was either, or it
+              becomes a way to test whether an address is already on an account. */}
+          <p className="mt-2">
+            If it is already the address on your account, a link is on its way — it
+            works once and stops working after 30 minutes. The first time you use a
+            new address, your administrator confirms it belongs to you before the
+            link goes out.
+          </p>
+          <p className="mt-2">
+            If nothing arrives, check the spam folder, then ask your administrator.
+          </p>
+        </PlateNote>
         <BackToSignIn />
       </AuthShell>
     );
@@ -131,50 +126,64 @@ export function ForgotPasswordPage() {
       title="Forgot your password?"
       subtitle="Enter your employee code and the work email your link should go to."
     >
-      <form onSubmit={submit} className="mt-6 flex flex-col gap-4">
-        <Input
-          label="Employee code"
-          aria-label="Employee code"
-          variant="bordered"
-          radius="md"
-          value={empCode}
-          onValueChange={setEmpCode}
-          autoFocus
-          autoComplete="username"
-          autoCapitalize="characters"
-          autoCorrect="off"
-          spellCheck="false"
-          placeholder="HR-EMP-09561"
-          description="The same code you sign in with."
-          isRequired
-        />
-        <Input
-          label="Work email"
-          aria-label="Work email"
-          type="email"
-          variant="bordered"
-          radius="md"
-          value={email}
-          onValueChange={setEmail}
-          autoComplete="email"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck="false"
-          placeholder="you@company.com"
-          description="Used the first time? Your administrator confirms it is yours before the link is sent."
-          isRequired
-        />
-        <Button
+      <form onSubmit={submit} className="mt-9 flex flex-col gap-5">
+        <div>
+          <label htmlFor={`${uid}-code`} className={authLabel}>Employee code</label>
+          <input
+            id={`${uid}-code`}
+            /* Mono for the same reason sign-in uses it: HR-EMP-00417 reads and
+               checks digit by digit, and a proportional face makes 1/l and 0/O the
+               reader's problem. */
+            className={`${authField} font-mono tracking-[0.04em]`}
+            value={empCode}
+            onChange={(e) => setEmpCode(e.target.value)}
+            autoFocus
+            autoComplete="username"
+            autoCapitalize="characters"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="HR-EMP-00000"
+            required
+          />
+          <p className={authHint}>The same code you sign in with.</p>
+        </div>
+
+        <div>
+          <label htmlFor={`${uid}-mail`} className={authLabel}>Work email</label>
+          <input
+            id={`${uid}-mail`}
+            className={authField}
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete="email"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder="you@company.com"
+            required
+          />
+          <p className={authHint}>
+            Used the first time? Your administrator confirms it is yours before the
+            link is sent.
+          </p>
+        </div>
+
+        <button
           type="submit"
-          color="primary"
-          radius="md"
-          isLoading={busy}
-          isDisabled={!empCode.trim() || !email.trim()}
-          endContent={!busy && <ArrowRight className="h-4 w-4" />}
-          className="mt-1 h-11 w-full font-semibold"
+          disabled={busy || !empCode.trim() || !email.trim()}
+          className={authSubmit}
         >
-          {busy ? "Sending…" : "Send reset link"}
-        </Button>
+          {busy ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> Sending
+            </span>
+          ) : (
+            <span className="flex items-center gap-2">
+              Send reset link <ArrowRight className="h-4 w-4" />
+            </span>
+          )}
+        </button>
       </form>
       <BackToSignIn />
     </AuthShell>
@@ -196,6 +205,7 @@ export function ResetPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const uid = useId();
 
   // Checked here as well as on the server. Not a security boundary — the server is —
   // but a person choosing a password should be told the rule before they submit.
@@ -227,13 +237,13 @@ export function ResetPasswordPage() {
         title="That link is incomplete"
         subtitle="Open the link from your email exactly as it was sent."
       >
-        <div className="mt-6 rounded-xl bg-bad-bg px-4 py-3 text-sm font-medium text-bad">
+        <PlateNote tone="bad" icon={AlertTriangle}>
           The reset link is missing its token. Ask for a new one and open it directly
           from the message rather than retyping it.
-        </div>
+        </PlateNote>
         <Link
           to="/forgot-password"
-          className="mt-6 inline-flex items-center gap-1.5 rounded text-sm font-semibold text-brand hover:text-brand-600"
+          className={`${authLink} mt-8 inline-flex items-center gap-1.5`}
         >
           Ask for a new link <ArrowRight className="h-4 w-4" />
         </Link>
@@ -248,24 +258,28 @@ export function ResetPasswordPage() {
         title="Password changed"
         subtitle="You can sign in with your new password now."
       >
-        <div className="mt-6 flex items-start gap-3 rounded-xl border border-line/70 bg-ok-bg/50 p-4">
-          <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-ok" />
-          <p className="text-sm text-body">
-            That link has now been used and will not work again.
-          </p>
-        </div>
-        <Button
-          color="primary"
-          radius="md"
-          onPress={() => nav("/login")}
-          endContent={<ArrowRight className="h-4 w-4" />}
-          className="mt-6 h-11 w-full font-semibold"
-        >
-          Go to sign in
-        </Button>
+        <PlateNote tone="ok" icon={CheckCircle2}>
+          That link has now been used and will not work again.
+        </PlateNote>
+        <button type="button" onClick={() => nav("/login")} className={`${authSubmit} mt-6`}>
+          <span className="flex items-center gap-2">
+            Go to sign in <ArrowRight className="h-4 w-4" />
+          </span>
+        </button>
       </AuthShell>
     );
   }
+
+  const eye = (
+    <button
+      type="button"
+      onClick={() => setShow((v) => !v)}
+      aria-label={show ? "Hide password" : "Show password"}
+      className="login-link absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-lg text-[var(--plate-faint)] transition-colors hover:text-[var(--plate-ink)]"
+    >
+      {show ? <EyeOff className="h-[18px] w-[18px]" /> : <Eye className="h-[18px] w-[18px]" />}
+    </button>
+  );
 
   return (
     <AuthShell
@@ -273,60 +287,69 @@ export function ResetPasswordPage() {
       title="Choose a new password"
       subtitle="At least 8 characters. You will use it the next time you sign in."
     >
-      <form onSubmit={submit} className="mt-6 flex flex-col gap-4">
-        <Input
-          label="New password"
-          aria-label="New password"
-          type={show ? "text" : "password"}
-          variant="bordered"
-          radius="md"
-          value={password}
-          onValueChange={setPassword}
-          autoFocus
-          autoComplete="new-password"
-          isInvalid={tooShort}
-          errorMessage={tooShort ? "Use at least 8 characters." : undefined}
-          endContent={
-            <button
-              type="button"
-              onClick={() => setShow((v) => !v)}
-              aria-label={show ? "Hide password" : "Show password"}
-              className="text-muted transition-colors hover:text-ink focus:outline-none"
-            >
-              {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          }
-        />
-        <Input
-          label="Confirm new password"
-          aria-label="Confirm new password"
-          type={show ? "text" : "password"}
-          variant="bordered"
-          radius="md"
-          value={confirm}
-          onValueChange={setConfirm}
-          autoComplete="new-password"
-          isInvalid={mismatch}
-          errorMessage={mismatch ? "The two passwords do not match." : undefined}
-        />
+      <form onSubmit={submit} className="mt-9 flex flex-col gap-5">
+        <div>
+          <label htmlFor={`${uid}-new`} className={authLabel}>New password</label>
+          <div className="relative">
+            <input
+              id={`${uid}-new`}
+              className={`${authField} pr-12`}
+              type={show ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoFocus
+              autoComplete="new-password"
+              aria-invalid={tooShort}
+              aria-describedby={tooShort ? `${uid}-new-err` : undefined}
+            />
+            {eye}
+          </div>
+          {tooShort && (
+            <p id={`${uid}-new-err`} className={authHint} style={{ color: "var(--plate-bad)" }}>
+              Use at least 8 characters.
+            </p>
+          )}
+        </div>
+
+        <div>
+          <label htmlFor={`${uid}-confirm`} className={authLabel}>
+            Confirm new password
+          </label>
+          <div className="relative">
+            <input
+              id={`${uid}-confirm`}
+              className={`${authField} pr-12`}
+              type={show ? "text" : "password"}
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="new-password"
+              aria-invalid={mismatch}
+              aria-describedby={mismatch ? `${uid}-confirm-err` : undefined}
+            />
+            {eye}
+          </div>
+          {mismatch && (
+            <p id={`${uid}-confirm-err`} className={authHint} style={{ color: "var(--plate-bad)" }}>
+              The two passwords do not match.
+            </p>
+          )}
+        </div>
 
         {error && (
-          <div className="rounded-xl bg-bad-bg px-3 py-2 text-sm font-medium text-bad">
-            {error}
-          </div>
+          <PlateNote tone="bad" icon={AlertTriangle}>{error}</PlateNote>
         )}
 
-        <Button
-          type="submit"
-          color="primary"
-          radius="md"
-          isLoading={busy}
-          isDisabled={!ready}
-          endContent={!busy && <ArrowRight className="h-4 w-4" />}
-          className="mt-1 h-11 w-full font-semibold"
-        >
-          {busy ? "Saving…" : "Set new password"}
-        </Button>
+        <button type="submit" disabled={busy || !ready} className={authSubmit}>
+          {busy ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> Saving
+            </span>
+          ) : (
+            <span className="flex items-center gap-2">
+              Set new password <ArrowRight className="h-4 w-4" />
+            </span>
+          )}
+        </button>
       </form>
       <BackToSignIn />
     </AuthShell>

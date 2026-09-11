@@ -133,9 +133,12 @@ function LocationsTab() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 items-start">
           {/* Left pane: Location Browser */}
-          <div className="col-span-1 border border-line rounded-xl bg-content1 overflow-hidden flex flex-col shadow-sm sticky top-6">
-            <div className="bg-content2 px-4 py-3 border-b border-line font-semibold text-sm flex items-center justify-between">
-              Storage Hierarchy
+          <div className="col-span-1 border border-line rounded-xl bg-content1/50 backdrop-blur-xl overflow-hidden flex flex-col shadow-lg sticky top-6 ring-1 ring-black/5">
+            <div className="bg-gradient-to-r from-content2 to-content1 px-4 py-3 border-b border-line font-semibold text-sm flex items-center justify-between shadow-sm">
+              <div className="flex items-center gap-2 text-ink">
+                <span className="text-primary opacity-80">🗂️</span>
+                Storage Hierarchy
+              </div>
               {locationsQuery.isLoading && <div className="animate-spin h-4 w-4 border-2 border-primary border-t-transparent rounded-full" />}
             </div>
             
@@ -143,13 +146,13 @@ function LocationsTab() {
               {selectedLocationId != null && (
                 <button 
                   onClick={() => setSelectedLocationId(locationMap.get(selectedLocationId)?.parent_location_id ?? null)} 
-                  className="flex items-center text-sm text-primary hover:bg-content2 p-2 rounded-lg w-full text-left font-medium transition-colors"
+                  className="flex items-center text-sm text-primary hover:bg-primary/10 p-2.5 rounded-lg w-full text-left font-medium transition-all duration-200"
                 >
-                  <span className="mr-2">←</span> Back to {breadcrumbs.length > 1 ? breadcrumbs[breadcrumbs.length - 2].name || breadcrumbs[breadcrumbs.length - 2].code : "Root"}
+                  <span className="mr-2 opacity-70">←</span> Back to {breadcrumbs.length > 1 ? breadcrumbs[breadcrumbs.length - 2].name || breadcrumbs[breadcrumbs.length - 2].code : "Root"}
                 </button>
               )}
               
-              <div className="px-2 py-2 text-xs font-bold text-muted uppercase tracking-wider">
+              <div className="px-3 py-2 text-[10px] font-extrabold text-muted uppercase tracking-widest">
                 {selectedLocationId 
                   ? (locationMap.get(selectedLocationId)?.name || locationMap.get(selectedLocationId)?.code) 
                   : "Top Level Locations"}
@@ -161,39 +164,47 @@ function LocationsTab() {
                   <button 
                     key={loc.id} 
                     onClick={() => setSelectedLocationId(loc.id)} 
-                    className="w-full text-left p-2.5 hover:bg-content2 active:bg-content3 rounded-lg flex justify-between items-center text-sm transition-colors group"
+                    className="w-full text-left px-3 py-2.5 hover:bg-content2/80 active:bg-content3 rounded-xl flex justify-between items-center text-sm transition-all duration-200 group border border-transparent hover:border-line/50 hover:shadow-sm"
                   >
-                    <div className="flex flex-col">
-                      <span className="font-semibold text-ink group-hover:text-primary transition-colors">{loc.code}</span>
-                      {loc.name && <span className="text-xs text-muted truncate">{loc.name}</span>}
+                    <div className="flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${hasChildren ? 'bg-primary/10 text-primary group-hover:bg-primary group-hover:text-white' : 'bg-content3 text-body group-hover:bg-content2 group-hover:text-ink'}`}>
+                        {hasChildren ? '📁' : '📍'}
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="font-semibold text-ink group-hover:text-primary transition-colors">{loc.code}</span>
+                        {loc.name && <span className="text-[11px] text-muted truncate max-w-[120px]">{loc.name}</span>}
+                      </div>
                     </div>
-                    {hasChildren && <span className="text-muted">›</span>}
+                    {hasChildren && <span className="text-muted opacity-50 group-hover:opacity-100 transition-opacity">›</span>}
                   </button>
                 );
               })}
               
               {(locationChildren.get(selectedLocationId ?? null) || []).length === 0 && (
-                <div className="p-5 flex flex-col">
-                  <div className="text-[10px] font-bold tracking-wider text-muted uppercase mb-4 text-center bg-content2 py-1.5 px-3 rounded-full self-center">
-                    Complete Hierarchy
+                <div className="p-6 flex flex-col items-center">
+                  <div className="w-12 h-12 bg-primary/10 text-primary rounded-2xl flex items-center justify-center text-2xl mb-4 shadow-inner">
+                    📦
                   </div>
-                  <div className="flex flex-col gap-0 mt-2">
+                  <div className="text-[10px] font-extrabold tracking-widest text-primary uppercase mb-5 text-center bg-primary/5 py-1.5 px-4 rounded-full border border-primary/10">
+                    Exact Location
+                  </div>
+                  <div className="flex flex-col gap-0 w-full relative">
+                    <div className="absolute left-3.5 top-2 bottom-6 w-px bg-gradient-to-b from-primary/30 to-transparent" />
                     {breadcrumbs.map((crumb, idx) => {
                       const isLast = idx === breadcrumbs.length - 1;
                       return (
-                        <div key={crumb.id} className="flex items-start">
-                          <div className="flex flex-col items-center mr-3 h-full pt-1">
+                        <div key={crumb.id} className="flex items-start mb-4 relative z-10">
+                          <div className="flex flex-col items-center mr-4 h-full pt-1 w-7">
                             <div 
-                              className={`w-3 h-3 rounded-full flex-shrink-0 z-10 transition-all duration-300 ${
+                              className={`w-3.5 h-3.5 rounded-full flex-shrink-0 transition-all duration-300 ${
                                 isLast 
-                                  ? 'bg-primary ring-4 ring-primary/20 shadow-sm shadow-primary/40' 
-                                  : 'bg-content3 border border-content1'
+                                  ? 'bg-primary ring-4 ring-primary/20 shadow-md shadow-primary/40 scale-125' 
+                                  : 'bg-content1 border-2 border-primary/40'
                               }`} 
                             />
-                            {!isLast && <div className="w-px h-10 bg-line/80 -mt-1" />}
                           </div>
-                          <div className={`pb-2 flex flex-col ${isLast ? 'opacity-100' : 'opacity-70'} transition-opacity`}>
-                            <span className={`text-sm ${isLast ? 'font-bold text-primary' : 'font-semibold text-body'}`}>
+                          <div className={`flex flex-col ${isLast ? 'opacity-100' : 'opacity-60 hover:opacity-100'} transition-opacity cursor-pointer`} onClick={() => !isLast && setSelectedLocationId(crumb.id)}>
+                            <span className={`text-sm ${isLast ? 'font-bold text-primary' : 'font-semibold text-ink'}`}>
                               {crumb.code}
                             </span>
                             {crumb.name && (
@@ -238,66 +249,85 @@ function LocationsTab() {
             {stockQuery.data && stockQuery.data.length > 0 && (
               <div className="space-y-8">
                 {stockQuery.data.map(itemGroup => (
-                  <div key={itemGroup.item_id} className="space-y-4">
+                  <div key={itemGroup.item_id} className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-500">
                     {/* Item Header */}
-                    <div className="flex items-center gap-3 pb-2 border-b border-line">
-                      <div className="h-10 w-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center font-bold text-lg">
+                    <div className="flex items-center gap-4 pb-3 border-b border-line">
+                      <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-primary/20 to-primary/5 text-primary flex items-center justify-center font-bold text-xl shadow-inner border border-primary/10">
                         {itemGroup.item_code?.[0] ?? "I"}
                       </div>
                       <div>
-                        <h3 className="font-semibold text-lg text-ink">{itemGroup.item_name || "Unknown Item"}</h3>
-                        <div className="text-sm text-muted font-mono">{itemGroup.item_code}</div>
+                        <h3 className="font-bold text-xl text-ink tracking-tight">{itemGroup.item_name || "Unknown Item"}</h3>
+                        <div className="text-sm text-muted font-mono bg-content2 inline-block px-2 py-0.5 rounded-md mt-1">{itemGroup.item_code}</div>
                       </div>
                     </div>
 
                     {/* Aggregate Stats for this Item */}
-                    <div className="grid grid-cols-3 gap-3">
-                      <StatCard label="Total Available" value={fmtQty(itemGroup.total_available) + (itemGroup.uom_code ? ` ${itemGroup.uom_code}` : "")} />
-                      <StatCard label="Total Reserved" value={fmtQty(itemGroup.total_reserved) + (itemGroup.uom_code ? ` ${itemGroup.uom_code}` : "")} />
-                      <StatCard label="Total On Hand" value={fmtQty(itemGroup.total_on_hand) + (itemGroup.uom_code ? ` ${itemGroup.uom_code}` : "")} />
+                    <div className="grid grid-cols-3 gap-4">
+                      <StatCard label="Total Available" value={fmtQty(itemGroup.total_available) + (itemGroup.uom_code ? ` ${itemGroup.uom_code}` : "")} tone="text-success" />
+                      <StatCard label="Total Reserved" value={fmtQty(itemGroup.total_reserved) + (itemGroup.uom_code ? ` ${itemGroup.uom_code}` : "")} tone="text-warn" />
+                      <StatCard label="Total On Hand" value={fmtQty(itemGroup.total_on_hand) + (itemGroup.uom_code ? ` ${itemGroup.uom_code}` : "")} tone="text-ink" />
                     </div>
 
                     {/* Locations for this Item */}
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                      {itemGroup.locations.map((loc) => (
-                        <Card key={loc.bin_id} className="overflow-hidden shadow-sm hover:shadow-md transition-shadow">
-                          <div className="border-b border-line bg-content2 px-4 py-3">
-                            <div className="font-semibold text-ink flex items-center gap-2">
-                              <span className="text-primary">📍</span> {loc.bin_code}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                      {itemGroup.locations.map((loc) => {
+                        const availPercent = Number(loc.total_on_hand) > 0 ? (Number(loc.total_available) / Number(loc.total_on_hand)) * 100 : 0;
+                        const resPercent = Number(loc.total_on_hand) > 0 ? (Number(loc.total_reserved) / Number(loc.total_on_hand)) * 100 : 0;
+                        
+                        return (
+                          <Card key={loc.bin_id} className="overflow-hidden shadow-sm hover:shadow-lg transition-all duration-300 border border-line/60 bg-content1 group">
+                            <div className="border-b border-line bg-gradient-to-br from-content2/80 to-content1 px-5 py-4">
+                              <div className="font-bold text-ink flex items-center gap-2 text-lg">
+                                <span className="text-primary text-xl">📍</span> {loc.bin_code}
+                              </div>
+                              <div className="text-[10px] font-bold text-muted mt-2 uppercase tracking-widest bg-content3/50 inline-block px-2 py-1 rounded-md">{loc.location_path.join(" › ")}</div>
+                              
+                              <div className="mt-5 space-y-2">
+                                <div className="flex justify-between text-xs font-semibold">
+                                  <span className="text-success">Avail: {fmtQty(loc.total_available)}</span>
+                                  <span className="text-warn">Res: {fmtQty(loc.total_reserved)}</span>
+                                  <span className="text-ink">Total: {fmtQty(loc.total_on_hand)}</span>
+                                </div>
+                                {/* Visual Progress Bar */}
+                                <div className="h-2 w-full bg-content3 rounded-full overflow-hidden flex shadow-inner">
+                                  <div className="h-full bg-success transition-all duration-1000" style={{ width: `${availPercent}%` }} />
+                                  <div className="h-full bg-warn transition-all duration-1000" style={{ width: `${resPercent}%` }} />
+                                </div>
+                              </div>
                             </div>
-                            <div className="text-[11px] text-muted mt-1 uppercase tracking-wider">{loc.location_path.join(" › ")}</div>
-                            <div className="mt-3 flex gap-4 text-sm bg-content1 rounded-md p-2">
-                              <div><span className="text-muted text-xs block">Available</span> <span className="font-semibold">{fmtQty(loc.total_available)}</span></div>
-                              <div><span className="text-muted text-xs block">Reserved</span> <span className="font-semibold">{fmtQty(loc.total_reserved)}</span></div>
-                              <div><span className="text-muted text-xs block">On Hand</span> <span className="font-semibold">{fmtQty(loc.total_on_hand)}</span></div>
-                            </div>
-                          </div>
-                          
-                          {loc.batches.length > 0 && (
-                            <div className="divide-y divide-line max-h-60 overflow-y-auto">
-                              {loc.batches.map((b) => {
-                                const tone = expiryTone(b.days_to_expiry ?? null, "Expiry");
-                                return (
-                                  <div key={b.stock_id} className="p-3 text-sm hover:bg-content2/50 transition-colors">
-                                    <div className="flex items-center justify-between mb-1">
-                                      <span className="font-mono font-semibold text-ink">{b.batch_no || b.serial_number || b.asset_code || "Bulk"}</span>
-                                      {b.days_to_expiry !== null && (
-                                        <Chip size="sm" variant="flat" color={tone.color}>{tone.label}</Chip>
-                                      )}
+                            
+                            {loc.batches.length > 0 && (
+                              <div className="divide-y divide-line max-h-60 overflow-y-auto custom-scrollbar">
+                                {loc.batches.map((b) => {
+                                  const tone = expiryTone(b.days_to_expiry ?? null, "Expiry");
+                                  return (
+                                    <div key={b.stock_id} className="p-4 text-sm hover:bg-primary/5 transition-colors group/batch cursor-default">
+                                      <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-primary/40 group-hover/batch:bg-primary transition-colors" />
+                                          <span className="font-mono font-bold text-ink">{b.batch_no || b.serial_number || b.asset_code || "Bulk"}</span>
+                                        </div>
+                                        {b.days_to_expiry !== null && (
+                                          <Chip size="sm" variant="flat" color={tone.color} className="font-semibold shadow-sm">{tone.label}</Chip>
+                                        )}
+                                      </div>
+                                      <div className="text-xs text-muted flex justify-between items-center pl-3.5">
+                                        <span>
+                                          {b.project_name && <span className="text-primary font-semibold mr-2 bg-primary/10 px-1.5 py-0.5 rounded">P: {b.project_name}</span>}
+                                        </span>
+                                        <div className="flex gap-3 font-medium">
+                                          <span className="text-success">A: {fmtQty(b.available_qty)}</span>
+                                          <span className="text-warn">R: {fmtQty(b.reserved_qty)}</span>
+                                        </div>
+                                      </div>
                                     </div>
-                                    <div className="text-xs text-muted flex justify-between">
-                                      <span>
-                                        {b.project_name && <span className="text-primary mr-2">P: {b.project_name}</span>}
-                                        Avail: {fmtQty(b.available_qty)} | Res: {fmtQty(b.reserved_qty)}
-                                      </span>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </Card>
-                      ))}
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </Card>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
@@ -486,100 +516,132 @@ export default function StockSegregation() {
       {tab === "locations" ? (
         <LocationsTab />
       ) : tab === "batches" ? (
-        <>
-          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <StatCard label="Batches held" value={batches.data?.items.length ?? 0} />
-            <StatCard label="Expiring in 90 days" value={expiring} tone="text-warn" />
-            <StatCard label="Expired" value={expired} tone="text-bad" />
-            <StatCard
-              label="Quantity"
-              value={fmtQty((batches.data?.items ?? []).reduce((s, b) => s + Number(b.initial_qty ?? 0), 0))}
-            />
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <div className="rounded-xl bg-gradient-to-br from-content1 to-content2/50 border border-line shadow-sm p-4 hover:shadow-md transition-shadow">
+              <div className="text-sm font-semibold text-muted mb-1 flex items-center gap-2"><span className="text-primary">📋</span> Batches held</div>
+              <div className="text-3xl font-bold text-ink">{batches.data?.items.length ?? 0}</div>
+            </div>
+            <div className="rounded-xl bg-gradient-to-br from-warning/10 to-content1 border border-warning/20 shadow-sm p-4 hover:shadow-md transition-shadow">
+              <div className="text-sm font-semibold text-warning-700 mb-1 flex items-center gap-2"><span>⏳</span> Expiring in 90 days</div>
+              <div className="text-3xl font-bold text-warning-700">{expiring}</div>
+            </div>
+            <div className="rounded-xl bg-gradient-to-br from-danger/10 to-content1 border border-danger/20 shadow-sm p-4 hover:shadow-md transition-shadow">
+              <div className="text-sm font-semibold text-danger mb-1 flex items-center gap-2"><span>⚠️</span> Expired</div>
+              <div className="text-3xl font-bold text-danger">{expired}</div>
+            </div>
+            <div className="rounded-xl bg-gradient-to-br from-primary/10 to-content1 border border-primary/20 shadow-sm p-4 hover:shadow-md transition-shadow">
+              <div className="text-sm font-semibold text-primary mb-1 flex items-center gap-2"><span>📦</span> Quantity</div>
+              <div className="text-3xl font-bold text-primary">{fmtQty((batches.data?.items ?? []).reduce((s, b) => s + Number(b.initial_qty ?? 0), 0))}</div>
+            </div>
           </div>
 
-          <FilterBar
-            search={search}
-            onSearch={setSearch}
-            placeholder="Search batch, item, vendor or GRN…"
-            onReset={() => { setSearch(""); setBucket(""); }}
-          >
-            <FilterSelect label="Expiry / Warranty" allLabel="Any date" value={bucket} onChange={setBucket}
-                          options={EXPIRY_BUCKETS} />
-          </FilterBar>
+          <div className="bg-content1/50 backdrop-blur-md p-4 rounded-xl border border-line/60 shadow-sm mb-6 sticky top-4 z-20">
+            <FilterBar
+              search={search}
+              onSearch={setSearch}
+              placeholder="Search batch, item, vendor or GRN…"
+              onReset={() => { setSearch(""); setBucket(""); }}
+            >
+              <FilterSelect label="Expiry / Warranty" allLabel="Any date" value={bucket} onChange={setBucket}
+                            options={EXPIRY_BUCKETS} />
+            </FilterBar>
+          </div>
 
           <ErrorBanner error={batches.error} />
 
-          <ResponsiveList
-            data={batchRows}
-            columns={batchColumns}
-            keyOf={(b) => b.id}
-            loading={batches.isLoading}
-            empty="No batches match these filters."
-            renderCard={(b) => {
-              const label = lifeDateLabel(b);
-              const tone = expiryTone(daysUntil(b.expiry_date), label);
-              return (
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-ink">{b.batch_no}</span>
-                    <Chip size="sm" variant="flat" color={tone.color}>{tone.label}</Chip>
+          <div className="bg-content1 rounded-xl shadow-sm border border-line/50 overflow-hidden">
+            <ResponsiveList
+              data={batchRows}
+              columns={batchColumns}
+              keyOf={(b) => b.id}
+              loading={batches.isLoading}
+              empty="No batches match these filters."
+              renderCard={(b) => {
+                const label = lifeDateLabel(b);
+                const tone = expiryTone(daysUntil(b.expiry_date), label);
+                return (
+                  <div className="space-y-2 p-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary/40" />
+                        <span className="font-mono text-sm font-bold text-ink">{b.batch_no}</span>
+                      </div>
+                      <Chip size="sm" variant="flat" color={tone.color} className="shadow-sm font-semibold">{tone.label}</Chip>
+                    </div>
+                    <div className="truncate text-sm font-medium text-body pl-3.5">{b.item_name ?? b.item_code ?? "—"}</div>
+                    <div className="text-[11px] text-muted flex gap-2 items-center pl-3.5">
+                      <span className="bg-content2 px-1.5 py-0.5 rounded text-ink font-semibold">{fmtQty(b.initial_qty)}</span>
+                      <span>·</span>
+                      <span className="truncate max-w-[120px]">{b.vendor_name ?? "—"}</span>
+                      <span>·</span>
+                      <span className="text-ink">{label}: {fmtDate(b.expiry_date)}</span>
+                    </div>
                   </div>
-                  <div className="truncate text-sm text-body">{b.item_name ?? b.item_code ?? "—"}</div>
-                  <div className="text-[11px] text-muted">
-                    {fmtQty(b.initial_qty)} · {b.vendor_name ?? "—"} · {label}: {fmtDate(b.expiry_date)}
-                  </div>
-                </div>
-              );
-            }}
-          />
-        </>
+                );
+              }}
+            />
+          </div>
+        </div>
       ) : (
-        <>
-          <FilterBar
-            search={search}
-            onSearch={setSearch}
-            placeholder="Search serial, asset code, item or bin…"
-            onReset={() => { setSearch(""); setSerialStatus(""); }}
-          >
-            <FilterSelect label="Status" value={serialStatus} onChange={setSerialStatus}
-                          options={SERIAL_STATUSES} />
-            <button
-              type="button"
-              onClick={() => setPrinting((p) => !p)}
-              className="min-h-11 rounded-lg border border-line px-3 text-sm font-semibold text-body hover:bg-content2"
+        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="bg-content1/50 backdrop-blur-md p-4 rounded-xl border border-line/60 shadow-sm mb-6 sticky top-4 z-20">
+            <FilterBar
+              search={search}
+              onSearch={setSearch}
+              placeholder="Search serial, asset code, item or bin…"
+              onReset={() => { setSearch(""); setSerialStatus(""); }}
             >
-              {printing ? "Hide labels" : "Print labels"}
-            </button>
-          </FilterBar>
+              <FilterSelect label="Status" value={serialStatus} onChange={setSerialStatus}
+                            options={SERIAL_STATUSES} />
+              <button
+                type="button"
+                onClick={() => setPrinting((p) => !p)}
+                className="min-h-11 rounded-lg border border-primary/20 bg-primary/5 px-4 text-sm font-bold text-primary hover:bg-primary/10 transition-colors flex items-center gap-2"
+              >
+                <span>🖨️</span> {printing ? "Hide labels" : "Print labels"}
+              </button>
+            </FilterBar>
+          </div>
 
           <ErrorBanner error={serials.error} />
 
           {printing && (
-            <Card className="mb-4 p-4">
+            <Card className="mb-6 p-6 shadow-md border border-line/80 bg-gradient-to-br from-content1 to-content2/30">
+              <div className="mb-4 text-lg font-bold text-ink flex items-center gap-2"><span className="text-primary">🏷️</span> Print Serial Labels</div>
               <LabelSheet labels={labels} title="serial labels" emptyHint="Nothing to label." />
             </Card>
           )}
 
-          <ResponsiveList
-            data={serialRows}
-            columns={serialColumns}
-            keyOf={(s) => s.id}
-            loading={serials.isLoading}
-            empty="No serial numbers match these filters."
-            renderCard={(s) => (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-xs font-semibold text-ink">{s.serial_number}</span>
-                  <StatusPill status={normaliseStatus(s.status)} />
+          <div className="bg-content1 rounded-xl shadow-sm border border-line/50 overflow-hidden">
+            <ResponsiveList
+              data={serialRows}
+              columns={serialColumns}
+              keyOf={(s) => s.id}
+              loading={serials.isLoading}
+              empty="No serial numbers match these filters."
+              renderCard={(s) => (
+                <div className="space-y-2 p-1 hover:bg-content2/30 transition-colors rounded-lg">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-1.5 h-1.5 rounded-full bg-primary/40" />
+                      <span className="font-mono text-sm font-bold text-ink">{s.serial_number}</span>
+                    </div>
+                    <StatusPill status={normaliseStatus(s.status)} />
+                  </div>
+                  <div className="truncate text-sm font-medium text-body pl-3.5">{s.item_name ?? s.item_code ?? "—"}</div>
+                  <div className="text-[11px] text-muted flex gap-2 items-center pl-3.5">
+                    <span className="text-ink font-semibold">{s.warehouse_name ?? "—"}</span>
+                    <span>·</span>
+                    <span className="bg-content2 px-1.5 py-0.5 rounded text-ink font-mono">{s.bin_code ?? "bulk"}</span>
+                    <span>·</span>
+                    <span className="text-primary">{s.asset_code ?? s.consumable_code ?? "—"}</span>
+                  </div>
                 </div>
-                <div className="truncate text-sm text-body">{s.item_name ?? s.item_code ?? "—"}</div>
-                <div className="text-[11px] text-muted">
-                  {s.warehouse_name ?? "—"} · {s.bin_code ?? "bulk"} · {s.asset_code ?? s.consumable_code ?? "—"}
-                </div>
-              </div>
-            )}
-          />
-        </>
+              )}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

@@ -15,6 +15,7 @@ import { approvalsApi } from "../api";
 import { approvalDecisionDocumentPath } from "../documentRoutes";
 import type { ApprovalDecisionRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /* ---------------------------------------------------------------------------
  * My Decisions — the approver's own ledger.
@@ -312,7 +313,7 @@ export function MyDecisionsPage() {
       title="My Decisions"
       actions={<div className="flex gap-2">
         <Button variant="ghost" onClick={() => nav("/approvals?view=reports")}><BarChart3 className="h-4 w-4" /> Reports</Button>
-        <Button variant="ghost" disabled={!rows.length} onClick={() => exportExcel(rows)}><Download className="h-4 w-4" /> Export Excel</Button>
+        <Button className={TONE_BLUE} variant="ghost" disabled={!rows.length} onClick={() => exportExcel(rows)}><Download className="h-4 w-4" /> Export Excel</Button>
       </div>}
     />
 

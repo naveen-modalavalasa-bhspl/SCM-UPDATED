@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Award, Check, Search, Trophy, ChevronDown, ChevronRight, Star } from "lucide-react";
-import { Button, Can, Card, ScrollBox, StatusPill } from "@/shared/components";
+import { Can, Card, ScrollBox, StatusPill } from "@/shared/components";
+import { Button } from "./ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { money } from "../pages/RequisitionListPage";
 import type { Comparison, ComparisonCell, ComparisonTotal } from "../types";
@@ -134,17 +135,16 @@ function FooterRow({ label, columns, render, strong = false }: {
 }
 
 export function QuotationComparison({
-  comparison, awardedQuotationId, poId, poNo, busy, onAward, onCreatePo, onOpenPo,
+  comparison, pos, busy, onAward, onAwardSplit, onCreatePo, onOpenPo,
 }: {
   comparison: Comparison;
-  /** The quote that already won, if one has. */
-  awardedQuotationId?: number | null;
-  poId?: number | null;
-  poNo?: string | null;
+  pos?: { po_id: number; po_no: string; quotation_id?: number | null }[];
   busy?: boolean;
   onAward: (quotationId: number) => void;
+  /** Share the tender out: one entry per (item, supplier) the buyer gave a quantity. */
+  onAwardSplit?: (allocations: { item_id: number; vendor_id: number; quantity: number }[]) => void;
   onCreatePo: (quotationId: number) => void;
-  onOpenPo: () => void;
+  onOpenPo: (poId: number) => void;
 }) {
   const totals = comparison.totals ?? [];
   // Which columns are open. Empty state means "the default window" rather than
@@ -162,6 +162,21 @@ export function QuotationComparison({
   // an answer a buyer needs to see.
   const [quotedOnly, setQuotedOnly] = useState(false);
   const [linesExpanded, setLinesExpanded] = useState(false);
+  /**
+   * How much of each item each supplier is being given, keyed `itemId:vendorId`.
+   *
+   * THE SPLIT IS DECIDED HERE, against the prices, and not on the RFQ form where it
+   * used to live — at the moment a tender is raised nobody knows what anything costs,
+   * so the buyer was being asked to guess the answer to the question the RFQ exists to
+   * ask. Every invited supplier quotes the whole line; this is where the line is
+   * shared out between the answers that came back.
+   *
+   * Held as typed text, not numbers: a half-typed "1" on the way to "10" must not be
+   * re-rendered as 1, and an emptied box must stay empty rather than snapping to 0.
+   */
+  const [split, setSplit] = useState<Record<string, string>>({});
+  const [splitting, setSplitting] = useState(false);
+  const splitKey = (itemId: number, vendorId: number) => `${itemId}:${vendorId}`;
 
   const columns = useMemo(() => {
     if (shown === null) return totals.slice(0, VISIBLE);
@@ -203,6 +218,9 @@ export function QuotationComparison({
         .some((field) => String(field ?? "").toLowerCase().includes(q));
     });
   }, [comparison.items, itemQuery, quotedOnly, columns]);
+
+  const isAnyAwarded = comparison.quotations.some((q) => q.status === "ACCEPTED");
+  const isSplitAward = comparison.quotations.filter((q) => q.status === "ACCEPTED").length > 1;
 
   return (
     <Card className="p-0 overflow-hidden shadow-lg border-line">
@@ -367,6 +385,20 @@ export function QuotationComparison({
                   <div className="mt-1 text-xs text-body">
                     {row.quantity} {row.uom_code ?? ""}
                   </div>
+                  {splitting && (() => {
+                    // What this row has been shared out so far, against what it asks
+                    // for. Over-allocating is shown here rather than only refused at
+                    // the save: the buyer is typing into a grid and the row is where
+                    // the arithmetic they are doing actually lives.
+                    const given = columns.reduce((sum, total) =>
+                      sum + (Number(split[splitKey(row.item_id, total.vendor_id)]) || 0), 0);
+                    const over = given > Number(row.quantity);
+                    return (
+                      <div className={`mt-1 text-[11px] font-semibold ${over ? "text-danger" : "text-muted"}`}>
+                        Allocated {given} / {row.quantity}
+                      </div>
+                    );
+                  })()}
                 </th>
                 {columns.map((total) => {
                   const cell = row.cells.find((c) => c.quotation_id === total.quotation_id);
@@ -375,6 +407,21 @@ export function QuotationComparison({
                       {cell
                         ? <Cell cell={cell} />
                         : <div className="py-3 text-center text-xs text-muted">Not quoted</div>}
+                      {/* Only against a cell that was actually quoted: a supplier who
+                        * did not answer for this item cannot be given any of it, and
+                        * the server refuses it, so there is no box to type into. */}
+                      {splitting && cell && (
+                        <input
+                          type="number" min="0" step="0.001"
+                          value={split[splitKey(row.item_id, total.vendor_id)] ?? ""}
+                          aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
+                          onChange={(e) => setSplit((current) => ({
+                            ...current,
+                            [splitKey(row.item_id, total.vendor_id)]: e.target.value,
+                          }))}
+                          className="mt-2 min-h-9 w-full rounded-md border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
+                        />
+                      )}
                     </td>
                   );
                 })}
@@ -409,6 +456,67 @@ export function QuotationComparison({
             <FooterRow label="Grand total" columns={columns} strong
                        render={(t) => money(t.grand_total)} />
 
+            {/* Sharing the tender out. A row of its own above the decision, because it
+              * is a different decision from "who wins the lot": one is a column, the
+              * other is a grid. Only offered while nothing has been awarded, and only
+              * when the caller wired it. */}
+            {onAwardSplit && !isAnyAwarded && (
+              <tr>
+                <th scope="row" className={`${PINNED} border-t border-line px-3 py-3 text-left text-xs font-medium text-muted`}>
+                  Split
+                </th>
+                <td colSpan={columns.length} className="border-t border-line px-3 py-3">
+                  {!splitting ? (
+                    <Can do="rfq.award">
+                      <Button variant="subtle" disabled={busy} onClick={() => setSplitting(true)}>
+                        Share between suppliers
+                      </Button>
+                    </Can>
+                  ) : (() => {
+                    const allocations = Object.entries(split)
+                      .map(([key, value]) => {
+                        const [itemId, vendorId] = key.split(":").map(Number);
+                        return { item_id: itemId, vendor_id: vendorId, quantity: Number(value) };
+                      })
+                      .filter((row) => row.quantity > 0);
+                    // Refused here as well as at the server, because the buyer is
+                    // typing into a grid and should not have to press Award to find
+                    // out that one row of it does not add up.
+                    const over = rows.filter((row) => {
+                      const given = columns.reduce((sum, total) =>
+                        sum + (Number(split[splitKey(row.item_id, total.vendor_id)]) || 0), 0);
+                      return given > Number(row.quantity);
+                    });
+                    return (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-muted">
+                          Type each supplier&rsquo;s share against their quoted price.
+                          An item nobody is given stays unordered.
+                        </span>
+                        <span className="flex-1" />
+                        {over.length > 0 && (
+                          <span className="text-xs font-semibold text-danger">
+                            {over.length === 1
+                              ? `${over[0].item_name ?? "One item"} is over-allocated.`
+                              : `${over.length} items are over-allocated.`}
+                          </span>
+                        )}
+                        <Button variant="subtle" onClick={() => { setSplitting(false); setSplit({}); }}>
+                          Cancel
+                        </Button>
+                        <Button
+                          disabled={busy || !allocations.length || over.length > 0}
+                          onClick={() => onAwardSplit(allocations)}
+                        >
+                          Split and award POs
+                        </Button>
+                      </div>
+                    );
+                  })()}
+                </td>
+              </tr>
+            )}
+
             {/* The decision row. Awarding and raising the order stay two acts with two
               * permissions: picking a winner is not approving a spend. */}
             <tr>
@@ -416,18 +524,24 @@ export function QuotationComparison({
                 Decision
               </th>
               {columns.map((total) => {
-                const won = awardedQuotationId === total.quotation_id;
+                const isAwarded = total.status === "ACCEPTED";
+                const isAnyAwarded = comparison.quotations.some((q) => q.status === "ACCEPTED");
+                const createdPo = pos?.find((p) => p.quotation_id === total.quotation_id);
                 return (
                   <td key={total.quotation_id} className={`${COL} border-t border-line px-3 py-3`}>
-                    {won ? (
+                    {isAwarded ? (
                       <div className="space-y-2">
                         <div className="flex items-center justify-end gap-1 text-xs font-semibold text-success">
                           <Award className="h-3.5 w-3.5" /> Awarded
                         </div>
-                        {poId ? (
-                          <Button variant="subtle" className="w-full" onClick={onOpenPo}>
-                            {poNo ?? "Purchase order"}
+                        {createdPo ? (
+                          <Button variant="subtle" className="w-full" onClick={() => onOpenPo(createdPo.po_id)}>
+                            {createdPo.po_no ?? "Purchase order"}
                           </Button>
+                        ) : isSplitAward ? (
+                          <div className="text-center text-xs text-muted">
+                            Processing PO...
+                          </div>
                         ) : (
                           <Can do="po.create">
                             <Button
@@ -440,7 +554,7 @@ export function QuotationComparison({
                           </Can>
                         )}
                       </div>
-                    ) : awardedQuotationId ? (
+                    ) : isAnyAwarded ? (
                       <p className="text-right text-xs text-muted">Not selected</p>
                     ) : (
                       <Can do="rfq.award">

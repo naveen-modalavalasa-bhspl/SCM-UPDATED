@@ -23,6 +23,7 @@ import { IndentApprovalReviewPage } from "./IndentApprovalReviewPage";
 import { ApprovalReportsPage } from "./ReportsPage";
 import { ApprovalPager } from "../components/Pager";
 import type { PendingApproval } from "../types";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 
 /** Document types this screen can sign without opening them.
@@ -690,10 +691,10 @@ export function ApprovalsPage() {
           onChange={(event) => setBulkNote(event.target.value)}
           placeholder="Comment (required to reject)"
         />
-        <Button disabled={bulk.isPending} onClick={() => bulk.mutate(true)}>
+        <Button className={TONE_APPROVE} disabled={bulk.isPending} onClick={() => bulk.mutate(true)}>
           {bulk.isPending ? "Signing…" : `Approve ${picked.size}`}
         </Button>
-        <Button
+        <Button className={TONE_REJECT}
           variant="danger"
           disabled={bulk.isPending || !bulkNote.trim()}
           onClick={() => bulk.mutate(false)}

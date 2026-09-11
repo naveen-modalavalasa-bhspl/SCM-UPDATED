@@ -1,4 +1,4 @@
-import { Button } from "@/shared/components";
+import { Button } from "./ActionButton";
 
 /**
  * Pick a hundred rows in one press, not five pages of twenty.

@@ -2,10 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
-import {
-  Button, Can, ErrorBanner, Input, PageHeader, ResponsiveList, Select,
-  StatusPill, useToast, type Column,
-} from "@/shared/components";
+import { Can, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, poApi, rfqApi } from "../api";
@@ -15,6 +13,7 @@ import {
 } from "../components/DetailKit";
 import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * One RFQ: its lines, who was asked, and — once quotes are in — the comparison.
@@ -153,6 +152,24 @@ export function RFQDetailPage() {
     onSuccess: refresh("Awarded"),
   });
 
+  const awardSplit = useMutation({
+    mutationFn: async (allocations: { item_id: number; vendor_id: number; quantity: number }[]) => {
+      const res = await rfqApi.awardSplit(rfqId, allocations);
+      
+      const vendorIds = new Set(allocations.map((a) => a.vendor_id));
+      const winningQuotations = (comparison?.quotations ?? []).filter((q) => vendorIds.has(q.vendor_id));
+      
+      for (const quote of winningQuotations) {
+        await poApi.createFromQuotation(quote.id);
+      }
+      return res;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pos"] });
+      refresh("Shared between suppliers and POs raised")();
+    },
+  });
+
   // The offer that won. Read off the comparison rather than off the RFQ's awarded
   // vendor id: a vendor can hold more than one quotation on an RFQ (they revise), and
   // the PO is raised against the exact quote that was accepted, not against the vendor.
@@ -175,7 +192,7 @@ export function RFQDetailPage() {
   });
 
   const busy = submit.isPending || approve.isPending || reject.isPending
-    || close.isPending || award.isPending || raisePo.isPending;
+    || close.isPending || award.isPending || awardSplit.isPending || raisePo.isPending;
 
   const copyInvite = async (vendorId: number, path: string) => {
     await navigator.clipboard.writeText(`${location.origin}${path}`);
@@ -201,11 +218,11 @@ export function RFQDetailPage() {
       className: "text-right",
       render: (r) => (editableQty ? (
         <div className="flex items-center justify-end gap-2">
-          <Input
-            type="number" min="0" max={String(r.quantity)} step="0.001" className="w-28"
+          <input
+            type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
             value={qtyEdits[r.id] ?? String(r.quantity)}
-            onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
-            title="Approved quantity — decrease only, 0 removes the line. Supplier will be asked for this number."
+            onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
+            title="Approved quantity — up to the source document quantity; 0 removes the line."
             aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
           />
           <span className="text-xs text-muted w-10 text-left">{r.uom_code ?? ""}</span>
@@ -278,7 +295,7 @@ export function RFQDetailPage() {
                 <Button variant="subtle" onClick={() => nav(`/procurement/rfqs/${rfqId}/edit`)}>
                   Edit
                 </Button>
-                <Button disabled={busy} onClick={() => submit.mutate()}>
+                <Button className={TONE_SUBMIT} disabled={busy} onClick={() => submit.mutate()}>
                   Send for approval
                 </Button>
               </Can>
@@ -292,10 +309,10 @@ export function RFQDetailPage() {
               * sufficient. */}
             {canDecide && (
               <Can do="rfq.approve">
-                <Button variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
+                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject
                 </Button>
-                <Button disabled={busy} onClick={() => approve.mutate()}>
+                <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
                   Approve &amp; publish
                 </Button>
               </Can>
@@ -326,7 +343,7 @@ export function RFQDetailPage() {
         }
       />
 
-      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? raisePo.error ?? saveQuantities.error} />
+      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? awardSplit.error ?? raisePo.error ?? saveQuantities.error} />
 
       <DetailShell
         main={(
@@ -346,7 +363,7 @@ export function RFQDetailPage() {
                     },
                     { label: "Priority", value: rfq.priority ?? "Normal" },
                     { label: "Department", value: rfq.department_name ?? "\u2014" },
-                    { label: "Warehouse", value: rfq.warehouse_name ?? "\u2014" },
+                    { label: "Shipment Address", value: rfq.warehouse_name ?? "\u2014" },
                     { label: "Project", value: rfq.project_name ?? "\u2014" },
                     { label: "Company", value: rfq.company_name ?? "\u2014" },
                   ]}
@@ -390,10 +407,11 @@ export function RFQDetailPage() {
                 <>
                   {editableQty && (
                     <p className="px-3 pb-2 text-xs text-muted">
-                      Adjust quantities before approving — decrease only, 0 removes the line. The approved number is what the vendor will be asked to quote/supply.
+                      Adjust quantities before approving — up to the source document quantity; 0 removes the line. The approved number is what the vendor will be asked to quote/supply.
                     </p>
                   )}
                   <ResponsiveList
+                    editable
                     data={rfq?.items ?? []}
                     columns={lineColumns}
                     keyOf={(r) => r.id}
@@ -405,10 +423,10 @@ export function RFQDetailPage() {
                         <div className="text-xs text-muted font-mono">{r.item_code ?? ""}</div>
                         {editableQty ? (
                           <div className="flex items-center gap-2">
-                            <Input
-                              type="number" min="0" max={String(r.quantity)} step="0.001" className="w-28"
+                            <input
+                              type="text" inputMode="decimal" className="h-11 w-28 rounded-md border border-line bg-content1 px-3 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                               value={qtyEdits[r.id] ?? String(r.quantity)}
-                              onChange={(e) => setQtyEdits({ ...qtyEdits, [r.id]: e.target.value })}
+                              onChange={(e) => setQtyEdits((current) => ({ ...current, [r.id]: e.target.value }))}
                               aria-label={`Quantity for ${r.item_name ?? r.item_id}`}
                             />
                             <span className="text-xs text-muted">{r.uom_code ?? ""}</span>
@@ -473,7 +491,11 @@ export function RFQDetailPage() {
               >
                 {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
                   <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-                    {comparison.responded} of 3 quotes on file.
+                    {/* `rfq?.` like every other read of it on this page: the query
+                        behind it is not guaranteed resolved here, and the two bare
+                        reads were what stopped the branch compiling. */}
+                    {comparison.responded} of {rfq?.vendor_count ?? 0}{" "}
+                    quote{rfq?.vendor_count === 1 ? "" : "s"} on file.
                   </p>
                 )}
                 {/* The sheet decides nothing. It flags the cheapest cell per item and
@@ -482,13 +504,12 @@ export function RFQDetailPage() {
                   ? (
                     <QuotationComparison
                       comparison={comparison}
-                      awardedQuotationId={awardedQuote?.id ?? null}
-                      poId={rfq?.po_id ?? null}
-                      poNo={rfq?.po_no ?? null}
+                      pos={rfq?.pos ?? []}
                       busy={busy}
                       onAward={(quotationId) => award.mutate(quotationId)}
+                      onAwardSplit={(allocations) => awardSplit.mutate(allocations)}
                       onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
-                      onOpenPo={() => nav(`/pos/${rfq?.po_id}`)}
+                      onOpenPo={(poId) => nav(`/pos/${poId}`)}
                     />
                   )
                   : <p className="py-6 text-center text-sm text-muted">Waiting on quotes.</p>}

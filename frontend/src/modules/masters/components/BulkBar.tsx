@@ -3,7 +3,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Download, FileUp, Loader2, Sheet } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button, Can } from "@/shared/components";
-import type { BulkApi, ImportResult } from "../api";
+import type { BulkApi, ImportPreview, ImportResult, ImportRow } from "../api";
+import { ImportReview } from "./ImportReview";
+import { TONE_BLUE } from "@/shared/components/tones";
 
 /** `Can` requires a permission code. A few masters (the UOM conversions, the vendor
  *  rates) are declared without one, and those should stay visible rather than
@@ -22,6 +24,10 @@ function Gate({ perm, children }: { perm?: string; children: ReactNode }) {
  *  error can be shown in full and the admin fixes the sheet and re-uploads. That is
  *  why the failure message is rendered whole, newlines and all, instead of being
  *  truncated to a toast.
+ *
+ *  Every pick stops at `preview`, which writes nothing and reports what the server
+ *  made of the sheet. Even a clean file needs an explicit Save: upload is selection,
+ *  not permission to change master data. Problems can be corrected in `ImportReview`.
  */
 export function BulkBar({ api, managePerm, queryKey, label }: {
   api: BulkApi;
@@ -35,6 +41,7 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
   const [busy, setBusy] = useState<"template" | "export" | "import" | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
 
   const run = async (kind: "template" | "export", call: () => Promise<void>) => {
     setBusy(kind); setError(null); setResult(null);
@@ -47,17 +54,34 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
     }
   };
 
+  const done = (outcome: ImportResult) => {
+    setResult(outcome);
+    setPreview(null);
+    qc.invalidateQueries({ queryKey: ["masters", queryKey] });
+  };
+
   const upload = async (file: File) => {
-    setBusy("import"); setError(null); setResult(null);
+    setBusy("import"); setError(null); setResult(null); setPreview(null);
     try {
-      setResult(await api.import(file));
-      qc.invalidateQueries({ queryKey: ["masters", queryKey] });
+      const draft = await api.preview(file);
+      setPreview(draft);
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
       setBusy(null);
       // Cleared so re-picking the same corrected file fires onChange again.
       if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const commit = async (rows: ImportRow[]) => {
+    setBusy("import"); setError(null);
+    try {
+      done(await api.commit(rows));
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -71,7 +95,7 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
                 onClick={() => run("template", api.template)}>
           {spin("template") ?? <Sheet className="h-4 w-4" />} Template
         </Button>
-        <Button variant="ghost" disabled={busy !== null}
+        <Button className={TONE_BLUE} variant="ghost" disabled={busy !== null}
                 onClick={() => run("export", () => api.export())}>
           {spin("export") ?? <Download className="h-4 w-4" />} Export
         </Button>
@@ -92,6 +116,13 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
         />
       </div>
 
+      {preview && (
+        <ImportReview
+          preview={preview} label={label} busy={busy === "import"}
+          onCommit={(rows) => void commit(rows)}
+          onCancel={() => setPreview(null)}
+        />
+      )}
       {result && (
         <div className="mt-2 rounded-lg bg-ok-bg px-3 py-2 text-sm text-ok">
           Imported {result.total} row{result.total === 1 ? "" : "s"} —{" "}

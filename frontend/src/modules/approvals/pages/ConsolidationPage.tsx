@@ -17,6 +17,7 @@ import type {
   ConsolidationBatch, ConsolidationDimension, ConsolidationFilterOptions,
   ConsolidationQuery,
 } from "../types";
+import { TONE_APPROVE } from "@/shared/components/tones";
 
 /** Indents per approve request. Small on purpose: the bar only moves when a chunk
  *  comes back, so 25 meant an approver watched "0 of 41" for minutes and assumed the
@@ -36,9 +37,15 @@ export const formatQty = (value: number) => {
 export { splitQuantity };
 
 /** Exclusion is by exact indent number — the list comes from picking real indents off
- *  the item's own page, never from free text that could half-match two of them. */
+ *  the item's own page, never from free text that could half-match two of them.
+ *
+ *  `is_excluded` is the SERVER's answer: a rung below already dropped this line and it
+ *  stays dropped, whatever this approver's draft says. Without it the same line was
+ *  offered an Exclude button at every rung (BUG_SCM_0008) and came up as an ordinary
+ *  zero once excluded (BUG_SCM_0007). */
 export const isExcluded = (allocation: ConsolidatedItemAllocation, excluded: string[]) =>
-  excluded.includes(allocation.indent_no.toUpperCase());
+  Boolean(allocation.is_excluded)
+  || excluded.includes(allocation.indent_no.toUpperCase());
 
 /** What one item row currently resolves to: the approver's total, who is out, and
  *  the per-indent split of what is left. Pure — the screen recomputes it on every
@@ -651,10 +658,16 @@ export function BatchCard({ batch, onBack }: {
       // because the split of an untouched item is simply its full ceiling.
       const lines = batch.consolidated_items.flatMap((item) => {
         const { split } = resolveItem(item, decisions[String(item.item_id)]);
+        const dropped = (decisions[String(item.item_id)]?.excluded ?? [])
+          .map((no) => no.toUpperCase());
         return (item.allocations ?? []).map((allocation) => ({
           indent_id: allocation.indent_id,
           line_id: allocation.line_id,
           approved_quantity: split.get(allocation.line_id) ?? 0,
+          // Said out loud, not left to be inferred from the zero: a line dropped from
+          // the batch and a line approved at nothing are the same number and mean
+          // completely different things (BUG_SCM_0004).
+          excluded: isExcluded(allocation, dropped),
         }));
       });
       // The frozen set, never whatever the server holds at click time: an indent that
@@ -744,7 +757,7 @@ export function BatchCard({ batch, onBack }: {
           >
             <PackageCheck className="h-4 w-4" /> Serve from own stock
           </Button>
-          <Button
+          <Button className={TONE_APPROVE}
             disabled={blocked || approve.isPending || sending === 0}
             onClick={() => approve.mutate()}
           >

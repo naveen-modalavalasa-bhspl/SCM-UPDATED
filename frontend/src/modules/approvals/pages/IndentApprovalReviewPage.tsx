@@ -20,6 +20,7 @@ import { isIndentModuleQuery } from "@/modules/indents/api";
 import { displayUom } from "@/modules/indents/displayFormat";
 import { alerts } from "@/modules/alerts";
 import type { ApprovalIndentLine } from "../types";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 type Decision = "approve" | "reject" | "return" | null;
 const CHECKS = [
@@ -716,10 +717,10 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
               <RotateCcw className="h-4 w-4" /> Return for correction
             </Button>
           )}
-          <Button variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}>
+          <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}>
             <X className="h-4 w-4" /> Reject
           </Button>
-          <Button disabled={busy || invalidQuantity || !checksDone} onClick={() => setConfirming("approve")}>
+          <Button className={TONE_APPROVE} disabled={busy || invalidQuantity || !checksDone} onClick={() => setConfirming("approve")}>
             <Check className="h-4 w-4" /> Approve
           </Button>
         </div>

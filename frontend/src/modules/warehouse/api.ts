@@ -19,6 +19,7 @@ import type {
   Issue,
   IssueDispatchSource,
   IssueStockSource,
+  UnitSupply,
   IssueWrite,
   ItemOption,
   LocationOption,
@@ -187,6 +188,13 @@ export const createStorageType = (body: StorageTypeWrite) =>
 export const updateStorageType = (id: number, body: StorageTypeWrite) =>
   put<StorageType>(`${BASE}/storage-types/${id}`, body);
 
+export const deleteStorageType = (id: number) => del(`${BASE}/storage-types/${id}`);
+
+/** Put the standard rungs back on a site whose master is empty. Idempotent — a kind
+ *  that is already there is left exactly as it has been edited. */
+export const seedStorageTypes = () =>
+  post<StorageType[]>(`${BASE}/storage-types/seed-defaults`, {});
+
 /* ------------------------------------------------------------------ inward -- */
 
 /** `gate_register` lists every row that was ever a gate entry, converted or not. */
@@ -218,9 +226,18 @@ export const completeReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/$
 export const cancelReceipt = (id: number, reason?: string) =>
   post<Receipt>(`${BASE}/receipts/${id}/cancel`, { reason });
 
-/** Open PO lines, so the GRN form fills itself from the order. */
-export const getPoLines = (poId: number) =>
-  get<PoPrefill>(`${BASE}/options/po-lines`, { po_id: poId });
+/**
+ * What the order still OWES, so the GRN form fills itself from it.
+ *
+ * Only the lines with something outstanding — a fully received line is not one to
+ * receive again. `receiptId` is the receipt being filled, whose own lines must not
+ * count against it, or a saved receipt re-filling from its order would be told the
+ * order owes nothing, by itself.
+ */
+export const getPoLines = (poId: number, receiptId?: number | null) =>
+  get<PoPrefill>(`${BASE}/options/po-lines`, {
+    po_id: poId, receipt_id: receiptId ?? undefined,
+  });
 
 /** Despatch notes the vendor has filed against an order — only SUBMITTED ones, since
  *  a draft is the vendor still typing. */
@@ -229,8 +246,10 @@ export const despatchNoteOptions = (poId: number) =>
 
 /** The vendor's paperwork and per-line batch/expiry, in the shape this form needs.
  *  Header and lines in one call — at the gate they are one act. */
-export const getDespatchPrefill = (noteId: number) =>
-  get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, { note_id: noteId });
+export const getDespatchPrefill = (noteId: number, receiptId?: number | null) =>
+  get<DespatchPrefill>(`${BASE}/options/despatch-prefill`, {
+    note_id: noteId, receipt_id: receiptId ?? undefined,
+  });
 
 /* ----------------------------------------------------------- quality (in) -- */
 
@@ -317,22 +336,11 @@ export const startPutaway = (id: number) => post<Putaway>(`${BASE}/putaways/${id
 export const confirmPutaway = (id: number, body: PutawayConfirm) =>
   post<Putaway>(`${BASE}/putaways/${id}/confirm`, body);
 
-/**
- * Bins worth offering for this task, best first.
- *
- * **The endpoint behind this is gone**, and deliberately: nothing suggests a location
- * any more. A putaway may be confirmed into any rung of the tree, so a shortlist of
- * eight bays in front of somebody who may legitimately choose any of nine hundred is a
- * wrong answer with a ranking on it. The location picker walks the hierarchy and the
- * capacity meter measures whatever was chosen.
- *
- * The declaration survives only because this branch carries the qa version of
- * `PutawayForm`, which still imports it. The call 404s, the query falls back to its
- * empty default, and the suggestion strip simply does not render. Delete this the
- * moment that screen is reconciled — it is a compile-time stub, not an API.
- */
-export const suggestBins = (id: number) =>
-  get<Bin[]>(`${BASE}/putaways/${id}/suggested-bins`);
+/* `suggestBins` was here. Nothing suggests a location any more — a putaway may be
+ * confirmed into any rung of the tree, so a shortlist of eight bays in front of
+ * somebody who may legitimately choose any of nine hundred is a wrong answer with a
+ * ranking on it. The location picker walks the hierarchy; the capacity meter measures
+ * whatever was chosen. */
 
 export const listStockMovements = (params: ListParams = {}) =>
   get<Page<StockMovement>>(`${BASE}/stock-movements`, params);
@@ -372,11 +380,37 @@ export const issueStockSources = (
   item_ids: number[],
   indent_id?: number | null,
 ) =>
-  get<IssueStockSource[]>(`${BASE}/issues/stock-sources`, {
+  post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
     warehouse_id,
-    item_ids: item_ids.join(","),
+    item_ids,
     indent_id,
   });
+
+/**
+ * How many identified units each (item, batch, location) could name, right now.
+ *
+ * Asked for the whole grid in one call rather than per row — a fifty-pick issue
+ * re-probing on every batch change would otherwise be fifty requests a keystroke
+ * apart. The count is bounded at `need + 1` on the server, so it stays cheap over a
+ * table holding 773k unit rows.
+ */
+export const issueUnitSupply = (
+  warehouse_id: number,
+  picks: UnitSupplyPick[],
+  issue_id?: number | null,
+  direction: "OUT" | "IN" = "OUT",
+) =>
+  post<UnitSupply[]>(`${BASE}/issues/unit-supply`, {
+    warehouse_id, picks, issue_id, direction,
+  });
+
+export interface UnitSupplyPick {
+  item_id: number;
+  batch_id?: number | null;
+  bin_id?: number | null;
+  need: number;
+  line_id?: number | null;
+}
 
 /** What each kind of unit identifier is called. Served so no screen writes the
  *  words "asset tag" or "IMEI" itself — see the backend's `TRACKING_META`. */
@@ -432,6 +466,24 @@ export const rejectIssue = (id: number, comments = "") =>
 
 /** Posts the movement — this is the point stock actually leaves the shelf. */
 export const postIssue = (id: number) => post<Issue>(`${BASE}/issues/${id}/issue`);
+
+/** One child issue per warehouse floor holding stock for the parent's items. */
+export interface IssueSplitResult {
+  parent_issue_id: number;
+  parent_issue_no: string;
+  children: {
+    id: number; issue_no: string;
+    floor_location_id: number | null; floor_location_name: string | null;
+    total_items: number; total_qty: string;
+  }[];
+  /** What no floor was holding. Reported, never rounded away — the shortage belongs
+   *  to the indent and hiding it is how a site waits for goods nobody is buying. */
+  unfulfilled: { item_id: number; item_code: string | null; item_name: string | null; qty: string }[];
+}
+
+/** Hand an approved issue down to the floors that are actually holding the stock. */
+export const splitIssue = (id: number) =>
+  post<IssueSplitResult>(`${BASE}/issues/${id}/split`);
 
 /** Names the physical units after approval — the rest of the issue stays frozen. */
 export const setIssueSerials = (
@@ -680,8 +732,23 @@ export const runReport = (key: ReportKey, params: Record<string, unknown> = {}) 
 
 /* ----------------------------------------------------------------- options -- */
 
-export const itemOptions = (search?: string) =>
-  get<ItemOption[]>(`${BASE}/options/items`, { search });
+/**
+ * Items for a picker, and — when a stocking point is named — what that point holds.
+ *
+ * `in_stock` narrows the list to what can actually be issued from there. The plain
+ * catalogue is right for a GRN (goods arrive for items the shelf has never seen) and
+ * wrong for an issue, where offering the whole master sends the storekeeper down two
+ * more dropdowns before anything tells him the shelf is empty.
+ */
+export const itemOptions = (
+  search?: string,
+  warehouse_id?: number | null,
+  in_stock?: boolean,
+  indent_id?: number | null,
+) =>
+  get<ItemOption[]>(`${BASE}/options/items`, {
+    search, warehouse_id, in_stock, indent_id,
+  });
 
 export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options/vendors`, { search });
 

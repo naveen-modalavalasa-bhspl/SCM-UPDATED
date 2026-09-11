@@ -1,4 +1,6 @@
-import { Button, ErrorBanner, Field, Input, PageHeader, Select } from "@/shared/components";
+import {
+  Button, Card, ErrorBanner, Field, Input, PageHeader, Select,
+} from "@/shared/components";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,31 +9,11 @@ import { ArrowLeft } from "lucide-react";
 import { Section } from "../../components/DocumentMeta";
 import { flattenBins } from "../../components/BinTree";
 import { createBin, getBinTree, listStorageTypes, locationVolumeBudget, updateBin } from "../../api";
-import type { Bin, BinWrite, VolumeBudget } from "../../types";
-
-const BIN_TYPES = [
-  { value: "BLOCK", label: "Block" },
-  { value: "FLOOR", label: "Floor" },
-  { value: "LANE", label: "Lane / aisle" },
-  { value: "RACK", label: "Rack" },
-  { value: "SHELF", label: "Shelf" },
-  { value: "BIN", label: "Storage bin" },
-  { value: "LOT", label: "Lot" },
-  { value: "PALLET", label: "Pallet" },
-  { value: "COLD_ROOM", label: "Cold store room" },
-  { value: "REFRIGERATOR", label: "Refrigerator" },
-  { value: "COLD_STORAGE_BIN", label: "Cold storage bin" },
-];
-
-const defaultChildType = (parent: Bin | null) => {
-  const type = (parent?.bin_type ?? "").toUpperCase();
-  if (!parent) return "BLOCK";
-  if (type === "BLOCK") return "FLOOR";
-  if (type === "FLOOR") return "LANE";
-  if (["LANE", "COLD_ROOM"].includes(type)) return "RACK";
-  if (type === "RACK") return "SHELF";
-  return "BIN";
-};
+import type { Bin, BinWrite, StorageType, VolumeBudget } from "../../types";
+import {
+  activeTypes, canStandAlone, defaultChildType, eligibleParents, isColdChain,
+  parentTypesOf, typeOfLocation,
+} from "../../storageTypes";
 
 const cleanDraft = (draft: BinWrite): BinWrite => ({
   ...draft,
@@ -42,16 +24,16 @@ const cleanDraft = (draft: BinWrite): BinWrite => ({
   shelf_level: draft.shelf_level ?? null,
 });
 
+/** A bay inside a cold room is at the cold room's temperature until somebody says
+ *  otherwise, so the band is inherited from the parent rather than typed again. The
+ *  KIND is not inherited — that is the whole point of choosing one. */
 const coldDefaultsFrom = (parent: Bin | null) => ({
-  storage_type_id: parent?.storage_type_id ?? null,
   temperature_controlled: !!parent?.temperature_controlled,
   humidity_percentage: parent?.humidity_percentage ?? null,
   target_temperature_celsius: parent?.target_temperature_celsius ?? null,
   min_temperature_celsius: parent?.min_temperature_celsius ?? null,
   max_temperature_celsius: parent?.max_temperature_celsius ?? null,
 });
-
-const isColdType = (type: string) => ["COLD_ROOM", "REFRIGERATOR", "COLD_STORAGE_BIN"].includes(type);
 
 function GateSummary({ draft }: { draft: BinWrite }) {
   const sides = [draft.length_cm, draft.width_cm, draft.height_cm].map(Number);
@@ -284,10 +266,14 @@ export default function BinForm() {
     queryFn: () => getBinTree(warehouseId),
   });
 
-  const { data: storageTypes = [] } = useQuery({
+  // What kinds of location this company has, and which of them may hold which. The
+  // form used to carry its own array of eleven kinds and a ladder that guessed a
+  // child's kind from its parent's; both are the master's answer now.
+  const { data: storageTypes = [], isLoading: typesLoading } = useQuery({
     queryKey: ["wh-storage-types"],
     queryFn: listStorageTypes,
   });
+  const kinds = useMemo(() => activeTypes(storageTypes), [storageTypes]);
 
   const flat = useMemo(() => flattenBins(bins), [bins]);
 
@@ -307,7 +293,7 @@ export default function BinForm() {
   });
 
   useEffect(() => {
-    if (binsLoading) return;
+    if (binsLoading || typesLoading) return;
     if (editing) {
       const bin = flat.find((b) => String(b.id) === bin_id);
       if (bin && !draft) {
@@ -342,13 +328,18 @@ export default function BinForm() {
     } else if (!draft) {
       const parent = parentParam ? flat.find((b) => String(b.id) === parentParam) ?? null : null;
       const cold = coldDefaultsFrom(parent);
+      // The first kind, in rung order, that the master says may sit inside this
+      // parent — so "Add under Rack 1" opens on Shelf without the form knowing what a
+      // rack is.
+      const suggested = defaultChildType(parent, storageTypes);
       setDraft({
         warehouse_id: warehouseId,
         code: "",
         name: "",
         description: "",
         parent_id: parent?.id ?? null,
-        bin_type: defaultChildType(parent),
+        bin_type: suggested?.code ?? null,
+        storage_type_id: suggested?.id ?? null,
         capacity_qty: null,
         barcode: "",
         floor_level: null,
@@ -362,10 +353,13 @@ export default function BinForm() {
         fill_efficiency_pct: null,
         aisle_width_meters: null,
         ...cold,
+        temperature_controlled:
+          cold.temperature_controlled || isColdChain(suggested),
         is_active: true,
       });
     }
-  }, [binsLoading, editing, bin_id, flat, warehouseId, parentParam, draft]);
+  }, [binsLoading, typesLoading, editing, bin_id, flat, warehouseId, parentParam,
+      draft, storageTypes]);
 
   const saveBin = useMutation({
     mutationFn: () => {
@@ -378,9 +372,43 @@ export default function BinForm() {
     },
   });
 
-  if (binsLoading || !draft) {
+  if (binsLoading || typesLoading || !draft) {
     return <div className="py-16 text-center text-muted">Loading…</div>;
   }
+
+  // Everything below reads off the master rather than off a constant in this file:
+  // which kind this is, which kinds may hold it, and therefore which of the nine
+  // hundred locations in the building are offered as its parent.
+  const kind = typeOfLocation(draft, storageTypes);
+  const parentKinds = parentTypesOf(kind, storageTypes);
+  const parents = eligibleParents(flat, kind, storageTypes, editing ? Number(bin_id) : null);
+  const topLevelAllowed = canStandAlone(kind);
+  const wantsCold = !!draft.temperature_controlled || isColdChain(kind);
+  const kindCode = (kind?.code ?? draft.bin_type ?? "").toUpperCase();
+  /** The walk down to the parent, so the strip above the form can read the whole path
+   *  back. Off the tree's own `path`, which the server derives from the parent links. */
+  const parentPath = (() => {
+    const parent = flat.find((row) => row.id === draft.parent_id);
+    if (!parent) return [] as string[];
+    return (parent.path ?? parent.code).split("/").filter(Boolean);
+  })();
+
+  /** Choosing a kind re-answers three things at once: what this is, whether the
+   *  location it was going to hang off may still hold it, and whether it needs a
+   *  temperature band. Doing them together is what stops a form sitting in a state the
+   *  server would refuse. */
+  const chooseKind = (next: StorageType | null) => {
+    const stillFits = eligibleParents(flat, next, storageTypes,
+                                      editing ? Number(bin_id) : null)
+      .some((row) => row.id === draft.parent_id);
+    setDraft({
+      ...draft,
+      bin_type: next?.code ?? null,
+      storage_type_id: next?.id ?? null,
+      parent_id: stillFits ? draft.parent_id : null,
+      temperature_controlled: isColdChain(next) || !!draft.temperature_controlled,
+    });
+  };
 
   return (
     <div>
@@ -394,15 +422,44 @@ export default function BinForm() {
             </Button>
             <Button
               onClick={() => saveBin.mutate()}
-              disabled={saveBin.isPending || !draft.code.trim()}
+              disabled={saveBin.isPending || !draft.code.trim() || !kind}
             >
-              {saveBin.isPending ? "Saving…" : "Save bin"}
+              {saveBin.isPending ? "Saving…" : "Save location"}
             </Button>
           </>
         }
       />
 
       <ErrorBanner error={saveBin.error} />
+
+      {/* Where this location will END UP, spelled out. The form asks for a kind and a
+          parent as two separate fields; what a storekeeper actually pictures is the walk
+          down to the bay, and reading it back is how a wrong parent gets caught before
+          the save rather than on the floor a week later. */}
+      <Card className="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+          Will sit at
+        </span>
+        {parentPath.map((step) => (
+          <span key={step} className="flex items-center gap-2">
+            <span className="font-mono text-xs text-muted">{step}</span>
+            <span className="text-muted">/</span>
+          </span>
+        ))}
+        <span className="font-mono text-xs font-bold text-ink">
+          {draft.code.trim() || "…"}
+        </span>
+        {kind && (
+          <span className="rounded-md bg-content2 px-2 py-0.5 text-[11px] font-medium text-body">
+            {kind.name}
+          </span>
+        )}
+        {kind?.is_pickable && (
+          <span className="rounded-md bg-ok-bg px-2 py-0.5 text-[11px] font-medium text-ok">
+            Holds stock
+          </span>
+        )}
+      </Card>
 
       <Section title="Identity" hint="Basic information to identify this storage location.">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -420,19 +477,17 @@ export default function BinForm() {
               placeholder="Aisle A, rack 1, shelf 3"
             />
           </Field>
-          <Field label="Type">
+          <Field
+            label="Type"
+            hint={kind?.description ?? "What kind of storage location this is"}
+          >
             <Select
-              value={draft.bin_type}
-              onChange={(v) => {
-                const binType = v || "BIN";
-                setDraft({
-                  ...draft,
-                  bin_type: binType,
-                  temperature_controlled: isColdType(binType) || !!draft.temperature_controlled,
-                });
-              }}
-              options={BIN_TYPES}
-              ariaLabel="Bin type"
+              value={kind ? String(kind.id) : ""}
+              onChange={(value) =>
+                chooseKind(kinds.find((row) => String(row.id) === value) ?? null)}
+              options={kinds.map((row) => ({ value: String(row.id), label: row.name }))}
+              placeholder="Choose a type"
+              ariaLabel="Storage type"
             />
           </Field>
           <div className="sm:col-span-2">
@@ -444,7 +499,40 @@ export default function BinForm() {
               />
             </Field>
           </div>
-          <Field label="Parent Location">
+
+          {/* The parent TYPE is not chosen — it follows from the type above, because
+              the storage-type master already says where a kind sits. Stated so the
+              short list of parents below reads as the rule it is rather than as
+              missing data. */}
+          <Field label="Parent type" hint="Follows from the type — set on Storage types">
+            <div className="flex min-h-11 flex-wrap items-center gap-1.5 rounded-lg border border-line bg-content2 px-3 py-2">
+              {parentKinds.length > 0 ? (
+                parentKinds.map((row) => (
+                  <span
+                    key={row.id}
+                    className="rounded-md bg-content1 px-2 py-0.5 text-xs font-medium text-body"
+                  >
+                    {row.name}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-muted">
+                  {kind
+                    ? `A ${kind.name.toLowerCase()} sits at the top of a warehouse.`
+                    : "Choose a type first."}
+                </span>
+              )}
+            </div>
+          </Field>
+
+          <Field
+            label="Parent location"
+            hint={
+              parentKinds.length
+                ? `Only ${parentKinds.map((row) => row.name.toLowerCase()).join(", ")} are offered`
+                : undefined
+            }
+          >
             <Select
               value={draft.parent_id == null ? "" : String(draft.parent_id)}
               onChange={(value) => {
@@ -452,23 +540,32 @@ export default function BinForm() {
                 setDraft({ ...draft, parent_id: parent?.id ?? null, ...coldDefaultsFrom(parent) });
               }}
               options={[
-                { value: "", label: "Top level" },
-                ...flat
-                  .filter((row) => String(row.id) !== bin_id)
-                  .map((row) => ({
-                    value: String(row.id),
-                    label: `${row.path ?? row.code} (${BIN_TYPES.find((t) => t.value === row.bin_type)?.label ?? row.bin_type ?? "Location"})`,
-                  })),
+                ...(topLevelAllowed ? [{ value: "", label: "Top level" }] : []),
+                ...parents.map((row) => ({
+                  value: String(row.id),
+                  label: `${row.path ?? row.code} (${
+                    typeOfLocation(row, storageTypes)?.name ?? row.bin_type ?? "Location"
+                  })`,
+                })),
               ]}
+              placeholder={topLevelAllowed ? undefined : "Choose where it sits"}
               ariaLabel="Parent location"
             />
           </Field>
+          {kind && parents.length === 0 && parentKinds.length > 0 && (
+            <p className="text-xs leading-relaxed text-warn sm:col-span-2 lg:col-span-3">
+              This warehouse has no{" "}
+              {parentKinds.map((row) => row.name.toLowerCase()).join(" or ")} yet, so
+              there is nowhere to put a {kind.name.toLowerCase()}. Add one first, or
+              change what a {kind.name.toLowerCase()} may sit inside on Storage types.
+            </p>
+          )}
         </div>
       </Section>
 
       <Section title="Specific Dimensions" hint="Levels and aisle spacing relevant to specific bin types.">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {draft.bin_type === "FLOOR" && (
+          {kindCode === "FLOOR" && (
             <Field label="Floor level number">
               <Input
                 type="number"
@@ -480,7 +577,7 @@ export default function BinForm() {
               />
             </Field>
           )}
-          {draft.bin_type === "LANE" && (
+          {kindCode === "LANE" && (
             <Field label="Aisle width (metres)">
               <Input
                 type="number"
@@ -492,7 +589,7 @@ export default function BinForm() {
               />
             </Field>
           )}
-          {draft.bin_type === "SHELF" && (
+          {kindCode === "SHELF" && (
             <Field label="Shelf level number">
               <Input
                 type="number"
@@ -504,7 +601,7 @@ export default function BinForm() {
               />
             </Field>
           )}
-          {["BIN", "COLD_STORAGE_BIN"].includes(draft.bin_type) && (
+          {!!kind?.is_pickable && (
             <Field label="Barcode">
               <Input
                 value={draft.barcode ?? ""}
@@ -647,21 +744,16 @@ export default function BinForm() {
             />
             <span className="text-sm text-body">Temperature controlled</span>
           </label>
-          {(draft.temperature_controlled || isColdType(draft.bin_type)) && (
+          {isColdChain(kind) && (
+            <p className="text-xs leading-relaxed text-muted">
+              {kind!.name} is a cold-chain type, so this location keeps a temperature
+              band whether or not the switch above is on. Which types are cold chain is
+              set on Storage types — there is no second "refrigeration type" to pick,
+              because the kind of location IS the answer.
+            </p>
+          )}
+          {wantsCold && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <Field label="Refrigeration type">
-                <Select
-                  value={draft.storage_type_id == null ? "" : String(draft.storage_type_id)}
-                  onChange={(value) => setDraft({
-                    ...draft,
-                    storage_type_id: value ? Number(value) : null,
-                  })}
-                  options={storageTypes
-                    .filter((row) => row.is_active)
-                    .map((row) => ({ value: String(row.id), label: row.code ? `${row.code} — ${row.name}` : row.name }))}
-                  ariaLabel="Refrigeration type"
-                />
-              </Field>
               <Field label="Target temperature °C">
                 <Input
                   type="number"
@@ -717,9 +809,9 @@ export default function BinForm() {
             <span>
               <span className="block text-sm font-medium text-body">Active</span>
               <span className="block text-xs text-muted">
-                {["BIN", "COLD_STORAGE_BIN"].includes(draft.bin_type)
+                {kind?.is_pickable
                   ? "Picking may take stock from here."
-                  : "Structure only — stock is held in the bins underneath this."}
+                  : "Structure only — stock is held in the locations underneath this."}
               </span>
             </span>
           </label>

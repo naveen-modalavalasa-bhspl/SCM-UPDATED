@@ -17,6 +17,12 @@ accepted in the first place, and it is a day's work rather than an architecture.
 issue 50,000 serials does it by uploading a manifest and letting a worker process it
 in chunks, not by posting 50,000 strings in one JSON body. Raising a number here to
 make a screen work is almost always the wrong fix.
+
+The serial caps were raised to 10,000 on 2026-09-09, which is the one time that was
+not true — and only because the paths underneath were rewritten to match in the same
+change. Raising a cap is the LAST step of that work, never the first: the number here
+is a statement about what the write path can actually absorb inside one request, so
+moving it without measuring that path is how the timeout comes back.
 """
 from typing import Annotated
 
@@ -37,12 +43,30 @@ MAX_BATCH_IDS = 500
 MAX_BATCH_DOCUMENTS = 200
 
 #: Serial / IMEI strings on a single line.
-MAX_SERIALS_PER_LINE = 1_000
+#:
+#: Raised 1,000 -> 10,000 (2026-09-09) for the GRN, where a single carton delivery of
+#: handsets genuinely carries that many scans and splitting it across documents would
+#: be inventing paperwork the delivery does not have. What makes it affordable is not
+#: the number: it is that the unit writes underneath became SET-BASED in the same
+#: change. `_clear_issue_serial_reservations`, `_reserve_issue_serials`, `_mark_serials`
+#: and `_claim_units` used to assign to `row.remarks` / `row.status` in a Python loop,
+#: which is one UPDATE per unit on flush — 10,000 round trips inside one transaction.
+#: They now issue chunked `UPDATE ... WHERE id IN (...)` statements instead, so the
+#: cost of a document is measured in statements, not in units.
+#:
+#: Do NOT raise this further without doing the same work again for whatever path the
+#: new number reaches. The module docstring's warning stands: the fix for 50,000 is the
+#: job queue, not another zero here.
+MAX_SERIALS_PER_LINE = 10_000
 
 #: Serial / IMEI strings across the WHOLE request, counted by `assert_serial_budget`.
-#: The per-line cap alone is not enough — 500 lines x 1,000 serials is half a million
+#: The per-line cap alone is not enough — 500 lines x 10,000 serials is five million
 #: units in one transaction, which is the exact failure this module exists to stop.
-MAX_SERIALS_PER_REQUEST = 5_000
+#:
+#: Equal to MAX_SERIALS_PER_LINE on purpose: one line may carry the whole budget, and
+#: a document that spreads 10,000 units over several lines costs the same as one that
+#: puts them all on one. It is the TOTAL that decides how long the request runs.
+MAX_SERIALS_PER_REQUEST = 10_000
 
 #: Units that may be individually CODED in one request.
 #:
@@ -78,7 +102,7 @@ ConfigEntries = Field(max_length=MAX_CONFIG_ENTRIES)
 
 
 def assert_serial_budget(model, *collections: str) -> None:
-    """Refuse a request whose serial/IMEI lists add up to more than one worker's worth.
+    """Refuse a request that names more physical UNITS than one worker's worth.
 
     Called from a model validator on the request schemas that nest serial lines, e.g.
 
@@ -87,19 +111,33 @@ def assert_serial_budget(model, *collections: str) -> None:
             assert_serial_budget(self, "items")
             return self
 
+    Counted per line as `max(serials, IMEIs)`, NOT as their sum (fixed 2026-09-09).
+    A handset carries both numbers — the same unit, labelled twice — so a GRN for
+    10,000 of them sends 10,000 serials and 10,000 IMEIs and was being charged 20,000
+    against the budget. It was refused for being twice the size it is, and the message
+    told the storekeeper to split a delivery that was already inside the limit.
+
+    The sum was never the quantity this limit is about. What costs is the UNIT: one
+    `whs_serial_numbers` row, claimed, locked and stamped by `_claim_units`,
+    `_land_units`, `_ship_units` and `_mark_serials`. Two identifiers for one unit is
+    one row, so `max` is the count of things the request will actually do work on.
+    A line naming 900 serials and 20 IMEIs is 900 units, not 920.
+
     Raises `ValueError`, which Pydantic turns into the 422 every other validation
     failure uses — the caller gets a sentence naming the limit, not a timeout.
     """
     total = 0
     for name in collections:
         for line in (getattr(model, name, None) or []):
-            for field in ("serial_numbers", "imei_numbers"):
-                total += len(getattr(line, field, None) or [])
+            total += max(
+                len(getattr(line, field, None) or [])
+                for field in ("serial_numbers", "imei_numbers")
+            )
     if total > MAX_SERIALS_PER_REQUEST:
         raise ValueError(
-            f"This document carries {total} serial/IMEI numbers, and a single request "
-            f"may carry at most {MAX_SERIALS_PER_REQUEST}. Split it across documents, "
-            "or upload a manifest so it can be processed in the background."
+            f"This document names {total} units, and a single request may carry at "
+            f"most {MAX_SERIALS_PER_REQUEST}. Split it across documents, or upload a "
+            "manifest so it can be processed in the background."
         )
 
 

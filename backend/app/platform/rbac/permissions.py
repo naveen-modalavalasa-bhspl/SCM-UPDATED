@@ -98,6 +98,11 @@ ISSUE_ISSUE = "issue.issue"
 # ISSUE_CREATE because the people who forward are not the people who decide what leaves
 # a main warehouse.
 ISSUE_FORWARD = "issue.forward"
+# Breaking one approved issue into a child per warehouse floor, each capped at the
+# stock that floor actually holds. The manager who may issue the whole thing is the
+# one who may hand pieces of it out, so this inherits ISSUE_ISSUE rather than landing
+# on nobody — see INHERITS_GRANTS_FROM.
+ISSUE_SPLIT = "issue.split"
 
 # --- Warehouse ---
 # The warehouse module runs the physical dock-to-stock cycle: receipt -> inspection
@@ -334,6 +339,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(ISSUE_VIEW, "warehouse", "issue", "view", "View issues"),
     Perm(ISSUE_CREATE, "warehouse", "issue", "create", "Create issues"),
     Perm(ISSUE_ISSUE, "warehouse", "issue", "issue", "Issue stock to a department"),
+    Perm(ISSUE_SPLIT, "warehouse", "issue", "split",
+         "Split an issue across the floors that hold the stock"),
     Perm(ISSUE_FORWARD, "warehouse", "issue", "forward",
          "Forward an arrived consignment on to a point below"),
     Perm(RECEIPT_VIEW, "warehouse", "receipt", "view", "View goods receipts"),
@@ -507,6 +514,10 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
+    # Splitting is a way of DOING the issue, not a new authority over it: whoever
+    # could post the whole issue yesterday can hand its pieces to the floors today.
+    # Fail-closed would leave the button on nobody's profile and the feature unused.
+    ISSUE_SPLIT: ISSUE_ISSUE,
 }
 
 

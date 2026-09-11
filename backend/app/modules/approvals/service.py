@@ -471,6 +471,12 @@ async def act_on_document(
     elif normalized == "PURCHASE_RETURN":
         from app.modules.warehouse import service as warehouse_service
         await warehouse_service.act_on_return(db, doc_id, action, comments, user)
+    elif normalized == DocType.TRANSPORT_REQUEST.value:
+        from app.modules.logistics import transport
+        await transport.act_on_tr(db, doc_id, action, user, comments)
+    elif normalized == DocType.CARRIER_AWARD.value:
+        from app.modules.logistics import transport
+        await transport.act_on_award(db, doc_id, action, user, comments)
     else:
         raise ValidationError(f"Approval action is not supported for {normalized}")
     return {"doc_type": normalized, "doc_id": doc_id, "action": action}
@@ -743,6 +749,8 @@ def _approval_out(
             approved_quantity=float(_approval_ceiling(line, has_previous_approval)),
             max_quantity=float(_approval_ceiling(line, has_previous_approval)),
             remarks=line.remarks,
+            is_excluded=bool(line.is_excluded),
+            excluded_by_name=line.excluded_by_name,
         )
         for line in sorted(indent.items, key=lambda item: (item.line_no, item.id))
     ]
@@ -1040,6 +1048,8 @@ def _build_batch(
                 requested_by_name=indent.requested_by_name,
                 requested_quantity=float(requested),
                 ceiling_quantity=float(ceiling),
+                is_excluded=bool(line.is_excluded),
+                excluded_by_name=line.excluded_by_name,
             ))
 
     indent_summaries = []
@@ -1272,6 +1282,11 @@ async def approve_indent(
     indent, instance, has_previous = task or await _load_indent_task(db, indent_id, user)
     approved_by_line = _validated_quantities(indent, quantities, has_previous)
 
+    # Which lines this approver DROPPED, as opposed to cut to nothing. Only lines the
+    # screen actually sent can be excluded; a line it never mentioned keeps whatever it
+    # already carried, so approving without touching anything never excludes.
+    excluded_lines = {q.line_id for q in quantities if getattr(q, "excluded", False)}
+
     before: dict[str, float] = {}
     after: dict[str, float] = {}
     for line in indent.items:
@@ -1280,6 +1295,16 @@ async def approve_indent(
         )
         line.approved_quantity = approved_by_line[line.id]
         after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
+        # Set once and never unset here: exclusion is a decision already taken further
+        # down the ladder, and a rung above must not silently put back a line somebody
+        # below deliberately dropped. Re-including is its own act, on the screen that
+        # owns it.
+        if line.id in excluded_lines and not line.is_excluded:
+            line.is_excluded = True
+            line.excluded_by_id = getattr(user, "id", None)
+            line.excluded_by_name = getattr(user, "full_name", None)
+            line.excluded_at = ist_now()
+            after[f"line_{line.id}_excluded"] = 1.0
 
     await write_audit(
         db,
@@ -1330,7 +1355,9 @@ async def approve_consolidation(
     quantities_by_indent: dict[int, list[ApprovalQuantityIn]] = defaultdict(list)
     for line in body.lines:
         quantities_by_indent[line.indent_id].append(
-            ApprovalQuantityIn(line_id=line.line_id, approved_quantity=line.approved_quantity),
+            ApprovalQuantityIn(line_id=line.line_id,
+                               approved_quantity=line.approved_quantity,
+                               excluded=line.excluded),
         )
 
     approved: list[int] = []

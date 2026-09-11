@@ -328,31 +328,18 @@ class WarehouseType(str, Enum):
     SCRAP = "SCRAP"
 
 
-class BinType(str, Enum):
-    """`whs_warehouse_locations.storage_type`. Locations nest through
-    `parent_location_id`, so the whole Block → Floor → Lane → Rack → Shelf → Bin
-    hierarchy of flow doc §1 is one table at different levels rather than six tables,
-    and there is no separate bins table.
-
-    Only BIN and COLD_STORAGE_BIN hold stock (`shared/models/warehouse.BIN_TYPES`);
-    the rest are the structure you walk past to reach one. BLOCK, LANE, REFRIGERATOR
-    and COLD_STORAGE_BIN are here because the live data uses them — a type the
-    database contains but the enum rejects makes those rows uneditable.
-    """
-    BLOCK = "BLOCK"
-    FLOOR = "FLOOR"
-    LINE = "LINE"
-    LANE = "LANE"
-    ZONE = "ZONE"
-    RACK = "RACK"
-    SHELF = "SHELF"
-    BIN = "BIN"
-    LOT = "LOT"
-    COLD_ROOM = "COLD_ROOM"
-    COLD_STORAGE_BIN = "COLD_STORAGE_BIN"
-    REFRIGERATOR = "REFRIGERATOR"
-    STORAGE = "STORAGE"
-    STAGING = "STAGING"
+# `BinType` was here: a fixed enum of the kinds a storage location can be.
+#
+# It is gone because the kinds are DATA. `whs_warehouse_storage_types` (the storage-type
+# master, owned by the warehouse module) carries them, along with the rungs each kind may
+# sit under, whether stock is held in it and whether it is temperature controlled. A site
+# that racks its goods in "carton bays" adds the rung on Warehouse > Masters > Storage
+# types; it does not wait for a release. The enum was also quietly wrong — the live data
+# has always used STAGING, which the write schema rejected, so those rows could be read
+# and never saved.
+#
+# `whs_warehouse_locations.storage_type` still holds the code (denormalised from the
+# master, written only by the warehouse service); `storage_type_id` is the master row.
 
 
 # ---- Inventory: reservations and material requests ----
@@ -670,6 +657,25 @@ class ScopeRung(str, Enum):
 CARRIER_VENDOR_TYPES = ("TRANSPORT", "LOGISTICS", "COURIER")
 
 
+#: The `whs_warehouses.warehouse_type` values a purchase may be shipped TO — the
+#: Shipment Address on a requisition, an RFQ or a consolidation (2026-09-07).
+#:
+#: An ALLOW-list, not "everything except LIP and MDP", because the difference matters:
+#: TRANSIT, QUARANTINE and SCRAP are not distribution points either, and none of them
+#: is somewhere a vendor delivers to. Written as "which of these is a place goods
+#: arrive from outside", the answer stays right when a type is added.
+#:
+#: This is what makes the picker usable at all. `whs_warehouses` holds 983 rows — 948
+#: LIP and 33 MDP field points against 2 real warehouses — so the buyer was searching
+#: nine hundred delivery addresses that no purchase order has ever been shipped to,
+#: and the two that matter sorted last and never arrived.
+#:
+#: Here rather than in procurement because the vendor master's carrier split sets the
+#: precedent directly above, and because the masters list has to be able to narrow
+#: itself while shared may not import a module (rule 5).
+SHIPMENT_ADDRESS_WAREHOUSE_TYPES = ("MAIN", "CENTRAL", "REGIONAL")
+
+
 class MailStatus(str, Enum):
     """`sys_mail_messages.status`. A row is written QUEUED before the send is
     attempted, so a message lost to a crash mid-send is still visible afterwards
@@ -684,6 +690,11 @@ class MailKind(str, Enum):
     carries a live reset link and the Sent tab is readable by anyone with `mail.view`."""
     MANUAL = "MANUAL"
     PASSWORD_RESET = "PASSWORD_RESET"
+    #: The six digits a vendor needs before their quotation can be submitted. Logged
+    #: without its body for the same reason as a reset link: it is a live credential
+    #: for the few minutes it lives, and the Sent tab is readable by anyone with
+    #: `mail.view`.
+    VENDOR_QUOTE_OTP = "VENDOR_QUOTE_OTP"
 
 
 class EmailClaimStatus(str, Enum):

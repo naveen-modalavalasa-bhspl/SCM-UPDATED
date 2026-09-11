@@ -129,6 +129,10 @@ export interface ConsolidatedItemAllocation {
   requested_by_name?: string | null;
   requested_quantity: number;
   ceiling_quantity: number;
+  /** Dropped at a rung below this one. Optional: a backend deployed before the flag
+   *  omits it, and the row then behaves exactly as it always did. */
+  is_excluded?: boolean;
+  excluded_by_name?: string | null;
 }
 
 export interface ConsolidatedItem {

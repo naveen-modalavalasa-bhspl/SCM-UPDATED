@@ -38,6 +38,40 @@ async def _audit(db: AsyncSession, **kwargs) -> None:
     await write_audit(db, **kwargs)
 
 
+@dataclass(frozen=True)
+class Lookup:
+    """A foreign key column, stated as the NAME of the thing rather than its id.
+
+    The masters are filled in by people whose job is the goods, not the database.
+    Asking for `category_id = 47` meant downloading eight other exports, finding
+    "Antibiotics" in one of them and typing the number next to it — for six required
+    columns, on every row. The column is the category's NAME now, and the name is
+    turned back into the id on the way in.
+
+    The target is a MODEL, not another master's path: `defs.py` already has every
+    model in scope, and a path would mean bulk.py reading the registry that is built
+    out of the module importing it.
+
+    `match` is tried in order and the first column that answers wins, so a file
+    holding codes still imports. A name that matches two rows is REFUSED rather than
+    guessed — a master row pointed at the wrong parent is not a typo anybody catches
+    later, it is stock counted against the wrong category for a year.
+    """
+    field: str                                   # "category_id"
+    model: type                                  # ItemCategory
+    label: str                                   # "Category" — the sheet's header
+    match: Sequence[str] = ("name", "code")
+    # Which column names the row on screen and in the sheet, first non-empty wins.
+    # Not always `name`: an HSN code has only a `code` and a `description`, and a
+    # lookup that insisted on `name` served that column no dropdown at all and left
+    # its export writing bare ids.
+    display: Sequence[str] = ("name", "code")
+    # How many options the template is willing to put in a dropdown. Above this the
+    # column is free text and the review screen resolves it: Excel chokes on a
+    # validation list of nine hundred warehouses, and so does the person reading it.
+    max_options: int = 500
+
+
 @dataclass
 class MasterDef:
     """Everything that differs between one master and the next."""
@@ -94,6 +128,10 @@ class MasterDef:
     # shared may not import a module (rule 5). Powers GET {base}/{id}/usage, so the
     # admin is told "used by 42 items" before deactivating rather than after.
     usage: Sequence[tuple[str, str, str]] = ()
+    # FK columns this master's spreadsheet states by name instead of by id. Empty
+    # means the sheet keeps the raw `*_id` columns, which is still what most masters
+    # want — a master with no foreign keys has nothing to look up.
+    lookups: Sequence[Lookup] = ()
 
 
 async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> None:

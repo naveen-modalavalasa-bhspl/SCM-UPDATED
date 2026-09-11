@@ -24,6 +24,7 @@ import {
   INDENT_STATUS_GROUPS,
   INDENT_STATUS_OPTIONS,
 } from "../constants";
+import { FILTER_APPLY, FILTER_PRESET_ON, FILTER_TICK_ON } from "../buttonTones";
 
 type FilterMode = "indents" | "activity" | "notifications";
 
@@ -321,7 +322,7 @@ function DateRangeFilterControl<P extends string>({
                 onClick={() => selectPreset(option.key)}
                 className={`flex min-h-10 items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] font-semibold ring-1 ring-inset transition-all duration-150 ${
                   draftPreset === option.key
-                    ? "bg-brand text-white ring-brand shadow-[0_2px_8px_-2px_rgba(62,99,221,0.45)]"
+                    ? FILTER_PRESET_ON
                     : "bg-content2/70 text-body ring-transparent hover:bg-content2 hover:ring-line"
                 }`}
               >
@@ -386,7 +387,7 @@ function DateRangeFilterControl<P extends string>({
                 onApply(draftPreset, draftFrom, draftTo);
                 onOpenChange(false);
               }}
-              className="min-h-10 rounded-xl bg-brand px-5 text-[13px] font-semibold text-white shadow-[0_2px_10px_-2px_rgba(62,99,221,0.5)] transition hover:bg-brand-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+              className={`min-h-10 rounded-xl px-5 text-[13px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${FILTER_APPLY}`}
             >
               Apply
             </button>
@@ -545,7 +546,7 @@ function MultiSelectMenu({
                       <span
                         aria-hidden="true"
                         className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-md border transition-all duration-150 ${
-                          on ? "border-brand bg-brand text-white shadow-[0_1px_4px_-1px_rgba(62,99,221,0.6)]" : "border-line bg-content1"
+                          on ? FILTER_TICK_ON : "border-line bg-content1"
                         }`}
                       >
                         {on && <Check className="h-3 w-3" />}
@@ -863,7 +864,7 @@ export function IndentFilterBar({
                     }}
                     className={`flex min-h-10 items-center justify-between rounded-xl px-3 py-2 text-left text-[13px] font-semibold ring-1 ring-inset transition-all duration-150 ${
                       datePreset === preset.key
-                        ? "bg-brand text-white ring-brand shadow-[0_2px_8px_-2px_rgba(62,99,221,0.45)]"
+                        ? FILTER_PRESET_ON
                         : "bg-content2/70 text-body ring-transparent hover:bg-content2 hover:ring-line"
                     }`}
                   >

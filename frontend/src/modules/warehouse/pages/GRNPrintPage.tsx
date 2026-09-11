@@ -1,10 +1,8 @@
-import { useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/shared/api/client";
 import { getReceipt, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
-import { PrintTemplate } from "@/shared/components";
+import { PrintTemplate, type PrintColumn } from "@/shared/components";
 
 export function GRNPrintPage() {
   const { id } = useParams();
@@ -16,29 +14,17 @@ export function GRNPrintPage() {
     enabled: Number.isFinite(grnId) && grnId > 0,
   });
 
-  const { data: company } = useQuery({
-    queryKey: ["print-company"],
-    queryFn: () =>
-      api.get<{ company?: Record<string, string> }>("/api/settings")
-        .then((r) => r.data.company ?? {})
-        .catch(() => ({} as Record<string, string>)),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  });
-
-  const { data: warehouses } = useQuery({
+  const warehousesQuery = useQuery({
     queryKey: ["print-warehouses"],
     queryFn: () => warehouseOptions(),
     staleTime: 5 * 60 * 1000,
   });
+  const warehouses = warehousesQuery.data;
 
-  useEffect(() => {
-    if (!query.data) return;
-    const timer = setTimeout(() => window.print(), 250);
-    return () => clearTimeout(timer);
-  }, [query.data]);
-
-  if (query.isLoading) return <p className="p-8 text-sm">Loading the document…</p>;
+  // The sheet opens the print dialog on its own once it is mounted, so a warehouse
+  // name still in flight would go to paper as "WH-3". Hold until it has answered.
+  if (query.isLoading || warehousesQuery.isLoading)
+    return <p className="p-8 text-sm">Loading the document…</p>;
   if (query.error) return <p className="p-8 text-sm">{(query.error as Error).message}</p>;
   if (!query.data) return <p className="p-8 text-sm">Document not found.</p>;
 
@@ -56,10 +42,10 @@ export function GRNPrintPage() {
     { label: "Gate Entry", value: grn.gate_entry_no || "—", mono: true },
   ];
 
-  const columns = [
+  const columns: PrintColumn[] = [
     { header: "Item" },
     { header: "Code/Batch" },
-    { header: "Qty", className: "text-right" },
+    { header: "Qty", align: "right" },
     { header: "Remarks" },
   ];
 
@@ -83,9 +69,6 @@ export function GRNPrintPage() {
       documentNo={grn.grn_no}
       date={fmtDate(grn.grn_date)}
       status={grn.status}
-      companyName={company?.name}
-      companyLegalName={company?.legal_name}
-      companyAddress={company?.address}
       metadata={metadata}
       columns={columns}
       items={items}

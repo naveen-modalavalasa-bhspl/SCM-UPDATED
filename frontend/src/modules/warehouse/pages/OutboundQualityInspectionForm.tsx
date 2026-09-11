@@ -21,6 +21,7 @@ import type {
   OutboundInspection as Inspection, OutboundInspectionItemWrite as InspectionItemWrite, InspectionParameter, OutboundInspectionWrite as InspectionWrite, Issue as Receipt,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 /**
  * Inspect a receipt line by line.
@@ -150,19 +151,34 @@ export default function OutboundQualityInspectionForm({
     pullIssue.mutate(doc.issue_id);
   }, [doc, pulled]);
 
-  const issueSerials = useMemo(() => {
-    const byLine = new Map<number, string[]>();
-    for (const line of issueDoc?.items ?? []) byLine.set(line.id, line.serial_numbers ?? []);
+  const delivery = issueDoc ?? pulled;
+
+  const deliveryMeta = useMemo(() => {
+    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[] }>();
+    for (const line of delivery?.items ?? []) {
+      byLine.set(line.id, {
+        is_serial_tracked: line.is_serial_tracked,
+        serials: line.serial_numbers ?? [],
+      });
+    }
     return byLine;
-  }, [issueDoc]);
+  }, [delivery]);
+
+  const isSerialTracked = (index: number | null) => {
+    if (index === null) return false;
+    const issueItemId = form.items[index]?.issue_item_id;
+    if (!issueItemId) return false;
+    return deliveryMeta.get(issueItemId)?.is_serial_tracked ?? false;
+  };
 
   /** The Material Issue serials behind an inspection line. Serial-tracked items must already have
    *  these from material issue, so QC selects accepted units from this list. */
   const availableSerials = (index: number | null) => {
     if (index === null) return null;
-    const receiptItemId = form.items[index]?.issue_item_id;
-    const serials = receiptItemId ? issueSerials.get(receiptItemId) : undefined;
-    return serials?.length ? serials : null;
+    const issueItemId = form.items[index]?.issue_item_id;
+    if (!issueItemId) return null;
+    const meta = deliveryMeta.get(issueItemId);
+    return meta?.serials?.length ? meta.serials : null;
   };
 
   /** Pulling the receipt in seeds the lines from what was actually issued. */
@@ -412,6 +428,8 @@ export default function OutboundQualityInspectionForm({
       width: "w-32",
       hideOnNarrow: true,
       render: (line, index) => {
+        if (!isSerialTracked(index)) return <span className="text-muted">—</span>;
+
         const available = availableSerials(index);
         // An untouched line has decided nothing, which means nothing rejected — show it
         // as all accepted rather than as zero.
@@ -476,11 +494,11 @@ export default function OutboundQualityInspectionForm({
             )}
             {editing && doc?.status === "PENDING_APPROVAL" && (
               <Can do="qc_outward.approve">
-                <Button variant="dangerSoft" onClick={() => decide.mutate("REJECT")}
+                <Button className={TONE_REJECT} variant="dangerSoft" onClick={() => decide.mutate("REJECT")}
                         disabled={decide.isPending}>
                   Reject
                 </Button>
-                <Button onClick={() => decide.mutate("APPROVE")} disabled={decide.isPending}>
+                <Button className={TONE_APPROVE} onClick={() => decide.mutate("APPROVE")} disabled={decide.isPending}>
                   {decide.isPending ? "Working…" : "Approve"}
                 </Button>
               </Can>

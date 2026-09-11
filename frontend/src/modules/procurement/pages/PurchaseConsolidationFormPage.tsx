@@ -1,10 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Button, Card, ErrorBanner, Field, Input, PageHeader, ResponsiveList, StatCard,
-  StatusPill, useAction, type Column,
-} from "@/shared/components";
+import { Card, ErrorBanner, Field, Input, PageHeader, ResponsiveList, StatCard, StatusPill, useAction, type Column } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
 import { SelectAllBar } from "../components/SelectAllBar";

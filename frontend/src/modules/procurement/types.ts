@@ -61,6 +61,8 @@ export interface PurchaseOrder {
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
   vendor_response_note?: string | null;
+  /** Server-calculated: accepted and not yet despatched. */
+  amendment_allowed?: boolean;
   /** 0 is the original order; every amendment adds one. */
   revision_no: number;
   amended_at?: string | null;
@@ -379,6 +381,8 @@ export interface RFQVendor {
   status?: string | null;
   sent_at?: string | null;
   responded_at?: string | null;
+  mapped_item_ids?: number[] | null;
+  item_quantities?: Record<string, number> | null;
 }
 
 export interface RFQListRow {
@@ -427,6 +431,7 @@ export interface RFQ extends RFQListRow {
   po_id?: number | null;
   po_no?: string | null;
   po_status?: string | null;
+  pos?: { po_id: number; po_no: string; po_status: string; vendor_id: number; quotation_id?: number | null }[];
   /** Carried across from the requisition behind it, so a tender reads on its own. */
   department_id?: number | null;
   department_name?: string | null;
@@ -451,6 +456,11 @@ export interface RFQCreate {
   due_date?: string | null;
   terms?: string | null;
   vendor_ids: number[];
+  vendor_allocations?: {
+    item_id: number;
+    vendor_id: number;
+    quantity: number;
+  }[];
   lines: {
     item_id: number;
     quantity: number;
@@ -462,6 +472,7 @@ export interface RFQCreate {
 
 export type RFQUpdate = Partial<Omit<RFQCreate, "requisition_id" | "vendor_ids" | "lines">> & {
   vendor_ids?: number[];
+  vendor_allocations?: RFQCreate["vendor_allocations"];
   lines?: RFQCreate["lines"];
 };
 
@@ -541,7 +552,18 @@ export interface Quotation extends QuoteListRow {
   items: QuoteItem[];
 }
 
+/** What the vendor's screen learns when a code is sent: which address it went to,
+ *  masked, and how long it lives. Never the digits. */
+export interface QuoteOtpSent {
+  sent_to: string;
+  expires_in_seconds: number;
+}
+
 export interface QuoteSubmit {
+  /** The six digits emailed to the vendor. The server refuses the submission without
+   *  a live, unused, matching one — the field is optional here only so the refusal is
+   *  a sentence the vendor can read rather than a 422 about a missing field. */
+  otp_code?: string | null;
   vendor_ref_no?: string | null;
   valid_till?: string | null;
   expected_delivery_date?: string | null;
@@ -832,9 +854,16 @@ export interface ApprovalTrail {
 /** One order line as it stood in a filed revision, read back out of the snapshot. */
 export interface PORevisionLine {
   item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
   quantity?: number;
   rate?: number;
   tax_percent?: number;
+  /** Line value as it stood. Filed by `_po_snapshot`, which is the only writer of
+   *  this shape — every key here exists because that function emits it. */
+  amount?: number;
+  received_quantity?: number;
 }
 
 /** The lines of a filed revision. Empty when there is no revision to compare against,

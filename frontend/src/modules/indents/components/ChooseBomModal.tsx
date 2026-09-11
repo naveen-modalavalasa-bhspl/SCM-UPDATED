@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { displayUom } from "../displayFormat";
 import type { BomChoice, TemplateLineItem } from "../types";
+import { TONE_AMBER, TONE_PINK } from "../buttonTones";
 
 interface PreviewItem extends TemplateLineItem {
   category_name?: string | null;
@@ -229,8 +230,9 @@ export function ChooseBomModal({
               )}
             </ModalBody>
             <ModalFooter>
-              <Button variant="ghost" onClick={close}>Cancel</Button>
+              <Button variant="soft" className={TONE_PINK} onClick={close}>Cancel</Button>
               <Button
+                className={TONE_AMBER}
                 disabled={
                   selectedBomId === null
                   || availablePreview.length === 0

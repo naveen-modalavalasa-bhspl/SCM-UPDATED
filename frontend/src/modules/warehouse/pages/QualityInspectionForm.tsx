@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -149,26 +149,39 @@ export default function QualityInspectionForm({
     return form.warehouse_id && wName ? [{ id: form.warehouse_id, name: wName, code: "" }] : undefined;
   }, [form.warehouse_id, doc?.warehouse_name, warehouseName]);
 
-  const grnSerials = useMemo(() => {
-    const byLine = new Map<number, string[]>();
-    for (const line of grn?.items ?? []) byLine.set(line.id, line.serial_numbers ?? []);
+  /** The delivery being inspected: the receipt loaded off a saved inspection, or the
+   *  one just pulled in on a new one. QC was showing the lines and nothing about where
+   *  they came from, so an inspector could not see the order, the vendor or the invoice
+   *  the goods arrived on without opening the GRN in another tab. */
+  const delivery = grn ?? pulled;
+
+  const deliveryMeta = useMemo(() => {
+    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[] }>();
+    for (const line of delivery?.items ?? []) {
+      byLine.set(line.id, {
+        is_serial_tracked: line.is_serial_tracked,
+        serials: line.serial_numbers ?? [],
+      });
+    }
     return byLine;
-  }, [grn]);
+  }, [delivery]);
+
+  const isSerialTracked = (index: number | null) => {
+    if (index === null) return false;
+    const receiptItemId = form.items[index]?.receipt_item_id;
+    if (!receiptItemId) return false;
+    return deliveryMeta.get(receiptItemId)?.is_serial_tracked ?? false;
+  };
 
   /** The GRN serials behind an inspection line. Serial-tracked items must already have
    *  these from goods receipt, so QC selects accepted units from this list. */
   const availableSerials = (index: number | null) => {
     if (index === null) return null;
     const receiptItemId = form.items[index]?.receipt_item_id;
-    const serials = receiptItemId ? grnSerials.get(receiptItemId) : undefined;
-    return serials?.length ? serials : null;
+    if (!receiptItemId) return null;
+    const meta = deliveryMeta.get(receiptItemId);
+    return meta?.serials?.length ? meta.serials : null;
   };
-
-  /** The delivery being inspected: the receipt loaded off a saved inspection, or the
-   *  one just pulled in on a new one. QC was showing the lines and nothing about where
-   *  they came from, so an inspector could not see the order, the vendor or the invoice
-   *  the goods arrived on without opening the GRN in another tab. */
-  const delivery = grn ?? pulled;
 
   /** Pulling the receipt in seeds the lines from what was actually received. */
   const pullReceipt = useMutation({
@@ -403,6 +416,8 @@ export default function QualityInspectionForm({
       width: "w-32",
       hideOnNarrow: true,
       render: (line, index) => {
+        if (!isSerialTracked(index)) return <span className="text-muted">—</span>;
+
         const available = availableSerials(index);
         // An untouched line has decided nothing, which means nothing rejected — show it
         // as all accepted rather than as zero.
@@ -444,6 +459,15 @@ export default function QualityInspectionForm({
             <Button variant="ghost" onClick={() => nav(listPath)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
+            {editing && (
+              <Button
+                variant="ghost"
+                onClick={() => window.open(`/warehouse/inspections/${id}/print?type=${type}`, "_blank")}
+                title="Download PDF"
+              >
+                <FileText className="h-4 w-4" /> Download PDF
+              </Button>
+            )}
             {!locked && (
               <Can do="grn.qc">
                 <Button variant="soft" onClick={() => save.mutate()} disabled={save.isPending}>

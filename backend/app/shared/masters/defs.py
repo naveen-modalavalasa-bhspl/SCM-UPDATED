@@ -13,14 +13,16 @@ from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
+from app.shared.limits import MAX_BATCH_IDS
 from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
     ItemScope,
-    CARRIER_VENDOR_TYPES, AttributeDataType, BinType, CategoryTagType, UomClass,
+    CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
+    AttributeDataType, CategoryTagType, UomClass,
     WarehouseType,
 )
-from app.shared.masters.crud import MasterDef
+from app.shared.masters.crud import Lookup, MasterDef
 from app.platform.rbac.models import Role
 from app.shared.models.master import (
     ItemEligibility,
@@ -29,7 +31,7 @@ from app.shared.models.master import (
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
     Packaging, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
 )
-from app.shared.models.warehouse import Bin, Warehouse
+from app.shared.models.warehouse import Bin, StorageType, Warehouse
 
 
 # --------------------------------------------------------------------------- #
@@ -462,6 +464,28 @@ class WarehouseIn(BaseModel):
     is_active: bool = True
 
 
+def warehouse_kind_filter(request, stmt):
+    """`?kind=SHIPMENT_ADDRESS` on the warehouse list.
+
+    One master holds the two real warehouses and the 981 LIP/MDP field points that
+    stock is distributed OUT to — that is on purpose, they are all stocking points —
+    but a purchase is only ever shipped to the former. The requisition, RFQ and
+    consolidation pickers were offering all 983, so a buyer searched nine hundred
+    addresses no vendor has ever delivered to and the two that matter sorted last.
+
+    Left off, the list is unchanged: the masters screen still manages every row, and
+    so does every other reader. Narrowing is the caller's choice, exactly as it is for
+    `vendor_kind_filter` above — and the same reason applies for why refusing a bad
+    id at SAVE time lives in procurement rather than here: this only decides what is
+    offered, never what is accepted.
+    """
+    kind = (request.query_params.get("kind") or "").strip().upper()
+    if kind != "SHIPMENT_ADDRESS":
+        return stmt
+    return stmt.where(func.upper(func.coalesce(Warehouse.warehouse_type, "MAIN")).in_(
+        SHIPMENT_ADDRESS_WAREHOUSE_TYPES))
+
+
 def warehouse_out(w: Warehouse) -> dict:
     return {"id": w.id, "code": w.code, "name": w.name, "facility_id": w.facility_id,
             "facility_name": w.facility_name, "office_id": w.office_id,
@@ -552,12 +576,36 @@ async def prepare_bins(db: AsyncSession, rows: list[Bin]) -> None:
         location._derived_path, location._derived_level = ancestry(location)
 
 
+async def _resolve_storage_type(db: AsyncSession, code: str) -> int | None:
+    """Is this a kind of location this company actually has, and which row is it?
+
+    Asked of the storage-type master (`whs_warehouse_storage_types`), not of an enum:
+    the kinds are rows now, so a site can add "carton bay" and file locations under it
+    the same afternoon. See `modules/warehouse/storage_types.py` for the whole story —
+    shared may not import that module (rule 5), so this asks the table directly.
+
+    A master with no rows in it accepts anything, which is the same answer this gave
+    before the table carried the kinds: a database created but never seeded must not
+    have its location master bricked by a missing type master.
+    """
+    rows = (await db.execute(
+        select(StorageType.id, StorageType.code, StorageType.is_active))).all()
+    if not rows:
+        return None
+    wanted = (code or "").strip().upper()
+    for row_id, row_code, _active in rows:
+        if (row_code or "").upper() == wanted:
+            return int(row_id)
+    live = sorted((c or "") for _i, c, active in rows if active)
+    raise ValidationError(
+        f"bin_type must be one of {', '.join(live)} — add it under "
+        f"Warehouse > Masters > Storage types if this site has one.")
+
+
 async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
     """Depth and ancestry are derived when a tree is read, never stored, so the tree
     cannot be saved into a depth that disagrees with its own ancestry."""
-    if data.bin_type not in {t.value for t in BinType}:
-        raise ValidationError(
-            f"bin_type must be one of {', '.join(t.value for t in BinType)}")
+    storage_type_id = await _resolve_storage_type(db, data.bin_type)
     if await db.get(Warehouse, data.warehouse_id) is None:
         raise ValidationError("Warehouse not found")
     if data.parent_id is not None and data.parent_id == b.id:
@@ -572,6 +620,11 @@ async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
 
     for key, value in data.model_dump().items():
         setattr(b, key, value)
+    # The kind is a ROW; the code on the location is that row's code. Set together here
+    # for the same reason `service._resolved_kind` sets them together — a location
+    # carrying a code with no id behind it is one the location form cannot label.
+    if storage_type_id is not None:
+        b.storage_type_id = storage_type_id
 
 
 async def _reject_bin_cycle(db: AsyncSession, b: Bin, parent) -> None:
@@ -654,11 +707,37 @@ def vendor_kind_filter(request, stmt):
     the list is unchanged: the masters screen still manages every row.
     """
     kind = (request.query_params.get("kind") or "").strip().upper()
-    if not kind:
-        return stmt
-    carriers = func.upper(func.coalesce(Vendor.vendor_type, "MATERIAL")).in_(
-        CARRIER_VENDOR_TYPES)
-    return stmt.where(carriers if kind == "CARRIER" else ~carriers)
+    if kind:
+        carriers = func.upper(func.coalesce(Vendor.vendor_type, "MATERIAL")).in_(
+            CARRIER_VENDOR_TYPES)
+        stmt = stmt.where(carriers if kind == "CARRIER" else ~carriers)
+
+    # `?item_ids=12,44` — only the vendors actually mapped to supply those items.
+    #
+    # The UNION, not the intersection: a tender for gauze and syringes goes to whoever
+    # can supply either, and asking for one vendor who covers both empties the list as
+    # soon as two items have different suppliers. Which items a given vendor covers is
+    # answered per row by `/api/vendor-items`, so the screen can say so.
+    #
+    # An item with NO mapping yields NO vendors, deliberately (2026-09-07). Falling
+    # back to every vendor is the friendlier failure and the wrong one: it silently
+    # restores exactly the free-for-all this rule exists to end, and nothing ever tells
+    # anybody the mapping is missing. An empty list is a defect you can see and fix in
+    # the item master, which is where the answer belongs.
+    raw = (request.query_params.get("item_ids") or "").strip()
+    if raw:
+        try:
+            item_ids = [int(piece) for piece in raw.split(",") if piece.strip()]
+        except ValueError:
+            raise ValidationError("item_ids must be a comma-separated list of numbers")
+        if not item_ids:
+            return stmt
+        if len(item_ids) > MAX_BATCH_IDS:
+            raise ValidationError(
+                f"Too many items at once: {len(item_ids)}, the most is {MAX_BATCH_IDS}.")
+        stmt = stmt.where(Vendor.id.in_(
+            select(VendorItem.vendor_id).where(VendorItem.item_id.in_(item_ids))))
+    return stmt
 
 
 def vendor_out(v: Vendor) -> dict:
@@ -1804,6 +1883,32 @@ async def apply_item_eligibility(db: AsyncSession, row: ItemEligibility,
             f"{item.code} is already tagged to {found}.")
 
 
+# The item sheet's nine foreign keys, stated by name rather than by id. Six of them
+# are required, so before this an item could not be added to the spreadsheet at all
+# without six lookups into six other exports — which is why the item master is the
+# one this started with.
+#
+# The chain the item form enforces (a general name narrows the brands, a brand
+# narrows the manufacturers) is NOT re-stated here: `apply_item` already checks it on
+# the way in and rejects a combination that does not hold, so a second copy in the
+# sheet would only be a second opinion to keep in step.
+ITEM_LOOKUPS = (
+    Lookup("category_id", ItemCategory, "Category"),
+    Lookup("general_name_id", GeneralName, "General name"),
+    Lookup("brand_id", Brand, "Brand"),
+    Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
+    Lookup("item_class_id", ItemClass, "Item class"),
+    Lookup("item_sub_class_id", ItemSubClass, "Item sub class"),
+    Lookup("uom_id", Uom, "Unit of measure"),
+    # An HSN row has no `name` — it is a code and a description, and the code is
+    # what is written on an invoice, so that is what the sheet asks for and matches
+    # on first.
+    Lookup("hsn_id", HsnCode, "HSN code",
+           match=("code", "description"), display=("code",)),
+    Lookup("dosage_form_id", DosageForm, "Dosage form"),
+)
+
+
 MASTERS: list[MasterDef] = [
     # Which items a role or a region may raise an indent for. Empty by default, and
     # an untagged item stays open to everyone — so this screen NARROWS, and can never
@@ -1822,6 +1927,7 @@ MASTERS: list[MasterDef] = [
               default_active_only=True,
               scope_to_user=restrict_items_to_my_groups,
               filters=("category_id", "item_class_id", "brand_id", "hsn_id"),
+              lookups=ITEM_LOOKUPS,
               usage=ITEM_USAGE),
 
     MasterDef(path="item-categories", name="Category", model=ItemCategory,
@@ -1866,6 +1972,7 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="warehouses", name="Warehouse", model=Warehouse, schema=WarehouseIn,
               manage_perm=perms.MASTER_LOCATION_MANAGE, serialize=warehouse_out,
               search_cols=("name", "code"), apply=apply_warehouse,
+              filters=("warehouse_type",), list_filter=warehouse_kind_filter,
               usage=WAREHOUSE_USAGE),
 
     MasterDef(path="bins", name="Bin", model=Bin, schema=BinIn,

@@ -7,13 +7,13 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/shared/auth/AuthContext";
-import { Select } from "@/shared/components";
+import { Input, Select } from "@/shared/components";
 import { MenuIcon } from "@/shared/layout/icons";
 import { homeApi, homeKeys } from "../api";
 import { fmtTime, parseIst } from "@/shared/datetime";
 import type {
-  AttentionSummary, HomeAction, HomeDateRange, HomeKpi, HomeModule,
-  RecentActivity,
+  AttentionSummary, HomeAction, HomeCustomRange, HomeDateRange, HomeKpi, HomeModule,
+  HomeSummary, RecentActivity,
 } from "../types";
 
 const toneStyles: Record<string, { badge: string; text: string }> = {
@@ -58,10 +58,24 @@ function IconBadge({
 }
 
 const RANGE_LABELS: Record<HomeDateRange, string> = {
+  day: "last 24 hours",
   week: "this week",
   month: "this month",
   quarter: "this quarter",
+  custom: "custom range",
 };
+
+const RANGE_OPTIONS = [
+  { value: "day", label: "Last 24 Hours" },
+  { value: "week", label: "This Week" },
+  { value: "month", label: "This Month" },
+  { value: "quarter", label: "This Quarter" },
+  { value: "custom", label: "Custom Range" },
+];
+
+/** Today, as the `yyyy-mm-dd` a date input speaks. Used to stop either end of a
+ *  custom range being set in the future, where no document can exist. */
+const isoToday = () => new Date().toISOString().slice(0, 10);
 
 function SectionLabel({ children }: { children: string }) {
   return (
@@ -185,15 +199,25 @@ function HomeSkeleton() {
 export function HomePage() {
   const { me } = useAuth();
   const [dateRange, setDateRange] = useState<HomeDateRange>("week");
+  // Held even while another range is selected, so switching to Month and back does not
+  // wipe the dates the user just typed.
+  const [custom, setCustom] = useState<HomeCustomRange>({ from: "", to: "" });
+  // A custom range only becomes a REQUEST once at least one end is set. Until then the
+  // dashboard would silently fall back to the month, which reads as the picker having
+  // done nothing.
+  const customReady = dateRange !== "custom" || Boolean(custom.from || custom.to);
   const [showAllModules, setShowAllModules] = useState(false);
   const accountScope = {
     employeeId: me?.employee.id ?? null,
     activePositionId: me?.active_position?.id ?? null,
   };
   const { data, isLoading, isError } = useQuery({
-    queryKey: homeKeys.summary(accountScope, dateRange),
-    queryFn: () => homeApi.summary(dateRange),
-    enabled: accountScope.employeeId !== null,
+    queryKey: homeKeys.summary(accountScope, dateRange, custom),
+    queryFn: () => homeApi.summary(dateRange, custom),
+    enabled: accountScope.employeeId !== null && customReady,
+    // Keeps the previous window's numbers on screen while the new one loads, instead
+    // of blanking the whole dashboard on every keystroke in a date field.
+    placeholderData: (previous: HomeSummary | undefined) => previous,
   });
 
   if (isLoading) return <HomeSkeleton />;
@@ -213,17 +237,37 @@ export function HomePage() {
         {/* The shared Select — HeroUI, the same control every filter in the app is
             now. The "Date range" caption went with the hand-rolled box it labelled:
             every option already names the period. */}
-        <div className="w-full sm:w-48">
-          <Select
-            ariaLabel="Date range"
-            value={dateRange}
-            onChange={(next) => setDateRange(next as HomeDateRange)}
-            options={[
-              { value: "week", label: "This Week" },
-              { value: "month", label: "This Month" },
-              { value: "quarter", label: "This Quarter" },
-            ]}
-          />
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <div className="w-full sm:w-48">
+            <Select
+              ariaLabel="Date range"
+              value={dateRange}
+              onChange={(next) => setDateRange(next as HomeDateRange)}
+              options={RANGE_OPTIONS}
+            />
+          </div>
+          {dateRange === "custom" && (
+            <div className="flex w-full items-center gap-2 sm:w-auto">
+              <Input
+                type="date"
+                aria-label="From date"
+                className="w-full sm:w-40"
+                value={custom.from}
+                max={custom.to || isoToday()}
+                onChange={(e) => setCustom((c) => ({ ...c, from: e.target.value }))}
+              />
+              <span className="text-sm text-muted">to</span>
+              <Input
+                type="date"
+                aria-label="To date"
+                className="w-full sm:w-40"
+                value={custom.to}
+                min={custom.from || undefined}
+                max={isoToday()}
+                onChange={(e) => setCustom((c) => ({ ...c, to: e.target.value }))}
+              />
+            </div>
+          )}
         </div>
       </div>
 

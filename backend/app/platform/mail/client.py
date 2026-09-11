@@ -21,21 +21,28 @@ import asyncio
 import email
 import imaplib
 import logging
+import re
 import smtplib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
+from html import unescape
 from email.message import EmailMessage
 from email.utils import formataddr, parsedate_to_datetime
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.platform.mail import template
 
 log = logging.getLogger(__name__)
 
 #: How many messages the Inbox pulls in one go. IMAP fetches are round trips, and a
 #: mailbox screen nobody scrolls past the first page of does not need more.
 INBOX_FETCH_LIMIT = 50
+
+# A generated document that travels with a system email.  Kept at the transport
+# boundary so business modules need not know anything about MIME construction.
+MailAttachment = tuple[str, bytes, str]
 
 
 class MailNotConfigured(AppException):
@@ -53,7 +60,15 @@ class MailSendError(AppException):
 @dataclass(frozen=True)
 class InboxMessage:
     """One message as the Inbox lists it. Deliberately flat and read-only — nothing
-    in this app owns a mailbox, it only shows one."""
+    in this app owns a mailbox, it only shows one.
+
+    BOTH halves of the message are carried, not the better one. `_body_of` used to
+    return a single string, preferring `text/plain` and falling back to html — so a
+    real reply chain (which is html in every modern client, with the plain part either
+    absent or a one-line stub) arrived either as raw markup or as almost nothing, and
+    a screen showing it as preformatted text could not tell which it had. The reader
+    picks: html when the sender sent html, text otherwise.
+    """
     uid: str
     from_addr: str
     to_addr: str
@@ -61,6 +76,10 @@ class InboxMessage:
     date: datetime | None
     preview: str
     body: str
+    #: The `text/html` alternative, empty when the sender sent none. NEVER trusted:
+    #: this is markup from an outside mailbox, and the screen renders it inside a
+    #: sandboxed frame on a null origin — see `MailBody` in `MailPage.tsx`.
+    body_html: str
     seen: bool
 
 
@@ -78,15 +97,31 @@ def _decode(raw: str | None) -> str:
         return raw
 
 
-def _body_of(msg: email.message.Message) -> str:
-    """The readable text of a message, preferring text/plain.
+def _body_of(msg: email.message.Message) -> tuple[str, str]:
+    """Both readable halves of a message: `(text, html)`, either possibly empty.
+
+    Returns the PAIR rather than the better of the two. A reply chain — the thing a
+    person actually opens this screen for — is html in every modern client, and its
+    plain-text alternative is routinely absent or a stub; collapsing the two here is
+    what made a long thread arrive as either raw markup or three lines. The caller
+    decides how to show each, and can only do that if it has both.
+
+    The LAST html part wins, not the first. Some clients send the quoted history as a
+    separate later part, and a mail forwarded through a list can carry the original as
+    a nested `message/rfc822` whose own parts walk past — taking the first match
+    truncated the thread to its newest message. Plain text keeps the FIRST, which is
+    the reply itself, because concatenating plain parts is how the signature and the
+    quote end up interleaved twice.
 
     Attachments are skipped (`Content-Disposition: attachment`) — the Inbox lists mail,
     it does not download files, and an inline base64 blob rendered as text is worse
     than nothing.
     """
     if not msg.is_multipart():
-        return _payload(msg)
+        payload = _payload(msg)
+        if msg.get_content_type() == "text/html":
+            return "", payload
+        return payload, ""
     plain, html = "", ""
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
@@ -95,9 +130,27 @@ def _body_of(msg: email.message.Message) -> str:
             continue
         if part.get_content_type() == "text/plain" and not plain:
             plain = _payload(part)
-        elif part.get_content_type() == "text/html" and not html:
-            html = _payload(part)
-    return plain or html
+        elif part.get_content_type() == "text/html":
+            candidate = _payload(part)
+            # Longest wins among the html parts: a client that sends both a stub and
+            # the full thread sends them in no reliable order.
+            if len(candidate) > len(html):
+                html = candidate
+    return plain, html
+
+
+def _strip_tags(html: str) -> str:
+    """Enough of an html-to-text pass to build a ONE-LINE PREVIEW, and nothing more.
+
+    Never used for the body: the body keeps its markup and is rendered in a sandboxed
+    frame. A regex is the wrong tool for trusting html and the right one for throwing
+    it away, which is all this does.
+    """
+    if not html:
+        return ""
+    text = re.sub(r"(?is)<(script|style|head)[^>]*>.*?</>", " ", html)
+    text = re.sub(r"(?i)<[^>]+>", " ", text)
+    return unescape(text)
 
 
 def _payload(part: email.message.Message) -> str:
@@ -115,10 +168,45 @@ def _payload(part: email.message.Message) -> str:
 #  SMTP
 # --------------------------------------------------------------------------- #
 
+def _attach_logos(message: EmailMessage, html: str) -> None:
+    """Attach each brand logo the html actually references, as an inline `cid:` part.
+
+    Only the referenced ones: a message that shows no logo must not carry 40 KB of
+    PNG, and an unreferenced inline part is what makes some clients draw a paperclip
+    on a mail with no attachments.
+
+    A missing file is skipped, never raised. The logos are decoration; a deployment
+    that lost them from the image still has to be able to send a password reset, and
+    the `alt` text on each `<img>` is the wordmark spelled out.
+    """
+    for cid, path in template.LOGO_CIDS.items():
+        if f"cid:{cid}" not in html:
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as exc:  # noqa: PERF203 - one missing logo, not a failed send
+            log.warning("mail logo %s could not be read: %s", path, exc)
+            continue
+        # `<cid>` angle brackets are the Content-ID form; the `src="cid:name"` in the
+        # html is the same name WITHOUT them, which `add_related` handles.
+        message.get_payload()[1].add_related(
+            data, maintype="image", subtype="png", cid=f"<{cid}>",
+            filename=path.name, disposition="inline",
+        )
+
+
 def _send_sync(to_addrs: list[str], subject: str, body: str,
                cc_addrs: list[str] | None = None,
-               reply_to: str | None = None) -> None:
-    """One connection, one message. Blocking — always called via `asyncio.to_thread`."""
+               reply_to: str | None = None,
+               html: str | None = None,
+               attachments: list[MailAttachment] | None = None) -> None:
+    """One connection, one message. Blocking — always called via `asyncio.to_thread`.
+
+    With `html`, the message is `multipart/alternative`: `body` is the `text/plain`
+    half and `html` the rich one, and the client picks. Both halves are always
+    present — a mail with no plain part is scored as spam by several filters, and some
+    readers are configured to show plain text only.
+    """
     if not settings.mail_configured:
         raise MailNotConfigured("No mailbox is configured on this server.")
 
@@ -131,6 +219,13 @@ def _send_sync(to_addrs: list[str], subject: str, body: str,
         message["Reply-To"] = reply_to
     message["Subject"] = subject
     message.set_content(body)
+    if html:
+        message.add_alternative(html, subtype="html")
+        _attach_logos(message, html)
+    for filename, content, mime_type in attachments or []:
+        maintype, _, subtype = mime_type.partition("/")
+        message.add_attachment(content, maintype=maintype or "application",
+                               subtype=subtype or "octet-stream", filename=filename)
 
     host, port = settings.MAIL_SMTP_HOST, settings.MAIL_SMTP_PORT
     timeout = settings.MAIL_TIMEOUT_SECONDS
@@ -156,9 +251,16 @@ def _send_sync(to_addrs: list[str], subject: str, body: str,
 
 async def send(to_addrs: list[str], subject: str, body: str,
                cc_addrs: list[str] | None = None,
-               reply_to: str | None = None) -> None:
-    """Send one message. Raises `MailNotConfigured` or `MailSendError`."""
-    await asyncio.to_thread(_send_sync, to_addrs, subject, body, cc_addrs, reply_to)
+               reply_to: str | None = None,
+               html: str | None = None,
+               attachments: list[MailAttachment] | None = None) -> None:
+    """Send one message. Raises `MailNotConfigured` or `MailSendError`.
+
+    `body` is the plain-text half and is never optional; `html` is the rich half, and
+    when given the brand logos it references ride along inline (see `_attach_logos`).
+    """
+    await asyncio.to_thread(
+        _send_sync, to_addrs, subject, body, cc_addrs, reply_to, html, attachments)
 
 
 # --------------------------------------------------------------------------- #
@@ -207,7 +309,7 @@ def _fetch_sync(mailbox: str, limit: int, search: str | None) -> list[InboxMessa
                 continue
             flags = str(payload[0][0])
             msg = email.message_from_bytes(payload[0][1])
-            body = _body_of(msg)
+            body, body_html = _body_of(msg)
             when = None
             try:
                 when = parsedate_to_datetime(msg.get("Date"))
@@ -221,8 +323,12 @@ def _fetch_sync(mailbox: str, limit: int, search: str | None) -> list[InboxMessa
                 to_addr=_decode(msg.get("To")),
                 subject=_decode(msg.get("Subject")) or "(no subject)",
                 date=when,
-                preview=" ".join(body.split())[:180],
+                # The preview reads off whichever half exists. A message with only
+                # an html part had a blank preview line before, which on a list of
+                # thirty rows reads as thirty broken messages.
+                preview=" ".join((body or _strip_tags(body_html)).split())[:180],
                 body=body,
+                body_html=body_html,
                 seen="\\Seen" in flags,
             ))
         return out

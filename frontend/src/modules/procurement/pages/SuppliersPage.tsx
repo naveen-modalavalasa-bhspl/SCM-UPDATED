@@ -4,11 +4,8 @@ import {
   AlertTriangle, CheckCircle2, ExternalLink, KeyRound, Lock, LockOpen, Mail, Pencil,
   Phone, Plus, RotateCcw, Search, ShieldCheck, Store, Trash2, UserRound,
 } from "lucide-react";
-import {
-  Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Field, Input, PageHeader,
-  KpiTiles, ResponsiveList, Select, StatusPill, useAction,
-  type Column, type KpiTileSpec,
-} from "@/shared/components";
+import { Can, Card, ConfirmModal, EmptyState, ErrorBanner, Field, Input, PageHeader, KpiTiles, ResponsiveList, Select, StatusPill, useAction, type Column, type KpiTileSpec } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { supplierRegisterApi } from "../api";
 import type { Supplier, SupplierInput } from "../types";

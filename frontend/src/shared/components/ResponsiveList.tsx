@@ -13,6 +13,8 @@ export interface Column<T> {
 }
 
 interface Props<T> {
+  /** Native table for form cells whose state changes independently of the rows. */
+  editable?: boolean;
   data: T[];
   columns: Column<T>[];
   renderCard: (row: T) => ReactNode;
@@ -40,7 +42,7 @@ interface Props<T> {
  * this — we never horizontal-scroll a table on a phone. */
 export function ResponsiveList<T>({
   data, columns, renderCard, onRowClick, keyOf, loading, empty,
-  page, totalPages, onPageChange, revision,
+  page, totalPages, onPageChange, revision, editable = false,
 }: Props<T>) {
   const colByKey = Object.fromEntries(columns.map((c) => [c.key, c])) as Record<string, Column<T>>;
   const rowByKey = new Map(data.map((r) => [String(keyOf(r)), r]));
@@ -67,7 +69,22 @@ export function ResponsiveList<T>({
        * scrolls inside its own box; the page itself never scrolls sideways. */}
       <div className="hidden md:block">
       <div className="overflow-x-auto">
-        <Table
+        {editable ? (
+          <table aria-label="List" className="w-full rounded-2xl border border-line/70 bg-content1">
+            <thead><tr>{columns.map((col) => <th key={col.key}
+              className={`bg-content2 px-3 py-3 text-left text-[11px] font-semibold uppercase text-muted ${col.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
+              {col.header}
+            </th>)}</tr></thead>
+            <tbody>{loading || data.length === 0 ? <tr><td colSpan={columns.length} className="p-6 text-center">
+              {loading ? <Spinner color="primary" /> : (empty ?? "Nothing here yet.")}
+            </td></tr> : data.map((item) => <tr key={keyOf(item)}>
+              {columns.map((col) => <td key={col.key}
+                className={`px-3 py-3.5 text-sm ${col.className ?? ""} ${col.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
+                {col.render(item)}
+              </td>)}
+            </tr>)}</tbody>
+          </table>
+        ) : <Table
           key={revision ?? "static"}
           aria-label="List"
           removeWrapper
@@ -117,7 +134,7 @@ export function ResponsiveList<T>({
                 {(columnKey) => {
                   const col = colByKey[String(columnKey)];
                   return (
-                    <TableCell className={`${col.className ?? ""} ${col.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
+                    <TableCell key={col.key} className={`${col.className ?? ""} ${col.hideOnNarrow ? "hidden lg:table-cell" : ""}`}>
                       {col.render(item)}
                     </TableCell>
                   );
@@ -125,7 +142,7 @@ export function ResponsiveList<T>({
               </TableRow>
             )}
           </TableBody>
-        </Table>
+        </Table>}
       </div>
         {/* The pager sits OUTSIDE the scroll box, not in the Table's `bottomContent`.
             Inside, it lives in the same `base` div as the table — which is now as wide

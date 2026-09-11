@@ -395,6 +395,19 @@ class MaterialIssue(Base):
     original_issue_id = Column(BigInteger, nullable=True)
     original_issue_no = Column(String(50), nullable=True)
 
+    # A split: one child per warehouse FLOOR, each capped at the stock that floor
+    # actually holds. The parent is the generic issue the allocation raised — it is
+    # not tagged to anybody and stays the header that says what was asked for.
+    #
+    # Which floor a child serves is stored HERE and nowhere else, and it is a fact
+    # about the DOCUMENT, not about the stock: it says who was handed this piece of
+    # work, which does not change if the goods are later moved. What the floor still
+    # HOLDS stays read-on-demand, the way the fulfilment remainder is.
+    parent_issue_id = Column(BigInteger, index=True, nullable=True)
+    parent_issue_no = Column(String(50), nullable=True)
+    floor_location_id = Column(BigInteger, index=True, nullable=True)
+    floor_location_name = Column(String(200), nullable=True)
+
     status = Column(String(30), nullable=False, default=IssueStatus.DRAFT.value)
     qc_status = Column(String(30), nullable=False, default=QcStatus.NOT_REQUIRED.value)
     total_items = Column(Integer, nullable=False, default=0)
@@ -773,20 +786,18 @@ class SerialNumber(Base):
 # only one mapper may own it, and that mapper lives in shared because the masters
 # screens need it too. Imported here so `m.WarehouseLocation` still reads naturally in
 # this module. See `app/shared/models/warehouse.py` for why there is no `whs_bins`.
-from app.shared.models.warehouse import BIN_TYPES, Bin, WarehouseLocation  # noqa: E402,F401
-
-
-class StorageType(Base):
-    """`whs_warehouse_storage_types` — the DB team's table, the one with rows in it.
-    A `whs_storage_types` also exists on the server but is an empty duplicate; do not
-    point anything at it."""
-    __tablename__ = "whs_warehouse_storage_types"
-
-    id = pk()
-    code = Column(String(50), nullable=False)
-    name = Column(String(50), nullable=False)
-    description = Column(String(200), nullable=True)
-    is_active = Column(Boolean, nullable=False, default=True)
+# `StorageType` and `StorageTypeParent` sit in shared for the same reason `Bin` does:
+# the shared masters API (`/api/bins`, `shared/masters/defs.apply_bin`) has to check a
+# location's kind against the master, and shared may not import a module (rule 5).
+from app.shared.models.warehouse import (  # noqa: E402,F401
+    BIN_TYPES,
+    Bin,
+    StorageType,
+    StorageTypeParent,
+    WarehouseLocation,
+    pickable_storage_types,
+    set_pickable_storage_types,
+)
 
 
 # `sys_attachments` moved to platform/settings/models.py — indents needs it for the

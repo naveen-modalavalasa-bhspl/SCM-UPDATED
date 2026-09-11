@@ -364,6 +364,19 @@ class RFQVendor(Base):
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)      # snapshot
     vendor_email = Column(String(200), nullable=True)     # snapshot
+    # The RFQ item master IDs this vendor was tagged to supply when the buyer saved
+    # the invitation. A snapshot keeps an issued tender stable if mappings change.
+    mapped_item_ids = Column(JSON, nullable=True)
+    # Item id -> quantity this supplier is being asked to quote. Stored with the
+    # invitation so every supplier can receive a different share of one RFQ line.
+    item_quantities = Column(JSON, nullable=True)
+    # Item id -> quantity this supplier WON. Separate from `item_quantities` above
+    # because that one is the ASK and is already filled, for everybody, at send time:
+    # a tender invites each supplier to quote the whole line. The split is decided
+    # against the quotations that come back — the first moment anyone knows a price —
+    # so it belongs to the award. NULL means this supplier won nothing, or the RFQ
+    # was awarded whole to a single quotation, which is still the common case.
+    awarded_quantities = Column(JSON, nullable=True)
     # Added to the DB team's columns. A single-use link is what lets a vendor who has
     # no portal account still open exactly this RFQ and nothing else — without it the
     # only way in is a password, and most vendors will never have one.
@@ -746,6 +759,55 @@ class POComment(Base):
 
 
 Index("ix_pro_po_comments_po_created", POComment.po_id, POComment.created_at)
+
+
+class QuoteOtp(Base):
+    """`pro_quote_otps` — one emailed code standing between a vendor and a submitted
+    quotation (2026-09-07).
+
+    A tender response is a priced commitment from an outside company, sent over a link
+    that reached somebody's inbox. Until now anybody holding that link could submit on
+    the vendor's behalf; the code proves the person pressing Submit is reading the
+    address the vendor registered with us.
+
+    SHAPED ON `sys_password_resets`, deliberately, and for the same reasons:
+
+      * the RAW code is never stored, only its SHA-256. A row is otherwise a live
+        submit credential, and a database backup is a folder full of them.
+      * rows are KEPT after use rather than deleted, so "this code was already used" is
+        a different answer from "this code never existed" — one is a double press, the
+        other is worth looking at.
+
+    `pro_`, not `sys_`: the rule it enforces is procurement's, it is read by nothing
+    outside this module, and a table only ever carries its owning module's prefix.
+
+    `attempts` is what makes six digits safe. Without a cap, a code with a million
+    possibilities and a five-minute life is guessable by a script; with one, a wrong
+    code costs the guesser the whole OTP.
+    """
+    __tablename__ = "pro_quote_otps"
+    id = pk()
+    rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
+                    index=True, nullable=False)
+    #: The vendor the code was issued to. Not a hard FK — `mst_vendors` is a master and
+    #: a deactivated vendor's issued codes must still read back.
+    vendor_id = Column(BigInteger, index=True, nullable=False)
+    #: SHA-256 hex of the six digits that were emailed.
+    code_hash = Column(String(64), nullable=False)
+    #: Where it went. Snapshotted so the record says which address was trusted at the
+    #: time, even after the vendor master is edited (rule 10).
+    sent_to = Column(String(255), nullable=True)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    #: Wrong codes tried against THIS row. Cheaper than a rate limiter and it survives
+    #: a restart, which a per-process counter does not.
+    attempts = Column(Integer, nullable=False, default=0)
+    requested_ip = Column(String(45), nullable=True)
+    created_at = created_at_col()
+
+
+#: The lookup every verification makes: the live code for this vendor on this RFQ.
+Index("ix_pro_quote_otps_rfq_vendor", QuoteOtp.rfq_id, QuoteOtp.vendor_id)
 
 
 doc_registry.register(DocType.PO.value, "pro_purchase_orders")

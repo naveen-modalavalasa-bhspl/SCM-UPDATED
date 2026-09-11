@@ -170,6 +170,90 @@ check; and `create_mr_from_shortfall` deduplicates per indent **line**, not per 
 — per indent was enough while a shortage was raised once, and rounds of serving mean a
 later shortage on the same indent is a different shortage that was being dropped.
 
+### An order is received ONCE, and what it still owes is READ (2026-09-08)
+
+BHS/104/2026-27/PO0013 was received in full by REC0031 and then, the next day, in full
+again by REC0033 — nineteen lines, every one at the whole ordered quantity, for goods
+that were ordered once. Two independent causes, one per door, and neither was a
+business rule that had been decided wrongly: there was no rule at all.
+
+**`po_lines` was defined TWICE in `service.py`.** The second definition is the one
+Python keeps, and it read `pro_po_items.received_quantity` — a column written by
+exactly one path (`logistics.receive_grn`, the original build's rival GRN table) and by
+nothing in this module, so it still reads `0.000` on every order received through
+Material Inward. The first definition, which summed the receipts and dropped settled
+lines, had been unreachable since the day the second was added. Two `async def` of one
+name is an error nothing reports: the shadowed one simply stops running, and the only
+symptom is a screen answering from the wrong code.
+`test_only_one_po_lines_survives_the_module` now walks the module's AST for repeated
+top-level names, because the class of bug is worth catching, not just the instance.
+
+**And nothing at the save asked the order whether it still owed any of it.**
+`_apply_receipt_lines` wrote `ordered_qty` straight through from the client.
+`_assert_po_fulfilment` now refuses a receipt that takes more off a line than the order
+still owes — per LINE, because a part delivery is normal and a settled line must not
+stop the rest of the order arriving, and accumulated across the lines of THIS receipt
+too, since the same PO line entered twice on one GRN is the same over-receipt in one
+document. The message names what is left and which receipts took the rest; "already
+received" on its own sends a storekeeper hunting through a list of GRNs.
+
+`po_received_by_line` is the one definition of "what has this order already had", read
+by the guard, by the PO prefill and by the despatch-note prefill. **Two answers that
+could disagree is how the first one came to be wrong.**
+
+- **Drafts count.** A receipt being written is a claim on the order — two storekeepers
+  working one delivery must not each be offered the whole of it — and the way to
+  release that claim is to CANCEL the receipt, which is the one status left out.
+- **A document is capped by what was claimed BEFORE it existed** (`only_before`).
+  Without that, the duplicate draft written today blocks an edit to the submitted
+  receipt that legitimately took the goods last week, and the wrong one of the two is
+  the one that cannot be saved.
+- **A receipt is never counted against itself** (`exclude_receipt_id`, threaded through
+  `?receipt_id=` on both prefill routes), or a saved receipt re-filling from its own
+  order would be told the order owes nothing, by itself.
+- **A line the order does not name is not capped by anything.** A delivery can carry a
+  replacement or a sample, and refusing it would stop real goods at the gate over a
+  paperwork mismatch.
+
+**The despatch note is the second door and needed the same cap.** That prefill REPLACES
+the form's lines with a complete statement of one delivery, so re-opening the same note
+against a received order filled a whole second receipt with it. `_despatch_prefill_line`
+caps the vendor's own figure at the outstanding quantity and drops a line with nothing
+outstanding — a ceiling, never a floor: a vendor who sent 4 of the 15 still owed has
+sent 4, and prefilling 15 would have the gate confirm goods that are not there.
+
+**A settled order leaves the Material Inward dropdown, on two independent tests.**
+
+`_sync_po_receipt_status` is the writer, and it derives BOTH figures from the receipts
+— `pro_po_items.received_quantity` per line (set, never incremented: it is a cache of
+the same sum `po_received_by_line` reads, so it cannot drift) and the order's own
+status. It used to count only receipts where `is_stock_posted`, which is the wrong test
+for an ORDER: a delivery booked in and waiting on QC or put-away is not a delivery
+still to come, so the order sat at ACCEPTED_BY_SUPPLIER and went on offering itself for
+a second receipt for as long as the first was in QC. It now counts every receipt from
+SUBMITTED onward (`RECEIVED_RECEIPT_STATUSES`) and runs on **submit** as well as on
+posting — and on **cancel**, because the way back matters as much as the way forward:
+an order stuck at RECEIVED has left the dropdown, and the delivery that actually turns
+up then has nowhere to be booked in. `_po_status_after` is that rule, pure and tested:
+an order nothing has arrived against keeps the status it has (PARTIALLY_RECEIVED on a
+zero total tells a buyer a delivery has started when none has), and a receipt never
+reopens an order a person cancelled or closed.
+
+`po_options` then filters on the status AND, separately, on whether anything is still
+outstanding — derived off the same rows `_assert_po_fulfilment` reads, drafts included.
+The derived half is not redundant: an order received before this landed still reads
+ACCEPTED_BY_SUPPLIER and no migration is going to walk history, and a DRAFT receipt
+claims goods without moving the order at all, which is right — a draft is a claim, not
+a delivery. Together they hold the property that matters: **the dropdown offers exactly
+the orders the save would accept.**
+
+`scripts/sync_po_receipts.py` brings history forward (`--apply`; idempotent, and a bare
+run only says what would change).
+
+**A settled order a storekeeper reaches anyway says so on the form** — a saved
+receipt's own order stays visible through the picker's fallback — in a banner naming
+the receipts that took it, rather than through a toast that scrolls away.
+
 ### A material issue is one ask per item, split over the bins that serve it (2026-09-03)
 
 An issue LINE names one batch and one bin. The shelf frequently does not: fifteen
@@ -184,27 +268,43 @@ document being unable to say what was happening.
 `indent_item_id`, already allows several rows per item, and every downstream reader is
 already per line — the reservation stamp, `_issue_unit_supply`, `move_stock_out`, the
 occupancy preview, `stk_ledger`. So two bins are two lines against one indent line and
-nothing behind the screen changed. The grid groups them (`frontend/src/modules/
-warehouse/issueSplits.ts`): a parent row per item states the ask, a child row per pick
-states its (batch, bin), what that location holds, what is taken from it, and how many
-identifiers are named against THAT pick.
+nothing behind the screen changed.
 
 **The invariant, which fails silently if narrowed:** `requested_qty` is DISTRIBUTED
 across a group's splits, never repeated. `_apply_issue_lines` refuses a line requesting
 nothing and refuses a line issuing more than it requests, and `out_issues.total_qty` is
 a plain SUM over lines — so a group asking for 15 must have splits whose requested
-quantities add to 15. `redistribute` is the only thing that writes them: adding or
-removing a pick measures the ask FIRST and puts it back over the new set, and
-`normalizeSplits` does the same on the way to the server. Put the full ask on each
-split instead and the document silently asks for double.
+quantities add to 15. Put the full ask on each split instead and the document silently
+asks for double, and nothing downstream will say so.
+
+**The SCREEN half is `issueSplits.ts` + `IssueSplitEditor`**: the flat line array read
+as one row per item — the ask on the left, every pick that serves it stacked on the
+right, under ONE set of column headings for the whole document. `normalizeSplits` puts
+the group's ask back onto its picks once, on the way OUT to the server, so the number in
+the Issue qty box stays the storekeeper's until Save. **There is deliberately no
+automatic split**: which bay a quantity comes out of is the decision of the person
+standing at the shelf, and the screen's job is to say what is there. The client
+normalising the ask does not make `_apply_issue_lines` optional — it is still the only
+thing standing between a mistyped split and a document that asks for double.
 
 `GET /api/warehouse/issues/stock-sources` is where the splits come from — every
 (batch, bin) an item can be drawn from, ordered expiry-then-batch-then-bin, so a screen
 taking them in order is doing FIFO without knowing what FIFO is. Read off `stk_balance`
 alone, NEVER off `whs_serial_numbers`: that table is one row per physical unit and holds
 773k of them. It honours `_stock_offerable(indent_id)` for the same reason `bin_options`
-does. Auto-split runs once on a freshly pulled draft, when that answer lands, and only
-on groups whose single source cannot serve them.
+does.
+
+**The same shelf is stated at three widths, and each figure carries the word for which
+one it is** (2026-09-08): the warehouse (`item_total_qty` / `item_available_qty`), the
+batch (`batch_total_qty` / `batch_available_qty`) and the location (the row's own
+`total_qty` / `drawable_qty`). The two outer ones are SERVED, denormalised onto every
+row of the item, and must never be summed out of the list on screen: a location another
+document has reserved outright is not offered as a source at all, so adding the rows up
+reports a stocked shelf as empty. They are read off `stk_balance` unfiltered by
+`_stock_offerable`, in one extra grouped query. A bare number beside a dropdown is the
+thing that gets read as the wrong quantity, so the grid says "40 in this batch" and "10
+at this location", never "40" and "10" — and the drawable column is "Can give **here**",
+because it is the one figure that is only about the bay the pick names.
 
 **Which identifier is being asked for is SERVED, never inferred in a screen.**
 `enums.TRACKING_META` (`GET /api/warehouse/tracking-types`) names each kind, and
@@ -221,6 +321,100 @@ catch it.
 The picker is scoped to one pick's own batch and bin (it always was) and now SAYS so,
 because a correctly short list reads as missing stock otherwise. Parity is checked per
 PICK: ten units over two bins with all ten codes on the first used to look complete.
+
+### A pick may move; FEFO decides how far (2026-09-08)
+
+An issue drafted from an approved allocation names the batch and the bay inventory
+reserved. The storekeeper standing at the shelf routinely finds neither: the pallet is
+behind another, the bay was consolidated overnight. **Both may be changed, and the
+hold follows** — but the two are not the same freedom.
+
+**The storage location is his call.** One batch sitting in two bays is one batch;
+FEFO cannot tell them apart, and which bay he walks to is not a decision the system
+should be making. `LocationPicker` offers every location holding **that batch of that
+item**, and the server checks only that the stock is there.
+
+**The batch is FEFO's call.** The allocated batch was chosen earliest-expiry-first, so
+a swap is allowed **only onto a batch expiring on the same day** — the single swap FEFO
+cannot see. Reaching past an earlier batch onto a later one leaves the earlier stock to
+expire and says nothing, which is why "no later than" is not the rule and neither is
+"any batch with stock". A batch with **no recorded expiry matches only another with
+none**: that is nobody having written a date down, not "never expires", and reading it
+as a distant date makes an undated batch swappable for anything on the shelf.
+`service._fefo_swap_allowed` is that rule, pure and tested without a database;
+`_assert_issue_sources` applies it, and `issueSplits.allowedExpiries` states it in the
+screen off the same rows. **A manual issue is not held to it** — nothing was signed to
+depart from — so its batches are merely offered oldest-first, with the older one named
+in a hint.
+
+**`_assert_issue_sources` is also the first thing that ever checked the stock exists.**
+A line may take what is free at its (batch, location) plus what THIS indent already
+holds there — the same `drawable_qty` the screen shows — summed **per (item, batch,
+location) across the picks**, because two picks on one bay each passing on their own is
+how a bay gets over-drawn. Before it, a manual issue could promise a hundred units of
+an item the point holds none of, and the mistake surfaced at `post_issue`, against a
+document that had been through the whole ladder. Two reads for the document, never one
+per line.
+
+**Changing either frees the hold that was left.** `_realign_issue_reservations` runs on
+create and on update: the reservation at the abandoned (bin, batch) is **released back
+to `available_qty`, free to anybody**, and the same quantity is taken where the picks
+now point (`allocation.relocate`, which owns the arithmetic — rule 7). The total held
+never changes, so an issue drawing less than was allocated keeps the rest exactly where
+it is; that is not a way to hand stock back. The grid says so before the press, per
+item and once at the top.
+
+**The pickers are built from `stock-sources`, not from `/options/batches` and
+`/options/bins`.** Those return an id and a code, so the two decisions that actually
+matter at the shelf — which batch expires first, how much is in the bay — were
+invisible at the moment they were being taken. `BatchPicker` and `LocationPicker`
+(`components/SourcePicker.tsx`) render expiry, days left, quantity and the walk down to
+the location on every option, and the same detail on hover of the closed field. They
+fetch nothing: the whole document's sources are already loaded once, where two Lookups
+per pick over fifty picks were a hundred cached queries.
+
+**`POST /api/warehouse/issues/unit-supply`** answers the OTHER question about a pick,
+off the other table: how many physical units at that (batch, location) carry a serial,
+IMEI or code the line could name. `stock-sources` is a quantity on `stk_balance`; this
+is identity, on `whs_serial_numbers`. A pick can be sound on one and impossible on the
+other. It exists because `units_available` on a saved line describes the bay the line
+named **when it was last saved** — the moment a pick is repointed that number belongs
+somewhere the storekeeper is no longer standing. **Bounded exactly as `_issue_unit_supply`
+is**: the count stops at `need + 1`, so a figure equal to that means "at least", and it
+never becomes the unbounded COUNT over 773k rows that CLAUDE.md warns about everywhere
+else. One call for the whole grid, debounced 400 ms, deduplicated per combination
+keeping the largest `need`.
+
+**Lowering an issue quantity takes the surplus identifiers with it** (`trimUnits`, from
+the tail — the last codes scanned are the ones still in the picker's hand).
+`_reserve_issue_serials` refuses a pick naming more units than it issues, so before
+this a storekeeper correcting 10 to 6 was sent back into the picker to unpick four by
+hand.
+
+**An issue can be raised with no indent at all.** `_build_issue` always allowed it —
+only a LIP, the bottom of the chain where everything held arrived against a request, is
+refused — but `IssueSplitEditor` was never given `onAddItem`, so the item picker
+existed with no way to create the empty line it picks into. A main store issues to
+departments, writes off scrap and moves stock for reasons no indent covers.
+
+**And the item picker on an issue lists what the POINT holds, not the catalogue.**
+`item_options` takes `warehouse_id` (decorates every row with `on_hand`, `batch_count`,
+`location_count`) and `in_stock` (narrows to what can actually be issued). Both are
+opt-in, so the GRN, put-away and inspection callers get exactly the list they had —
+goods arrive for items a shelf has never seen, which is why the plain catalogue is
+right there and wrong here. `on_hand` is DRAWABLE, by the same rule
+`issue_stock_sources` uses, so the item list and the batch list underneath it can never
+disagree about whether there is anything to take. **The whole catalogue stays one press
+away** (`ItemPicker`'s "Show every item"): naming an item the system does not think is
+there is a real thing a storekeeper has to do, and a picker that simply refuses is one
+he works around. An item with nothing here is drawn "None here", and the row it lands
+on says so in a sentence — the live database has 87 items in the master and 22 on the
+main warehouse's floor, and picking one of the other 65 used to dead-end three
+decisions deep: batch reading "nothing on the shelf" over location reading "pick the
+batch first", with nothing anywhere saying **this point has never held that item**.
+That band needs `sourcesReady`, because an empty source list means two different things
+— still loading, and nothing here — and drawing the second before the first has settled
+accuses a stocked warehouse of being empty.
 
 ### The outward leg (doc Phase D+E), under Logistics
 
@@ -588,6 +782,69 @@ the right one is the durable job queue that is still outstanding
     cannot answer. `GET /bins/{id}/volume-budget` serves that arithmetic to the form,
     so the sentence on screen and the rule the save enforces cannot drift apart.
 
+### What a storage location IS, is a master (2026-09-05)
+
+The kinds of storage location — floor, lane, rack, shelf, bin, cold room, refrigerator
+— were an enum in three places at once: `shared.enums.BinType`, a `STORAGE_TYPES` tuple
+the write schema validated against, and a `BIN_TYPES` array in `BinForm.tsx` with a
+`defaultChildType` ladder beside it. They never fully agreed, and the live data has
+always used **STAGING**, which the write schema rejected — so those locations could be
+read and never saved from the form that owns them.
+
+They are rows now. **Warehouse > Masters > Storage types** (was "Refrigeration types",
+`/warehouse/masters/storage-types`), over `whs_warehouse_storage_types` and the new
+`whs_storage_type_parents`. A cold room is a KIND OF LOCATION, not a separate idea,
+which is what the old screen made it — there is no second "refrigeration type" to pick
+on a bin any more, and `whs_warehouse_locations.storage_type_id` now means the kind.
+`storage_type` still carries that row's code, denormalised, so every query already
+reading the code keeps working; only `service._resolved_kind` writes the pair.
+
+Four flags carry what used to be hardcoded about a kind, and all four fail SILENTLY if
+they drift: `is_pickable` (the `BIN_TYPES` tuple, as data — what a bin picker offers),
+`is_temperature_controlled` (was the browser asking whether the code contained "COLD"),
+`allow_top_level`, and `sort_order` (the rung's depth, so every list reads floor, lane,
+rack, shelf, bin rather than alphabetically).
+
+**A kind sits where the master says it sits.** `whs_storage_type_parents` is which
+kinds may hold which, and it is the SAME list on both sides: the location form offers
+only locations of an allowed kind as a parent (`storageTypes.eligibleParents`), and
+`storage_types.assert_can_sit_under` refuses the save. A screen that offers only racks
+over a server that accepts anything is a screen nobody trusts twice. A kind with no
+parents configured is NOT constrained — the list starts empty for a kind somebody has
+just added, and refusing everything would make a new rung unusable on the day it exists.
+
+`is_pickable` on a location row reads a per-process registry in
+`shared/models/warehouse.py`, refreshed from the master by `storage_types.pickable_codes`
+whenever the module reads or writes one. That is deliberate: it is a plain property on
+an ORM row, so it cannot go to the database and a lazy relationship would raise
+MissingGreenlet. Every QUERY that filters on pickability reads the master directly and
+is therefore always right; the registry only decorates rows already loaded, and it
+starts life holding the old tuple.
+
+`StorageType` and `StorageTypeParent` are mapped in `shared/models/warehouse.py`, beside
+`Bin` and for the same reason: the shared masters API (`/api/bins`,
+`masters/defs.apply_bin`) has to check a location's kind, and shared may not import a
+module (rule 5). The rules live in `modules/warehouse/storage_types.py`.
+
+`c1a7d3f9b2e5` adds the columns and the table, seeds the standard ladder, seeds a kind
+for every `storage_type` the DATA already uses that the ladder does not name, and
+backfills `storage_type_id` from the code. It is **also the merge point** for the two
+Alembic heads this tree had grown (`92c9c40ec9d7` and `fb6b1c0ef043`) — see the section
+below for what two heads cost the last time. `bootstrap` seeds the ladder through
+`provision_warehouse`, the test `engine` fixture through the same call, and
+`POST /api/warehouse/storage-types/seed-defaults` puts it back on a site whose master
+is empty. All three are idempotent and none of them corrects an edited row.
+
+**The floor plan is a tree** (`/warehouse/masters/floor-plan`). It was a flat table,
+which is what a list of `whs_warehouse_locations` looks like if you forget that
+`parent_location_id` is the whole point — `F1-A1-R1-B2` sorted next to `F1-A1-R1-B1`
+says nothing about which end of which floor either is on, and the codes are
+near-identical by design. `list_locations` now serves `path`, `path_names`, `level`,
+`parent_code`, `child_count`, `is_pickable` and the kind's `storage_type_name`, all
+DERIVED on the way out: a stored path goes stale the day somebody re-parents a rack and
+nothing tells you it has. It is still not a drawing — the table carries no surveyed
+coordinates, and an invented layout would look authoritative while being fiction.
+
 ### A 500 on a screen that worked yesterday is usually an UNAPPLIED MIGRATION
 
 Two outages on 2026-09-03, one cause: the database was behind the models.
@@ -611,6 +868,17 @@ Compare the models to the live schema directly — SQLAlchemy's metadata against
 raises 1054 the moment anybody opens that screen; a missing INDEX raises nothing at
 all until a sort gets big enough or a JSON column widens the sort record (see the
 section below).
+
+As of 2026-09-09 the tree is back to **one head** (`f7a1c3e5d9b2`), so
+`alembic upgrade head` moves again. Check `alembic heads` before assuming otherwise.
+Three merge revisions now stand in that lineage, each of them schema-free and each
+cut for the same reason — a branch and `qa` grew a migration apiece and neither side
+would apply while there were two heads: `c1a7d3f9b2e5` joins `92c9c40ec9d7` and
+`fb6b1c0ef043` (and adds the storage-type master), `b3e7c9a1d4f6` joins that to the
+qa floor-access lineage, and `f7a1c3e5d9b2` joins THAT to `e4f5a6b7c8d9`, the indent
+line-exclusion columns. A merge revision every time, never a re-pointed
+`down_revision`: a database already stamped at one side would treat the other side's
+revisions as ancestors it had passed and skip them in silence.
 
 As of 2026-09-03 this database has **0 missing tables and 0 missing columns**, and 54
 missing single-column indexes, all on `lgs_*` and `pro_*` tables that were created by

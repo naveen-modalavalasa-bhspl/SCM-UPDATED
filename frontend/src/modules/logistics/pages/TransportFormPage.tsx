@@ -15,6 +15,7 @@ import {
 import type {
   ModeRule, TransportMode, TRInput, TRLineInput,
 } from "../transportTypes";
+import { TONE_SUBMIT } from "@/shared/components/tones";
 
 const BLANK_LINE: TRLineInput = {
   item_name: "", uom_code: "", quantity: 0, package_count: 1, package_type: "",
@@ -801,7 +802,7 @@ export function TransportFormPage() {
             <Button variant="ghost" onClick={() => save.mutate()} disabled={cannotSave}>
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
-            <Button onClick={() => saveAndSubmit.mutate()} disabled={cannotSubmit}>
+            <Button className={TONE_SUBMIT} onClick={() => saveAndSubmit.mutate()} disabled={cannotSubmit}>
               {saveAndSubmit.isPending ? "Sending…" : "Save & send for approval"}
             </Button>
           </div>

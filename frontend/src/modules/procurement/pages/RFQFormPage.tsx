@@ -1,10 +1,8 @@
-import { useEffect, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Button, Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select,
-  useToast,
-} from "@/shared/components";
+import { Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { api } from "@/shared/api/client";
 import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
@@ -47,7 +45,7 @@ export function RFQFormPage() {
   const [org, setOrg] = useState<OrgValue>({
     departmentId: "", warehouseId: "", projectId: "", companyName: "",
   });
-  const [vendorIds, setVendorIds] = useState<number[]>([]);
+  const [chosenVendors, setChosenVendors] = useState<number[]>([]);
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
   const [problem, setProblem] = useState<string | null>(null);
@@ -70,15 +68,36 @@ export function RFQFormPage() {
     enabled: Boolean(fromConsolidation) && !editing,
   });
 
-  const { data: vendors = [] } = useQuery({
-    queryKey: ["rfq-vendors", vendorSearch],
-    queryFn: () =>
+  // The items this tender is for. Vendors are offered against THESE, so the list
+  // has to move when a line is added, changed or removed.
+  const chosenItemIds = useMemo(
+    () => [...new Set(lines.map((l) => l.item_id).filter((id): id is number => id !== ""))],
+    [lines],
+  );
+
+  const { data: vendorsByItem = {} } = useQuery<Record<number, MasterVendor[]>>({
+    // Item ids are part of the key, so changing a line refetches rather than leaving
+    // the previous item's suppliers on screen looking selectable.
+    queryKey: ["rfq-vendors", vendorSearch, chosenItemIds],
+    queryFn: async () => Object.fromEntries(await Promise.all(chosenItemIds.map(async (itemId) => {
       // Material suppliers only: the logistics partners share this master, and an
       // RFQ sent to a truck operator for gauze is a tender nobody can answer.
-      api.get<{ items: MasterVendor[] }>("/api/vendors", {
-        params: { search: vendorSearch || undefined, size: 50, is_active: true,
-                  kind: "MATERIAL" },
-      }).then((r) => r.data.items),
+      //
+      // `item_ids` narrows further, to the vendors actually mapped to supply what is
+      // being asked for. The union across the lines, not the intersection — a tender
+      // for gauze and syringes goes to whoever can supply either. The same rule is
+      // checked again on save; this only decides what is offered.
+      const response = await api.get<{ items: MasterVendor[] }>("/api/vendors", {
+        params: {
+          search: vendorSearch || undefined, size: 50, is_active: true,
+          kind: "MATERIAL", item_ids: String(itemId),
+        },
+      });
+      return [itemId, response.data.items] as const;
+    }))),
+    // No items chosen yet means no question to ask: an unfiltered list here would be
+    // every supplier in the master, which is the thing this restriction removes.
+    enabled: chosenItemIds.length > 0,
   });
 
   const { data: methods } = useQuery({
@@ -99,12 +118,18 @@ export function RFQFormPage() {
       projectId: existing.project_id ?? "",
       companyName: existing.company_name ?? "",
     });
-    setVendorIds(existing.vendors.map((v) => v.vendor_id));
+    // Who was invited, which is now the whole of what this form holds about vendors.
+    // An RFQ saved before the split moved to the comparison still carries its
+    // per-item quantities on `vendor.item_quantities`; they are left untouched on the
+    // record and simply not re-edited here, so re-saving an old tender neither loses
+    // them nor pretends this screen is where they are decided.
+    setChosenVendors([...new Set(existing.vendors.map((vendor) => vendor.vendor_id))]);
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
       item_code: item.item_code,
       item_name: item.item_name,
       quantity: String(item.quantity),
+      original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
     })));
@@ -129,6 +154,7 @@ export function RFQFormPage() {
       item_code: item.item_code,
       item_name: item.item_name,
       quantity: String(item.quantity),
+      original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
     })));
@@ -150,10 +176,32 @@ export function RFQFormPage() {
       item_code: item.item_code ?? "",
       item_name: item.item_name ?? "",
       quantity: String(item.approved_qty),
+      original_quantity: String(item.approved_qty),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
     })));
   }, [sourceConsolidation]);
+
+  /**
+   * Everyone mapped to at least one item on this RFQ, each named once.
+   *
+   * `vendorsByItem` is keyed per item because that is how the mapping is stored, and
+   * the same supplier legitimately appears under several items. Inviting is a
+   * per-DOCUMENT decision, so they are folded to one row here and the count of items
+   * they cover is carried along — it is the one thing that made the per-item grid
+   * worth reading, and it costs nothing to keep.
+   */
+  const invitableVendors = useMemo(() => {
+    const byId = new Map<number, MasterVendor & { itemCount: number }>();
+    for (const vendors of Object.values(vendorsByItem)) {
+      for (const vendor of vendors) {
+        const seen = byId.get(vendor.id);
+        if (seen) seen.itemCount += 1;
+        else byId.set(vendor.id, { ...vendor, itemCount: 1 });
+      }
+    }
+    return [...byId.values()].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  }, [vendorsByItem]);
 
   const save = useMutation({
     mutationFn: () => {
@@ -167,7 +215,12 @@ export function RFQFormPage() {
         project_id: org.projectId === "" ? null : org.projectId,
         department_id: org.departmentId === "" ? null : org.departmentId,
         company_name: org.companyName || null,
-        vendor_ids: vendorIds,
+        // Suppliers only. Splitting a line between them is a decision taken against
+        // PRICES, and at this point nobody has any — see the note on the section
+        // below. `vendor_allocations` is deliberately not sent: the service reads
+        // its absence as "ask every invited supplier for the whole line", which is
+        // what a tender is.
+        vendor_ids: chosenVendors,
         lines: usable.map((line) => ({
           item_id: Number(line.item_id),
           quantity: Number(line.quantity),
@@ -196,8 +249,14 @@ export function RFQFormPage() {
       setProblem("Add at least one line with an item and a quantity.");
       return;
     }
-    if (!vendorIds.length) {
-      setProblem("Pick at least one vendor to ask.");
+    for (const line of usable) {
+      if (line.original_quantity && Number(line.quantity) > Number(line.original_quantity)) {
+        setProblem(`Quantity cannot exceed ${line.original_quantity} for ${line.item_name || line.item_code}.`);
+        return;
+      }
+    }
+    if (!chosenVendors.length) {
+      setProblem("Pick at least one supplier to send this RFQ to.");
       return;
     }
     setProblem(null);
@@ -205,10 +264,11 @@ export function RFQFormPage() {
   };
 
   const toggleVendor = (vendorId: number) =>
-    setVendorIds((current) =>
+    setChosenVendors((current) =>
       current.includes(vendorId)
-        ? current.filter((v) => v !== vendorId)
+        ? current.filter((id) => id !== vendorId)
         : [...current, vendorId]);
+
 
   return (
     <div>
@@ -229,7 +289,7 @@ export function RFQFormPage() {
           <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-5">
             {[
               ["Department", source.department_name],
-              ["Warehouse", source.warehouse_name],
+              ["Shipment Address", source.warehouse_name],
               ["Project", source.project_name],
               ["Company", source.company_name],
               ["Priority", source.priority ?? "Normal"],
@@ -321,44 +381,60 @@ export function RFQFormPage() {
 
         <div>
           <h2 className="mb-1 text-sm font-semibold text-ink">
-            Who to ask
+            Suppliers to invite
             <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
-            <span className="sr-only"> (required)</span>
-            <span className="ml-2 text-xs font-normal text-muted">
-              {vendorIds.length} selected
-            </span>
           </h2>
+          {/* SUPPLIERS, AND NOTHING ELSE.
+            *
+            * This section used to split every line between its vendors, quantity by
+            * quantity, before the tender had gone out. That is a decision taken
+            * against PRICES, and at the moment an RFQ is raised nobody has any —
+            * so the buyer was being asked to guess the answer to the question the
+            * RFQ exists to ask. Each invited supplier is now asked to quote the
+            * WHOLE line, which is what a tender is, and the split is decided
+            * against the quotations that come back.
+            *
+            * Only suppliers mapped to at least one item on the RFQ are offered: the
+            * service refuses an invitation to a vendor who supplies none of them,
+            * and a picker that offers what the save rejects is a picker nobody
+            * trusts twice. */}
           <p className="mb-3 text-xs text-muted">
-            Each vendor gets their own link. Removing one who has already quoted is
-            refused — their offer is part of the record.
+            Every supplier invited is asked to quote the full quantity of each item
+            they are mapped to. Who supplies how much is decided later, against their
+            quotations.
           </p>
-          <Input
-            value={vendorSearch}
-            onChange={(e) => setVendorSearch(e.target.value)}
-            placeholder="Search vendors…"
-          />
-          <div className="mt-3 max-h-64 space-y-1 overflow-y-auto rounded-xl border border-line p-2">
-            {vendors.map((vendor) => (
-              <label
-                key={vendor.id}
-                className="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 hover:bg-surface-2"
-              >
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={vendorIds.includes(vendor.id)}
-                  onChange={() => toggleVendor(vendor.id)}
-                />
-                <span className="min-w-0">
-                  <span className="block truncate text-sm text-ink">{vendor.name}</span>
-                  <span className="block truncate text-[11px] text-muted">
-                    {vendor.code ?? "—"}{vendor.email ? ` · ${vendor.email}` : ""}
-                  </span>
-                </span>
-              </label>
-            ))}
-            {!vendors.length && (
-              <p className="px-3 py-4 text-sm text-muted">No vendors match that search.</p>
+          <Input value={vendorSearch} onChange={(e) => setVendorSearch(e.target.value)}
+                 placeholder="Search suppliers…" />
+          <div className="mt-3 space-y-1">
+            {invitableVendors.map((vendor) => {
+              const selected = chosenVendors.includes(vendor.id);
+              return (
+                <label key={vendor.id}
+                       className="grid min-h-12 cursor-pointer grid-cols-[auto_1fr] items-center gap-3 rounded-lg px-2 hover:bg-surface-2">
+                  <input type="checkbox" className="h-4 w-4" checked={selected}
+                         onChange={() => toggleVendor(vendor.id)} />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm text-ink">{vendor.name}</p>
+                    <p className="truncate text-[11px] text-muted">
+                      {vendor.code ?? "—"}{vendor.email ? ` · ${vendor.email}` : ""}
+                      {vendor.itemCount ? ` · ${vendor.itemCount} of these items` : ""}
+                    </p>
+                  </div>
+                </label>
+              );
+            })}
+            {!chosenItemIds.length && (
+              <p className="rounded-xl border border-line px-3 py-4 text-sm text-muted">
+                Add an item first to see who can supply it.
+              </p>
+            )}
+            {!!chosenItemIds.length && !invitableVendors.length && (
+              <p className="rounded-xl border border-line px-3 py-4 text-sm text-muted">
+                No mapped supplier found for these items. Add one under{" "}
+                <Link to="/masters?tab=vendor-items" className="font-semibold text-brand underline">
+                  Masters → Vendor Rates
+                </Link>.
+              </p>
             )}
           </div>
         </div>

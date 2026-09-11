@@ -31,6 +31,7 @@ from app.platform.hcm import mappers
 from app.platform.hcm.models import (
     HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
+from app.platform.notifications import service as notifications
 from app.platform.rules import evaluator as rules
 from app.platform.workflow import engine, ladder
 from app.platform.workflow.models import Action, Instance, Stage
@@ -42,7 +43,7 @@ from app.platform.rbac import service as rbac_service
 from app.platform.rbac import permissions as perms
 from app.shared.models.base import utcnow
 from app.shared.scope import scope_condition
-from app.shared.models.master import Item
+from app.shared.models.master import Bom, BomGroup, BomItem, Item
 from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
 from app.modules.indents.enums import (
@@ -1773,6 +1774,7 @@ async def return_indent_for_correction(
     )
     indent.status = IndentStatus.RETURNED_FOR_CORRECTION.value
     indent.current_approver_name = None
+    await notify_indent_followers(db, indent, indent.status)
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.UPDATE, actor=user,
@@ -4285,6 +4287,7 @@ _ACTIVITY_RESPONSE_FIELDS = (
     "quantity",
     "requested_quantity",
     "uom_code",
+    "line_count",
     "department_name",
     "office_name",
     "region_id",
@@ -4321,6 +4324,7 @@ def _activity_event_columns(
     quantity=None,
     requested_quantity=None,
     uom_code=None,
+    line_count=None,
     remarks=None,
     source_type,
     source_id,
@@ -4349,6 +4353,7 @@ def _activity_event_columns(
         _activity_value(quantity, Numeric(16, 3)).label("quantity"),
         _activity_value(requested_quantity, Numeric(16, 3)).label("requested_quantity"),
         _activity_value(uom_code, String).label("uom_code"),
+        _activity_value(line_count, BigInteger).label("line_count"),
         visible.c.department_name,
         visible.c.office_name,
         visible.c.region_id,
@@ -4426,6 +4431,30 @@ async def activity_ledger(
 ) -> dict:
     """Read-only, source-normalized audit trail over visible indents."""
     _validate_filter_date_range(date_from, date_to)
+    # What the request was RAISED for, carried on the header events.
+    #
+    # Those events — created, submitted, approved, rejected, returned — are one row per
+    # DOCUMENT, so they name no item and used to leave QTY blank; the column only ever
+    # filled in once allocation fanned the indent out per line, which reads as "nobody
+    # recorded a quantity" rather than "nothing has moved yet" (BUG_SCM_0001/0002).
+    #
+    # Summed here, never per approval rung: `approved_qty` is OVERWRITTEN at every rung
+    # and no per-rung history is stored, so the only quantity that is true against every
+    # header row is the one that was asked for. `uom_count` is what stops the sum being
+    # a lie — 3 CAN + 2 BOTTLE + 1100 NOS has no total, so a mixed-unit request reports
+    # its line count alone and no number at all.
+    line_totals = (
+        select(
+            IndentItem.indent_id.label("indent_id"),
+            func.count().label("line_count"),
+            func.count(IndentItem.uom_code.distinct()).label("uom_count"),
+            func.sum(IndentItem.quantity).label("requested_total"),
+            func.min(IndentItem.uom_code).label("uom_code"),
+        )
+        .group_by(IndentItem.indent_id)
+        .subquery("indent_line_totals")
+    )
+    single_uom = line_totals.c.uom_count == 1
     visible_stmt = select(
         Indent.id.label("indent_id"),
         Indent.indent_no,
@@ -4441,7 +4470,12 @@ async def activity_ledger(
         Indent.region_name,
         Indent.project_name,
         Indent.created_at,
-    )
+        line_totals.c.line_count.label("line_count"),
+        case((single_uom, line_totals.c.requested_total),
+             else_=cast(literal(None), Numeric(16, 3))).label("requested_total"),
+        case((single_uom, line_totals.c.uom_code),
+             else_=cast(literal(None), String)).label("request_uom_code"),
+    ).outerjoin(line_totals, line_totals.c.indent_id == Indent.id)
     if user is not None:
         visible_stmt = visible_stmt.where(await _indent_visibility(db, user))
     # Narrowed on the CTE, not after the UNION: every branch fans one indent out into
@@ -4469,6 +4503,9 @@ async def activity_ledger(
         actor_id=visible.c.requested_by_id,
         actor_name=visible.c.requested_by_name,
         actor_position=visible.c.position_name,
+        quantity=visible.c.requested_total,
+        uom_code=visible.c.request_uom_code,
+        line_count=visible.c.line_count,
         source_type="ind_indents",
         source_id=visible.c.indent_id,
         source_rank=10,
@@ -4562,6 +4599,9 @@ async def activity_ledger(
             actor_id=workflow_actor_id,
             actor_name=workflow_actor_name,
             actor_position=workflow_context,
+            quantity=visible.c.requested_total,
+            uom_code=visible.c.request_uom_code,
+            line_count=visible.c.line_count,
             remarks=workflow_remarks,
             source_type="wf_actions",
             source_id=Action.id,
@@ -5484,6 +5524,7 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         raise NotFoundError(f"Indent {indent_id} not found")
 
     committed = await _committed_by_line(db, indent_id)
+    on_order = await _on_order_by_line(db, indent_id)
 
     # Read-only, so it never refuses. Every row in the fulfilment queue opens THIS
     # screen — one row, one destination — and the screen says what state the indent is
@@ -5534,12 +5575,14 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
     elif indent.items and not any(
         _owed_quantity(line, recorded)
         - Decimal(str(line.allocated_quantity or 0))
-        - committed.get(line.id, Decimal("0")) > 0
+        - committed.get(line.id, Decimal("0"))
+        - on_order.get(line.id, Decimal("0")) > 0
         for line in indent.items
     ):
         blocked_reason = (
-            "Every line is already covered by an allocation — an approver served this "
-            "out of their own stock."
+            "Every line is already covered by an allocation or an active material "
+            "request. Outstanding demand becomes available again when procurement "
+            "is received, rejected or cancelled."
         )
 
     lines = [{
@@ -5555,12 +5598,14 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         "requested_qty": float(max(
             _owed_quantity(line, recorded)
             - Decimal(str(line.allocated_quantity or 0))
-            - committed.get(line.id, Decimal("0")),
+            - committed.get(line.id, Decimal("0"))
+            - on_order.get(line.id, Decimal("0")),
             Decimal("0"),
         )),
         "already_allocated": float(
             Decimal(str(line.allocated_quantity or 0)) + committed.get(line.id, Decimal("0"))
         ),
+        "on_order_qty": float(on_order.get(line.id, Decimal("0"))),
         "project_id": indent.project_id,
     } for line in indent.items]
 
@@ -6145,6 +6190,74 @@ async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
     )
 
 
+#: What an indent's status means to the people following it, in the words the bell
+#: shows. Only the states worth interrupting somebody for: DRAFT and PENDING_APPROVAL
+#: are already covered by the workflow engine's own "needs your approval", and
+#: re-announcing them here would double every approval.
+_LIFECYCLE_NOTICES: dict[str, tuple[str, str]] = {
+    IndentStatus.ALLOCATED.value: (
+        "Stock set aside for {no}", "The full quantity is reserved and waiting to be issued."),
+    IndentStatus.PARTIALLY_FULFILLED.value: (
+        "{no} is partly covered from stock",
+        "Some of it is reserved; the rest is going to procurement."),
+    IndentStatus.PENDING_PROCUREMENT.value: (
+        "{no} has gone to procurement", "No stock was available, so it will be bought in."),
+    IndentStatus.ORDERED.value: (
+        "{no} has been ordered", "A purchase order is out with the vendor."),
+    IndentStatus.PARTIALLY_ORDERED.value: (
+        "{no} is partly ordered", "Some lines are on a purchase order with the vendor."),
+    IndentStatus.CLOSED.value: (
+        "{no} is complete", "Everything requested has been received."),
+    IndentStatus.RETURNED_FOR_CORRECTION.value: (
+        "{no} needs correcting", "An approver sent it back for changes."),
+}
+
+
+async def notify_indent_followers(db: AsyncSession, indent: Indent, status: str) -> int:
+    """Tell the people involved in this indent that it has moved on.
+
+    WHY THIS EXISTS. The bell only ever carried three things — "needs your approval",
+    "approved", "rejected" — because the workflow engine was the only thing writing
+    `sys_notifications`. Everything after approval (stock set aside, gone to
+    procurement, ordered, complete) happened in silence, so the only way to find out
+    was to open Alerts & Notifications and read statuses off a list (BUG_SCM_0003).
+
+    WHO GETS IT. Everybody who has actually TOUCHED the document: the raiser, plus
+    every approver who acted on it. Deliberately NOT everyone who can see it — an OE's
+    visibility covers their whole reporting subtree, and notifying on visibility would
+    put hundreds of badge rows in front of people who never handled the request, which
+    is how a bell stops being read at all. Acting on a document is the signal that you
+    want to know how it ended.
+
+    Never raises and never rolls anything back: `notify` swallows its own errors, and a
+    status change must not fail because a courtesy message could not be written.
+    """
+    notice = _LIFECYCLE_NOTICES.get(status)
+    if notice is None:
+        return 0
+    title, body = notice
+    # The approvers who acted, from the same table the ledger reads. A document with no
+    # workflow (a fallback, or an indent that never needed one) simply has no actors,
+    # and the raiser alone is then the whole audience.
+    actors = set((await db.execute(
+        select(Action.actor_id)
+        .join(Instance, Instance.id == Action.instance_id)
+        .where(Instance.doc_type == DocType.INDENT.value,
+               Instance.doc_id == indent.id,
+               Action.actor_id.isnot(None))
+    )).scalars().all())
+    actors.add(indent.requested_by_id)
+    return await notifications.notify(
+        db,
+        actors,
+        title=title.format(no=indent.indent_no),
+        body=body,
+        deep_link=notifications.link_for(DocType.INDENT.value, indent.id),
+        entity_type=DocType.INDENT.value,
+        entity_id=indent.id,
+    )
+
+
 async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent) -> None:
     stmt = (
         select(
@@ -6185,6 +6298,7 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         total_requested += requested
         total_allocated += allocated
 
+    was = indent.status
     if total_requested <= 0:
         # Every line approved at zero: there is nothing to allocate and nothing to
         # buy. Falling through to PENDING_PROCUREMENT would ask procurement to source
@@ -6196,6 +6310,11 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         indent.status = IndentStatus.ALLOCATED.value
     else:
         indent.status = IndentStatus.PARTIALLY_FULFILLED.value
+    # Only on an actual transition. This function is re-run on every allocation touch,
+    # and re-announcing the status it already held would put a duplicate in the bell
+    # every time somebody opened the desk.
+    if indent.status != was:
+        await notify_indent_followers(db, indent, indent.status)
 
 
 async def item_demand(db: AsyncSession, item_id: int, user=None) -> dict:
@@ -7075,4 +7194,42 @@ async def eligible_items(db: AsyncSession, user, *, search: str | None = None,
         "name": row.name,
         "uom_code": row.uom_code,
         "category_name": row.category_name,
+    } for row in rows]
+
+
+async def eligible_bom_items(db: AsyncSession, user, bom_id: int) -> list[dict]:
+    """The selected BOM's lines, narrowed to what this requester may raise.
+
+    BOM access is already limited by the active job profile.  This second filter is
+    intentionally line-level: a profile can be assigned a ten-line BOM while being
+    allowed to request only eight of those items.
+    """
+    # Do not let a caller bypass the BOM picker by guessing an id.  The visible BOM
+    # list and its lines must be scoped by the same active job profile.
+    from app.platform.rbac.profiles import profile_keys_for_user
+
+    profile_keys = await profile_keys_for_user(db, user)
+    today = date.today()
+    permitted_bom_ids = select(BomGroup.bom_id).where(
+        BomGroup.profile_key.in_(profile_keys),
+        BomGroup.is_active.is_(True),
+        (BomGroup.effective_from.is_(None) | (BomGroup.effective_from <= today)),
+        (BomGroup.effective_to.is_(None) | (BomGroup.effective_to >= today)),
+    )
+    bom = (await db.execute(
+        select(Bom.id).where(Bom.id == bom_id, Bom.id.in_(permitted_bom_ids))
+    )).scalar_one_or_none()
+    if bom is None:
+        raise NotFoundError("BOM not found")
+
+    stmt = select(BomItem).where(BomItem.bom_id == bom_id)
+    clause = await eligibility.eligible_filter(db, user)
+    if clause is not None:
+        stmt = stmt.join(Item, Item.id == BomItem.item_id).where(clause)
+    rows = (await db.execute(stmt.order_by(BomItem.line_no, BomItem.id))).scalars().all()
+    return [{
+        "id": row.id, "bom_id": row.bom_id, "line_no": row.line_no,
+        "item_id": row.item_id, "item_code": row.item_code, "item_name": row.item_name,
+        "category_name": row.category_name, "uom_id": row.uom_id,
+        "uom_code": row.uom_code, "quantity": float(row.quantity), "remarks": row.remarks,
     } for row in rows]

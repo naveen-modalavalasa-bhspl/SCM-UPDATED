@@ -245,16 +245,22 @@ export function DateInput({
   onChange,
   disabled,
   ariaLabel,
+  min,
+  max,
 }: {
   value?: string | null;
   onChange: (value: string) => void;
   disabled?: boolean;
   ariaLabel: string;
+  min?: string;
+  max?: string;
 }) {
   return (
     <input
       type="date"
       value={value ?? ""}
+      min={min}
+      max={max}
       disabled={disabled}
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value)}

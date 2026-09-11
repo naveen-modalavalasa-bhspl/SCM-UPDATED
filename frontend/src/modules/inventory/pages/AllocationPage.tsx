@@ -11,6 +11,8 @@ import { ClaimsPanel } from "../components/ClaimsPanel";
 import { LoadingRows } from "../components/PageStates";
 import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
+import { TONE_SUBMIT } from "@/shared/components/tones";
+import { TONE_MINT } from "@/shared/components/tones";
 
 /** One "give this much, out of this warehouse" row. A line can carry several. */
 type Split = { qty: string; wh: string };
@@ -34,9 +36,7 @@ export function AllocationPage() {
   const qc = useQueryClient();
   const [decisions, setDecisions] = useState<Record<number, Split[]>>({});
   const [remarks, setRemarks] = useState("");
-  // MR numbers raised from this screen, keyed by indent line. The proposal is not
-  // refetched after raising one — nothing about the stock changed — so the button has
-  // to remember its own answer or it offers to raise the same request again.
+  // Immediate receipt while the refreshed proposal loads procurement coverage.
   const [raised, setRaised] = useState<Record<number, string>>({});
 
   const { data, isLoading, error } = useQuery({
@@ -148,6 +148,7 @@ export function AllocationPage() {
       setRaised((prev) => ({ ...prev, [line.indent_item_id]: mr.mr_no }));
       void alerts.success("material_request.raised", { number: mr.mr_no });
       void qc.invalidateQueries({ queryKey: ["material-requests"] });
+      void qc.invalidateQueries({ queryKey: ["allocation-proposal", id] });
     },
   });
 
@@ -175,6 +176,7 @@ export function AllocationPage() {
       void alerts.success("allocation.saved");
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["fulfillment-queue"] }),
+        qc.invalidateQueries({ queryKey: ["allocation-proposal", id] }),
         qc.invalidateQueries({ queryKey: ["allocations", "PENDING_APPROVAL"] }),
         // The screen this allocation is now waiting on. Neither key above matches
         // it, so Allocation Approvals opened on its cached list: the allocation just
@@ -244,7 +246,7 @@ export function AllocationPage() {
         </Card>
       )}
 
-      <div className="space-y-4">
+      <fieldset disabled={!data.allocatable || save.isPending || raise.isPending} className="space-y-4">
         {data.lines.map((line: AllocationProposalLine) => {
           const splits = splitsOf(line.indent_item_id);
           const giving = givenOn(line.indent_item_id);
@@ -259,6 +261,9 @@ export function AllocationPage() {
 
           return (
             <Card key={line.indent_item_id} className="p-4">
+              {(line.on_order_qty ?? 0) > 0 && <p className="mb-3 text-sm text-warning">
+                {line.on_order_qty} {line.uom_code} already covered by procurement.
+              </p>}
               <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
                 <div>
                   <span className="mono text-xs text-muted">{line.item_code}</span>
@@ -390,7 +395,7 @@ export function AllocationPage() {
                   never hear about the line unless somebody says so. Drawing from a
                   distribution point is still allowed and still on the screen above;
                   this is the other answer, made available rather than assumed. */}
-              {line.main_available_qty === 0 && short > 0 && (
+              {data.allocatable && !(line.on_order_qty ?? 0) && line.main_available_qty === 0 && short > 0 && (
                 <Can do="mr.create">
                   <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
                     <span className="text-sm text-muted">
@@ -404,7 +409,7 @@ export function AllocationPage() {
                         Requested on {raised[line.indent_item_id]}
                       </span>
                     ) : (
-                      <Button
+                      <Button className={TONE_MINT}
                         variant="secondary"
                         disabled={raise.isPending}
                         onClick={() => raise.mutate({ line, quantity: short })}
@@ -418,7 +423,7 @@ export function AllocationPage() {
             </Card>
           );
         })}
-      </div>
+      </fieldset>
 
       <div className="mt-4 space-y-3">
         <Field label="Why this split (optional)">
@@ -446,7 +451,7 @@ export function AllocationPage() {
               is the job profile — is this person one of the people who decides. */}
           {data.allocatable && (
             <Can do="allocation.submit">
-              <Button onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
+              <Button className={TONE_SUBMIT} onClick={() => save.mutate()} disabled={save.isPending || overSplits.length > 0}>
                 {save.isPending ? "Submitting…" : "Submit for approval"}
               </Button>
             </Can>

@@ -9,7 +9,7 @@ from app.platform.settings.clientinfo import get_client_info
 from app.platform.settings.models import AuditLog, Setting
 from app.platform.settings.schemas import (
     CodeFormatSettings, CompanySettings, FallbackSettings, HcmSyncSettings,
-    NotificationSettings, NumberingSettings, RegionalSettings, SettingsIn, SettingsOut,
+    NotificationSettings, NumberingSettings, SecuritySettings, RegionalSettings, SettingsIn, SettingsOut,
     WarehouseSettings,
 )
 from app.shared.enums import AuditAction
@@ -58,6 +58,14 @@ SETTINGS_SPEC = {
         # not answered for itself. Same key name the migration seeds — two spellings
         # of one setting is two settings.
         "requires_inward_default": ("warehouse.requires_inward_default", "bool"),
+    }),
+    "security": (SecuritySettings, {
+        # The SAME key `procurement.quote_otp.SETTING_KEY` reads at verification
+        # time. Two spellings of one setting is two settings, and the one the
+        # admin can see would be the one that does nothing.
+        "vendor_quote_otp_seconds": ("security.vendor_quote_otp_seconds", "int"),
+        # Read by `mail.service._reset_minutes`. Same key on both sides, same reason.
+        "password_reset_minutes": ("security.password_reset_minutes", "int"),
     }),
 }
 
@@ -150,6 +158,11 @@ async def get_app_settings(db: AsyncSession) -> SettingsOut:
             values[field] = defaults[field] if raw is None else _decode(raw, value_type)
         setattr(settings, group, model(**values))
     return settings
+
+
+async def get_company_letterhead(db: AsyncSession) -> CompanySettings:
+    """The company block alone, for the print templates every module renders."""
+    return (await get_app_settings(db)).company
 
 
 async def update_app_settings(db: AsyncSession, data: SettingsIn, user) -> SettingsOut:

@@ -2,3 +2,7 @@ node_modules
 dist
 *.local
 .DS_Store
+
+# Vitest writes these beside the config while a run is in flight; they are
+# process artefacts, not source.
+vitest.config.ts.timestamp-*

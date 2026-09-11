@@ -10,6 +10,7 @@ import { returnsApi } from "../api";
 import { ReturnsNav } from "../components/ReturnsNav";
 import { STATUS_FILTER_OPTIONS } from "../constants";
 import type { StockReturn } from "../types";
+import { TONE_MINT } from "@/shared/components/tones";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
 
@@ -126,7 +127,7 @@ export default function ReturnsListPage() {
           // the whole point of the screen, and hiding the only way in left storekeepers
           // on an empty page with nothing to do. The endpoint is still permission-gated
           // — a login without the code is refused at submit, which is the real check.
-          <Button onClick={() => navigate("/returns/new")}>
+          <Button className={TONE_MINT} onClick={() => navigate("/returns/new")}>
             <Plus className="h-4 w-4" /> New return
           </Button>
         }

@@ -11,6 +11,7 @@ import {
   rejectAllocationsBatch,
 } from "../api";
 import type { AllocBatchResult } from "../types";
+import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
 /**
  * One monthly cycle's allocations, opened from the Allocation Approvals list.
@@ -341,7 +342,7 @@ export function AllocationCycleApprovalPage() {
           )}
         </p>
         <div className="flex gap-2">
-          <Button
+          <Button className={TONE_REJECT}
             variant="ghost"
             disabled={act.isPending || signable.length === 0}
             onClick={() => { setResult(null); setProgress(0); act.mutate({ approve: false }); }}
@@ -352,7 +353,7 @@ export function AllocationCycleApprovalPage() {
               permission as the single Approve and reserve — signing a cycle is the
               same decision taken in one go. */}
           <Can do="allocation.approve_reserve">
-            <Button
+            <Button className={TONE_APPROVE}
               disabled={act.isPending || signable.length === 0}
               onClick={() => { setResult(null); setProgress(0); act.mutate({ approve: true }); }}
             >

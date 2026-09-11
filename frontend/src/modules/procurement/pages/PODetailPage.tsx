@@ -5,7 +5,8 @@ import {
   ShoppingCart, Package, Building2, Calendar, Coins, MapPin, FileText, ShieldCheck, History, Sparkles, TrendingDown, Save,
 } from "lucide-react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Button, Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
+import { Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
+import { Button } from "../components/ActionButton";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
 import { revisionLines } from "../types";
@@ -16,6 +17,7 @@ import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -202,9 +204,9 @@ export function PODetailPage() {
 
   const canDecide = po.data.awaiting_me ?? po.data.status === "PENDING_APPROVAL";
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
-  const canAmend = po.data.vendor_status === "ACCEPTED" || (po.data.vendor_status == null && po.data.status === "SENT_TO_VENDOR");
+  const canAmend = po.data.amendment_allowed === true;
   const isDraft = po.data.status === "DRAFT";
-  const isFinished = ["RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
+  const isFinished = ["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
   const busy = submit.isPending || send.isPending || decide.isPending;
 
@@ -276,7 +278,7 @@ export function PODetailPage() {
               )}
               {po.data.status === "DRAFT" && (
                 <Can do="po.submit">
-                  <Button disabled={busy} onClick={() => submit.mutate()} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
+                  <Button disabled={busy} onClick={() => submit.mutate()} className={`shadow-sm ${TONE_SUBMIT}`}>
                     <Send className="h-4 w-4" /> {submit.isPending ? "Sending…" : "Send for approval"}
                   </Button>
                 </Can>
@@ -604,16 +606,18 @@ export function PODetailPage() {
           <p className="text-xs text-muted">
             The current version is filed away and the order goes back to draft: it is approved again, and {po.data.vendor_status === "ACCEPTED" ? "the vendor has to accept the new version before anything can be delivered." : "sent to the vendor again for their answer."}
           </p>
-          <Field label="Why is it being amended?">
-            <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
-          </Field>
           <POHeaderFields value={header} disabled={true} onChange={(patch) => setHeader({ ...header, ...patch })} />
           <div className="border-t border-line pt-2">
             <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
             <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} freezeRateAndTax={true} />
           </div>
-          {amend.error && <p className="text-sm text-danger">{(amend.error as Error).message}</p>}
-          <div className="flex justify-end gap-2">
+          <div className="border-t border-line pt-4">
+            {amend.error && <p className="mb-3 text-sm text-danger">{(amend.error as Error).message}</p>}
+            <Field label="Reason for amendment" required>
+              <Input autoFocus value={amendReason} onChange={(e) => setAmendReason((e.target as HTMLInputElement).value)} placeholder="Required — e.g. delivery pushed to month end at vendor's request" />
+            </Field>
+          </div>
+          <div className="flex justify-end gap-2 mt-4">
             <Button variant="subtle" onClick={() => { setAmending(false); setAmendReason(""); }}>Cancel</Button>
             <Button disabled={amend.isPending || !amendReason.trim() || amendLines.length === 0} onClick={() => amend.mutate()}>{amend.isPending ? "Amending…" : "Save as a new revision"}</Button>
           </div>
@@ -625,7 +629,7 @@ export function PODetailPage() {
         <div className="p-3 sm:p-4"><ApprovalTrail docType="PO" docId={po.data.id} /></div>
       </div>
 
-      {po.data.status === "PENDING_APPROVAL" && (po.data.pending_with?.length > 0 || po.data.current_approver_name) && !canDecide && (
+      {po.data.status === "PENDING_APPROVAL" && ((po.data.pending_with?.length ?? 0) > 0 || po.data.current_approver_name) && !canDecide && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm p-4 text-sm font-medium text-ink flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-amber-500" />
           Waiting on {po.data.pending_with?.length ? po.data.pending_with.join(", ") : po.data.current_approver_name} for approval
@@ -652,10 +656,10 @@ export function PODetailPage() {
             {decide.error && <p className="mt-2 text-sm font-semibold text-red-600">{(decide.error as Error).message}</p>}
             <div className="mt-3 flex justify-end gap-2">
               <Can do="po.reject">
-                <Button variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
+                <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
               </Can>
               <Can do="po.approve">
-                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className="!bg-emerald-600 hover:!bg-emerald-700"><Check className="h-4 w-4"/> Approve</Button>
+                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className={TONE_APPROVE}><Check className="h-4 w-4"/> Approve</Button>
               </Can>
             </div>
           </div>

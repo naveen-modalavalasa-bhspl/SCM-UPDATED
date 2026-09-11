@@ -31,8 +31,8 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.core.security import hash_password_async, verify_password_async
 from app.platform.hcm.models import HcmEmployee
-from app.platform.mail import client
-from app.platform.mail.schemas import MailSendIn
+from app.platform.mail import client, template
+from app.platform.mail.schemas import MailComposeIn, MailSendIn
 from app.platform.settings.models import (
     EmailClaim, MailMessage, PasswordReset, UserCredential,
 )
@@ -68,12 +68,19 @@ def mailbox_status() -> dict:
 async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
                         cc_addrs: list[str] | None, subject: str, body: str,
                         kind: MailKind, actor=None,
-                        store_body: bool = True) -> MailMessage:
+                        store_body: bool = True,
+                        html: str | None = None,
+                        attachments: list[client.MailAttachment] | None = None) -> MailMessage:
     """Write the row, attempt the send, record what happened. Commits either way.
 
     `store_body=False` for password-reset mail: that body carries a live reset link
     and the Sent tab is readable by anyone holding `mail.view`, so logging it would
     hand every reader a working takeover link for whoever asked for one.
+
+    The row logs `body`, the plain-text half, and never `html`: the Sent tab is a
+    record of what was said, the markup around it says nothing a reader of that tab
+    needs, and a table column holding 12 KB of inline styles per message is a cost
+    with no reader.
     """
     row = MailMessage(
         to_addrs=", ".join(to_addrs),
@@ -91,7 +98,8 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
     await db.flush()
 
     try:
-        await client.send(to_addrs, subject, body, cc_addrs)
+        await client.send(to_addrs, subject, body, cc_addrs, html=html,
+                          attachments=attachments)
     except Exception as exc:  # noqa: BLE001 - recorded, then re-raised unchanged
         row.status = MailStatus.FAILED.value
         row.error = str(exc)[:2000]
@@ -105,17 +113,70 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
     return row
 
 
-async def send_mail(db: AsyncSession, data: MailSendIn, user) -> MailMessage:
-    """Send one message from the Mail screen. Gated on `mail.send` in the router."""
+async def send_mail(db: AsyncSession, data: MailComposeIn | MailSendIn,
+                    user, *, attachments: list[client.MailAttachment] | None = None) -> MailMessage:
+    """Send one message from the Mail screen. Gated on `mail.send` in the router.
+
+    Typed text is WRAPPED in the house template, never sent bare: a message from this
+    system carries the same letterhead whether a person wrote it or a document did.
+    A caller that has already built its own html (procurement's order copy) passes it
+    on `data.html` and is wrapped no further.
+    """
+    body = data.body
+    html = getattr(data, "html", None) or template.render(
+        subject=data.subject,
+        heading=data.subject,
+        preheader=" ".join(body.split())[:120],
+        # One typed line is one paragraph. A blank line in the box is therefore
+        # spacing and not an empty `<p>`, which is what a naive split would put in.
+        blocks=[template.paragraph(line) for line in body.splitlines() if line.strip()],
+        company=await _company(db),
+    )
     return await _log_and_send(
         db,
         to_addrs=[str(a) for a in data.to],
         cc_addrs=[str(a) for a in data.cc],
         subject=data.subject,
-        body=data.body,
+        body=body,
         kind=MailKind.MANUAL,
         actor=user,
+        html=html,
+        attachments=attachments,
     )
+
+
+async def _reset_minutes(db: AsyncSession) -> int:
+    """How long a reset link lives, as the admin has set it.
+
+    Settings first, `config.PASSWORD_RESET_MINUTES` behind it. The env value stays the
+    DEFAULT rather than being deleted: it is what shipped, it is what an unconfigured
+    deployment and every test still get, and rule 13 keeps deployment-time values in
+    `.env`. What changed is only that an admin no longer needs a redeploy to move it.
+
+    Never fatal. An unreadable settings row must not stop somebody getting back into
+    their account — the fallback is a working window, not zero.
+    """
+    try:
+        from app.platform.settings.service import get_setting
+        raw = await get_setting(db, "security.password_reset_minutes")
+        # Floored at 5: a link that dies before the mail is opened is a support call,
+        # and a nought typed into the box must not lock everybody out of recovery.
+        return max(5, int(raw)) if raw else settings.PASSWORD_RESET_MINUTES
+    except Exception as exc:  # noqa: BLE001 - a setting is not worth a locked-out user
+        log.warning("reset expiry setting unreadable, using the configured default: %s",
+                    exc)
+        return settings.PASSWORD_RESET_MINUTES
+
+
+async def _company(db: AsyncSession) -> template.Company:
+    """The letterhead the footer prints. Never fatal: an unreadable settings row must
+    not stop a password reset, and `Company()` is the registered particulars."""
+    try:
+        from app.platform.settings.service import get_company_letterhead
+        return template.Company.of(await get_company_letterhead(db))
+    except Exception as exc:  # noqa: BLE001 - a footer is not worth a failed send
+        log.warning("company letterhead unavailable for mail footer: %s", exc)
+        return template.Company()
 
 
 async def list_sent(db: AsyncSession, params: PageParams,
@@ -148,9 +209,20 @@ async def inbox(search: str | None = None, limit: int = client.INBOX_FETCH_LIMIT
 #  Password reset
 # --------------------------------------------------------------------------- #
 
-def _reset_email(name: str, link: str, minutes: int) -> tuple[str, str]:
+def _reset_email(name: str, link: str, minutes: int,
+                 company: template.Company | None = None) -> tuple[str, str, str]:
+    """Subject, plain-text body, html body — the three halves of the reset message.
+
+    The plain text is WRITTEN and not derived from the html: this is the one message
+    whose fallback a person may genuinely have to read, and the link has to sit on a
+    line of its own where a client will make it clickable.
+
+    The link is repeated under the button (`link_fallback`) for the same reason. A
+    reset that arrives as an unclickable button is a locked-out user and a support
+    call, and the token is already in the message either way.
+    """
     subject = "Reset your SCM ERP password"
-    body = (
+    text = (
         f"Hello {name},\n\n"
         "Somebody asked to reset the password for your SCM ERP account.\n"
         "Open this link to choose a new one:\n\n"
@@ -160,7 +232,31 @@ def _reset_email(name: str, link: str, minutes: int) -> tuple[str, str]:
         "and nobody has been given access to your account.\n\n"
         "— SCM ERP"
     )
-    return subject, body
+    html = template.render(
+        subject=subject,
+        eyebrow="Account security",
+        heading="Reset your password",
+        preheader=f"Choose a new password. The link is good for {minutes} minutes.",
+        blocks=[
+            template.paragraph(f"Hello {name},"),
+            template.paragraph(
+                "Somebody asked to reset the password for your SCM ERP account. "
+                "Choose a new one here:"),
+            template.button("Choose a new password", link),
+            template.facts([
+                ("Valid for", f"{minutes} minutes from now"),
+                ("Uses", "Once — the link stops working after a password is set"),
+            ]),
+            template.link_fallback(link),
+            template.paragraph(
+                "If this was not you, ignore this message. Your password has not "
+                "changed and nobody has been given access to your account.",
+                muted=True),
+        ],
+        company=company,
+        footer_note="Never forward this message — the link inside it signs in as you.",
+    )
+    return subject, text, html
 
 
 def domain_allowed(address: str) -> bool:
@@ -301,17 +397,22 @@ async def _send_reset_link(db: AsyncSession, employee: HcmEmployee,
         stale.used_at = now
 
     token = secrets.token_urlsafe(32)
+    # Read once and used for BOTH the stamp and the sentence in the mail. Reading it
+    # twice would let a setting changed between the two lines put a link on the wire
+    # that promises one window and dies at another.
+    minutes = await _reset_minutes(db)
     db.add(PasswordReset(
         employee_id=employee.id,
         token_hash=_digest(token),
-        expires_at=now + timedelta(minutes=settings.PASSWORD_RESET_MINUTES),
+        expires_at=now + timedelta(minutes=minutes),
         requested_ip=ip_address,
     ))
     await db.flush()
 
     link = f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={token}"
-    subject, body = _reset_email(
-        employee.full_name or "there", link, settings.PASSWORD_RESET_MINUTES)
+    subject, body, html = _reset_email(
+        employee.full_name or "there", link, minutes,
+        await _company(db))
     try:
         await _log_and_send(
             db,
@@ -319,6 +420,7 @@ async def _send_reset_link(db: AsyncSession, employee: HcmEmployee,
             cc_addrs=None,
             subject=subject,
             body=body,
+            html=html,
             kind=MailKind.PASSWORD_RESET,
             actor=None,
             # NEVER log the body: it is a live takeover link and the Sent tab is
