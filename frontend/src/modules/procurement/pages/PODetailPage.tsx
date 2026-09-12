@@ -53,6 +53,12 @@ export function PODetailPage() {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["purchase-order", poId] });
     qc.invalidateQueries({ queryKey: ["pos"] });
+    // RFQ allocation is derived from live PO lines. Mark it stale whenever an order
+    // changes so returning from a rejection/cancellation immediately shows the
+    // released quantity and enables a re-share where appropriate.
+    qc.invalidateQueries({ queryKey: ["rfq"] });
+    qc.invalidateQueries({ queryKey: ["rfqs"] });
+    qc.invalidateQueries({ queryKey: ["rfq-comparison"] });
     qc.invalidateQueries({ queryKey: ["approvals"] });
     qc.invalidateQueries({ queryKey: ["procurement", "approval-trail"] });
   };
@@ -609,7 +615,15 @@ export function PODetailPage() {
           <POHeaderFields value={header} disabled={true} onChange={(patch) => setHeader({ ...header, ...patch })} />
           <div className="border-t border-line pt-2">
             <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
-            <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} freezeRateAndTax={true} />
+            <LinePicker
+              lines={amendLines}
+              onChange={setAmendLines}
+              showRate
+              showTax
+              showDate={false}
+              freezeRateAndTax={true}
+              capQuantityAtOriginal={false}
+            />
           </div>
           <div className="border-t border-line pt-4">
             {amend.error && <p className="mb-3 text-sm text-danger">{(amend.error as Error).message}</p>}

@@ -105,17 +105,17 @@ export function SavedViews({
                 }}
               />
               <Button onClick={commit} disabled={!name.trim()}>
-                <Check className="mr-1.5 h-4 w-4" /> Save
+                <Check className="h-4 w-4" /> Save
               </Button>
               <Button variant="subtle" onClick={() => setNaming(false)}>Cancel</Button>
             </>
           ) : (
             <Button variant="subtle" onClick={() => setNaming(true)}>
-              <Bookmark className="mr-1.5 h-4 w-4" /> Save this view
+              <Bookmark className="h-4 w-4" /> Save this view
             </Button>
           )}
           <Button variant="subtle" onClick={() => setPicking((open) => !open)}>
-            <Columns3 className="mr-1.5 h-4 w-4" />
+            <Columns3 className="h-4 w-4" />
             Columns ({shown.size}/{columns.length})
           </Button>
         </div>

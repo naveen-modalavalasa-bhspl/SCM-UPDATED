@@ -296,6 +296,13 @@ function AppRoutes() {
           path="/warehouse/grn/:id/print"
           element={me ? <GRNPrintPage /> : <Navigate to="/login" replace />}
         />
+        {/* The same sheet and the same row — a gate entry IS the receipt before it
+            converts, and the component heads the paper off `receipt_type`. The second
+            path exists so the gate register's own link does not read /grn/. */}
+        <Route
+          path="/warehouse/gate-entries/:id/print"
+          element={me ? <GRNPrintPage /> : <Navigate to="/login" replace />}
+        />
         <Route
           path="/warehouse/consignments/:id/print"
           element={me ? <ConsignmentPrintPage /> : <Navigate to="/login" replace />}

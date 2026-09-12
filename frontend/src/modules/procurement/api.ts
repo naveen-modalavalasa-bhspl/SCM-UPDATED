@@ -213,8 +213,13 @@ export const rfqApi = {
   evaluationMethods: () =>
     api.get<EvaluationMethodOption[]>("/api/rfqs/evaluation-methods")
       .then((r) => r.data),
-  award: (id: number, quotation_id: number, comments = "") =>
-    api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_id, comments }).then((r) => r.data),
+  award: (id: number, quotation_ids: number[], comments = "") =>
+    api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_ids, comments }).then((r) => r.data),
+  awardSplit: (
+    id: number,
+    allocations: { item_id: number; vendor_id: number; quantity: number }[],
+    comments = "",
+  ) => api.post<RFQ>(`/api/rfqs/${id}/award`, { allocations, comments }).then((r) => r.data),
   quotations: (params: {
     rfq_id?: number; vendor_id?: number; search?: string;
     /** One status or a comma-separated set, so a KPI tile counting a bucket

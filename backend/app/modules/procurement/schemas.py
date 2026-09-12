@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
@@ -531,6 +531,16 @@ class RFQVendorOut(BaseModel):
     responded_at: datetime | None = None
     mapped_item_ids: list[int] | None = None
     item_quantities: dict[str, float] | None = None
+    #: What this supplier WON, item id -> quantity, once the tender is awarded. Null on
+    #: a whole-quote award, where the winner took every line as quoted. Served so the
+    #: comparison sheet can restate an existing split when a dead purchase order sends
+    #: part of the award back to be re-split — a re-award has to say what everybody
+    #: keeps, not only what is moving.
+    awarded_quantities: dict[str, float] | None = None
+    #: What is currently covered by a live purchase order, item id -> quantity.
+    #: Computed from the PO lines on every RFQ read rather than stored beside the
+    #: award: rejecting or cancelling an order must release its quantity immediately.
+    live_allocated_quantities: dict[str, float] | None = None
 
 
 class RFQListRow(BaseModel):
@@ -561,6 +571,19 @@ class RFQListRow(BaseModel):
     created_at: datetime
 
 
+class RFQPurchaseOrderRef(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    status: str
+    quotation_id: int | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    # The original PO quantity for each item. This lets the comparison screen show
+    # exactly what was already sent before the buyer awards an additional balance.
+    item_quantities: dict[str, float] = Field(default_factory=dict)
+
+
 class RFQOut(RFQListRow):
     requisition_id: int | None = None
     requisition_no: str | None = None
@@ -579,6 +602,7 @@ class RFQOut(RFQListRow):
     po_id: int | None = None
     po_no: str | None = None
     po_status: str | None = None
+    purchase_orders: list[RFQPurchaseOrderRef] = []
     # Carried from the requisition behind it, so a tender reads on its own. Derived at
     # request time (service.get_rfq) and empty on the vendor-facing routes, which read
     # the RFQ by a different path — a supplier has no business with our indent numbers.
@@ -811,9 +835,29 @@ class QuoteOut(QuoteListRow):
     items: list[QuoteItemOut] = []
 
 
+class RFQAwardAllocationIn(BaseModel):
+    """One supplier's share of one RFQ item, decided against submitted prices."""
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
 class AwardIn(BaseModel):
-    quotation_id: int
+    """Award one quotation in full, or split items between suppliers."""
+    quotation_id: int | None = None
+    # Compatibility with the earlier UI. The service accepts exactly one id here;
+    # a genuine multi-supplier award must state its per-item quantities.
+    quotation_ids: Annotated[list[int], BatchIds] = []
+    allocations: Annotated[list[RFQAwardAllocationIn], BatchIds] | None = None
     comments: str = ""
+
+    @model_validator(mode="after")
+    def _one_shape(self):
+        if sum((bool(self.quotation_id), bool(self.quotation_ids),
+                bool(self.allocations))) != 1:
+            raise ValueError(
+                "Award one quotation or provide item allocations, not both or neither")
+        return self
 
 
 # --------------------------------------------------------------------------- #

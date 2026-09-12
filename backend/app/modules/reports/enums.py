@@ -12,12 +12,18 @@ class LedgerKey(str, Enum):
     INDENT_TRACKER = "indent_tracker"
     APPROVAL_SLA = "approval_sla"
     CONSUMPTION = "consumption"
+    # The asset-tagged half of stock. `stk_balance.asset_code` is written only by
+    # warehouse putaway for an item flagged `mst_items.is_asset`, so a row carrying
+    # one already IS an asset unit — there is nothing left to join or flag.
+    ASSETS = "assets"
     # Everything going back: field returns up the chain (`inv_sto` rows carrying the
     # returns marker) and purchase returns out to vendors (`pro_returns`), on one
     # ledger because "what went back and what happened to it" is one question.
     RETURNS = "returns"
     # The outward transport leg — mode, carrier, freight, where it got to.
     TRANSPORT = "transport"
+    # Purchase orders — raised, approved, sent, and the vendor's answer.
+    PROCUREMENT = "procurement"
 
 
 class AgeBucket(str, Enum):

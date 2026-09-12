@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
+import { useEffect, useRef, useState } from "react";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Skeleton } from "@heroui/react";
+import { FixedSizeList } from "react-window";
 import { Boxes, MapPin, ScanLine, Trash2 } from "lucide-react";
 import { Button, ErrorBanner } from "@/shared/components";
 import { TrackingBadge } from "./TrackingBadge";
@@ -142,6 +143,16 @@ export function SerialNumbersModal({
     onPageChange: (page: number) => void;
     /** Debounced by the caller; drives the server query. */
     onSearchChange: (value: string) => void;
+    /** Why the list could not be fetched, if it could not.
+     *
+     * "No codes are available here" and "the request for them failed" are different
+     * facts and only one of them is about the shelf. Conflating them sent a
+     * storekeeper to look for stock that was sitting in the bay, because a failed
+     * request rendered as an empty one. */
+    error?: string | null;
+    /** True once a fetch has actually completed. An empty list before that is "not
+     *  asked yet", which must not be drawn as "nothing here". */
+    loaded?: boolean;
     /** Look one exact identifier up across the WHOLE pool, for a scan that lands on
      *  a unit the current page does not carry. Returns the value to select, or null. */
     onResolve?: (value: string) => Promise<string | null>;
@@ -184,10 +195,30 @@ export function SerialNumbersModal({
    * query per character of a barcode.
    */
   const onSearchChange = paging?.onSearchChange;
+  /**
+   * What was last HANDED to the server, so an unchanged needle is never sent twice.
+   *
+   * Not an optimisation — it is what makes the pager work. `paging` is built as an
+   * object literal by the caller, so `onSearchChange` is a new function on every
+   * render and this effect re-runs every time. Without this guard each of those runs
+   * re-sent the same (usually empty) search, and telling the caller "the search
+   * changed" is what resets it to page 1: pressing Next moved to page 2 and snapped
+   * back 300 ms later, so no page but the first could ever be read.
+   */
+  const sentSearch = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) sentSearch.current = "";
+  }, [isOpen]);
+
   useEffect(() => {
     if (!isOpen || !onSearchChange) return;
     const value = entry.trim();
-    const timer = setTimeout(() => onSearchChange(value), 300);
+    if (sentSearch.current === value) return;
+    const timer = setTimeout(() => {
+      sentSearch.current = value;
+      onSearchChange(value);
+    }, 300);
     return () => clearTimeout(timer);
   }, [entry, isOpen, onSearchChange]);
 
@@ -239,16 +270,30 @@ export function SerialNumbersModal({
     const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
     /**
-     * NOT BUILT: "tick the whole list in one press".
+     * Tick the whole list in one press.
      *
-     * The counterpart to Clear was designed and its bounds were written — never more
-     * than the line asks for, following the search box so "all" means the units on
-     * screen — but no button was ever rendered for it, so the arithmetic sat unread
-     * and the build refused it as dead. Removed here rather than wired, because
-     * wiring it is a new press on a screen nobody has tested, not part of a merge.
-     * Issuing 200 handsets off one bin is still 200 clicks or 200 scans until it
-     * lands.
+     * Issuing 200 handsets off one bin was 200 clicks, or 200 scans, for a decision
+     * the storekeeper had already made — they are all in the same bay and the line is
+     * for all of them. Bounded exactly as a scan is: never more than the line asks
+     * for, so it fills the remaining slots and stops.
+     *
+     * It follows the search box, so with a filter typed "all" means the units on
+     * screen — how one batch is picked out of a mixed bin — and clearing the search
+     * offers the rest. Units already chosen are left alone rather than re-added.
+     *
+     * qa deleted this on the reasonable evidence that nothing rendered it and the
+     * build called it dead. The button exists (below, beside Clear); it was the
+     * BUTTON that had gone missing, not this arithmetic, so the fix is to keep both
+     * rather than to drop the half that was still correct.
      */
+    const addable = visible.filter((s) => !selected.has(s));
+    const room = required - selected.size;
+    const willAdd = Math.max(0, Math.min(room, addable.length));
+    const selectAll = () => {
+      if (willAdd <= 0) return;
+      setError(null);
+      setSerials((rows) => [...rows, ...addable.slice(0, willAdd)]);
+    };
     const clearAll = () => {
       setError(null);
       setSerials([]);
@@ -273,9 +318,11 @@ export function SerialNumbersModal({
       const rows = available ?? [];
       // The value the line is keyed on first, then any other identifier of the
       // same unit — so one scan of the label finds it whichever number is on it.
+      // If none match exactly but the filter narrowed the list to exactly one, select it.
       const hit =
         rows.find((s) => same(s, value))
-        ?? rows.find((s) => aliases(s).some((token) => same(token, value)));
+        ?? rows.find((s) => aliases(s).some((token) => same(token, value)))
+        ?? (visible.length === 1 ? visible[0] : undefined);
       setEntry("");
       if (!hit) {
         // Paged: the gun fires faster than the debounce, so the unit it just read is
@@ -337,7 +384,7 @@ export function SerialNumbersModal({
     return (
       <Modal isOpen={isOpen} onClose={onClose} size={typed ? "3xl" : "lg"} scrollBehavior="inside">
         <ModalContent>
-          <ModalHeader className="flex-col items-start gap-1">
+          <ModalHeader className="flex-col items-start gap-1 bg-content1/80 backdrop-blur-md border-b border-line/50 pb-4">
             <span className="flex flex-wrap items-center gap-2">
               <span className="font-display text-lg font-bold text-ink">
                 {selectMode
@@ -434,6 +481,16 @@ export function SerialNumbersModal({
 
             {selectMode && !readOnly && (available ?? []).length > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-2">
+                {/* `disabled`, not `isDisabled`: the shared Button forwards only the
+                  * former, so the latter is dropped and the button stays pressable at
+                  * the ceiling. Bounded by what the pick still has room for. */}
+                <Button
+                  variant="subtle"
+                  disabled={willAdd <= 0}
+                  onClick={selectAll}
+                >
+                  Select {willAdd > 0 ? willAdd : "all"}
+                </Button>
                 <Button
                   variant="subtle"
                   disabled={selected.size === 0}
@@ -441,7 +498,7 @@ export function SerialNumbersModal({
                 >
                   Clear
                 </Button>
-                {selected.size >= required && (
+                {willAdd <= 0 && selected.size >= required && (
                   <span className="text-xs text-muted">
                     This pick is full at {required}.
                   </span>
@@ -449,9 +506,19 @@ export function SerialNumbersModal({
               </div>
             )}
 
-            {paging?.loading && (available ?? []).length === 0 ? (
-              <div className="py-8 text-center text-sm text-muted">
-                Loading {plural(2)}…
+            {paging?.error && (available ?? []).length === 0 ? (
+              <div className="py-8 text-center text-sm">
+                <p className="font-semibold text-bad">The {plural(2)} could not be loaded.</p>
+                <p className="mt-1 text-muted">{paging.error}</p>
+                <p className="mt-1 text-muted">
+                  This is not a statement about the shelf — the stock may well be there.
+                </p>
+              </div>
+            ) : (paging && !paging.loaded) || (paging?.loading && (available ?? []).length === 0) ? (
+              <div className="space-y-3 py-4">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <Skeleton key={i} className="h-11 w-full rounded-lg" />
+                ))}
               </div>
             ) : (available ?? []).length === 0 ? (
               <div className="py-8 text-center text-sm text-muted">
@@ -469,94 +536,82 @@ export function SerialNumbersModal({
                 Nothing here matches the search.
               </div>
             ) : typed ? (
-              /* The columned picker. One row per unit, and the TYPE is stated in its
-               * own column rather than left to be inferred from the shape of the
-               * string — an IMEI and an asset tag are indistinguishable by eye. The
-               * batch and bin repeat down every row on purpose: they are what the
-               * list is scoped to, so a row that somehow carries a different one is
-               * visible instead of silent. */
-              <div className="overflow-x-auto rounded-xl border border-line/70">
-                <table className="w-full min-w-[620px] border-collapse text-sm">
-                  <thead className="bg-content2">
-                    <tr>
-                      <th className="w-10 px-3 py-2" aria-label="Selected" />
-                      <th className="w-8 px-1 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">#</th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">
-                        {trackingMeta?.label ?? "Identifier"}
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">
-                        Also on this unit
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Batch</th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Location</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visible.map((value, i) => {
-                      const unit = unitByValue?.[value];
-                      const isSelected = selected.has(value);
-                      // Full at the ceiling: an unticked row that cannot be ticked
-                      // says so by going quiet, rather than by refusing the click
-                      // with an error the storekeeper has to read.
-                      const full = selectMode && !isSelected && selected.size >= required;
-                      return (
-                        <tr
-                          key={value}
-                          onClick={() => !readOnly && !full && toggle(value)}
-                          className={`border-t border-line/70 ${
-                            isSelected ? "bg-brand/5" : full ? "opacity-50" : "hover:bg-content2/60"
-                          } ${readOnly || full ? "" : "cursor-pointer"}`}
-                        >
-                          <td className="px-3 py-2">
-                            <input
-                              type="checkbox"
-                              checked={selectMode ? isSelected : !isSelected}
-                              disabled={readOnly || full}
-                              onChange={() => toggle(value)}
-                              onClick={(e) => e.stopPropagation()}
-                              aria-label={`${selectMode ? "Select" : "Reject"} ${value}`}
-                              className="h-4 w-4 accent-current text-brand"
-                            />
-                          </td>
-                          <td className="px-1 py-2 text-[11px] text-muted tabular">{i + 1}</td>
-                          <td className="px-3 py-2">
-                            <span className="flex items-center gap-2">
-                              <TrackingBadge type={unit?.type ?? trackingType} meta={trackingMeta} size="sm" />
-                              <span className="font-mono text-sm font-semibold text-ink">{value}</span>
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 font-mono text-[11px] leading-4 text-muted">
-                            {[
-                              unit?.serial && unit.serial !== value ? `SN ${unit.serial}` : null,
-                              unit?.imei && unit.imei !== value ? `IMEI ${unit.imei}` : null,
-                              unit?.code && unit.code !== value ? `Code ${unit.code}` : null,
-                            ].filter(Boolean).join("  ·  ") || "—"}
-                          </td>
-                          <td className="px-3 py-2 font-mono text-xs text-body">{unit?.batchNo || "—"}</td>
-                          <td className="px-3 py-2 font-mono text-xs text-body">
-                            <span className="flex items-center gap-1">
-                              <MapPin className="h-3 w-3 shrink-0 text-brand" aria-hidden />
-                              {unit?.binCode || "—"}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <div className="overflow-hidden rounded-xl border border-line/70">
+                <div className="bg-content2 flex items-center border-b border-line/70">
+                  <div className="w-10 px-3 py-2" />
+                  <div className="w-8 px-1 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">#</div>
+                  <div className="flex-1 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">{trackingMeta?.label ?? "Identifier"}</div>
+                  <div className="w-24 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Batch</div>
+                  <div className="w-24 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Location</div>
+                </div>
+                <FixedSizeList
+                  height={400}
+                  itemCount={visible.length}
+                  itemSize={44}
+                  width="100%"
+                >
+                  {({ index, style }) => {
+                    const value = visible[index];
+                    const unit = unitByValue?.[value];
+                    const isSelected = selected.has(value);
+                    const full = selectMode && !isSelected && selected.size >= required;
+                    return (
+                      <div
+                        style={style}
+                        onClick={() => !readOnly && !full && toggle(value)}
+                        className={`flex items-center border-b border-line/70 last:border-b-0 transition-colors ${
+                          isSelected ? "bg-brand/5" : full ? "opacity-50" : "hover:bg-content2/60"
+                        } ${readOnly || full ? "" : "cursor-pointer"}`}
+                      >
+                        <div className="w-10 px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={selectMode ? isSelected : !isSelected}
+                            disabled={readOnly || full}
+                            onChange={() => toggle(value)}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label={`${selectMode ? "Select" : "Reject"} ${value}`}
+                            className="h-4 w-4 accent-current text-brand"
+                          />
+                        </div>
+                        <div className="w-8 px-1 py-2 text-[11px] text-muted tabular">{index + 1}</div>
+                        <div className="flex-1 px-3 py-2 truncate">
+                          <span className="flex items-center gap-2">
+                            <TrackingBadge type={unit?.type ?? trackingType} meta={trackingMeta} size="sm" />
+                            <span className="font-mono text-sm font-semibold text-ink">{value}</span>
+                          </span>
+                        </div>
+                        <div className="w-24 px-3 py-2 font-mono text-xs text-body truncate">{unit?.batchNo || "—"}</div>
+                        <div className="w-24 px-3 py-2 font-mono text-xs text-body truncate">
+                          <span className="flex items-center gap-1">
+                            <MapPin className="h-3 w-3 shrink-0 text-brand" aria-hidden />
+                            {unit?.binCode || "—"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  }}
+                </FixedSizeList>
               </div>
             ) : (
-              <ul className="space-y-1.5">
-                {visible.map((s, i) => {
-                  const isSelected = selected.has(s);
-                  const isRejected = !isSelected;
-                  return (
-                    <li key={s}>
+              <div className="rounded-xl border border-line/70 overflow-hidden">
+                <FixedSizeList
+                  height={400}
+                  itemCount={visible.length}
+                  itemSize={44}
+                  width="100%"
+                >
+                  {({ index, style }) => {
+                    const s = visible[index];
+                    const isSelected = selected.has(s);
+                    const isRejected = !isSelected;
+                    return (
                       <label
-                        className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border px-3 ${
+                        style={style}
+                        className={`flex cursor-pointer items-center gap-3 border-b border-line/50 last:border-0 px-3 transition-colors ${
                           selectMode
-                            ? isSelected ? "border-brand/50 bg-brand/5" : "border-line/70 bg-content1"
-                            : isRejected ? "border-bad/50 bg-bad-bg/40" : "border-line/70 bg-content1"
+                            ? isSelected ? "bg-brand/5" : "bg-content1 hover:bg-content2/50"
+                            : isRejected ? "bg-bad-bg/40" : "bg-content1 hover:bg-content2/50"
                         }`}
                       >
                         <input
@@ -567,17 +622,15 @@ export function SerialNumbersModal({
                           aria-label={`${selectMode ? "Select" : "Reject"} ${s}`}
                           className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
                         />
-                        <span className="w-6 shrink-0 text-[11px] text-muted tabular">{i + 1}</span>
-                        <span className="min-w-0">
+                        <span className="w-6 shrink-0 text-[11px] text-muted tabular">{index + 1}</span>
+                        <span className="min-w-0 flex flex-col justify-center">
                           <span className="block truncate font-mono text-sm text-ink">{s}</span>
-                          {imeiBySerial?.[s] && (
+                          {(imeiBySerial?.[s] || metaByValue?.[s]) && (
                             <span className="block truncate font-mono text-[11px] text-muted">
-                              IMEI {imeiBySerial[s]}
-                            </span>
-                          )}
-                          {metaByValue?.[s] && (
-                            <span className="block truncate font-mono text-[11px] text-muted">
-                              {metaByValue[s]}
+                              {[
+                                imeiBySerial?.[s] ? `IMEI ${imeiBySerial[s]}` : null,
+                                metaByValue?.[s]
+                              ].filter(Boolean).join(" · ")}
                             </span>
                           )}
                         </span>
@@ -589,10 +642,10 @@ export function SerialNumbersModal({
                           {selectMode ? (isSelected ? "Selected" : "Available") : (isRejected ? "Rejected" : "Accepted")}
                         </span>
                       </label>
-                    </li>
-                  );
-                })}
-              </ul>
+                    );
+                  }}
+                </FixedSizeList>
+              </div>
             )}
 
             {/* The pager. Present only for a paged caller, and deliberately BELOW the
@@ -647,7 +700,25 @@ export function SerialNumbersModal({
                     );
                     return;
                   }
-                  onSave((available ?? []).filter((s) => selected.has(s)));
+                  // Select mode hands back the WHOLE selection; reject mode hands
+                  // back what is left of the page.
+                  //
+                  // These are not the same question, and intersecting with
+                  // `available` answered the wrong one as soon as the list paged:
+                  // `available` is the page on screen, so picking 500 on page 1 and
+                  // 500 on page 2 saved only the 500 the reader happened to be
+                  // looking at. QC's list is the line's own captured serials and is
+                  // never paged, so there the intersection is exactly right — it is
+                  // what turns "rejected" into "accepted".
+                  //
+                  // Deduplicated through a Set rather than `indexOf`: this list runs
+                  // to `limits.MAX_SERIALS_PER_LINE` (10,000), where the quadratic
+                  // form freezes the tab.
+                  onSave(
+                    selectMode
+                      ? Array.from(new Set(serials))
+                      : (available ?? []).filter((s) => selected.has(s)),
+                  );
                   onClose();
                 }}
               >

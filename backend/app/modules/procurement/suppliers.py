@@ -306,9 +306,8 @@ async def deactivate_supplier(db: AsyncSession, vendor_id: int, user) -> dict:
 # vendor login is minted, and it is idempotent: pressing Issue login twice leaves the
 # password the supplier may already have changed exactly as it is.
 #
-# A supplier KEEPS the forced first change that carriers are excused (see
-# `partners._clear_forced_change`): an RFQ carries prices, so the buyer who typed the
-# default must not stay able to sign in as the vendor and read them.
+# Every emailed default password is forced to change on first sign-in, for suppliers
+# and carriers alike.
 
 async def issue_login(db: AsyncSession, vendor_id: int, username: str | None,
                       user) -> dict:

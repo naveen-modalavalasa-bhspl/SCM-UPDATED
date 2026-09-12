@@ -1,7 +1,7 @@
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getReceipt, warehouseOptions } from "../api";
-import { fmtDate, fmtQty } from "../format";
+import { fmtDate, fmtDateTime, fmtQty } from "../format";
 import { PrintTemplate, type PrintColumn } from "@/shared/components";
 
 export function GRNPrintPage() {
@@ -33,13 +33,34 @@ export function GRNPrintPage() {
   const warehouse = warehouses?.find((w: any) => w.id === grn.warehouse_id || w.value === grn.warehouse_id) as any;
   const warehouseName = warehouse?.label || warehouse?.name || `WH-${grn.warehouse_id}`;
 
+  // A gate entry and a GRN are the SAME ROW (`inb_receipts`, `receipt_type` says
+  // which), so one sheet serves both — and must, or the paper a storekeeper hands the
+  // driver at the gate would be headed "Goods Receipt Note" over goods that are not
+  // ours yet, numbered with a REC the gate never wrote down. The number that identifies
+  // a gate entry is `gate_entry_no`; `grn_no` on that row is re-minted when it converts.
+  const atGate = grn.receipt_type === "GATE_ENTRY";
+
   const metadata = [
     { label: "Warehouse", value: grn.warehouse_id ? warehouseName : "—" },
     { label: "Vendor", value: grn.vendor_name || "—" },
     { label: "PO Number", value: grn.po_no || "—", mono: true },
     { label: "Invoice Number", value: grn.invoice_no || "—", mono: true },
     { label: "Vehicle", value: grn.vehicle_no || "—", mono: true },
-    { label: "Gate Entry", value: grn.gate_entry_no || "—", mono: true },
+    ...(atGate
+      ? [
+          { label: "Transporter", value: grn.transporter_name || "—" },
+          { label: "LR Number", value: grn.lr_no || "—", mono: true },
+          { label: "E-way Bill", value: grn.eway_bill_no || "—", mono: true },
+        ]
+      : [
+          // The GRN names the gate entry it came in on, and when. The link between the
+          // two is the only record that the goods were seen at the gate first.
+          { label: "Gate Entry", value: grn.gate_entry_no || "—", mono: true },
+          {
+            label: "Gate Entry At",
+            value: grn.gate_entry_at ? fmtDateTime(grn.gate_entry_at) : "—",
+          },
+        ]),
   ];
 
   const columns: PrintColumn[] = [
@@ -65,14 +86,31 @@ export function GRNPrintPage() {
 
   return (
     <PrintTemplate
-      title="Goods Receipt Note"
-      documentNo={grn.grn_no}
+      title={atGate ? "Gate Entry" : "Goods Receipt Note"}
+      kicker={atGate ? "Inward — at the gate" : undefined}
+      documentNo={atGate ? (grn.gate_entry_no || grn.grn_no) : grn.grn_no}
       date={fmtDate(grn.grn_date)}
+      dateFields={
+        atGate && grn.gate_entry_at
+          ? [["Arrived", fmtDateTime(grn.gate_entry_at)]]
+          : undefined
+      }
       status={grn.status}
       metadata={metadata}
       columns={columns}
       items={items}
+      itemsTitle={atGate ? "Declared at the gate" : "Line items"}
       remarks={grn.remarks}
+      signatures={
+        atGate
+          ? ["Driver", "Security / gate", "Storekeeper", "Authorised signatory"]
+          : undefined
+      }
+      footerNote={
+        atGate
+          ? "Gate entry only. The goods recorded here have NOT been accepted — acceptance happens on the GRN raised from this entry."
+          : undefined
+      }
     />
   );
 }

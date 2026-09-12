@@ -16,11 +16,11 @@ import { unitSupplyKey } from "../components/IssueSplitEditor";
 import type { IssueGroup, IssueSplit } from "../issueSplits";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components/Timeline";
-import { SerialNumbersModal } from "../components/SerialNumbersModal";
+import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import {
   acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
   employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
-  issueApprovalHistory, listSerials, postIssue, projectOptions,
+  issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
   returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
@@ -35,7 +35,7 @@ import { alerts } from "@/modules/alerts";
 import type {
   HandlingUnit,
   Issue, IssueItemWrite, IssueStockSource, IssueWrite, ItemOption, OccupancyMove,
-  SerialNumber, TrackingType, UnitMode, UnitSupply,
+  TrackingType, UnitMode, UnitSupply,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
@@ -246,21 +246,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   >(null);
   const [reason, setReason] = useState("");
   const [serialLine, setSerialLine] = useState<number | null>(null);
-  /**
-   * Which page of this pick's units the picker is showing, and what it is searching
-   * for. Both are SERVER state: one bin can hold 10,000 coded units and the page
-   * ceiling is 500, so the old single `size: 500` read offered the first 500 and
-   * called the other 9,500 missing stock.
-   *
-   * Reset together whenever the modal opens on a different pick — page 14 of the
-   * last line's units is not a sensible place to open the next line's list.
-   */
-  const [serialPage, setSerialPage] = useState(1);
-  const [serialSearch, setSerialSearch] = useState("");
-  useEffect(() => {
-    setSerialPage(1);
-    setSerialSearch("");
-  }, [serialLine]);
   const [destination, setDestination] = useState("");
   // The destination office's service area code. Held beside the destination name and
   // filled from the same answer, because it belongs to the office the goods are going
@@ -384,89 +369,19 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
   // an issue drafted from an allocation carries it on every line. Narrowing the
   // serial list by it would match nothing.
   const sourceId = (value: number | null | undefined) => (value ? value : undefined);
-  const activeSerialLineReady = !!(activeSerialLine?.item_id && form.warehouse_id);
-  const availableSerials = useQuery({
-    queryKey: [
-      "wh-issue-serials",
-      form.warehouse_id,
-      activeSerialLine?.item_id ?? 0,
-      activeSerialLine?.batch_id ?? 0,
-      activeSerialLine?.bin_id ?? 0,
-      activeSerialLine?.id ?? 0,
-      serialLine,
-      serialPage,
-      serialSearch,
-    ],
-    queryFn: () =>
-      listSerials({
-        item_id: activeSerialLine!.item_id,
-        batch_id: sourceId(activeSerialLine!.batch_id),
-        warehouse_id: form.warehouse_id,
-        bin_id: isBinManaged ? sourceId(activeSerialLine!.bin_id) : undefined,
-        // Scoped to THIS line. Two lines of the same item — the normal shape of a
-        // consolidated issue — were both offered the whole item's units, so the same
-        // serial could be picked twice and the clash only surfaced at the shelf.
-        issue_id: editing ? Number(id) : undefined,
-        issue_line_id: activeSerialLine?.id,
-        status: "available",
-        // One page at a time, and the needle goes to the server with it. `size` is
-        // MAX_PAGE_SIZE; the pool behind it is whatever the bay holds.
-        page: serialPage,
-        size: 200,
-        search: serialSearch || undefined,
-      }),
-    enabled: serialLine !== null && activeSerialLineReady,
-    // The page a storekeeper is looking at should not blank out while the next one
-    // loads — a list that empties and refills reads as stock disappearing.
-    placeholderData: (previous) => previous,
-  });
-
-  // Serial -> IMEI -> code. A unit is one row in whs_serial_numbers; which of its
-  // columns identifies it depends on what the item is tracked by, and the ones that
-  // are not the key are shown beside it so validating on one reflects the rest.
+  // The codes themselves are NOT fetched here any more. `CodeAssignmentScreen` owns
+  // that query, because it is the only thing that draws them and it has to page: one
+  // bay can hold hundreds of thousands of coded units, and pulling the pool into this
+  // form meant every keystroke on the header re-rendered a list nothing was showing.
   const unitMode = (line?: IssueItemWrite): UnitMode =>
     line?.unit_mode
       ?? (line?.is_serial_tracked ? "SERIAL" : line?.is_imei_tracked ? "IMEI" : "CODE");
   const activeUnitMode = unitMode(activeSerialLine ?? undefined);
-  const unitKey = (row: SerialNumber, mode: UnitMode) =>
-    mode === "SERIAL"
-      ? row.serial_number
-      : mode === "IMEI"
-        ? row.imei ?? ""
-        : row.asset_code ?? row.consumable_code ?? row.serial_number;
   const unitNoun = (mode: UnitMode) =>
     mode === "SERIAL" ? "serial" : mode === "IMEI" ? "IMEI" : "code";
-  const unitRows = (availableSerials.data?.items ?? []).filter(
-    (row) => !!unitKey(row, activeUnitMode),
-  );
-  const unitOptions = unitRows.map((row) => unitKey(row, activeUnitMode));
-  /**
-   * The whole unit behind each offered value, keyed by that value.
-   *
-   * The picker used to get one column of monospace strings and nothing else, so a
-   * serial, an IMEI, an asset tag and a consumable lot code were indistinguishable
-   * on screen — and the batch and bin the list was scoped to were invisible, which
-   * made a correctly short list look like missing stock. Every one of those is on
-   * the row now, and the type is named rather than inferred.
-   */
   const activeTracking: TrackingType = activeSerialLine
     ? trackingOf(activeSerialLine)
     : "NONE";
-  const unitDetail = Object.fromEntries(
-    unitRows.map((row) => [
-      unitKey(row, activeUnitMode),
-      {
-        value: unitKey(row, activeUnitMode),
-        type: activeTracking,
-        serial: row.serial_number,
-        imei: row.imei,
-        code: row.asset_code ?? row.consumable_code ?? null,
-        batchNo: row.batch_no,
-        binCode: row.bin_code,
-      },
-    ]),
-  );
-
   const set = <K extends keyof IssueWrite>(key: K, value: IssueWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
 
@@ -1080,19 +995,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
                 </Button>
               </Can>
             )}
-            {/* Only once the raiser has confirmed what reached them. Until then the
-                store that shipped the goods would be signing for its own delivery. */}
-            {editing && ["ISSUED", "DISPATCHED"].includes(doc?.status ?? "") && (
-              <Can do="issue.view">
-                {doc?.can_acknowledge ? (
-                  <Button onClick={() => setConfirming("ack")}>Acknowledge</Button>
-                ) : (
-                  <Button disabled title="Waiting for the requester to confirm this delivery in Acknowledgements">
-                    Acknowledge
-                  </Button>
-                )}
-              </Can>
-            )}
             {editing && doc && !["CANCELLED", "ACKNOWLEDGED"].includes(doc.status) && (
               <Can do="issue.create">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
@@ -1461,77 +1363,32 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         <AttachmentsPanel entityType="ISSUE" entityId={doc?.id} category="ISSUE" readOnly={locked} />
       </Section>
 
-      <SerialNumbersModal
-        isOpen={serialLine !== null}
+      {/* Naming the units is a SCREEN, not a dialog — see CodeAssignmentScreen. It
+        * owns its own paged query, so the whole pool is reachable however large the
+        * bay is, and the selection it hands back spans every page it was made on. */}
+      <CodeAssignmentScreen
+        open={serialLine !== null}
         onClose={() => setSerialLine(null)}
         quantity={serialLine === null ? 0 : num(form.items[serialLine]?.issued_qty)}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
-        available={unitOptions}
-        unitByValue={unitDetail}
         trackingType={activeTracking}
         trackingMeta={trackingMeta(activeTracking)}
-        // Where this pick is confined to. The list holds only the units in this
-        // batch and this bin — the scope has to be visible, or a short list reads
-        // as missing stock rather than as a split that draws elsewhere.
-        scope={activeScope}
         noun={unitNoun(activeUnitMode)}
-        pickMode="select"
-        paging={{
-          page: serialPage,
-          pageSize: 200,
-          total: availableSerials.data?.total ?? 0,
-          loading: availableSerials.isFetching,
-          onPageChange: setSerialPage,
-          // A new needle always restarts at page 1: staying on page 7 of the old
-          // result set lands on an empty page of the new one.
-          onSearchChange: (value) => {
-            setSerialSearch(value);
-            setSerialPage(1);
-          },
-          /**
-           * One identifier, looked up across the whole pool rather than the page.
-           *
-           * A scanner gun fires its payload and Enter in one burst, well inside the
-           * search debounce, so the unit it just read is routinely on a page that has
-           * not been fetched. Without this the picker told the storekeeper the handset
-           * in his hand was not in this bay.
-           *
-           * Bounded to one row and scoped exactly as the list is — same line, same
-           * batch, same bin, same `available` status — so it can never select a unit
-           * the list itself would not have offered.
-           */
-          onResolve: async (value) => {
-            if (!activeSerialLine?.item_id || !form.warehouse_id) return null;
-            const found = await listSerials({
-              item_id: activeSerialLine.item_id,
-              batch_id: sourceId(activeSerialLine.batch_id),
-              warehouse_id: form.warehouse_id,
-              bin_id: isBinManaged ? sourceId(activeSerialLine.bin_id) : undefined,
-              issue_id: editing ? Number(id) : undefined,
-              issue_line_id: activeSerialLine.id,
-              status: "available",
-              search: value,
-              page: 1,
-              size: 25,
-            });
-            const rows = (found.items ?? []).filter((row) => !!unitKey(row, activeUnitMode));
-            const match = rows.find(
-              (row) => unitKey(row, activeUnitMode).trim().toLowerCase() === value.trim().toLowerCase(),
-            ) ?? rows.find((row) =>
-              [row.serial_number, row.imei, row.asset_code, row.consumable_code]
-                .some((token) => (token ?? "").trim().toLowerCase() === value.trim().toLowerCase()),
-            );
-            return match ? unitKey(match, activeUnitMode) : null;
-          },
-        }}
-        itemLabel={
-          serialLine === null
-            ? ""
-            : savedLine(serialLine)?.item_name
-              ?? form.items[serialLine]?.item_name
-              ?? `Line ${serialLine + 1}`
-        }
+        unitMode={activeUnitMode}
+        scope={activeScope}
         readOnly={serialsLocked}
+        itemId={activeSerialLine?.item_id}
+        warehouseId={form.warehouse_id}
+        batchId={sourceId(activeSerialLine?.batch_id)}
+        binId={isBinManaged ? sourceId(activeSerialLine?.bin_id) : undefined}
+        issueId={editing ? Number(id) : undefined}
+        issueLineId={activeSerialLine?.id}
+        itemLabel={(() => {
+          if (serialLine === null) return "";
+          const name = savedLine(serialLine)?.item_name ?? form.items[serialLine]?.item_name ?? `Line ${serialLine + 1}`;
+          const code = savedLine(serialLine)?.item_code ?? form.items[serialLine]?.item_code ?? null;
+          return code ? `${code} — ${name}` : name;
+        })()}
         onSave={(serials) => {
           if (serialLine === null) return;
           patchLine(serialLine, { serial_numbers: serials });
@@ -1630,23 +1487,6 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
         onConfirm={() => act.mutate("post")}
         onClose={() => setConfirming(null)}
       />
-
-      <ConfirmModal
-        isOpen={confirming === "ack"}
-        title="Acknowledge receipt?"
-        message="Confirms the receiver has the goods."
-        confirmLabel="Acknowledge"
-        busy={act.isPending}
-        error={act.error}
-        onConfirm={() => act.mutate("ack")}
-        onClose={() => setConfirming(null)}
-      >
-        <div className="mt-3">
-          <Field label="Remarks">
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} />
-          </Field>
-        </div>
-      </ConfirmModal>
 
       <ConfirmModal
         isOpen={confirming === "cancel"}

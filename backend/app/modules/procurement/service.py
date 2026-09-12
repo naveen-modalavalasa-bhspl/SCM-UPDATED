@@ -57,7 +57,7 @@ from app.shared.scope import scope_condition
 
 logger = logging.getLogger(__name__)
 from app.shared.enums import (
-    SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
+    CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AuditAction, ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus,
     InstanceStatus, MRStatus, POStatus, POVendorStatus, QuotationStatus,
     RequisitionStatus, RFQStatus,
@@ -471,6 +471,15 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     return await get_po(db, po.id)
 
 
+#: A purchase order that has stopped claiming anything — it never reaches a vendor and
+#: nothing will ever be received against it. CANCELLED was always read this way; REJECTED
+#: was not, so an order thrown out in approval went on holding its award: the RFQ kept
+#: showing that dead order in the vendor's column, the "Create PO" button never came back,
+#: and the awarded quantity could not be bought from anybody. The two statuses are the
+#: same fact and must be tested together, or the next reader gets it wrong the same way.
+_DEAD_PO_STATUSES = (POStatus.CANCELLED.value, POStatus.REJECTED.value)
+
+
 async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
                                    data: POFromQuotationIn, user) -> PurchaseOrder:
     """Turn the awarded quotation into a purchase order, lines, rates and tax and all.
@@ -507,30 +516,80 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             f"{quote.quotation_no} did not win {rfq.rfq_no}; only the awarded "
             "quotation becomes a purchase order")
 
-    existing = await db.scalar(
-        select(PurchaseOrder.po_no).where(
-            PurchaseOrder.quotation_id == quote.id,
-            PurchaseOrder.status != POStatus.CANCELLED.value,
-        ).limit(1)
-    )
-    if existing:
-        raise ValidationError(f"{quote.quotation_no} already became {existing}")
-
     vendor = await db.get(Vendor, quote.vendor_id)
     if vendor is None:
         raise ValidationError(f"Unknown vendor {quote.vendor_id}")
 
     lines = [line for line in quote.items if _d(line.quantity) > 0]
+
+    # A split award records the ceiling this supplier won beside the invitation.
+    # Keep the quotation immutable and apply the ceiling only while building its PO.
+    awarded = await db.scalar(select(RFQVendor.awarded_quantities).where(
+        RFQVendor.rfq_id == rfq.id,
+        RFQVendor.vendor_id == quote.vendor_id,
+    ))
+    share: dict[str, float] = awarded or {}
+    order_qty: dict[int, Decimal] = {}
+
+    # A complete-quote award is one order, full stop.  A split award is different:
+    # it is a ceiling, and a buyer may later increase that ceiling after another
+    # supplier's PO is rejected.  In that case retain the earlier live PO and raise a
+    # second one for only the part not already ordered from this quotation.
+    live_orders = list((await db.execute(
+        select(PurchaseOrder)
+        .options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.quotation_id == quote.id,
+               PurchaseOrder.status.notin_(_DEAD_PO_STATUSES))
+        .order_by(PurchaseOrder.id)
+    )).scalars().all())
+    if not share and live_orders:
+        raise ValidationError(
+            f"{quote.quotation_no} already became {live_orders[0].po_no}")
+
+    if share:
+        already_ordered: dict[int, Decimal] = {}
+        for prior_po in live_orders:
+            for prior_line in prior_po.items:
+                already_ordered[prior_line.item_id] = (
+                    already_ordered.get(prior_line.item_id, Decimal("0"))
+                    + _d(prior_line.quantity))
+        kept = []
+        for line in lines:
+            won = _d(share.get(str(line.item_id), 0))
+            # The saved award says how many this supplier may receive in total.
+            # Existing live POs have already consumed part of it, so this PO contains
+            # only the positive balance.  This is why a 6-unit PO followed by a
+            # re-award of 10 produces a second 4-unit PO rather than duplicating 10.
+            balance = won - already_ordered.get(line.item_id, Decimal("0"))
+            if balance <= 0:
+                continue
+            # The award endpoint already rejects a share above the submitted offer.
+            order_qty[line.id] = balance
+            kept.append(line)
+        lines = kept
     if not lines:
-        raise ValidationError(f"{quote.quotation_no} has no quantities to order")
+        prior = ", ".join(po.po_no for po in live_orders)
+        suffix = f"; already covered by {prior}" if prior else ""
+        raise ValidationError(
+            f"{quote.quotation_no} has no remaining awarded quantities to order{suffix}")
 
     requisition = (await db.get(Requisition, rfq.requisition_id)
                    if rfq.requisition_id else None)
+    requisitions = [requisition] if requisition else []
+    if rfq.consolidation_id:
+        requisitions = list((await db.execute(
+            select(Requisition)
+            .join(PurchaseConsolidationSource,
+                  PurchaseConsolidationSource.requisition_id == Requisition.id)
+            .where(PurchaseConsolidationSource.consolidation_id == rfq.consolidation_id)
+            .order_by(Requisition.id)
+        )).scalars().all())
+    requisition_ids = [row.id for row in requisitions]
     req_items = list((await db.execute(
         select(RequisitionItem)
-        .where(RequisitionItem.requisition_id == requisition.id)
-        .order_by(RequisitionItem.line_no)
-    )).scalars().all()) if requisition else []
+        .where(RequisitionItem.requisition_id.in_(requisition_ids))
+        .order_by(RequisitionItem.requisition_id, RequisitionItem.line_no)
+    )).scalars().all()) if requisition_ids else []
 
     # An indent only rides along when the whole requisition served exactly one. A
     # consolidated sheet serves many, and stamping one of them on the PO would say the
@@ -579,7 +638,7 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
 
     sub_total = tax_total = Decimal("0")
     for index, line in enumerate(lines, start=1):
-        quantity = _d(line.quantity)
+        quantity = order_qty.get(line.id, _d(line.quantity))
         gross = quantity * _d(line.rate)
         amount = gross - gross * _d(line.discount_percent or 0) / _d(100)
         tax = amount * _d(line.tax_percent or 0) / _d(100)
@@ -617,10 +676,16 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
     #
     # Only when the caller said nothing. A buyer who typed a figure on the create call
     # has negotiated it, and the quote must not overwrite them.
+    # A document-level charge belongs to the whole quotation. For a split PO, carry
+    # only the same proportion as the awarded taxable subtotal; copying the complete
+    # freight/discount onto every winner would multiply the quoted commercial terms.
+    quote_base = _d(quote.sub_total or 0)
+    split_ratio = (min(Decimal("1"), sub_total / quote_base)
+                   if share and quote_base > 0 else Decimal("1"))
     if not _d(po.freight_amount or 0):
-        po.freight_amount = _d(quote.freight_amount or 0)
+        po.freight_amount = _d(quote.freight_amount or 0) * split_ratio
     if not _d(po.discount_amount or 0):
-        po.discount_amount = _d(quote.discount_amount or 0)
+        po.discount_amount = _d(quote.discount_amount or 0) * split_ratio
 
     # FIXED 2026-08-23 — the offer's PROMISES, carried across the same way its money
     # already was. The vendor states both on the portal quotation form, and neither
@@ -642,8 +707,10 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
 
     _apply_po_totals(po, sub_total, tax_total)
 
-    if requisition is not None:
-        await _close_requisition_if_ordered(db, requisition, req_items)
+    for source_requisition in requisitions:
+        source_items = [row for row in req_items
+                        if row.requisition_id == source_requisition.id]
+        await _close_requisition_if_ordered(db, source_requisition, source_items)
     if rfq.consolidation_id:
         await _close_sheet_if_ordered(db, rfq.consolidation_id)
 
@@ -654,16 +721,26 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
 
 
 async def _close_requisition_if_ordered(db: AsyncSession, requisition: Requisition,
-                                        req_items: list[RequisitionItem]) -> None:
+                                        req_items: list[RequisitionItem],
+                                        released: bool = False) -> None:
     """Move the requisition — and the material request behind it — forward.
 
     ORDERED only when every line is fully covered. A requisition bought in two tenders
     must keep reading RFQ_RAISED in between, or the second half looks already done.
+
+    `released` says the caller has just HANDED quantity back (a dead order let go of what
+    it was holding), and turns the same arithmetic around: ORDERED becomes a status this
+    may step out of, and the material request's own figure is set rather than ratcheted.
+    The ratchet is right on the way forward — two tenders must not undo each other — and
+    wrong on the way back, where the whole point is that the number goes down.
     """
     fully = all(_d(row.ordered_qty or 0) >= _d(row.quantity) for row in req_items)
-    if requisition.status in (RequisitionStatus.APPROVED.value,
-                              RequisitionStatus.CONSOLIDATED.value,
-                              RequisitionStatus.RFQ_RAISED.value):
+    movable = (RequisitionStatus.APPROVED.value,
+               RequisitionStatus.CONSOLIDATED.value,
+               RequisitionStatus.RFQ_RAISED.value)
+    if released:
+        movable += (RequisitionStatus.ORDERED.value,)
+    if requisition.status in movable:
         requisition.status = (RequisitionStatus.ORDERED.value if fully
                               else RequisitionStatus.RFQ_RAISED.value)
 
@@ -687,18 +764,24 @@ async def _close_requisition_if_ordered(db: AsyncSession, requisition: Requisiti
     for row in mr_items:
         claimable = by_item.get(row.item_id, Decimal("0"))
         if claimable <= 0:
+            # On the way back a line the requisition no longer covers reads zero, not
+            # whatever it happened to read before — skipping it here is how a released
+            # quantity would stay visible on the MR after the order holding it died.
+            if released:
+                row.ordered_quantity = Decimal("0")
             continue
         applied = min(claimable, _d(row.quantity))
         # The pool is spent whether or not this line moved: two MR lines for the same
         # item must not both claim the same ordered quantity.
         by_item[row.item_id] = claimable - applied
-        if applied > _d(row.ordered_quantity or 0):
+        if released or applied > _d(row.ordered_quantity or 0):
             row.ordered_quantity = applied
 
-    if mr.status == MRStatus.APPROVED.value and all(
-        _d(row.ordered_quantity or 0) >= _d(row.quantity) for row in mr_items
-    ):
+    covered = all(_d(row.ordered_quantity or 0) >= _d(row.quantity) for row in mr_items)
+    if mr.status == MRStatus.APPROVED.value and covered:
         mr.status = MRStatus.ORDERED.value
+    elif released and mr.status == MRStatus.ORDERED.value and not covered:
+        mr.status = MRStatus.APPROVED.value
 
 
 async def _close_sheet_if_ordered(db: AsyncSession, consolidation_id: int) -> None:
@@ -715,6 +798,73 @@ async def _close_sheet_if_ordered(db: AsyncSession, consolidation_id: int) -> No
     )).scalars().all())
     if statuses and all(value == RequisitionStatus.ORDERED.value for value in statuses):
         sheet.status = ConsolidationStatus.CLOSED.value
+
+
+async def _release_po_claims(db: AsyncSession, po: PurchaseOrder) -> None:
+    """Hand back the requisition quantity a now-dead order was holding.
+
+    `create_po_from_quotation` adds every ordered quantity onto the requisition line it
+    covers, and that running total is what stops a second tender buying the same thing
+    twice. Nothing ever subtracted it again. So an order rejected in approval went on
+    holding goods nobody will deliver: the requisition kept reading ORDERED, the material
+    request behind it kept reading ORDERED, and the replacement order raised in its place
+    found no free quantity left to claim — it came out pointing at no indent line at all.
+
+    Matched back by ITEM, in line order, exactly as the claim was made: a purchase order
+    line records the indent line it served but not the requisition line, and re-deriving
+    the pairing the same way is what keeps the two halves in step.
+    """
+    lines = list((await db.execute(
+        select(POItem).where(POItem.po_id == po.id).order_by(POItem.id)
+    )).scalars().all())
+    if not lines:
+        return
+
+    rfq = await db.get(RFQ, po.rfq_id) if po.rfq_id else None
+    if rfq is not None and rfq.consolidation_id:
+        requisitions = list((await db.execute(
+            select(Requisition)
+            .join(PurchaseConsolidationSource,
+                  PurchaseConsolidationSource.requisition_id == Requisition.id)
+            .where(PurchaseConsolidationSource.consolidation_id == rfq.consolidation_id)
+            .order_by(Requisition.id)
+        )).scalars().all())
+    else:
+        source_id = po.requisition_id or (rfq.requisition_id if rfq else None)
+        requisition = await db.get(Requisition, source_id) if source_id else None
+        requisitions = [requisition] if requisition else []
+    if not requisitions:
+        return
+
+    req_items = list((await db.execute(
+        select(RequisitionItem)
+        .where(RequisitionItem.requisition_id.in_([row.id for row in requisitions]))
+        .order_by(RequisitionItem.requisition_id, RequisitionItem.line_no)
+    )).scalars().all())
+    held: dict[int, list[RequisitionItem]] = {}
+    for row in req_items:
+        held.setdefault(row.item_id, []).append(row)
+
+    for line in lines:
+        remaining = _d(line.quantity)
+        for req_line in held.get(line.item_id, []):
+            if remaining <= 0:
+                break
+            # Never below zero: history holds orders raised before anything released,
+            # and an over-release would read as quantity still to buy that was bought.
+            taken = min(_d(req_line.ordered_qty or 0), remaining)
+            if taken <= 0:
+                continue
+            req_line.ordered_qty = _d(req_line.ordered_qty or 0) - taken
+            remaining -= taken
+
+    for source_requisition in requisitions:
+        source_items = [row for row in req_items
+                        if row.requisition_id == source_requisition.id]
+        await _close_requisition_if_ordered(db, source_requisition, source_items,
+                                            released=True)
+    logger.info("purchase order %s released its claim on %d requisition line(s)",
+                po.po_no, len(req_items))
 
 
 async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
@@ -940,6 +1090,7 @@ async def act_on_po(db: AsyncSession, po_id: int, action: str, comments: str, us
     elif instance.status == InstanceStatus.REJECTED.value:
         po.status = POStatus.REJECTED.value
         po.current_approver_name = None
+        await _release_po_claims(db, po)
     else:
         await _refresh_current_approver(db, po)
     await db.commit()
@@ -2735,13 +2886,54 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
     # Read here rather than derived in the screen because only the server knows — a
     # buyer coming back to an awarded RFQ was still being offered "Create purchase
     # order" for an order that exists, and only found out by pressing it.
-    row = (await db.execute(
-        select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.status)
+    po_rows = (await db.execute(
+        select(PurchaseOrder.id, PurchaseOrder.po_no, PurchaseOrder.status,
+               PurchaseOrder.quotation_id, PurchaseOrder.vendor_id,
+               PurchaseOrder.vendor_name)
         .where(PurchaseOrder.rfq_id == rfq.id,
-               PurchaseOrder.status != POStatus.CANCELLED.value)
-        .order_by(PurchaseOrder.id).limit(1)
-    )).first()
-    rfq.po_id, rfq.po_no, rfq.po_status = row if row else (None, None, None)
+               PurchaseOrder.status.notin_(_DEAD_PO_STATUSES))
+        .order_by(PurchaseOrder.id)
+    )).all()
+    first_po = po_rows[0] if po_rows else None
+    rfq.po_id, rfq.po_no, rfq.po_status = (
+        first_po[0:3] if first_po else (None, None, None))
+    # Keep the live PO history at item level as well as at header level.  The
+    # comparison screen needs to say *which* earlier PO carried (say) six batteries,
+    # before the buyer enters the new total award.  A header-only reference cannot
+    # explain why the next PO will contain only the remaining quantity.
+    po_item_rows = (await db.execute(
+        select(POItem.po_id, POItem.item_id, func.sum(POItem.quantity))
+        .where(POItem.po_id.in_([row.id for row in po_rows]))
+        .group_by(POItem.po_id, POItem.item_id)
+    )).all() if po_rows else []
+    quantities_by_po: dict[int, dict[str, float]] = {}
+    for po_id, item_id, quantity in po_item_rows:
+        quantities_by_po.setdefault(po_id, {})[str(item_id)] = float(_d(quantity))
+    rfq.purchase_orders = [SimpleNamespace(
+        id=row.id, po_no=row.po_no, status=row.status,
+        quotation_id=row.quotation_id, vendor_id=row.vendor_id,
+        vendor_name=row.vendor_name,
+        item_quantities=quantities_by_po.get(row.id, {}),
+    ) for row in po_rows]
+
+    # The split award is the buyer's decision; this separate, derived view is the
+    # quantity still backed by an order.  Do not copy it into `awarded_quantities`:
+    # a rejected or cancelled PO must make its share available again without erasing
+    # the audit record of who was originally awarded it.  Reading live PO lines also
+    # keeps this figure correct if an approver trims a pending order's quantity.
+    live_rows = (await db.execute(
+        select(PurchaseOrder.vendor_id, POItem.item_id, func.sum(POItem.quantity))
+        .select_from(PurchaseOrder)
+        .join(POItem, POItem.po_id == PurchaseOrder.id)
+        .where(PurchaseOrder.rfq_id == rfq.id,
+               PurchaseOrder.status.notin_(_DEAD_PO_STATUSES))
+        .group_by(PurchaseOrder.vendor_id, POItem.item_id)
+    )).all()
+    live_by_vendor: dict[int, dict[str, float]] = {}
+    for vendor_id, item_id, quantity in live_rows:
+        live_by_vendor.setdefault(vendor_id, {})[str(item_id)] = float(_d(quantity))
+    for invitation in rfq.vendors:
+        invitation.live_allocated_quantities = live_by_vendor.get(invitation.vendor_id) or None
 
     # What the RFQ itself says stands. Where it says nothing, the requisition behind it
     # answers — and failing that, the raiser's own HCM record. Department follows the
@@ -3506,28 +3698,189 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
     }
 
 
+def _same_share(before, after) -> bool:
+    """Do two awarded-quantity maps say the same thing?
+
+    Compared as numbers, never as dicts: the column is JSON, so what went in as a
+    Decimal comes back as a float and an untouched share would otherwise read as changed.
+    """
+    left = {key: _d(value) for key, value in (before or {}).items() if _d(value) > 0}
+    right = {key: _d(value) for key, value in (after or {}).items() if _d(value) > 0}
+    return left == right
+
+
+async def _live_po_awards(db: AsyncSession, rfq_id: int) -> tuple[
+        dict[int, dict[str, Decimal]], dict[int, str]]:
+    """Return live PO quantities by vendor, plus a PO reference for each vendor.
+
+    The RFQ award may grow after it was first ordered, but it must never shrink below
+    quantity on a PO that has not been rejected or cancelled. Reading PO lines, not
+    saved award JSON, makes that floor correct if a draft PO was edited before sending.
+    """
+    rows = list((await db.execute(
+        select(PurchaseOrder)
+        .options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.rfq_id == rfq_id,
+               PurchaseOrder.status.notin_(_DEAD_PO_STATUSES))
+        .order_by(PurchaseOrder.id)
+    )).scalars().all())
+    quantities: dict[int, dict[str, Decimal]] = {}
+    po_nos: dict[int, str] = {}
+    for po in rows:
+        po_nos.setdefault(po.vendor_id, po.po_no)
+        vendor_quantities = quantities.setdefault(po.vendor_id, {})
+        for line in po.items:
+            key = str(line.item_id)
+            vendor_quantities[key] = (
+                vendor_quantities.get(key, Decimal("0")) + _d(line.quantity))
+    return quantities, po_nos
+
+
+async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
+                               locked_quantities: dict[int, dict[str, Decimal]] | None = None,
+                               locked_po_nos: dict[int, str] | None = None,
+                               ) -> tuple[set[int], list[Quotation]]:
+    """Validate and persist item-level shares, returning winning quote ids/rows.
+
+    `locked` names the vendors whose share is already on a live purchase order. Their
+    numbers may be restated but never changed — the order has been placed, and moving
+    the award under it would leave the RFQ saying one thing and the PO another.
+    """
+    locked_quantities = locked_quantities or {}
+    locked_po_nos = locked_po_nos or {}
+    rfq_quantities = {line.item_id: _d(line.quantity) for line in rfq.items}
+    invited_rows = list((await db.execute(
+        select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
+    )).scalars().all())
+    invited = {row.vendor_id: row for row in invited_rows}
+    quotations = list((await db.execute(
+        select(Quotation).where(Quotation.rfq_id == rfq.id)
+    )).scalars().all())
+    submitted = {
+        quote.vendor_id: quote for quote in quotations
+        if quote.status != QuotationStatus.DRAFT.value
+    }
+
+    shares: dict[int, dict[str, float]] = {}
+    totals: dict[int, Decimal] = {}
+    for allocation in allocations:
+        item_id, vendor_id = allocation.item_id, allocation.vendor_id
+        quantity = _d(allocation.quantity)
+        if item_id not in rfq_quantities:
+            raise ValidationError(f"Item {item_id} is not on {rfq.rfq_no}")
+        invitation = invited.get(vendor_id)
+        if invitation is None:
+            raise ValidationError(f"Vendor {vendor_id} was not invited to {rfq.rfq_no}")
+        quote = submitted.get(vendor_id)
+        if quote is None:
+            raise ValidationError(
+                f"{invitation.vendor_name or f'Vendor {vendor_id}'} has not "
+                "submitted a quotation")
+        quote_line = next((line for line in quote.items if line.item_id == item_id), None)
+        if quote_line is None or _d(quote_line.quantity) <= 0:
+            raise ValidationError(
+                f"{quote.vendor_name or vendor_id} did not quote item {item_id}")
+
+        vendor_shares = shares.setdefault(vendor_id, {})
+        key = str(item_id)
+        combined = _d(vendor_shares.get(key, 0)) + quantity
+        if combined > _d(quote_line.quantity):
+            raise ValidationError(
+                f"{quote.vendor_name or vendor_id} quoted {_d(quote_line.quantity)} "
+                f"of item {item_id}, but {combined} was awarded")
+        vendor_shares[key] = float(combined)
+        totals[item_id] = totals.get(item_id, Decimal("0")) + quantity
+
+    for item_id, total in totals.items():
+        if total > rfq_quantities[item_id]:
+            raise ValidationError(
+                f"{total} allocated for item {item_id}, but the RFQ quantity is "
+                f"{rfq_quantities[item_id]}")
+
+    for invitation in invited_rows:
+        fresh = shares.get(invitation.vendor_id)
+        # An earlier sent/approved PO is a minimum, not a lock on the whole award.
+        # Increasing the total is safe: the PO generator creates only the balance.
+        # Reducing below the live line would make the RFQ contradict an order that
+        # still exists, so that is the one case that needs a cancellation/rejection.
+        for item_id, ordered_quantity in locked_quantities.get(
+                invitation.vendor_id, {}).items():
+            fresh_quantity = _d((fresh or {}).get(item_id, 0))
+            if fresh_quantity < ordered_quantity:
+                po_no = locked_po_nos.get(invitation.vendor_id, "a live purchase order")
+                raise ValidationError(
+                    f"{invitation.vendor_name or f'Vendor {invitation.vendor_id}'} "
+                    f"already has {ordered_quantity} of item {item_id} on {po_no}. "
+                    "Keep at least that quantity, or cancel/reject the PO first.")
+        invitation.awarded_quantities = fresh
+    winning_quotes = [submitted[vendor_id] for vendor_id in shares]
+    return {quote.id for quote in winning_quotes}, winning_quotes
+
+
 async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
-    """Pick a quotation. Does not raise the PO — that is a separate, approved act."""
+    """Pick a quotation. Does not raise the PO — that is a separate, approved act.
+
+    An AWARDED tender may be awarded AGAIN, because a purchase order can die: rejected in
+    approval, or cancelled. What that order was carrying has to be buyable by somebody,
+    and the only prices anybody ever quoted for it are the ones on this RFQ — so the
+    re-award is closed to the vendors already invited here, who already priced the work.
+    An outside vendor would be an award resting on no offer at all.
+
+    A live PO fixes the quantity already ordered, but does not prevent a larger total
+    award to that vendor. The PO generator turns only that newly added balance into the
+    next PO, leaving the earlier order intact.
+    """
     rfq = await get_rfq(db, rfq_id, user)
     OPEN = (RFQStatus.PUBLISHED.value, RFQStatus.CLOSED.value)
-    if rfq.status not in OPEN:
+    locked_quantities: dict[int, dict[str, Decimal]] = {}
+    locked_po_nos: dict[int, str] = {}
+    if rfq.status == RFQStatus.AWARDED.value:
+        locked_quantities, locked_po_nos = await _live_po_awards(db, rfq.id)
+        if locked_po_nos and not data.allocations:
+            raise ValidationError(
+                "Part of this RFQ is already on a purchase order. Re-award it by "
+                "entering item quantities, so the vendors already ordered from keep "
+                "what they won.")
+        whole = next((invitation for invitation in rfq.vendors
+                      if invitation.vendor_id in locked_po_nos
+                      and not (invitation.awarded_quantities or {})), None)
+        if whole is not None:
+            raise ValidationError(
+                f"{locked_po_nos[whole.vendor_id]} covers the whole of {rfq.rfq_no}. Cancel or "
+                "reject that order before awarding this tender again.")
+    elif rfq.status not in OPEN:
         raise ValidationError(f"Cannot award an RFQ in {rfq.status} status")
-    quote = await get_quotation(db, data.quotation_id)
-    if quote.rfq_id != rfq.id:
-        raise ValidationError("That quotation belongs to a different RFQ")
-    if quote.status == QuotationStatus.DRAFT.value:
-        raise ValidationError("That vendor has not submitted a quotation yet")
-
-    for other in (await db.execute(
+    quotations = (await db.execute(
         select(Quotation).where(Quotation.rfq_id == rfq.id)
-    )).scalars().all():
-        if other.id == quote.id:
-            other.status = QuotationStatus.ACCEPTED.value
-        elif other.status != QuotationStatus.DRAFT.value:
-            other.status = QuotationStatus.REJECTED.value
+    )).scalars().all()
+    if data.allocations:
+        selected_ids, winners = await _split_award_winners(
+            db, rfq, data.allocations, locked_quantities, locked_po_nos)
+    else:
+        requested = list(dict.fromkeys(
+            data.quotation_ids or ([data.quotation_id] if data.quotation_id else [])))
+        if len(requested) != 1:
+            raise ValidationError(
+                "Select one complete quotation, or enter item quantities to split the award")
+        by_id = {quote.id: quote for quote in quotations}
+        quote = by_id.get(requested[0])
+        if quote is None:
+            raise ValidationError("The selected quotation belongs to a different RFQ")
+        if quote.status == QuotationStatus.DRAFT.value:
+            raise ValidationError(
+                f"{quote.vendor_name or 'The selected vendor'} has not submitted a quotation")
+        selected_ids, winners = {quote.id}, [quote]
+        for invitation in rfq.vendors:
+            invitation.awarded_quantities = None
+    for quote in quotations:
+        if quote.id in selected_ids:
+            quote.status = QuotationStatus.ACCEPTED.value
+        elif quote.status != QuotationStatus.DRAFT.value:
+            quote.status = QuotationStatus.REJECTED.value
     rfq.status = RFQStatus.AWARDED.value
-    rfq.awarded_vendor_id = quote.vendor_id
-    rfq.awarded_vendor_name = quote.vendor_name
+    rfq.awarded_vendor_id = winners[0].vendor_id if len(winners) == 1 else None
+    rfq.awarded_vendor_name = ", ".join(
+        quote.vendor_name or f"Vendor {quote.vendor_id}" for quote in winners)
     if rfq.requisition_id:
         requisition = await db.get(Requisition, rfq.requisition_id)
         if requisition and requisition.status == RequisitionStatus.APPROVED.value:
@@ -3585,6 +3938,9 @@ async def ensure_vendor_account(db: AsyncSession, data: VendorAccountIn,
     db.add(account)
     await db.commit()
     await db.refresh(account)
+    portal = "carrier" if vendor.vendor_type in CARRIER_VENDOR_TYPES else "supplier"
+    await email_vendor_credentials(
+        db, vendor.id, account.username, portal, "issued", user)
     return account
 
 
@@ -3612,7 +3968,69 @@ async def reset_vendor_password(db: AsyncSession, vendor_id: int, user) -> Vendo
     account.must_change_password = True
     await db.commit()
     await db.refresh(account)
+    vendor = await db.get(Vendor, vendor_id)
+    portal = ("carrier" if vendor and vendor.vendor_type in CARRIER_VENDOR_TYPES
+              else "supplier")
+    await email_vendor_credentials(
+        db, vendor_id, account.username, portal, "reset", user)
     return account
+
+
+async def email_vendor_credentials(db: AsyncSession, vendor_id: int,
+                                   username: str, portal: str, action: str,
+                                   user) -> bool:
+    """Send issued/reset portal credentials without making account creation fail."""
+    try:
+        vendor = await db.get(Vendor, vendor_id)
+        address = (getattr(vendor, "email", None) or "").strip()
+        if not address:
+            logger.warning("login credentials not emailed to vendor %s: no email",
+                           getattr(vendor, "name", None) or vendor_id)
+            return False
+        portal_name = "Carrier Portal" if portal == "carrier" else "Supplier Portal"
+        portal_url = f"{settings.APP_BASE_URL.rstrip('/')}/{portal}/login"
+        verb = "reset" if action == "reset" else "issued"
+        subject = f"Your Bavya SCM {portal_name} login"
+        company = await mail_service._company(db)
+        html = mail_template.render(
+            subject=subject,
+            eyebrow="Portal access",
+            heading=f"Your login has been {verb}",
+            preheader=f"Sign-in details for the Bavya SCM {portal_name}.",
+            blocks=[
+                mail_template.paragraph(
+                    f"Hello {getattr(vendor, 'name', None) or 'Partner'},"),
+                mail_template.paragraph(
+                    f"Use the credentials below to sign in to the {portal_name}."),
+                mail_template.facts([
+                    ("Username", username),
+                    ("Temporary password", DEFAULT_VENDOR_PASSWORD),
+                ]),
+                mail_template.button(f"Open {portal_name}", portal_url),
+                mail_template.link_fallback(portal_url),
+                mail_template.paragraph(
+                    "For security, you must change this password after signing in.",
+                    muted=True),
+            ],
+            company=company,
+            footer_note="Do not forward this email or share these credentials.",
+        )
+        text = (
+            f"Hello {getattr(vendor, 'name', None) or 'Partner'},\n\n"
+            f"Your Bavya SCM {portal_name} login has been {verb}.\n"
+            f"Username: {username}\n"
+            f"Temporary password: {DEFAULT_VENDOR_PASSWORD}\n"
+            f"Portal: {portal_url}\n\n"
+            "You must change this password after signing in."
+        )
+        await mail_service.send_mail(
+            db, MailSendIn(to=[address], subject=subject, body=text, html=html), user)
+        logger.info("%s credentials emailed to %s", portal_name, address)
+        return True
+    except Exception as exc:  # credentials already exist; mail is a side effect
+        logger.warning("could not email portal credentials for vendor %s: %s",
+                       vendor_id, exc)
+        return False
 
 
 async def vendor_login(db: AsyncSession, username: str, password: str) -> dict:

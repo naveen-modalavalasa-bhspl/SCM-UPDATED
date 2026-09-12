@@ -302,10 +302,12 @@ async def cancel_receipt(receipt_id: int, body: s.ReasonIn, db: AsyncSession = D
 @router.get("/inspections", response_model=Page[s.InspectionRead])
 async def list_inspections(params: PageParams = Depends(), inspection_type: str | None = None,
                            status: str | None = None, warehouse_id: int | None = None,
+                           receipt_id: int | None = None,
                            search: str | None = None, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(INSPECTION_VIEW))):
     return await service.list_inspections(db, params, inspection_type=inspection_type,
                                           status=status, warehouse_id=warehouse_id,
+                                          receipt_id=receipt_id,
                                           search=search, user=user)
 
 
@@ -1195,11 +1197,13 @@ async def despatch_prefill(note_id: int = Query(...), receipt_id: int | None = N
 @router.get("/options/receipts", response_model=list[s.Option])
 async def receipt_options(search: str | None = None, receipt_type: str | None = None,
                           warehouse_id: int | None = None, for_putaway: bool = False,
+                          for_qc: bool = False,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(RECEIPT_VIEW))):
     return await service.receipt_options(db, search, receipt_type,
                                          warehouse_id=warehouse_id,
-                                         for_putaway=for_putaway, user=user)
+                                         for_putaway=for_putaway, for_qc=for_qc,
+                                         user=user)
 
 
 @router.get("/options/incoming-dispatches", response_model=list[s.Option])

@@ -668,6 +668,12 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("rep_approvals", "reports", "Reports · Approval Ledger"),
     ("rep_inventory", "reports", "Reports · Stock Ledger"),
     ("rep_warehouse", "reports", "Reports · Warehouse Ledger"),
+    # Three ledgers that had no rail row at all — the spec existed and the screen
+    # rendered, but only for somebody who typed the URL. Catalogued so each inherits
+    # from the permission that reads the underlying document, below.
+    ("rep_procurement", "reports", "Reports · Procurement Ledger"),
+    ("rep_transport", "reports", "Reports · Logistics Ledger"),
+    ("rep_returns", "reports", "Reports · Returns Ledger"),
     ("grp_rbac", "rbac", "RBAC"),
     ("rbac_access", "rbac", "RBAC · Roles & Access"),
     ("rbac_groups", "rbac", "RBAC · User Groups"),
@@ -813,4 +819,13 @@ INHERITS_GRANTS_FROM.update({
     # ledgers' own reads, polled. Neither should fail closed to Admin.
     page_view_code("rep_attachments"): REPORT_VIEW,
     page_view_code("rep_live_tracking"): REPORT_VIEW,
+    # NOT from REPORT_VIEW, unlike the three above. Each of these ledgers draws on a
+    # document class the Reports rail does not otherwise expose, and the service
+    # refuses the rows to a login without that permission
+    # (`reports.service.readable_spec`). Inheriting the wider code would put a rail
+    # row in front of people whose first press is a 403 — the menu has to agree with
+    # what the endpoint will do.
+    page_view_code("rep_procurement"): PO_VIEW,
+    page_view_code("rep_transport"): TRANSPORT_VIEW,
+    page_view_code("rep_returns"): RETURN_VIEW,
 })

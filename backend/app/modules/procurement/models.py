@@ -370,6 +370,13 @@ class RFQVendor(Base):
     # Item id -> quantity this supplier is being asked to quote. Stored with the
     # invitation so every supplier can receive a different share of one RFQ line.
     item_quantities = Column(JSON, nullable=True)
+    # Item id -> quantity this supplier WON. Separate from `item_quantities` above
+    # because that one is the ASK and is already filled, for everybody, at send time:
+    # a tender invites each supplier to quote the whole line. The split is decided
+    # against the quotations that come back — the first moment anyone knows a price —
+    # so it belongs to the award. NULL means this supplier won nothing, or the RFQ
+    # was awarded whole to a single quotation, which is still the common case.
+    awarded_quantities = Column(JSON, nullable=True)
     # Added to the DB team's columns. A single-use link is what lets a vendor who has
     # no portal account still open exactly this RFQ and nothing else — without it the
     # only way in is a password, and most vendors will never have one.

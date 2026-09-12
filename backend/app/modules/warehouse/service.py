@@ -3520,7 +3520,8 @@ async def _raise_inspection_for(
 
 async def list_inspections(db: AsyncSession, params: PageParams, *,
                            inspection_type: str | None = None, status: str | None = None,
-                           warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
+                           warehouse_id: int | None = None, receipt_id: int | None = None,
+                           search: str | None = None, user=None) -> dict:
     stmt = select(m.Inspection)
     if user is not None:
         # Warehouse scope, plus the inspections this person ran. Every other document
@@ -3540,6 +3541,11 @@ async def list_inspections(db: AsyncSession, params: PageParams, *,
         stmt = stmt.where(m.Inspection.status.in_(_any_case(status)))
     if warehouse_id:
         stmt = stmt.where(m.Inspection.warehouse_id == warehouse_id)
+    if receipt_id:
+        # Which inspections were raised off one receipt — what the GRN's own linked
+        # documents panel reads. Scoped by the same `scope_condition` above, so the
+        # panel can never name an inspection the login could not open on its own.
+        stmt = stmt.where(m.Inspection.receipt_id == receipt_id)
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(
@@ -9989,6 +9995,34 @@ async def _adopt_legacy_issue_reservations(
     await db.flush()
 
 
+async def _unit_codes_required(db: AsyncSession, item, *, config: dict | None = None) -> bool:
+    """Must an issue of this item name one identifier per unit before it may post?
+
+    Until 2026-09-10 only `is_serial_tracked` did. An asset tag and a consumable lot
+    code are the same promise — one label, one physical thing — so an asset issued
+    without its tags left the building with nothing tying the goods to the document,
+    and the gap showed up only when somebody went looking for a unit months later.
+
+    The rule MIRRORS THE MINT, deliberately: the conditions are exactly the ones
+    `_place_unit_codes` uses to decide whether to give these units codes at putaway —
+    the item master's code toggle (`codeformat.is_code_tracked`) and countability.
+    If putaway would have coded them, the issue must name them; if it would not,
+    there is nothing to name and nothing is demanded. Any other pairing has one door
+    minting labels the other never asks for, or asks for labels nothing mints.
+
+    Serial and IMEI are declared on the item master directly and are unconditional —
+    they are what the manufacturer stamped, and a countability check has no business
+    overruling that.
+    """
+    if bool(getattr(item, "is_serial_tracked", False)):
+        return True
+    if bool(getattr(item, "is_imei_tracked", False)):
+        return True
+    if not codeformat.is_code_tracked(item, config or await codeformat.code_settings(db)):
+        return False
+    return await _is_countable(db, item)
+
+
 async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool) -> None:
     """Flips the status of the units leaving or coming back with an issue.
 
@@ -10002,6 +10036,9 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
     new_status = (SerialStatus.ISSUED if outward else SerialStatus.RETURNED).value
     from_status = (SerialStatus.AVAILABLE if outward else SerialStatus.ISSUED).value
     await _adopt_legacy_issue_reservations(db, issue)
+    # Five queries, read once for the document: the toggle cannot differ between two
+    # lines of one issue.
+    code_config = await codeformat.code_settings(db)
 
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
@@ -10021,9 +10058,12 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
                 m.SerialNumber.is_active.is_(True))
             .with_for_update()
         )).scalars().all()
-        if item.is_serial_tracked and len(rows) != wanted:
+        # Every kind of identifier the master declares, not just the serial. The noun
+        # follows the kind, so an asset line is not told it is missing "serials".
+        if await _unit_codes_required(db, item, config=code_config)                 and len(rows) != wanted:
+            noun = _UNIT_NOUN[_unit_mode(item)]
             raise ValidationError(
-                f"{line.item_code or line.item_id}: {wanted} serials are required, "
+                f"{line.item_code or line.item_id}: {wanted} {noun} are required, "
                 f"but {len(rows)} are reserved for this issue"
             )
         # The flip is the same two columns for every unit on the line, so it is one
@@ -12194,16 +12234,89 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     if bin_id:
         stmt = stmt.where(m.SerialNumber.bin_id == bin_id)
     if search:
-        like = f"%{search}%"
-        stmt = stmt.where(or_(
-            m.SerialNumber.serial_number.ilike(like),
-            m.SerialNumber.imei.ilike(like),
-            m.SerialNumber.asset_code.ilike(like),
-            m.SerialNumber.consumable_code.ilike(like)))
+        needle = search.strip()
+        # A WHOLE code is found by INDEX SEEK; only a fragment is scanned for.
+        #
+        # These are two questions wearing one box, and they cost three orders of
+        # magnitude apart. The storekeeper at the shelf has the entire code — a gun
+        # read it off the label — and `serial_number` and `imei` are indexed, so that
+        # is a seek. `asset_code` and `consumable_code` are NOT indexed, so including
+        # them in the same OR drags the whole thing back down to a scan. Measured on
+        # one live bay of 464,776 units:
+        #
+        #     probe, serial_number = '<code>'          0.01 s
+        #     probe, four columns OR-ed together       1.65 s
+        #     COUNT over that same four-column OR      8.73 s
+        #     four columns ILIKE '%<fragment>%'        9.89 s
+        #
+        # So the indexed columns are probed FIRST and separately; the unindexed pair
+        # is only reached when neither matched, which is rare — `_place_unit_codes`
+        # writes a minted asset/consumable code into `serial_number` as well, so for
+        # those items the indexed probe already hits.
+        #
+        # And a hit narrows the query to that ONE ROW BY ID. Every identity column is
+        # unique per unit, so an exact code names exactly one, and pinning it by
+        # primary key means the count and the page below cost nothing at all instead
+        # of re-deriving the same row through the unindexed OR.
+        hit = None
+        probes = (
+            m.SerialNumber.serial_number == needle,       # indexed
+            m.SerialNumber.imei == needle,                # indexed
+            or_(m.SerialNumber.asset_code == needle,      # not indexed — last resort
+                m.SerialNumber.consumable_code == needle),
+        )
+        for probe in probes:
+            hit = await db.scalar(
+                stmt.with_only_columns(m.SerialNumber.id).order_by(None)
+                .where(probe).limit(1))
+            if hit:
+                break
+        if hit:
+            stmt = stmt.where(m.SerialNumber.id == hit)
+        else:
+            like = f"%{needle}%"
+            stmt = stmt.where(or_(
+                m.SerialNumber.serial_number.ilike(like),
+                m.SerialNumber.imei.ilike(like),
+                m.SerialNumber.asset_code.ilike(like),
+                m.SerialNumber.consumable_code.ilike(like)))
 
-    page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
-    page["items"] = await _decorate_serials(db, page["items"])
-    return page
+    # PAGED ON THE ID, THEN LOADED BY IT. Not a refinement of `paginate` — a different
+    # query, for the reason `stk_ledger` taught (CLAUDE.md, "never sort a list on a
+    # non-indexed column of a JSON-bearing table"): what costs is the SORT, and a sort
+    # record is as wide as the columns the statement carries.
+    #
+    # Measured on the live floor, one bay holding 464,776 available units:
+    #
+    #     ORDER BY id DESC LIMIT 500, selecting the whole row   8.93 s
+    #     ORDER BY id DESC LIMIT 500, selecting the id alone    0.09 s
+    #     loading those 500 rows by primary key                 0.02 s
+    #
+    # Eighty times, and it is the whole of why switching a page in the unit picker
+    # took a quarter of a minute. The narrow statement is served from
+    # `ix_whs_serial_stock_lookup` — a secondary index carries the primary key, so the
+    # ids come out of it already ordered and nothing is sorted at all. Widen this
+    # statement back to `select(m.SerialNumber)` and the filesort returns in silence:
+    # the answer stays correct, only the clock moves.
+    id_stmt = stmt.with_only_columns(m.SerialNumber.id).order_by(None)
+    total = await db.scalar(select(func.count()).select_from(id_stmt.subquery()))
+    ids = list((await db.execute(
+        id_stmt.order_by(m.SerialNumber.id.desc())
+        .limit(params.size).offset(params.offset)
+    )).scalars().all())
+
+    rows: list[m.SerialNumber] = []
+    if ids:
+        found = (await db.execute(
+            select(m.SerialNumber).where(m.SerialNumber.id.in_(ids))
+        )).scalars().all()
+        # `IN` gives no order back, and the page's order is the answer's — newest
+        # first — so it is restored from the ids rather than re-sorted in the database.
+        rank = {value: index for index, value in enumerate(ids)}
+        rows = sorted(found, key=lambda row: rank[row.id])
+
+    return {"items": await _decorate_serials(db, rows), "total": total or 0,
+            "page": params.page, "size": params.size}
 
 
 async def serial_summary(db: AsyncSession, *, item_ids: list[int],
@@ -13949,6 +14062,7 @@ async def receipt_options(
     *,
     warehouse_id: int | None = None,
     for_putaway: bool = False,
+    for_qc: bool = False,
     user=None,
 ) -> list[dict]:
     stmt = select(m.Receipt).where(m.Receipt.status != ReceiptStatus.CANCELLED.value)
@@ -13991,6 +14105,30 @@ async def receipt_options(
                 m.Receipt.is_stock_posted.is_(False),
                 m.Receipt.id.in_(waiting),
             )
+        )
+    if for_qc:
+        # Only the deliveries an inspection could still be raised against. Narrowed the
+        # same way `for_putaway` is, and for the same reason: the picker listed every
+        # receipt ever booked in, so an inspector chose a GRN whose QC had finished
+        # months ago and typed a second inspection over it.
+        #
+        # The test is the LINE, not the receipt's status. `qc_status` is what QC itself
+        # writes, so a line still at PENDING is the one statement of "this has not been
+        # inspected" that cannot go stale — where `status == PENDING_QC` is a rung a
+        # receipt passes through and leaves. On this database not one receipt is sitting
+        # at PENDING_QC while thirty lines are still PENDING, so narrowing on the status
+        # would have emptied the picker and taken the screen with it.
+        #
+        # Plus RECEIVED_RECEIPT_STATUSES, because QC comes after the goods are declared
+        # received: a DRAFT receipt's lines read PENDING having never been inspected,
+        # and offering one would have an inspector sign for a count nobody has submitted.
+        pending = (
+            select(m.ReceiptItem.receipt_id)
+            .where(m.ReceiptItem.qc_status == QcStatus.PENDING.value)
+        )
+        stmt = stmt.where(
+            m.Receipt.status.in_(RECEIVED_RECEIPT_STATUSES),
+            m.Receipt.id.in_(pending),
         )
     if search:
         like = f"%{search}%"

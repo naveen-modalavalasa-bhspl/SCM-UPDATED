@@ -1,6 +1,6 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
@@ -8,6 +8,7 @@ import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
+import { InspectionLinkedDocuments } from "../components/LinkedDocuments";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   cancelInspection, completeInspection, createInspection, employeeOptions, getInspection,
@@ -42,6 +43,11 @@ const RESULTS = [
   { value: "PARTIAL", label: "Partial" },
 ];
 
+/** The GRN picker on this screen, narrowed server-side to deliveries still awaiting QC.
+ *  Declared out here so the `Lookup` gets a stable function and does not refetch on
+ *  every keystroke of the rest of the form. */
+const awaitingQcOptions = (search?: string) => grnOptions(search, undefined, true);
+
 const deriveResult = (inspected: number, accepted: number): InspectionItemWrite["result"] => {
   if (inspected <= 0) return "PENDING";
   if (accepted >= inspected) return "PASSED";
@@ -56,6 +62,7 @@ export default function QualityInspectionForm({
 }) {
   const pointLabel = usePointLabel();
   const { id } = useParams();
+  const [search] = useSearchParams();
   const nav = useNavigate();
   const qc = useQueryClient();
   const editing = !!id && id !== "new";
@@ -212,6 +219,21 @@ export default function QualityInspectionForm({
       if (receipt.grn_no) setGrnNo(receipt.grn_no);
     },
   });
+
+  /* Opened straight off a GRN: `?receipt_id=` names the delivery, so the inspector
+   * lands on a form already pointed at it rather than hunting it out of a picker.
+   * New documents only, and once — a saved inspection's receipt is its own. */
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (editing || prefilled.current) return;
+    const fromUrl = Number(search.get("receipt_id"));
+    if (!Number.isFinite(fromUrl) || fromUrl <= 0) return;
+    prefilled.current = true;
+    set("receipt_id", fromUrl);
+    pullReceipt.mutate(fromUrl);
+    // `pullReceipt`/`set` are recreated each render; the ref is what makes this run once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, search]);
 
   const savedLine = (i: number) => doc?.items?.[i];
 
@@ -535,10 +557,19 @@ export default function QualityInspectionForm({
               onChange={(e) => set("inspection_date", e.target.value)}
             />
           </Field>
-          <Field label="Against GRN" hint="Pulls the received lines in.">
+          <Field
+            label="Against GRN"
+            hint="Deliveries awaiting QC. Pulls the received lines in."
+          >
             <Lookup
               name="receipts"
-              load={grnOptions}
+              /* Narrowed to what an inspection can still be raised against — the same
+                 `for_qc` test the list screen's Awaiting QC filter uses. Unnarrowed it
+                 offered every receipt ever booked in, so an inspector picked a GRN
+                 whose QC finished months ago and typed a second inspection over it.
+                 A SAVED inspection's own GRN is no longer in that set, which is what
+                 `grnFallback` is for — the field still reads its own number. */
+              load={awaitingQcOptions}
               value={form.receipt_id ?? ""}
               fallback={grnFallback}
               isDisabled={locked}
@@ -684,6 +715,11 @@ export default function QualityInspectionForm({
       <Section title="Evidence" hint="Test certificates, photographs of the defect.">
         <AttachmentsPanel entityType="INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
       </Section>
+
+      {/* The delivery this inspection was raised off, and what it arrived on. Read off
+          `receipt_id`, which `_raise_inspection_for` stamped on submit — nothing here
+          is written for this panel. */}
+      {doc && <InspectionLinkedDocuments inspection={doc} receipt={delivery} />}
 
       <SerialNumbersModal
         isOpen={serialsFor !== null}

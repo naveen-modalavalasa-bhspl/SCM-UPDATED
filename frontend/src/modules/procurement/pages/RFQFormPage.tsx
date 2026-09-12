@@ -45,7 +45,7 @@ export function RFQFormPage() {
   const [org, setOrg] = useState<OrgValue>({
     departmentId: "", warehouseId: "", projectId: "", companyName: "",
   });
-  const [allocations, setAllocations] = useState<Record<number, Record<number, string>>>({});
+  const [chosenVendors, setChosenVendors] = useState<number[]>([]);
   const [vendorSearch, setVendorSearch] = useState("");
   const [lines, setLines] = useState<DraftLine[]>([blankLine()]);
   const [problem, setProblem] = useState<string | null>(null);
@@ -118,16 +118,12 @@ export function RFQFormPage() {
       projectId: existing.project_id ?? "",
       companyName: existing.company_name ?? "",
     });
-    const restored: Record<number, Record<number, string>> = {};
-    existing.vendors.forEach((vendor) => {
-      (vendor.mapped_item_ids ?? []).forEach((itemId) => {
-        restored[itemId] ??= {};
-        const fullQuantity = existing.items.find((item) => item.item_id === itemId)?.quantity ?? 0;
-        restored[itemId][vendor.vendor_id] = String(
-          vendor.item_quantities?.[String(itemId)] ?? fullQuantity);
-      });
-    });
-    setAllocations(restored);
+    // Who was invited, which is now the whole of what this form holds about vendors.
+    // An RFQ saved before allocation moved to the comparison may still carry old
+    // per-supplier invitation quantities. Re-saving a draft intentionally normalizes
+    // those invitations to the current rule: every selected supplier quotes each full
+    // mapped line, and the actual shares are decided only after prices arrive.
+    setChosenVendors([...new Set(existing.vendors.map((vendor) => vendor.vendor_id))]);
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,
       item_code: item.item_code,
@@ -186,16 +182,30 @@ export function RFQFormPage() {
     })));
   }, [sourceConsolidation]);
 
+  /**
+   * Everyone mapped to at least one item on this RFQ, each named once.
+   *
+   * `vendorsByItem` is keyed per item because that is how the mapping is stored, and
+   * the same supplier legitimately appears under several items. Inviting is a
+   * per-DOCUMENT decision, so they are folded to one row here and the count of items
+   * they cover is carried along — it is the one thing that made the per-item grid
+   * worth reading, and it costs nothing to keep.
+   */
+  const invitableVendors = useMemo(() => {
+    const byId = new Map<number, MasterVendor & { itemCount: number }>();
+    for (const vendors of Object.values(vendorsByItem)) {
+      for (const vendor of vendors) {
+        const seen = byId.get(vendor.id);
+        if (seen) seen.itemCount += 1;
+        else byId.set(vendor.id, { ...vendor, itemCount: 1 });
+      }
+    }
+    return [...byId.values()].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  }, [vendorsByItem]);
+
   const save = useMutation({
     mutationFn: () => {
       const usable = lines.filter((l) => l.item_id !== "" && Number(l.quantity) > 0);
-      const vendorAllocations = usable.flatMap((line) =>
-        Object.entries(allocations[Number(line.item_id)] ?? {})
-          .filter(([, quantity]) => Number(quantity) > 0)
-          .map(([vendorId, quantity]) => ({
-            item_id: Number(line.item_id), vendor_id: Number(vendorId),
-            quantity: Number(quantity),
-          })));
       const payload = {
         title: title || null,
         due_date: dueDate || null,
@@ -205,8 +215,12 @@ export function RFQFormPage() {
         project_id: org.projectId === "" ? null : org.projectId,
         department_id: org.departmentId === "" ? null : org.departmentId,
         company_name: org.companyName || null,
-        vendor_ids: [...new Set(vendorAllocations.map((row) => row.vendor_id))],
-        vendor_allocations: vendorAllocations,
+        // Suppliers only. Splitting a line between them is a decision taken against
+        // PRICES, and at this point nobody has any — see the note on the section
+        // below. `vendor_allocations` is deliberately not sent: the service reads
+        // its absence as "ask every invited supplier for the whole line", which is
+        // what a tender is.
+        vendor_ids: chosenVendors,
         lines: usable.map((line) => ({
           item_id: Number(line.item_id),
           quantity: Number(line.quantity),
@@ -240,39 +254,21 @@ export function RFQFormPage() {
         setProblem(`Quantity cannot exceed ${line.original_quantity} for ${line.item_name || line.item_code}.`);
         return;
       }
-      const itemAllocations = Object.values(allocations[Number(line.item_id)] ?? {})
-        .map(Number).filter((quantity) => quantity > 0);
-      if (!itemAllocations.length) {
-        setProblem(`Pick at least one vendor for ${line.item_name || line.item_code || "each item"}.`);
-        return;
-      }
-      const allocated = itemAllocations.reduce((sum, quantity) => sum + quantity, 0);
-      if (allocated > Number(line.quantity)) {
-        setProblem(`Allocated quantity cannot exceed ${line.quantity} for ${line.item_name || line.item_code}.`);
-        return;
-      }
+    }
+    if (!chosenVendors.length) {
+      setProblem("Pick at least one supplier to send this RFQ to.");
+      return;
     }
     setProblem(null);
     save.mutate();
   };
 
-  const toggleVendor = (itemId: number, vendorId: number, maximum: number) =>
-    setAllocations((current) => {
-      const item = { ...(current[itemId] ?? {}) };
-      if (vendorId in item) delete item[vendorId];
-      else {
-        const used = Object.values(item).reduce((sum, quantity) => sum + (Number(quantity) || 0), 0);
-        const remaining = Math.max(0, maximum - used);
-        item[vendorId] = remaining > 0 ? String(remaining) : "";
-      }
-      return { ...current, [itemId]: item };
-    });
+  const toggleVendor = (vendorId: number) =>
+    setChosenVendors((current) =>
+      current.includes(vendorId)
+        ? current.filter((id) => id !== vendorId)
+        : [...current, vendorId]);
 
-  const setVendorQuantity = (itemId: number, vendorId: number, quantity: string) =>
-    setAllocations((current) => ({
-      ...current,
-      [itemId]: { ...(current[itemId] ?? {}), [vendorId]: quantity },
-    }));
 
   return (
     <div>
@@ -385,72 +381,59 @@ export function RFQFormPage() {
 
         <div>
           <h2 className="mb-1 text-sm font-semibold text-ink">
-            Vendors and quantities per item
+            Suppliers to invite
             <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
           </h2>
+          {/* SUPPLIERS, AND NOTHING ELSE.
+            *
+            * This section used to split every line between its vendors, quantity by
+            * quantity, before the tender had gone out. That is a decision taken
+            * against PRICES, and at the moment an RFQ is raised nobody has any —
+            * so the buyer was being asked to guess the answer to the question the
+            * RFQ exists to ask. Each invited supplier is now asked to quote the
+            * WHOLE line, which is what a tender is, and the split is decided
+            * against the quotations that come back.
+            *
+            * Only suppliers mapped to at least one item on the RFQ are offered: the
+            * service refuses an invitation to a vendor who supplies none of them,
+            * and a picker that offers what the save rejects is a picker nobody
+            * trusts twice. */}
           <p className="mb-3 text-xs text-muted">
-            Split each item between its mapped vendors. The combined allocation cannot
-            exceed the quantity carried from the previous document.
+            Every supplier invited is asked to quote the full quantity of each item
+            they are mapped to. Who supplies how much is decided later, against their
+            quotations.
           </p>
           <Input value={vendorSearch} onChange={(e) => setVendorSearch(e.target.value)}
-                 placeholder="Search vendors…" />
-          <div className="mt-3 space-y-3">
-            {lines.filter((line) => line.item_id !== "").map((line) => {
-              const itemId = Number(line.item_id);
-              const maximum = Number(line.quantity) || 0;
-              const itemAllocations = allocations[itemId] ?? {};
-              const allocated = Object.values(itemAllocations)
-                .reduce((sum, quantity) => sum + (Number(quantity) || 0), 0);
-              const itemVendors = vendorsByItem[itemId] ?? [];
+                 placeholder="Search suppliers…" />
+          <div className="mt-3 space-y-1">
+            {invitableVendors.map((vendor) => {
+              const selected = chosenVendors.includes(vendor.id);
               return (
-                <div key={itemId} className="rounded-xl border border-line p-3">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold text-ink">
-                        {line.item_code ? `${line.item_code} — ` : ""}{line.item_name}
-                      </p>
-                      <p className="text-xs text-muted">Maximum {maximum} {line.uom_code ?? ""}</p>
-                    </div>
-                    <p className={`text-xs font-semibold ${allocated > maximum ? "text-danger" : "text-muted"}`}>
-                      Allocated {allocated} / {maximum}
+                <label key={vendor.id}
+                       className="grid min-h-12 cursor-pointer grid-cols-[auto_1fr] items-center gap-3 rounded-lg px-2 hover:bg-surface-2">
+                  <input type="checkbox" className="h-4 w-4" checked={selected}
+                         onChange={() => toggleVendor(vendor.id)} />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm text-ink">{vendor.name}</p>
+                    <p className="truncate text-[11px] text-muted">
+                      {vendor.code ?? "—"}{vendor.email ? ` · ${vendor.email}` : ""}
+                      {vendor.itemCount ? ` · ${vendor.itemCount} of these items` : ""}
                     </p>
                   </div>
-                  <div className="space-y-1">
-                    {itemVendors.map((vendor) => {
-                      const selected = vendor.id in itemAllocations;
-                      return (
-                        <div key={vendor.id}
-                             className="grid min-h-12 grid-cols-[auto_1fr_9rem] items-center gap-3 rounded-lg px-2 hover:bg-surface-2">
-                          <input type="checkbox" className="h-4 w-4" checked={selected}
-                                 onChange={() => toggleVendor(itemId, vendor.id, maximum)} />
-                          <div className="min-w-0">
-                            <p className="truncate text-sm text-ink">{vendor.name}</p>
-                            <p className="truncate text-[11px] text-muted">
-                              {vendor.code ?? "—"}{vendor.email ? ` · ${vendor.email}` : ""}
-                            </p>
-                          </div>
-                          <Input type="number" min="0.001" max={String(maximum)} step="0.001"
-                                 disabled={!selected} value={selected ? itemAllocations[vendor.id] : ""}
-                                 aria-label={`Quantity for ${vendor.name}`}
-                                 onChange={(e) => setVendorQuantity(itemId, vendor.id, e.target.value)} />
-                        </div>
-                      );
-                    })}
-                    {!itemVendors.length && (
-                      <p className="px-2 py-3 text-sm text-muted">
-                        No mapped vendor found. Add one under{" "}
-                        <Link to="/masters?tab=vendor-items" className="font-semibold text-brand underline">
-                          Masters → Vendor Rates
-                        </Link>.
-                      </p>
-                    )}
-                  </div>
-                </div>
+                </label>
               );
             })}
             {!chosenItemIds.length && (
               <p className="rounded-xl border border-line px-3 py-4 text-sm text-muted">
-                Add an item first to choose its vendors.
+                Add an item first to see who can supply it.
+              </p>
+            )}
+            {!!chosenItemIds.length && !invitableVendors.length && (
+              <p className="rounded-xl border border-line px-3 py-4 text-sm text-muted">
+                No mapped supplier found for these items. Add one under{" "}
+                <Link to="/masters?tab=vendor-items" className="font-semibold text-brand underline">
+                  Masters → Vendor Rates
+                </Link>.
               </p>
             )}
           </div>

@@ -47,13 +47,24 @@ export function LedgerToolbar({
           </Field>
         </div>
         <Field label={`From (${dateField.replace(/_/g, " ")})`}>
+          {/* `max` and `min` stop the picker offering the halves of a range no row
+              can satisfy. A report that comes back empty because the dates were
+              entered the wrong way round reads as missing data, not as a typo. */}
           <Input type="date" value={dateFrom} aria-label="From date"
+                 max={dateTo || undefined}
                  onChange={(e) => onDate("date_from", e.target.value)} />
         </Field>
         <Field label="To">
           <Input type="date" value={dateTo} aria-label="To date"
+                 min={dateFrom || undefined}
                  onChange={(e) => onDate("date_to", e.target.value)} />
         </Field>
+        {/* Typed or pasted straight into the URL, the native control never saw it. */}
+        {dateFrom && dateTo && dateFrom > dateTo && (
+          <p className="sm:col-span-2 lg:col-span-4 -mt-1 text-xs text-bad">
+            From date is after To date — no row can match this range.
+          </p>
+        )}
 
         {filters.map((filter) => (
           <Field key={filter.key} label={filter.label}>
@@ -105,15 +116,15 @@ export function LedgerToolbar({
         </span>
         <div className="flex flex-wrap gap-2">
           <Button variant="subtle" onClick={onReset}>
-            <RotateCcw className="mr-1.5 h-4 w-4" /> Reset filters
+            <RotateCcw className="h-4 w-4" /> Reset filters
           </Button>
           <Can do="report.export">
             <Button variant="subtle" className={TONE_BLUE} onClick={() => onExport("csv")}
                     disabled={exporting || total === 0}>
-              <Download className="mr-1.5 h-4 w-4" /> CSV
+              <Download className="h-4 w-4" /> CSV
             </Button>
             <Button className={TONE_BLUE} onClick={() => onExport("xlsx")} disabled={exporting || total === 0}>
-              <Download className="mr-1.5 h-4 w-4" />
+              <Download className="h-4 w-4" />
               {exporting ? "Preparing…" : "Export Excel"}
             </Button>
           </Can>

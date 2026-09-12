@@ -47,6 +47,7 @@ export function LinePicker({
   lines, onChange, showRate = false, showTax = false, showDate = true,
   disabled = false,
   freezeRateAndTax = false,
+  capQuantityAtOriginal = true,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
@@ -55,6 +56,9 @@ export function LinePicker({
   showDate?: boolean;
   disabled?: boolean;
   freezeRateAndTax?: boolean;
+  /** Source-backed RFQs cannot exceed their authorised quantity. Amendments are
+   * re-approved, so their revised quantity stays open for the approver to decide. */
+  capQuantityAtOriginal?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const toast = useToast();
@@ -149,7 +153,7 @@ export function LinePicker({
               <Input
                 type="number"
                 min="0"
-                max={line.original_quantity}
+                max={capQuantityAtOriginal ? line.original_quantity : undefined}
                 step="0.001"
                 value={line.quantity}
                 disabled={disabled}

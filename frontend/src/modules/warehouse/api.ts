@@ -255,8 +255,9 @@ export const getDespatchPrefill = (noteId: number, receiptId?: number | null) =>
 
 // `inspection_type` is this list's own filter (the endpoint takes it), not something
 // every warehouse list understands — so it widens here rather than in ListParams.
-export const listInspections = (params: ListParams & { inspection_type?: string } = {}) =>
-  get<Page<Inspection>>(`${BASE}/inspections`, params);
+export const listInspections = (
+  params: ListParams & { inspection_type?: string; receipt_id?: number } = {},
+) => get<Page<Inspection>>(`${BASE}/inspections`, params);
 
 export const getInspection = (id: number) => get<Inspection>(`${BASE}/inspections/${id}`);
 
@@ -821,9 +822,9 @@ export const poOptions = (search?: string, warehouse_id?: number) =>
 /** GRNs this login can see. `for_putaway` narrows it to the ones with stock actually
  *  standing on the floor at a bin-managed point — the only ones a putaway can be
  *  raised against. */
-export const grnOptions = (search?: string, for_putaway?: boolean) =>
+export const grnOptions = (search?: string, for_putaway?: boolean, for_qc?: boolean) =>
   get<Option[]>(`${BASE}/options/receipts`, {
-    search, receipt_type: "GRN", for_putaway,
+    search, receipt_type: "GRN", for_putaway, for_qc,
   });
 
 export const gateEntryOptions = (search?: string) =>

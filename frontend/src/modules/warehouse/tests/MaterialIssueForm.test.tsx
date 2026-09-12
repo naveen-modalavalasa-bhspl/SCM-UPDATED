@@ -95,6 +95,26 @@ vi.mock("../api", async (importOriginal) => {
       { item_id: 1, batch_id: 11, bin_id: 10, need: 5, has_units: true, available: 6 },
       { item_id: 1, batch_id: 12, bin_id: 20, need: 10, has_units: true, available: 11 },
     ]),
+    // One bay holding more units than a page. Each page carries its OWN codes, so a
+    // test that reads page 2 can only pass if the request actually asked for page 2.
+    listSerials: vi.fn().mockImplementation(({ page = 1, size = 100 }: any) => {
+      const total = 450;
+      const start = (page - 1) * size;
+      return Promise.resolve({
+        items: Array.from(
+          { length: Math.max(0, Math.min(size, total - start)) },
+          (_unused, offset) => {
+            const n = start + offset + 1;
+            return {
+              id: n, item_id: 1, serial_number: `SN-${n}`, imei: null,
+              asset_code: `AST-${n}`, consumable_code: null,
+              batch_id: 11, batch_no: "AUG-26", bin_id: 10, bin_code: "F1-A1-R1-B1",
+            };
+          },
+        ),
+        total, page, size,
+      });
+    }),
     issueStockSources: vi.fn().mockResolvedValue([
       {
         item_id: 1, bin_id: 10, bin_code: "F1-A1-R1-B1",
@@ -228,6 +248,65 @@ describe("MaterialIssueForm", () => {
     // the system does not think is there is a real thing a storekeeper has to do.
     expect(screen.getAllByText("Show every item").length).toBeGreaterThan(0);
   });
+
+  const pickButton = (label: RegExp) =>
+    screen.getAllByRole("button").find((node) => label.test(node.textContent || ""));
+
+  const openPick = async (label: RegExp) => {
+    await waitFor(() => expect(pickButton(label)).toBeTruthy());
+    fireEvent.click(pickButton(label)!);
+  };
+
+  it("walks to the next page of codes and keeps them there", async () => {
+    // `paging` used to be built as an object literal, so the debounced search effect
+    // re-ran on every render and re-sent an unchanged needle — which resets the reader
+    // to page 1. Next moved to page 2 and snapped back 300 ms later, so no page but
+    // the first could ever be read. `sent` is the guard; this is its test.
+    open();
+    await openPick(/^\s*1\s*\/\s*5\s*$/);
+
+    expect(await screen.findByText("AST-1")).toBeTruthy();
+    expect(screen.queryByText("AST-201")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    expect(await screen.findByText("AST-201")).toBeTruthy();
+    expect(screen.queryByText("AST-1")).toBeNull();
+
+    // And it STAYS there: the reset fired on a 300 ms debounce, so an assertion made
+    // straight after the press passed even against the bug.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(screen.queryByText("AST-201")).toBeTruthy();
+    expect(screen.queryByText("AST-1")).toBeNull();
+  }, 15_000);
+
+  it("keeps codes picked on every page, not just the page that was open at Save", async () => {
+    // The reported bug: 500 picked on page 1, 500 on page 2, Save — and the line came
+    // back with 500, because the save intersected the selection with the page on
+    // screen. The selection is the document's, not the page's.
+    open();
+    await openPick(/^\s*0\s*\/\s*10\s*$/);
+
+    const scan = await screen.findByLabelText(/scan or search codes/i);
+    const enter = (code: string) => {
+      fireEvent.change(scan, { target: { value: code } });
+      fireEvent.keyDown(scan, { key: "Enter" });
+    };
+
+    await screen.findByText("AST-1");
+    ["AST-1", "AST-2", "AST-3", "AST-4", "AST-5"].forEach(enter);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /selected \(5\)/i })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: /next/i }));
+    await screen.findByText("AST-201");
+    ["AST-201", "AST-202", "AST-203", "AST-204", "AST-205"].forEach(enter);
+
+    // Ten selected, five of them on a page that is no longer on screen.
+    const save = await screen.findByRole("button", { name: /save 10 codes/i });
+    fireEvent.click(save);
+
+    await waitFor(() => expect(pickButton(/^\s*10\s*\/\s*10\s*$/)).toBeTruthy());
+  }, 15_000);
 
   it("counts identifiers per pick, so a pick with none is called out on its own row", async () => {
     open();

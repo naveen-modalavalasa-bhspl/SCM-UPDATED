@@ -14,6 +14,7 @@ Two groups, gated very differently on purpose:
     `service.request_reset`.
 """
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import throttle
@@ -23,9 +24,24 @@ from app.core.pagination import Page, PageParams
 from app.platform.mail import service
 from app.platform.mail.schemas import (
     EmailClaimDecisionIn, EmailClaimOut, ForgotPasswordIn, InboxMessageOut,
-    MailComposeIn, MailMessageOut, MailboxStatusOut, ResetPasswordIn,
+    MailComposeIn, MailMessageDetailOut, MailMessageOut, MailboxStatusOut,
+    ResetPasswordIn,
 )
 from app.platform.rbac import permissions as perms
+
+#: Characters a `Content-Disposition` filename must not carry. Stripped rather
+#: than escaped: a stored name is only ever one this system generated, and header
+#: injection is not a thing to get subtly right when nothing needs these.
+_HEADER_UNSAFE = frozenset('";') | frozenset('\\') | frozenset('\r\n')
+
+
+def _safe_filename(name: str) -> str:
+    """A filename that header can carry, or a neutral one when nothing is left."""
+    cleaned = "".join(
+        c for c in (name or "") if c.isprintable() and c not in _HEADER_UNSAFE
+    )
+    return cleaned.strip() or "attachment"
+
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 #: The reset pair sits under /api/auth so it reads as part of signing in, which is
@@ -54,6 +70,36 @@ async def sent(params: PageParams = Depends(), search: str | None = None,
                user=Depends(require_permission(perms.MAIL_VIEW))):
     """Everything this app has sent, failures included — see `service.list_sent`."""
     return await service.list_sent(db, params, search)
+
+
+@router.get("/sent/{message_id}", response_model=MailMessageDetailOut)
+async def sent_message(message_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.MAIL_VIEW))):
+    """One sent message, opened — the html as the recipient received it, plus what
+    went with it. Separate from the list because the markup is the bulk of the row."""
+    return await service.get_sent(db, message_id)
+
+
+@router.get("/sent/{message_id}/attachments/{attachment_id}")
+async def sent_attachment(message_id: int, attachment_id: int,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.MAIL_VIEW))):
+    """Download one file that travelled with a sent message.
+
+    ALWAYS as an attachment and never inline, whatever the recorded content type. The
+    same rule `settings/attachments.py` keeps: a file served inline from our own origin
+    is our origin's script, and the Sent log holds documents generated for outsiders.
+    `nosniff` for the half of that the header alone does not cover.
+    """
+    row = await service.sent_attachment(db, message_id, attachment_id)
+    return Response(
+        content=row.content,
+        media_type=row.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_safe_filename(row.filename)}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("", response_model=MailMessageOut, status_code=201)
