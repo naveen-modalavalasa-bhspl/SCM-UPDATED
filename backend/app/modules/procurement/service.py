@@ -4209,70 +4209,81 @@ async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
     if not accept and not (note or "").strip():
         raise ValidationError("Say why the order is being declined")
 
-    po.vendor_status = (POVendorStatus.ACCEPTED.value if accept
-                        else POVendorStatus.REJECTED.value)
-    po.vendor_responded_at = utcnow()
-    po.vendor_response_note = (note or "").strip() or None
-    
     if accept:
-        if lines:
-            # Vendor has provided updated rates for the items
-            po = (await db.execute(
-                select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
-                .where(PurchaseOrder.id == po.id)
+        po.vendor_status = POVendorStatus.ACCEPTED.value
+        po.vendor_responded_at = utcnow()
+        po.vendor_response_note = (note or "").strip() or None
+        po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
+    else:
+        # Vendor rejected the PO
+        # If this PO was an amendment (revision_no > 0), revert to the previous revision
+        if po.revision_no and po.revision_no > 0:
+            revision = (await db.execute(
+                select(PORevision).where(PORevision.po_id == po.id)
+                .order_by(PORevision.revision_no.desc(), PORevision.id.desc())
+                .limit(1)
             )).scalars().first()
-            
-            sub_total = Decimal(0)
-            tax_total = Decimal(0)
-            lines_by_id = {line.id: line for line in lines}
-            
-            for item in po.items:
-                if item.id in lines_by_id:
-                    item.rate = _d(lines_by_id[item.id].rate)
+            if revision and revision.snapshot:
+                snap = revision.snapshot
+                po.po_no = snap.get("po_no", po.po_no)
+                po.expected_date = date.fromisoformat(snap["expected_date"]) if snap.get("expected_date") else None
+                po.remarks = snap.get("remarks")
+                po.payment_terms = snap.get("payment_terms")
+                po.delivery_terms = snap.get("delivery_terms")
+                po.material_terms = snap.get("material_terms")
+                po.logistics_terms = snap.get("logistics_terms")
+                po.billing_address = snap.get("billing_address")
+                po.shipping_address = snap.get("shipping_address")
+                po.sub_total = Decimal(snap.get("sub_total", 0))
+                po.discount_amount = Decimal(snap.get("discount_amount", 0))
+                po.tax_amount = Decimal(snap.get("tax_amount", 0))
+                po.freight_amount = Decimal(snap.get("freight_amount", 0))
+                po.total_amount = Decimal(snap.get("total_amount", 0))
+                po.revision_no = revision.revision_no
                 
-                amount = _d(item.quantity) * item.rate
-                item.amount = amount
-                sub_total += amount
-                tax_total += amount * _d(item.tax_percent or 0) / Decimal(100)
+                # Restore status and vendor_status
+                po.status = revision.status
+                po.vendor_status = revision.vendor_status
                 
-            _apply_po_totals(po, sub_total, tax_total)
-            
-            # If the supplier changed the rates, the PO needs internal re-approval
-            from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
-            from app.platform.workflow import engine
-            from app.shared.enums import DocType, InstanceStatus
-            
-            creator = await db.get(HcmEmployee, po.created_by_id)
-            if not creator:
-                raise ValidationError("Cannot route for approval: order creator not found")
+                # Re-load items to modify them
+                po = (await db.execute(
+                    select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
+                    .where(PurchaseOrder.id == po.id)
+                )).scalars().first()
                 
-            # Get the creator's active position to resolve the correct ladder
-            assignment = (await db.execute(
-                select(HcmPositionAssignment).where(
-                    HcmPositionAssignment.employee_id == creator.id,
-                    HcmPositionAssignment.is_active == True
-                )
-            )).scalars().first()
-            position_id = assignment.position_id if assignment else None
-            
-            # Monkeypatch the active_position_id onto the creator object for the engine
-            creator.active_position_id = position_id
+                snap_items = snap.get("items", [])
+                snap_items_by_item_id = {i["item_id"]: i for i in snap_items}
                 
-            instance = await engine.start(
-                db, DocType.PO.value, po.id,
-                context={"total_amount": float(po.total_amount),
-                         "project_id": po.project_id or None,
-                         "requester_position_id": position_id,
-                         "doc_no": po.po_no},
-                user=creator
-            )
-            
-            if instance.status == InstanceStatus.APPROVED.value:
-                po.status = POStatus.APPROVED.value
-            else:
-                po.status = POStatus.PENDING_APPROVAL.value
+                items_to_keep = []
+                for item in list(po.items):
+                    if item.item_id in snap_items_by_item_id:
+                        snap_item = snap_items_by_item_id.pop(item.item_id)
+                        item.quantity = Decimal(snap_item.get("quantity", 0))
+                        item.rate = Decimal(snap_item.get("rate", 0))
+                        item.tax_percent = Decimal(snap_item.get("tax_percent", 0))
+                        item.amount = Decimal(snap_item.get("amount", 0))
+                        items_to_keep.append(item)
+                    else:
+                        db.delete(item)
+                
+                # Recreate missing items from the snapshot
+                for item_id, snap_item in snap_items_by_item_id.items():
+                    po.items.append(POItem(
+                        item_id=item_id, item_code=snap_item.get("item_code"),
+                        item_name=snap_item.get("item_name"), uom_code=snap_item.get("uom_code"),
+                        quantity=Decimal(snap_item.get("quantity", 0)),
+                        rate=Decimal(snap_item.get("rate", 0)),
+                        tax_percent=Decimal(snap_item.get("tax_percent", 0)),
+                        amount=Decimal(snap_item.get("amount", 0)),
+                        received_quantity=Decimal(snap_item.get("received_quantity", 0)),
+                    ))
+                
+                # We revert the PO, so this revision is no longer history, it's the present again.
+                db.delete(revision)
         else:
-            po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
+            po.vendor_status = POVendorStatus.REJECTED.value
+            po.vendor_responded_at = utcnow()
+            po.vendor_response_note = (note or "").strip() or None
 
     await db.commit()
     await db.refresh(po)

@@ -608,8 +608,15 @@ export function PODetailPage() {
           </p>
           <POHeaderFields value={header} disabled={true} onChange={(patch) => setHeader({ ...header, ...patch })} />
           <div className="border-t border-line pt-2">
+            <div className="mb-4 flex items-start gap-3 rounded-xl bg-blue-50/50 p-4 text-blue-800 ring-1 ring-blue-100/50">
+              <div className="mt-0.5"><FilePen className="h-5 w-5 text-blue-500" /></div>
+              <div className="text-sm">
+                <p className="font-semibold text-blue-900">Editing Order Lines</p>
+                <p className="mt-1 text-blue-700/80">You can adjust quantities or add new items. Changing an existing item's quantity will unlock its rate and tax fields for editing.</p>
+              </div>
+            </div>
             <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
-            <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} freezeRateAndTax={true} />
+            <LinePicker lines={amendLines} onChange={setAmendLines} showRate showTax showDate={false} conditionalFreeze={true} />
           </div>
           <div className="border-t border-line pt-4">
             {amend.error && <p className="mb-3 text-sm text-danger">{(amend.error as Error).message}</p>}

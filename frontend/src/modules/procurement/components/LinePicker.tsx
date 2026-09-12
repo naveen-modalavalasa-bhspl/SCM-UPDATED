@@ -34,6 +34,7 @@ interface MasterItem {
   code?: string | null;
   name: string;
   uom_code?: string | null;
+  tax_percent?: number;
 }
 
 /**
@@ -47,6 +48,7 @@ export function LinePicker({
   lines, onChange, showRate = false, showTax = false, showDate = true,
   disabled = false,
   freezeRateAndTax = false,
+  conditionalFreeze = false,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
@@ -55,6 +57,7 @@ export function LinePicker({
   showDate?: boolean;
   disabled?: boolean;
   freezeRateAndTax?: boolean;
+  conditionalFreeze?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const toast = useToast();
@@ -139,6 +142,7 @@ export function LinePicker({
                     uom_code: chosen?.uom_code ?? null,
                     item_code: chosen?.code ?? null,
                     item_name: chosen?.name ?? null,
+                    tax_percent: chosen?.tax_percent !== undefined ? String(chosen.tax_percent) : "0",
                   });
                 }}
               />
@@ -168,7 +172,7 @@ export function LinePicker({
                   min="0"
                   step="0.01"
                   value={line.rate ?? ""}
-                  disabled={disabled || !!line.id || freezeRateAndTax}
+                  disabled={disabled || (conditionalFreeze ? (!!line.id && line.quantity === (line.original_quantity ?? line.quantity)) : (!!line.id || freezeRateAndTax))}
                   onChange={(e) => set(index, { rate: e.target.value })}
                 />
               </Field>
@@ -182,7 +186,7 @@ export function LinePicker({
                   min="0"
                   step="0.01"
                   value={line.tax_percent ?? ""}
-                  disabled={disabled || !!line.id || freezeRateAndTax}
+                  disabled={disabled || (conditionalFreeze ? (!!line.id && line.quantity === (line.original_quantity ?? line.quantity)) : (!!line.id || freezeRateAndTax))}
                   onChange={(e) => set(index, { tax_percent: e.target.value })}
                 />
               </Field>
