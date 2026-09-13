@@ -69,6 +69,25 @@
   --color-info-bg: #e8edfb;
   --color-neutral: #5a6377;
   --color-neutral-bg: #eceef3;
+  /* ---- The progress rail (every flow stepper in the product) ----
+     FILLED means done, outlined means not yet. One calm hue per meaning and no
+     gradient: `.bg-brand` carries the four-stop brand sweep as a background IMAGE and
+     the sweep runs ACROSS the row rather than within one dot, so a finished shipment
+     was seven discs each a different colour from its neighbour. Emerald for a leg that
+     is done, indigo for the one in play — analogous cool hues, so the row reads as one
+     track and recedes behind the page's warm brand instead of competing with it.
+     Only an OUTCOME breaks the pair: rejected and cancelled keep the semantic hues,
+     because a stopped document must never wear the colour of one still moving.
+     Every value carries a WHITE glyph and is dark enough to clear 4.5:1 against white.
+     `-rail` is the line between two done dots and is deliberately the ONLY light value
+     here: a rail at full strength turns the row into a bar chart. */
+  --color-step-done: #0f8a62;
+  --color-step-done-rail: #66c09a;
+  --color-step-live: #3e63dd;
+  --color-step-bad: #c93b48;
+  --color-step-hold: #7357a0;
+  --color-step-off: #59616f;
+
 
   /* Height of the tab strip's horizontal scrollbar. Read twice: once to draw the
      bar, once to reserve its lane so the header does not change height with it. */
@@ -132,6 +151,17 @@
   --color-info-bg: #171f3d;
   --color-neutral: #97a1b8;
   --color-neutral-bg: #232a3d;
+  /* The same six, re-STEPPED for the dark ground rather than auto-lightened: the light
+     emerald and indigo both sit too close to #121828 to read as a filled disc on it,
+     and the check inside them has to stay white in both themes or "done" changes shape
+     between the two. */
+  --color-step-done: #14916a;
+  --color-step-done-rail: #276b56;
+  --color-step-live: #4f74e8;
+  --color-step-bad: #d9505c;
+  --color-step-hold: #8b6bc4;
+  --color-step-off: #6b7488;
+
 
   /* Re-stepped for the dark surface, not lightened automatically. */
   --color-chart-returned: #a78bfa;

@@ -134,7 +134,7 @@ export function ShipmentTimeline({
 
       {adding && (
         <div className="mt-3 space-y-3 rounded-xl border border-line bg-surface/60 p-3">
-          <Field label="What happened">
+          <Field label="What happened" required>
             <Select
               value={form.event_type}
               options={EVENT_TYPES}
@@ -246,7 +246,7 @@ export function ShipmentTimeline({
                       </div>
                       {settling === event.id && (
                         <div className="mt-2 space-y-2">
-                          <Field label="How was it settled">
+                          <Field label="How was it settled" required>
                             <Input
                               value={resolution}
                               placeholder="Credit note 4,500 received from the carrier"

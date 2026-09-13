@@ -690,6 +690,10 @@ class MailKind(str, Enum):
     carries a live reset link and the Sent tab is readable by anyone with `mail.view`."""
     MANUAL = "MANUAL"
     PASSWORD_RESET = "PASSWORD_RESET"
+    #: A carrier or supplier portal username plus the shared first password. The
+    #: body is not logged because those credentials should not be readable from
+    #: the Sent screen.
+    VENDOR_LOGIN_INVITE = "VENDOR_LOGIN_INVITE"
     #: The six digits a vendor needs before their quotation can be submitted. Logged
     #: without its body for the same reason as a reset link: it is a live credential
     #: for the few minutes it lives, and the Sent tab is readable by anyone with

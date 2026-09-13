@@ -4,8 +4,9 @@ import type { GRN, GRNCreate, GRNListRow, Issue, MovementRow, StockRow } from ".
 import type {
   ActivityRow, ActivityType,
   CarriageRule, CarrierOption, CarrierQuote, Comparison, Consignment, ConsignmentDetail,
-  ConsignmentLink, DispatchInput, EvaluationMethod, FlowStage, LogisticsVendor,
-  LogisticsVendorInput, LogisticsVendorSummary, ModeRule, ModeSuggestion,
+  ConsignmentLink, DispatchInput, DispatchPolicy, EvaluationMethod, FlowStage,
+  LogisticsVendor, LogisticsVendorInput, LogisticsVendorSummary, ModeRule,
+  ModeSuggestion,
   PartnerType, ProviderBoardRow, RaiserTracking, ReceiptEvidence, ShipmentEvent, TransportRequest,
   TransportSummary, TRInput, TRListRow,
 } from "./transportTypes";
@@ -56,14 +57,21 @@ export const transportApi = {
     api.get<ModeSuggestion | null>("/api/transport/suggest-mode", { params })
       .then((r) => r.data),
   /** The stepper for this mode. Served, never hardcoded — see FlowStage. */
-  flow: (mode?: string) =>
-    api.get<FlowStage[]>("/api/transport/flow", { params: { mode } })
+  flow: (mode?: string, manualCourier = false) =>
+    api.get<FlowStage[]>("/api/transport/flow", {
+      params: { mode, manual_courier: manualCourier },
+    })
       .then((r) => r.data),
   summary: () =>
     api.get<TransportSummary>("/api/transport/summary").then((r) => r.data),
   carriers: (search?: string) =>
     api.get<CarrierOption[]>("/api/transport/carriers", { params: { search } })
       .then((r) => r.data),
+  /** The safe subset of Company Settings that the dispatch form needs — which
+   * courier form to draw, and which of its boxes the service will hold the press
+   * back for. Both come from the backend for the same reason `modes` does. */
+  dispatchPolicy: () =>
+    api.get<DispatchPolicy>("/api/transport/dispatch-policy").then((r) => r.data),
 
   /** Which of these warehouse consignments already have a transport leg. One call
    * for a whole page of consignments rather than one lookup per row. */
@@ -168,6 +176,17 @@ export const transportApi = {
   dispatchConsignment: (data: DispatchInput) =>
     api.post<TransportRequest>("/api/transport/dispatch-consignment", data)
       .then((r) => r.data),
+  /** ADDED 2026-09-10. The same press, on a leg that already exists.
+   *
+   * A return's shipment is drafted by the returns module the moment the return
+   * reaches logistics, so there is nothing for this desk to create — only to arrange.
+   * This applies the arrangement and, on a draft, walks it on exactly as
+   * `dispatchConsignment` does: out to the providers for a price, or ready to leave.
+   * It never releases the load — a return leg may not leave before the return's own
+   * logistics approval is signed. */
+  dispatchLeg: (id: number, data: Partial<DispatchInput>) =>
+    api.post<TransportRequest>(`/api/transport/${id}/dispatch-leg`, data)
+      .then((r) => r.data),
   /** "That price is fine" — books the provider and readies the shipment. */
   acceptQuote: (id: number, quote_id?: number) =>
     api.post<TransportRequest>(`/api/transport/${id}/accept-quote`,
@@ -195,10 +214,18 @@ export const transportApi = {
   }) =>
     api.post<TransportRequest>(`/api/transport/${id}/provider`, data).then((r) => r.data),
 
+  /** "It has left." The custody block is the HAND-OVER's half of the LR and the
+   *  docket beside it — that leg has neither paper, so who took the goods is the
+   *  whole record, and this press is the last moment it can be corrected. The
+   *  service applies those four only to a direct hand-over. */
   dispatch: (id: number, data: {
     lr_no?: string | null; docket_no?: string | null; tracking_url?: string | null;
     eway_bill_no?: string | null; gate_pass_no?: string | null;
     expected_delivery?: string | null; remarks?: string | null;
+    handed_over_by_name?: string | null;
+    handed_over_employee_id?: string | null;
+    handed_over_aadhaar?: string | null;
+    handed_over_phone?: string | null;
   }) =>
     api.post<TransportRequest>(`/api/transport/${id}/dispatch`, data).then((r) => r.data),
   addEvent: (id: number, data: {

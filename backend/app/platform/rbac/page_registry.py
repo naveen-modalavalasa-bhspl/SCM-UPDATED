@@ -270,7 +270,7 @@ PAGES: list[PageDef] = [
     # `page.logistics_overview.view` inherits from `page.logistics_transport.view` (see
     # permissions.INHERITS_GRANTS_FROM) so the desk that works Shipments gets it without
     # anybody re-granting.
-    PageDef("logistics_overview", "/logistics", "Overview",
+    PageDef("logistics_overview", "/logistics/overview", "Overview",
             parent="grp_logistics", module="logistics", icon="layout-dashboard",
             sort_order=0),
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",

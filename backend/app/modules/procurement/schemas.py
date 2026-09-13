@@ -91,16 +91,19 @@ class POAmendIn(POHeaderIn):
     lines: Annotated[list[POAmendLineIn], DocumentLines] | None = None
 
 
-class POVendorResponseLineIn(BaseModel):
-    id: int
-    rate: float = Field(ge=0)
-
-
 class POVendorResponseIn(BaseModel):
-    """The vendor's answer. A decline must say why; an acceptance need not."""
+    """The vendor's answer. A decline must say why; an acceptance need not.
+
+    IT CARRIES NO PRICES. It used to take a `lines` list of rates, which let the
+    supplier accept the order at figures of their own and pushed the rewritten order
+    back up our approval ladder. That is not an acceptance, it is a counter-offer
+    wearing one: the buyer agreed a price, the order says it, and the only two things
+    a supplier may do with it are take it or refuse it. A price that needs to change
+    is the buyer amending the order, where the change is theirs, the reason is
+    recorded and the new total is approved before the supplier ever sees it.
+    """
     accept: bool
     note: str = ""
-    lines: list[POVendorResponseLineIn] | None = None
 
 
 class PORevisionOut(BaseModel):

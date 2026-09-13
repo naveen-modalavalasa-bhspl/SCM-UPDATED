@@ -372,7 +372,7 @@ class MaterialIssue(Base):
 
     id = pk()
     issue_no = Column(String(50), nullable=False, unique=True)
-    issue_type = Column(String(30), nullable=False, default="DEPARTMENT")
+    issue_type = Column(String(30), nullable=False, default="DIRECT")
     issue_date = Column(Date, nullable=False)
 
     indent_id = Column(BigInteger, index=True, nullable=True)

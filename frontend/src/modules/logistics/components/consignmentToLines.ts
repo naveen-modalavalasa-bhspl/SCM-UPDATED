@@ -1,4 +1,6 @@
-import type { ConsignmentDetail, TRInput, TRItem, TRLineInput } from "../transportTypes";
+import type {
+  ConsignmentDetail, PackageQuantity, TRInput, TRItem, TRLineInput,
+} from "../transportTypes";
 
 /**
  * A packed consignment, turned into the transport lines a carrier can price.
@@ -149,6 +151,9 @@ export function manifestLines(items: TRItem[] | undefined | null): TRItem[] {
       if (line.weight_kg != null) {
         merged.weight_kg = Number(merged.weight_kg ?? 0) + Number(line.weight_kg);
       }
+      merged.package_quantities = mergePackageQuantities(
+        merged.package_quantities, line.package_quantities,
+      );
       merged.is_fragile = merged.is_fragile || line.is_fragile;
       continue;
     }
@@ -157,4 +162,53 @@ export function manifestLines(items: TRItem[] | undefined | null): TRItem[] {
     lines.push(copy);
   }
   return lines;
+}
+
+function mergePackageQuantities(
+  left: PackageQuantity[] | undefined,
+  right: PackageQuantity[] | undefined,
+): PackageQuantity[] | undefined {
+  if (!left?.length) return right?.length ? [...right] : left;
+  if (!right?.length) return left;
+  const seen = new Set(left.map(packageQuantityKey));
+  const merged = [...left];
+  for (const part of right) {
+    const key = packageQuantityKey(part);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(part);
+  }
+  return merged;
+}
+
+/** Which physical package a per-package quantity belongs to. Exported because the
+ *  manifest panel counts packages DISTINCT across lines and must agree with the
+ *  merge above about what "the same package" means. */
+export function packageQuantityKey(part: PackageQuantity) {
+  return `${part.package_id ?? ""}|${part.package_no ?? ""}|${part.package_type ?? ""}`;
+}
+
+export function packageQuantityParts(line: TRItem): PackageQuantity[] {
+  return (line.package_quantities ?? [])
+    .filter((part) => Number(part.quantity ?? 0) > 0);
+}
+
+export function quantityLabel(value: number | string | null | undefined): string {
+  const amount = Number(value ?? 0);
+  if (!Number.isFinite(amount)) return "0";
+  return amount.toLocaleString("en-IN", {
+    maximumFractionDigits: 3,
+    minimumFractionDigits: Number.isInteger(amount) ? 0 : undefined,
+  });
+}
+
+export function packageQuantityName(part: PackageQuantity, index: number): string {
+  const packageNo = part.package_no?.trim();
+  const suffix = packageNo?.match(/(?:^|[-/|])((?:PKG|P)\d+)$/i)?.[1];
+  return suffix || packageNo || part.package_type || `Package ${index + 1}`;
+}
+
+export function packageQuantityFallback(line: TRItem): string {
+  const count = Number(line.package_count ?? 0);
+  return count > 0 ? `${quantityLabel(count)} pkg` : "—";
 }

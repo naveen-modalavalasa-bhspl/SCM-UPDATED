@@ -9,8 +9,8 @@ from app.platform.settings.clientinfo import get_client_info
 from app.platform.settings.models import AuditLog, Setting
 from app.platform.settings.schemas import (
     CodeFormatSettings, CompanySettings, FallbackSettings, HcmSyncSettings,
-    NotificationSettings, NumberingSettings, SecuritySettings, RegionalSettings, SettingsIn, SettingsOut,
-    WarehouseSettings,
+    LogisticsSettings, NotificationSettings, NumberingSettings, RegionalSettings,
+    SecuritySettings, SettingsIn, SettingsOut, WarehouseSettings,
 )
 from app.shared.enums import AuditAction
 
@@ -58,6 +58,9 @@ SETTINGS_SPEC = {
         # not answered for itself. Same key name the migration seeds — two spellings
         # of one setting is two settings.
         "requires_inward_default": ("warehouse.requires_inward_default", "bool"),
+    }),
+    "logistics": (LogisticsSettings, {
+        "manual_courier_dispatch": ("logistics.manual_courier_dispatch", "bool"),
     }),
     "security": (SecuritySettings, {
         # The SAME key `procurement.quote_otp.SETTING_KEY` reads at verification

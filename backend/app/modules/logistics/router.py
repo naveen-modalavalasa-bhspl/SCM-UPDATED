@@ -9,7 +9,7 @@ Same arrangement the supplier portal already uses.
 """
 from datetime import date
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -141,8 +141,9 @@ async def transport_evaluation_methods(
 # the thing that decides that.
 @transport_router.get("/flow", response_model=list[dict])
 async def transport_flow(mode: str | None = None,
+                         manual_courier: bool = False,
                          user=Depends(require_permission(perms.TRANSPORT_VIEW))):
-    return service.flow_catalogue(mode)
+    return service.flow_catalogue(mode, manual_courier=manual_courier)
 
 
 @transport_router.get("/summary", response_model=dict)
@@ -250,6 +251,18 @@ async def dispatch_consignment(body: QuickDispatchIn,
     return await service.dispatch_consignment(db, body, user)
 
 
+@transport_router.get("/dispatch-policy")
+async def dispatch_policy(db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    """The slice of Company Settings the dispatch form needs to render safely.
+
+    Company Settings itself remains admin-only; dispatchers need only which courier
+    form applies and which of its boxes are compulsory, never the company's
+    addresses, notification settings, or other admin data.
+    """
+    return await service.dispatch_policy(db)
+
+
 # `{tr_id:int}` on the three single-segment routes, not a bare `{tr_id}`. A literal
 # one-word path under this prefix (`/carriers`, `/provider-board`, whatever is added
 # next) is otherwise matched by these the moment it is declared below them, and the
@@ -309,6 +322,17 @@ async def update_transport(tr_id: int, body: TRUpdate,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(perms.TRANSPORT_CREATE))):
     return await service.update_tr(db, tr_id, body, user)
+
+
+# The same press as `/dispatch-consignment`, on a leg that already exists — a return's
+# draft is raised by the returns module the moment the return reaches logistics, so
+# there is nothing to create and the dispatch board would otherwise have had no button
+# on it. See service.dispatch_leg.
+@transport_router.post("/{tr_id:int}/dispatch-leg", response_model=TROut)
+async def dispatch_leg(tr_id: int, body: TRUpdate,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.TRANSPORT_CREATE))):
+    return await service.dispatch_leg(db, tr_id, body, user)
 
 
 @transport_router.delete("/{tr_id:int}")
@@ -590,9 +614,10 @@ async def list_logistics_vendors(
 
 @partner_router.post("", response_model=PartnerOut, status_code=201)
 async def create_logistics_vendor(
-        body: PartnerCreate, db: AsyncSession = Depends(get_db),
+        body: PartnerCreate, background_tasks: BackgroundTasks,
+        db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
-    return await partners.create_partner(db, body, user)
+    return await partners.create_partner(db, body, user, background_tasks)
 
 
 @partner_router.get("/{vendor_id}", response_model=PartnerOut)
@@ -618,10 +643,12 @@ async def deactivate_logistics_vendor(
 
 @partner_router.post("/{vendor_id}/login", response_model=PartnerOut)
 async def issue_logistics_vendor_login(
-        vendor_id: int, body: PartnerLoginIn = PartnerLoginIn(),
+        vendor_id: int, background_tasks: BackgroundTasks,
+        body: PartnerLoginIn = PartnerLoginIn(),
         db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.LOGISTICS_PARTNER_MANAGE))):
-    return await partners.issue_login(db, vendor_id, body.username, user)
+    return await partners.issue_login(
+        db, vendor_id, body.username, user, background_tasks)
 
 
 @partner_router.post("/{vendor_id}/login/reset", response_model=PartnerOut)

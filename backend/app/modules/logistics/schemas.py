@@ -155,6 +155,10 @@ class TRCreate(BaseModel):
     eway_bill_no: str | None = None
 
     carrier_id: int | None = None
+    #: Used only when Company Settings enables manual courier dispatch.  It is kept
+    #: separate from `carrier_id`: a typed counter name is not a vendor-master record
+    #: and must never grant a carrier portal access.
+    manual_courier_name: str | None = Field(default=None, max_length=200)
     carrier_reference: str | None = None
     vehicle_number: str | None = None
     driver_name: str | None = None
@@ -215,6 +219,14 @@ class ReviseQuoteIn(BaseModel):
     note: str = Field(min_length=1)
 
 
+class TRPackageQuantityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    package_id: int | None = None
+    package_no: str | None = None
+    package_type: str | None = None
+    quantity: float
+
+
 class TRItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -233,6 +245,7 @@ class TRItemOut(BaseModel):
     height_cm: float | None = None
     is_fragile: bool
     remarks: str | None = None
+    package_quantities: list[TRPackageQuantityOut] = []
 
 
 class QuoteOut(BaseModel):
@@ -384,6 +397,13 @@ class TRListRow(BaseModel):
     mode: str
     carriage_mode: str | None = None
     status: str
+    # FIX 2026-09-07: which document this leg is carrying, so a list can say so. The
+    # outward leg has always had `consignment_no`/`indent_no` below to name its source;
+    # a RETURN leg has neither, and without these it read as a bare TR number with no
+    # way to tell it apart from an outward one. Additive: `TROut` has carried both
+    # since the column existed, so nothing downstream changes shape.
+    source_type: str | None = None
+    source_no: str | None = None
     dispatch_id: int | None = None
     consignment_no: str | None = None
     indent_no: str | None = None
@@ -475,7 +495,19 @@ class ProviderIn(BaseModel):
 
 class DispatchIn(BaseModel):
     """Releasing the consignment. The gate pass belongs here rather than on the
-    warehouse document: it is written at the same moment as the LR it travels with."""
+    warehouse document: it is written at the same moment as the LR it travels with.
+
+    The custody block below is the HAND-OVER's answer to the LR and the docket above
+    it. A direct hand-over has neither of those papers — nobody issues an LR for a
+    storekeeper walking a carton to the requester — so the boxes the desk was asked to
+    fill at this press were four it could only leave blank, and the one fact the leg
+    actually records (who took it, and which number pins them down) was frozen at
+    booking with no way to correct it at the gate. The person who finally collects is
+    often not the person named the day before.
+
+    `_release` applies these ONLY to a direct hand-over, so no other mode's dispatch
+    changes shape.
+    """
     lr_no: str | None = None
     docket_no: str | None = None
     tracking_url: str | None = None
@@ -483,6 +515,10 @@ class DispatchIn(BaseModel):
     gate_pass_no: str | None = None
     expected_delivery: date | None = None
     remarks: str | None = None
+    handed_over_by_name: str | None = None
+    handed_over_employee_id: str | None = None
+    handed_over_aadhaar: str | None = None
+    handed_over_phone: str | None = None
 
 
 class CarrierAcceptIn(BaseModel):

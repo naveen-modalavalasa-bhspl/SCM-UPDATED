@@ -20,21 +20,27 @@ password rules, the forced first change and the username clash check must be the
 ones the supplier portal enforces. There is exactly one kind of vendor login.
 """
 import logging
+from types import SimpleNamespace
 
+from pydantic import EmailStr, TypeAdapter
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.logistics.enums import CARRIER_VENDOR_TYPES
 from app.modules.procurement.models import VendorUser
+from app.platform.mail import service as mail_service
+from app.platform.mail import template as mail_template
 from app.platform.settings.service import write_audit
-from app.shared.enums import AuditAction
+from app.shared.enums import AuditAction, MailKind
 from app.shared.models.master import Vendor
 
 logger = logging.getLogger(__name__)
 
 AUDIT_ENTITY = "mst_vendors"
+_EMAIL = TypeAdapter(EmailStr)
 
 #: What the Logistics Vendors screen offers in its type dropdown. The same tuple the
 #: Dispatch dropdown filters on, served rather than duplicated in the frontend — a
@@ -125,6 +131,139 @@ def _row(vendor: Vendor, account: VendorUser | None) -> dict:
     }
 
 
+def _carrier_login_url() -> str:
+    """The carrier-facing frontend route, rooted at this deployment's public app URL."""
+    return f"{settings.APP_BASE_URL.rstrip('/')}/carrier/login"
+
+
+def _invite_address(raw: str | None, carrier_name: str) -> str | None:
+    """Where this partner's invite goes, or None if nobody wrote an address down.
+
+    A blank address is NOT an error, and making it one was: it put the whole Logistics
+    Vendors screen behind the mail server. The login is what lets a carrier answer a
+    quote request, the invite is only how the password reaches them, and a desk that
+    phones the partner and reads it out is how this worked before the invite existed.
+    Refusing the account because the notification cannot be sent stops carrier
+    onboarding dead every time SMTP is down or a partner is on the phone only.
+
+    A MALFORMED address still raises, and must: that is a typo, the desk can see the
+    box it is in, and sending a credential to a mistyped domain is worse than not
+    sending it at all.
+    """
+    address = (raw or "").strip()
+    if not address:
+        return None
+    try:
+        return str(_EMAIL.validate_python(address)).lower()
+    except ValueError as exc:
+        raise ValidationError(
+            f"{address!r} is not a valid carrier email address.",
+            field="email",
+        ) from exc
+
+
+def _invite_blocked_because(carrier: Vendor) -> str | None:
+    """Why this partner's invite cannot go out, in one line for the log, or None.
+
+    Two reasons, and neither is a reason to refuse the login itself: nobody recorded an
+    address, or this deployment has no mailbox configured to send from.
+    """
+    if not _invite_address(carrier.email, carrier.name):
+        return "no email address is recorded for them"
+    if not settings.mail_configured:
+        return "no mailbox is configured on this deployment"
+    return None
+
+
+async def _send_login_invite(db: AsyncSession, *, carrier: Vendor,
+                             account: VendorUser, password: str, actor) -> None:
+    """Send the carrier's portal invite through the shared mailbox.
+
+    A no-op when there is nothing to send to, so every caller is spared the check and
+    no caller can skip it. The account is already minted by this point either way.
+    """
+    blocked = _invite_blocked_because(carrier)
+    if blocked:
+        logger.info("No portal invite sent to %s: %s", carrier.name, blocked)
+        return
+    address = _invite_address(carrier.email, carrier.name)
+    login_url = _carrier_login_url()
+    name = (carrier.contact_person or carrier.name or "Carrier").strip()
+    subject = "Bavya has invited you to SCM ERP"
+    text = (
+        f"Hello {name},\n\n"
+        f"Bavya has invited {carrier.name} to use the SCM ERP carrier portal.\n\n"
+        f"Open the carrier login page:\n{login_url}\n\n"
+        f"Username: {account.username}\n"
+        f"Initial password: {password}\n\n"
+        "Use this portal to quote freight, accept awarded jobs and update delivery "
+        "progress.\n\n"
+        "If you were not expecting this invite, contact the Bavya logistics team.\n\n"
+        "- SCM ERP"
+    )
+    html = mail_template.render(
+        subject=subject,
+        eyebrow="Carrier portal",
+        heading="Bavya has invited you",
+        preheader="Use your username and initial password to open the carrier portal.",
+        blocks=[
+            mail_template.paragraph(f"Hello {name},"),
+            mail_template.paragraph(
+                f"Bavya has invited {carrier.name} to use the SCM ERP carrier "
+                "portal for freight quotes, awarded jobs and delivery updates."),
+            mail_template.button("Open carrier login", login_url),
+            mail_template.facts([
+                ("Carrier", carrier.name),
+                ("Username", account.username),
+                ("Initial password", password),
+                ("Portal", login_url),
+            ]),
+            mail_template.link_fallback(login_url),
+            mail_template.paragraph(
+                "Use this portal to quote freight, accept awarded jobs and update "
+                "delivery progress.",
+                muted=True,
+            ),
+        ],
+        company=await mail_service._company(db),
+        footer_note="Keep this invite private. It contains first-login credentials.",
+    )
+    await mail_service._log_and_send(
+        db,
+        to_addrs=[address],
+        cc_addrs=None,
+        subject=subject,
+        body=text,
+        html=html,
+        kind=MailKind.VENDOR_LOGIN_INVITE,
+        actor=actor,
+        store_body=False,
+    )
+
+
+async def _send_login_invite_from_ids(*, carrier_id: int, account_id: int,
+                                      password: str, actor_id: int | None,
+                                      actor_name: str | None) -> None:
+    """Background-safe invite send with its own database session."""
+    from app.core.database import SessionLocal
+
+    async with SessionLocal() as db:
+        carrier = await db.get(Vendor, carrier_id)
+        account = await db.get(VendorUser, account_id)
+        if carrier is None or account is None:
+            logger.warning(
+                "Carrier invite skipped; carrier=%s account=%s was not found",
+                carrier_id, account_id)
+            return
+        actor = SimpleNamespace(id=actor_id, full_name=actor_name)
+        try:
+            await _send_login_invite(
+                db, carrier=carrier, account=account, password=password,
+                actor=actor)
+        except Exception:
+            logger.exception("Carrier invite email failed for %s", carrier.name)
+
+
 # --------------------------------------------------------------------------- #
 #  Read
 # --------------------------------------------------------------------------- #
@@ -200,13 +339,19 @@ _EDITABLE = ("name", "contact_person", "phone", "email", "address", "city", "sta
              "is_blacklisted")
 
 
-async def create_partner(db: AsyncSession, data, user) -> dict:
+async def create_partner(db: AsyncSession, data, user,
+                         background_tasks=None) -> dict:
     """Add a third-party logistics provider, and optionally let them in.
 
     `issue_login` is on by default from the screen: a partner with no account cannot
     answer a quote request, and the whole reason THIRD_PARTY exists is the round trip.
     Creating one silently loginless is the same trap the old two-screen route set.
     """
+    # The typed address is checked for SHAPE here, while the desk is still looking at
+    # the form — but a blank one does not stop the partner or the login being created.
+    # See `_invite_address`.
+    if getattr(data, "issue_login", False):
+        _invite_address(data.email, data.name)
     code = (data.code or "").strip().upper() or await _next_code(db, data.name)
     clash = (await db.execute(
         select(Vendor).where(func.upper(Vendor.code) == code)
@@ -236,7 +381,7 @@ async def create_partner(db: AsyncSession, data, user) -> dict:
     await db.refresh(vendor)
 
     if getattr(data, "issue_login", False):
-        await issue_login(db, vendor.id, data.username, user)
+        await issue_login(db, vendor.id, data.username, user, background_tasks)
     return await get_partner(db, vendor.id)
 
 
@@ -302,7 +447,8 @@ async def _legacy_clear_forced_change(db: AsyncSession, vendor_id: int) -> None:
     screen only meant nobody at the courier could get in on the day a job was tendered.
 
     Retained only for historical context. New and reset carrier logins no longer call
-    this: every emailed default password must be changed on first sign-in.
+    this: the invite above emails the partner the default password, so the partner can
+    change it themselves and every emailed credential must be changed on first sign-in.
     """
     account = (await db.execute(
         select(VendorUser).where(VendorUser.vendor_id == vendor_id)
@@ -313,14 +459,29 @@ async def _legacy_clear_forced_change(db: AsyncSession, vendor_id: int) -> None:
 
 
 async def issue_login(db: AsyncSession, vendor_id: int, username: str | None,
-                      user) -> dict:
+                      user, background_tasks=None) -> dict:
     from app.modules.procurement.schemas import VendorAccountIn
-    from app.modules.procurement.service import ensure_vendor_account
+    from app.modules.procurement.service import (
+        DEFAULT_VENDOR_PASSWORD, ensure_vendor_account,
+    )
 
     vendor = await _partner(db, vendor_id)
-    await ensure_vendor_account(
+    account = await ensure_vendor_account(
         db, VendorAccountIn(vendor_id=vendor.id,
                             username=(username or "").strip() or None), user)
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _send_login_invite_from_ids,
+            carrier_id=vendor.id,
+            account_id=account.id,
+            password=DEFAULT_VENDOR_PASSWORD,
+            actor_id=getattr(user, "id", None),
+            actor_name=getattr(user, "full_name", None),
+        )
+    else:
+        await _send_login_invite(
+            db, carrier=vendor, account=account, password=DEFAULT_VENDOR_PASSWORD,
+            actor=user)
     logger.info("Issued a portal login for logistics vendor %s", vendor.name)
     return await get_partner(db, vendor.id)
 

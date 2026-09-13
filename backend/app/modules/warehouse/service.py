@@ -8374,7 +8374,7 @@ async def _forward_drafts(db: AsyncSession, *, warehouse_id: int, source_no: str
             continue
 
         draft = await _build_issue(db, s.IssueWrite(
-            issue_type=IssueType.DEPARTMENT,
+            issue_type=IssueType.INDENT_BASED,
             issue_date=ist_today(),
             indent_id=indent_id,
             warehouse_id=warehouse_id,

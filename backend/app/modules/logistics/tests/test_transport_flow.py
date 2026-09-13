@@ -22,8 +22,9 @@ from app.modules.logistics.enums import (
 )
 from app.modules.logistics.schemas import (
     AcknowledgeIn, AwardIn, CarrierAcceptIn, CarrierDeclineIn, CarrierTrackIn,
-    DeliverIn, DispatchIn, InviteIn, QuoteIn, TRCreate, TRLineIn,
+    DeliverIn, DispatchIn, InviteIn, QuoteIn, QuickDispatchIn, TRCreate, TRLineIn,
 )
+from app.platform.settings.service import set_setting
 from app.platform.hcm.models import HcmEmployee
 from app.platform.rbac.models import Role, UserRole
 from app.shared.enums import ApprovalAction
@@ -497,12 +498,14 @@ async def test_a_carrier_scan_lands_on_the_same_timeline_as_the_desks(db):
 #  The flow the screen draws
 # --------------------------------------------------------------------------- #
 
-def test_only_a_tendered_mode_has_a_tender_and_a_confirmation_stage():
-    tendered = [s.key for s in flow_stages(TransportMode.THIRD_PARTY.value)]
+def test_courier_and_third_party_have_the_same_tender_flow():
+    third_party = [s.key for s in flow_stages(TransportMode.THIRD_PARTY.value)]
+    courier = [s.key for s in flow_stages(TransportMode.COURIER.value)]
     handover = [s.key for s in flow_stages(TransportMode.DIRECT.value)]
 
-    assert tendered == ["PLAN", "APPROVE", "TENDER", "CONFIRM", "DISPATCH",
-                        "TRANSIT", "DELIVERED", "ACKNOWLEDGE"]
+    assert third_party == ["PLAN", "APPROVE", "TENDER", "CONFIRM", "DISPATCH",
+                           "TRANSIT", "ACKNOWLEDGE"]
+    assert courier == third_party
     assert "TENDER" not in handover and "CONFIRM" not in handover
     # Both end at the signature: every mode is acknowledged by the receiving site.
     assert handover[-1] == "ACKNOWLEDGE"
@@ -522,3 +525,131 @@ def test_the_stepper_covers_every_status_a_live_shipment_can_hold():
     live = {s.value for s in TransportStatus} - {
         TransportStatus.REJECTED.value, TransportStatus.CANCELLED.value}
     assert live <= covered
+
+
+# --------------------------------------------------------------------------- #
+#  The one press the dispatch desk actually makes
+# --------------------------------------------------------------------------- #
+# Everything above raises a shipment through the register (`create_tr` + `submit_tr`).
+# Nearly every real shipment is raised by `dispatch_consignment` instead — one press on
+# Confirm dispatch — and that path was never covered here, which is exactly where a
+# courier leg stopped being sent out for a price while third-party carried on working.
+
+def _quick(mode, **over):
+    """The body the Confirm dispatch screen posts."""
+    body = _payload(mode).model_dump()
+    body.update(over)
+    return QuickDispatchIn(**body)
+
+
+async def _dispatched(db, w: World, mode, **over):
+    """One press, plus the signature if a ladder caught it."""
+    doc = await transport.dispatch_consignment(db, _quick(mode, **over), w.desk)
+    if doc.status == TransportStatus.PENDING_APPROVAL.value:
+        doc = await transport.act_on_tr(
+            db, doc.id, ApprovalAction.APPROVED.value, w.head)
+    return doc
+
+
+async def test_a_courier_dispatch_goes_out_for_a_price_like_a_tender(db):
+    """The courier is ASKED what it costs, exactly as a hired truck is.
+
+    A courier is a vendor with a portal login, so a booking pushed at them without
+    the question ever being sent is a leg that reaches the gate with no price agreed,
+    nothing to check the invoice against, and a courier who was never asked whether
+    they wanted it.
+    """
+    w = await _world(db)
+    doc = await _dispatched(db, w, TransportMode.COURIER.value,
+                            carrier_ids=[w.fast.id])
+
+    assert doc.status == TransportStatus.QUOTING.value
+    # Not theirs until the price is accepted — the same rule the tender path applies.
+    assert doc.carrier_id is None
+    assert [(q.carrier_id, q.status) for q in doc.quotes] == [
+        (w.fast.id, QuoteStatus.INVITED.value)]
+
+
+async def test_the_invited_courier_finds_the_job_in_their_own_portal(db):
+    """The half the desk cannot see. An invitation nobody can answer is not one."""
+    from app.core.pagination import PageParams
+
+    w = await _world(db)
+    doc = await _dispatched(db, w, TransportMode.COURIER.value,
+                            carrier_ids=[w.fast.id])
+
+    board = await transport.carrier_open_requests(
+        db, w.fast.id, PageParams(page=1, size=20), status="QUOTING")
+    assert [row.id for row in board["items"]] == [doc.id]
+    assert (await transport.carrier_summary(db, w.fast.id))["to_quote"] == 1
+    # And only theirs: the other carrier was not asked.
+    assert (await transport.carrier_summary(db, w.cheap.id))["to_quote"] == 0
+
+
+async def test_a_courier_price_is_accepted_and_the_courier_still_says_yes(db):
+    """Accepting the rate is our half. The vehicle on the day is theirs."""
+    w = await _world(db)
+    doc = await _dispatched(db, w, TransportMode.COURIER.value,
+                            carrier_ids=[w.fast.id])
+    await transport.record_quote(db, doc.id, w.fast.id,
+                                 QuoteIn(freight_amount=850, transit_days=2), w.desk)
+
+    doc = await transport.accept_quote(db, doc.id, None, w.desk)
+    assert doc.status == TransportStatus.AWAITING_CARRIER.value
+    assert (doc.carrier_id, float(doc.freight_amount)) == (w.fast.id, 850.0)
+
+    doc = await transport.carrier_accept(db, w.fast.id, doc.id, CarrierAcceptIn())
+    assert doc.status == TransportStatus.READY.value
+
+
+async def test_a_manual_courier_is_still_settled_at_the_desk(db):
+    """The one courier that cannot be asked: a name off a counter receipt has no
+    vendor row, no portal and no login. That flow is untouched by the tender above —
+    recorded at the desk, approved, and ready to leave."""
+    await set_setting(db, transport.MANUAL_COURIER_SETTING, "true",
+                      value_type="bool", category="logistics")
+    await db.commit()
+    w = await _world(db)
+
+    doc = await _dispatched(db, w, TransportMode.COURIER.value,
+                            manual_courier_name="Counter Courier",
+                            driver_name="Ravi", driver_phone="9876543210",
+                            docket_no="DKT-77")
+
+    assert doc.quotes == []
+    assert (doc.carrier_id, doc.carrier_name) == (None, "Counter Courier")
+    assert doc.status == TransportStatus.READY.value
+
+
+async def test_a_manual_courier_press_cannot_name_a_registered_vendor(db):
+    """One courier flow at a time. Both answered at once is a leg that is booked with
+    a vendor and recorded against a counter name."""
+    await set_setting(db, transport.MANUAL_COURIER_SETTING, "true",
+                      value_type="bool", category="logistics")
+    await db.commit()
+    w = await _world(db)
+
+    with pytest.raises(ValidationError):
+        await transport.dispatch_consignment(
+            db, _quick(TransportMode.COURIER.value, carrier_ids=[w.fast.id],
+                       manual_courier_name="Counter Courier"), w.desk)
+
+
+async def test_a_third_party_dispatch_still_asks_everyone_named(db):
+    """The mode that always worked, pinned so the courier change cannot cost it."""
+    w = await _world(db)
+    doc = await _dispatched(db, w, TransportMode.THIRD_PARTY.value,
+                            carrier_ids=[w.fast.id, w.cheap.id])
+
+    assert doc.status == TransportStatus.QUOTING.value
+    assert {q.carrier_id for q in doc.quotes} == {w.fast.id, w.cheap.id}
+
+
+async def test_a_desk_settled_mode_leaves_on_the_press(db):
+    """Own vehicle asks nobody outside: the driver and the vehicle are on the form."""
+    w = await _world(db)
+    doc = await _dispatched(db, w, TransportMode.OWN_VEHICLE.value,
+                            vehicle_number="AP39XX1234", driver_name="Ravi")
+
+    assert doc.status == TransportStatus.READY.value
+    assert doc.quotes == []

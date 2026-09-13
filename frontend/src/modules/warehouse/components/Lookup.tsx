@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { Select } from "@/shared/components";
 import { useQuery } from "@tanstack/react-query";
 import type { Option } from "../types";
@@ -38,7 +38,7 @@ interface Props {
   fallback?: Option[];
 }
 
-export function Lookup({
+function LookupInner({
   name,
   load,
   value,
@@ -105,3 +105,11 @@ export function Lookup({
     />
   );
 }
+
+/** Memoised, because a lookup is the most expensive thing on a warehouse form and the
+ *  cheapest to skip. The consignment screen re-renders on every package edit, every
+ *  serial tick and every button press; none of those change what is in the "To
+ *  warehouse" list, so re-rendering a 993-row dropdown for them was pure cost. Callers
+ *  must pass stable `load` and `onChange` — see ConsignmentForm, where both are
+ *  `useCallback`ed for exactly this reason. */
+export const Lookup = memo(LookupInner);

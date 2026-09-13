@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, CheckCircle2, Handshake } from "lucide-react";
 import {
@@ -14,18 +14,36 @@ import { CARRIAGE_ICON } from "../components/transportIcons";
 import { phoneError, PHONE_HINT, problems, sanitizePhone } from "../components/validate";
 import type { CarriageMode, TransportRequest, TRListRow } from "../transportTypes";
 import { EmptyQueue, PortalHeading } from "./portalUi";
-import { manifestLines } from "../components/consignmentToLines";
+import { ManifestTable } from "../components/ManifestTable";
 
 const BLANK = {
   driver_name: "", vehicle_number: "", driver_phone: "", driver_licence_no: "",
   lr_no: "", docket_no: "", tracking_url: "", eway_bill_no: "", carrier_reference: "",
 };
 
-/** The two the service will not take an acknowledgement without: a load leaves with a
- *  vehicle and somebody driving it, and a booking with neither cannot be met at the
- *  gate. Read forward off the same rule `CarrierAckIn` enforces, so the button is held
- *  back before the round trip rather than after it. */
-const REQUIRED = ["driver_name", "vehicle_number"] as const;
+/** The fields this portal form marks as owed before the carrier can acknowledge.
+ *  The LR/docket pair is checked separately because either one is enough. */
+const REQUIRED = ["driver_name", "vehicle_number", "driver_phone"] as const;
+const REQUIRED_LABELS: Record<(typeof REQUIRED)[number], string> = {
+  driver_name: "driver's name",
+  vehicle_number: "vehicle number",
+  driver_phone: "phone number",
+};
+
+/** Every rung a won job passes through after the yes. The Shipments board is the
+ *  tender and nothing else, so these are listed here — collected, on the road, landed
+ *  — and each row opens the job screen, which is where the LR and the delivery report
+ *  are given. */
+const RUNNING = "READY,IN_TRANSIT,DELIVERED,ACKNOWLEDGED";
+
+/** What is still owed on a job already taken, said in the row rather than left to the
+ *  status pill: "READY" is our word for it, "the warehouse has it packed" is theirs. */
+const NEXT_STEP: Record<string, string> = {
+  READY: "Ready to collect — add the LR number when you pick it up",
+  IN_TRANSIT: "On the road — tell us when it lands",
+  DELIVERED: "Delivered — waiting for the site to sign for it",
+  ACKNOWLEDGED: "Signed for by the site",
+};
 
 /**
  * Acknowledgements — the awarded carrier saying yes, and saying what is coming.
@@ -50,6 +68,7 @@ const REQUIRED = ["driver_name", "vehicle_number"] as const;
 export function CarrierAckPage() {
   // Which shipment is being answered lives in the URL, so the page can be linked to
   // from a job card and a reload does not drop the carrier back to the list.
+  const nav = useNavigate();
   const [search, setSearch] = useSearchParams();
   const chosenId = Number(search.get("tr") ?? 0);
   const [form, setForm] = useState({ ...BLANK });
@@ -58,11 +77,14 @@ export function CarrierAckPage() {
     queryKey: ["carrier-jobs", "AWAITING_CARRIER"],
     queryFn: () => carrierPortalApi.list({ status: "AWAITING_CARRIER", size: 50 }),
   });
-  // What has already been answered, read-only: a carrier who filled this in yesterday
-  // should be able to see WHAT they said without opening each job.
+  // What has already been answered: a carrier who filled this in yesterday should be
+  // able to see WHAT they said without opening each job. It runs to ACKNOWLEDGED
+  // because the Shipments board carries the tender only — once a lane is won, this is
+  // the one screen the job is listed on, and adding the LR or reporting it delivered
+  // is reached from these rows.
   const { data: confirmed } = useQuery({
-    queryKey: ["carrier-jobs", "READY,IN_TRANSIT"],
-    queryFn: () => carrierPortalApi.list({ status: "READY,IN_TRANSIT", size: 20 }),
+    queryKey: ["carrier-jobs", RUNNING],
+    queryFn: () => carrierPortalApi.list({ status: RUNNING, size: 20 }),
   });
 
   const rows = awarded?.items ?? [];
@@ -97,9 +119,9 @@ export function CarrierAckPage() {
       vehicle_number: form.vehicle_number.trim(),
       driver_phone: form.driver_phone || null,
       driver_licence_no: form.driver_licence_no || null,
-      lr_no: form.lr_no || null,
-      docket_no: form.docket_no || null,
-      tracking_url: form.tracking_url || null,
+      lr_no: form.lr_no.trim() || null,
+      docket_no: form.docket_no.trim() || null,
+      tracking_url: form.tracking_url.trim() || null,
       eway_bill_no: form.eway_bill_no || null,
       carrier_reference: form.carrier_reference || null,
     }),
@@ -109,15 +131,20 @@ export function CarrierAckPage() {
   });
 
   const missing = REQUIRED.filter((key) => !form[key].trim());
+  const courierNeedsTracking = job?.mode === "COURIER";
+  const docketLabel = courierNeedsTracking ? "courier docket number" : "docket number";
+  const hasTrackingHandle = Boolean(form.lr_no.trim() || form.docket_no.trim());
+  const missingTrackingHandle = !hasTrackingHandle;
   const badValues = problems(phoneError(form.driver_phone, "Phone"));
   const blocked = !job || missing.length > 0 || badValues.length > 0
+    || missingTrackingHandle
     || acknowledge.isPending;
 
   return (
     <div>
       <PortalHeading
         title="Acknowledgements"
-        subtitle="Confirm the jobs you were awarded, and tell us what is coming for the load."
+        subtitle="Confirm the jobs you were awarded, and run them through to delivery."
       />
 
       <ErrorBanner error={error ?? detailError ?? acknowledge.error} />
@@ -169,8 +196,8 @@ export function CarrierAckPage() {
                   </h2>
                   <p className="mb-3 text-xs text-muted">
                     The vehicle and the driver are what the gate is expecting; the LR or
-                    docket is what the receiving site tracks it on. Only the first two
-                    are needed to confirm.
+                    docket is what the receiving site tracks it on. Give either the LR
+                    number or the {docketLabel}; one is enough.
                   </p>
 
                   <div className="grid gap-3 sm:grid-cols-2">
@@ -184,7 +211,7 @@ export function CarrierAckPage() {
                           ...form, vehicle_number: e.target.value,
                         })} />
                     </Field>
-                    <Field label="Phone number"
+                    <Field label="Phone number" required
                       hint={phoneError(form.driver_phone, "Phone") ?? PHONE_HINT}>
                       <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
                         onChange={(e) => setForm({
@@ -197,11 +224,19 @@ export function CarrierAckPage() {
                           ...form, driver_licence_no: e.target.value,
                         })} />
                     </Field>
-                    <Field label="LR number" hint="Optional.">
+                    <Field
+                      label="LR number"
+                      hint={`This or the ${docketLabel} is required.`}
+                      required={missingTrackingHandle}
+                    >
                       <Input value={form.lr_no}
                         onChange={(e) => setForm({ ...form, lr_no: e.target.value })} />
                     </Field>
-                    <Field label="Docket number" hint="Optional.">
+                    <Field
+                      label={courierNeedsTracking ? "Courier docket number" : "Docket number"}
+                      hint="This or the LR number is required."
+                      required={missingTrackingHandle}
+                    >
                       <Input value={form.docket_no}
                         onChange={(e) => setForm({ ...form, docket_no: e.target.value })} />
                     </Field>
@@ -234,8 +269,13 @@ export function CarrierAckPage() {
                     {missing.length > 0 && (
                       <span className="text-xs text-muted">
                         Fill in the {missing.map((key) => (
-                          key === "driver_name" ? "driver's name" : "vehicle number"
+                          REQUIRED_LABELS[key]
                         )).join(" and the ")}.
+                      </span>
+                    )}
+                    {missingTrackingHandle && (
+                      <span className="text-xs text-muted">
+                        Fill in either the LR number or the {docketLabel}.
                       </span>
                     )}
                     {badValues.map((message) => (
@@ -253,25 +293,35 @@ export function CarrierAckPage() {
         <div className="mt-8">
           <h2 className="mb-2 flex items-center gap-2 font-display text-lg font-bold text-ink">
             <CheckCircle2 className="h-4 w-4 text-emerald-600" aria-hidden />
-            Already acknowledged
+            Jobs you have taken
           </h2>
           <ul className="space-y-2">
             {confirmed!.items.map((row) => (
-              <li key={row.id} className="rounded-xl border border-line bg-content1 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <span className="font-mono text-xs font-semibold text-ink">
-                    {row.tr_no}
-                  </span>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <Travel row={row} />
-                    <StatusPill status={row.status} />
+              <li key={row.id}>
+                {/* The whole row is the press: past the yes, the LR and the delivery
+                    report are given on the job screen, and this is the only list the
+                    job is on. */}
+                <button
+                  type="button"
+                  onClick={() => nav(`/carrier/jobs/${row.id}`)}
+                  className="w-full rounded-xl border border-line bg-content1 p-4 text-left transition hover:border-brand/40 hover:bg-surface-2"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <span className="font-mono text-xs font-semibold text-ink">
+                      {row.tr_no}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Travel row={row} />
+                      <StatusPill status={row.status} />
+                    </div>
                   </div>
-                </div>
-                <Lane row={row} />
-                <p className="mt-1.5 text-xs text-muted">
-                  Acknowledged{row.lr_no || row.docket_no
-                    ? ` · ${row.lr_no ?? row.docket_no}` : ""}
-                </p>
+                  <Lane row={row} />
+                  <p className="mt-1.5 text-xs text-muted">
+                    {NEXT_STEP[row.status] ?? "Acknowledged"}
+                    {row.lr_no || row.docket_no
+                      ? ` · ${row.lr_no ?? row.docket_no}` : ""}
+                  </p>
+                </button>
               </li>
             ))}
           </ul>
@@ -326,25 +376,11 @@ function JobDetails({ row, detail }: {
         ))}
       </dl>
 
+      {/* The same manifest panel as the desk and the job sheet. A carrier signing
+        * for a load reads what is on it in the shape they have already read it in
+        * twice — while pricing, and while collecting. */}
       {(detail?.items.length ?? 0) > 0 && (
-        <div className="mt-4 border-t border-line/70 pt-3">
-          <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-            Items in this load
-          </p>
-          <div className="space-y-2">
-            {manifestLines(detail!.items).map((item) => (
-              <div key={item.id} className="grid gap-1 rounded-lg bg-content1 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto_auto]">
-                <span className="min-w-0 truncate font-medium text-ink">
-                  {item.item_code ? `${item.item_code} - ` : ""}{item.item_name ?? "Item"}
-                </span>
-                <span className="text-muted">{item.quantity} {item.uom_code ?? ""}</span>
-                <span className="text-muted">
-                  {item.package_count} pkg{item.weight_kg != null ? ` · ${item.weight_kg} kg` : ""}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
+        <ManifestTable className="mt-4" items={detail!.items} status={detail!.status} />
       )}
     </section>
   );
