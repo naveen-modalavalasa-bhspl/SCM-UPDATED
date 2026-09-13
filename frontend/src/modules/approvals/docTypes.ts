@@ -16,6 +16,9 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
   RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
   TRANSPORT_REQUEST: "Shipment",
+  // FIX 2026-09-07: absent, so the queue printed the raw enum "STOCK RETURN" through
+  // the underscore fallback while every row beside it read as words.
+  STOCK_RETURN: "Stock return", STOCK_RETURN_RECEIPT: "Stock return receipt", STOCK_RETURN_LOGISTICS: "Stock return logistics",
 };
 
 export const docTypeLabel = (value: string) =>

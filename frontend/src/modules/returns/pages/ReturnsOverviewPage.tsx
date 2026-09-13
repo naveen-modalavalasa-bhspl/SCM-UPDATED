@@ -8,9 +8,8 @@ import {
   Button, Card, PageHeader, StatCard, StatusPill,
 } from "@/shared/components";
 import { returnsApi } from "../api";
-import { ReturnsNav } from "../components/ReturnsNav";
 import { STATUS_LABEL, STATUS_ORDER } from "../constants";
-import { TONE_MINT } from "@/shared/components/tones";
+import { originState } from "../origin";
 
 /**
  * The module's landing screen — the same shape as the indent Overview: KPI tiles, a
@@ -91,8 +90,6 @@ export default function ReturnsOverviewPage() {
 
   return (
     <div>
-      <ReturnsNav />
-
       <PageHeader
         eyebrow="RETURN"
         title="Overview"
@@ -101,7 +98,7 @@ export default function ReturnsOverviewPage() {
           // the whole point of the screen, and hiding the only way in left storekeepers
           // on an empty page with nothing to do. The endpoint is still permission-gated
           // — a login without the code is refused at submit, which is the real check.
-          <Button className={TONE_MINT} onClick={() => navigate("/returns/new")}>
+          <Button onClick={() => navigate("/returns/new")}>
             <Plus className="h-4 w-4" /> New return
           </Button>
         }
@@ -176,7 +173,7 @@ export default function ReturnsOverviewPage() {
           </ul>
         </Card>
 
-        <Card className="p-4">
+        <Card className="p-5">
           <div className="mb-3 flex items-center justify-between gap-2">
             <h2 className="font-display text-lg font-bold text-ink">Recent returns</h2>
             <Button variant="subtle" onClick={() => navigate("/returns")}>
@@ -193,16 +190,19 @@ export default function ReturnsOverviewPage() {
               <li key={row.id}>
                 <button
                   type="button"
-                  onClick={() => navigate(`/returns/${row.id}`)}
+                  onClick={() => navigate(`/returns/${row.id}`, { state: originState("/returns/dashboard") })}
                   className="min-h-11 w-full rounded-lg px-2 py-2 text-left transition-colors hover:bg-content2"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-semibold text-ink">{row.return_no}</span>
                     <StatusPill status={row.status} />
                   </div>
+                  {/* FIX 2026-09-05: this said office where every other returns screen
+                    * says the warehouse, for what is usually the same place under two
+                    * names. One name for one location, everywhere. */}
                   <div className="mt-0.5 text-xs text-muted">
                     {row.raised_by_name ?? "—"}
-                    {row.office_name ? ` · ${row.office_name}` : ""}
+                    {row.from_warehouse_name ? ` · ${row.from_warehouse_name}` : ""}
                   </div>
                 </button>
               </li>

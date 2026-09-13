@@ -2,7 +2,12 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+
+# Journey timestamps go out with their `+05:30` offset, the way the indent journey
+# serves its own: MySQL stores naive IST, and a naive value stamped `Z` renders 5h30
+# early in every browser. See `app/shared/time.py`.
+from app.shared.time import iso as ist_iso
 
 from .enums import Disposition, ReturnIntent, ReturnKind, ReturnReason
 from app.shared.limits import (  # request-size guards, see the module
@@ -34,6 +39,11 @@ class ReturnWrite(BaseModel):
     reason: ReturnReason
     reason_note: str | None = Field(default=None, max_length=500)
     to_warehouse_id: int | None = None
+    # ADDED 2026-09-07 — the indent this return answers. Optional: a return raised on its
+    # own keeps the behaviour it has always had. Naming one resolves the Indent Return
+    # approval flow and then keeps only rungs that existed on that indent's actual
+    # approval path.
+    indent_id: int | None = None
     # Everything this module writes comes off a branch shelf, so FIELD is the default and
     # the field is here to be recorded rather than chosen — a purchase return is
     # `pro_returns`, raised in the warehouse module off a rejected GRN line.
@@ -69,6 +79,10 @@ class DecisionIn(BaseModel):
     vendor_id: int | None = None
     # CONTROLLED_DISPOSAL only.
     disposal_agency: str | None = Field(default=None, max_length=200)
+    # Logistics leg - four standard methods reused from logistics/transport (DIRECT, COURIER, OWN_VEHICLE, THIRD_PARTY)
+    logistics_mode: str | None = Field(default=None, max_length=30)
+    # How the return travels: own vehicle vs vendor pickup (maps to OWN_VEHICLE vs THIRD_PARTY/vendor_arranged)
+    vehicle_type: str | None = Field(default=None, max_length=30)
 
     @field_validator("note")
     @classmethod
@@ -91,6 +105,69 @@ class ObjectionIn(BaseModel):
     comments: str = Field(min_length=1, max_length=1000)
 
 
+class SendBackIn(BaseModel):
+    """A desk handing the whole document back to the raiser to correct.
+
+    The note is mandatory and it is not a formality: the return drops to DRAFT with its
+    decision cleared and its approvals abandoned, and this sentence is the only thing the
+    raiser is given to work out what to change.
+    """
+
+    comments: str = Field(min_length=1, max_length=1000)
+
+
+class ReceiptLineIn(BaseModel):
+    """One line of a return, and how much of it arrived."""
+
+    line_id: int
+    #: What turned up on THIS line, never the running total. Capped server-side at what
+    #: was dispatched on it (`_receipt_lines`).
+    received_quantity: float = Field(gt=0)
+
+
+class AcknowledgeIn(BaseModel):
+    """What the far end says about the material it is signing for.
+
+    Every field is optional and an EMPTY body is the whole of the older contract: no
+    lines means the load arrived as it was sent, and no condition means it arrived in
+    good order. That is what keeps the raiser's plain close — which moves nothing and
+    has no delivery to describe — a single press.
+    """
+
+    lines: list[ReceiptLineIn] = Field(default_factory=list,
+                                       max_length=MAX_DOCUMENT_LINES)
+    #: GOOD or DAMAGED. Not SHORT — the quantities above already say that, and the
+    #: service derives it from them (`service.ACK_CONDITIONS`).
+    condition: str | None = None
+    #: Required when anything is wrong with it; it is what the claim is worked from.
+    remarks: str | None = None
+
+
+class RejectIn(BaseModel):
+    """A desk refusing the return outright. Ends the document, so it has to say why."""
+
+    comments: str = Field(min_length=1, max_length=1000)
+
+
+class TransportRefOut(BaseModel):
+    """The shipment carrying this return. None until the final approval raises one."""
+
+    transport_request_id: int
+    transport_request_no: str | None = None
+    # STORE or SUPPLIER — which of the two journeys the decision put it on.
+    leg: str | None = None
+    leg_label: str | None = None
+
+
+class SentBackOut(BaseModel):
+    """Why this draft is sitting with the raiser again."""
+
+    count: int = 0
+    note: str | None = None
+    by_name: str | None = None
+    from_stage: str | None = None
+
+
 class ReturnLineOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -100,6 +177,11 @@ class ReturnLineOut(BaseModel):
     item_name: str | None = None
     uom_code: str | None = None
     quantity: Decimal
+    # What left the branch on this line, and what the far end has signed for. The receipt
+    # form asks for a quantity per line and caps it at the first minus the second, so both
+    # are served rather than inferred from the document's status.
+    dispatched_quantity: Decimal = Decimal("0")
+    received_quantity: Decimal = Decimal("0")
     remarks: str | None = None
     # The handling features this item's category carries — derived, never stored. Anything
     # with one is refused the plain Scrap route.
@@ -130,8 +212,9 @@ class ReturnOut(BaseModel):
     id: int
     return_no: str
     status: str
-    # FIELD or DECISION or ENDORSE — which desk is holding it. Both of the last two are
-    # PENDING_APPROVAL, so the status alone cannot say.
+    # DECISION, ENDORSE, FIELD or LOGISTICS — which stage is holding it, in that order.
+    # The first three are all PENDING_APPROVAL so the status alone cannot separate them,
+    # and LOGISTICS spans APPROVED and DISPATCHED for the same reason.
     phase: str = "FIELD"
     kind: str | None = None
     kind_label: str | None = None
@@ -140,6 +223,10 @@ class ReturnOut(BaseModel):
     reason: str | None = None
     reason_label: str | None = None
     reason_note: str | None = None
+    # The request this return answers. None on a return raised on its own — which is every
+    # return raised before 2026-09-07, and those keep their own approval chain.
+    indent_id: int | None = None
+    indent_no: str | None = None
 
     # None means nothing on this return has a cost recorded anywhere.
     value: Decimal | None = None
@@ -168,8 +255,25 @@ class ReturnOut(BaseModel):
     can_decide: bool = False
     # Agreeing with that choice, or sending it back for another one.
     can_endorse: bool = False
+    # Handing the whole document back to the raiser. True only for whoever is actually
+    # holding it, at any of the three approval stages.
+    can_send_back: bool = False
     can_acknowledge: bool = False
+    # ADDED 2026-09-10. True while that acknowledgement is still a RECEIPT — the material
+    # is on its leg, and the press credits the receiving point's stock balance and raises
+    # the purchase return. False once it has landed, where the same press only closes the
+    # document.
+    can_receive: bool = False
     can_withdraw: bool = False
+    can_approve_logistics: bool = False
+
+    # STORE or SUPPLIER, and the shipment carrying it. All three are None until the
+    # decision desk has chosen an outcome that travels.
+    leg: str | None = None
+    leg_label: str | None = None
+    transport: TransportRefOut | None = None
+    # Set on a draft that a desk handed back. None on one that has never been out.
+    sent_back: SentBackOut | None = None
     # A controlled disposal cannot close on the agency's name alone. False on everything
     # that is not one.
     needs_certificate: bool = False
@@ -182,6 +286,7 @@ class ReturnOut(BaseModel):
     received_at: datetime | None = None
 
     items: list[ReturnLineOut] = []
+    can_approve_logistics: bool = False
 
 
 class TopRowOut(BaseModel):
@@ -196,16 +301,22 @@ class SummaryOut(BaseModel):
     draft: int = 0
     pending_approval: int = 0
     approved: int = 0
+    dispatched: int = 0
     acknowledged: int = 0
     rejected: int = 0
     cancelled: int = 0
     total: int = 0
     by_status: dict[str, int] = {}
 
-    # The two desks' backlogs. Both are PENDING_APPROVAL, so one status count cannot
-    # separate them and the desk that is behind stays invisible.
+    # Each stage's own backlog. The first three are all PENDING_APPROVAL, so one status
+    # count cannot separate them and whichever stage is behind stays invisible.
     awaiting_decision: int = 0
     awaiting_endorsement: int = 0
+    awaiting_approval: int = 0
+    # Signed off and waiting on a vehicle, and already on one. Neither is an approval
+    # backlog — they are what is sitting on the yard and what is on the road.
+    awaiting_dispatch: int = 0
+    in_transit: int = 0
     written_off: int = 0
     refused_uneconomic: int = 0
     # Whole days the longest-waiting return has been sitting at a desk, or None when
@@ -234,6 +345,14 @@ class DispositionOptionOut(BaseModel):
     is_default: bool = False
 
 
+class OptionOut(BaseModel):
+    """A served value/label pair. The screen renders it and never invents one."""
+
+    value: str
+    label: str
+    hint: str | None = None
+
+
 class DestinationOptionOut(BaseModel):
     """A point the material could go to, and how much of it that point already holds."""
 
@@ -244,6 +363,10 @@ class DestinationOptionOut(BaseModel):
     tier_label: str | None = None
     on_hand: Decimal = Decimal("0")
     is_default: bool = False
+    #: This is the point the material came from, resolved off the paper trail — as
+    #: against merely being the pre-filled row. Said separately so a fallback default is
+    #: not labelled as a resolved one.
+    is_originating: bool = False
 
 
 class VendorOptionOut(BaseModel):
@@ -263,6 +386,31 @@ class DecisionOptionsOut(BaseModel):
     value: Decimal | None = None
     intent: str | None = None
     intent_label: str | None = None
+    # ADDED 2026-09-08 — the pre-filled destination and what put it there, the trip, and
+    # the category the resulting purchase return will be filed under. All served so the
+    # screen never works out its own answer and then disagrees with the service.
+    originating_warehouse_id: int | None = None
+    originating_warehouse_name: str | None = None
+    originating_source_doc: str | None = None
+    originating_is_resolved: bool = False
+    current_warehouse_id: int | None = None
+    current_warehouse_name: str | None = None
+    logistics_modes: list[OptionOut] = []
+    vehicle_options: list[OptionOut] = []
+    default_logistics_mode: str | None = None
+    default_vehicle_type: str | None = None
+    purchase_return_category: str | None = None
+    purchase_return_category_label: str | None = None
+    #: The rung actually resolved for THIS document, said in a served sentence. The
+    #: category is a coarse three-way filter over a THREE-rung chain (WAREHOUSE / MDP /
+    #: LIP), so it cannot name the point on its own — this does, in the same words the
+    #: stock screens use (`inventory.locations`).
+    purchase_return_source_detail: str | None = None
+    purchase_return_source_tier: str | None = None
+    #: False when no warehouse row answered, so the category is a fallback rather than a
+    #: fact and the screen can say which it is reading.
+    purchase_return_source_resolved: bool = False
+    qc_rejected_tag: bool = False
 
 
 class PurchaseReturnOut(BaseModel):
@@ -283,6 +431,15 @@ class PurchaseReturnOut(BaseModel):
     warehouse_id: int | None = None
     warehouse_name: str | None = None
     reason: str | None = None
+    #: Where the material came from: FROM_WAREHOUSE / FROM_LIP_MDB / QC_REJECTED_GRN.
+    #: Null on every row raised before 2026-09-08 and on hand-raised ones, which reads as
+    #: "source not stated" rather than as a fourth category.
+    source_category: str | None = None
+    source_category_label: str | None = None
+    #: The branch stock return that produced this one, where it was produced
+    #: automatically off a returned load landing at the warehouse.
+    source_return_id: int | None = None
+    source_return_no: str | None = None
     total_items: int = 0
     total_qty: Decimal = Decimal("0")
     total_value: Decimal = Decimal("0")
@@ -299,14 +456,79 @@ class JourneyPhaseOut(BaseModel):
     caption: str | None = None
 
 
+class JourneyStageOut(BaseModel):
+    """One STEP of the journey — a rung that signed, or one still owed a decision.
+
+    The same shape at both zooms: the eight-dot stepper reads `phases`, the journey screen
+    reads these, and both come out of one server-side answer so they cannot disagree.
+    """
+
+    event_id: str | None = None
+    sequence: int
+    title: str
+    status: str
+    is_current: bool = False
+    approver_name: str | None = None
+    position_name: str | None = None
+    timestamp: datetime | None = None
+    comments: str | None = None
+    duration_seconds: int | None = None
+    #: Which leg this step belongs to: draft, submission, decision, sign_off, approval,
+    #: logistics, movement, acknowledgement. The screen groups the timeline by it.
+    stage_type: str
+    reference_no: str | None = None
+    quantity_summary: str | None = None
+
+    @field_serializer("timestamp", when_used="json")
+    def _stamp(self, value: datetime | None):
+        return ist_iso(value)
+
+
+class JourneyEventOut(BaseModel):
+    """One press on the return, from the immutable audit rows. Append-only history."""
+
+    id: str
+    event_type: str
+    title: str
+    description: str | None = None
+    actor_name: str | None = None
+    position_name: str | None = None
+    timestamp: datetime | None = None
+    comments: str | None = None
+    reference_no: str | None = None
+    quantity_summary: str | None = None
+
+    @field_serializer("timestamp", when_used="json")
+    def _stamp(self, value: datetime | None):
+        return ist_iso(value)
+
+
 class JourneyOut(BaseModel):
     """What the tracker draws. Built server-side so the stepper and the status guards
-    can never describe different flows."""
+    can never describe different flows.
 
+    `phases` is the eight-dot tracker on the document; `stages` and `history` are the same
+    journey at step level, which the journey screen draws. All three describe the RETURN —
+    `indent_no` is the request it answers and is a reference only, never a source of steps.
+    """
+
+    return_id: int | None = None
+    return_no: str | None = None
     status: str
+    indent_id: int | None = None
+    indent_no: str | None = None
+    raised_by_name: str | None = None
+    raised_by_position: str | None = None
+    created_at: datetime | None = None
     phases: list[JourneyPhaseOut] = []
     current_sequence: int = 1
     current_stage_message: str | None = None
+    stages: list[JourneyStageOut] = []
+    history: list[JourneyEventOut] = []
+
+    @field_serializer("created_at", when_used="json")
+    def _stamp(self, value: datetime | None):
+        return ist_iso(value)
 
 
 class HolderOut(BaseModel):
@@ -348,6 +570,75 @@ class ReceivingConfigIn(BaseModel):
     position_ids: list[int] = Field(default_factory=list, max_length=10)
 
 
+class IndentOptionOut(BaseModel):
+    """One indent a return may be raised against — the raiser's own, past approval, and
+    still holding something of its own on the raiser's shelf."""
+
+    id: int
+    indent_no: str
+    indent_date: str | None = None
+    status: str
+    total_items: int = 0
+    # How many of those items the raiser is still holding and could send back. Served
+    # rather than inferred: the picker labels the option with it, and an option that
+    # advertises the indent's ORIGINAL line count on an indent holding nothing is the
+    # dead end `service.returnable_indents` exists to remove.
+    returnable_items: int = 0
+    total_qty: Decimal = Decimal("0")
+    project_name: str | None = None
+    position_name: str | None = None
+
+
+class ApprovalStepOut(BaseModel):
+    """One rung of a resolved chain, as the screens draw it — and where the document has
+    reached on it.
+
+    `state` is one of the five the return's own journey uses — completed, current,
+    pending, rejected, cancelled — so the approval stepper and the progress tracker are
+    drawn from one vocabulary. It is read off the press made on the rung and off the
+    instance's `current_sequence`, never inferred from the document's status.
+    """
+
+    sequence: int
+    name: str
+    position_name: str | None = None
+    role_name: str | None = None
+    approver_names: list[str] = []
+    state: str = "pending"
+    # What the state says under the circle. Served so two screens cannot word it two ways.
+    caption: str | None = None
+    # Who actually pressed the rung, which is not always one of `approver_names`: a
+    # delegate signs a rung he is not a member of.
+    actor_name: str | None = None
+    acted_at: datetime | None = None
+
+
+class ApprovalFlowOut(BaseModel):
+    """The approval a return will follow, resolved rather than described.
+
+    Produced by `engine.preview_chain`, which is the same resolution the submit runs, so
+    the steps listed here are the people the document will actually be routed to.
+    """
+
+    indent_id: int | None = None
+    indent_no: str | None = None
+    # Always STOCK_RETURN: linked indents affect the resolution context, not the doc type.
+    doc_type: str
+    # False means no chain is configured for this scope at all — different from a chain
+    # configured to need no signature, which is `is_configured` with no steps.
+    is_configured: bool = False
+    # True once the reporting line has actually started, in which case the steps are the
+    # document's own frozen chain and their states are facts. False means a forecast.
+    is_live: bool = False
+    # The rung the document is sitting on, for the "Stage N of M" line. Null while nothing
+    # has started, or once the chain is settled.
+    current_sequence: int | None = None
+    # Where the approval has reached, in one sentence, built from the steps themselves.
+    current_stage_message: str | None = None
+    steps: list[ApprovalStepOut] = []
+    note: str | None = None
+
+
 class MyStockOut(BaseModel):
     """One returnable line: an item the signed-in raiser is actually holding."""
 
@@ -378,6 +669,13 @@ class RaiserOut(BaseModel):
     destination_note: str | None = None
 
 
+class PurchaseSourceOut(BaseModel):
+    """One of the three purchase-return source categories, served for the filter."""
+
+    value: str
+    label: str
+
+
 class ReasonOut(BaseModel):
     value: str
     label: str
@@ -391,6 +689,76 @@ class HistoryOut(BaseModel):
     action: str
     comments: str | None = None
     acted_at: datetime | None = None
+
+
+class RelatedDocumentOut(BaseModel):
+    """One document on the trail behind the returned item.
+
+    The same fields whatever kind it is, so the section renders one way and branches on
+    nothing. `doc_label` is SERVED rather than mapped in the screen (`enums.TRAIL_LABELS`)
+    — a document type the frontend has never heard of still renders with its real name.
+    `note` is the one-line qualifier that makes a row worth opening: who signed the
+    allocation, the vendor's invoice number, the lot the stock stood in, the LR of the
+    truck. `extra` carries what a link or a badge needs and nothing a reader sees.
+    """
+
+    doc_type: str
+    doc_label: str | None = None
+    doc_id: int | None = None
+    doc_no: str | None = None
+    status: str | None = None
+    date: str | None = None
+    vendor_name: str | None = None
+    warehouse_name: str | None = None
+    note: str | None = None
+    extra: dict | None = None
+
+
+class RelatedDocumentsOut(BaseModel):
+    """The paper trail behind the item, for the reviewer to check before deciding.
+
+    `originating_*` is where the material CAME from, resolved from the trail, and is what
+    the destination picker pre-fills with. `current_*` is where the stock stands today —
+    a different fact, and never a destination, since a return cannot go back to the shelf
+    it is already on.
+    """
+
+    return_id: int
+    return_no: str | None = None
+    originating_warehouse_id: int | None = None
+    originating_warehouse_name: str | None = None
+    #: Which document answered, or null when this is the addressed-to fallback.
+    originating_source_doc: str | None = None
+    originating_is_resolved: bool = False
+    current_warehouse_id: int | None = None
+    current_warehouse_name: str | None = None
+    material_issue_no: str | None = None
+    material_issue_id: int | None = None
+    intent: str | None = None
+    intent_label: str | None = None
+    items: list[dict] = []
+    documents: list[RelatedDocumentOut] = []
+    #: Set only when a kind of document hit the per-kind cap, so a reader can tell a
+    #: complete trail from a truncated one. Null is the normal case and means the list
+    #: below is everything.
+    documents_note: str | None = None
+    purchase_return_category: str | None = None
+    purchase_return_category_label: str | None = None
+    #: The rung actually resolved for THIS document, said in a served sentence. The
+    #: category is a coarse three-way filter over a THREE-rung chain (WAREHOUSE / MDP /
+    #: LIP), so it cannot name the point on its own — this does, in the same words the
+    #: stock screens use (`inventory.locations`).
+    purchase_return_source_detail: str | None = None
+    purchase_return_source_tier: str | None = None
+    #: False when no warehouse row answered, so the category is a fallback rather than a
+    #: fact and the screen can say which it is reading.
+    purchase_return_source_resolved: bool = False
+    qc_rejected_tag: bool = False
+    vehicle_options: list[OptionOut] = []
+    vehicle_type: str | None = None
+    logistics_mode: str | None = None
+    #: The warehouse-side document the gate-out raised, once the load has left.
+    warehouse_return_no: str | None = None
 
 
 class AttachmentOut(BaseModel):

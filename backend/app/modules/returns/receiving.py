@@ -124,7 +124,36 @@ async def get_config(db: AsyncSession) -> dict:
             "in_flight": in_flight, "steps": steps, "warnings": warnings}
 
 
-async def decision_desk(db: AsyncSession) -> dict | None:
+async def resolved_chain(db: AsyncSession, project_id: int | None = None,
+                         requester_id: int | None = None,
+                         requester_position_id: int | None = None,
+                         context: dict | None = None) -> list[dict] | None:
+    raiser_role_id = await ladder.role_of_position(db, requester_position_id)
+    found = await ladder.find_ladder(db, project_id, DOC_TYPE, raiser_role_id)
+    if found is None:
+        return None
+
+    wf, stages = found
+    policy, _fallback_position_id = await ladder.read_policy(db, stages)
+    ctx = dict(context or {})
+    if project_id is not None:
+        ctx.setdefault("project_id", project_id)
+    if requester_position_id is not None:
+        ctx.setdefault("requester_position_id", requester_position_id)
+
+    if custom_ladder.is_custom(wf):
+        return await custom_ladder.resolve_fixed_chain(
+            db, stages, requester_id, policy, requester_position_id, ctx)
+    if requester_position_id is None:
+        return None
+    return await ladder.resolve_chain(
+        db, stages, requester_position_id, requester_id, ctx, policy)
+
+
+async def decision_desk(db: AsyncSession, project_id: int | None = None,
+                        requester_id: int | None = None,
+                        requester_position_id: int | None = None,
+                        context: dict | None = None) -> dict | None:
     """The FIRST rung of the receiving ladder — the inventory desk that decides.
 
     Resolved without starting a workflow, because the decision comes before the
@@ -137,27 +166,49 @@ async def decision_desk(db: AsyncSession) -> dict | None:
     Rungs two and upward are the endorsers; the engine resolves those itself, in order,
     the ordinary way.
     """
-    wf = await _active(db)
-    if wf is None:
+    raiser_role_id = await ladder.role_of_position(db, requester_position_id)
+    found = await ladder.find_ladder(db, project_id, DOC_TYPE, raiser_role_id)
+    if found is None:
         return None
-    stage = (await db.execute(
-        select(Stage).where(Stage.workflow_id == wf.id, Stage.position_id.isnot(None))
-        .order_by(Stage.sequence)
-    )).scalars().first()
-    if stage is None:
+
+    wf, stages = found
+    policy, _fallback_position_id = await ladder.read_policy(db, stages)
+    ctx = dict(context or {})
+    if project_id is not None:
+        ctx.setdefault("project_id", project_id)
+    if requester_position_id is not None:
+        ctx.setdefault("requester_position_id", requester_position_id)
+
+    if custom_ladder.is_custom(wf):
+        chain = await custom_ladder.resolve_fixed_chain(
+            db, stages, requester_id, policy, requester_position_id, ctx)
+    else:
+        if requester_position_id is None:
+            return None
+        chain = await ladder.resolve_chain(
+            db, stages, requester_position_id, requester_id, ctx, policy)
+    if not chain:
         return None
-    holders = (await _holders(db, [stage.position_id])).get(stage.position_id, [])
+
+    first = chain[0]
+    approver_ids = first.get("approver_ids") or []
+    approver_names = first.get("approver_names") or []
     return {
-        "position_id": stage.position_id,
-        "name": stage.name,
-        "holders": holders,
+        "position_id": first.get("position_id"),
+        "post_id": first.get("post_id"),
+        "role_id": first.get("role_id"),
+        "name": first.get("role_name") or first.get("position_name") or "Decision Desk",
+        "holders": [
+            {
+                "id": int(employee_id),
+                "name": approver_names[index] if index < len(approver_names) else "",
+                "code": "",
+            }
+            for index, employee_id in enumerate(approver_ids)
+        ],
         # Whether anybody stands behind the decider. With nobody there the decision is
         # the last word and is carried out the moment it is recorded.
-        "has_endorsers": await db.scalar(
-            select(Stage.id).where(Stage.workflow_id == wf.id,
-                                   Stage.position_id.isnot(None),
-                                   Stage.sequence > stage.sequence).limit(1)
-        ) is not None,
+        "has_endorsers": len(chain) > 1,
     }
 
 

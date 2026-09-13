@@ -1,11 +1,11 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Card, EmptyState, ErrorBanner, Input, PageHeader, ResponsiveList, StatusPill,
-  type Column,
+  Button, Card, EmptyState, ErrorBanner, Field, Input, PageHeader, ResponsiveList,
+  Select, StatusPill, type Column,
 } from "@/shared/components";
 import { returnsApi } from "../api";
-import { ReturnsNav } from "../components/ReturnsNav";
 import { money } from "../constants";
 import type { PurchaseReturn } from "../types";
 
@@ -24,12 +24,23 @@ const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
  * value column is a real number rather than an em dash.
  */
 export default function PurchaseReturnsPage() {
+  const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  // Where the material came from, which is the question the buying desk actually asks
+  // about a purchase return — our own upper-tier stock going back, a branch pushing
+  // material up the chain, or something that failed on the inspection bench.
+  const [source, setSource] = useState("");
+
+  const { data: sources } = useQuery({
+    queryKey: ["returns", "purchase", "sources"],
+    queryFn: () => returnsApi.purchaseReturnSources(),
+    staleTime: Infinity,
+  });
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["returns", "purchase", { page, search }],
-    queryFn: () => returnsApi.purchaseReturns({ page, size: 20, search }),
+    queryKey: ["returns", "purchase", { page, search, source }],
+    queryFn: () => returnsApi.purchaseReturns({ page, size: 20, search, source }),
   });
 
   const rows = data?.items ?? [];
@@ -70,6 +81,21 @@ export default function PurchaseReturnsPage() {
       ),
     },
     {
+      key: "source",
+      header: "Source",
+      hideOnNarrow: true,
+      render: (row) => (
+        <div className="text-sm">
+          {/* Null on every row raised before 2026-09-08 and on ones raised by hand at
+            * the warehouse. Rendered as an honest gap, never as a fourth category. */}
+          <div className="text-ink">{row.source_category_label ?? "Not stated"}</div>
+          {row.source_return_no && (
+            <div className="text-xs text-muted">from {row.source_return_no}</div>
+          )}
+        </div>
+      ),
+    },
+    {
       key: "qty",
       header: "Quantity",
       render: (row) => (
@@ -102,23 +128,47 @@ export default function PurchaseReturnsPage() {
 
   return (
     <div>
-      <ReturnsNav />
-
-      <PageHeader eyebrow="RETURN" title="Purchase returns" />
+      <PageHeader
+        eyebrow="RETURN"
+        title="Purchase returns"
+        actions={
+          <Button onClick={() => navigate("/warehouse/purchase-returns/new")}>New Purchase Return</Button>
+        }
+      />
 
       <Card className="mb-4 p-3">
-        <Input
-          placeholder="Search by return no., vendor, PO or GRN…"
-          value={search}
-          onChange={(event) => {
-            setSearch(event.target.value);
-            setPage(1);
-          }}
-          aria-label="Search purchase returns"
-        />
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr]">
+          <Input
+            placeholder="Search by return no., vendor, PO or GRN…"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(1);
+            }}
+            aria-label="Search purchase returns"
+          />
+          <Field label="Source">
+            <Select
+              value={source}
+              onChange={(value) => {
+                setSource(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "", label: "Any source" },
+                ...(sources ?? []).map((option) => ({
+                  value: option.value,
+                  label: option.label,
+                })),
+              ]}
+              ariaLabel="Filter by source"
+            />
+          </Field>
+        </div>
         <p className="mt-2 text-xs text-muted">
-          Raised in the warehouse when QC rejects a receipt line. Listed here, worked
-          there — the vendor conversation and the credit note are Purchase's and Accounts'.
+          Warehouse → Vendor flow: pick a purchase transaction, vendor & item details auto-fetch, enter quantity, pick
+          reason and press <span className="font-semibold">Send to Vendor</span>. Existing Logistics carries it — no new
+          master, no duplicate logistics.
         </p>
       </Card>
 
@@ -149,6 +199,10 @@ export default function PurchaseReturnsPage() {
               {row.po_no ? `${row.po_no} · ` : ""}
               {qty(row.total_qty)} across {row.total_items}{" "}
               {row.total_items === 1 ? "item" : "items"} · {money(row.total_value)}
+            </div>
+            <div className="mt-1 text-xs text-muted">
+              {row.source_category_label ?? "Source not stated"}
+              {row.source_return_no ? ` · from ${row.source_return_no}` : ""}
             </div>
           </div>
         )}
