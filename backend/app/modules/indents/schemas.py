@@ -265,6 +265,22 @@ class AcknowledgementLineRow(BaseModel):
     issued_quantity: float
     dispatched_quantity: float
     received_quantity: float
+    is_serial_tracked: bool = False
+    #: WHICH kind of identifier the labels below are — SERIAL, IMEI, ASSET,
+    #: CONSUMABLE or NONE (`warehouse.enums.TRACKING_META`). Served rather than
+    #: inferred in the screen for the same reason the issue picker serves it: the
+    #: four are indistinguishable by eye, and only the item knows which was printed
+    #: on the goods the requester is holding.
+    tracking_type: str = "NONE"
+    #: The units that actually left the warehouse against this line — named by
+    #: whichever identifier each one carries. Read-only, so the requester can match
+    #: what is in their hands before acknowledging receipt.
+    serial_numbers: list[str] = Field(default_factory=list)
+    #: How much of this line procurement is already buying (an unsettled material
+    #: request). Served because no screen can derive it: the indent status describes
+    #: the whole document, so a mixed indent — one line off the shelf, one out to be
+    #: bought — says nothing about which line is which.
+    on_order_quantity: float = 0
     # Plain-English answer to "why hasn't my stuff come yet", derived at read time from
     # the issue and dispatch state — never stored, so it cannot go stale.
     pending_with: str | None = None

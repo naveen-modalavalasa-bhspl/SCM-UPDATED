@@ -476,6 +476,7 @@ export default function ReturnDetailPage() {
               returnId={returnId}
               onDone={() => setError(null)}
               onDestinationChange={setPickedDestination}
+              canViewTrail={Boolean(doc.can_view_trail)}
             />
           )}
 
@@ -630,11 +631,24 @@ export default function ReturnDetailPage() {
             />
           </SectionCard>
 
-          {/* The paper trail under the item — intent, indent, material issue, PO, GRN, QC.
-            * Suppressed for the decider, because `DecisionPanel` renders the same section
-            * directly above the decision it is there to inform, and two copies of it on
-            * one page is one of them being scrolled past. */}
-          {!doc.can_decide && <RelatedDocumentsSection returnId={returnId} />}
+          {/* The material's own history — indent, allocation, PO, GRN, QC, issue.
+            *
+            * Two gates, and they are different questions. `can_view_trail` is SERVED and
+            * asks whether this login may read it at all: `return.decide`, the decision
+            * desk's code, because this is a dozen OTHER modules' documents and not a
+            * wider view of the return. Everyone else keeps the whole document — header,
+            * lines, journey, approval trail — and is simply not shown the branch's
+            * purchase orders, its vendor or what the material cost. The route refuses
+            * them too (rule 6: this only keeps the screen from drawing a panel that
+            * would collect a 403).
+            *
+            * `can_decide` is the second: it suppresses the section for whoever is
+            * actually holding the document, because `DecisionPanel` renders the same
+            * section directly above the decision it is there to inform, and two copies
+            * of it on one page is one of them being scrolled past. */}
+          {doc.can_view_trail && !doc.can_decide && (
+            <RelatedDocumentsSection returnId={returnId} />
+          )}
 
           <AttachmentsPanel returnId={returnId} editable={doc.can_edit} />
         </div>

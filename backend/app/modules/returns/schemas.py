@@ -266,6 +266,11 @@ class ReturnOut(BaseModel):
     can_receive: bool = False
     can_withdraw: bool = False
     can_approve_logistics: bool = False
+    # Whether the paper trail behind the MATERIAL may be read — the other modules'
+    # documents under the item, not this document. `return.decide`, served on the
+    # single-document read only. Default False, so a payload built by anything that does
+    # not set it leaves the section out rather than drawing it for everybody.
+    can_view_trail: bool = False
 
     # STORE or SUPPLIER, and the shipment carrying it. All three are None until the
     # decision desk has chosen an outcome that travels.
@@ -704,6 +709,10 @@ class RelatedDocumentOut(BaseModel):
 
     doc_type: str
     doc_label: str | None = None
+    #: Which leg of the material's life this row belongs to (`enums.TRAIL_CHAPTERS`).
+    #: Served on the row so the screen groups by a key it was given rather than by a
+    #: second copy of the doc-type-to-chapter map — the way `doc_label` already works.
+    chapter: str | None = None
     doc_id: int | None = None
     doc_no: str | None = None
     status: str | None = None
@@ -712,6 +721,21 @@ class RelatedDocumentOut(BaseModel):
     warehouse_name: str | None = None
     note: str | None = None
     extra: dict | None = None
+
+
+class TrailChapterOut(BaseModel):
+    """One leg of the material's life, and the question that leg answers.
+
+    Sent in the order the work happens, and sent COMPLETE — a chapter nothing landed in
+    still arrives, because "this material was never bought, it came off stock already on
+    the shelf" is a fact the reviewer needs and an absent heading cannot state it.
+    """
+
+    key: str
+    label: str
+    caption: str
+    #: How many rows of the trail landed here. Zero is meaningful, see above.
+    count: int = 0
 
 
 class RelatedDocumentsOut(BaseModel):
@@ -738,6 +762,11 @@ class RelatedDocumentsOut(BaseModel):
     intent_label: str | None = None
     items: list[dict] = []
     documents: list[RelatedDocumentOut] = []
+    #: The legs of the material's life, in order, every one of them — the headings the
+    #: `documents` above are read under. Served rather than held in the screen so a
+    #: document type added to the trail lands under a heading without the frontend
+    #: knowing it exists.
+    chapters: list[TrailChapterOut] = []
     #: Set only when a kind of document hit the per-kind cap, so a reader can tell a
     #: complete trail from a truncated one. Null is the normal case and means the list
     #: below is everything.

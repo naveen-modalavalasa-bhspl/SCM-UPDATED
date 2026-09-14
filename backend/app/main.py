@@ -257,7 +257,22 @@ def _include_routers() -> None:
     for path in router_paths:
         try:
             module = import_module(path)
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
+            # The bare `continue` here is for a stage that has not been built yet —
+            # the router module itself is absent, which is the skeleton-boot case this
+            # function exists for. It must NEVER swallow a module that DOES exist and
+            # whose own imports are broken: that drops the entire module's API with no
+            # error anywhere, and the only symptom is every screen in it answering 404
+            # "it may have been removed". The logistics module vanished exactly that
+            # way (2026-09-14) and it read as a frontend defect for a day.
+            missing = exc.name or ""
+            if missing == path or path.startswith(f"{missing}."):
+                continue
+            log.error(
+                "Router %s was NOT registered: it imports %r, which is missing. "
+                "Every endpoint in this module is unreachable.",
+                path, missing, exc_info=True,
+            )
             continue
         router = getattr(module, "router", None)
         if router is not None:

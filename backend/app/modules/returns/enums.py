@@ -375,6 +375,106 @@ TRAIL_ORDER: dict[str, int] = {
 }
 
 
+class TrailChapter(str, Enum):
+    """The six legs of a material's life that the trail behind a return is read in.
+
+    Eighteen document types is a correct answer to "what is behind this item" and a
+    useless one to ask a person to read: the desk deciding where a returned carton goes
+    was handed a flat list of twenty-six numbered rows and had to know, from the row's
+    own name, whether a Requisition came before or after a GRN. A chapter is one run of
+    documents under the name the business already uses for it — Request, Allocation,
+    Purchase, Receipt, Issue, Return — so the same trail reads as six things with detail
+    under them.
+
+    The LABELS are the application's own document nouns, not a plain-English retelling
+    of them (CHANGED 2026-09-14). They were "Asked for / Promised / Bought / Arrived /
+    Issued out / Coming back", which reads well and names nothing a storekeeper can look
+    up: the rows under "Promised" are allocations, the screen that opens them is called
+    Allocation, and the leg heading was the one word in that chain that did not match.
+    The caption carries the sentence the label used to; a heading a reader can map onto a
+    menu is worth more than a heading that explains itself once.
+
+    Declared in TRAIL_ORDER sequence and each chapter's types are CONTIGUOUS in it, so
+    the sort the trail already runs produces the chapters grouped, in order, with no
+    second pass. A new `TrailDocType` joins the chapter its neighbours are in; nothing
+    re-orders.
+    """
+
+    REQUEST = "REQUEST"
+    COMMITMENT = "COMMITMENT"
+    SOURCING = "SOURCING"
+    INBOUND = "INBOUND"
+    OUTBOUND = "OUTBOUND"
+    REVERSE = "REVERSE"
+
+
+#: What each chapter is called, what it answers, and which document types land in it —
+#: SERVED with the trail for the same reason `TRAIL_LABELS` is. The screen draws the
+#: chapters it is sent, in the order it is sent them, and knows no doc type at all: a
+#: type added to the trail appears under its chapter without the frontend changing.
+#:
+#: `caption` is the question, in the words a storekeeper would use. Not a definition of
+#: the document type — the row already carries its own name — but what the reader learns
+#: by opening this run of them.
+TRAIL_CHAPTERS: list[dict] = [
+    {
+        "key": TrailChapter.REQUEST.value,
+        "label": "Request",
+        "caption": "The indent it was asked for on, and what the branch wants "
+                   "done with it now.",
+        "doc_types": [TrailDocType.INTENT.value, TrailDocType.INDENT.value],
+    },
+    {
+        "key": TrailChapter.COMMITMENT.value,
+        "label": "Allocation",
+        "caption": "What the store committed off its own shelf, and what it had "
+                   "to go and ask for.",
+        "doc_types": [TrailDocType.ALLOCATION.value,
+                      TrailDocType.MATERIAL_REQUEST.value],
+    },
+    {
+        "key": TrailChapter.SOURCING.value,
+        "label": "Purchase",
+        "caption": "How it was sourced, who quoted for it, and the order that "
+                   "was placed.",
+        "doc_types": [TrailDocType.REQUISITION.value, TrailDocType.RFQ.value,
+                      TrailDocType.QUOTATION.value, TrailDocType.PO.value],
+    },
+    {
+        "key": TrailChapter.INBOUND.value,
+        "label": "Receipt",
+        "caption": "The delivery, the check at the gate and the shelf it went on.",
+        "doc_types": [TrailDocType.DESPATCH_NOTE.value, TrailDocType.GRN.value,
+                      TrailDocType.QC.value, TrailDocType.PUTAWAY.value],
+    },
+    {
+        "key": TrailChapter.OUTBOUND.value,
+        "label": "Issue",
+        "caption": "Picked off the shelf, checked on the way out and handed to "
+                   "the branch that is now returning it.",
+        "doc_types": [TrailDocType.PICKLIST.value, TrailDocType.MATERIAL_ISSUE.value,
+                      TrailDocType.QC_OUTWARD.value],
+    },
+    {
+        "key": TrailChapter.REVERSE.value,
+        "label": "Return",
+        "caption": "The load carrying it back, and the purchase return it becomes.",
+        "doc_types": [TrailDocType.CONSIGNMENT.value, TrailDocType.SHIPMENT.value,
+                      TrailDocType.PURCHASE_RETURN.value],
+    },
+]
+
+#: Which chapter a document type belongs to. Derived from the list above so the two can
+#: never disagree — the mapping is the chapter definition read the other way round, and
+#: a type in two chapters or in none is caught by the test rather than by a reader
+#: noticing a row went missing off the screen.
+CHAPTER_BY_DOC_TYPE: dict[str, str] = {
+    doc_type: chapter["key"]
+    for chapter in TRAIL_CHAPTERS
+    for doc_type in chapter["doc_types"]
+}
+
+
 class VehicleArrangement(str, Enum):
     """Who provides the truck: we do, or the vendor collects.
 

@@ -16,8 +16,10 @@ from app.core.exceptions import ValidationError
 from app.modules.returns import router as returns_router
 from app.modules.returns import service
 from app.modules.returns.enums import (
-    AWAITING_ACK, CLOSED, EDITABLE, HOLDING_STOCK, PHASES, PHASES_APPROVAL_FIRST,
-    PURCHASE_RETURN_SOURCE_LABELS, REASON_LABELS, SELECTABLE_REASONS, TRAIL_LABELS,
+    AWAITING_ACK, CHAPTER_BY_DOC_TYPE, CLOSED, EDITABLE, HOLDING_STOCK, PHASES,
+    PHASES_APPROVAL_FIRST,
+    PURCHASE_RETURN_SOURCE_LABELS, REASON_LABELS, SELECTABLE_REASONS, TRAIL_CHAPTERS,
+    TRAIL_LABELS,
     TRAIL_ORDER, ReturnDocType, ReturnReason, ReturnStatus, TrailDocType,
 )
 from app.modules.returns.schemas import DecisionIn, ReturnLineIn, ReturnWrite
@@ -1111,6 +1113,73 @@ class TestTheWholeTrail:
                    if row["doc_type"] == TrailDocType.QC.value)
         assert row["extra"]["rejected_qty"] == "3"
         assert row["note"] == "3 rejected on these items"
+
+
+class TestWhoReadsTheTrail:
+    """Who may read the history behind the returned MATERIAL, as opposed to the return.
+
+    ADDED 2026-09-14. The trail is a dozen OTHER modules' documents — the purchase order,
+    the vendor, the price, the GRN — and it was served to anybody holding `return.view`,
+    which is everybody who can open a return at all. It is the decision desk's own code
+    now: `return.decide`.
+
+    Asserted off the route's resolved dependency graph rather than off the source text, so
+    a route that imports `require_permission` and then stops applying it still fails here.
+    Rule 6: the screen leaving the panel out is not the control.
+    """
+
+    def test_the_route_asks_for_the_deciding_code_not_the_viewing_one(self):
+        route = next(r for r in returns_router.router.routes
+                     if getattr(r, "path", None)
+                     == "/api/returns/{return_id}/related-documents")
+        codes = {value for dependency in route.dependant.dependencies
+                 if dependency.call is not None
+                 for cell in getattr(dependency.call, "__closure__", None) or ()
+                 for value in [cell.cell_contents] if isinstance(value, str)}
+        assert "return.decide" in codes, codes
+        assert "return.view" not in codes, codes
+
+    def test_a_request_with_no_user_at_all_reads_nothing(self):
+        """The served flag is what the screen renders off, and its fail-closed default
+        matters: a caller that cannot say who is asking is told no."""
+        assert asyncio.run(service._may_read_trail(None, None)) is False
+
+
+class TestTheTrailReadsAsChapters:
+    """The six legs the trail is grouped under, and the two ways they fail silently.
+
+    ADDED 2026-09-14. Eighteen document types in one flat list is a correct answer to
+    "what is behind this item" and an unreadable one — the live desk was handed twenty-six
+    numbered rows and had to know from each row's name whether a Requisition came before
+    or after a GRN. The chapters are the question each run of documents answers.
+
+    Both of these are silent in production if they drift. A doc type in no chapter
+    vanishes off a screen that groups by chapter — the row is served, the heading it
+    belongs under is not, and nobody is told a document went missing. And a chapter whose
+    types are NOT contiguous in `TRAIL_ORDER` interleaves: the trail is sorted once, by
+    trail order, and the screen relies on that sort to produce the chapters in blocks, so
+    a stray type puts a second copy of a heading halfway down the list.
+    """
+
+    def test_every_document_type_on_the_trail_lands_in_a_chapter(self):
+        assert set(CHAPTER_BY_DOC_TYPE) == set(TRAIL_LABELS)
+
+    def test_no_document_type_is_claimed_by_two_chapters(self):
+        claimed = [doc_type for chapter in TRAIL_CHAPTERS
+                   for doc_type in chapter["doc_types"]]
+        assert len(claimed) == len(set(claimed))
+
+    def test_each_chapter_is_one_unbroken_run_of_the_trail_order(self):
+        positions = [TRAIL_ORDER[doc_type] for chapter in TRAIL_CHAPTERS
+                     for doc_type in chapter["doc_types"]]
+        assert positions == list(range(len(TRAIL_ORDER)))
+
+    def test_every_chapter_says_what_it_is_and_what_it_answers(self):
+        """Wording is SERVED — the screen renders the heading it is sent and composes
+        nothing — so an empty label is a blank heading on a live page."""
+        for chapter in TRAIL_CHAPTERS:
+            assert chapter["key"] and chapter["label"] and chapter["caption"], chapter
+
 
 class TestTheRungIsNamedProperly:
     """What the desk is TOLD the material came off, against what it actually came off.

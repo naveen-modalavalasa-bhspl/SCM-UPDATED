@@ -153,6 +153,17 @@ export interface StockReturn {
   can_receive: boolean;
   can_withdraw: boolean;
   can_approve_logistics: boolean;
+  /**
+   * Whether the paper trail behind the MATERIAL may be read — the other modules'
+   * documents under the item, never this document. `return.decide`, the decision desk's
+   * own code, and served on the single-document read only.
+   *
+   * Asked rather than guessed: `GET /related-documents` is gated on the same code, so a
+   * screen that renders the section for everyone collects a 403 for most of the people
+   * who open a return, and an error panel reads as a broken screen rather than a private
+   * one. Optional so a payload from a backend older than this reads as false.
+   */
+  can_view_trail?: boolean;
 
   /** STORE or SUPPLIER. Null until a decision chose an outcome that travels. */
   leg: string | null;
@@ -319,6 +330,11 @@ export interface RelatedDocument {
   /** What this kind of document is CALLED, served with the row (`enums.TRAIL_LABELS`).
    *  A type this screen has never heard of still renders with its real name. */
   doc_label?: string | null;
+  /** Which leg of the material's life this row is read under (`enums.TRAIL_CHAPTERS`).
+   *  Served, like `doc_label`, so the screen groups by a key it was given rather than by
+   *  a second copy of the doc-type-to-chapter map. Null on a type the server could not
+   *  place, which the trail draws under its own heading at the end. */
+  chapter?: string | null;
   doc_id: number | null;
   doc_no: string | null;
   status: string | null;
@@ -329,6 +345,17 @@ export interface RelatedDocument {
    *  the vendor's invoice number, the lot the stock stood in, the LR of the truck. */
   note?: string | null;
   extra?: Record<string, unknown> | null;
+}
+
+/** One leg of the material's life, served with the trail (`enums.TRAIL_CHAPTERS`). */
+export interface TrailChapter {
+  key: string;
+  label: string;
+  /** The question this leg answers, in the words the served payload uses. Never
+   *  composed here — the same chapter is named by this screen and by the payload, and
+   *  two copies of that wording is how one of them goes stale. */
+  caption: string;
+  count: number;
 }
 
 export interface RelatedDocuments {
@@ -355,6 +382,12 @@ export interface RelatedDocuments {
     uom_code?: string | null;
   }[];
   documents: RelatedDocument[];
+  /** The legs of the material's life, in the order the work happens — EVERY one of
+   *  them, including the ones nothing landed in. A `count` of 0 is a fact about this
+   *  material ("never bought — it came off stock already on the shelf") and only a
+   *  heading that is present can say so. Optional: an older payload sends none, and the
+   *  screen then falls back to one flat list. */
+  chapters?: TrailChapter[];
   /** Set only when a kind of document hit the per-kind cap. Null — the normal case —
    *  means the list above is the whole trail. */
   documents_note: string | null;

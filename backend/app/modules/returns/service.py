@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.platform.rbac import permissions as perms
 from app.shared.scope import scope_condition
 from app.modules.inventory import allocation, locations
 from app.modules.inventory import service as inventory
@@ -99,6 +100,7 @@ from .enums import (
     NUMBER_SERIES, PHASES, PHASES_APPROVAL_FIRST,
     PURCHASE_RETURN_SOURCE_LABELS, REASON_LABELS,
     SELECTABLE_DISPOSITIONS, SELECTABLE_PURCHASE_RETURN_SOURCES, SELECTABLE_REASONS,
+    CHAPTER_BY_DOC_TYPE, TRAIL_CHAPTERS,
     TRAIL_LABELS, TRAIL_ORDER, VEHICLE_ARRANGEMENT_LABELS,
     TRAVELS, WITHDRAWABLE, Disposition, Movement, PurchaseReturnSource, ReturnDocType,
     ReturnIntent, ReturnKind, ReturnLeg, ReturnReason, ReturnStatus, TrailDocType,
@@ -1227,8 +1229,47 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
     }
 
 
+async def _may_read_trail(db: AsyncSession, user) -> bool:
+    """Whether this login may read the paper trail behind the returned MATERIAL.
+
+    One condition: **`return.decide`**, the decision desk's own code, and deliberately
+    not `return.view`. The trail is a dozen other modules' documents (the purchase order,
+    the vendor, the price, the GRN, the inspection), gathered because the desk deciding
+    where material goes cannot make that call without them. Everyone who can open a
+    return holds `return.view`; almost none of them need the commercial history of the
+    item, which is why it used to be served to all of them.
+
+    Not a workflow test. `can_decide` is true only while the document is actually SITTING
+    on the desk, and the desk has to be able to look at a return it has already decided,
+    or one a colleague is holding. This asks whether the login is a decider at all — so
+    a decider who raised a return themselves still reads its trail, which is deliberate:
+    the desk's view of a return is the same view whoever is holding it.
+
+    Whether a given job profile SHOULD hold `return.decide` is an administrator's
+    decision on Job Profiles, not this function's — and the documents in the trail are
+    each gated by their own module besides, so a row this serves is still unopenable by
+    somebody with no right to that document.
+
+    The route is what enforces it (rule 6). This exists so the screen can leave the
+    section out rather than draw it and collect a 403 — a panel that renders an error for
+    most of the people who open the document reads as a broken screen, not a private one.
+    """
+    if user is None:
+        return False
+    from app.platform.rbac.service import get_user_permissions
+
+    codes = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    return perms.RETURN_DECIDE in codes
+
+
 async def get_return(db: AsyncSession, return_id: int, user=None) -> dict:
-    return await _out(db, await _load(db, return_id), user)
+    out = await _out(db, await _load(db, return_id), user)
+    # Only on the single-document read. `_out` also builds every row of a forty-row
+    # queue, and no list screen draws the trail.
+    out["can_view_trail"] = await _may_read_trail(db, user)
+    return out
 
 
 
@@ -6102,6 +6143,18 @@ async def get_related_documents(db: AsyncSession, return_id: int, user=None) -> 
             },
         })
 
+    # The chapter each row is read under, stamped in ONE pass over the finished list so
+    # the appended purchase-return row above is covered too. Unknown types land nowhere
+    # rather than in the wrong place: the screen draws a row with no chapter at the end
+    # of the trail under its own heading, which is honest, where guessing a chapter for
+    # it would file a document under a leg it never travelled.
+    for row in documents:
+        row["chapter"] = CHAPTER_BY_DOC_TYPE.get(row.get("doc_type") or "")
+    counts: dict[str, int] = {}
+    for row in documents:
+        if row["chapter"]:
+            counts[row["chapter"]] = counts.get(row["chapter"], 0) + 1
+
     return {
         "return_id": doc.id,
         "return_no": doc.sto_no,
@@ -6125,6 +6178,15 @@ async def get_related_documents(db: AsyncSession, return_id: int, user=None) -> 
             "uom_code": line.uom_code,
         } for line in list(doc.items or [])],
         "documents": documents,
+        # Every chapter, including the empty ones. A leg with nothing in it is a FACT
+        # about this material — "it was never bought, it came off stock already on the
+        # shelf" — and only a heading that is present can say so.
+        "chapters": [{
+            "key": chapter["key"],
+            "label": chapter["label"],
+            "caption": chapter["caption"],
+            "count": counts.get(chapter["key"], 0),
+        } for chapter in TRAIL_CHAPTERS],
         # Said, never silent: the trail is capped per kind and a reader has to be able
         # to tell a complete list from a truncated one.
         "documents_note": _cap_note(documents),

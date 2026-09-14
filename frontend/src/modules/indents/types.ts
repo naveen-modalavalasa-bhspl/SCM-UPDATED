@@ -194,6 +194,22 @@ export interface AcknowledgementLine {
   issued_quantity: number;
   dispatched_quantity: number;
   received_quantity: number;
+  is_serial_tracked?: boolean;
+  /**
+   * Which KIND of identifier `serial_numbers` holds — SERIAL, IMEI, ASSET,
+   * CONSUMABLE or NONE. Served, never inferred here: the four look identical on a
+   * label, and only the item says which one was printed on the goods.
+   */
+  tracking_type?: string;
+  /** The units that left the warehouse for this line, by whichever code each carries. */
+  serial_numbers?: string[];
+  /**
+   * How much of this line procurement is already buying. Served, because nothing on
+   * the screen can work it out: the indent status describes the whole document, so a
+   * mixed indent — one line off the shelf, one out to be bought — says nothing about
+   * which line is which. Absent on an older backend, hence optional.
+   */
+  on_order_quantity?: number;
   /** Derived server-side: "On the way to you", "With procurement", … */
   pending_with?: string | null;
 }

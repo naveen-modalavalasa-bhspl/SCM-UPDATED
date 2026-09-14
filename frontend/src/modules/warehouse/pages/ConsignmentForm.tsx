@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
-import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, Warehouse } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Lock, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow } from "../components/DocumentMeta";
 import { PrintPortal } from "../components/LabelPrint";
@@ -268,25 +268,10 @@ function ConsignmentSection({
 function ConsignmentJourney({
   title,
   actions,
-  sourceLoaded,
-  origin,
-  destination,
-  packageCount,
-  remaining,
 }: {
   title: string;
   actions: ReactNode;
-  sourceLoaded: boolean;
-  origin: string;
-  destination: string;
-  packageCount: number;
-  remaining: number;
 }) {
-  const steps = [
-    { label: "Material issue", detail: sourceLoaded ? "Selected" : "Select issue", active: sourceLoaded },
-    { label: "Packages", detail: `${packageCount} package${packageCount === 1 ? "" : "s"}`, active: sourceLoaded && remaining === 0 },
-    { label: "Process dispatch", detail: remaining === 0 && sourceLoaded ? "Ready" : "After packing", active: false },
-  ];
   return (
     <div className="mb-5 overflow-hidden rounded-2xl border border-line bg-content1 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-5 sm:px-6">
@@ -298,40 +283,6 @@ function ConsignmentJourney({
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted">Organise goods from the material issue into packages, then move them to their destination.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">{actions}</div>
-      </div>
-
-      {/* Hairline dividers instead of nested cards: the route and the three steps are
-          one band of the same header, not five boxes floating on a gradient. */}
-      <div className="grid gap-px border-t border-line bg-line sm:grid-cols-2">
-        <div className="flex min-w-0 items-center gap-3 bg-content1 px-5 py-3.5 sm:px-6">
-          <Warehouse className="h-4 w-4 shrink-0 text-muted" />
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">From warehouse</div>
-            <div className="truncate text-sm font-semibold text-ink">{origin || "—"}</div>
-          </div>
-        </div>
-        <div className="flex min-w-0 items-center gap-3 bg-content1 px-5 py-3.5 sm:px-6">
-          <MapPin className="h-4 w-4 shrink-0 text-brand" />
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">Destination</div>
-            <div className="truncate text-sm font-semibold text-ink">{destination || "—"}</div>
-          </div>
-        </div>
-      </div>
-      <div className="grid gap-px border-t border-line bg-line sm:grid-cols-3">
-        {steps.map((step, index) => (
-          <div key={step.label} className="flex min-w-0 items-center gap-3 bg-content1 px-5 py-3 sm:px-6">
-            <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border text-[11px] font-bold ${
-              step.active ? "border-brand bg-brand text-white" : "border-line text-muted"
-            }`}>
-              {step.active ? <CheckCircle2 className="h-3.5 w-3.5" /> : index + 1}
-            </span>
-            <div className="min-w-0">
-              <div className="truncate text-xs font-semibold text-ink">{step.label}</div>
-              <div className="truncate text-[11px] text-muted">{step.detail}</div>
-            </div>
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -845,11 +796,6 @@ export default function ConsignmentForm() {
     <div>
       <ConsignmentJourney
         title={editing ? `Consignment ${doc?.dispatch_no ?? ""}` : "New consignment"}
-        sourceLoaded={!!source || !!doc}
-        origin={originName}
-        destination={destination || form.delivery_address || ""}
-        packageCount={packages.length}
-        remaining={remainingToPack}
         actions={
           <>
             <Button variant="ghost" onClick={() => nav(listPath)}>

@@ -13,6 +13,19 @@ export interface PendingApproval {
   approver_name?: string | null;
 }
 
+/** One line the approver DROPPED when they signed — stored on the indent line
+ *  itself (`is_excluded`), served with the decision so the ledger can say what was
+ *  left out without sending the reader to the document to guess from a zero. */
+export interface ApprovalDecisionExclusion {
+  line_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  requested_quantity: number;
+  excluded_by_name?: string | null;
+  excluded_at?: string | null;
+}
+
 export interface ApprovalDecisionRow {
   id: number;
   doc_type: string;
@@ -29,6 +42,7 @@ export interface ApprovalDecisionRow {
   requester?: string | null;
   approver_name?: string | null;
   workflow_status: string;
+  excluded_items?: ApprovalDecisionExclusion[];
 }
 
 export interface ApprovalReportRow {

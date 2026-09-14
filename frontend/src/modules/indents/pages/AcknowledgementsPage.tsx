@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Camera, CheckCircle2, Circle, ExternalLink, FileText, ListFilter, PackageCheck,
-  Trash2, TriangleAlert, Truck,
+  Boxes, Camera, CheckCircle2, Circle, Clock, ExternalLink, FileText, ListFilter,
+  PackageCheck, ShoppingCart, Trash2, TriangleAlert, Truck,
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
@@ -50,6 +50,88 @@ const receivable = (line: AcknowledgementLine) =>
 
 const outstanding = (line: AcknowledgementLine) =>
   Math.max(line.approved_quantity - line.received_quantity, 0);
+
+/** What of this line somebody is already buying in. Absent on an older backend. */
+const onOrder = (line: AcknowledgementLine) =>
+  Math.max(Number(line.on_order_quantity ?? 0), 0);
+
+/**
+ * Where one line's goods actually are.
+ *
+ * Read top-down, the same order the server reads it in: the nearest place the goods
+ * have got to is the honest answer, and a stage is only ever claimed by the number
+ * that proves it. The pill used to fall through to "On the way" for everything that
+ * was neither settled nor confirmable, so a line still sitting with procurement — not
+ * picked, not packed, not loaded — told the person waiting for it that it was
+ * travelling. Nothing here says a thing has moved unless something was dispatched.
+ */
+type LineStage = "received" | "arrived" | "packed" | "on_order" | "waiting";
+
+function lineStage(line: AcknowledgementLine): LineStage {
+  if (outstanding(line) === 0) return "received";
+  if (receivable(line) > 0) return "arrived";
+  if (Number(line.issued_quantity ?? 0) > Number(line.dispatched_quantity ?? 0)) {
+    return "packed";
+  }
+  if (onOrder(line) > 0) return "on_order";
+  return "waiting";
+}
+
+/**
+ * How each stage reads, and what colour it wears.
+ *
+ * `caption` is only a fallback: the server derives the sentence (`pending_with`) and
+ * it is the one that shows, so the wording cannot drift between the screen and the
+ * documents behind it. These are here for a line an older backend served without one.
+ */
+const STAGE: Record<LineStage, {
+  label: string;
+  tone: string;
+  icon: typeof Truck;
+  caption: string;
+}> = {
+  received: {
+    label: "Received", tone: "bg-ok-bg text-ok", icon: CheckCircle2, caption: "",
+  },
+  arrived: {
+    // Label is the quantity — this is the one stage with something to press.
+    label: "", tone: "bg-brand-050 text-brand", icon: PackageCheck,
+    caption: "On the way to you",
+  },
+  packed: {
+    label: "Packed to send", tone: "bg-info-bg text-info", icon: Boxes,
+    caption: "Issued, waiting to be dispatched",
+  },
+  on_order: {
+    label: "On order", tone: "bg-warn-bg text-warn", icon: ShoppingCart,
+    caption: "With procurement",
+  },
+  waiting: {
+    label: "Not dispatched", tone: "bg-neutral-bg text-neutral", icon: Clock,
+    caption: "In the warehouse, not yet issued",
+  },
+};
+
+/**
+ * How each kind of unit identifier is named on this screen.
+ *
+ * Keyed on `tracking_type`, which the server derives from the item (the same answer
+ * the issue picker is given) — so the requester matching units in their hands is
+ * told which of the two numbers printed on the box is the one being checked.
+ */
+const TRACKING: Record<string, { heading: string; unit: string }> = {
+  SERIAL: { heading: "Serial numbers", unit: "serial number" },
+  IMEI: { heading: "IMEI numbers", unit: "IMEI" },
+  ASSET: { heading: "Asset tags", unit: "asset tag" },
+  CONSUMABLE: { heading: "Lot codes", unit: "lot code" },
+};
+
+/** The one line of reassurance a stage owes someone who cannot act on it yet. */
+const STAGE_HINT: Partial<Record<LineStage, string>> = {
+  on_order: "Being bought in. It appears here to confirm once it is dispatched to you.",
+  waiting: "Nothing to confirm yet. It appears here once the warehouse dispatches it.",
+  packed: "Picked and packed. It appears here to confirm once it leaves the warehouse.",
+};
 
 /**
  * What the status says to the person who raised it. CLOSED reads as FULFILLED (the
@@ -124,9 +206,26 @@ function LineCard({ line, value, onChange }: {
   const max = receivable(line);
   const approved = Number(line.approved_quantity ?? 0);
   const settled = outstanding(line) === 0;
-  // Approved is the whole bar; what was sent shades it, what you confirmed fills it.
-  const width = (amount: number) =>
-    (approved > 0 ? `${Math.min(100, (Number(amount ?? 0) / approved) * 100)}%` : "0%");
+  const ordered = onOrder(line);
+  const stage = lineStage(line);
+  const { tone, icon: StageIcon, caption } = STAGE[stage];
+  const serials = line.serial_numbers?.filter(Boolean) ?? [];
+  // What the labels on the goods actually say, SERVED — a serial, an IMEI, an asset
+  // tag and a consumable lot code are fifteen characters of upper case apiece, and
+  // only the item knows which one the person holding the box is being asked to read.
+  const tracking = TRACKING[line.tracking_type ?? ""]
+    ?? (line.is_serial_tracked ? TRACKING.SERIAL : null);
+  // Nothing has been issued against this line, so there is nothing that could have
+  // been recorded. Saying "Not recorded" there reads as a defect in the dispatch.
+  const trackable = Boolean(tracking) && Number(line.issued_quantity ?? 0) > 0;
+  const showSerials = serials.length > 0 || trackable;
+  // The one stage with something to press names its quantity instead of itself.
+  const label = stage === "arrived" ? `${qty(max)} to acknowledge` : STAGE[stage].label;
+  // Approved is the whole bar; each band is the stage that far along, so the bar and
+  // the numbers under it are the same facts read two ways.
+  const share = (amount: number) =>
+    (approved > 0 ? Math.min(100, Math.max(0, (Number(amount ?? 0) / approved) * 100)) : 0);
+  const width = (amount: number) => `${share(amount)}%`;
 
   return (
     <li className="rounded-xl border border-line bg-content1 p-3 sm:p-4">
@@ -136,18 +235,24 @@ function LineCard({ line, value, onChange }: {
           <div className="font-mono text-[11px] text-muted">{line.item_code}</div>
         </div>
         <span
-          className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-            settled ? "bg-ok-bg text-ok"
-              : max > 0 ? "bg-brand-050 text-brand"
-                : "bg-neutral-bg text-neutral"
-          }`}
+          className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${tone}`}
         >
-          {settled ? "Received" : max > 0 ? `${qty(max)} to acknowledge` : "On the way"}
+          <StageIcon className="h-3.5 w-3.5" aria-hidden />
+          {label}
         </span>
       </div>
 
       <div className="relative mt-3 h-1.5 overflow-hidden rounded-full bg-content3">
-        <div className="absolute inset-y-0 left-0 bg-brand/30"
+        {/* On order is not progress — it is a promise from procurement — so it wears
+            its own colour and starts where the physical bands END, rather than being
+            drawn over them. Overlapping the two showed a line that was fully
+            accounted for (5 sent, 15 being bought) as three quarters of a bar. */}
+        <div className="absolute inset-y-0 bg-warn/40"
+             style={{ left: width(line.issued_quantity),
+                      width: `${Math.min(share(ordered), 100 - share(line.issued_quantity))}%` }} />
+        <div className="absolute inset-y-0 left-0 bg-brand/20"
+             style={{ width: width(line.issued_quantity) }} />
+        <div className="absolute inset-y-0 left-0 bg-brand/45"
              style={{ width: width(line.dispatched_quantity) }} />
         <div className="absolute inset-y-0 left-0 bg-ok"
              style={{ width: width(line.received_quantity) }} />
@@ -156,14 +261,58 @@ function LineCard({ line, value, onChange }: {
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
         <span>Approved <b className="font-semibold tabular-nums text-ink">
           {qty(line.approved_quantity)}</b></span>
+        {/* Shown only when there is one: a column of zeroes on every other line is
+            noise, and "On order 20" is the whole answer to "where is my stuff" on
+            the one line that has it. */}
+        {ordered > 0 && (
+          <span>On order <b className="font-semibold tabular-nums text-warn">
+            {qty(ordered)}</b></span>
+        )}
         <span>Sent <b className="font-semibold tabular-nums text-ink">
           {qty(line.dispatched_quantity)}</b></span>
         <span>Received <b className="font-semibold tabular-nums text-ink">
           {qty(line.received_quantity)}</b></span>
       </div>
 
-      {!settled && line.pending_with && (
-        <div className="mt-1.5 text-[11px] text-muted">{line.pending_with}</div>
+      {!settled && (
+        <div className="mt-1.5 text-[11px] text-muted">
+          {/* The server's sentence, so the screen and the documents behind it cannot
+              word the same state differently. */}
+          <span className="font-medium text-body">{line.pending_with || caption}</span>
+          {STAGE_HINT[stage] && (
+            <span className="mt-0.5 block">{STAGE_HINT[stage]}</span>
+          )}
+        </div>
+      )}
+
+      {showSerials && (
+        <div className="mt-3 rounded-lg border border-line bg-content2/70 px-3 py-2">
+          <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
+            <span className="font-semibold text-body">
+              {(tracking ?? TRACKING.SERIAL).heading}
+            </span>
+            <span className="tabular-nums text-muted">
+              {serials.length > 0 ? serials.length : "Not recorded"}
+            </span>
+          </div>
+          {serials.length > 0 ? (
+            <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto pr-1">
+              {serials.map((serial) => (
+                <span
+                  key={serial}
+                  className="rounded-md border border-line bg-content1 px-2 py-1 font-mono text-[11px] text-ink"
+                >
+                  {serial}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[11px] text-muted">
+              {`No ${(tracking ?? TRACKING.SERIAL).unit}s were recorded against what `
+                + "was sent to you."}
+            </div>
+          )}
+        </div>
       )}
 
       {max > 0 && (

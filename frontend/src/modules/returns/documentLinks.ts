@@ -30,7 +30,21 @@ import type { RelatedDocument } from "./types";
 export interface DocumentLinks {
   open: string | null;
   print: string | null;
+  /**
+   * The document's own STAGE-BY-STAGE screen, where one exists.
+   *
+   * Different from `open`, which lands on the document: this lands on the story of it —
+   * which rung it is sitting at, who signed each one, what is still owed. A reviewer
+   * deciding where returned material goes usually wants that rather than the lines, and
+   * an indent's journey is the one that answers "why did this branch have these units".
+   *
+   * Only the indent has one today. Null everywhere else, and the row simply omits the
+   * action rather than offering a route that 404s — the same rule `print` follows.
+   */
+  journey: string | null;
 }
+
+const NONE: DocumentLinks = { open: null, print: null, journey: null };
 
 /** A number off `extra`, or null. The payload is typed `Record<string, unknown>`
  *  because it carries a different shape per document type, so every read of it is
@@ -44,26 +58,34 @@ export function relatedDocumentLinks(doc: RelatedDocument): DocumentLinks {
   const id = doc.doc_id;
   if (doc.doc_type === "QUOTATION") {
     const rfqId = extraId(doc, "rfq_id");
-    return { open: rfqId ? `/procurement/rfqs/${rfqId}` : null, print: null };
+    return {
+      ...NONE,
+      open: rfqId ? `/procurement/rfqs/${rfqId}` : null,
+    };
   }
-  if (!id) return { open: null, print: null };
+  if (!id) return NONE;
   switch (doc.doc_type) {
     case "INDENT":
-      return { open: `/indents/${id}`, print: `/indents/${id}/print` };
+      return {
+        open: `/indents/${id}`,
+        print: `/indents/${id}/print`,
+        // The whole request, stage by stage — see `journey` on DocumentLinks.
+        journey: `/indents/${id}/journey`,
+      };
     case "ALLOCATION":
       // The approval screen, which is where an allocation is read whether or not a
       // ladder is configured for it — there is no second, plainer view of one.
-      return { open: `/inventory/allocation-approvals/${id}`, print: null };
+      return { ...NONE, open: `/inventory/allocation-approvals/${id}` };
     case "MATERIAL_REQUEST":
-      return { open: `/inventory/material-requests/${id}`, print: null };
+      return { ...NONE, open: `/inventory/material-requests/${id}` };
     case "REQUISITION":
-      return { open: `/procurement/requisitions/${id}`, print: null };
+      return { ...NONE, open: `/procurement/requisitions/${id}` };
     case "RFQ":
-      return { open: `/procurement/rfqs/${id}`, print: null };
+      return { ...NONE, open: `/procurement/rfqs/${id}` };
     case "PO":
-      return { open: `/pos/${id}`, print: `/pos/${id}/print` };
+      return { ...NONE, open: `/pos/${id}`, print: `/pos/${id}/print` };
     case "GRN":
-      return { open: `/warehouse/grn/${id}`, print: `/warehouse/grn/${id}/print` };
+      return { ...NONE, open: `/warehouse/grn/${id}`, print: `/warehouse/grn/${id}/print` };
     case "QC": {
       // One table, two points in the flow (`inb_inspections.inspection_type`), and the
       // print sheet asks which — served on the row rather than assumed, even though the
@@ -72,6 +94,7 @@ export function relatedDocumentLinks(doc: RelatedDocument): DocumentLinks {
         ? doc.extra.inspection_type
         : null;
       return {
+        ...NONE,
         open: `/warehouse/quality-inspection/${id}`,
         print: `/warehouse/inspections/${id}/print${type ? `?type=${type}` : ""}`,
       };
@@ -80,21 +103,24 @@ export function relatedDocumentLinks(doc: RelatedDocument): DocumentLinks {
       // A different table (`whs_inspections`) and its own screen, but the SAME print
       // page — it renders either direction and asks which by query string.
       return {
+        ...NONE,
         open: `/warehouse/qc-outward/${id}`,
         print: `/warehouse/inspections/${id}/print?type=OUTGOING`,
       };
     case "PUTAWAY":
-      return { open: `/warehouse/putaway/${id}`, print: `/warehouse/putaway/${id}/print` };
+      return { ...NONE, open: `/warehouse/putaway/${id}`, print: `/warehouse/putaway/${id}/print` };
     case "PICKLIST":
       // The screen is `picklist`, the print sheet is `picklists`. Both are the live
       // routes; the inconsistency is theirs and copying it here is what makes the
       // links work.
       return {
+        ...NONE,
         open: `/warehouse/picklist/${id}`,
         print: `/warehouse/picklists/${id}/print`,
       };
     case "MATERIAL_ISSUE":
       return {
+        ...NONE,
         open: `/warehouse/material-issues/${id}`,
         print: `/warehouse/material-issues/${id}/print`,
       };
@@ -103,6 +129,7 @@ export function relatedDocumentLinks(doc: RelatedDocument): DocumentLinks {
       // where the outward leg is worked, and the gate pass still prints off the
       // warehouse route that renders it.
       return {
+        ...NONE,
         open: `/logistics/consignments/${id}`,
         print: `/warehouse/consignments/${id}/print`,
       };
@@ -110,10 +137,10 @@ export function relatedDocumentLinks(doc: RelatedDocument): DocumentLinks {
       // No print: the sheet behind a shipment is the GATE PASS, which is a different
       // document about a different moment, and offering it under "PDF" here would hand
       // a reviewer the wrong piece of paper.
-      return { open: `/logistics/shipments/${id}`, print: null };
+      return { ...NONE, open: `/logistics/shipments/${id}` };
     case "PURCHASE_RETURN":
-      return { open: `/warehouse/purchase-returns/${id}`, print: null };
+      return { ...NONE, open: `/warehouse/purchase-returns/${id}` };
     default:
-      return { open: null, print: null };
+      return NONE;
   }
 }

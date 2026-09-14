@@ -12890,12 +12890,20 @@ _ON_THE_ROAD = (
 
 
 def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
-                  received: Decimal, indent_status: str) -> str | None:
+                  received: Decimal, indent_status: str,
+                  on_order: Decimal = ZERO) -> str | None:
     """Plain-English answer to "where is the rest of my stuff".
 
     Read top-down: the nearest place the goods have got to is the honest answer. Derived
     at read time from the issue and dispatch state, never stored, so it cannot go stale
     behind the documents it describes.
+
+    `on_order` is THIS LINE's quantity sitting with procurement, and it is asked before
+    the indent status because the indent status answers for the whole document. An
+    indent whose first line was served off the shelf and whose second went out to be
+    bought is PARTIALLY_FULFILLED, so the status branch below never fired and the
+    bought line was described as sitting "in the warehouse, not yet issued" — the one
+    place it certainly was not.
     """
     if received >= approved:
         return None
@@ -12903,6 +12911,8 @@ def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
         return "On the way to you"
     if issued > dispatched:
         return "Issued, waiting to be dispatched"
+    if on_order > ZERO:
+        return "With procurement"
     if indent_status in (IndentStatus.PENDING_PROCUREMENT.value,
                          IndentStatus.PARTIALLY_ORDERED.value,
                          IndentStatus.ORDERED.value):
@@ -12955,7 +12965,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     Shared by the requester's delivery list and by one indent's fulfilment trail, so the
     two can never disagree about how far an order has got.
     """
-    from app.modules.indents.service import owed_quantity
+    from app.modules.indents.models import IndentItem
+    from app.modules.indents.service import _on_order_by_lines, owed_quantity
 
     if not indents:
         return []
@@ -12993,7 +13004,147 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
 
+    # ------------------------------------------------------------------
+    # Which physical units left for each (indent, item)
+    # ------------------------------------------------------------------
+    # `whs_serial_numbers` is the only per-UNIT record there is, and it carries no
+    # foreign key to the document moving it — the link is `remarks`, a stamp that is
+    # REWRITTEN at every doorway the unit passes through. So the read has to name
+    # every stamp a unit may be wearing right now, and attribute it through the issue
+    # LINE rather than the issue header. Both halves failed silently as "Not recorded"
+    # on a line that plainly had serials:
+    #
+    #   * a consignment credited at its destination re-stamps its units
+    #     `Received by <dispatch_no>` (`_land_units`), so every delivery to an LIP or
+    #     an MDP lost its serials at the moment the goods arrived — which is exactly
+    #     when the requester opens this screen to acknowledge them;
+    #   * a reservation is stamped per LINE (`_issue_line_serial_marker`), not per
+    #     document, so units captured on an approved-but-unposted issue matched none
+    #     of the document-level markers;
+    #   * the issue HEADER names one indent and a consolidated issue serves several
+    #     on its lines, so one indent collected every unit on the issue and the others
+    #     were told nothing had been recorded.
+    issue_line_rows = (await db.execute(
+        select(m.MaterialIssueLine.issue_id, m.MaterialIssueLine.id,
+               m.MaterialIssueLine.item_id, IndentItem.indent_id)
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .join(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+        .where(IndentItem.indent_id.in_(indent_ids),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               ~relayed)
+    )).all()
+
+    # marker -> {item_id: {indent_id, ...}}. A per-line stamp resolves to exactly one
+    # line; the document-level ones are shared by the issue's lines, so the item is
+    # what tells them apart.
+    marker_targets: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+    issue_ids: set[int] = set()
+    for issue_id, line_id, item_id, indent_id in issue_line_rows:
+        issue_ids.add(issue_id)
+        for marker in (*_issue_serial_markers(issue_id),
+                       _issue_line_serial_marker(issue_id, line_id)):
+            marker_targets[marker][item_id].add(indent_id)
+
+    # The consignments carrying those issues. A credited arrival re-stamps the units
+    # with the consignment's number, which is the only trace left of where they came
+    # from — so the dispatch number is a marker like any other.
+    dispatch_rows = (await db.execute(
+        select(m.Dispatch.id, m.Dispatch.dispatch_no, m.MaterialIssue.id)
+        .join(m.MaterialIssue, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .where(m.MaterialIssue.id.in_(issue_ids or {0}),
+               m.Dispatch.status != DispatchStatus.CANCELLED.value)
+    )).all() if issue_ids else []
+    dispatch_ids: list[int] = []
+    for dispatch_id, dispatch_no, issue_id in dispatch_rows:
+        dispatch_ids.append(dispatch_id)
+        source = marker_targets.get(_shipped_unit_marker("issue", issue_id), {})
+        for marker in (_shipped_unit_marker("dispatch", dispatch_id),
+                       f"Received by {dispatch_no}" if dispatch_no else None):
+            if not marker:
+                continue
+            for item_id, indents_for_item in source.items():
+                marker_targets[marker][item_id] |= indents_for_item
+
+    serials_by_indent_item: dict[tuple[int, int], list[str]] = defaultdict(list)
+
+    def _record(indent_id: int, item_id: int, code: str | None) -> None:
+        value = str(code or "").strip()
+        if not value:
+            return
+        bucket = serials_by_indent_item[(indent_id, item_id)]
+        if value not in bucket:
+            bucket.append(value)
+
+    if marker_targets:
+        # Named by whichever identifier the unit actually carries — `serial_number`
+        # alone left an IMEI-tracked handset and an asset-coded unit reading "Not
+        # recorded" while their labels sat one column over. `_unit_keys` is the same
+        # answer the picker gives, so the acknowledgement and the issue speak about a
+        # unit with one name.
+        unit_rows = (await db.execute(
+            select(m.SerialNumber)
+            .where(m.SerialNumber.remarks.in_(list(marker_targets)),
+                   m.SerialNumber.is_active.is_(True))
+            .order_by(m.SerialNumber.id)
+        )).scalars().all()
+        modes: dict[int, str] = {}
+        for row in unit_rows:
+            targets = marker_targets.get(row.remarks or "", {}).get(row.item_id)
+            if not targets:
+                continue
+            if row.item_id not in modes:
+                modes[row.item_id] = _unit_mode(await db.get(Item, row.item_id))
+            keys = _unit_keys(row, modes[row.item_id])
+            code = keys[0] if keys else (row.serial_number or row.asset_code
+                                         or row.consumable_code or row.imei)
+            for indent_id in sorted(targets):
+                _record(indent_id, row.item_id, code)
+
+    # The consignment's own per-unit lines, for a load gated out without an issue
+    # behind it — those units are stamped against the dispatch, never against an issue.
+    if dispatch_ids:
+        dispatch_serial_rows = (await db.execute(
+            select(m.Dispatch.id, m.DispatchItem.item_id, m.DispatchItem.serial_no)
+            .join(m.DispatchItem, m.DispatchItem.dispatch_id == m.Dispatch.id)
+            .where(m.Dispatch.id.in_(dispatch_ids),
+                   m.Dispatch.status.in_(_ON_THE_ROAD),
+                   m.DispatchItem.serial_no.isnot(None))
+            .order_by(m.Dispatch.id, m.DispatchItem.item_id, m.DispatchItem.line_no)
+        )).all()
+        # (dispatch_id, dispatch_no, issue_id) — the issue is what the markers key on.
+        by_dispatch = {row[0]: row[2] for row in dispatch_rows}
+        for dispatch_id, item_id, serial_no in dispatch_serial_rows:
+            issue_id = by_dispatch.get(dispatch_id)
+            targets = (marker_targets
+                       .get(_shipped_unit_marker("issue", issue_id), {})
+                       .get(item_id, set())) if issue_id else set()
+            for indent_id in sorted(targets):
+                _record(indent_id, item_id, serial_no)
+
     shipments = await _shipments_by_indent(db, indent_ids)
+
+    # What of each line somebody is already BUYING. The indents module owns the
+    # definition of "on order" (`_SETTLED_MR_STATUSES`) and the fulfilment desk's
+    # remainder is netted by the same function — reading it here rather than writing a
+    # second query is what keeps the requester's screen and the desk from disagreeing
+    # about whether a line went out to procurement.
+    on_order_by_line = await _on_order_by_lines(
+        db, [item.id for indent in indents for item in indent.items])
+    item_ids = {item.item_id for indent in indents for item in indent.items}
+    # WHICH identifier the requester is being asked to match, not merely whether one
+    # exists. `is_serial_tracked` alone answered for every item that names its units,
+    # so an IMEI-tracked handset and an asset-coded unit showed no panel at all —
+    # `_tracking_type` is the same served answer the picker uses, and it is asked per
+    # LINE because an item may be asset-coded in the master with nothing coded here.
+    item_rows = {
+        row.id: row
+        for row in (await db.execute(
+            select(Item).where(Item.id.in_(item_ids))
+        )).scalars().all()
+    } if item_ids else {}
 
     out = []
     for indent in indents:
@@ -13003,6 +13154,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             received = _d(item.received_quantity)
             issued = issued_by_line.get(item.id, ZERO)
             dispatched = dispatched_by_line.get(item.id, ZERO)
+            on_order = on_order_by_line.get(item.id, ZERO)
+            line_serials = serials_by_indent_item.get((indent.id, item.item_id), [])
             lines.append({
                 "indent_item_id": item.id,
                 "item_code": item.item_code,
@@ -13012,8 +13165,23 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
                 "received_quantity": float(received),
+                "is_serial_tracked": bool(getattr(
+                    item_rows.get(item.item_id), "is_serial_tracked", False)),
+                # Served, never inferred in a screen (same rule as the issue picker):
+                # a serial, an IMEI, an asset tag and a lot code are fifteen
+                # characters of upper case apiece, and only the item says which one
+                # the labels below are.
+                "tracking_type": _tracking_type(
+                    item_rows.get(item.item_id),
+                    has_units=bool(line_serials),
+                ) if item_rows.get(item.item_id) is not None else TrackingType.NONE.value,
+                "serial_numbers": line_serials,
+                # Served, not inferred: the screen cannot tell a line being bought in
+                # from one waiting on a shelf, and guessing it from the indent status
+                # is exactly what got a procurement line labelled "on the way".
+                "on_order_quantity": float(on_order),
                 "pending_with": _pending_with(approved, issued, dispatched, received,
-                                              indent.status),
+                                              indent.status, on_order),
             })
         out.append({
             "indent_id": indent.id,

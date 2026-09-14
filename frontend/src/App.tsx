@@ -140,6 +140,7 @@ const ResetPasswordPage = lazy(() => import("@/pages/PasswordResetPages").then((
 const ReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnDetailPage })));
 const ReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnFormPage })));
 const ReturnJourneyPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnJourneyPage })));
+const ReturnTrailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnTrailPage })));
 const ReturnsListPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsListPage })));
 const ReturnsOverviewPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsOverviewPage })));
 const RulesPage = lazy(() => import("@/modules/admin/pages/RulesPage").then((m) => ({ default: m.RulesPage })));
@@ -509,6 +510,9 @@ function AppRoutes() {
         <Route path="returns/:id" element={<ReturnDetailPage />} />
         <Route path="returns/:id/edit" element={<ReturnFormPage />} />
         <Route path="returns/:id/journey" element={<ReturnJourneyPage />} />
+        {/* The material's history, not the document's: every other module's paperwork
+          * behind the returned items. Gated by the endpoint on `return.decide`. */}
+        <Route path="returns/:id/trail" element={<ReturnTrailPage />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
         <Route path="inventory/stock-balance" element={<StockBalanceView />} />
         <Route path="inventory/ledger" element={<StockLedgerView />} />
