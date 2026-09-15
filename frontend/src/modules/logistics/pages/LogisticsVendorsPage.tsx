@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle, CheckCircle2, ExternalLink, KeyRound, Lock, LockOpen, Mail, Pencil,
-  Phone, Plus, RotateCcw, Search, ShieldCheck, Trash2, Truck, UserRound,
+  LoaderCircle, Phone, Plus, RotateCcw, Search, ShieldCheck, Trash2, Truck, UserRound,
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, EmptyState, ErrorBanner, Field, Input, PageHeader,
@@ -22,6 +22,8 @@ const SUMMARY_KEY = ["logistics-vendors", "summary"];
  *  screens instead of the RFQ list. Named here once so the button and the sentence
  *  below it can never drift apart. */
 const PORTAL_LOGIN = "/carrier/login";
+
+const DEFAULT_PASSWORD = "Bavya@123";
 
 /** A new tab, deliberately. The portal runs outside the employee shell on its own
  *  token, so opening it in place would drop the desk out of Settings mid-task and
@@ -131,7 +133,10 @@ export function LogisticsVendorsPage() {
     success: (row) => editing
       ? `${row.name} updated`
       : row.has_login
-        ? `${row.name} added — they sign in as ${row.username} with Bavya@123`
+        ? row.email
+          ? `${row.name} added — invite emailed to ${row.email}`
+          : `${row.name} added with a login. No email on file, so nothing was sent — `
+            + `pass ${DEFAULT_PASSWORD} on to them.`
         : `${row.name} added. Issue a login before sending them a quote request.`,
     invalidates,
     onDone: close,
@@ -139,12 +144,15 @@ export function LogisticsVendorsPage() {
 
   const issue = useAction({
     run: (row: LogisticsVendor) => logisticsVendorApi.issueLogin(row.id),
-    success: (row) => `${row.name} signs in as ${row.username} with Bavya@123`,
+    success: (row) => (row.email
+      ? `Invite emailed to ${row.email} — username ${row.username}`
+      : `Login created for ${row.name} — username ${row.username}. No email on file, `
+        + `so nothing was sent: pass ${DEFAULT_PASSWORD} on to them.`),
     invalidates,
   });
   const reset = useAction({
     run: (row: LogisticsVendor) => logisticsVendorApi.resetLogin(row.id),
-    success: (row) => `${row.name}'s password is back to Bavya@123`,
+    success: (row) => `${row.name}'s password is back to ${DEFAULT_PASSWORD}`,
     invalidates,
   });
   const toggleLogin = useAction({
@@ -161,8 +169,8 @@ export function LogisticsVendorsPage() {
     onDone: () => setConfirmOff(null),
   });
 
-  const busy = save.isPending || issue.isPending || reset.isPending
-    || toggleLogin.isPending || deactivate.isPending;
+  const busy = save.isPending || reset.isPending || toggleLogin.isPending
+    || deactivate.isPending;
 
   const openEdit = (row: LogisticsVendor) => {
     setEditing(row);
@@ -219,7 +227,7 @@ export function LogisticsVendorsPage() {
             </span>
           </span>
           <span className="mt-1 block truncate text-[11px] text-muted">
-            {row.must_change_password ? "Default password — not yet changed"
+            {row.must_change_password ? `Default password (${DEFAULT_PASSWORD})`
               : row.last_login_at ? `Last in ${fmtDate(row.last_login_at)}`
                 : "Password set, never signed in"}
           </span>
@@ -254,48 +262,63 @@ export function LogisticsVendorsPage() {
    * phone card and a single line is not physically possible. */
   const ROW_BTN = "px-3 whitespace-nowrap";
 
-  const actions = (row: LogisticsVendor) => (
-    <div className="flex flex-wrap items-center gap-1.5 md:flex-nowrap md:justify-end">
-      <Can do="logistics.partner.manage">
-        <Button variant="subtle" className={ROW_BTN} disabled={busy}
-          onClick={() => openEdit(row)}>
-          <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
-        </Button>
-        {row.has_login ? (
-          <>
-            <Button variant="ghost" className={ROW_BTN} disabled={busy}
-              onClick={() => reset.mutate(row)}>
-              <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reset password
-            </Button>
-            <Button variant="ghost" className={ROW_BTN} disabled={busy}
-              onClick={() => toggleLogin.mutate(row)}>
-              {row.login_is_active
-                ? <><Lock className="mr-1 h-3.5 w-3.5" /> Disable login</>
-                : <><LockOpen className="mr-1 h-3.5 w-3.5" /> Enable login</>}
-            </Button>
-          </>
-        ) : (
-          <Button variant="soft" className={ROW_BTN} disabled={busy}
-            onClick={() => issue.mutate(row)}>
-            <KeyRound className="mr-1 h-3.5 w-3.5" /> Issue login
+  const actions = (row: LogisticsVendor) => {
+    // SMTP can take a few seconds; keep the wait attached to the exact row.
+    const issuing = issue.isPending && issue.variables?.id === row.id;
+    return (
+      <div className="flex flex-wrap items-center gap-1.5 md:flex-nowrap md:justify-end">
+        <Can do="logistics.partner.manage">
+          <Button variant="subtle" className={ROW_BTN} disabled={busy}
+            onClick={() => openEdit(row)}>
+            <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
           </Button>
-        )}
-        {row.is_active && (
-          // The bare symbol: no box, no label, square tap target. The colour sits on
-          // the icon rather than the button, so it cannot be overridden by the
-          // variant's own text colour.
-          <span title="Remove" className="inline-flex">
-            <Button variant="ghost"
-              className="w-11 min-w-11 px-0 data-[hover=true]:bg-bad-bg"
-              disabled={busy} onClick={() => setConfirmOff(row)}>
-              <Trash2 className="h-4 w-4 text-bad" />
-              <span className="sr-only">Remove</span>
+          {row.has_login ? (
+            <>
+              <Button variant="ghost" className={ROW_BTN} disabled={busy}
+                onClick={() => reset.mutate(row)}>
+                <RotateCcw className="mr-1 h-3.5 w-3.5" /> Reset password
+              </Button>
+              <Button variant="ghost" className={ROW_BTN} disabled={busy}
+                onClick={() => toggleLogin.mutate(row)}>
+                {row.login_is_active
+                  ? <><Lock className="mr-1 h-3.5 w-3.5" /> Disable login</>
+                  : <><LockOpen className="mr-1 h-3.5 w-3.5" /> Enable login</>}
+              </Button>
+            </>
+          ) : (
+            // Live with or without an address: the press mints the ACCOUNT, and
+            // only the invite needs somewhere to go. Said in the title rather than by
+            // disabling, because a carrier reached by phone is a carrier the desk
+            // still has to be able to let in.
+            <Button variant="soft" className={ROW_BTN}
+              disabled={busy || issuing}
+              title={row.email
+                ? undefined
+                : "No email on file — the login is created but nothing is sent. "
+                  + "Add an address to email the invite."}
+              onClick={() => issue.mutate(row)}>
+              {issuing
+                ? <><LoaderCircle className="mr-1 h-3.5 w-3.5 animate-spin" /> Sending...</>
+                : <><KeyRound className="mr-1 h-3.5 w-3.5" /> Issue login</>}
             </Button>
-          </span>
-        )}
-      </Can>
-    </div>
-  );
+          )}
+          {row.is_active && (
+            // The bare symbol: no box, no label, square tap target. The colour sits on
+            // the icon rather than the button, so it cannot be overridden by the
+            // variant's own text colour.
+            <span title="Remove" className="inline-flex">
+              <Button variant="ghost"
+                className="w-11 min-w-11 px-0 data-[hover=true]:bg-bad-bg"
+                disabled={busy} onClick={() => setConfirmOff(row)}>
+                <Trash2 className="h-4 w-4 text-bad" />
+                <span className="sr-only">Remove</span>
+              </Button>
+            </span>
+          )}
+        </Can>
+      </div>
+    );
+  };
 
   const columns: Column<LogisticsVendor>[] = [
     { key: "name", header: "Partner", render: partnerCell },
@@ -475,20 +498,20 @@ export function LogisticsVendorsPage() {
         title={editing ? `Edit ${editing.name}` : "Add a logistics vendor"}
         confirmLabel={editing ? "Save" : "Add partner"}
         busy={save.isPending}
-        confirmDisabled={!form?.name?.trim()}
+        confirmDisabled={!form?.name?.trim() || !form?.phone?.trim()}
         error={save.error}
         onConfirm={() => form && save.mutate(form)}
         onClose={close}
       >
         {form && (
           <div className="mt-3 grid gap-4 sm:grid-cols-2">
-            <Field label="Name" hint="What the desk will see on Dispatch">
+            <Field label="Name" required hint="What the desk will see on Dispatch">
               <Input value={form.name}
                 onChange={(e) => set({ name: e.target.value })}
                 className={PLACEHOLDER}
                 placeholder="Flipkart" />
             </Field>
-            <Field label="Type">
+            <Field label="Type" required>
               <Select
                 value={form.vendor_type}
                 onChange={(value) => set({ vendor_type: value })}
@@ -508,11 +531,17 @@ export function LogisticsVendorsPage() {
               <Input value={form.contact_person ?? ""}
                 onChange={(e) => set({ contact_person: e.target.value })} />
             </Field>
-            <Field label="Phone">
+            <Field label="Phone" required>
               <Input value={form.phone ?? ""}
                 onChange={(e) => set({ phone: e.target.value })} />
             </Field>
-            <Field label="Email">
+            <Field
+              label="Email"
+              hint={(form.issue_login ?? true) && !editing
+                ? "Where the invite is emailed. Left blank, the login is still created "
+                  + "and the password has to be passed on by hand"
+                : undefined}
+            >
               <Input type="email" value={form.email ?? ""}
                 onChange={(e) => set({ email: e.target.value })} />
             </Field>
@@ -549,9 +578,9 @@ export function LogisticsVendorsPage() {
                   Give them a portal login now
                 </label>
                 <p className="mt-1 text-xs text-muted">
-                  They sign in at <span className="font-mono">/carrier</span> with the
-                  shared password <b>Bavya@123</b> and must change it before anything
-                  is shown. Without an account they cannot answer a quote request.
+                  SCM emails their username, the carrier login link and the initial
+                  password <b>{DEFAULT_PASSWORD}</b>. Without an account they cannot
+                  answer a quote request.
                 </p>
                 {(form.issue_login ?? true) && (
                   <div className="mt-3">

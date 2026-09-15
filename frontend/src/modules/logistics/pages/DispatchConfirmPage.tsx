@@ -3,13 +3,13 @@ import type { ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CheckCircle2, FileDown,
-  FileText, Handshake, IdCard, MapPin, Package, Paperclip, Printer, Sparkles, Truck,
+  AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CheckCircle2,
+  FileText, Handshake, IdCard, MapPin, Package, Paperclip, Sparkles, Truck,
   Upload, Warehouse, X,
 } from "lucide-react";
 import {
   Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select, StatusPill,
-  useAction,
+  TONE_YELLOW, useAction,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
@@ -17,12 +17,13 @@ import {
   headerFromConsignment, linesFromConsignment,
 } from "../components/consignmentToLines";
 import {
-  carriageLabel, carriageTint, load, modeLabel, modeTint,
+  carriageLabel, carriageTint, humanStatus, load, modeLabel, modeTint,
 } from "../components/modeCopy";
 import {
   CARRYING_LABEL, carryingFields, carryingValue,
 } from "../components/gatePassFields";
 import type { CarryingField } from "../components/gatePassFields";
+import { aadhaarError, HANDOVER_PERSONS } from "../components/HandoverCustody";
 import { OptionTiles } from "../components/OptionTiles";
 import { CARRIAGE_ICON, MODE_ICON } from "../components/transportIcons";
 import {
@@ -56,7 +57,7 @@ const BLANK = {
   // only ever wrote the docket, so an LR could not be recorded on the press that
   // books the leg and had to be typed on the shipment screen afterwards.
   lr_no: "", docket_no: "", tracking_url: "", eway_bill_no: "",
-  carrier_reference: "",
+  carrier_reference: "", manual_courier_name: "",
 };
 
 /** The paperwork a leg physically leaves with, on the two modes that leave with an
@@ -103,6 +104,7 @@ const FIELD_LABELS: Record<string, string> = {
   handed_over_employee_id: "their employee id",
   handed_over_aadhaar: "their Aadhaar number",
   handed_over_phone: "a phone number",
+  driver_phone: "a phone number for them",
   lr_no: "the LR number",
   docket_no: "the docket number",
   // Not a field on the form — the service releases on EITHER paper, so the press is
@@ -110,24 +112,22 @@ const FIELD_LABELS: Record<string, string> = {
   tracking_handle: "the LR or the docket number",
 };
 
+/** The same fields said the way a MANUAL courier desk knows them, and the mirror of
+ *  the backend's `_MANUAL_FIELD_LABELS`. Nobody was SENT for this load — somebody
+ *  walked up to a counter — so "the driver" is whoever took it and there is no vendor
+ *  behind the name. Only the entries that differ; the rest fall through to the list
+ *  above. */
+const MANUAL_FIELD_LABELS: Record<string, string> = {
+  carrier_id: "the courier name",
+  driver_name: "who collected it",
+  driver_phone: "their phone number",
+};
+
 /** The key `missing` carries when neither tracking paper has been written. Its own
  *  name because it is a rule about two fields, not a field. */
-/** Who is carrying it. One of ours or somebody else — the only thing that changes is
- *  which number identifies them, because an outsider has no employee id. */
-const HANDOVER_PERSONS = [
-  { value: "EMPLOYEE", label: "Employee" },
-  { value: "OTHERS", label: "Others" },
-];
-
-/** Twelve digits, never starting 0 or 1 — UIDAI issues neither. Local to this screen
- *  rather than in `validate.ts`: this is the only box an Aadhaar is typed into. */
-const aadhaarError = (value: string): string | null => {
-  const digits = value.replace(/\D/g, "");
-  if (!digits) return null;
-  if (digits.length !== 12) return "Aadhaar must be 12 digits";
-  if (/^[01]/.test(digits)) return "Aadhaar does not start with 0 or 1";
-  return null;
-};
+/* Who is carrying it, and which number identifies them, come from
+ * `HandoverCustody` — the same block the "It has left" press edits, so the two
+ * screens cannot end up asking a hand-over for different things. */
 
 /** HOW the load physically travels — a separate question from WHO moves it, and one
  *  the shipment now REMEMBERS. Both the four carriages and which arrangements each of
@@ -225,7 +225,7 @@ const OUTCOME_HEADLINE: Record<string, string> = {
  * to read past on the way to the two lines that matter.
  */
 function DispatchOutcome({
-  leg, doc, rule, justSent, providers, onAnother,
+  leg, doc, rule, justSent, providers,
 }: {
   leg: Outcome;
   /** The shipment itself, once it has been read back. Every field on the pass comes
@@ -242,7 +242,6 @@ function DispatchOutcome({
   justSent: boolean;
   /** How many were asked for a price. Only meaningful on the press that asked. */
   providers: number;
-  onAnother: () => void;
 }) {
   const tendered = leg.status === "QUOTING";
   const providerPending = leg.status === "AWAITING_CARRIER";
@@ -260,9 +259,8 @@ function DispatchOutcome({
 
   // The pass, in a new tab: dispatch ends on THIS screen, and a print view that
   // replaced it would take the desk off the shipment it is still watching.
-  const sheet = (save: boolean) => window.open(
-    `/logistics/shipments/${leg.tr_id}/gate-pass${save ? "?save=1" : ""}`,
-    "_blank", "noopener");
+  const sheet = () => window.open(
+    `/logistics/shipments/${leg.tr_id}/gate-pass`, "_blank", "noopener");
 
   // Only what this mode records, and only ever one half of the identity pair. The
   // press itself answers some of these and the far side answers the rest; both are
@@ -393,20 +391,22 @@ function DispatchOutcome({
         )}
 
         <div className="mt-4 flex flex-wrap gap-2 border-t border-line/70 pt-4">
-          {/* The paper the load leaves with. Both buttons open the same sheet — the
-              browser's own dialog is the PDF writer, which is how the purchase order
-              has always printed, so there is no second renderer to keep in step. */}
-          <Button variant="soft" onClick={() => sheet(false)}>
-            <Printer className="h-4 w-4" /> Print gate pass
-          </Button>
-          <Button variant="soft" onClick={() => sheet(true)}>
-            <FileDown className="h-4 w-4" /> Download PDF
-          </Button>
-          {/* The pass is the end of this desk's press. Where the shipment goes next —
-              the tender on Provider Selection, the leg on Shipments — is
-              reached from the tabs above, not from a link on the paper. */}
-          <Button variant="ghost" onClick={onAnother}>
-            <Truck className="h-4 w-4" /> Dispatch another
+          {/* ONE door to the paper, on every mode — hired vehicle, own vehicle, courier,
+              hand-over and tender alike, because every one of them leaves the gate and
+              the gate reads the pass. Print and Download opened the same sheet and the
+              same browser dialog — the two buttons only asked the desk to choose a word
+              for it — and the sheet itself is where the destination is picked, exactly
+              as the indent prints. Where the shipment goes next — the tender on Provider
+              Selection, the leg on Shipments — is reached from the tabs above, not from
+              a link on the paper.
+
+              It wears `TONE_YELLOW`, the app-wide PDF tone: the same pastel pill, the
+              same document glyph and the same one-word label as the indent's and the
+              order's, so a desk that prints in four modules looks for one button. It
+              was `soft` — the brand pink — which on this card read as the next action
+              to take rather than as the paper. */}
+          <Button variant="secondary" className={TONE_YELLOW} onClick={sheet}>
+            <FileText className="h-4 w-4" /> PDF
           </Button>
         </div>
       </div>
@@ -594,6 +594,24 @@ export function DispatchConfirmPage() {
   const nav = useNavigate();
   const [params] = useSearchParams();
   const preselected = Number(params.get("consignment_id") ?? 0);
+  /**
+   * ADDED 2026-09-10: the other way onto this screen — a leg that already exists.
+   *
+   * A consignment arrives here as something to be RAISED: the warehouse packed it,
+   * nothing in logistics exists for it yet, and one press creates the shipment,
+   * arranges it and sends it out. A RETURN arrives the other way round. The returns
+   * module drafts its shipment the moment the return reaches logistics, so what the
+   * desk is handed is a leg that already knows what travels, from where and to where,
+   * and the only thing left is the same two questions this screen exists to ask: how
+   * does it travel, and with whom.
+   *
+   * So the screen takes either. `?consignment_id=` raises one; `?tr_id=` arranges the
+   * one that is already there, and everything between those two points — the carriage
+   * tiles, the arrangement tiles, the provider set, the custody and tracking boxes,
+   * what holds the press back — is the same form, because it is the same decision.
+   */
+  const legId = Number(params.get("tr_id") ?? 0);
+  const isLeg = legId > 0;
 
   const [consignmentId, setConsignmentId] = useState(
     preselected > 0 ? String(preselected) : "");
@@ -630,6 +648,9 @@ export function DispatchConfirmPage() {
   const { data: ready, isLoading } = useQuery({
     queryKey: ["lgs-packed-consignments"],
     queryFn: () => consignmentApi.list({ status: "PACKED", size: 100 }),
+    // A return leg is not chosen from the packed list — it is the load this screen
+    // was opened on — so the picker behind this is not drawn and the list is not read.
+    enabled: !isLeg,
   });
   const { data: modes } = useQuery({
     queryKey: ["transport-modes"], queryFn: transportApi.modes,
@@ -642,19 +663,26 @@ export function DispatchConfirmPage() {
   const { data: carriers } = useQuery({
     queryKey: ["transport-carriers"], queryFn: () => transportApi.carriers(),
   });
+  const dispatchPolicyQuery = useQuery({
+    queryKey: ["transport-dispatch-policy"],
+    queryFn: transportApi.dispatchPolicy,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    staleTime: 0,
+  });
   // The packing list is what the transport lines are built from — weights, cartons
   // and the indent behind them are read off the consignment, never retyped.
   const { data: doc } = useQuery({
     queryKey: ["lgs-consignment", consignmentId],
     queryFn: () => consignmentApi.get(id),
-    enabled: id > 0,
+    enabled: id > 0 && !isLeg,
   });
   // Dispatching the same consignment twice raises a second transport request for one
   // physical load. Ask first, and offer the one that exists.
   const { data: links } = useQuery({
     queryKey: ["lgs-consignment-links", consignmentId],
     queryFn: () => transportApi.forConsignments([id]),
-    enabled: id > 0,
+    enabled: id > 0 && !isLeg,
     // Polled so the carrier's answer LANDS here rather than waiting for a reload, and
     // refetched on focus for the same reason: the desk that just rang the carrier
     // comes back to this tab to see whether they answered. See LIVE_MS.
@@ -662,6 +690,17 @@ export function DispatchConfirmPage() {
     refetchOnWindowFocus: true,
   });
   const already = links?.[0];
+  /** The leg this screen was opened on, when it was opened on one. Polled like
+   *  everything else here: a provider prices it in their own portal and a carrier
+   *  acknowledges it in theirs, and this tab is where those answers are read. Same
+   *  query key as `shipment` below, so the two are one request. */
+  const { data: leg, error: legError } = useQuery({
+    queryKey: ["transport", String(legId)],
+    queryFn: () => transportApi.get(legId),
+    enabled: isLeg,
+    refetchInterval: LIVE_MS,
+    refetchOnWindowFocus: true,
+  });
 
   const carriageRule: CarriageRule | undefined = useMemo(
     () => carriages?.find((row) => row.value === carriage), [carriages, carriage],
@@ -682,6 +721,7 @@ export function DispatchConfirmPage() {
     setCarrierIds([]);
     setPapers({});
     setHandoverPerson("EMPLOYEE");
+    if (next === "COURIER") void dispatchPolicyQuery.refetch();
   };
 
   const rule: ModeRule | undefined = useMemo(
@@ -698,6 +738,37 @@ export function DispatchConfirmPage() {
 
   const chosen = (ready?.items ?? []).find((row) => row.id === id) ?? doc ?? null;
 
+  /** WHAT is being dispatched, in one shape.
+   *
+   *  A consignment and a return leg are different documents that answer the same four
+   *  questions — what is it called, where is it going, where is it coming from, and
+   *  how much of it is there — and the summary rail, the mode advice and the step
+   *  header all only ever wanted those four. Reading them off two different objects in
+   *  six places is how the screen ends up half-blank on the door it was added to
+   *  second. */
+  const subject = useMemo(() => {
+    if (isLeg) {
+      return leg ? {
+        no: leg.source_no ?? leg.tr_no,
+        to: leg.to_location_name ?? "—",
+        from: leg.from_warehouse_name ?? "—",
+        packages: leg.total_packages,
+        weight_kg: leg.total_weight_kg,
+        dateLabel: "Drafted",
+        date: leg.tr_date ?? leg.created_at,
+      } : null;
+    }
+    return chosen ? {
+      no: chosen.dispatch_no,
+      to: destinationOf(chosen),
+      from: chosen.warehouse_name ?? "—",
+      packages: chosen.total_packages,
+      weight_kg: chosen.total_weight_kg,
+      dateLabel: "Packed",
+      date: chosen.dispatch_date,
+    } : null;
+  }, [isLeg, leg, chosen]);
+
   /** The leg this consignment already travels on, if it travels on one.
    *
    *  Read from the SERVER first and from the press only as a stand-in for the second
@@ -708,6 +779,21 @@ export function DispatchConfirmPage() {
    *  pressed the button a second ago, refreshed, or opened the link tomorrow.
    */
   const outcome: Outcome | null = useMemo(() => {
+    // A leg opened by id IS the outcome — there is no press to wait for and no
+    // consignment link to read it off. Null until it lands, so nothing below
+    // describes a shipment this screen has not seen yet.
+    if (isLeg) {
+      return leg ? {
+        tr_id: leg.id, tr_no: leg.tr_no, status: leg.status,
+        mode: leg.mode, carriage_mode: leg.carriage_mode,
+        // The paper the branch rang up about, not the shipment number.
+        consignment_no: leg.source_no ?? null,
+        carrier_name: leg.carrier_name,
+        vehicle_number: leg.vehicle_number,
+        driver_name: leg.driver_name,
+        lr_no: leg.lr_no ?? leg.docket_no,
+      } : null;
+    }
     if (already) {
       return {
         tr_id: already.tr_id, tr_no: already.tr_no, status: already.status,
@@ -733,7 +819,7 @@ export function DispatchConfirmPage() {
       };
     }
     return null;
-  }, [already, sent, chosen]);
+  }, [already, sent, chosen, isLeg, leg]);
 
   /** The mode rule the PASS is drawn from — the shipment's own mode, never the
    *  picker's. They agree the moment the button is pressed and part company on the
@@ -798,8 +884,97 @@ export function DispatchConfirmPage() {
       tracking_url: shipment.tracking_url ?? "",
       eway_bill_no: shipment.eway_bill_no ?? "",
       carrier_reference: shipment.carrier_reference ?? "",
+      // A manual courier is stored in the existing carrier-name column.  Hydrate it
+      // back into the editable field only when there is no vendor behind that name.
+      manual_courier_name: shipment.carrier_id ? "" : shipment.carrier_name ?? "",
     });
   }, [shipment]);
+
+  /** WHICH courier arrangement this screen is looking at — and, crucially, WHERE that
+   *  answer comes from.
+   *
+   *  Company Settings decides how a courier leg is RAISED. It decides nothing about
+   *  one that already exists. Read live it silently rewrote shipments already on the
+   *  road: an admin turning the toggle off left a manual leg's own typed name refused,
+   *  with a vendor dropdown beside it offering nothing that could satisfy the press;
+   *  turning it on drew the typed box over a leg genuinely booked with a registered
+   *  courier, whose next save would then have detached the carrier that had already
+   *  accepted the job.
+   *
+   *  So a RAISED leg answers for itself: a courier shipment carrying a name but no
+   *  vendor id is a manual booking, one carrying a vendor id is not, and that is a
+   *  durable fact about the row rather than about today's settings. The setting is
+   *  asked only where nothing has been arranged yet — exactly the split
+   *  `_manual_courier_here` applies on the way back in, so the form and the service
+   *  cannot disagree about which flow this is.
+   *
+   *  `shipment ?? sent` because the server is the authority and the press's own answer
+   *  only stands in for the second it takes the poll to land. */
+  const raised = shipment ?? sent;
+  const raisedManualCourier = raised?.mode === "COURIER"
+    ? !raised.carrier_id && Boolean((raised.carrier_name ?? "").trim())
+    : null;
+  // WHICH courier form a NEW leg gets belongs to Company Settings, so a policy that
+  // has not answered is UNKNOWN — never "off". Defaulting it to off drew the vendor
+  // dropdown on a screen that looked like it was working, and then the service refused
+  // the press ("enter the courier name instead of selecting a vendor") with nothing on
+  // the form able to satisfy it. Unknown holds the step and says so instead — but only
+  // where the policy is what decides, which a raised leg does not need.
+  const courierPolicy = dispatchPolicyQuery.data;
+  /** Which of the two courier flows applies here — the same answer `manualCourier`
+   *  gives, without the "is courier the mode right now" half, so the mode tiles can
+   *  say what the courier tile would do before it is chosen. */
+  const courierIsManual = raisedManualCourier
+    ?? courierPolicy?.manual_courier_dispatch === true;
+  const manualCourier = mode === "COURIER" && courierIsManual;
+  const courierPolicyUnknown = mode === "COURIER"
+    && raisedManualCourier === null && !courierPolicy;
+  /** What a MANUAL courier leg has to be told HERE, because nowhere else can tell it.
+   *
+   *  A vendor courier fills the person, the phone and the docket in from their own
+   *  portal when they acknowledge the booking, which is why the COURIER mode rule
+   *  leaves all three optional and must keep doing so. A manual courier is a name on a
+   *  counter slip — no vendor row, no login, nobody downstream — so left optional they
+   *  stay empty for the life of the shipment and the site is asked to sign for a load
+   *  with no number to chase it on.
+   *
+   *  The list is the SERVICE's (`/api/transport/dispatch-policy`), same as the mode
+   *  rule above: a second copy written into this screen is a rule with two values, and
+   *  the day they disagree the desk is either blocked by an unmarked box or told the
+   *  press is ready when it is not. Empty until the policy lands, so nothing is
+   *  demanded on a flow that turns out not to be manual. */
+  const manualNeeds = (field: string) => manualCourier
+    && (courierPolicy?.manual_courier_required_fields ?? []).includes(field);
+  /** The pair one of which satisfies "how it is chased" — a parcel comes back with a
+   *  docket, a load with an LR, and which paper exists depends on what turned up. */
+  const manualTracking = useMemo(() => (manualCourier
+    ? courierPolicy?.manual_courier_tracking_fields ?? []
+    : []), [manualCourier, courierPolicy]);
+  /** Whether the pair has been answered at all, which is what decides the asterisk on
+   *  each of the two boxes: both are marked while neither is filled, and the mark
+   *  leaves the other one the moment one of them is. An asterisk that stays on both
+   *  would be saying two papers are owed when the rule is either. */
+  const manualTracked = manualTracking.some((field) =>
+    String(form[field as keyof typeof form] ?? "").trim());
+  // Still in flight, or it came back an error. Only the second is the desk's to act
+  // on, and it is the one that used to be invisible.
+  const courierPolicyFailed = courierPolicyUnknown
+    && !dispatchPolicyQuery.isFetching;
+  /** Does the PROVIDER answer this press with a price, or is the leg settled here?
+   *
+   *  The mirror of the service's `asks_provider_for_price`, and the same reasoning:
+   *  courier and third-party both go out to providers for quotes and award one. Only
+   *  the manual courier cannot be asked, since a name off a counter receipt has no
+   *  login to send the question to. */
+  const asksForPrice = !manualCourier && (
+    Boolean(rule?.needs_quotes)
+    || (mode === "COURIER" && !courierPolicyUnknown)
+  );
+  const tenderedMode = asksForPrice;
+
+  useEffect(() => {
+    if (manualCourier && carrierIds.length > 0) setCarrierIds([]);
+  }, [manualCourier, carrierIds.length]);
 
   // What this mode still has blank. The MODE says which fields it needs — that list is
   // the backend's — and this only reads them off the form, so a hand-over and an
@@ -808,7 +983,7 @@ export function DispatchConfirmPage() {
   const missing = useMemo(() => {
     const gaps = (rule?.required_fields ?? []).filter((field) => (
       field === "carrier_id"
-        ? carrierIds.length === 0
+        ? manualCourier ? !form.manual_courier_name.trim() : carrierIds.length === 0
         : !String(form[field as keyof typeof form] ?? "").trim()
     ));
     // Released on this press, so the paper it travels with is needed on this press.
@@ -829,35 +1004,55 @@ export function DispatchConfirmPage() {
         gaps.push("handed_over_phone");
       }
     }
+    if (needs("vehicle_number") && !form.driver_phone.trim()) {
+      gaps.push("driver_phone");
+    }
+    // And what a MANUAL courier owes on top of its mode, read forward off the same
+    // served policy the form marks its asterisks from — see `manualNeeds`.
+    for (const field of (manualCourier
+      ? courierPolicy?.manual_courier_required_fields ?? [] : [])) {
+      if (!String(form[field as keyof typeof form] ?? "").trim()) gaps.push(field);
+    }
+    if (manualTracking.length && !manualTracking.some((field) =>
+      String(form[field as keyof typeof form] ?? "").trim())) {
+      // One key for the pair, not one per empty box: the rule is "either paper", and
+      // holding the press back for both would be demanding a docket of a lorry.
+      gaps.push("tracking_handle");
+    }
     return gaps;
-  }, [rule, form, carrierIds, handoverPerson]);
+  }, [rule, form, carrierIds, handoverPerson, manualCourier, courierPolicy,
+      manualTracking, asksForPrice]);
 
   // "Provider identified based on distance, weight, items" (doc E3). The backend owns
   // the thresholds and answers null when the consignment carried neither a distance
   // nor a weight — advice off no evidence reads as an answer.
   const { data: suggestion } = useQuery({
-    queryKey: ["transport-suggest", chosen?.total_weight_kg, chosen?.total_packages],
+    queryKey: ["transport-suggest", subject?.weight_kg, subject?.packages],
     queryFn: () => transportApi.suggestMode({
-      weight_kg: chosen?.total_weight_kg ?? null,
-      packages: chosen?.total_packages ?? null,
+      weight_kg: subject?.weight_kg ?? null,
+      packages: subject?.packages ?? null,
     }),
-    enabled: Boolean(chosen),
+    enabled: Boolean(subject),
   });
 
   const send = useAction({
     run: async () => {
-      const detail = doc ?? await consignmentApi.get(id);
-      const body: DispatchInput = {
-        ...headerFromConsignment(detail),
+      /** The answer to the two questions this screen asks, and nothing else.
+       *
+       *  Split out so the two doors send the SAME arrangement: a consignment's press
+       *  wraps it in the header and the manifest it is raising, a return leg's press
+       *  sends it on its own — the header there belongs to the return and this screen
+       *  has no business rewriting it. `update_tr` writes only the fields a payload
+       *  actually carries, so what is left out is left alone. */
+      const arrangement = {
         mode,
         // Both halves of "how does it travel". The carriage was asked on this screen
         // from the day it was built and thrown away on every press — a rail leg read
         // back as a plain third-party truck, and the carrier's portal could not tell
         // the winner which way the job was going.
         carriage_mode: carriage,
-        lines: linesFromConsignment(detail),
-        gate_pass_no: gatePass.trim() || `GP/${detail.dispatch_no}`,
         carrier_ids: carrierIds,
+        manual_courier_name: manualCourier ? form.manual_courier_name.trim() || null : null,
         evaluation_method: null,
         vehicle_number: form.vehicle_number || null,
         driver_name: form.driver_name || null,
@@ -878,18 +1073,41 @@ export function DispatchConfirmPage() {
         tracking_url: form.tracking_url || null,
         eway_bill_no: form.eway_bill_no || null,
         carrier_reference: form.carrier_reference || null,
-        // A settled mode leaves on this press. Everything the release checks is on
-        // this form, so sending it to READY and asking for a second "it has left"
-        // only delayed the moment the receiving site can sign for it — and the indent
-        // behind it stayed open in the gap. A tender has no carrier yet, so it waits.
-        // Courier and third-party providers complete the same acknowledgement fields
-        // in their own login. Only hand-over and own vehicle are entered manually and
-        // leave on this press.
-        release_now: false,
       };
-      const tr = outcome
-        ? await transportApi.update(outcome.tr_id, body)
-        : await transportApi.dispatchConsignment(body);
+
+      /* A return leg is ARRANGED, never raised: the returns module drafted it when
+         the return reached logistics, so the press applies the arrangement above and
+         — on a draft — walks the leg on exactly as a consignment's press does, out to
+         the providers for a price or ready to leave. It stops there deliberately. A
+         return may not leave before its own logistics rung is signed on the return, so
+         the load is released on the shipment, not here. */
+      const tr = isLeg
+        ? await transportApi.dispatchLeg(legId, {
+          ...arrangement,
+          // Only when the desk typed one. Sent blank it would erase the pass the leg
+          // already carries.
+          ...(gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
+        })
+        : await (async () => {
+          const detail = doc ?? await consignmentApi.get(id);
+          const body: DispatchInput = {
+            ...headerFromConsignment(detail),
+            ...arrangement,
+            lines: linesFromConsignment(detail),
+            gate_pass_no: gatePass.trim() || `GP/${detail.dispatch_no}`,
+            // A settled mode leaves on this press. Everything the release checks is
+            // on this form, so sending it to READY and asking for a second "it has
+            // left" only delayed the moment the receiving site can sign for it — and
+            // the indent behind it stayed open in the gap. A tender has no carrier
+            // yet, so it waits. Courier and third-party providers complete the same
+            // acknowledgement fields in their own login. Only hand-over and own
+            // vehicle are entered manually and leave on this press.
+            release_now: false,
+          };
+          return outcome
+            ? await transportApi.update(outcome.tr_id, body)
+            : await transportApi.dispatchConsignment(body);
+        })();
 
       // Posted only now: `sys_attachments` is keyed by document id, so the papers
       // could not be filed before there was a shipment. Each is tried on its own and
@@ -908,7 +1126,9 @@ export function DispatchConfirmPage() {
       return tr;
     },
     success: (tr) => {
-      const sent = tr.status === "AWAITING_CARRIER"
+      const sent = tr.status === "PENDING_APPROVAL"
+        ? `${tr.tr_no} sent for approval`
+        : tr.status === "AWAITING_CARRIER"
         ? `${tr.tr_no} sent to ${tr.carrier_name ?? "the courier"} for acknowledgement`
         : tr.status === "QUOTING"
         ? `${tr.tr_no} sent to ${carrierIds.length} provider${carrierIds.length === 1 ? "" : "s"} for a price`
@@ -921,7 +1141,10 @@ export function DispatchConfirmPage() {
     },
     invalidates: [["lgs-dispatch-queue"], ["lgs-consignment-links"],
       ["lgs-packed-consignments"], ["transport"], ["transport-summary"],
-      ["transport-provider-board"]],
+      ["transport-provider-board"],
+      // The return board on the dispatch page pages on its own query, so a leg that
+      // has just gone out for a price stays on its old status without this.
+      ["lgs-dispatch-returns"]],
     // Where the press LANDS the desk, read off the shipment's own status rather than
     // off the picker: the mode decides who answers next, and the desk should be
     // standing where that answer arrives instead of hunting for the screen.
@@ -1045,9 +1268,11 @@ export function DispatchConfirmPage() {
     "DRAFT", "PENDING_APPROVAL", "QUOTING", "AWAITING_CARRIER", "READY",
   ].includes(shipment.status));
 
-  const blocked = !id
+  const blocked = !(isLeg ? legId : id)
+    || (isLeg && !leg)
     || (Boolean(outcome) && !shipment && !sent)
     || lockedAfterFinalDispatch
+    || courierPolicyUnknown
     || missing.length > 0
     || badValues.length > 0
     || send.isPending;
@@ -1056,10 +1281,10 @@ export function DispatchConfirmPage() {
    *  and a button that reads differently in two places reads as two buttons. */
   const pressLabel = send.isPending
     ? "Sending..."
-    : rule?.needs_quotes
-      ? `Send for a price${carrierIds.length > 1 ? ` (${carrierIds.length})` : ""}`
-      : rule?.needs_carrier
-        ? "Send to courier"
+    : manualCourier
+      ? "Send for approval"
+      : asksForPrice
+        ? `Send for a price${carrierIds.length > 1 ? ` (${carrierIds.length})` : ""}`
         : "Dispatch now";
 
   // Does this mode ask anything past the two pickers? A hand-over asks who took it, a
@@ -1087,6 +1312,10 @@ export function DispatchConfirmPage() {
       />
 
       <ErrorBanner error={send.error} />
+      {/* The leg failed to LOAD, which is not the same as it still loading. Without
+          this the box below reads "Loading..." forever and the desk has no way to
+          tell a slow request from a leg it cannot see. */}
+      <ErrorBanner error={legError} />
 
       {/* The form and the rail. Below `xl` the rail stacks under the form, which puts
           the load, the choice and the press at the end of the page, where a phone
@@ -1103,17 +1332,36 @@ export function DispatchConfirmPage() {
               rule={outcomeRule}
               justSent={Boolean(sent)}
               providers={carrierIds.length}
-              onAnother={() => nav("/logistics/dispatch")}
             />
           ) : (
           <fieldset disabled={lockedAfterFinalDispatch} className="contents">
           <Step
             n={1}
-            title="Which consignment"
-            subtitle="Packed consignments only."
+            title={isLeg ? "Which return leg" : "Which consignment"}
+            subtitle={isLeg
+              ? "Drafted when the return was released to logistics."
+              : "Packed consignments only."}
           >
             <div className="grid gap-4 lg:grid-cols-2">
-              <Field label="Consignment">
+              {isLeg ? (
+                /* Not a picker. The leg is the load this screen was opened on, and
+                   there is nothing to choose between — a dropdown here would invite
+                   one return's transport to be arranged against another's. */
+                <Field
+                  label="Return leg"
+                  hint={leg ? `${leg.tr_no} · ${humanStatus(leg.status)}` : undefined}
+                >
+                  <Input
+                    value={subject
+                      ? `${subject.no} — ${subject.to} · ${load(subject.packages, subject.weight_kg)}`
+                      : legError
+                        ? "Could not load this return leg"
+                        : "Loading..."}
+                    disabled
+                  />
+                </Field>
+              ) : (
+              <Field label="Consignment" required>
                 <Select
                   value={consignmentId}
                   onChange={setConsignmentId}
@@ -1125,6 +1373,7 @@ export function DispatchConfirmPage() {
                   ariaLabel="Consignment"
                 />
               </Field>
+              )}
               <Field label="Gate pass no" hint="Optional.">
                 <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
               </Field>
@@ -1183,16 +1432,26 @@ export function DispatchConfirmPage() {
                   onChange={(value) => chooseType(value as TransportMode)}
                   options={(modes ?? [])
                     .filter((option) => typeAllowed(option.value))
-                    .map((option) => ({
-                      value: option.value,
-                      label: modeLabel(option.value),
-                      help: oneLine(option.help),
-                      icon: MODE_ICON[option.value],
-                      // What the press does, read off the mode's own rule rather than
-                      // listed here: a tendered mode goes out for prices, everything
-                      // else leaves on the press (`release_now`).
-                      badge: option.needs_quotes ? "Tender" : "Leaves now",
-                    }))}
+                    .map((option) => {
+                      const optionTendered = option.value === "COURIER"
+                        ? !courierIsManual
+                        : option.needs_quotes;
+                      return {
+                        value: option.value,
+                        label: modeLabel(option.value),
+                        help: option.value === "COURIER"
+                          ? optionTendered
+                            ? "Invite courier providers, compare their quotes and award the shipment."
+                            : "Record the courier name at the dispatch desk."
+                          : oneLine(option.help),
+                        icon: MODE_ICON[option.value],
+                        // What the press does. A tender goes out to several for
+                        // prices. Manual courier and the modes we move ourselves do not.
+                        badge: option.value === "COURIER" && courierIsManual
+                          ? "Leaves now"
+                          : optionTendered ? "Tender" : "Leaves now",
+                      };
+                    })}
                 />
 
                 {/* Advice, never a decision — whatever is picked is validated the same
@@ -1221,52 +1480,94 @@ export function DispatchConfirmPage() {
           {asksDetails && (
             <Step
               n={3}
-              title={rule?.needs_carrier ? "Which provider handles it?" : "Who has it, and how it is chased"}
-              subtitle={rule?.needs_carrier
+              title={rule?.needs_carrier
+                ? manualCourier ? "Which courier handles it?" : "Which provider handles it?"
+                : "Who has it, and how it is chased"}
+              subtitle={manualCourier
+                ? "A manual courier has no login, so who took it, their number and "
+                  + "the LR or docket are recorded here. Approval is followed by "
+                  + "final dispatch at the desk."
+                : rule?.needs_carrier
                 ? "The provider fills in the journey details when they acknowledge."
                 : `What a ${modeLabel(mode).toLowerCase()} leg records.`}
             >
               <div className="grid gap-4 lg:grid-cols-2">
                 {/* The provider list is the carrier vendors — whoever is on the master.
-                    A tender takes as many as should price the job; a booking takes one. */}
+                    Courier and third-party take as many as should price the job; a
+                    desk-settled booking takes one. */}
                 {rule?.needs_carrier && (
                   <>
                     <Group
                       first
                       icon={<Package className="h-4 w-4" />}
-                      title={rule.needs_quotes ? "The tender" : "The booking"}
-                      hint={rule.needs_quotes
-                        ? "Everyone who should price this job"
-                        : "Booked at their published rate"}
+                      title={manualCourier ? "Manual courier"
+                        : tenderedMode ? "The tender" : "The booking"}
+                      hint={manualCourier ? "Recorded at the dispatch desk"
+                        : tenderedMode
+                          ? "Everyone who should price this job"
+                          : "Asked for their rate before anything is booked"}
                     />
                     <div className="col-span-full">
+                      {courierPolicyUnknown ? (
+                        <Field
+                          label="Courier"
+                          hint={courierPolicyFailed
+                            ? undefined
+                            : "Checking the company dispatch setting"}
+                        >
+                          {courierPolicyFailed ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-xs text-warn">
+                                Could not read the company dispatch setting, so this
+                                screen does not yet know whether this courier is
+                                booked from the vendor register or entered by hand.
+                              </p>
+                              <Button variant="soft"
+                                onClick={() => void dispatchPolicyQuery.refetch()}>
+                                Try again
+                              </Button>
+                            </div>
+                          ) : (
+                            <Input value="Loading..." disabled />
+                          )}
+                        </Field>
+                      ) : manualCourier ? (
+                        <Field label="Courier name" required
+                          hint="Type the courier named on the booking or receipt.">
+                          <Input value={form.manual_courier_name}
+                            onChange={(e) => setForm({
+                              ...form, manual_courier_name: e.target.value,
+                            })} />
+                        </Field>
+                      ) : (
                       <Field
-                        label={rule.needs_quotes ? "Logistics partners" : "Courier"}
-                        hint={rule.needs_quotes
+                        label={tenderedMode ? "Logistics partners" : "Courier"}
+                        required
+                        hint={tenderedMode
                           ? "Prices come back side by side on Provider Selection."
-                          : undefined}
+                          : "Their price comes back on Provider Selection, where it is accepted."}
                       >
                         <Select
-                          value={rule.needs_quotes ? "" : (carrierIds[0] ? String(carrierIds[0]) : "")}
+                          value={tenderedMode ? "" : (carrierIds[0] ? String(carrierIds[0]) : "")}
                           onChange={(value) => {
                             const picked = Number(value);
                             if (!picked) return;
                             // A tender ADDS; a booking REPLACES. Same control, and the
                             // mode is the only thing that decides which, so there is one
                             // place to read what "choose a provider" means here.
-                            setCarrierIds(rule.needs_quotes
+                            setCarrierIds(tenderedMode
                               ? (carrierIds.includes(picked) ? carrierIds : [...carrierIds, picked])
                               : [picked]);
                           }}
                           options={(carriers ?? [])
-                            .filter((carrier) => !(rule.needs_quotes
+                            .filter((carrier) => !(tenderedMode
                               && carrierIds.includes(carrier.id)))
                             .map((carrier) => ({
                               value: String(carrier.id), label: carrier.name,
                             }))}
                           placeholder={noPartners
                             ? "No logistics vendors registered yet"
-                            : rule.needs_quotes
+                            : tenderedMode
                               ? "Add a provider to the tender"
                               : "Select the provider"}
                           ariaLabel="Provider"
@@ -1276,7 +1577,7 @@ export function DispatchConfirmPage() {
                             went to several, so who is on it has to be readable without
                             opening a second screen — and removable before it is sent,
                             not after. */}
-                        {rule.needs_quotes && carrierIds.length > 0 && (
+                        {tenderedMode && carrierIds.length > 0 && (
                           <div className="mt-2 flex flex-wrap gap-2">
                             {carrierIds.map((carrierId) => (
                               <span
@@ -1297,7 +1598,7 @@ export function DispatchConfirmPage() {
                             ))}
                           </div>
                         )}
-                        {rule.needs_quotes && carrierIds.length === 1 && (
+                        {tenderedMode && carrierIds.length === 1 && (
                           <p className="mt-2 flex items-start gap-1.5 text-xs text-warn">
                             <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
                             <span>
@@ -1321,6 +1622,7 @@ export function DispatchConfirmPage() {
                           </p>
                         )}
                       </Field>
+                      )}
                     </div>
 
                     <div className="contents">
@@ -1335,13 +1637,26 @@ export function DispatchConfirmPage() {
                     <Group
                       icon={<IdCard className="h-4 w-4" />}
                       title="Who collected it"
-                      hint="Blank until somebody turns up"
+                      hint={manualCourier
+                        ? "Recorded here — there is no portal to fill it in later"
+                        : "Blank until somebody turns up"}
                     />
                     {/* A tender leaves with a hired truck and the man behind its
                         wheel; a courier sends whoever is on the round for a parcel.
                         Same box, and the label says which of the two turned up. */}
-                    <Field label={rule.needs_quotes ? "Driver name" : "Collected by"}
-                      required={needs("driver_name")}>
+                    {/* Required on a MANUAL courier and on nothing else: an
+                        integrated provider names their own man when they acknowledge
+                        the job, so demanding it of a booking that has only just been
+                        sent asks the desk for something it cannot know. Nobody
+                        acknowledges a counter receipt, so here the desk is the only
+                        party who will ever know, and this is the only moment. */}
+                    <Field label={manualCourier
+                        ? "Collected by"
+                        : tenderedMode ? "Driver name" : "Collected by"}
+                      required={needs("driver_name") || manualNeeds("driver_name")}
+                      hint={manualNeeds("driver_name")
+                        ? "The person who came for the load."
+                        : undefined}>
                       <Input value={form.driver_name}
                         onChange={(e) => setForm({ ...form, driver_name: e.target.value })} />
                     </Field>
@@ -1356,7 +1671,7 @@ export function DispatchConfirmPage() {
                           ...form, vehicle_number: e.target.value,
                         })} />
                     </Field>
-                    <Field label="Phone number" required={needs("driver_phone")}
+                    <Field label="Phone number" required
                       hint={phoneError(form.driver_phone, "Phone") ?? PHONE_HINT}>
                       <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
                         onChange={(e) => setForm({
@@ -1388,12 +1703,18 @@ export function DispatchConfirmPage() {
                       hint="What the site tracks it on"
                     />
                     <Field label="LR number"
-                      hint={rule.needs_quotes ? "Optional." : "The consignment note."}>
+                      required={manualTracking.includes("lr_no") && !manualTracked}
+                      hint={manualTracking.length
+                        ? "The consignment note — this or the docket."
+                        : tenderedMode ? "Optional." : "The consignment note."}>
                       <Input value={form.lr_no}
                         onChange={(e) => setForm({ ...form, lr_no: e.target.value })} />
                     </Field>
                     <Field label="Docket number"
-                      hint={rule.needs_quotes ? "Optional." : "Either this or the LR."}>
+                      required={manualTracking.includes("docket_no") && !manualTracked}
+                      hint={manualTracking.length
+                        ? "The counter slip's number — this or the LR."
+                        : tenderedMode ? "Optional." : "Either this or the LR."}>
                       <Input value={form.docket_no}
                         onChange={(e) => setForm({ ...form, docket_no: e.target.value })} />
                     </Field>
@@ -1412,7 +1733,8 @@ export function DispatchConfirmPage() {
                         })} />
                     </Field>
 
-                    {paperwork(rule.needs_quotes ? TRANSPORT_DOCS : COURIER_DOCS)}
+                    {paperwork(manualCourier ? COURIER_DOCS
+                      : tenderedMode ? TRANSPORT_DOCS : COURIER_DOCS)}
                     </div>
                   </>
                 )}
@@ -1440,7 +1762,7 @@ export function DispatchConfirmPage() {
                       <Input value={form.driver_name}
                         onChange={(e) => setForm({ ...form, driver_name: e.target.value })} />
                     </Field>
-                    <Field label="Driver phone" required={needs("driver_phone")}
+                    <Field label="Driver phone" required
                       hint={phoneError(form.driver_phone, "Driver phone") ?? PHONE_HINT}>
                       <Input value={form.driver_phone} inputMode="numeric" maxLength={18}
                         onChange={(e) => setForm({
@@ -1477,8 +1799,7 @@ export function DispatchConfirmPage() {
 
                     {personId()}
 
-                    <Field label="Phone number"
-                      required={needs("handed_over_phone")}
+                    <Field label="Phone number" required
                       hint={phoneError(form.handed_over_phone, "Phone") ?? PHONE_HINT}>
                       <Input value={form.handed_over_phone} inputMode="numeric"
                         maxLength={18}
@@ -1502,9 +1823,9 @@ export function DispatchConfirmPage() {
           <Card className="overflow-hidden p-0">
             <div className="border-b border-line/70 bg-content2/40 px-4 py-3">
               <h2 className="font-display text-[15px] font-bold text-ink">Dispatch summary</h2>
-              {chosen ? (
+              {subject ? (
                 <p className="mono mt-0.5 truncate text-xs font-semibold text-brand">
-                  {chosen.dispatch_no}
+                  {subject.no}
                 </p>
               ) : (
                 <p className="mt-0.5 text-xs text-muted">Nothing picked yet</p>
@@ -1512,20 +1833,22 @@ export function DispatchConfirmPage() {
             </div>
 
             <div className="space-y-3.5 p-4">
-              {chosen ? (
+              {subject ? (
                 <>
                   <Fact icon={<MapPin className="h-4 w-4" />} label="Going to"
-                    value={destinationOf(chosen)} />
+                    value={subject.to} />
                   <Fact icon={<Warehouse className="h-4 w-4" />} label="From"
-                    value={chosen.warehouse_name ?? "—"} />
+                    value={subject.from} />
                   <Fact icon={<Boxes className="h-4 w-4" />} label="Load"
-                    value={load(chosen.total_packages, chosen.total_weight_kg)} />
-                  <Fact icon={<CalendarDays className="h-4 w-4" />} label="Packed"
-                    value={fmtDate(chosen.dispatch_date)} />
+                    value={load(subject.packages, subject.weight_kg)} />
+                  <Fact icon={<CalendarDays className="h-4 w-4" />}
+                    label={subject.dateLabel} value={fmtDate(subject.date)} />
                 </>
               ) : (
                 <p className="text-sm text-muted">
-                  Pick a consignment to see its details.
+                  {isLeg
+                    ? "Loading this return's leg."
+                    : "Pick a consignment to see its details."}
                 </p>
               )}
 
@@ -1545,16 +1868,23 @@ export function DispatchConfirmPage() {
                   reads as a broken screen — and at the bottom of a long form, the reason
                   sat somewhere the eye had already left. */}
               <div className="border-t border-line/70 pt-3.5">
-                {outcome ? (
+                {/* A DRAFT is not an outcome. It is the state a return's leg is
+                    HANDED to this desk in — nothing arranged, nothing sent — so
+                    reporting it as "ready, generate the gate pass" would hide the one
+                    list that matters here: what the chosen mode is still missing. A
+                    consignment never reaches this screen in draft (its press raises
+                    and advances the leg in one call), so this reads exactly as it did
+                    for the door it was written for. */}
+                {outcome && outcome.status !== "DRAFT" ? (
                   <p className="flex items-start gap-1.5 text-xs font-medium text-ok">
                     <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
                     <span>
                       {showGatePass
-                        ? `${outcome.tr_no} carries this consignment.`
+                        ? `${outcome.tr_no} carries this ${isLeg ? "return" : "consignment"}.`
                         : `${outcome.tr_no} is ready — generate the gate pass.`}
                     </span>
                   </p>
-                ) : !id ? (
+                ) : !(isLeg ? legId : id) ? (
                   <p className="text-xs text-muted">Choose a consignment to begin.</p>
                 ) : missing.length > 0 || badValues.length > 0 ? (
                   <>
@@ -1566,7 +1896,10 @@ export function DispatchConfirmPage() {
                         <li key={field} className="flex items-start gap-1.5 text-xs text-body">
                           <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-warn"
                             aria-hidden />
-                          {FIELD_LABELS[field] ?? field}
+                          {field === "carrier_id" && courierPolicyUnknown
+                            ? "the company dispatch setting"
+                            : (manualCourier ? MANUAL_FIELD_LABELS[field] : undefined)
+                              ?? FIELD_LABELS[field] ?? field}
                         </li>
                       ))}
                       {badValues.map((problem) => (
@@ -1582,10 +1915,14 @@ export function DispatchConfirmPage() {
                   <p className="flex items-start gap-1.5 text-xs font-medium text-ok">
                     <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
                     <span>
-                      {rule?.needs_quotes
+                      {asksForPrice
                         ? `Ready to go out to ${carrierIds.length} provider${carrierIds.length === 1 ? "" : "s"} for a price.`
-                        : rule?.needs_carrier
-                          ? "Ready to send to the courier for acknowledgement."
+                        : manualCourier
+                          // Nobody outside answers a manual booking — there is no
+                          // vendor and no login — so the next press is the approval,
+                          // and saying "for acknowledgement" pointed the desk at a
+                          // portal that will never reply.
+                          ? "Ready to send for approval."
                           : "Ready for final dispatch in Shipments."}
                     </span>
                   </p>
@@ -1602,6 +1939,10 @@ export function DispatchConfirmPage() {
                       <Truck className="h-4 w-4" />
                       {pressLabel}
                     </Button>
+                    {/* Every arrangement, manual courier included. A parcel handed
+                        over a counter still leaves the gate, and the pass is the paper
+                        the gate reads — hiding the press here left the rail saying
+                        "generate the gate pass" over a panel with no way to do it. */}
                     <Button className="w-full" variant="soft"
                       onClick={() => press(true)} disabled={blocked}>
                       <FileText className="h-4 w-4" /> Generate gate pass

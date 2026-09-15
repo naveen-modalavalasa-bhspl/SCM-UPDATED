@@ -1,6 +1,6 @@
 import { Link, Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Handshake, LogOut, Truck, User } from "lucide-react";
+import { ClipboardList, Handshake, LogOut, Truck, User } from "lucide-react";
 import { api, clearVendorToken, vendorToken } from "@/shared/api/client";
 import { VendorBell } from "@/modules/supplier/VendorBell";
 
@@ -96,8 +96,11 @@ export function CarrierLayout() {
               a fourth must not push the sign-out button onto its own line. */}
           <nav aria-label="Carrier" className="-mx-1 overflow-x-auto px-1">
             <div className="flex w-max gap-6">
+              {/* Named for the work, not for the document. This board carries the
+                  tender and nothing else — price a lane, revise it until the desk
+                  decides — and everything from the award onwards is the next tab. */}
               <NavLink to="/carrier/jobs" className={tab}>
-                <Truck className="h-4 w-4" /> Shipments
+                <ClipboardList className="h-4 w-4" /> Quote for it
               </NavLink>
               {/* Where an awarded job is answered. Its own tab rather than a panel
                   buried in the shipments board: a carrier prices lanes all week and

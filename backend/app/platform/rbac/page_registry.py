@@ -260,17 +260,17 @@ PAGES: list[PageDef] = [
     # same flow) the warehouse serves; these are separate rbac_pages rows pointing at
     # the same paths under /logistics. The warehouse rows keep their own codes, paths
     # and permissions and are not touched.
-    # NEW 2026-08-23. The module's front page, and its FIRST child, so /logistics opens
-    # on it. Every other module leads with an Overview; logistics redirected straight
-    # into Consignments, which asked the desk to start reading the queue before anything
-    # had told them the shape of the day.
+    # NEW 2026-08-23. The module's front page, and its FIRST child. It keeps its OWN
+    # url: `/logistics` is the module door and redirects to Shipments, where a
+    # logistics day is worked, so the Overview tab has to point at the Overview
+    # screen rather than follow that door.
     #
     # It reads `/api/transport/summary` and writes nothing, so it is guarded by the
     # transport code the Shipments register already needs — no new permission, and
     # `page.logistics_overview.view` inherits from `page.logistics_transport.view` (see
     # permissions.INHERITS_GRANTS_FROM) so the desk that works Shipments gets it without
     # anybody re-granting.
-    PageDef("logistics_overview", "/logistics", "Overview",
+    PageDef("logistics_overview", "/logistics/overview", "Overview",
             parent="grp_logistics", module="logistics", icon="layout-dashboard",
             sort_order=0),
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",

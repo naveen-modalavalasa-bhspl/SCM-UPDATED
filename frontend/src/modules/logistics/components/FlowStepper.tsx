@@ -21,14 +21,17 @@ import { transportApi } from "../api";
  * and the only press left was this desk's. It stands on "Provider accepts" instead,
  * which is where the Approve award button is and where the provider answers next.
  */
-export function FlowStepper({ mode, status, awardPending = false }: {
+export function FlowStepper({
+  mode, status, awardPending = false, manualCourier = false,
+}: {
   mode: string;
   status: string;
   awardPending?: boolean;
+  manualCourier?: boolean;
 }) {
   const { data: stages } = useQuery({
-    queryKey: ["transport-flow", mode],
-    queryFn: () => transportApi.flow(mode),
+    queryKey: ["transport-flow", mode, manualCourier],
+    queryFn: () => transportApi.flow(mode, manualCourier),
   });
 
   const stopped = ["REJECTED", "CANCELLED"].includes(status);
@@ -68,26 +71,29 @@ export function FlowStepper({ mode, status, awardPending = false }: {
               <div className="flex min-w-0 flex-1 flex-col items-center text-center">
                 <div className="flex w-full items-center">
                   {/* The rail either side of the dot, so the line reads as one track
-                      rather than as eight disconnected circles. */}
+                      rather than as eight disconnected circles. It wears the same
+                      `--color-step-done-rail` the indent rail does (index.css) —
+                      the one light value in that set, because a rail drawn at the
+                      dots' own strength turns the row into a bar chart. */}
                   <span
                     className={`h-0.5 flex-1 ${index === 0 ? "bg-transparent"
-                      : done || here ? "bg-brand" : "bg-line"}`}
+                      : done || here ? "bg-step-done-rail" : "bg-line"}`}
                     aria-hidden
                   />
                   <span
-                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold transition ${
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-bold transition ${
                       done
-                        ? "bg-brand text-white"
+                        ? "border-transparent bg-step-done text-white"
                         : here
-                          ? "bg-brand text-white ring-4 ring-brand/20"
-                          : "bg-content2 text-muted"
+                          ? "border-transparent bg-step-live text-white ring-4 ring-step-live/20"
+                          : "border-line bg-content2 text-muted"
                     }`}
                   >
                     {done ? <Check className="h-3.5 w-3.5" /> : index + 1}
                   </span>
                   <span
                     className={`h-0.5 flex-1 ${index === stages.length - 1
-                      ? "bg-transparent" : done ? "bg-brand" : "bg-line"}`}
+                      ? "bg-transparent" : done ? "bg-step-done-rail" : "bg-line"}`}
                     aria-hidden
                   />
                 </div>

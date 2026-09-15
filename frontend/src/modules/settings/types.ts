@@ -38,6 +38,10 @@ export interface AppSettings {
      *  answered for itself. The per-point flag on the warehouse master wins. */
     requires_inward_default: boolean;
   };
+  logistics: {
+    /** Let the dispatch desk record a courier name without a logistics-vendor login. */
+    manual_courier_dispatch: boolean;
+  };
   security: {
     /** How long a vendor's one-time code stays good for, in seconds. Enforced by the
      *  server at verification time — the vendor's screen shows the window but never

@@ -11,7 +11,7 @@ import { transportApi } from "../api";
 import { CarrierComparison } from "../components/CarrierComparison";
 import { load, modeLabel, modeTint, money } from "../components/modeCopy";
 import type { ProviderBoardRow } from "../transportTypes";
-import { manifestLines } from "../components/consignmentToLines";
+import { ManifestTable } from "../components/ManifestTable";
 
 const SIZE = 20;
 
@@ -100,6 +100,10 @@ export function ProviderSelectionPage() {
 
   const view = VIEWS.find((v) => v.key === viewKey) ?? VIEWS[0];
   const openId = Number(params.get("tr") ?? 0);
+  // FIX 2026-09-10: `?invite=1` is the intent the caller arrived with. The shipment's
+  // "Invite carriers & award" press names inviting, so it must land on the partner
+  // picker rather than on a tender sheet that has nothing on it yet.
+  const wantsInvite = params.get("invite") === "1";
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["transport-provider-board", viewKey, page, search],
@@ -206,7 +210,7 @@ export function ProviderSelectionPage() {
   ];
 
   if (openId > 0) {
-    return <ProviderSheet trId={openId} onBack={closeSheet} />;
+    return <ProviderSheet trId={openId} autoInvite={wantsInvite} onBack={closeSheet} />;
   }
 
   return (
@@ -309,7 +313,12 @@ export function ProviderSelectionPage() {
  * the comparison is the thing being read — pushing it below the fold would mean
  * scrolling past the list to make the decision the list exists to reach.
  */
-function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
+function ProviderSheet({ trId, autoInvite = false, onBack }: {
+  trId: number;
+  /** Arrived from a press that said "invite": open the partner picker straight away. */
+  autoInvite?: boolean;
+  onBack: () => void;
+}) {
   const nav = useNavigate();
 
   const { data: doc, isLoading, error } = useQuery({
@@ -433,72 +442,38 @@ function ProviderSheet({ trId, onBack }: { trId: number; onBack: () => void }) {
         )}
       </Card>
 
-      <h2 className="mb-2 text-sm font-semibold text-ink">What is being priced</h2>
-      <Card className="mb-5 p-5">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[520px] text-sm">
-            <thead>
-              <tr className="border-b border-line text-left text-xs text-muted">
-                <th className="py-2">Item</th>
-                <th className="py-2 text-right">Qty</th>
-                <th className="py-2 text-right">Packages</th>
-                <th className="py-2 text-right">Weight</th>
-              </tr>
-            </thead>
-            <tbody>
-              {manifestLines(doc.items).map((line) => (
-                <tr key={line.id} className="border-b border-line/50">
-                  <td className="py-2">
-                    <div className="text-body">{line.item_name ?? "—"}</div>
-                    <div className="font-mono text-[11px] text-muted">
-                      {line.item_code ?? ""}
-                    </div>
-                    {line.is_fragile && (
-                      <span className="text-[11px] text-amber-600">Fragile</span>
-                    )}
-                  </td>
-                  <td className="py-2 text-right">
-                    {Number(line.quantity)} {line.uom_code ?? ""}
-                  </td>
-                  <td className="py-2 text-right">{line.package_count}</td>
-                  <td className="py-2 text-right">
-                    {line.weight_kg != null ? `${Number(line.weight_kg)} kg` : "—"}
-                  </td>
-                </tr>
-              ))}
-              {doc.items.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="py-6 text-center text-sm text-muted">
-                    No lines on this shipment.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      {/* What the carriers are pricing, in the manifest panel every other logistics
+        * screen uses. The heading it carries is the same one the carrier sees on
+        * their job sheet, which is the point: a price is quoted against a load, and
+        * the two sides must be reading the same statement of it. */}
+      <ManifestTable className="mb-5" items={doc.items} status={doc.status} />
 
-      {/* The tender itself. Only a quoted mode has one — a courier booking and a
-          hand-over were settled the moment the mode was chosen. */}
-      {doc.mode === "THIRD_PARTY" ? (
-        <Card className="p-5">
-          <CarrierComparison
-            trId={doc.id}
-            status={doc.status}
-            quotes={doc.quotes}
-            awardPending={awardPending}
-            compact
-            // Awarding ends this desk's work: the shipment now has a provider and
-            // everything after it — dispatch, the LR, tracking — is the transport
-            // request's. Landing there is the next press, not a search for it.
-            onAwarded={(id) => nav(`/logistics/shipments/${id}`)}
-          />
-        </Card>
-      ) : (
-        <Card className="p-6 text-center text-sm text-muted">
-          A {modeLabel(doc.mode).toLowerCase()} shipment is not tendered — the provider
-          was settled when the mode was chosen. Set or change it on the transport
-          request.
+      {/* The prices themselves, and the press that settles them. Drawn off the
+          INVITATIONS on the shipment rather than off its mode: a third-party tender
+          and a courier asked for its rate both carry a quote row and both are decided
+          here, while a manual courier, an own vehicle and a hand-over carry none
+          because there was never anybody outside to ask. Keyed on the mode, a courier
+          booked with a registered courier reached this desk with its price sitting on
+          it and nothing to press. */}
+      <Card className="p-5">
+        <CarrierComparison
+          trId={doc.id}
+          status={doc.status}
+          quotes={doc.quotes}
+          awardPending={awardPending}
+          autoInvite={autoInvite}
+          compact
+          onAwarded={(id) => nav(`/logistics/shipments/${id}`)}
+        />
+      </Card>
+      {/* FIX 2026-09-10: it used to read "click Invite more above" — the name of a quiet
+          ghost button in the corner of the card, and one that is not rendered at all for
+          a login without `transport.award`. The picker is now offered inside the card,
+          where the emptiness is, so this only has to say what the step is FOR. */}
+      {doc.quotes.length === 0 && doc.status === "QUOTING" && (
+        <Card className="mt-3 border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          No carriers invited yet. Pick 2–3 logistics vendors above and invite them to
+          price this shipment — their quotes come back here for you to compare and award.
         </Card>
       )}
     </div>

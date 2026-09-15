@@ -180,6 +180,14 @@ def item_out(i: Item) -> dict:
             "item_sub_class_code": i.item_sub_class_code,
             "item_sub_class_name": i.item_sub_class_name,
             "hsn_id": i.hsn_id, "hsn_code": i.hsn_code, "is_asset": i.is_asset,
+            # A PREFILL for a document line, never the authority on the rate. Tax is a
+            # property of the HSN classification and a PO or GRN reads it from there
+            # at the moment it is raised (`_hsn_rates`), which is the rule this does
+            # not touch: it only saves a buyer retyping the usual figure into a line
+            # they can still edit. Served as NULL rather than 0 when the item says
+            # nothing, because 0% is a real rate that exempt goods genuinely carry and
+            # stamping it on an unclassified item would be a claim nobody made.
+            "tax_percent": float(i.tax_percent) if i.tax_percent is not None else None,
             "description": i.description,
             "has_components": i.has_components, "barcode_type": i.barcode_type,
             "barcode_value": i.barcode_value,

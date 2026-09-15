@@ -723,7 +723,7 @@ async def vendor_respond_to_po(po_id: int, body: POVendorResponseIn,
     """Accept the order, or decline it with a reason. The vendor id comes from the
     token, never from the caller, so this can only ever answer their own order."""
     await service.vendor_respond_to_po(
-        db, account.vendor_id, po_id, body.accept, body.note, getattr(body, "lines", None))
+        db, account.vendor_id, po_id, body.accept, body.note)
     return await service.vendor_get_po(db, account.vendor_id, po_id)
 
 

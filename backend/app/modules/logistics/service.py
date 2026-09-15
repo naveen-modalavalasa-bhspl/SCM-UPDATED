@@ -272,6 +272,13 @@ from app.modules.logistics.transport import (  # noqa: E402
     delete_tr,
     deliver_tr,
     dispatch_consignment,
+    # FIX 2026-09-10: `dispatch_leg` was added to transport.py but never listed
+    # here, so `service.dispatch_leg` did not exist and the dispatch board's press
+    # on a return leg answered 500 ("Something went wrong on our side"). The
+    # router reads every transport function through this module, so a name missing
+    # from this list is a route that cannot be called.
+    dispatch_leg,
+    dispatch_policy,
     dispatch_tr,
     document_file,
     evaluation_methods,
@@ -283,6 +290,7 @@ from app.modules.logistics.transport import (  # noqa: E402
     invite_carriers,
     list_documents,
     list_trs,
+    manual_courier_dispatch_enabled,
     mode_catalogue,
     mode_suggestion,
     open_exceptions,
@@ -313,13 +321,16 @@ __all__ = [
     "carrier_view_request",
     "carrier_track", "close_tr", "comparison", "create_grn_from_po", "create_issue",
     "create_tr", "decline_award", "delete_tr", "deliver_tr", "dispatch_consignment",
-    "dispatch_tr", "document_file", "evaluation_methods", "flow_catalogue",
+    "dispatch_leg",
+    "dispatch_policy", "dispatch_tr", "document_file", "evaluation_methods",
+    "flow_catalogue",
     "for_consignments",
     "for_indent",
     "get_grn", "get_tr", "history", "invite_carriers", "issue_stock",
     "list_documents", "list_grn",
-    "list_issues", "list_trs", "mode_catalogue", "mode_suggestion", "open_exceptions",
-    "provider_board", "receipt_evidence", "receipt_evidence_file",
-    "qc_fail", "qc_pass", "record_quote", "resolve_exception", "set_provider",
-    "share_tracking", "submit_tr", "transport_summary", "update_tr",
+    "list_issues", "list_trs", "manual_courier_dispatch_enabled",
+    "mode_catalogue", "mode_suggestion", "open_exceptions", "provider_board",
+    "receipt_evidence", "receipt_evidence_file", "qc_fail", "qc_pass",
+    "record_quote", "resolve_exception", "set_provider", "share_tracking",
+    "submit_tr", "transport_summary", "update_tr",
 ]

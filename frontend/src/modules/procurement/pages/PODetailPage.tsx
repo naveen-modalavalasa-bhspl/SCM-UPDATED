@@ -612,6 +612,9 @@ export function PODetailPage() {
           <p className="text-xs text-muted">
             The current version is filed away and the order goes back to draft: it is approved again, and {po.data.vendor_status === "ACCEPTED" ? "the vendor has to accept the new version before anything can be delivered." : "sent to the vendor again for their answer."}
           </p>
+          <p className="text-xs text-muted">
+            Quantities, rates and tax can all be changed here. Nothing reaches the vendor until the new total has been approved again. A line that has already been received keeps its rate: the goods are in and valued at it.
+          </p>
           <POHeaderFields value={header} disabled={true} onChange={(patch) => setHeader({ ...header, ...patch })} />
           <div className="border-t border-line pt-2">
             <h3 className="mb-3 text-sm font-semibold">Order Lines</h3>
@@ -621,7 +624,7 @@ export function PODetailPage() {
               showRate
               showTax
               showDate={false}
-              freezeRateAndTax={true}
+              allowRepricing
               capQuantityAtOriginal={false}
             />
           </div>

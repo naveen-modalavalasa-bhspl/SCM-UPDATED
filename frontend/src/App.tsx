@@ -432,7 +432,10 @@ function AppRoutes() {
             than bouncing into Consignments. The old redirect is gone, not kept
             alongside — two answers to "what is /logistics" is how a rail ends up
             highlighting one row and showing another. */}
-        <Route path="logistics" element={<LogisticsOverviewPage />} />
+        {/* Landing is Shipments, not Overview: /logistics used to render the
+            Overview screen, whose own menu row now lives at /logistics/overview.
+            Shipments is where a logistics day is worked. */}
+        <Route path="logistics" element={<Navigate to="/logistics/shipments" replace />} />
         <Route path="logistics/overview" element={<LogisticsOverviewPage />} />
         <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
         <Route path="logistics/consignments/new" element={<ConsignmentFormScreen />} />

@@ -187,6 +187,7 @@ export function QtyInput({
   disabled,
   invalid,
   ariaLabel,
+  step = "0.001",
 }: {
   value: number | string;
   onChange: (value: any) => void;
@@ -194,6 +195,10 @@ export function QtyInput({
   disabled?: boolean;
   invalid?: boolean;
   ariaLabel: string;
+  /** Quantities carry three decimals in the schema and default to them. Money does
+   *  not: a rate box passes "0.01" so the arrows step in paise and the browser's own
+   *  validation refuses a third digit. */
+  step?: string;
 }) {
   return (
     <input
@@ -201,7 +206,7 @@ export function QtyInput({
       inputMode="decimal"
       min={0}
       max={max}
-      step="0.001"
+      step={step}
       value={value === 0 ? "0" : String(value ?? "")}
       disabled={disabled}
       aria-label={ariaLabel}

@@ -137,12 +137,19 @@ DEAD_ISSUE_STATUSES = (IssueStatus.CANCELLED.value, IssueStatus.REJECTED.value)
 
 
 class IssueType(str, Enum):
-    """`out_issues.issue_type`."""
-    DEPARTMENT = "DEPARTMENT"
-    PROJECT = "PROJECT"
-    VEHICLE = "VEHICLE"
-    CONSUMPTION = "CONSUMPTION"
-    SCRAP = "SCRAP"
+    """`out_issues.issue_type` - what an issue IS, not what it was for.
+
+    It held DEPARTMENT / PROJECT / VEHICLE / CONSUMPTION / SCRAP, which are five
+    REASONS, and the reason is already on the document: department, project and
+    vehicle are columns of their own, and nothing downstream ever read consumption
+    against scrap. The one thing that changes how an issue behaves is whether it
+    serves a request somebody raised - so that is what this says.
+
+    `a4d8f2c6b9e3` maps every existing row off `indent_id`, which is the fact the old
+    words could only ever agree with or be wrong about.
+    """
+    INDENT_BASED = "INDENT_BASED"
+    DIRECT = "DIRECT"
 
 
 class IssueDirection(str, Enum):

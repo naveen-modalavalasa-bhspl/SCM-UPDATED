@@ -8,9 +8,10 @@ import pytest
 
 from app.modules.logistics import transport
 from app.modules.logistics.enums import (
-    EXCEPTION_EVENT_TYPES, MODE_RULES, ShipmentEventType, TERMINAL_STATUSES,
-    TransportMode, TransportStatus, mode_rule,
+    EXCEPTION_EVENT_TYPES, MODE_RULES, QuoteStatus, ShipmentEventType,
+    TERMINAL_STATUSES, TransportMode, TransportStatus, mode_rule,
 )
+from app.modules.logistics.models import TransportRequest
 
 
 def test_every_mode_has_a_rule():
@@ -22,10 +23,10 @@ def test_mode_rule_rejects_an_unknown_mode():
         mode_rule("TELEPORT")
 
 
-def test_only_third_party_is_tendered():
-    """Quoting is what separates a hired truck from every other way of moving goods."""
+def test_courier_and_third_party_are_tendered():
+    """Courier and third-party both collect provider quotes before one is awarded."""
     quoted = {value for value, rule in MODE_RULES.items() if rule.needs_quotes}
-    assert quoted == {TransportMode.THIRD_PARTY.value}
+    assert quoted == {TransportMode.COURIER.value, TransportMode.THIRD_PARTY.value}
 
 
 def test_a_tendered_mode_also_needs_a_carrier():
@@ -86,16 +87,41 @@ def test_terminal_statuses_cannot_be_reopened():
 
 @pytest.mark.parametrize("mode,expected", [
     (TransportMode.THIRD_PARTY.value, TransportStatus.QUOTING.value),
-    (TransportMode.COURIER.value, TransportStatus.READY.value),
+    (TransportMode.COURIER.value, TransportStatus.QUOTING.value),
     (TransportMode.OWN_VEHICLE.value, TransportStatus.READY.value),
     (TransportMode.DIRECT.value, TransportStatus.READY.value),
 ])
 def test_approval_sends_a_quoted_mode_to_tender_and_the_rest_to_ready(mode, expected):
     """A hand-over must never land in a QUOTING queue nobody works."""
-    class Doc:
-        pass
-
-    doc = Doc()
-    doc.mode = mode
+    # A real (unsaved) row, not a bare stub: where the request goes next is read off
+    # the invitations and the carrier on it as well as the mode, and a stub with only
+    # a mode on it tests a narrower rule than the one the service applies.
+    doc = TransportRequest(mode=mode)
     transport._advance_after_approval(doc)
     assert doc.status == expected
+
+
+def test_a_courier_picked_on_the_register_is_asked_before_it_is_booked():
+    """The Shipments form has one provider picker, so an approved courier leg arrives
+    here with a carrier and no invitation. That pick is the first invitation — booking
+    it outright is a leg on the road at a price nobody agreed."""
+    doc = TransportRequest(mode=TransportMode.COURIER.value,
+                           carrier_id=7, carrier_name="Amazon")
+
+    transport._advance_after_approval(doc)
+
+    assert doc.status == TransportStatus.QUOTING.value
+    assert (doc.carrier_id, doc.carrier_name) == (None, None)
+    assert [(q.carrier_id, q.carrier_name, q.status) for q in doc.quotes] == [
+        (7, "Amazon", QuoteStatus.INVITED.value)]
+
+
+def test_a_courier_written_down_at_the_desk_is_never_sent_to_a_portal():
+    """A manual courier has no vendor row and no login. Nobody is there to answer."""
+    doc = TransportRequest(mode=TransportMode.COURIER.value,
+                           carrier_name="Counter Courier")
+
+    transport._advance_after_approval(doc)
+
+    assert doc.status == TransportStatus.READY.value
+    assert doc.quotes == []

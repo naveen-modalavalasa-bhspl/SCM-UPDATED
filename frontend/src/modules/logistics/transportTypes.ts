@@ -34,6 +34,21 @@ export interface ModeRule {
   required_fields: string[];
 }
 
+/** Served by `GET /api/transport/dispatch-policy` — the slice of Company Settings the
+ *  dispatch form needs, and the only one a dispatcher may read.
+ *
+ *  `manual_courier_dispatch` decides WHICH courier form is drawn: a vendor from the
+ *  carrier register, or a name typed at the counter. The two lists below apply only to
+ *  the typed one, and they are served rather than written into the screen because they
+ *  are the same lists the service refuses the press on — a manual courier has no
+ *  portal, so what a vendor would have filled in from their own login has to be typed
+ *  here. Either one of `tracking_fields` satisfies it; the rest are each required. */
+export interface DispatchPolicy {
+  manual_courier_dispatch: boolean;
+  manual_courier_required_fields: string[];
+  manual_courier_tracking_fields: string[];
+}
+
 /** What the leg is carrying, which is also WHICH WAY it runs. RETURN is the same
  *  document run backwards — field to warehouse (doc E7). */
 export type TransportSource = "CONSIGNMENT" | "ISSUE" | "RETURN";
@@ -226,6 +241,14 @@ export interface TRItem {
   height_cm?: number | null;
   is_fragile: boolean;
   remarks?: string | null;
+  package_quantities?: PackageQuantity[];
+}
+
+export interface PackageQuantity {
+  package_id?: number | null;
+  package_no?: string | null;
+  package_type?: string | null;
+  quantity: number;
 }
 
 export interface CarrierQuote {
@@ -355,6 +378,11 @@ export interface TRListRow {
   mode: TransportMode;
   carriage_mode?: CarriageMode | null;
   status: string;
+  /** FIX 2026-09-07: which document the leg carries. An outward leg names itself with
+   *  `consignment_no` / `indent_no` below; a RETURN leg has neither, so without these
+   *  the dispatch board could not tell a return apart from anything else on it. */
+  source_type?: TransportSource | null;
+  source_no?: string | null;
   dispatch_id?: number | null;
   consignment_no?: string | null;
   indent_no?: string | null;
@@ -539,6 +567,8 @@ export interface TRInput {
   tracking_url?: string | null;
   eway_bill_no?: string | null;
   carrier_id?: number | null;
+  /** Used only when Company Settings enables manual courier dispatch. */
+  manual_courier_name?: string | null;
   carrier_reference?: string | null;
   vehicle_number?: string | null;
   driver_name?: string | null;

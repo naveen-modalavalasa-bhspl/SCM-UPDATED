@@ -8,7 +8,7 @@ import {
 import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { carrierPortalApi } from "../api";
 import { load, money } from "../components/modeCopy";
-import { manifestLines } from "../components/consignmentToLines";
+import { ManifestTable } from "../components/ManifestTable";
 
 const SCANS = [
   { value: "", label: "No scan, just save the numbers" },
@@ -108,7 +108,7 @@ export function CarrierJobPage() {
     // Straight back to the queue they answered. Staying on the form after the press
     // left the screen looking exactly as it did before it — same fields, same button —
     // which is why a sent quote read as an unsent one.
-    onDone: () => nav("/carrier/jobs?queue=QUOTING"),
+    onDone: () => nav("/carrier/jobs"),
   });
   const decline = useAction({
     run: () => carrierPortalApi.decline(jobId, declineReason),
@@ -207,36 +207,12 @@ export function CarrierJobPage() {
           <Row label="Note" value={job.remarks} />
         </dl>
 
+        {/* The same manifest panel the logistics desk reads, down to the wording:
+          * when a carrier queries a quantity they and the desk are looking at one
+          * document. Their own status drives the delivered column, so a job still
+          * on the road is not shown a page of zeroes to explain. */}
         {job.items.length > 0 && (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[420px] text-sm">
-              <thead>
-                <tr className="border-b border-line text-left text-xs text-muted">
-                  <th className="py-2">Item</th>
-                  <th className="py-2 text-right">Qty</th>
-                  <th className="py-2 text-right">Pkgs</th>
-                  <th className="py-2 text-right">Weight</th>
-                </tr>
-              </thead>
-              <tbody>
-                {manifestLines(job.items).map((line) => (
-                  <tr key={line.id} className="border-b border-line/50">
-                    <td className="py-2">
-                      {line.item_name ?? "—"}
-                      {line.is_fragile && (
-                        <span className="ml-2 text-[11px] text-amber-600">Fragile</span>
-                      )}
-                    </td>
-                    <td className="py-2 text-right">{Number(line.quantity)}</td>
-                    <td className="py-2 text-right">{line.package_count}</td>
-                    <td className="py-2 text-right">
-                      {line.weight_kg != null ? `${Number(line.weight_kg)} kg` : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ManifestTable className="mt-4" items={job.items} status={job.status} />
         )}
       </Card>
 
@@ -388,7 +364,7 @@ export function CarrierJobPage() {
             </Button>
           </div>
           <div className="rounded-lg border border-line p-3">
-            <Field label="Cannot take it? Tell us why">
+            <Field label="Cannot take it? Tell us why" required>
               <Input value={declineReason}
                 placeholder="No vehicle for that lane this week"
                 onChange={(e) => setDeclineReason(e.target.value)} />
@@ -523,16 +499,12 @@ export function CarrierJobPage() {
   );
 }
 
-/** Where "Back" lands: the one list this shipment is on right now. Kept beside the
- *  queues it mirrors — the board carries a chip per rung except AWAITING_CARRIER,
- *  whose rows are worked on the Acknowledgements screen. */
+/** Where "Back" lands: the screen this shipment is listed on right now. The portal has
+ *  two — Shipments is the lanes still being priced, Acknowledgements is everything
+ *  from the award onwards — so a job past QUOTING goes back to the second one. */
 function backTo(status: string, lost: boolean): string {
-  if (lost) return "/carrier/jobs?queue=NOT_AWARDED";
-  if (status === "AWAITING_CARRIER") return "/carrier/acknowledgements";
-  if (["DELIVERED", "ACKNOWLEDGED"].includes(status)) {
-    return "/carrier/jobs?queue=DELIVERED,ACKNOWLEDGED";
-  }
-  return `/carrier/jobs?queue=${status}`;
+  if (lost || status === "QUOTING") return "/carrier/jobs";
+  return "/carrier/acknowledgements";
 }
 
 function Row({ label, value }: { label: string; value?: string | null }) {

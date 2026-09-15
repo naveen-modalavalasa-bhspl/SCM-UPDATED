@@ -37,6 +37,33 @@ const RESET_WINDOWS = [
 const TIMEZONES = ["Asia/Kolkata", "UTC", "Asia/Dubai", "Europe/London"]
   .map((value) => ({ value, label: value }));
 
+const LOGISTICS_DEFAULTS: AppSettings["logistics"] = {
+  manual_courier_dispatch: false,
+};
+
+const SECURITY_DEFAULTS: AppSettings["security"] = {
+  vendor_quote_otp_seconds: 300,
+  password_reset_minutes: 30,
+};
+
+function normalizeSettings(data: AppSettings): AppSettings {
+  const incoming = data as AppSettings & {
+    logistics?: Partial<AppSettings["logistics"]> | null;
+    security?: Partial<AppSettings["security"]> | null;
+  };
+  return {
+    ...data,
+    logistics: {
+      ...LOGISTICS_DEFAULTS,
+      ...(incoming.logistics ?? {}),
+    },
+    security: {
+      ...SECURITY_DEFAULTS,
+      ...(incoming.security ?? {}),
+    },
+  };
+}
+
 function Toggle({
   label, checked, onChange,
 }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
@@ -73,8 +100,15 @@ export function SettingsPage() {
   const save = useMutation({
     mutationFn: settingsApi.update,
     onSuccess: (data) => {
-      setForm(data);
+      setForm(normalizeSettings(data));
       qc.invalidateQueries({ queryKey: ["settings"] });
+      // The dispatch desk reads the manual-courier choice from its own small policy
+      // endpoint rather than from all of Company Settings, so that cache is a second
+      // copy of this answer and has to be dropped with this one. Without it a desk
+      // already sitting on Dispatch keeps the form for the OLD setting until it is
+      // reloaded, which is exactly the "I turned it on and nothing changed" report.
+      qc.invalidateQueries({ queryKey: ["transport-dispatch-policy"] });
+      qc.invalidateQueries({ queryKey: ["transport-flow"] });
       // Offers a refresh: date format and currency are read at render time all over
       // the app, and screens already mounted keep the old ones until reloaded.
       void alerts.info("settings.changed").then((refreshNow) => {
@@ -84,7 +118,7 @@ export function SettingsPage() {
   });
 
   useEffect(() => {
-    if (settings.data) setForm(settings.data);
+    if (settings.data) setForm(normalizeSettings(settings.data));
   }, [settings.data]);
 
   if (!form) {
@@ -244,6 +278,30 @@ export function SettingsPage() {
                   onChange={(value) => set("fallback", "notify_admin_on_fallback", value)} />
           <Toggle label="Auto admin fallback" checked={form.fallback.allow_auto_admin_fallback}
                   onChange={(value) => set("fallback", "allow_auto_admin_fallback", value)} />
+        </Section>
+
+        <Section title="Dispatch">
+          <Toggle
+            label="Manual courier dispatch"
+            checked={form.logistics.manual_courier_dispatch}
+            onChange={(value) => set("logistics", "manual_courier_dispatch", value)}
+          />
+          <p className="text-xs text-muted md:col-span-2">
+            On: Courier dispatches use a typed courier name and move through approval
+            and final dispatch at the desk — the collector, their phone number and the
+            LR or docket are recorded on the dispatch press, because a typed courier
+            has no login to fill them in later. Off: Courier keeps the
+            registered-vendor selection and carrier acknowledgement flow.
+          </p>
+          {/* Said here because this is where somebody would expect otherwise. The two
+              flows differ in who fills the journey details in, so a shipment cannot be
+              moved between them halfway: changing this would either strand a typed
+              courier's name with a vendor dropdown that has nothing to offer it, or
+              detach a registered carrier that had already accepted the job. */}
+          <p className="text-xs text-muted md:col-span-2">
+            Applies to dispatches raised from now on. Shipments already raised keep the
+            arrangement they went out with.
+          </p>
         </Section>
       </div>
     </>

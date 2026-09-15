@@ -28,9 +28,9 @@ describe("warehouse formatting", () => {
     expect(num("not a number")).toBe(0);
   });
 
-  it("drops trailing zeros from a 3dp quantity", () => {
-    expect(fmtQty("12.500")).toBe("12.5");
-    expect(fmtQty(0)).toBe("0");
+  it("shows every quantity at two decimals, so a column lines up", () => {
+    expect(fmtQty("12.500")).toBe("12.50");
+    expect(fmtQty(0)).toBe("0.00");
   });
 
   it("shortens money for a KPI tile", () => {

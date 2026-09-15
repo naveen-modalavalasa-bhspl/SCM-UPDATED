@@ -252,6 +252,7 @@ export function TransportFormPage() {
     return problems(
       requiredError(header.to_location_name,
         isReturn ? "The warehouse it comes back to" : "Destination"),
+      requiredError(header.contact_phone, "Contact phone"),
       lines.some((line) => line.item_name || line.item_id || Number(line.quantity))
         ? null : "Add at least one line",
       // A line that exists must say WHAT and HOW MANY: a nameless line prices nothing,
@@ -265,6 +266,8 @@ export function TransportFormPage() {
               (provider as unknown as Record<string, string>)[field],
               labels[field] ?? field)
       )),
+      (rule?.required_fields ?? []).includes("vehicle_number")
+        ? requiredError(provider.driver_phone, "Driver phone") : null,
     );
   }, [header, provider, lines, rule, isReturn]);
 
@@ -554,7 +557,7 @@ export function TransportFormPage() {
                   <Input value={provider.driver_name}
                     onChange={(e) => setProvider({ ...provider, driver_name: e.target.value })} />
                 </Field>
-                <Field label="Driver phone">
+                <Field label="Driver phone" required>
                   <Input value={provider.driver_phone}
                     onChange={(e) => setProvider({ ...provider, driver_phone: e.target.value })} />
                 </Field>
@@ -613,7 +616,7 @@ export function TransportFormPage() {
           {/* The message replaces the hint rather than sitting beside it: `Field` takes
               a hint and nothing else, and widening the shared kit is not this module's
               to do. The footer carries the blocking list either way. */}
-          <Field label="Contact phone"
+          <Field label="Contact phone" required
             hint={phoneError(header.contact_phone, "Contact phone") ?? PHONE_HINT}>
             <Input value={header.contact_phone} inputMode="numeric" maxLength={18}
               onChange={(e) => setHeader({

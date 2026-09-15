@@ -271,9 +271,10 @@ export const supplierApi = {
   revisions: (poId: number) =>
     api.get<PORevision[]>(`/api/supplier/pos/${poId}/revisions`).then((r) => r.data),
   /** Accept the order, or decline it with a reason. Nothing may be despatched against
-   *  an order that has not been accepted. */
-  respondToPo: (id: number, accept: boolean, note = "", lines?: { id: number; rate: number }[]) =>
-    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note, lines })
+   *  an order that has not been accepted, and an acceptance carries NO PRICES - see
+   *  `POVendorResponseIn` on the server for why a counter-offer is not an answer. */
+  respondToPo: (id: number, accept: boolean, note = "") =>
+    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note })
       .then((r) => r.data),
   createDespatch: (poId: number, body: DespatchNoteWrite) =>
     api.post<DespatchNote>(`/api/supplier/pos/${poId}/despatch-notes`, body)
