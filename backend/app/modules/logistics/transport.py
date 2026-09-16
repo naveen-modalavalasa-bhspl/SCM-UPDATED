@@ -486,20 +486,49 @@ _SUMMARY_QUEUES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-async def summary(db: AsyncSession) -> dict:
-    """How many consignments are sitting at each stage, plus the open claims."""
+async def _summary_scope(db: AsyncSession, user):
+    """What this login may COUNT — exactly what `list_trs` lets it read.
+
+    The board and the queue behind it must be one answer. `summary` counted the whole
+    table while `list_trs` scoped every row, so a tile could show a number and then
+    open an empty list: the Overview read "1 delivered" over "No shipments match that"
+    for a desk whose rung does not reach that shipment. A count nobody can open is
+    worse than no count, because it sends somebody hunting for a row that was never
+    theirs.
+
+    The RETURN carve-out is `list_trs`' own, repeated here for the same reason it
+    exists there — an inbound leg from a field warehouse is every logistics viewer's
+    business — and repeating it is what keeps the two halves in agreement.
+    """
+    return or_(await _tr_scope(db, user),
+               TransportRequest.source_type == "RETURN")
+
+
+async def summary(db: AsyncSession, user=None) -> dict:
+    """How many consignments are sitting at each stage, plus the open claims.
+
+    `user` is optional for the same reason it is on `list_trs`: an internal caller
+    that already knows what it is reading is unaffected. Every ROUTE passes it.
+    """
+    scope = await _summary_scope(db, user) if user is not None else literal(True)
+
     rows = (await db.execute(
         select(TransportRequest.status, func.count(TransportRequest.id))
+        .where(scope)
         .group_by(TransportRequest.status)
     )).all()
     by_status = {status: count for status, count in rows}
 
     counts = {key: sum(by_status.get(s, 0) for s in statuses)
               for key, statuses in _SUMMARY_QUEUES}
+    # Scoped through the shipment the claim is against: a claim is a fact about a leg,
+    # so it is visible exactly when the leg is.
     counts["open_claims"] = (await db.execute(
         select(func.count(ShipmentEvent.id))
+        .join(TransportRequest, TransportRequest.id == ShipmentEvent.tr_id)
         .where(ShipmentEvent.is_exception.is_(True),
-               ShipmentEvent.resolved_at.is_(None))
+               ShipmentEvent.resolved_at.is_(None),
+               scope)
     )).scalar_one()
     # The two the desk is actually judged on: nothing should sit here.
     counts["awaiting_ack"] = sum(by_status.get(s, 0) for s in AWAITING_ACK_STATUSES)
@@ -507,7 +536,8 @@ async def summary(db: AsyncSession) -> dict:
         select(func.count(TransportRequest.id))
         .where(TransportRequest.status.in_([TransportStatus.IN_TRANSIT.value,
                                             TransportStatus.DELIVERED.value]),
-               TransportRequest.tracking_shared_at.is_(None))
+               TransportRequest.tracking_shared_at.is_(None),
+               scope)
     )).scalar_one()
     return counts
 
