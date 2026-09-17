@@ -439,6 +439,23 @@ export interface PurchaseReturn {
    */
   source_category: PurchaseReturnSource | null;
   source_category_label: string | null;
+  /**
+   * True where the GRN / PO / vendor above were READ off the purchase behind the stock
+   * rather than stored on the document — every return raised automatically off a branch
+   * consignment stores none of them. Marked on the row, never presented as recorded.
+   */
+  chain_traced?: boolean;
+  /**
+   * The purchase the trace found, where the stored pair above is empty. Rendered in
+   * place of the em dash and marked "traced" — the register has to agree with the
+   * detail screen, which has always shown these.
+   */
+  traced_po_id?: number | null;
+  traced_po_no?: string | null;
+  traced_grn_id?: number | null;
+  traced_grn_no?: string | null;
+  traced_vendor_id?: number | null;
+  traced_vendor_name?: string | null;
   /** The branch stock return that produced this one, where one did. */
   source_return_id: number | null;
   source_return_no: string | null;

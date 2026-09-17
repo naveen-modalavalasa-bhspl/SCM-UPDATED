@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
@@ -191,13 +192,36 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   errorMessage?: string;
 }
 
+/** A number box, everywhere, gets two guards it does not have on its own:
+ *
+ *  - **The wheel never edits it.** A focused `type="number"` field takes wheel events
+ *    as up/down, so scrolling past a form quietly rewrites whatever it passed over —
+ *    a quote goes out at a price nobody typed. The listener is passive (React attaches
+ *    wheel at the root), so `preventDefault` is not available; blurring is.
+ *  - **No negatives.** `min` stops the stepper; stripping the sign off the value stops
+ *    typing and pasting one. A field that wants negatives passes its own `min`, but
+ *    nothing in this system does — freight, quantities, days and percentages are all
+ *    zero-or-more. */
 export function Input({ className, ...props }: InputProps) {
+  const { onChange, onWheel, min, ...rest } = props;
+  const numeric = props.type === "number";
   return (
     <HInput
       variant="bordered"
       radius="md"
       classNames={{ inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
-      {...(props as any)}
+      {...(rest as any)}
+      min={numeric ? min ?? 0 : min}
+      onWheel={(e) => {
+        if (numeric) e.currentTarget.blur();
+        onWheel?.(e);
+      }}
+      onChange={(e) => {
+        if (numeric && e.target.value.includes("-")) {
+          e.target.value = e.target.value.replace(/-/g, "");
+        }
+        onChange?.(e);
+      }}
     />
   );
 }
@@ -240,6 +264,24 @@ export interface SelectOption {
  *  it either way for a screen that knows better than the count does. */
 const SEARCHABLE_FROM = 10;
 
+/** The two item renderers, hoisted OUT of the component on purpose.
+ *
+ *  React Aria keys its collection memo on the identity of the render function as
+ *  well as the items (`useCollection`: `[builder, children, items, collection,
+ *  context, factory]`). Written inline, that function is new on every render, so a
+ *  993-row stocking-point list was rebuilt — and, for the Autocomplete, re-filtered
+ *  on top (`useComboBoxState` re-runs `filterCollection` whenever the collection
+ *  changes identity) — every single time the HOST form re-rendered. On the
+ *  consignment screen, which re-renders on every package edit and every button
+ *  press, that was ~2000 nodes of pure waste per keystroke. Hoisted, the collection
+ *  is built once per list and the dropdown costs nothing until its options change. */
+const renderSelectItem = (option: SelectOption) => (
+  <HSelectItem key={String(option.value)}>{option.label}</HSelectItem>
+);
+const renderAutocompleteItem = (option: SelectOption) => (
+  <AutocompleteItem key={String(option.value)}>{option.label}</AutocompleteItem>
+);
+
 interface SelectProps {
   value?: string | number | "";
   onChange: (value: string) => void;
@@ -280,6 +322,17 @@ export function Select({
 }: SelectProps) {
   const selected = value === "" || value === undefined || value === null
     ? null : String(value);
+  // Memoised for the same reason the item renderers above are hoisted: HeroUI feeds
+  // these straight into tailwind-variants, which re-resolves every slot when the
+  // object arrives with a new identity. A stable one keeps a re-render of the host
+  // form from re-styling a dropdown that has not changed.
+  const inputProps = useMemo(() => ({
+    classNames: { inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` },
+  }), [className]);
+  const selectClassNames = useMemo(
+    () => ({ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }),
+    [className],
+  );
   const common = {
     variant: "bordered" as const,
     radius: "md" as const,
@@ -308,11 +361,9 @@ export function Select({
           const key = Array.from(keys as Set<string | number>)[0];
           onChange(key == null ? "" : String(key));
         }}
-        classNames={{ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
+        classNames={selectClassNames}
       >
-        {(option: SelectOption) => (
-          <HSelectItem key={String(option.value)}>{option.label}</HSelectItem>
-        )}
+        {renderSelectItem}
       </HSelect>
     );
   }
@@ -326,13 +377,9 @@ export function Select({
       // Clearing the box gives null, which must reach the caller as "" — the same
       // empty value it passes in — or a cleared field would keep its old id.
       onSelectionChange={(key) => onChange(key == null ? "" : String(key))}
-      inputProps={{
-        classNames: { inputWrapper: `min-h-11 border-line bg-content1 ${className ?? ""}` },
-      }}
+      inputProps={inputProps}
     >
-      {(option: SelectOption) => (
-        <AutocompleteItem key={String(option.value)}>{option.label}</AutocompleteItem>
-      )}
+      {renderAutocompleteItem}
     </Autocomplete>
   );
 }

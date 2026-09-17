@@ -126,6 +126,8 @@ const PurchaseConsolidationDetailPage = lazy(() => import("@/modules/procurement
 const PurchaseConsolidationFormPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationFormPage").then((m) => ({ default: m.PurchaseConsolidationFormPage })));
 const PurchaseConsolidationListPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationListPage").then((m) => ({ default: m.PurchaseConsolidationListPage })));
 const PurchaseReturnsPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnsPage })));
+const PurchaseReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnFormPage })));
+const PurchaseReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnDetailPage })));
 const PutawayPrintPage = lazy(() => import("@/modules/warehouse/pages/PutawayPrintPage").then((m) => ({ default: m.PutawayPrintPage })));
 const QuotationListPage = lazy(() => import("@/modules/procurement/pages/QuotationListPage").then((m) => ({ default: m.QuotationListPage })));
 const RFQDetailPage = lazy(() => import("@/modules/procurement/pages/RFQDetailPage").then((m) => ({ default: m.RFQDetailPage })));
@@ -160,6 +162,8 @@ const SupplierPODetailPage = lazy(() => import("@/modules/supplier/pages/Supplie
 const SupplierPOListPage = lazy(() => import("@/modules/supplier/pages/SupplierPOListPage").then((m) => ({ default: m.SupplierPOListPage })));
 const SupplierPasswordPage = lazy(() => import("@/modules/supplier/pages/SupplierPasswordPage").then((m) => ({ default: m.SupplierPasswordPage })));
 const SupplierProfilePage = lazy(() => import("@/modules/supplier/pages/SupplierProfilePage").then((m) => ({ default: m.SupplierProfilePage })));
+const SupplierReturnDetailPage = lazy(() => import("@/modules/supplier/pages/SupplierReturnDetailPage").then((m) => ({ default: m.SupplierReturnDetailPage })));
+const SupplierReturnListPage = lazy(() => import("@/modules/supplier/pages/SupplierReturnListPage").then((m) => ({ default: m.SupplierReturnListPage })));
 const SupplierRFQDetailPage = lazy(() => import("@/modules/supplier/pages/SupplierRFQDetailPage").then((m) => ({ default: m.SupplierRFQDetailPage })));
 const SupplierRFQListPage = lazy(() => import("@/modules/supplier/pages/SupplierRFQListPage").then((m) => ({ default: m.SupplierRFQListPage })));
 const SuppliersPage = lazy(() => import("@/modules/procurement/pages/SuppliersPage").then((m) => ({ default: m.SuppliersPage })));
@@ -245,6 +249,11 @@ function AppRoutes() {
             one before the vehicle leaves (doc B12). */}
         <Route path="pos" element={<SupplierPOListPage />} />
         <Route path="pos/:id" element={<SupplierPODetailPage />} />
+        {/* Goods coming BACK — their own tab beside the orders (2026-09-11). They used
+            to be a section under `SupplierPOListPage`, which meant scrolling the whole
+            order board to reach them and nowhere to go when told one was on its way. */}
+        <Route path="returns" element={<SupplierReturnListPage />} />
+        <Route path="returns/:id" element={<SupplierReturnDetailPage />} />
         <Route path="profile" element={<SupplierProfilePage />} />
       </Route>
 
@@ -499,12 +508,23 @@ function AppRoutes() {
         <Route path="returns/dashboard" element={<ReturnsOverviewPage />} />
         <Route path="returns/approvals" element={<ReturnsListPage />} />
         <Route path="returns/mine" element={<ReturnsListPage />} />
-        {/* The two desks. One component, the queue read off the path. */}
+        {/* The return queues. One component, the queue read off the path. */}
         <Route path="returns/decisions" element={<DecisionQueuePage />} />
         <Route path="returns/sign-off" element={<DecisionQueuePage />} />
         <Route path="returns/logistics" element={<DecisionQueuePage />} />
-        {/* Read only — pro_returns is the warehouse module's table. */}
+        {/* The purchase-return register, and the form and review screen it opens.
+            `pro_returns` is still the warehouse module's table and the warehouse still
+            owns these two components — but a storekeeper who opened the register from
+            the Returns rail was being handed over to the Warehouse module the moment
+            they clicked a row or pressed New, and the rail, the tabs and the eyebrow
+            all changed under them. Same component, served on this side, exactly as
+            Consignments is served under /logistics. `/warehouse/purchase-returns/*`
+            still resolves and still behaves as it did. `new` before `:id` so the word
+            is never read as an id. */}
         <Route path="returns/purchase" element={<PurchaseReturnsPage />} />
+        <Route path="returns/purchase/new" element={<PurchaseReturnFormPage />} />
+        <Route path="returns/purchase/:id" element={<PurchaseReturnDetailPage />} />
+        <Route path="returns/purchase/:id/edit" element={<PurchaseReturnFormPage />} />
         <Route path="returns/new" element={<ReturnFormPage />} />
         <Route path="returns/settings/receiving" element={<ReceivingConfigPage />} />
         <Route path="returns/:id" element={<ReturnDetailPage />} />

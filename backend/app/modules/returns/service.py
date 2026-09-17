@@ -3278,15 +3278,15 @@ async def _receive_at_far_end(db: AsyncSession, doc: StockTransferOrder, user,
     await db.flush()
     logger.info("Return %s acknowledged at the far end of %s (%s)",
                 doc.sto_no, reference or "—", condition)
-    # The receiving warehouse has signed for what arrived, so the purchase return against
-    # its document is raised — asked of the ladder like any other, never approved here
-    # (see `_raise_purchase_return`). It creates the DRAFT `pro_returns` row first where
-    # the gate-out did not, so a load that left through an older door still produces one.
+    # The receiving warehouse has signed for what arrived, so its purchase return is on
+    # the register as a DRAFT, waiting to be read and sent (see `_raise_purchase_return`
+    # — nothing here submits it). It creates the row first where the gate-out did not,
+    # so a load that left through an older door still produces one.
     #
     # Swallowed on failure, and that is the right way round: the material has arrived and
     # the signature above is a fact about the physical world. A paperwork problem
-    # downstream must not roll back a delivery. It is logged loudly and the DRAFT document
-    # is still on the register for the warehouse to submit by hand.
+    # downstream must not roll back a delivery. It is logged loudly, and the worst case
+    # is a draft the warehouse raises by hand.
     try:
         await _raise_purchase_return(db, doc, tr, user)
     except Exception:
@@ -3554,24 +3554,41 @@ async def _warehouse_return_document(db: AsyncSession, doc: StockTransferOrder,
 
 async def _raise_purchase_return(db: AsyncSession, doc: StockTransferOrder,
                                  tr, user) -> None:
-    """The warehouse signed for the load, so the purchase return against it goes live.
+    """The warehouse signed for the load, so its purchase return exists — as a DRAFT.
 
     ADDED 2026-09-08. This is the last automatic step of the flow: the warehouse person
     opens the document the gate-out raised, acknowledges what actually arrived, and the
-    purchase return against it is raised without anybody retyping the load.
+    purchase return against it is there without anybody retyping the load.
 
-    **It is raised, not approved.** `engine.start` is asked with the warehouse's own
-    `PURCHASE_RETURN` doc type and the same context keys `warehouse.submit_return` passes,
-    so whatever ladder an admin has configured for a purchase return applies to this one
-    exactly as it would to one raised by hand — and where a project has no ladder it lands
-    APPROVED, which is what a hand-raised one does too. Nothing here decides who signs.
+    **It is raised, never submitted** (CHANGED 2026-09-16). It used to call
+    `engine.start` here and land the document in somebody's approval queue — but only
+    where `_document_chain` had happened to resolve a vendor at gate-out, and that query
+    asks one narrow question ("was a PO raised against the INDENT this field return
+    names"), which finds nothing whenever the branch was served out of stock bought on
+    some other order. That is the ordinary case. So two loads of the same kind, landing
+    the same way, produced one document sitting in approval and one sitting in DRAFT,
+    and which you got was decided by a query neither the storekeeper nor the approver
+    can see. The register showed exactly that: PRET0001 PENDING_APPROVAL against
+    PO0013, PRET0002 DRAFT with an empty vendor column — while its detail screen traced
+    the vendor off the batch perfectly well.
+
+    Worse, the half that DID reach approval reached it unread. Nobody had opened the
+    document, confirmed the vendor, checked the quantities that came off the truck or
+    picked a reason; the approver was the first human to see it.
+
+    So the automatic half stops at DRAFT, always — which is also the state the rest of
+    this flow is built for. **Send to Vendor** (`warehouse.send_to_vendor`) is the press
+    that carries one of these documents, and it is the write that BINDS the traced
+    GRN / PO / vendor: the screen posts `traced_*` where the document stores nothing,
+    the service re-reads every id and refuses a vendor the purchase trail disagrees
+    with. Nothing can bind that chain except a person who has read the vendor's name on
+    a confirm, which is exactly what a document auto-submitted past them skipped.
 
     Runs inside the acknowledgement hook's transaction and never commits. A failure is
     logged and swallowed by the caller: the material has arrived and the receiving
     signature is a fact, and a paperwork problem downstream must not undo it.
     """
     from app.modules.warehouse.enums import ReturnStatus as PurchaseReturnStatus
-    from app.modules.warehouse.enums import WarehouseDocType
 
     # Raised at gate-out in the ordinary case. Raised here when the load left through a
     # door that predates this wiring, so an old shipment landing still produces one.
@@ -3582,45 +3599,21 @@ async def _raise_purchase_return(db: AsyncSession, doc: StockTransferOrder,
         logger.info("Return %s: %s is already %s — nothing to raise",
                     doc.sto_no, document.return_no, document.status)
         return
-    if not document.vendor_id:
-        # Nobody to send it back to. Neither the desk's decision nor the paper trail
-        # named a vendor — which happens on material that reached the branch with no PO
-        # behind it — and a purchase return climbing a ladder with an empty vendor is a
-        # document nobody can act on at the top of it. It stays DRAFT on the register,
-        # where the warehouse names the vendor and submits it the ordinary way.
-        logger.info("Return %s: %s stays DRAFT — no vendor is named on it, so there is "
-                    "nobody to raise it against", doc.sto_no, document.return_no)
-        return
 
-    context = {
-        "doc_no": document.return_no,
-        "doc_summary": f"Purchase return {document.return_no}",
-        "warehouse_id": document.warehouse_id,
-        "vendor_id": document.vendor_id,
-        "total_value": float(_d(document.total_value)),
-        "requester_position_id": getattr(user, "active_position_id", None),
-        # So a ladder condition can route a QC rejection differently from a branch
-        # return without having to guess from the reason text.
-        "source_category": document.source_category,
-    }
-    instance = await engine.start(
-        db, WarehouseDocType.PURCHASE_RETURN.value, document.id, context, user)
-    document.status = (
-        PurchaseReturnStatus.APPROVED.value
-        if instance.status == InstanceStatus.APPROVED.value
-        else PurchaseReturnStatus.PENDING_APPROVAL.value)
-
+    # No status change to audit — the CREATE row `_warehouse_return_document` wrote is
+    # the document's whole story so far. What this adds is the fact the gate-out could
+    # not know: the load actually landed, which is what makes the draft workable.
     await write_audit(
         db, entity="pro_returns", entity_id=document.id,
         entity_no=document.return_no, action=AuditAction.UPDATE, actor=user,
         before={"status": PurchaseReturnStatus.DRAFT.value},
         after={"status": document.status, "source_return_no": doc.sto_no,
                "source_category": document.source_category},
-        summary=f"{document.return_no} raised automatically on receipt of return "
-                f"{doc.sto_no}")
+        summary=f"{document.return_no} ready to send — {doc.sto_no} was received at "
+                f"{document.warehouse_name or 'the warehouse'}")
     await db.flush()
-    logger.info("Return %s: purchase return %s raised on receipt (%s)",
-                doc.sto_no, document.return_no, document.status)
+    logger.info("Return %s: purchase return %s is a draft on the register, waiting to "
+                "be sent to the vendor", doc.sto_no, document.return_no)
 
 
 def _register_transport_hooks() -> None:
@@ -6266,6 +6259,24 @@ async def list_purchase_returns(db: AsyncSession, params: PageParams, *,
 
     page = await paginate(db, stmt.order_by(PurchaseReturn.id.desc()), params)
     rows = list(page["items"])
+
+    # The GRN, PO and vendor behind the rows that store none of them.
+    #
+    # FIXED 2026-09-16. This register built its dicts straight off the stored columns,
+    # so a return raised automatically off a branch consignment — which stores no
+    # `grn_id`, `po_id` or `vendor_id` — printed an em dash in Vendor and in Against,
+    # while opening that same row showed "Transasia Bio-Medicals Ltd, read from GRN
+    # REC/2026-27/00002". One screen saying there is no vendor and the next naming one
+    # is how a document gets read as broken. The warehouse module already answers this
+    # for its own register in a fixed number of queries; the same call, so the two can
+    # never drift.
+    #
+    # Served as TRACED, never as the document's own: these are read off the stock, and
+    # binding them is a write that belongs to Send to Vendor, where a person has read
+    # the name on a confirm (`warehouse._trace_purchase_source`).
+    from app.modules.warehouse.service import trace_purchase_sources
+
+    traced = await trace_purchase_sources(db, rows) if rows else {}
     counts = {}
     if rows:
         counts = {return_id: int(count) for return_id, count in (await db.execute(
@@ -6298,6 +6309,16 @@ async def list_purchase_returns(db: AsyncSession, params: PageParams, *,
             row.source_category or ""),
         "source_return_id": row.source_return_id,
         "source_return_no": row.source_return_no,
+        # Read off the stock for the rows that store no purchase of their own. The
+        # screen renders these where the stored pair is empty and marks the row
+        # "traced", so what is evidence and what is binding stay distinguishable.
+        "chain_traced": bool(traced.get(row.id)),
+        "traced_po_id": (traced.get(row.id) or {}).get("po_id"),
+        "traced_po_no": (traced.get(row.id) or {}).get("po_no"),
+        "traced_grn_id": (traced.get(row.id) or {}).get("grn_id"),
+        "traced_grn_no": (traced.get(row.id) or {}).get("grn_no"),
+        "traced_vendor_id": (traced.get(row.id) or {}).get("vendor_id"),
+        "traced_vendor_name": (traced.get(row.id) or {}).get("vendor_name"),
         "total_items": counts.get(row.id, row.total_items or 0),
         "total_qty": _d(row.total_qty),
         # Unlike a field return this one IS costed — the rate came off the GRN line — so

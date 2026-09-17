@@ -144,22 +144,16 @@ def _and_list(names: list[str]) -> str:
 async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
     """Load one shipment, applying the same scope as the transport register.
 
-    INBOUND legs are exempt from the row scope, for exactly the reason `list_trs`
-    exempts them: a return runs field -> warehouse, so `from_warehouse_id` holds the
-    field office it left rather than the warehouse it is coming to, and no central
-    logistics profile is scoped to that. Leaving it scoped here was not a narrower
-    read — it was a broken screen: the Dispatch board's return queue is unscoped and
-    lists the leg, and then EVERY staff route carrying its id 404s, because
-    `_require_transport_in_scope` is this function. Confirm dispatch opened on a leg
-    it could never load and sat on "Loading..." forever, and the press behind it would
-    have failed the same way. The scope still applies in full to outward legs.
+    `_tr_readable` is that scope, and it is deliberately the same call the register and
+    the summary make: leaving an inbound leg scoped here was not a narrower read but a
+    broken screen. The Dispatch board's return queue lists the leg, and then EVERY
+    staff route carrying its id 404s, because `_require_transport_in_scope` is this
+    function. Confirm dispatch opened on a leg it could never load and sat on
+    "Loading..." forever, and the press behind it would have failed the same way.
     """
     stmt = select(TransportRequest).where(TransportRequest.id == tr_id)
     if user is not None:
-        stmt = stmt.where(or_(
-            TransportRequest.source_type.in_(INBOUND_SOURCES),
-            await _tr_scope(db, user),
-        ))
+        stmt = stmt.where(await _tr_readable(db, user))
     doc = (await db.execute(stmt)).scalar_one_or_none()
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
@@ -279,6 +273,27 @@ async def _tr_scope(db: AsyncSession, user):
     )
 
 
+async def _tr_readable(db: AsyncSession, user):
+    """What this login may READ on the register — the row scope, plus every INBOUND leg.
+
+    ONE definition, because the three reads that used to carve the return out on their
+    own had drifted into three different answers. `get_tr` exempted it, `_summary_scope`
+    exempted it, and `list_trs` exempted it only when the CALLER had already asked for
+    `source_type=RETURN` by name — so the Shipments register's default "Everything" view
+    applied the scope and dropped the very legs the tile above it had just counted and
+    the Dispatch board below it was listing. A count nobody can open is the defect the
+    `_summary_scope` docstring was written about; this is the other half of it.
+
+    The carve-out itself is `get_tr`'s reason unchanged: a return runs field ->
+    warehouse, so `from_warehouse_id` holds the field office it LEFT rather than the
+    warehouse it is coming to, and no central logistics profile is scoped to that. An
+    inbound leg from a field warehouse is every logistics viewer's business. The scope
+    still applies in full to outward legs.
+    """
+    return or_(await _tr_scope(db, user),
+               TransportRequest.source_type.in_(INBOUND_SOURCES))
+
+
 # The paperwork that travels WITH the load, as opposed to the receipt evidence above,
 # which is the requester's and comes back from the far end. Two documents, because
 # those are the two a leg leaves with: the way bill the carrier moves it on, and the
@@ -329,14 +344,15 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
                    awaiting_ack: bool = False,
                    user=None) -> dict:
     stmt = select(TransportRequest)
-    # FIXED — see `_tr_scope`. Optional so an internal caller that already knows what
+    # FIXED — see `_tr_readable`. Optional so an internal caller that already knows what
     # it is reading (a hook, a handoff) is unaffected; every ROUTE passes the user.
-    # RETURN legs are inbound from field warehouses (E7). Scoping on from_warehouse_id
-    # would hide every field return from a central logistics desk — show all RETURN legs
-    # to any viewer with transport.view, same way the DispatchPage return board needs it.
+    # The carve-out for inbound legs is UNCONDITIONAL now. It used to fire only when the
+    # caller had asked for `source_type=RETURN` by name, which meant the one view that
+    # does not name it — the register's "Everything" — was the one view a field return
+    # was missing from, while the tile above it counted the leg and the Dispatch board
+    # below it listed the same row.
     if user is not None:
-        if not (source_type and source_type.upper() == "RETURN"):
-            stmt = stmt.where(await _tr_scope(db, user))
+        stmt = stmt.where(await _tr_readable(db, user))
     if source_type:
         # The one filter that separates the outward leg from the return one (doc E7).
         # Same register, same statuses, opposite direction.
@@ -496,12 +512,10 @@ async def _summary_scope(db: AsyncSession, user):
     worse than no count, because it sends somebody hunting for a row that was never
     theirs.
 
-    The RETURN carve-out is `list_trs`' own, repeated here for the same reason it
-    exists there — an inbound leg from a field warehouse is every logistics viewer's
-    business — and repeating it is what keeps the two halves in agreement.
+    One CALL rather than a repeated clause, for the same reason: this file already had
+    three hand-copied versions of the inbound carve-out and one of them had drifted.
     """
-    return or_(await _tr_scope(db, user),
-               TransportRequest.source_type == "RETURN")
+    return await _tr_readable(db, user)
 
 
 async def summary(db: AsyncSession, user=None) -> dict:
@@ -729,11 +743,14 @@ async def provider_board(db: AsyncSession, params: PageParams,
     stmt = (select(TransportRequest)
             .where(TransportRequest.status.in_(
                 wanted or list(PROVIDER_BOARD_STATUSES))))
-    # FIXED — same rung as the register. The provider board carries the QUOTED PRICES,
-    # so leaving it unscoped published every carrier's rates for every lane to anyone
-    # holding transport.view.
+    # FIXED — same rung as the register, and literally the same call. The provider board
+    # carries the QUOTED PRICES, so leaving it unscoped published every carrier's rates
+    # for every lane to anyone holding transport.view. The inbound carve-out inside
+    # `_tr_readable` is not a hole in that: a return leg is already listed, counted and
+    # opened by every transport.view holder, and leaving it out HERE only meant a leg
+    # that reached QUOTING had no desk able to award it.
     if user is not None:
-        stmt = stmt.where(await _tr_scope(db, user))
+        stmt = stmt.where(await _tr_readable(db, user))
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(
@@ -785,7 +802,10 @@ async def open_exceptions(db: AsyncSession, params: PageParams, user=None) -> di
     FIXED 2026-08-20 — was unscoped. A claim names a shipment, a lane and a carrier, so
     an open claims board with no rung told every logistics login what had gone wrong on
     every other region's freight. `ShipmentEvent` carries no location of its own, so it
-    is bounded through its shipment — the same rung `list_trs` applies.
+    is bounded through its shipment — the same rung `list_trs` applies, which is why it
+    is `_tr_readable` and not `_tr_scope`: a claim raised on a return leg has to be
+    visible to the desk that can see the leg, or the material that came back damaged is
+    on a board nobody who can act on it is allowed to read.
     """
     stmt = (select(ShipmentEvent)
             .where(ShipmentEvent.is_exception.is_(True),
@@ -793,7 +813,7 @@ async def open_exceptions(db: AsyncSession, params: PageParams, user=None) -> di
             .order_by(ShipmentEvent.event_at.desc()))
     if user is not None:
         stmt = stmt.where(ShipmentEvent.tr_id.in_(
-            select(TransportRequest.id).where(await _tr_scope(db, user))))
+            select(TransportRequest.id).where(await _tr_readable(db, user))))
     return await paginate(db, stmt, params)
 
 
@@ -916,8 +936,12 @@ async def activity_ledger(db: AsyncSession, params: PageParams, *,
     # bounds the whole ledger. WITHOUT this the retired Tracking and Exceptions boards
     # were replaced by a screen that showed strictly MORE than they did — who awarded
     # a job, at what freight, to which carrier — to anyone holding transport.view.
+    #
+    # `_tr_readable` rather than `_tr_scope`, for the reason the helper gives: the
+    # Dispatch board opens this ledger per row (`?dispatch_id=`), so a bound narrower
+    # than the board's own is a link that lands on an empty trail.
     if user is not None:
-        visible_stmt = visible_stmt.where(await _tr_scope(db, user))
+        visible_stmt = visible_stmt.where(await _tr_readable(db, user))
     visible = visible_stmt.cte("visible_shipments")
 
     key = func.concat(literal("tr:"), cast(visible.c.tr_id, String))
@@ -3022,9 +3046,15 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     indent's loop. A site reporting SHORT or DAMAGED opens a claim on the same shipment
     timeline rather than in a second place — the logistics desk chasing the carrier and
     the site's complaint are one fact, and recording them apart is how they diverge.
+
+    The signature also CLOSES the leg (see below) — every leg, claim or no claim.
     """
     doc = await get_tr(db, tr_id)
-    if doc.status == TransportStatus.ACKNOWLEDGED.value:
+    # Read off the STAMP, not off the status: a clean signature closes the leg on the
+    # way through, so a second press on an already-signed one arrives at CLOSED and
+    # would otherwise fall through to "only a consignment that has left can be
+    # acknowledged" — which is true of nothing and tells the site the wrong thing.
+    if doc.acknowledged_at is not None:
         raise ValidationError(f"{doc.tr_no} has already been acknowledged")
     if doc.status not in AWAITING_ACK_STATUSES:
         raise ValidationError(
@@ -3107,12 +3137,30 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     # — logistics sits in front of warehouse in the import chain (rule 5).
     await hooks.fire(hooks.ON_ACKNOWLEDGE, db, doc, user)
 
+    # THE SIGNATURE IS THE END OF THE LEG. The goods are at the destination and the
+    # person they were for has said so; there is no further transport fact to record,
+    # so the leg closes here and the Close press is gone from the screen entirely.
+    #
+    # A CLAIM DOES NOT HOLD IT OPEN (2026-09-16). It used to, and that was the wrong
+    # place to hold: a shortage is worked on the CLAIM — `resolve_exception`, off the
+    # shipment timeline, which never looks at the leg's status — not by leaving a
+    # delivered consignment parked in a transport queue. Holding the leg open made
+    # "has this arrived" and "has the carrier paid for what was missing" one question
+    # when they are two, and it is the first one the register exists to answer. The
+    # claim stays open, visible on the timeline and in the Activity Ledger, and is
+    # settled there.
+    #
+    # The OTHER door to a signature — the indent raiser's receipt, in
+    # `warehouse._close_signed_legs` — already closed on its own; only which claims
+    # it waits for differed, and now neither waits.
+    doc.status = TransportStatus.CLOSED.value
+
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},
                       after={"status": doc.status, "condition": condition},
                       summary=(f"{doc.acknowledged_by_name or 'The site'} acknowledged "
-                               f"{doc.tr_no} as {condition.lower()}"))
+                               f"{doc.tr_no} as {condition.lower()} — leg closed"))
     await db.commit()
     await db.refresh(doc)
     return doc
@@ -3137,11 +3185,12 @@ async def close_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
             "The indent requester must acknowledge this consignment before it can "
             "be closed" if doc.indent_id
             else "Only a delivered consignment can be closed")
-    open_claims = [e for e in doc.events if e.is_exception and e.resolved_at is None]
-    if open_claims:
-        raise ValidationError(
-            f"{len(open_claims)} open claim(s) on this consignment. Close them with "
-            "the provider before closing the shipment.")
+    # NO CLAIM CHECK (2026-09-16). It used to refuse while a shortage was unsettled,
+    # which is the same hold `acknowledge_tr` has stopped applying and for the same
+    # reason: a claim is worked on the claim (`resolve_exception`, which never reads the
+    # leg's status), not by keeping a delivered consignment in a transport queue. Two
+    # routes reaching one status had to agree, or whichever door a desk used decided
+    # whether the leg could end.
     doc.status = TransportStatus.CLOSED.value
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,

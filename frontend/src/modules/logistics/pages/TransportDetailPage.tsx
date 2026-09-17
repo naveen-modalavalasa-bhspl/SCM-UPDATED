@@ -159,11 +159,6 @@ export function TransportDetailPage() {
     run: () => transportApi.shareTracking(trId),
     success: "Tracking shared with the field", invalidates,
   });
-  const close = useAction({
-    run: () => transportApi.close(trId),
-    success: "Shipment closed", invalidates,
-  });
-
   const downloadEvidence = async (attachmentId: number, fileName: string) => {
     setDownloadingEvidence(attachmentId);
     setEvidenceDownloadError(null);
@@ -297,19 +292,20 @@ export function TransportDetailPage() {
               </Can>
             )}
 
-            {doc.status === "ACKNOWLEDGED" && (
-              <Can do="transport.track">
-                <Button onClick={() => close.mutate()} disabled={close.isPending}>
-                  Close shipment
-                </Button>
-              </Can>
-            )}
+            {/* NO CLOSE PRESS (2026-09-16). The receiver signing for the load IS the
+                end of the leg — `acknowledge_tr` lands it on CLOSED — so this button
+                sat in front of somebody who had already finished, could be pressed
+                exactly one way, and left every leg nobody remembered to press parked
+                in a queue that reads as unfinished work. An open claim does not hold
+                it either: a claim is settled on the claim, in the timeline below.
+                `transportApi.close` and `POST /{id}/close` both stay, for the legs
+                acknowledged before this landed. */}
           </>
         }
       />
 
       <ErrorBanner error={submit.error ?? approve.error ?? dispatch.error
-        ?? close.error ?? share.error
+        ?? share.error
         ?? carrierDeclined.error ?? approveAward.error
         ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
 
@@ -498,7 +494,9 @@ export function TransportDetailPage() {
         <Card className="mb-4 border-amber-300 bg-amber-50 p-4 dark:bg-amber-900/20">
           <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
             {openClaims} open claim{openClaims === 1 ? "" : "s"} on this consignment.
-            It cannot be closed until they are settled with the provider.
+            Settle {openClaims === 1 ? "it" : "them"} with the provider on the claim
+            itself, in Tracking below. The leg is closed either way — where the goods
+            got to and what the carrier still owes for them are two questions.
           </p>
         </Card>
       )}

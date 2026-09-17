@@ -94,7 +94,9 @@ export const NEXT_MOVE: Record<string, string> = {
   READY: "Dispatch it — gate pass and LR",
   IN_TRANSIT: "Waiting for the site to sign",
   DELIVERED: "Waiting for the site to sign",
-  ACKNOWLEDGED: "Close the shipment",
+  // Nothing left to do: the signature closes the leg. Only legs acknowledged before
+  // 2026-09-16 rest here at all, which is why the wording is a state, not a move.
+  ACKNOWLEDGED: "Signed for — nothing outstanding",
   CLOSED: "Done",
   REJECTED: "Rejected",
   CANCELLED: "Cancelled",

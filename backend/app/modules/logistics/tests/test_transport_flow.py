@@ -22,7 +22,8 @@ from app.modules.logistics.enums import (
 )
 from app.modules.logistics.schemas import (
     AcknowledgeIn, AwardIn, CarrierAcceptIn, CarrierDeclineIn, CarrierTrackIn,
-    DeliverIn, DispatchIn, InviteIn, QuoteIn, QuickDispatchIn, TRCreate, TRLineIn,
+    DeliverIn, DispatchIn, InviteIn, QuoteIn, QuickDispatchIn, ResolveIn,
+    TRCreate, TRLineIn,
 )
 from app.platform.settings.service import set_setting
 from app.platform.hcm.models import HcmEmployee
@@ -245,8 +246,9 @@ async def test_the_outbid_carrier_is_told_the_outcome_and_no_more(db):
     # put them straight back to watching the tender they priced vanish with nothing
     # said. Most tenders end closed, so this is the normal case, not an edge one.
     await transport.deliver_tr(db, doc.id, DeliverIn(), w.desk)
-    await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(), w.desk)
-    await transport.close_tr(db, doc.id, w.desk)
+    # The signature closes it — there is no second press to make on a clean leg.
+    doc = await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(), w.desk)
+    assert doc.status == TransportStatus.CLOSED.value
 
     closed = await transport.carrier_open_requests(
         db, w.fast.id, PageParams(page=1, size=20), status="NOT_AWARDED")
@@ -372,7 +374,10 @@ async def test_the_site_signing_for_it_closes_the_loop(db):
         db, doc.id, AcknowledgeIn(acknowledged_by_name="Site Nurse",
                                   condition=AckCondition.GOOD.value), w.desk)
 
-    assert doc.status == TransportStatus.ACKNOWLEDGED.value
+    # CLOSED, not ACKNOWLEDGED: the signature IS the end of the leg, and the Close
+    # press that used to follow it has been removed from the screen entirely.
+    assert doc.status == TransportStatus.CLOSED.value
+    assert doc.acknowledged_at is not None
     assert doc.acknowledged_by_name == "Site Nurse"
     assert not [e for e in doc.events if e.is_exception]
 
@@ -390,10 +395,10 @@ async def test_a_short_delivery_raises_a_claim_on_the_same_timeline(db):
     assert claims[0].event_type == "MISSING"
     assert claims[0].affected_item_name == "Gloves"
 
-    # And the open claim blocks the close, so a shortage cannot be filed away by
-    # closing the shipment on top of it.
-    with pytest.raises(ValidationError, match="open claim"):
-        await transport.close_tr(db, doc.id, w.desk)
+    # And the leg still CLOSES. A claim does not hold a delivered consignment in the
+    # transport queue: where the goods got to and what the carrier owes for what was
+    # missing are two questions, and the claim is worked on the claim.
+    assert doc.status == TransportStatus.CLOSED.value
 
 
 async def test_a_shortage_must_say_what_was_short(db):
@@ -423,13 +428,26 @@ async def test_it_cannot_be_signed_for_twice(db):
         await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(), w.desk)
 
 
-async def test_an_acknowledged_shipment_closes(db):
+async def test_a_claim_outlives_the_leg_that_carried_it(db):
+    """Closing the leg does not close the claim, and settling the claim is still open.
+
+    The two were held together by `close_tr` refusing while a shortage stood. They are
+    separate facts: the consignment arrived and was signed for, and the carrier owes
+    for what was missing. `resolve_exception` never reads the leg's status, which is
+    what makes settling a claim on a closed shipment work.
+    """
     w = await _world(db)
     doc = await _delivered(db, w)
-    await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(), w.desk)
+    doc = await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(
+        condition=AckCondition.SHORT.value, remarks="One carton missing"), w.desk)
 
-    doc = await transport.close_tr(db, doc.id, w.desk)
     assert doc.status == TransportStatus.CLOSED.value
+    claim = next(e for e in doc.events if e.is_exception)
+    assert claim.resolved_at is None, "closing the leg must not settle the claim"
+
+    settled = await transport.resolve_exception(
+        db, claim.id, ResolveIn(resolution="Credit note from the carrier"), w.desk)
+    assert settled.resolved_at is not None
 
 
 async def test_a_shipment_that_has_landed_can_no_longer_be_cancelled(db):
@@ -437,7 +455,10 @@ async def test_a_shipment_that_has_landed_can_no_longer_be_cancelled(db):
     doc = await _delivered(db, w)
     await transport.acknowledge_tr(db, doc.id, AcknowledgeIn(), w.desk)
 
-    with pytest.raises(ValidationError, match="already left"):
+    # "already closed" rather than "already left": the signature took it to CLOSED,
+    # which is terminal, and `cancel_tr` refuses on that one rung earlier. Either way
+    # a landed consignment is not cancellable — a claim is how it is unwound.
+    with pytest.raises(ValidationError, match="already closed"):
         await transport.cancel_tr(db, doc.id, w.desk, "changed our mind")
 
 

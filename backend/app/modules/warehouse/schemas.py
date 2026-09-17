@@ -8,13 +8,16 @@ caller invent its own document number or mark its own issue approved.
 """
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.warehouse.enums import (
+    VENDOR_RETURN_INBOUND_RESPONSES, VENDOR_RETURN_REFUND_RESPONSES,
     DispatchEventType, DispatchType, InspectionResult, InspectionType, IssueDirection,
-    IssueType, PickStrategy, ReceiptType,
+    IssueType, PickStrategy, ReceiptType, VendorReturnResponse,
 )
+from app.shared.time import today as ist_today
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, ConfigEntries, DocumentLines, SerialList,
     MAX_BATCH_IDS, MAX_DOCUMENT_LINES, MAX_SERIALS_PER_LINE,
@@ -649,6 +652,20 @@ class ReceiptRead(_Read):
     lr_no: str | None = None
     gate_entry_no: str | None = None
     gate_entry_at: datetime | None = None
+    #: WHEN THE GOODS ARE EXPECTED, on a receipt raised before they arrive — today that
+    #: is a supplier's replacement promise off a purchase return. Served here because
+    #: writing the date and never showing it to the store would achieve nothing: this is
+    #: the field that answers "what is due at my gate this week". Null on a receipt
+    #: written AT the gate, which is describing goods already standing there, AND on a
+    #: collection, where nothing is coming until somebody here sends a vehicle.
+    expected_delivery: date | None = None
+    #: SUPPLIER_DELIVERS or WE_COLLECT (`INBOUND_TRANSPORT_MODES`). The store acts
+    #: differently on each — wait at the gate, or send a vehicle — so this is the field
+    #: that decides which. Null on a receipt not raised in advance of the goods.
+    inbound_transport_mode: str | None = None
+    #: A collection's own two facts: where our vehicle goes, and when it may go.
+    pickup_address: str | None = None
+    goods_ready_date: date | None = None
     status: str
     total_items: int
     total_received_qty: Decimal
@@ -1842,15 +1859,73 @@ class DispatchDetail(DispatchRead):
 # Purchase returns
 # ---------------------------------------------------------------------------
 
+class ReturnReasonOption(BaseModel):
+    """One reason the storekeeper can pick — served so UI never hard-codes them."""
+    value: str
+    label: str
+
+
+PURCHASE_RETURN_REASONS: list[tuple[str, str]] = [
+    ("DAMAGED", "Damaged"),
+    ("DEFECTIVE", "Defective"),
+    ("WRONG_MATERIAL", "Wrong Material"),
+    ("EXCESS_MATERIAL", "Excess Material"),
+    ("QUALITY_ISSUE", "Quality Issue"),
+    ("INCORRECT_SPECIFICATION", "Incorrect Specification"),
+    ("EXPIRED", "Expired"),
+    ("MATERIAL_NOT_REQUIRED", "Material Not Required"),
+    ("OTHER", "Other"),
+]
+
+
+#: The supplier's possible answers, WORDED FOR THEM, and served rather than mapped in
+#: the portal — the same rule `PURCHASE_RETURN_REASONS` follows and the same reason
+#: `VENDOR_RETURN_STATUS_LABEL` exists on the frontend: every sentence about a return has
+#: to read from where the supplier is standing, not from inside our store.
+#:
+#: Note the direction of each. "Returned" on this screen means the SUPPLIER is sending
+#: our goods back to us, which is the exact opposite of what "return" means everywhere
+#: else in this module — hence the wording spells the direction out rather than
+#: reusing the bare verb.
+#:
+#: ACCEPTED is kept and worded even though the portal no longer writes it: this map is
+#: the ONLY place an answer is turned into a sentence, so a legacy row drops out of every
+#: screen at once if it is removed from here. Its wording says what the row actually
+#: means — goods kept, settlement never stated — rather than pretending it was a refund.
+VENDOR_RETURN_RESPONSES: list[tuple[str, str]] = [
+    (VendorReturnResponse.REFUNDED.value, "Refund being paid"),
+    (VendorReturnResponse.REPLACED.value, "Replacement being sent"),
+    (VendorReturnResponse.RETURNED.value, "Sent back to you"),
+    (VendorReturnResponse.ACCEPTED.value, "Accepted (settlement not recorded)"),
+]
+
+
 class ReturnItemWrite(BaseModel):
     id: int | None = None
     po_item_id: int | None = None
     grn_item_id: int | None = None
-    item_id: int
+    #: Optional since 2026-09-10 — a MANUAL line names an item by hand and that item
+    #: need not exist in `mst_items`. Still required on a sourced line, which the
+    #: service enforces: it is the link the returnable cap is computed against.
+    item_id: int | None = None
     batch_id: int | None = None
     quantity: Decimal
     rate: Decimal | None = None
     reason: str | None = None
+
+    # --- manual lines ---------------------------------------------------------------
+    #: This line was typed rather than read off the source document.
+    is_manual: bool = False
+    #: What the storekeeper called it. Used only where `is_manual` and no `item_id`;
+    #: a sourced line's name is always snapshotted from the master.
+    item_name: str | None = Field(default=None, max_length=300)
+    item_code: str | None = Field(default=None, max_length=50)
+    uom_code: str | None = Field(default=None, max_length=20)
+    #: Purchased / already returned / available, as typed. Stored verbatim on a manual
+    #: line because there is no source document to derive them from.
+    original_qty: Decimal | None = None
+    previously_returned: Decimal | None = None
+    returnable_qty: Decimal | None = None
 
 
 class ReturnWrite(BaseModel):
@@ -1860,7 +1935,30 @@ class ReturnWrite(BaseModel):
     vendor_id: int | None = None
     warehouse_id: int | None = None
     reason: str | None = None
+    remarks: str | None = Field(default=None, max_length=1000)
     items: Annotated[list[ReturnItemWrite], DocumentLines] = []
+
+    # --- manual returns ---------------------------------------------------------------
+    #
+    # ADDED 2026-09-10. A return whose vendor and lines are TYPED rather than read off a
+    # purchase transaction, for goods whose paperwork never reached this system. The
+    # sourced path is unchanged and remains the default: `is_manual` false means every
+    # existing rule applies, including the vendor lock.
+    is_manual: bool = False
+    #: The document number the storekeeper typed for their own reference. A note, never
+    #: resolved and never linked.
+    source_ref_no: str | None = Field(default=None, max_length=100)
+    #: The vendor as typed. Only read where `is_manual`.
+    vendor_name: str | None = Field(default=None, max_length=200)
+    vendor_code: str | None = Field(default=None, max_length=50)
+    vendor_contact_person: str | None = Field(default=None, max_length=200)
+    vendor_phone: str | None = Field(default=None, max_length=50)
+    vendor_email: str | None = Field(default=None, max_length=200)
+    vendor_address: str | None = Field(default=None, max_length=500)
+    vendor_city: str | None = Field(default=None, max_length=100)
+    vendor_state: str | None = Field(default=None, max_length=100)
+    vendor_pincode: str | None = Field(default=None, max_length=20)
+    vendor_gstin: str | None = Field(default=None, max_length=20)
 
 
 class ReturnItemRead(_Read):
@@ -1869,7 +1967,10 @@ class ReturnItemRead(_Read):
     line_no: int
     po_item_id: int | None = None
     grn_item_id: int | None = None
-    item_id: int
+    #: Null on a manually typed line — see `models.PurchaseReturnItem.item_id`.
+    item_id: int | None = None
+    #: This line was typed rather than read off a source document.
+    is_manual: bool = False
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
@@ -1879,6 +1980,10 @@ class ReturnItemRead(_Read):
     rate: Decimal | None = None
     amount: Decimal | None = None
     reason: str | None = None
+    # Per-line eligibility — served so frontend never computes it.
+    original_qty: Decimal | None = None
+    previously_returned: Decimal | None = None
+    returnable_qty: Decimal | None = None
 
 
 class ReturnRead(_Read):
@@ -1889,12 +1994,53 @@ class ReturnRead(_Read):
     po_no: str | None = None
     grn_id: int | None = None
     grn_no: str | None = None
+    # The GRN's own date and the vendor's invoice behind it — the purchase reference the
+    # return is argued against. Read off `inb_receipts` on every load, never stored here.
+    grn_date: date | None = None
+    invoice_no: str | None = None
+    invoice_date: date | None = None
     vendor_id: int | None = None
     vendor_name: str | None = None
+    # Full vendor snapshot — auto-fetched, never typed.
+    vendor_code: str | None = None
+    vendor_contact_person: str | None = None
+    vendor_phone: str | None = None
+    vendor_email: str | None = None
+    vendor_address: str | None = None
+    vendor_city: str | None = None
+    vendor_state: str | None = None
+    vendor_gstin: str | None = None
+    vendor_pincode: str | None = None
     warehouse_id: int | None = None
     warehouse_name: str | None = None
+    # Indent snapshot — the request this return answers.
+    indent_id: int | None = None
+    indent_no: str | None = None
+    material_receipt_id: int | None = None
+    #: THE QC THAT CONDEMNED THE GOODS. Stored columns since 2026-09-12, resolved on read
+    #: off the return's own GRN while they are blank and bound at send — so the evidence
+    #: the vendor is being asked to accept is on the document from the moment it is
+    #: raised and survives to the moment it is closed. Null where the return names no
+    #: goods receipt, or where nobody inspected the one it names.
+    inspection_id: int | None = None
+    inspection_no: str | None = None
     reason: str | None = None
+    reason_label: str | None = None
+    #: The served reason code where the stored reason is one (see
+    #: `service._enrich_return_with_vendor`); null where it is free text, which is the
+    #: signal that the send has to ask for a reason rather than reuse this one.
+    reason_code: str | None = None
+    remarks: str | None = None
     status: str
+    #: The stored status re-worded once the SUPPLIER has answered — "Replacement to
+    #: warehouse" rather than "SENT_TO_VENDOR". Null while unanswered, and null once the
+    #: return is closed, so a screen writes `status_label ?? status` and every row raised
+    #: before the portal could answer renders exactly as it did. Served, never composed
+    #: in a screen, for the same reason `reason_label` is: the list and the detail must
+    #: not be able to word the same document differently. See
+    #: `enums.vendor_return_stage_label`.
+    status_label: str | None = None
+    sent_at: datetime | None = None
     total_items: int
     total_qty: Decimal
     total_value: Decimal
@@ -1902,12 +2048,1303 @@ class ReturnRead(_Read):
     created_by_id: int | None = None
     created_by_name: str | None = None
     created_at: datetime | None = None
+    # Logistics leg — the shipment carrying this return to the vendor.
+    dispatch_id: int | None = None
+    dispatch_no: str | None = None
+
+    # --- where the material came from, and what raised this document ----------------
+    #
+    # Stored columns (`pro_returns.source_category`, `.source_return_id`,
+    # `.source_return_no`) that nothing served until now, so the review screen could not
+    # say that the draft in front of the reader was raised automatically off a branch
+    # consignment the warehouse had already signed for. That is the first thing a reader
+    # asks of a DRAFT nobody remembers typing, and the answer was sitting in the row.
+    source_category: str | None = None
+    source_category_label: str | None = None
+    source_return_id: int | None = None
+    source_return_no: str | None = None
+
+    # --- manual returns ---------------------------------------------------------------
+    #: The vendor and lines on this document were typed, not read off a purchase. The
+    #: `vendor_*` fields above are then served from the typed values rather than from
+    #: `mst_vendors`, so the shape a reader gets is the same either way.
+    is_manual: bool = False
+    #: The document number the storekeeper typed for their own reference. A note.
+    source_ref_no: str | None = None
+
+    # --- what the SUPPLIER said, and what it raised ----------------------------------
+    #
+    # Stored columns on `pro_returns` since the portal learned to answer (2026-09-11)
+    # that only the SUPPLIER's own schema served. The buyer's screen could therefore not
+    # say that the supplier had accepted the goods, nor that an inbound receipt was
+    # already waiting at the store for the replacement — both of which are the reason
+    # anybody opens a sent return. Read-only here: the answer is the supplier's to write
+    # and `vendor_respond_to_return` is the only thing that writes it.
+    #
+    #: REFUNDED | REPLACED | RETURNED, or legacy ACCEPTED. Null means unanswered, which
+    #: is every return raised before the portal could answer.
+    vendor_response: str | None = None
+    #: The answer as a sentence, off `VENDOR_RETURN_RESPONSES` — the one place an answer
+    #: is turned into words, so a legacy ACCEPTED row still reads correctly.
+    vendor_response_label: str | None = None
+    vendor_response_at: datetime | None = None
+    #: Why, in the supplier's own words. The store's first question about a consignment
+    #: it did not expect.
+    vendor_response_note: str | None = None
+    #: What the supplier is crediting, on a REFUNDED answer only.
+    vendor_refund_amount: Decimal | None = None
+    #: The DRAFT inbound receipt the answer raised, where it raised one — the document
+    #: the replacement will actually be received against.
+    vendor_followup_receipt_id: int | None = None
+    vendor_followup_receipt_no: str | None = None
+
+    # --- the chain READ behind a return that was raised without one -----------------
+    #
+    # A return the returns module raises off a branch consignment stores no GRN, no PO
+    # and often no vendor (`service._trace_purchase_source` explains why), so the review
+    # screen had an empty header and an empty vendor block. These carry what the trail
+    # says instead, kept SEPARATE from the stored fields above rather than filled into
+    # them: a traced value is evidence, not a binding, and a reader — human or code —
+    # must be able to tell the two apart. Sending is what binds them.
+    chain_traced: bool = False
+    chain_note: str | None = None
+    traced_grn_id: int | None = None
+    traced_grn_no: str | None = None
+    traced_po_id: int | None = None
+    traced_po_no: str | None = None
+    traced_vendor_id: int | None = None
+    traced_vendor_name: str | None = None
+
+    # --- the decision on a SENT return, and the leg that brings the material back ----
+    #
+    # ADDED 2026-09-11. See `models.PurchaseReturn.vendor_decision` for why each is
+    # stored. Everything here is null on a return that has not been decided, which is
+    # every return raised before today.
+    #
+    #: APPROVED | REJECTED. Null means the sent return has not been answered yet, which
+    #: is what puts the two buttons on the screen.
+    vendor_decision: str | None = None
+    vendor_decision_at: datetime | None = None
+    vendor_decision_by_name: str | None = None
+    vendor_decision_note: str | None = None
+
+    #: VENDOR_ARRANGES | WAREHOUSE_REQUESTS (`enums.ReturnVehicleArrangement`).
+    vehicle_arrangement: str | None = None
+    #: The arrangement as the card words it, off `RETURN_VEHICLE_ARRANGEMENT_LABELS` —
+    #: the one place an arrangement is turned into words, so the detail screen and the
+    #: history cannot word the same choice differently.
+    vehicle_arrangement_label: str | None = None
+    vehicle_arrangement_at: datetime | None = None
+    vehicle_arrangement_by_name: str | None = None
+
+    #: THE VEHICLE BRINGING IT BACK. One shape on both branches: typed on a vendor leg,
+    #: read live off the Logistics transport request on a warehouse-requested one — see
+    #: `service._decorate_return_inbound_leg`. A screen never asks which.
+    inbound_vehicle_no: str | None = None
+    inbound_driver_name: str | None = None
+    inbound_driver_phone: str | None = None
+    inbound_transporter_name: str | None = None
+    inbound_lr_no: str | None = None
+    inbound_expected_date: date | None = None
+    inbound_dispatched_at: datetime | None = None
+    #: The Logistics leg carrying it back, on a WAREHOUSE_REQUESTS arrangement.
+    inbound_tr_id: int | None = None
+    inbound_tr_no: str | None = None
+    #: Where that leg has got to (`TransportStatus`), read off it rather than mirrored.
+    inbound_tr_status: str | None = None
+    #: Where the vehicle collects from, and the earliest it may go.
+    inbound_pickup_address: str | None = None
+    inbound_ready_date: date | None = None
+
+    #: THE OUTWARD LEG — our warehouse to the vendor's dock, on a WAREHOUSE_REQUESTS
+    #: arrangement. Its own pair, never `inbound_tr_*` above: three different trips can
+    #: hang off one return and each settles differently.
+    outbound_tr_id: int | None = None
+    outbound_tr_no: str | None = None
+
+    #: The vendor accepting the collection job, on a VENDOR_ARRANGES leg.
+    vendor_transport_accepted_at: datetime | None = None
+    vendor_transport_accepted_by_name: str | None = None
+
+    #: The vendor signing for the returned goods at their own dock — the receipt that
+    #: ends our liability for the stock and opens the replacement.
+    vendor_receipt_confirmed_at: datetime | None = None
+    vendor_receipt_by_name: str | None = None
+    vendor_receipt_vehicle_no: str | None = None
+    vendor_receipt_remarks: str | None = None
+
+    #: THE REPLACEMENT DISPATCH NOTE. The per-line half (batch, mfg, expiry) rides on
+    #: `ReturnItemRead.replacement_*`; these are the header facts.
+    replacement_dispatched_at: datetime | None = None
+    replacement_dispatch_no: str | None = None
+    replacement_dispatch_date: date | None = None
+    replacement_expected_date: date | None = None
+    replacement_transporter_name: str | None = None
+    replacement_vehicle_no: str | None = None
+    replacement_lr_no: str | None = None
+    replacement_remarks: str | None = None
+
+    received_at: datetime | None = None
+    received_by_name: str | None = None
+    received_remarks: str | None = None
+
+    #: The internal refund's own stamp. The AMOUNT is `vendor_refund_amount` above
+    #: (one credit column whichever desk recorded it); these three say the desk did.
+    #: All null except on a REFUNDED return.
+    refunded_at: datetime | None = None
+    refunded_by_name: str | None = None
+    refund_remarks: str | None = None
+
+
+class ReplacementDocumentRead(_Read):
+    """One of the two files a replacement dispatch carries.
+
+    Declared HERE, above both documents that serve it — `ReturnDetail` for our store and
+    `VendorReturnDetail` for the supplier — so neither needs a forward reference. Both
+    sides read the same rows, so the file the supplier attached and the file the store
+    downloads cannot be described two different ways.
+
+    A NARROWED `AttachmentRead`, deliberately. `file_path` is where the bytes sit inside
+    our own store and is of no use to a caller who can only reach the file through the
+    download route; serving it to an outside login states the layout of the upload
+    directory for nothing in return.
+    """
+    id: int
+    doc_category: str
+    #: "Capture image" / "Replacement invoice / bill", off `REPLACEMENT_DOCUMENT_META`,
+    #: so the panel that lists an uploaded file and the field that asked for it cannot
+    #: end up calling the same slot two different things.
+    label: str | None = None
+    file_name: str
+    file_size: int | None = None
+    mime_type: str | None = None
+    uploaded_by_name: str | None = None
+    created_at: datetime | None = None
 
 
 class ReturnDetail(ReturnRead):
     items: list[ReturnItemRead] = []
     #: See IssueDetail.can_approve.
     can_approve: bool = False
+    can_send_to_vendor: bool = False
+    # --- which of the inbound-leg presses this document is standing at ---------------
+    #
+    # SERVED, never worked out in the screen. The rungs are the service's own guards
+    # (`enums.RETURN_DECIDABLE_STATUSES` and friends), and a screen that re-derived them
+    # from the status string would be a second copy of the ladder drifting from the
+    # first. Permission is still checked separately and on the server — `<Can>` decides
+    # whether the button is worth drawing, `require_permission` decides whether it works.
+    #: The vendor has agreed a replacement and this warehouse owes the one decision it
+    #: still makes: whose vehicle carries the goods. THE ONLY `can_*` on this document
+    #: that puts a button on an employee's screen — every other rung below is the
+    #: vendor's own press on their portal, served here so our screen can SAY where the
+    #: return is standing without offering to do it for them.
+    can_arrange_transport: bool = False
+    #: The material is on its way to this warehouse and somebody here may sign it in.
+    can_confirm_receipt: bool = False
+
+    # --- what the VENDOR is standing at, read-only on our side -----------------------
+    #: Waiting on their Approve / Reject.
+    awaiting_vendor_decision: bool = False
+    #: Approved; waiting on them to choose refund or replacement.
+    awaiting_vendor_settlement: bool = False
+    #: Waiting on them to accept the collection job (VENDOR_ARRANGES only).
+    awaiting_vendor_transport: bool = False
+    #: Waiting on them to sign for the goods at their dock.
+    awaiting_vendor_receipt: bool = False
+    #: Waiting on their replacement dispatch note.
+    awaiting_replacement_dispatch: bool = False
+
+    #: RETAINED SPELLING. `can_arrange_vehicle` was this flag's name while the vehicle
+    #: being arranged brought material back FROM the vendor. Served alongside the new
+    #: name, with the same value, so a screen built against the old contract keeps
+    #: rendering its panel rather than silently losing it.
+    can_arrange_vehicle: bool = False
+
+    # --- the replacement's INTAKE: the GRN, its QC and its putaway --------------------
+    #
+    # READ off the three documents that own those rungs (`inb_receipts`,
+    # `inb_inspections`, `whs_warehouse_items`) on every load, never stored on
+    # `pro_returns` — see `enums.RETURN_REPLACEMENT_INTAKE_STATUSES`. All null / zero on a
+    # return with no replacement coming: a refund, a refusal, and every return raised
+    # before this flow existed.
+    #: The goods receipt the replacement dispatch note raised — the same document as
+    #: `vendor_followup_receipt_no`, served under the name the intake uses.
+    replacement_grn_no: str | None = None
+    #: DRAFT | PENDING_QC | QC_PASSED | QC_FAILED | PARTIALLY_RECEIVED | COMPLETED.
+    replacement_grn_status: str | None = None
+    #: The QC inspection raised against it, once the receipt has been submitted.
+    replacement_inspection_no: str | None = None
+    replacement_putaway_total: int = 0
+    replacement_putaway_done: int = 0
+    #: The receipt has reached COMPLETED: booked in, passed and placed. This is the fact
+    #: that closes the return (`service._close_return_on_intake_complete`).
+    replacement_intake_complete: bool = False
+
+    #: THE PAPERWORK THE SUPPLIER DISPATCHED THE REPLACEMENT ON — the loading image,
+    #: which they could not send without, and their invoice, which is optional and may
+    #: therefore be absent on a perfectly good consignment. Served on OUR side of the
+    #: document as well as theirs: a store checking a short or wrong delivery needs the
+    #: picture of what left, and collecting evidence only the supplier can see would be
+    #: collecting it for nobody. Downloaded through
+    #: `/returns/{id}/documents/{attachment_id}/download`, which scopes by this return
+    #: rather than by attachment id.
+    replacement_documents: list[ReplacementDocumentRead] = []
+    #: What the store still owes, in one sentence. Composed on the server so the band on
+    #: the detail screen and the journey tracker beside it cannot word one document two
+    #: ways. Null where there is no replacement, and once the return is closed.
+    replacement_intake_stage: str | None = None
+
+
+# --- Purchase Return source selection (Warehouse → Vendor flow) ---
+
+class PurchaseReturnSourceOption(BaseModel):
+    """One eligible source transaction the storekeeper can pick."""
+    source_type: str  # GRN | PO | INDENT | ITEM
+    source_id: int
+    source_no: str
+    source_date: date | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    vendor_code: str | None = None
+    item_id: int | None = None
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    po_id: int | None = None
+    po_no: str | None = None
+    grn_id: int | None = None
+    grn_no: str | None = None
+
+
+class PurchaseReturnSourceLookupOut(BaseModel):
+    """The answer to a document number somebody typed in by hand.
+
+    A 200 with `found: false` rather than a 404: this is asked on every keystroke of a
+    number being typed, and a half-typed number is not an error condition — it is the
+    ordinary state of the field. `message` is what the screen says either way, written
+    here because only the server knows WHY a number did not resolve (no such document,
+    outside your warehouses, or found but with no vendor behind it).
+    """
+    found: bool = False
+    #: Populated only when `found`. The same shape the dropdown's rows carry, so the
+    #: screen hands it to exactly the same auto-fetch and nothing downstream branches.
+    option: PurchaseReturnSourceOption | None = None
+    #: False where the document exists but a purchase return cannot be raised against
+    #: it — an indent with no purchase order behind it names no vendor to return to.
+    can_return: bool = False
+    message: str | None = None
+
+
+class VendorDetailOut(BaseModel):
+    vendor_id: int | None = None
+    vendor_code: str | None = None
+    vendor_name: str | None = None
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    gstin: str | None = None
+
+
+class ItemDetailOut(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    description: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    batch_id: int | None = None
+    serial_no: str | None = None
+    # The source line this row was read off — echoed back on save so the
+    # returnable cap is checked per line, not per item.
+    grn_item_id: int | None = None
+    po_item_id: int | None = None
+    original_qty: Decimal
+    previously_returned: Decimal = Decimal("0")
+    returnable_qty: Decimal
+    # Unit price off the source line (GRN/PO rate) and the extended amount, so the
+    # form can show price x returnable without recomputing it in the browser.
+    unit_price: Decimal | None = None
+    amount: Decimal | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+
+
+class PurchaseDetailsOut(BaseModel):
+    po_id: int | None = None
+    po_no: str | None = None
+    grn_id: int | None = None
+    grn_no: str | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    receipt_id: int | None = None
+    receipt_no: str | None = None
+    order_date: date | None = None
+    receipt_date: date | None = None
+    # The vendor's invoice behind the GRN — the "Purchase Invoice" the return
+    # answers. Null on a PO-sourced return with no GRN yet.
+    invoice_no: str | None = None
+    invoice_date: date | None = None
+
+
+class PurchaseReturnSourceDetail(BaseModel):
+    """Everything auto-fetched when a source is picked — single call, single truth."""
+    source_type: str
+    source_id: int
+    source_no: str
+    vendor: VendorDetailOut
+    items: list[ItemDetailOut] = []
+    purchase: PurchaseDetailsOut
+    # Top-level warehouse for the return itself.
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    total_original_qty: Decimal = Decimal("0")
+    total_previously_returned: Decimal = Decimal("0")
+    total_returnable_qty: Decimal = Decimal("0")
+
+
+#: How a purchase return physically travels back to the supplier, in the order the
+#: Send to Vendor wizard offers the three cards.
+#:
+#: Deliberately a SUBSET of the logistics module's `TransportMode` rather than a new
+#: vocabulary of its own: these values land in `out_dispatches.transport_mode`, which
+#: every other consignment in the product already fills from that enum, and inventing
+#: "BY_HAND" here would have meant the shipments board showed one mode it could not
+#: label. COURIER is the member left out — nothing in the returns flow books a
+#: published parcel rate today — and leaving it out of the PICKER rather than out of
+#: the enum means offering it later is a screen change and not a migration.
+#:
+#: Served, never hard-coded in UI, exactly as `PURCHASE_RETURN_REASONS` is.
+PURCHASE_RETURN_LOGISTICS_MODES: list[tuple[str, str, str]] = [
+    ("DIRECT", "By Hand",
+     "Somebody carries it to the supplier. Nobody is hired and no freight is paid — "
+     "the record is who took it and who signed for it."),
+    ("THIRD_PARTY", "Third Party",
+     "Handed to a hired carrier. Capture who is carrying it and the LR number, so the "
+     "consignment can be chased while it is on the road."),
+    ("OWN_VEHICLE", "Own Vehicle",
+     "Sent on a company vehicle. No freight is paid — the record is which vehicle "
+     "went and who drove it."),
+]
+
+#: The modes above that need a hired carrier named, and the ones that need a vehicle.
+#: Held here beside the catalogue rather than in the service so the rule and the list
+#: it applies to cannot drift apart.
+LOGISTICS_MODES_NEEDING_CARRIER = ("THIRD_PARTY",)
+LOGISTICS_MODES_NEEDING_VEHICLE = ("OWN_VEHICLE",)
+LOGISTICS_MODES_NEEDING_BEARER = ("DIRECT",)
+
+
+#: WHO MOVES GOODS COMING TOWARDS US. `inb_receipts.inbound_transport_mode`.
+#:
+#: A DIFFERENT AXIS from `PURCHASE_RETURN_LOGISTICS_MODES` above, which is why it is a
+#: separate list and not two more rows on it. That one answers "how does it travel and
+#: who is paid" for a leg WE are sending; every one of its values presumes the sender
+#: arranges the journey. Goods coming towards us raise a prior question — is anything
+#: coming at all, or is it sitting on the supplier's dock waiting for our vehicle — and
+#: `OWN_VEHICLE` cannot answer it, because on an inbound leg "own vehicle" is ambiguous
+#: between the supplier's truck and ours.
+#:
+#: Only two members, and deliberately so: this says who is responsible for the journey,
+#: not what it moves on. If the answer is SUPPLIER_DELIVERS, how THEY chose to send it is
+#: recorded by the transporter/vehicle/LR they state; if it is WE_COLLECT, the mode of
+#: our own vehicle is ours to decide later and is not the supplier's to declare.
+INBOUND_TRANSPORT_MODES: list[tuple[str, str, str]] = [
+    ("SUPPLIER_DELIVERS", "We are sending it to you",
+     "The supplier puts it on a vehicle and it arrives at our warehouse. They state the "
+     "date it will reach us, and the carrier if one is booked."),
+    ("WE_COLLECT", "Please collect it from us",
+     "The goods are ready on the supplier's dock and somebody here has to send a "
+     "vehicle. They state where to collect from and the date it is ready."),
+]
+
+#: The inbound mode that promises an ARRIVAL, and the one that promises goods READY on
+#: the supplier's dock. Kept beside the catalogue for the same reason the `needs_*`
+#: tuples above are: what an option requires must not be restated anywhere else.
+INBOUND_MODES_ARRIVING = ("SUPPLIER_DELIVERS",)
+INBOUND_MODES_COLLECTED = ("WE_COLLECT",)
+
+#: Every replacement-only field on `VendorReturnResponseIn`, grouped by the leg it
+#: belongs to. Module level rather than class attributes on the model: Pydantic v2 turns
+#: underscore-prefixed class attributes into private attributes, so a tuple declared
+#: inside the class is not reliably readable as a plain tuple from a validator.
+REPLACEMENT_DELIVERY_FIELDS = (
+    "replacement_expected_date", "replacement_transporter_name",
+    "replacement_vehicle_no", "replacement_lr_no",
+)
+REPLACEMENT_COLLECTION_FIELDS = (
+    "replacement_pickup_address", "replacement_ready_date",
+)
+
+
+class PurchaseReturnLogisticsIn(BaseModel):
+    """How the goods travel, who signed for them, and everything in between.
+
+    One nested block rather than eighteen loose fields on the send payload, because
+    every value here lands on the SAME `out_dispatches` row that `send_to_vendor`
+    already raises — grouping them says so, and keeps the send payload's own fields
+    (what is being returned, and why) legible beside it.
+
+    THE WHOLE BLOCK IS OPTIONAL ON THE ENDPOINT, and that is not laziness. The send
+    API predates this wizard and other callers post without it; a required block would
+    have broken every one of them. Absent, the send behaves exactly as it always did.
+    Present, it is validated in full — see `_apply_return_logistics`.
+
+    Mode-specific fields are optional HERE and required THERE for the same reason:
+    what a leg must carry depends on which of the three it is, and a Pydantic model
+    that made `vehicle_number` mandatory would have refused a hand-over.
+    """
+    #: One of `PURCHASE_RETURN_LOGISTICS_MODES`.
+    mode: str = Field(min_length=1, max_length=30)
+
+    # --- who moves it: only the fields its own mode asks for are ever filled ---
+    #: DIRECT — the person who physically carried it out of the gate.
+    hand_carried_by: str | None = Field(default=None, max_length=200)
+    #: OWN_VEHICLE
+    vehicle_number: str | None = Field(default=None, max_length=50)
+    driver_name: str | None = Field(default=None, max_length=200)
+    driver_phone: str | None = Field(default=None, max_length=20)
+    #: THIRD_PARTY. Typed, not picked off the carrier master: a return leg often goes
+    #: with whoever the supplier nominated, and demanding a master record for a one-off
+    #: truck is precisely what was keeping this on paper.
+    carrier_name: str | None = Field(default=None, max_length=200)
+    lr_no: str | None = Field(default=None, max_length=50)
+    freight_amount: Decimal | None = Field(default=None, ge=0)
+
+    # --- where it goes: the supplier's delivery point ---
+    # Defaulted from the vendor master on screen and editable, because goods go back to
+    # a gate or a stores address that is frequently not the billing address on file.
+    delivery_address: str | None = Field(default=None, max_length=500)
+    contact_person: str | None = Field(default=None, max_length=200)
+    contact_phone: str | None = Field(default=None, max_length=20)
+
+    # --- what leaves the gate ---
+    total_packages: int | None = Field(default=None, ge=0)
+    total_weight_kg: Decimal | None = Field(default=None, ge=0)
+    eway_bill_no: str | None = Field(default=None, max_length=50)
+    expected_delivery: date | None = None
+    gate_pass_no: str | None = Field(default=None, max_length=50)
+    dispatch_remarks: str | None = Field(default=None, max_length=1000)
+
+    # --- the supplier's signature ---
+    acknowledged_by_name: str | None = Field(default=None, max_length=200)
+    acknowledged_at: datetime | None = None
+    #: Where the signed copy lives — a link or a file reference, typed.
+    pod_url: str | None = Field(default=None, max_length=500)
+
+
+class PurchaseReturnSendToVendorIn(BaseModel):
+    """The single commitment: quantities per item + reason."""
+    return_reason: str = Field(min_length=1, max_length=50)
+    remarks: str | None = Field(default=None, max_length=1000)
+    items: list[ReturnItemWrite] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+    # Optional: if the source was not already bound to the draft, bind it now.
+    grn_id: int | None = None
+    po_id: int | None = None
+    indent_id: int | None = None
+    vendor_id: int | None = None
+    warehouse_id: int | None = None
+    #: How it travels and who signed. Optional — see `PurchaseReturnLogisticsIn`.
+    logistics: PurchaseReturnLogisticsIn | None = None
+
+
+class ReturnDecisionIn(BaseModel):
+    """Approve or Reject a return that has already been sent to the vendor.
+
+    RETAINED for `VendorReturnDecisionIn` to inherit the shape from and for any caller
+    still posting it. The DECISION itself moved to the vendor's portal on 2026-09-12;
+    this model no longer has a route of its own.
+    """
+    #: Why. Optional on an approval, REQUIRED on a rejection — enforced in the service
+    #: rather than here, because the same model serves both answers and a required field
+    #: would refuse a perfectly ordinary approval.
+    comments: str | None = Field(default=None, max_length=1000)
+
+
+class VendorReturnDecisionIn(BaseModel):
+    """The VENDOR's Approve or Reject on a return we have sent them.
+
+    The action is a FIELD here rather than coming from the route, which is the opposite
+    of how `ReturnDecisionIn` worked and deliberately so: the portal has no permission
+    code to hang two routes off (a vendor holds no RBAC grants at all — they are scoped
+    by the vendor id on their token), so two routes would buy nothing and one press with
+    one body is what the screen actually sends.
+    """
+    #: APPROVED or REJECTED.
+    action: Literal["APPROVED", "REJECTED"]
+    #: Why. REQUIRED on a rejection and optional on an approval — checked in the service,
+    #: because only it knows which way the answer went and a field required here would
+    #: refuse an ordinary approval.
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class VendorReturnSettlementIn(BaseModel):
+    """Refund or Replacement — the vendor's second answer, once they have approved.
+
+    Two members and no third. `VendorReturnResponse` also carries RETURNED and a legacy
+    ACCEPTED, and neither belongs on this press: RETURNED is a REFUSAL, which is now the
+    earlier `VendorReturnDecisionIn`, and ACCEPTED is the half-answer this whole pair of
+    presses exists to eliminate. Spelling the two out as a Literal rather than accepting
+    the enum is what stops either arriving here.
+    """
+    settlement: Literal["REFUNDED", "REPLACED"]
+    #: What the vendor is crediting, in the return's own currency. REQUIRED on a refund
+    #: and REFUSED on a replacement — a figure stored against an answer that promises
+    #: goods and pays nothing would show on screen as a credit nobody agreed to. `gt=0`
+    #: because a zero refund is not a refund. The upper cap (never more than the value of
+    #: the goods) is checked in the service, which is the only place that has the row.
+    refund_amount: Decimal | None = Field(default=None, gt=0, max_digits=16,
+                                          decimal_places=2)
+    remarks: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _amount_belongs_to_a_refund(self):
+        if self.settlement == "REFUNDED" and self.refund_amount is None:
+            raise ValueError(
+                "Enter the amount you are refunding — a refund with no figure on it is "
+                "the half-answer this press exists to avoid.")
+        if self.settlement != "REFUNDED" and self.refund_amount is not None:
+            raise ValueError(
+                "A replacement carries no refund amount. Choose a refund if money is "
+                "being credited.")
+        return self
+
+
+class VendorTransportAcceptIn(BaseModel):
+    """The vendor accepting the collection job, and the vehicle they are sending.
+
+    Every field optional: a vendor accepts on Monday and frequently does not know the
+    truck until Thursday, and refusing the acceptance for want of a registration number
+    pushes them back to the telephone this screen replaces. What they do state is stored;
+    what they leave blank stays blank and can be filled in at the pickup.
+    """
+    vehicle_no: str | None = Field(default=None, max_length=50)
+    driver_name: str | None = Field(default=None, max_length=200)
+    driver_phone: str | None = Field(default=None, max_length=30)
+    transporter_name: str | None = Field(default=None, max_length=200)
+    lr_no: str | None = Field(default=None, max_length=50)
+    #: When they expect to collect.
+    expected_date: date | None = None
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class VendorPickupIn(VendorTransportAcceptIn):
+    """The vendor's vehicle has loaded at our warehouse and left with the goods.
+
+    The same fields as the acceptance, because this is where a truck named days earlier
+    gets corrected to the one that actually turned up. Inherited rather than restated so
+    the two cannot drift; the service applies both through one mapping.
+    """
+
+
+#: `ReplacementDispatchIn` is declared further down the file, immediately after
+#: `VendorReplacementLineIn` — the per-line model it is built out of. Python needs that
+#: class to exist before this one refers to it, and keeping the two together is also how
+#: a reader finds the second half of the dispatch note.
+
+
+class ReturnVehicleArrangementIn(BaseModel):
+    """Who moves an approved return's goods to the vendor.
+
+    The warehouse's one press in this flow. The field names still say "pickup", which is
+    read from the VEHICLE's point of view rather than ours: on a vendor-arranged leg their
+    truck collects from our dock, and on a warehouse-arranged one Logistics' truck does
+    the same. Either way this is where the load is picked up and when it may go.
+    """
+    #: One of `enums.ReturnVehicleArrangement`, as served by
+    #: `GET /returns/vehicle-arrangements`.
+    arrangement: str = Field(min_length=1, max_length=30)
+    #: Where the vehicle loads. Defaulted from the warehouse on screen and editable,
+    #: because goods are frequently ready on a dock that is not the registered address.
+    pickup_address: str | None = Field(default=None, max_length=500)
+    #: The earliest the material may be collected — our own goods-ready date. NOT a
+    #: delivery date: nobody can know when the load reaches the vendor until a vehicle has
+    #: been assigned.
+    ready_date: date | None = None
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class ReturnInboundVehicleIn(BaseModel):
+    """The vehicle the VENDOR named, on a vendor-arranged leg.
+
+    Only reachable on `VENDOR_ARRANGES`. On the other branch every field here belongs to
+    the Logistics transport request and is read back off it — typing a second copy is
+    what would let the two documents disagree about which truck is coming.
+
+    Every field is optional so a desk can record a vehicle number the moment it is given
+    and add the driver when the vendor calls back; the service refuses a press that
+    states nothing at all rather than a model that demands everything at once.
+    """
+    vehicle_no: str | None = Field(default=None, max_length=50)
+    driver_name: str | None = Field(default=None, max_length=200)
+    driver_phone: str | None = Field(default=None, max_length=30)
+    transporter_name: str | None = Field(default=None, max_length=200)
+    lr_no: str | None = Field(default=None, max_length=50)
+    expected_date: date | None = None
+    #: The vehicle has left the vendor. Flips the return onto IN_TRANSIT, which is the
+    #: one thing a vendor-arranged leg has no Logistics document to say for it.
+    dispatched: bool = False
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class ReturnReceivedIn(BaseModel):
+    """The material is back in the building, and who signed for it."""
+    received_by_name: str | None = Field(default=None, max_length=200)
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class ResolveRefundIn(BaseModel):
+    """Settle an approved return in money instead of bringing goods back.
+
+    The amount is what the VENDOR stated they will credit — recorded by the desk,
+    never invented here — so it is required, positive, and capped at the value of
+    the goods sent back (a supplier cannot credit more than they received).
+    """
+    refund_amount: Decimal = Field(gt=0, max_digits=16, decimal_places=2)
+    refund_remarks: str | None = Field(default=None, max_length=1000)
+
+
+class VehicleArrangementOption(BaseModel):
+    """One of the two cards offered after an approval. Served so UI hard-codes neither."""
+    value: str
+    label: str
+    help: str
+    #: This option hands the leg to LOGISTICS — a vehicle request is raised on their
+    #: Dispatch board and the vehicle and driver come back from it. Served for the same
+    #: reason `LogisticsModeOption.raises_shipment` is: a screen that decided it by
+    #: testing for the string "WAREHOUSE_REQUESTS" would be a second copy of the rule.
+    raises_vehicle_request: bool = False
+
+
+class LogisticsModeOption(BaseModel):
+    """One card on the wizard's first step. Served so UI never hard-codes the three."""
+    value: str
+    label: str
+    help: str
+    #: Which extra questions this mode asks, so the screen renders the right fields
+    #: from the catalogue instead of branching on the code in three places.
+    needs_carrier: bool = False
+    needs_vehicle: bool = False
+    needs_bearer: bool = False
+    #: This mode hands the load to LOGISTICS rather than finishing it at the gate, so
+    #: the trip still has to be arranged and the supplier cannot have signed for it yet.
+    #: Served for the same reason the three above are: whether the wizard may ask for an
+    #: acknowledgement is a business rule, and `_validate_return_logistics` enforces the
+    #: same one on the way in. A screen that decided it by testing for the string
+    #: "OWN_VEHICLE" would be a second copy of the rule, drifting from the first.
+    raises_shipment: bool = False
+
+
+class VendorReturnListRow(BaseModel):
+    """One purchase return, as the SUPPLIER sees it on their own portal.
+
+    A separate shape from `ReturnRead`, and deliberately narrower. The internal read
+    carries the warehouse, who raised it, the approval trail and the credit note; none
+    of that is the supplier's business, and a portal row assembled by trimming an
+    internal one drifts the moment somebody adds a column to the internal one.
+
+    What IS here is what a supplier needs to answer "what is coming back to me, why,
+    and how is it arriving": the return and the purchase behind it, the reason, the
+    totals, and the logistics leg read off `out_dispatches` — the mode, who is
+    carrying it, and when to expect it.
+    """
+    model_config = ORM
+
+    id: int
+    return_no: str
+    return_date: date | None = None
+    #: The purchase this return answers. Either may be null — a return can be raised
+    #: against a GRN with no PO behind it, and a manual return has neither.
+    po_no: str | None = None
+    grn_no: str | None = None
+    #: THE QC THAT CONDEMNED THE GOODS. On the supplier's copy because it is the evidence
+    #: they are being asked to accept — the business requires them to be able to verify a
+    #: return against the GRN, the PO and the QC before they answer it, and until
+    #: 2026-09-12 the third of those was on no screen at all.
+    inspection_no: str | None = None
+    reason_code: str | None = None
+    reason_label: str | None = None
+    remarks: str | None = None
+    total_items: int = 0
+    total_qty: Decimal = Decimal("0")
+    total_value: Decimal = Decimal("0")
+    status: str
+    #: The stored status as a sentence. Served for the same reason `reason_label` is: the
+    #: supplier reading "REPLACEMENT_AGREED" is reading our database.
+    status_label: str | None = None
+    sent_at: datetime | None = None
+
+    # --- the rungs the supplier themselves answered, read straight off the columns ----
+    #: APPROVED | REJECTED, and their own words for it.
+    vendor_decision: str | None = None
+    vendor_decision_at: datetime | None = None
+    vendor_decision_note: str | None = None
+    #: Who moves the goods, once the buyer's warehouse has decided. VENDOR_ARRANGES means
+    #: this supplier owes a vehicle; WAREHOUSE_REQUESTS means one is coming to them.
+    vehicle_arrangement: str | None = None
+    vehicle_arrangement_label: str | None = None
+    vendor_transport_accepted_at: datetime | None = None
+    #: The replacement dispatch note they raised, and how it travels.
+    replacement_dispatched_at: datetime | None = None
+    replacement_dispatch_no: str | None = None
+    replacement_dispatch_date: date | None = None
+    replacement_expected_date: date | None = None
+    replacement_transporter_name: str | None = None
+    replacement_vehicle_no: str | None = None
+    replacement_lr_no: str | None = None
+
+    # --- the logistics leg, read off the consignment; all null on a manual return,
+    # --- which raises no consignment at all (see `send_to_vendor`).
+    dispatch_no: str | None = None
+    transport_mode: str | None = None
+    transport_mode_label: str | None = None
+    carrier_name: str | None = None
+    vehicle_number: str | None = None
+    driver_name: str | None = None
+    lr_no: str | None = None
+    eway_bill_no: str | None = None
+    total_packages: int | None = None
+    expected_delivery: date | None = None
+    acknowledged_by_name: str | None = None
+    acknowledged_at: datetime | None = None
+
+    # --- the supplier's own two acts, read straight off the columns. Both null until
+    # --- they answer, which is the state every return raised before 2026-09-11 is in.
+    #: The physical handover. Null means nobody has signed for the consignment yet.
+    vendor_receipt_confirmed_at: datetime | None = None
+    vendor_receipt_by_name: str | None = None
+    vendor_receipt_vehicle_no: str | None = None
+    vendor_receipt_remarks: str | None = None
+    #: REFUNDED | REPLACED | RETURNED, or legacy ACCEPTED. Null means unanswered.
+    vendor_response: str | None = None
+    #: The answer as the supplier should read it — SERVED, never mapped in a screen,
+    #: for the same reason `reason_label` and `transport_mode_label` are.
+    vendor_response_label: str | None = None
+    vendor_response_at: datetime | None = None
+    vendor_response_note: str | None = None
+    #: What the supplier is crediting, on a REFUNDED answer only. Null on every other
+    #: answer — including legacy ACCEPTED, where no figure was ever captured — so a
+    #: screen must read "is there an amount" and not "is this settled in money".
+    vendor_refund_amount: Decimal | None = None
+    #: The refund set beside what was sent back, worded by the server because the
+    #: comparison is the point: a short credit is normal and the document has to say so
+    #: rather than leaving the reader to subtract. Null when there is no refund.
+    vendor_refund_label: str | None = None
+    #: The inbound receipt the answer raised, where it raised one.
+    vendor_followup_receipt_no: str | None = None
+
+
+class VendorReturnItemRow(BaseModel):
+    """One line of a purchase return, as the SUPPLIER sees it.
+
+    Narrower than `ReturnItemRead` for the same reason `VendorReturnListRow` is
+    narrower than `ReturnRead`: the internal line carries the source `po_item_id` /
+    `grn_item_id`, the batch id and the returnable-quantity arithmetic, none of which
+    is the supplier's business. What is left is what is physically in the carton and
+    what we say it is worth.
+    """
+    model_config = ORM
+
+    line_no: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    quantity: Decimal
+    rate: Decimal | None = None
+    amount: Decimal | None = None
+    #: The per-line reason, already worded. A line may carry its own reason where the
+    #: consignment mixes several — a damaged drum beside an over-supplied one — and
+    #: falls back to the document's where it does not.
+    reason_label: str | None = None
+
+    # --- WHAT A REPLACEMENT OF THIS LINE HAS TO STATE ---------------------------------
+    #
+    # Served so the portal can ask for exactly what the item master demands, rather than
+    # showing three boxes on every line and letting the supplier find out from a refusal
+    # which of them mattered. The same two flags `_apply_receipt_lines` enforces when the
+    # store submits the GRN, read from the same item master, so the portal and the
+    # receiving desk cannot disagree about what a line needs.
+    #: This item is batch tracked — a replacement of it must name its batch.
+    needs_batch: bool = False
+    #: This item carries an expiry (or, on an asset, a warranty end) — a replacement of
+    #: it must state the date.
+    needs_expiry: bool = False
+    #: What to CALL that date on screen. One flag, two words for it: a consumable
+    #: expires, an asset's warranty ends. Worded here so every screen says it the same
+    #: way, exactly as `_apply_receipt_lines` picks the word for its refusal.
+    life_label: str = "Expiry"
+
+    # --- WHAT WE ORIGINALLY RECEIVED, read off the GRN line these goods came in on.
+    #
+    # PREFILL, NOT A BINDING. The replacement is different physical stock and will
+    # usually carry a different batch and a later expiry, so these are never written to
+    # the new receipt on their own (see `_raise_vendor_return_inbound`) — they are handed
+    # to the supplier as the starting point so a one-batch, one-expiry replacement is a
+    # confirmation rather than a re-typing exercise, and so the supplier can see what we
+    # are complaining about. Null where the return names no GRN line, and on a manual
+    # return, which has no purchase behind it at all.
+    original_batch_no: str | None = None
+    original_mfg_date: date | None = None
+    original_expiry_date: date | None = None
+
+
+class VendorReturnDetail(VendorReturnListRow):
+    """One purchase return opened on the supplier's portal.
+
+    The list row plus the two things a row cannot carry: WHAT is in the consignment,
+    and WHERE it is being delivered. The supplier reconciles goods against their own
+    paperwork line by line, so a list that stops at "1.000 in 1 line" cannot answer the
+    only question they open the document to ask.
+
+    Everything else is inherited rather than restated, so a field added to the row is
+    on the detail automatically and the two cannot drift.
+    """
+    items: list[VendorReturnItemRow] = []
+
+    # --- where the consignment is going. Off the same `out_dispatches` leg the list
+    # --- row's logistics fields come from, so null on a manual return.
+    delivery_address: str | None = None
+    contact_person: str | None = None
+    contact_phone: str | None = None
+    total_weight_kg: Decimal | None = None
+
+    # --- THE TWO PARTIES, added 2026-09-11 for the acknowledgement receipt. A receipt
+    # --- that does not name who handed over and who received is not a receipt, and the
+    # --- portal previously served neither: the supplier's own identity was known only
+    # --- from the page header, and the warehouse that sent the goods was nowhere.
+    # ---
+    # --- Detail-only on purpose. A list row is a queue and repeats the same supplier
+    # --- on every line; these are read once, with one document open.
+    # --- HOW THE REPLACEMENT IS TRAVELLING, read back off the draft inbound receipt the
+    # --- answer raised (2026-09-11). Not columns on the return: the receipt owns these
+    # --- and this is a read of it, so the page and the store's receiving screen can
+    # --- never show two different dates for one lorry.
+    # ---
+    # --- Detail-only, because it costs a second query. A list row says "replacement
+    # --- being sent" and that is the whole answer at queue level.
+    #: SUPPLIER_DELIVERS or WE_COLLECT (`INBOUND_TRANSPORT_MODES`) — which of the two
+    #: inbound legs was agreed. The field a screen should branch on; the dates below are
+    #: each meaningful on one leg only.
+    replacement_mode: str | None = None
+    #: When the supplier said the replacement would reach us. DELIVERY only — null on a
+    #: collection, where nothing is due until a vehicle is scheduled here.
+    replacement_expected_date: date | None = None
+    #: When the goods are ready on the SUPPLIER's dock, and where to fetch them from.
+    #: COLLECTION only. `replacement_ready_date` is not an arrival date and must never be
+    #: shown as one.
+    replacement_ready_date: date | None = None
+    replacement_pickup_address: str | None = None
+    #: The whole leg as one sentence — an arrival with its carrier, or a collection with
+    #: its ready date and address. Worded by the server so the portal and any later
+    #: screen say it identically.
+    replacement_label: str | None = None
+
+    #: OUR warehouse — the party handing the goods over.
+    warehouse_name: str | None = None
+    #: The SUPPLIER — the party receiving them. Their own details, shown back to them so
+    #: the receipt they are signing names both sides. `vendor_name` is a column;
+    #: the rest are assigned on read by `_enrich_return_with_vendor` off `mst_vendors`,
+    #: which is why a manual return's typed values arrive under these same names.
+    vendor_name: str | None = None
+    vendor_code: str | None = None
+    vendor_gstin: str | None = None
+    vendor_address: str | None = None
+    vendor_contact_person: str | None = None
+    vendor_phone: str | None = None
+
+    #: THE REPLACEMENT'S PAPERWORK — the loading image and the invoice, whichever of the
+    #: two have been uploaded so far. The screen reads this to know which slots are
+    #: already filled, and the SERVER reads the same rows to decide whether the dispatch
+    #: may run, so the press cannot be enabled over a requirement the save will refuse.
+    replacement_documents: list[ReplacementDocumentRead] = []
+
+
+class VendorReturnReceiptIn(BaseModel):
+    """The supplier signing for the consignment — the acknowledgement receipt.
+
+    Only the name is required. The vehicle is prefilled on screen from the consignment
+    and may genuinely be blank (a manual return raises no consignment at all, and a
+    hand-carried one has no vehicle), and remarks are for the discrepancy nobody
+    planned for. The MOMENT is never taken from the caller: it is stamped server-side,
+    because a receipt whose time the signing party can choose is not evidence.
+    """
+    received_by_name: str = Field(min_length=1, max_length=200)
+    vehicle_number: str | None = Field(default=None, max_length=50)
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class VendorReplacementLineIn(BaseModel):
+    """Batch and life dates for ONE line of the replacement the supplier is sending.
+
+    ASKED AT SOURCE, and this is the whole point of it. The draft inbound receipt a
+    replacement raises used to carry a blank batch and no expiry — correctly, because the
+    FAULTY goods' batch belongs to different physical stock (see
+    `_raise_vendor_return_inbound`) — and the storekeeper then could not submit the GRN
+    at all: an expiry-tracked item with no expiry date is refused by
+    `_apply_receipt_lines`, which is the rule that keeps unlabelled stock out of
+    inventory. The store cannot invent the number and neither can we. The supplier
+    packing the carton is the only party who knows it, so they are asked in the same
+    press that promises the replacement.
+
+    PER LINE, not per document. A return may send back several items, and replacement
+    goods for two different items have two different batches and two different expiries.
+    One pair of boxes on the whole answer would be right only for the single-line case
+    and quietly wrong for every other.
+
+    Every field is optional HERE because what a line actually needs is a fact of the ITEM
+    MASTER, which this request cannot see. `_raise_vendor_return_inbound` holds the items
+    and refuses a batch-tracked line with no batch and an expiry-tracked line with no
+    date; the portal marks the same boxes required from `needs_batch` / `needs_expiry` on
+    `VendorReturnItemRow`, so the supplier is told before they press rather than after.
+    """
+    #: Which line of the RETURN this describes — `VendorReturnItemRow.line_no`, the
+    #: number the supplier is looking at. Never a database id: the portal is not given
+    #: line ids and must not need them.
+    line_no: int = Field(ge=1)
+    batch_no: str | None = Field(default=None, max_length=50)
+    mfg_date: date | None = None
+    #: Expiry for a consumable, warranty end for an asset — one column, and the item
+    #: master decides which word the portal prints (`life_label`).
+    expiry_date: date | None = None
+
+    @model_validator(mode="after")
+    def _the_dates_make_sense(self):
+        if (self.expiry_date is not None and self.mfg_date is not None
+                and self.expiry_date < self.mfg_date):
+            raise ValueError(
+                f"Line {self.line_no}: the expiry cannot be before the manufacturing "
+                "date.")
+        # Goods that have already expired are not a replacement, they are the next
+        # complaint. Refused at the edge rather than received and written off, which is
+        # what the store would otherwise have to do with them.
+        if self.expiry_date is not None and self.expiry_date < ist_today():
+            raise ValueError(
+                f"Line {self.line_no}: that expiry has already passed. Send goods that "
+                "will still be in date when they reach us.")
+        if self.batch_no is not None:
+            self.batch_no = self.batch_no.strip() or None
+        return self
+
+
+class ReplacementDispatchIn(BaseModel):
+    """THE REPLACEMENT DISPATCH NOTE — what the vendor has put on a vehicle towards us.
+
+    Carries what the business requires the note to carry. The item, the quantity, the
+    purchase return number and the GRN/PO references are already on the return and are
+    printed from it; what only the vendor can state is here — the batch and life dates of
+    the goods ACTUALLY being sent, the dispatch date, and how it travels.
+
+    Declared HERE rather than beside the other vendor presses because it is built out of
+    `VendorReplacementLineIn` above, and Python needs that class to exist first.
+
+    `lines` may be empty ONLY where no line needs a batch or a life date. The service
+    checks each line against the item master (`_validate_replacement_cartons`) and refuses
+    a batch-tracked item with no batch or an expiry-tracked one with no date — the same
+    two rules that will stop the store's GRN, applied while the person who can read the
+    number off the carton is still on the screen.
+    """
+    #: The vendor's OWN dispatch note number, as they state it. Never generated here and
+    #: never resolved — it is their reference, printed so the two sides can quote one
+    #: number at each other.
+    dispatch_no: str | None = Field(default=None, max_length=100)
+    #: The day the goods left the vendor.
+    dispatch_date: date | None = None
+    #: When the replacement is expected to reach our warehouse. This is what the receiving
+    #: screen sorts its queue by, so it is the one date worth asking for.
+    expected_date: date | None = None
+    transporter_name: str | None = Field(default=None, max_length=200)
+    vehicle_no: str | None = Field(default=None, max_length=50)
+    lr_no: str | None = Field(default=None, max_length=50)
+    remarks: str | None = Field(default=None, max_length=1000)
+    #: What is in each carton, per line of the return. See the class docstring.
+    lines: Annotated[list[VendorReplacementLineIn], DocumentLines] = []
+
+
+class VendorReturnResponseIn(BaseModel):
+    """The supplier's decision about the goods: refund, replace, or send them back.
+
+    A note is demanded for the two answers that send goods back to us and optional for
+    the one that does not — the store is about to receive an unexpected consignment and
+    "why" is the first thing they will ask. The same rule, for the same reason, as
+    `vendor_respond_to_po` requiring a reason to decline an order.
+
+    `refund_amount` is REQUIRED on a REFUNDED answer and REFUSED on any other, both
+    enforced here rather than left to the service. An amount arriving with REPLACED
+    would be a figure stored against an answer that promises goods and pays nothing, and
+    a screen showing it would be inventing a credit nobody agreed to; a REFUNDED answer
+    with no amount is the half-answer this whole outcome exists to eliminate. Neither is
+    a correctable mistake, so both are rejected at the edge.
+
+    What is NOT checked here is the amount against what was actually returned — the
+    request does not carry the return's value, and inferring it from a client-supplied
+    figure is exactly the check an attacker controls both sides of. `vendor_respond_to_
+    return` caps it against `pro_returns.total_value`, which it reads from the row.
+    """
+    response: VendorReturnResponse
+    remarks: str | None = Field(default=None, max_length=1000)
+    #: What the supplier is crediting, in the return's own currency. `gt=0` because a
+    #: zero refund is not a refund — a supplier settling for nothing is REPLACED or a
+    #: conversation with the buyer, and storing 0.00 would read on screen as a paid
+    #: credit of nothing. Two decimal places, matching `MONEY`.
+    refund_amount: Decimal | None = Field(default=None, gt=0, max_digits=16,
+                                          decimal_places=2)
+
+    # --- HOW THE REPLACEMENT TRAVELS (2026-09-11) -------------------------------------
+    # REPLACED always raised a draft inbound receipt, so the store knew WHAT to expect
+    # and never when, on what, or even whether anything was coming. These fill it in, and
+    # they are written straight onto that receipt rather than stored on the return: the
+    # receipt is the document the receiving screen reads, and a second copy on
+    # `pro_returns` would be two places for one fact to drift.
+    #
+    # TWO LEGS, and `replacement_mode` picks which (`INBOUND_TRANSPORT_MODES`):
+    #
+    #   SUPPLIER_DELIVERS  they send it. `replacement_expected_date` is a real promise of
+    #                      arrival at our gate, and the carrier fields describe THEIR
+    #                      vehicle. Pickup fields are meaningless and refused.
+    #   WE_COLLECT         it is ready on their dock and we send a vehicle.
+    #                      `pickup_address` and `goods_ready_date` are required; the
+    #                      arrival date and carrier fields are REFUSED, because the
+    #                      vehicle is ours to assign and the supplier cannot promise when
+    #                      goods they are not moving will reach us.
+    #
+    # Within each leg only the date is compulsory. That mirrors what the supplier can
+    # actually know: somebody promising a replacement can promise a date, but the lorry
+    # is frequently not booked until the goods are packed, and refusing the whole answer
+    # for want of a vehicle number pushes them back to the telephone this screen
+    # replaces.
+    #: One of `INBOUND_TRANSPORT_MODES`. Required on a replacement, refused otherwise.
+    replacement_mode: str | None = Field(default=None, max_length=30)
+
+    # --- SUPPLIER_DELIVERS only ---
+    #: When the replacement is expected to reach OUR warehouse.
+    replacement_expected_date: date | None = None
+    replacement_transporter_name: str | None = Field(default=None, max_length=200)
+    replacement_vehicle_no: str | None = Field(default=None, max_length=50)
+    replacement_lr_no: str | None = Field(default=None, max_length=50)
+
+    # --- WE_COLLECT only ---
+    #: Where our vehicle goes. Required on a collection: "come and collect it" with no
+    #: address is not an instruction anybody can act on.
+    replacement_pickup_address: str | None = Field(default=None, max_length=500)
+    #: When it can be collected — ready on THEIR dock, not arriving at ours.
+    replacement_ready_date: date | None = None
+
+    # --- WHAT IS IN THE CARTON, per line. Belongs to neither leg: the batch and expiry
+    # --- of the replacement goods are the same facts whether they drive them here or we
+    # --- fetch them. See `VendorReplacementLineIn` for why this is asked at all.
+    replacement_lines: list[VendorReplacementLineIn] = []
+
+    @model_validator(mode="after")
+    def _reason_required_when_goods_come_back(self):
+        if self.response.value in VENDOR_RETURN_INBOUND_RESPONSES:
+            if not (self.remarks or "").strip():
+                raise ValueError(
+                    "Say why the goods are coming back — the warehouse receiving them "
+                    "has nothing else to go on.")
+        return self
+
+    @model_validator(mode="after")
+    def _shipment_belongs_to_a_replacement(self):
+        """The travel facts are a replacement's, and each leg accepts only its own.
+
+        Refused on every other answer for the same reason `refund_amount` is: a vehicle
+        number stored against a refund would show on the store's receiving screen as an
+        expected delivery that is never coming, and against a RETURNED consignment it
+        would claim to describe a lorry WE booked rather than theirs.
+
+        ACROSS the two legs the refusal matters just as much, and is the reason this is
+        not four optional fields the store can sort out later. A collection carrying an
+        arrival date would be the supplier promising when goods THEY are not moving reach
+        us, and the receiving queue would wait at the gate for it; a delivery carrying a
+        pickup address would send a vehicle to fetch something already on its way here.
+        Both are a wasted journey, so both are rejected at the edge rather than stored
+        and reconciled by whoever notices.
+        """
+        replacing = self.response is VendorReturnResponse.REPLACED
+        named = [f for f in REPLACEMENT_DELIVERY_FIELDS + REPLACEMENT_COLLECTION_FIELDS
+                 if getattr(self, f) is not None]
+
+        if not replacing:
+            if named or self.replacement_mode is not None or self.replacement_lines:
+                raise ValueError(
+                    "Replacement shipment details only belong on a replacement. "
+                    "Choose the replacement answer, or leave them out.")
+            return self
+
+        # One entry per line, and no line named twice. A repeated `line_no` is a client
+        # bug, and taking the last one silently would write a batch nobody chose onto
+        # stock — refused rather than resolved, exactly as `_apply_receipt_lines` refuses
+        # the same item and batch twice on one GRN.
+        seen = {line.line_no for line in self.replacement_lines}
+        if len(seen) != len(self.replacement_lines):
+            raise ValueError(
+                "Each line of the return can carry only one batch. One of them was "
+                "answered twice.")
+
+        mode = (self.replacement_mode or "").strip().upper()
+        valid = {v for v, _, _ in INBOUND_TRANSPORT_MODES}
+        if mode not in valid:
+            raise ValueError(
+                "Say who is moving the replacement — whether you are sending it to us "
+                "or we should collect it from you.")
+        self.replacement_mode = mode
+
+        delivering = mode in INBOUND_MODES_ARRIVING
+        wrong = [f for f in (REPLACEMENT_COLLECTION_FIELDS if delivering
+                             else REPLACEMENT_DELIVERY_FIELDS)
+                 if getattr(self, f) is not None]
+        if wrong:
+            raise ValueError(
+                "Those details belong to the other kind of journey. A delivery states "
+                "when it reaches us and who is carrying it; a collection states where "
+                "to collect from and when it is ready.")
+
+        if delivering:
+            if self.replacement_expected_date is None:
+                raise ValueError(
+                    "Say when the replacement will reach us — the warehouse has to know "
+                    "what date to expect it.")
+            if self.replacement_expected_date < ist_today():
+                raise ValueError(
+                    "The expected date is in the past. Give the date the replacement "
+                    "will actually reach us.")
+            return self
+
+        if not (self.replacement_pickup_address or "").strip():
+            raise ValueError(
+                "Say where we should collect from — an address is the whole instruction "
+                "the vehicle is sent on.")
+        self.replacement_pickup_address = self.replacement_pickup_address.strip()
+        if self.replacement_ready_date is None:
+            raise ValueError(
+                "Say when the goods will be ready to collect, so a vehicle is not sent "
+                "before they are packed.")
+        if self.replacement_ready_date < ist_today():
+            raise ValueError(
+                "The ready date is in the past. Give the date the goods will actually "
+                "be ready to collect.")
+        return self
+
+    @model_validator(mode="after")
+    def _amount_belongs_to_a_refund_and_only_a_refund(self):
+        refunding = self.response.value in VENDOR_RETURN_REFUND_RESPONSES
+        if refunding and self.refund_amount is None:
+            raise ValueError(
+                "Say how much you are refunding — a refund with no amount on it tells "
+                "the buyer nothing they did not already know.")
+        if not refunding and self.refund_amount is not None:
+            raise ValueError(
+                "A refund amount only belongs on a refund. Choose the refund answer, "
+                "or leave the amount out.")
+        return self
+
+
+# --- The dossier: every document behind a purchase return, and everything that
+# --- has happened to it. Read-only, served in one call.
+
+class LinkedDocumentOut(BaseModel):
+    """One document on the trail, in the shape every row is rendered from.
+
+    Deliberately uniform — `doc_type` names what it is and the screen renders one row
+    for all of them rather than branching per kind. `facts` is an ordered list of
+    label/value pairs the SERVER chose, so adding a fact to the GRN row later is a
+    backend change and not a frontend one.
+    """
+    #: INDENT | REQUISITION | RFQ | QUOTATION | PO | GRN | QC | BRANCH_RETURN |
+    #: TRANSPORT_REQUEST | PURCHASE_RETURN | DISPATCH | CREDIT_NOTE
+    doc_type: str
+    doc_label: str
+    doc_id: int | None = None
+    doc_no: str | None = None
+    status: str | None = None
+    #: Named `doc_date` and not `date`: a field called `date` in a Pydantic class body
+    #: shadows the imported `date` type and the annotation beside it stops resolving.
+    doc_date: date | None = None
+    party: str | None = None
+    #: Ordered [label, value] pairs. A list rather than a dict so the order is the
+    #: server's and survives JSON.
+    facts: list[list[str]] = []
+    #: Which half of the story this belongs to: how it was BOUGHT, how it came BACK,
+    #: or the return itself. The screen groups on this.
+    leg: str = "PURCHASE"
+    #: True where the row was READ off the trail rather than named by the document —
+    #: evidence, not a binding. See `service._trace_purchase_source`.
+    traced: bool = False
+    #: Where this document lives in the app, relative. Null where the module has no
+    #: detail route for it, and the row then renders unclickable rather than 404-ing.
+    route: str | None = None
+
+
+class TimelineEventOut(BaseModel):
+    """One thing that happened, on one document, to one person's name."""
+    at: datetime | None = None
+    #: The table it happened on — `pro_returns`, `inv_sto`, `lgs_transport_requests`.
+    entity: str
+    doc_no: str | None = None
+    #: CREATE | UPDATE | APPROVED | REJECTED | … as recorded, never re-derived.
+    action: str
+    title: str
+    detail: str | None = None
+    actor_name: str | None = None
+    #: DRAFT / PENDING_APPROVAL / … where this event moved the document's status.
+    status_to: str | None = None
+
+
+class PurchaseReturnJourneyLeg(BaseModel):
+    """One leg of the twelve-leg tracker, as the server decided it.
+
+    The whole flow is SERVED — which legs exist, what each is called, which one the
+    document is standing on and what it says — for the reason every other catalogue in
+    this module is served: a screen that re-derived the ladder from a status string would
+    be a second copy of it, free to drift from the guards that actually enforce it.
+    """
+    #: `created` | `sent_to_vendor` | `vendor_decision` | `settlement` | `transport` |
+    #: `vendor_received` | `replacement_dispatched` | `warehouse_received` | `grn` |
+    #: `qc` | `putaway` | `closed`
+    key: str
+    label: str
+    #: `completed` | `current` | `pending` | `rejected` | `cancelled`. A leg a particular
+    #: return will never reach (a refund never travels) reads `cancelled` with a caption
+    #: saying why, rather than sitting at `pending` as though somebody still owed it.
+    state: str
+    at: datetime | None = None
+    #: Who did it — an employee's name, or the vendor's on a rung they answered.
+    actor_name: str | None = None
+    #: What was said: the remark recorded, or the sentence for a leg with nothing to do.
+    detail: str | None = None
+    #: The document number this leg produced, where it produced one — the consignment,
+    #: the transport leg, the dispatch note, the credit note.
+    reference_no: str | None = None
+
+
+class PurchaseReturnDossierOut(BaseModel):
+    """The whole paper trail behind one purchase return, its history, and its journey.
+
+    One call, because the question a reader has in front of a DRAFT they did not raise
+    is a single question — "where did this come from and what has happened to it" — and
+    answering it out of six modules is how it went unanswered.
+    """
+    return_id: int
+    return_no: str
+    documents: list[LinkedDocumentOut] = []
+    timeline: list[TimelineEventOut] = []
+    #: Said plainly rather than left for the reader to infer from an empty list.
+    trail_note: str | None = None
+    #: The twelve-leg tracker. On this call rather than an endpoint of its own: the detail
+    #: screen already fetches the dossier, and two round trips for facts drawn off one row
+    #: is two chances for them to disagree about where the document is.
+    journey: list[PurchaseReturnJourneyLeg] = []
+    #: Which leg it is standing on (1-based), and the sentence that says so.
+    current_sequence: int = 1
+    current_stage_message: str | None = None
 
 
 # ---------------------------------------------------------------------------

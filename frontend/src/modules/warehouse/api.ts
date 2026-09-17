@@ -586,6 +586,10 @@ export const listReturns = (params: ListParams = {}) =>
 
 export const getReturn = (id: number) => get<PurchaseReturn>(`${BASE}/returns/${id}`);
 
+/** Every document behind a purchase return, and everything that has happened to it. */
+export const purchaseReturnDossier = (id: number) =>
+  get<import("./types").PurchaseReturnDossier>(`${BASE}/returns/${id}/dossier`);
+
 export const createReturn = (body: PurchaseReturnWrite) =>
   post<PurchaseReturn>(`${BASE}/returns`, body);
 
@@ -610,6 +614,62 @@ export const cancelReturn = (id: number, reason?: string) =>
 /** Received lines of a GRN, so a return can only ever be raised against real receipts. */
 export const getReturnableLines = (grnId: number) =>
   get<PurchaseReturn["items"]>(`${BASE}/returns/returnable-lines`, { grn_id: grnId });
+
+/* ----- Warehouse → Vendor: Purchase Return with auto-fetch & Send to Vendor ----- */
+
+export const purchaseReturnReasons = () =>
+  get<{ value: string; label: string }[]>(`${BASE}/returns/reasons`);
+
+/** By Hand / Third Party / Own Vehicle, and which extra fields each one asks for. */
+export const purchaseReturnLogisticsModes = () =>
+  get<import("./types").LogisticsModeOption[]>(`${BASE}/returns/logistics-modes`);
+
+export const purchaseReturnSourceOptions = (params: ListParams & { warehouse_id?: number } = {}) =>
+  get<import("./types").Page<import("./types").PurchaseReturnSourceOption>>(`${BASE}/returns/source-options`, params);
+
+/** Resolve an indent / PO / GRN number typed by hand, instead of picking from a list. */
+export const purchaseReturnSourceLookup = (doc_no: string, source_type?: string) =>
+  get<import("./types").PurchaseReturnSourceLookup>(`${BASE}/returns/source-lookup`, {
+    doc_no,
+    source_type: source_type || undefined,
+  });
+
+export const purchaseReturnSourceDetail = (source_type: string, source_id: number, item_id?: number) =>
+  get<import("./types").PurchaseReturnSourceDetail>(`${BASE}/returns/source-detail`, {
+    source_type,
+    source_id,
+    item_id,
+  });
+
+export const sendPurchaseReturnToVendor = (returnId: number, body: import("./types").PurchaseReturnSendToVendorPayload) =>
+  post<PurchaseReturn>(`${BASE}/returns/${returnId}/send-to-vendor`, body);
+
+/* --- after SENT_TO_VENDOR: the decision, and the leg that brings the material back --- */
+
+/**
+ * The two cards offered once the vendor has agreed a replacement. Served, never
+ * hard-coded — the sentence the desk decides against and the sentence the audit trail
+ * records have to be the same sentence.
+ */
+export const purchaseReturnVehicleArrangements = () =>
+  get<import("./types").VehicleArrangementOption[]>(`${BASE}/returns/vehicle-arrangements`);
+
+/**
+ * Who moves the goods to the vendor: their vehicle, or Logistics on our request.
+ *
+ * THE ONLY press this warehouse still makes on a sent return. Approve/Reject and
+ * Refund/Replacement moved to the supplier portal on 2026-09-12 — they are the vendor's
+ * answers, and `approveSentReturn` / `rejectSentReturn` / `resolveRefund` /
+ * `recordReturnVehicle` went with them. Answered once.
+ */
+export const arrangeReturnTransport = (
+  id: number, body: import("./types").ReturnVehicleArrangementPayload,
+) => post<PurchaseReturn>(`${BASE}/returns/${id}/transport`, body);
+
+/** Sign the replacement in at the warehouse gate. Posts no stock. */
+export const confirmReturnReceived = (
+  id: number, body: import("./types").ReturnReceivedPayload = {},
+) => post<PurchaseReturn>(`${BASE}/returns/${id}/receive`, body);
 
 /* ------------------------------------------------------- serials & batches -- */
 

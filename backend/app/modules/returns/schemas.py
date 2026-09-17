@@ -445,6 +445,17 @@ class PurchaseReturnOut(BaseModel):
     #: automatically off a returned load landing at the warehouse.
     source_return_id: int | None = None
     source_return_no: str | None = None
+    #: The purchase behind a row that stores none — read off the stock the return is
+    #: sending back (`warehouse.trace_purchase_sources`), never written to the document.
+    #: The screen shows these where the stored pair above is empty, marked "traced":
+    #: binding them is the Send to Vendor press, not a read.
+    chain_traced: bool = False
+    traced_po_id: int | None = None
+    traced_po_no: str | None = None
+    traced_grn_id: int | None = None
+    traced_grn_no: str | None = None
+    traced_vendor_id: int | None = None
+    traced_vendor_name: str | None = None
     total_items: int = 0
     total_qty: Decimal = Decimal("0")
     total_value: Decimal = Decimal("0")

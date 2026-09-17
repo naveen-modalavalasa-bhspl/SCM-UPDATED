@@ -233,9 +233,10 @@ export function DecisionPanel({
             <strong className="text-ink">
               {options.purchase_return_category_label ?? "—"}
             </strong>
-            {options.qc_rejected_tag ? " and tagged QC rejected after GRN" : ""}. The
-            purchase return against it is raised when the receiving warehouse
-            acknowledges what arrived.
+            {options.qc_rejected_tag ? " and tagged QC rejected after GRN" : ""}. It
+            waits as a draft on Purchase Returns until the receiving warehouse
+            acknowledges what arrived; somebody there then opens it and sends it to the
+            vendor, which is what puts it into approval.
             {/* Which rung it actually resolved to, served — the category folds three
               * rungs into two and so can never name the point on its own. */}
             {options.purchase_return_source_detail && (

@@ -6,7 +6,8 @@ import {
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
-  KpiTiles, ResponsiveList, StatusPill, useAction, type Column, type KpiTileSpec,
+  KpiTiles, ResponsiveList, StatusPill, useAction,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
@@ -21,7 +22,7 @@ import type {
 const SIZE = 20;
 
 /**
- * ADDED 2026-09-07: the return legs this desk still has to move.
+ * ADDED 2026-09-07: the return legs this desk has to move.
  *
  * A field return that travels is signed off in the returns module, which raises its
  * shipment there and then and puts the return in front of the Return Logistics rung.
@@ -31,13 +32,24 @@ const SIZE = 20;
  * return leg has no consignment behind it, so the one screen a logistics day is worked
  * from had no row for the trip back. It does now, as a second board below the first.
  *
- * The statuses are every rung a leg can be sitting on while it is still this desk's
- * work — drafted, waiting on the return's own approval, out for a price, awarded and
- * waiting on the carrier, ready at the gate, or on the road. What has been signed for
- * at the far end (ACKNOWLEDGED, CLOSED) or will never travel (REJECTED, CANCELLED) is
- * not work, so it stays off the board and lives on the register.
+ * FIX 2026-09-16: the board no longer DROPS a leg the moment it is signed for.
+ *
+ * It used to list six statuses — everything up to IN_TRANSIT — on the reasoning that
+ * what has been signed for at the far end is not work. The reasoning was right about
+ * the work and wrong about the screen: DELIVERED and ACKNOWLEDGED were missing too, so
+ * the row a desk had arranged, watched and chased simply vanished from under it at the
+ * moment the return completed, with nothing on the board saying it had. "Where did my
+ * dispatch go" is the one question a queue must never provoke, and a desk that cannot
+ * see the finished leg cannot answer the branch ringing up to ask whether the material
+ * got there.
+ *
+ * So the board keeps the whole life of the leg and says which part of it a row is in.
+ * REJECTED and CANCELLED are in `RETURN_ALL` as well: a leg that was called off is a
+ * fact the desk is asked about, and hiding it reads as the return never existing.
  */
-const RETURN_QUEUE = "DRAFT,PENDING_APPROVAL,QUOTING,AWAITING_CARRIER,READY,IN_TRANSIT";
+const RETURN_OPEN = "DRAFT,PENDING_APPROVAL,QUOTING,AWAITING_CARRIER,READY,IN_TRANSIT";
+const RETURN_DONE = "DELIVERED,ACKNOWLEDGED,CLOSED,REJECTED,CANCELLED";
+const RETURN_ALL = `${RETURN_OPEN},${RETURN_DONE}`;
 
 /**
  * ADDED 2026-09-10: the statuses on which a return leg is still THIS desk's to
@@ -167,7 +179,7 @@ export function DispatchPage() {
     queryKey: ["lgs-dispatch-returns", search, returnPage],
     queryFn: () => transportApi.list({
       source_type: "RETURN",
-      status: RETURN_QUEUE,
+      status: RETURN_ALL,
       search: search.trim() || undefined,
       page: returnPage, size: SIZE,
     }),
@@ -618,7 +630,7 @@ export function DispatchPage() {
           screen — it is opened, priced and released on the shipment itself. Mixing
           them would put a Dispatch button on a row that must not raise a second leg. */}
       <div className="mt-6">
-        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-display text-base font-semibold text-ink">
             Return legs
             {returnRows.length > 0 && (
@@ -628,9 +640,7 @@ export function DispatchPage() {
             )}
           </h2>
           <span className="text-[11px] text-muted">
-            Material coming back off site. Dispatched from here like any other load —
-            the return is already signed off, so this desk is the only one left to
-            arrange it.
+            Material coming back off site. The leg stays here after it is signed for.
           </span>
         </div>
 
@@ -648,7 +658,7 @@ export function DispatchPage() {
             page={returnPage}
             totalPages={Math.max(1, Math.ceil((returns?.total ?? 0) / SIZE))}
             onPageChange={setReturnPage}
-            empty="No returns waiting to travel."
+            empty="No return legs yet."
             renderCard={(row) => (
               <div className="space-y-1.5">
                 <div className="flex items-start justify-between gap-2">

@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Clock, Gavel, Hourglass, PenLine, PencilLine, Send, Truck, type LucideIcon,
+  Archive, CheckCircle2, Clock, Gavel, Hourglass, PenLine, PencilLine, Send, Truck,
+  type LucideIcon,
 } from "lucide-react";
 import {
   Button, Can, Card, ErrorBanner, Input, KpiTiles, PageHeader, ResponsiveList,
@@ -33,7 +34,6 @@ const MODES = [
  *  value. Offering "Outward" here would mean either a second backend filter or a
  *  screen that quietly drops issue legs out of its own list. */
 const DIRECTIONS = [
-  { value: "", label: "Everything" },
   { value: "CONSIGNMENT", label: "Out — consignments" },
   { value: "ISSUE", label: "Out — issues" },
   { value: "RETURN", label: "Returns from the field" },
@@ -41,7 +41,15 @@ const DIRECTIONS = [
 
 /** The board across the top: one tile per queue, and pressing it filters the list.
  *  The order is the order the flow runs, so the board reads left to right as the
- *  journey a consignment takes. */
+ *  journey a consignment takes — and it runs to the END of that journey.
+ *
+ *  FIX 2026-09-16: "Signed" and "Closed" were missing, and the board stopped at
+ *  "To sign". Both counts have always been served (`_SUMMARY_QUEUES`), so the effect
+ *  was a shipment falling off every tile the moment the site acknowledged it: a desk
+ *  that works this screen by pressing numbers had no number left that contained the
+ *  row, and an acknowledged leg read as deleted. The last two tiles are history rather
+ *  than work, which is why they sit after the divider the order already implies — but
+ *  a register that cannot show you a finished shipment is not a register. */
 const QUEUES: {
   key: keyof TransportSummary; label: string; status: string;
   icon: LucideIcon; tone: Tone;
@@ -58,6 +66,10 @@ const QUEUES: {
     icon: Truck, tone: "brand" },
   { key: "delivered", label: "To sign", status: "DELIVERED",
     icon: PenLine, tone: "warn" },
+  { key: "acknowledged", label: "Signed", status: "ACKNOWLEDGED",
+    icon: CheckCircle2, tone: "ok" },
+  { key: "closed", label: "Closed", status: "CLOSED",
+    icon: Archive, tone: "neutral" },
 ];
 
 /**
@@ -199,17 +211,13 @@ export function TransportRequestsPage() {
             <Button variant="ghost" onClick={() => nav("/logistics/consignments")}>
               From a consignment
             </Button>
-            {/* The trip BACK, raised on its own rather than hidden behind a tickbox
-                inside the outward form. A return is planned, priced, tracked and
-                closed exactly like an outward leg (doc E7), so it is the same document
-                and the same screens — but it starts from a different question, and a
-                desk arranging a collection from a site should be able to say so in one
-                press instead of finding a checkbox halfway down a form titled
-                "Where it goes". */}
-            <Button variant="ghost"
-              onClick={() => nav("/logistics/shipments/new?direction=return")}>
-              Return leg
-            </Button>
+            {/* REMOVED 2026-09-16 — the "Return leg" press only. A return leg is not
+                raised from this desk: it is raised by the returns module when a
+                decision is signed off and the load is released, which is what stamps
+                `source_type=RETURN` and links the branch return behind it. A leg
+                started here would have carried none of that. The form still accepts
+                `?direction=return` and the "Returns from the field" filter, the route
+                and every existing return leg are untouched. */}
             <Button className={TONE_MINT} onClick={() => nav("/logistics/shipments/new")}>
               New shipment
             </Button>
@@ -275,6 +283,8 @@ export function TransportRequestsPage() {
           <Select
             value={direction}
             options={DIRECTIONS}
+            placeholder="Direction"
+            searchable
             onChange={(value) => { setDirection(String(value)); setPage(1); }}
           />
         </div>
@@ -301,7 +311,7 @@ export function TransportRequestsPage() {
           onPageChange={setPage}
           empty={
             onlyReturns && !status && !mode && !search
-              ? "No return legs yet. Raise one with “Return leg” when a site is sending material back."
+              ? "No return legs yet."
               : status || mode || direction || search
                 ? "No shipments match that."
                 : "Nothing being moved yet. Start from a packed consignment."
