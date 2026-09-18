@@ -1842,6 +1842,25 @@ class DispatchDetail(DispatchRead):
 # Purchase returns
 # ---------------------------------------------------------------------------
 
+class ReturnReasonOption(BaseModel):
+    """One reason the storekeeper can pick — served so UI never hard-codes them."""
+    value: str
+    label: str
+
+
+PURCHASE_RETURN_REASONS: list[tuple[str, str]] = [
+    ("DAMAGED", "Damaged"),
+    ("DEFECTIVE", "Defective"),
+    ("WRONG_MATERIAL", "Wrong Material"),
+    ("EXCESS_MATERIAL", "Excess Material"),
+    ("QUALITY_ISSUE", "Quality Issue"),
+    ("INCORRECT_SPECIFICATION", "Incorrect Specification"),
+    ("EXPIRED", "Expired"),
+    ("MATERIAL_NOT_REQUIRED", "Material Not Required"),
+    ("OTHER", "Other"),
+]
+
+
 class ReturnItemWrite(BaseModel):
     id: int | None = None
     po_item_id: int | None = None
@@ -1879,6 +1898,10 @@ class ReturnItemRead(_Read):
     rate: Decimal | None = None
     amount: Decimal | None = None
     reason: str | None = None
+    # Per-line eligibility — served so the frontend never computes it.
+    original_qty: Decimal | None = None
+    previously_returned: Decimal | None = None
+    returnable_qty: Decimal | None = None
 
 
 class ReturnRead(_Read):
@@ -1891,9 +1914,23 @@ class ReturnRead(_Read):
     grn_no: str | None = None
     vendor_id: int | None = None
     vendor_name: str | None = None
+    # Full vendor snapshot — auto-fetched, never typed.
+    vendor_code: str | None = None
+    vendor_contact_person: str | None = None
+    vendor_phone: str | None = None
+    vendor_email: str | None = None
+    vendor_address: str | None = None
+    vendor_city: str | None = None
+    vendor_state: str | None = None
     warehouse_id: int | None = None
     warehouse_name: str | None = None
+    # Indent snapshot — the request this return answers.
+    indent_id: int | None = None
+    indent_no: str | None = None
+    material_receipt_id: int | None = None
     reason: str | None = None
+    reason_label: str | None = None
+    remarks: str | None = None
     status: str
     total_items: int
     total_qty: Decimal
@@ -1902,12 +1939,112 @@ class ReturnRead(_Read):
     created_by_id: int | None = None
     created_by_name: str | None = None
     created_at: datetime | None = None
+    # Logistics leg — the shipment carrying this return to the vendor.
+    dispatch_id: int | None = None
+    dispatch_no: str | None = None
 
 
 class ReturnDetail(ReturnRead):
     items: list[ReturnItemRead] = []
     #: See IssueDetail.can_approve.
     can_approve: bool = False
+    can_send_to_vendor: bool = False
+
+
+# --- Purchase Return source selection (Warehouse → Vendor flow) ---
+
+class PurchaseReturnSourceOption(BaseModel):
+    """One eligible source transaction the storekeeper can pick."""
+    source_type: str  # GRN | PO | INDENT | ITEM
+    source_id: int
+    source_no: str
+    source_date: date | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    vendor_code: str | None = None
+    item_id: int | None = None
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    po_id: int | None = None
+    po_no: str | None = None
+    grn_id: int | None = None
+    grn_no: str | None = None
+
+
+class VendorDetailOut(BaseModel):
+    vendor_id: int | None = None
+    vendor_code: str | None = None
+    vendor_name: str | None = None
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    gstin: str | None = None
+
+
+class ItemDetailOut(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    description: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    batch_id: int | None = None
+    serial_no: str | None = None
+    original_qty: Decimal
+    previously_returned: Decimal = Decimal("0")
+    returnable_qty: Decimal
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+
+
+class PurchaseDetailsOut(BaseModel):
+    po_id: int | None = None
+    po_no: str | None = None
+    grn_id: int | None = None
+    grn_no: str | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    receipt_id: int | None = None
+    receipt_no: str | None = None
+    order_date: date | None = None
+    receipt_date: date | None = None
+
+
+class PurchaseReturnSourceDetail(BaseModel):
+    """Everything auto-fetched when a source is picked — single call, single truth."""
+    source_type: str
+    source_id: int
+    source_no: str
+    vendor: VendorDetailOut
+    items: list[ItemDetailOut] = []
+    purchase: PurchaseDetailsOut
+    # Top-level warehouse for the return itself.
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    total_original_qty: Decimal = Decimal("0")
+    total_previously_returned: Decimal = Decimal("0")
+    total_returnable_qty: Decimal = Decimal("0")
+
+
+class PurchaseReturnSendToVendorIn(BaseModel):
+    """The single commitment: quantities per item + reason."""
+    return_reason: str = Field(min_length=1, max_length=50)
+    remarks: str | None = Field(default=None, max_length=1000)
+    items: list[ReturnItemWrite] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+    # Optional: if the source was not already bound to the draft, bind it now.
+    grn_id: int | None = None
+    po_id: int | None = None
+    indent_id: int | None = None
+    vendor_id: int | None = None
+    warehouse_id: int | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -611,6 +611,24 @@ export const cancelReturn = (id: number, reason?: string) =>
 export const getReturnableLines = (grnId: number) =>
   get<PurchaseReturn["items"]>(`${BASE}/returns/returnable-lines`, { grn_id: grnId });
 
+/* ----- Warehouse → Vendor: Purchase Return with auto-fetch & Send to Vendor ----- */
+
+export const purchaseReturnReasons = () =>
+  get<{ value: string; label: string }[]>(`${BASE}/returns/reasons`);
+
+export const purchaseReturnSourceOptions = (params: ListParams & { warehouse_id?: number } = {}) =>
+  get<import("./types").Page<import("./types").PurchaseReturnSourceOption>>(`${BASE}/returns/source-options`, params);
+
+export const purchaseReturnSourceDetail = (source_type: string, source_id: number, item_id?: number) =>
+  get<import("./types").PurchaseReturnSourceDetail>(`${BASE}/returns/source-detail`, {
+    source_type,
+    source_id,
+    item_id,
+  });
+
+export const sendPurchaseReturnToVendor = (returnId: number, body: import("./types").PurchaseReturnSendToVendorPayload) =>
+  post<PurchaseReturn>(`${BASE}/returns/${returnId}/send-to-vendor`, body);
+
 /* ------------------------------------------------------- serials & batches -- */
 
 export const listSerials = (

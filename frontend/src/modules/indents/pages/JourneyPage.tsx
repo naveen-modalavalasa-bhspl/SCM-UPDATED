@@ -35,19 +35,19 @@ function formatDuration(seconds?: number | null) {
   return rest ? `${hours} hr ${rest} min` : `${hours} hr`;
 }
 
+// The same `--color-step-*` tints the compact stepper and the shipment one wear, so
+// the expanded journey and the seven-dot summary of it are one rail read at two
+// zooms. Never `.bg-brand` — that token carries the four-stop brand sweep as a
+// background image, which puts a different colour on every dot in the column.
 function stageTone(stage: IndentJourneyStage) {
   const status = stageStatus(stage);
-  if (status === "REJECTED") return "border-bad bg-bad-bg text-bad";
-  if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return "border-warn bg-warn-bg text-warn";
-  if (status === "CANCELLED") return "border-neutral bg-neutral-bg text-neutral";
-  if (stage.is_current) return "border-brand bg-brand/5 text-brand";
-  // The brand sweep, matching the compact stepper and the shipment one: `.bg-brand`
-  // carries the gradient as a background IMAGE, so the dot is the four-stop Bavya
-  // fill rather than green. Rejected/returned/cancelled above keep their semantic
-  // colours — only a finished stage wears the brand.
-  if (["APPROVED", "SUBMITTED", "COMPLETED", "ACKNOWLEDGED"].includes(status)) return "border-transparent bg-brand text-white";
+  if (status === "REJECTED") return "border-transparent bg-step-bad text-white";
+  if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return "border-transparent bg-step-hold text-white";
+  if (status === "CANCELLED") return "border-transparent bg-step-off text-white";
+  if (stage.is_current) return "border-transparent bg-step-live text-white";
+  if (["APPROVED", "SUBMITTED", "COMPLETED", "ACKNOWLEDGED"].includes(status)) return "border-transparent bg-step-done text-white";
   if (status === "NOT_REQUIRED") return "border-line bg-content2 text-muted";
-  return "border-line bg-white text-muted";
+  return "border-line bg-content1 text-muted";
 }
 
 function statusLabel(stage: IndentJourneyStage) {

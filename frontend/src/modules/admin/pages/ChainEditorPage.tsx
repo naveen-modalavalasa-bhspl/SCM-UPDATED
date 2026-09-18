@@ -165,7 +165,7 @@ export function ChainEditorPage() {
 
   const chosen = useMemo(() => new Set(steps.map(stepKey)), [steps]);
   const noApproval = policy === "NO_APPROVAL";
-  const label = chain.data?.label ?? docType;
+  const label = chain.data?.label ?? flowLabel(docType);
   const projectName = (options.data?.projects ?? [])
     .find((project) => project.id === projectId)?.name ?? null;
   const policyLabel = (chain.data?.policies ?? [])
@@ -500,6 +500,12 @@ export function ChainEditorPage() {
       />
     </div>
   );
+}
+
+function flowLabel(docType: string) {
+  if (docType === "STOCK_RETURN") return "Indent Return";
+  if (docType === "STOCK_RETURN_RECEIPT") return "Decision Desk";
+  return docType;
 }
 
 /** What the chain on screen actually does, as a sentence — the unsaved steps, not the

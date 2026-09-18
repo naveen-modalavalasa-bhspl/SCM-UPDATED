@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
-  AlarmClock, BarChart3, CheckCheck, ChevronRight, ClipboardList, FileText, Inbox,
+  AlarmClock, BarChart3, CheckCheck, ClipboardList, FileText, Inbox,
   Lock, Package, RefreshCw, Search, Truck, TriangleAlert, X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -61,6 +61,11 @@ const FAMILY: Record<string, { icon: LucideIcon; tint: string }> = {
   OWN_STOCK_ISSUE: { icon: Package, tint: "bg-ok-bg text-ok" },
   GRN: { icon: Package, tint: "bg-ok-bg text-ok" },
   PURCHASE_RETURN: { icon: Package, tint: "bg-ok-bg text-ok" },
+  // FIX 2026-09-07: a stock return moves stock, so it reads with the rest of that
+  // family instead of falling through to the generic document glyph.
+  STOCK_RETURN: { icon: Package, tint: "bg-ok-bg text-ok" },
+  STOCK_RETURN_RECEIPT: { icon: Package, tint: "bg-ok-bg text-ok" },
+  STOCK_RETURN_LOGISTICS: { icon: Package, tint: "bg-ok-bg text-ok" },
   QC_OUTWARD: { icon: Package, tint: "bg-ok-bg text-ok" },
   DISPATCH: { icon: Truck, tint: "bg-warn-bg text-warn" },
   CARRIER_AWARD: { icon: Truck, tint: "bg-warn-bg text-warn" },
@@ -378,16 +383,11 @@ export function ApprovalsPage() {
         );
       },
     },
-    {
-      key: "action", header: "", className: "w-32",
-      // Ghost, not filled: twelve solid buttons down the right-hand side turned the
-      // queue into a column of blue and pulled the eye off the documents themselves.
-      render: (row) => (
-        <Button variant="ghost" onClick={() => setSelected(row)}>
-          Review <ChevronRight className="h-4 w-4" />
-        </Button>
-      ),
-    },
+    // FIX 2026-09-07: the Review column is gone. It only ever repeated what the row
+    // itself does — the whole row navigates through `onRowClick`, and the shared list
+    // gives it the pointer, the hover and the keyboard handler — so the button was a
+    // second target for one action, and the widest column on a queue that is read for
+    // its documents.
   ];
 
   const pastDue = queue.filter(overdue).length;
@@ -634,27 +634,28 @@ export function ApprovalsPage() {
               ? <span className="font-semibold text-body"> · {inr(Number(row.amount))}</span>
               : ` · ${row.current_stage_name ?? `Stage ${row.stage_sequence}`}`}
           </p>
-          <div className="flex items-center justify-between gap-2">
-            {BULK_SIGNABLE.has(row.doc_type)
-              // The whole card navigates, so the label's TEXT has to stop the click
-              // too — the tick itself does, but tapping the word "Select" would
-              // otherwise both select the row and open it.
-              ? <label
-                  className="flex cursor-pointer items-center gap-1 text-xs font-medium text-body"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <Tick
-                    checked={picked.has(refOf(row))}
-                    onChange={() => toggle(row)}
-                    aria={`Select ${row.doc_no ?? row.doc_id}`}
-                  />
-                  Select
-                </label>
-              : <span />}
-            <Button variant="soft" onClick={() => setSelected(row)}>
-              Review <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
+          {/* FIX 2026-09-07: the card's Review button went with the table's Review
+              column — the whole card already navigates. The footer is now the tick
+              alone, so it renders only on a row that can actually be bulk-signed
+              rather than leaving an empty band under every other card. */}
+          {BULK_SIGNABLE.has(row.doc_type) && (
+            <div className="flex items-center gap-2">
+              {/* The whole card navigates, so the label's TEXT has to stop the click
+                  too — the tick itself does, but tapping the word "Select" would
+                  otherwise both select the row and open it. */}
+              <label
+                className="flex cursor-pointer items-center gap-1 text-xs font-medium text-body"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <Tick
+                  checked={picked.has(refOf(row))}
+                  onChange={() => toggle(row)}
+                  aria={`Select ${row.doc_no ?? row.doc_id}`}
+                />
+                Select
+              </label>
+            </div>
+          )}
         </div>;
       }}
     />}

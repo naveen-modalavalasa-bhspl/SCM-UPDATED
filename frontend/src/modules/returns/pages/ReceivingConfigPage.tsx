@@ -5,7 +5,6 @@ import {
   Button, Card, EmptyState, ErrorBanner, Input, PageHeader,
 } from "@/shared/components";
 import { returnsApi } from "../api";
-import { ReturnsNav } from "../components/ReturnsNav";
 import type { ReceivingStep } from "../types";
 
 /**
@@ -84,7 +83,6 @@ export default function ReceivingConfigPage() {
 
   return (
     <div>
-      <ReturnsNav />
       <PageHeader
         eyebrow="RETURNS"
         title="Receiving approvers"
@@ -130,8 +128,8 @@ export default function ReceivingConfigPage() {
       </Card>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card className="p-4">
-          <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+        <Card className="p-5">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted">
             Signing order
           </h2>
           {isLoading && <p className="text-sm text-muted">Loading…</p>}
@@ -186,8 +184,8 @@ export default function ReceivingConfigPage() {
           </ol>
         </Card>
 
-        <Card className="p-4">
-          <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+        <Card className="p-5">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted">
             Add a post
           </h2>
           <Input

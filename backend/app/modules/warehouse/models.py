@@ -669,6 +669,20 @@ class PurchaseReturn(Base):
     reason = Column(String(500), nullable=True)
     status = Column(String(30), nullable=False, default=ReturnStatus.DRAFT.value)
 
+    # ADDED 2026-09-08 (returns work). Where the material being sent back came FROM,
+    # as against which warehouse is sending it: off an upper-tier shelf, up the chain
+    # from a branch, or rejected on the inspection bench after the GRN. Nullable and
+    # unread by anything in this module — every existing route behaves as before — and
+    # written by whoever raises the return. `returns.enums.PurchaseReturnSource` names
+    # the values; the column is a plain String so the warehouse module does not have to
+    # import the returns module to store one (rule 5: the chain runs the other way).
+    source_category = Column(String(30), index=True, nullable=True)
+    # The stock return that produced this one, where it was produced automatically off a
+    # branch return landing at the warehouse. A soft link: `inv_sto` is inventory's
+    # table and a purchase return outlives the transfer that caused it.
+    source_return_id = Column(BigInteger, index=True, nullable=True)
+    source_return_no = Column(String(50), nullable=True)
+
     total_items = Column(Integer, nullable=False, default=0)
     total_qty = Column(QTY, nullable=False, default=0)
     total_value = Column(MONEY, nullable=False, default=0)

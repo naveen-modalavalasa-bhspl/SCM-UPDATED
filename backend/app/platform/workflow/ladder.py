@@ -68,6 +68,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.STOCK_MOVEMENT_ORDER.value: "Inventory",
     DocType.STOCK_RETURN.value: "Returns",
     DocType.STOCK_RETURN_RECEIPT.value: "Returns",
+    DocType.STOCK_RETURN_LOGISTICS.value: "Returns",
     DocType.WH_ISSUE.value: "Warehouse",
     DocType.GRN.value: "Warehouse",
     # Both really are submitted to the engine by modules/warehouse/service.py, and both
@@ -101,8 +102,9 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # same-project transfer never starts a workflow, so this ladder stays quiet.
     DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
     DocType.STOCK_MOVEMENT_ORDER.value: "Stock Movement (bin to bin)",
-    DocType.STOCK_RETURN.value: "Stock Return (sending material back up)",
-    DocType.STOCK_RETURN_RECEIPT.value: "Stock Return (receiving and deciding)",
+    DocType.STOCK_RETURN.value: "Indent Return",
+    DocType.STOCK_RETURN_RECEIPT.value: "Decision Desk",
+    DocType.STOCK_RETURN_LOGISTICS.value: "Return Logistics",
     DocType.WH_ISSUE.value: "Material Issue",
     DocType.GRN.value: "Goods Receipt",
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
@@ -122,6 +124,23 @@ DOC_TYPE_LABEL: dict[str, str] = {
 # The order the modules are listed in on the config screen.
 MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement",
                 "Logistics"]
+
+# Document types nothing OPENS an instance for any more. They keep their label and
+# their module — an instance raised before the retirement still has to render with a
+# name, and `engine` reads DOC_TYPE_LABEL for the stage name on a self-approved row —
+# but Approvals Config no longer OFFERS them, and `ladder_config_validate` refuses a
+# chain saved against one. Same reasoning as the ISSUE note above: a ladder the engine
+# never looks up is configuration that is written, never read, and silently ignored.
+#
+#   STOCK_RETURN_LOGISTICS — the return's second signature. `_open_logistics_approval`
+#       was retired on 2026-09-10 (`modules/returns/service.py`): the transport leg is
+#       raised at the hand-over, the load may leave without it, the shelf is debited at
+#       the gate and the far end signs on the Sign-off screen — so the rung asked
+#       somebody to approve a journey that had already been approved, arranged and
+#       sometimes finished. Its READ side is deliberately still standing for a return
+#       that was already sitting on the rung; nothing new opens one, so there is nothing
+#       left for a chain to govern.
+RETIRED_DOC_TYPES = frozenset({DocType.STOCK_RETURN_LOGISTICS.value})
 
 # Document types whose DEFAULT approver is the raiser's own post, not somebody above
 # it. These are the events where authority comes from holding the thing rather than
@@ -237,16 +256,20 @@ def configurable_doc_types() -> list[str]:
     module submits it to the engine. Exposing this as a function rather than letting
     callers iterate `DocType` is what stops a picker offering ISSUE or QUOTATION,
     against which a workflow can be saved and never read.
+
+    Minus `RETIRED_DOC_TYPES`, which are on the label map for display only: the engine
+    once read them and no longer opens one, so offering them is the same trap.
     """
-    return list(DOC_TYPE_LABEL)
+    return [code for code in DOC_TYPE_LABEL if code not in RETIRED_DOC_TYPES]
 
 
 async def list_doc_types() -> list[dict]:
+    """What Approvals Config lists: one row per configurable type, retired ones gone."""
     return [{
         "code": code,
         "label": DOC_TYPE_LABEL.get(code, code.title()),
         "module": MODULE_BY_DOC_TYPE.get(code, "Other"),
-    } for code in DOC_TYPE_LABEL]
+    } for code in configurable_doc_types()]
 
 
 def _held_position_ids(project_id: int):

@@ -862,6 +862,55 @@ async def returnable_lines(grn_id: int = Query(...), db: AsyncSession = Depends(
     return await service.returnable_lines(db, grn_id)
 
 
+@router.get("/returns/reasons", response_model=list[s.ReturnReasonOption])
+async def purchase_return_reasons(user=Depends(require_permission(RETURN_VIEW))):
+    """Return Reason dropdown — served, never hard-coded in UI."""
+    return service.purchase_return_reasons()
+
+
+@router.get("/returns/source-options", response_model=Page[s.PurchaseReturnSourceOption])
+async def purchase_return_source_options(
+    params: PageParams = Depends(),
+    search: str | None = None,
+    warehouse_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(RETURN_VIEW)),
+):
+    """Searchable Source Transaction dropdown: GRN / PO / Indent / Item.
+
+    Single call, existing SCM data only — no duplicate master.
+    """
+    return await service.purchase_return_source_options(
+        db, params, search=search, warehouse_id=warehouse_id, user=user)
+
+
+@router.get("/returns/source-detail", response_model=s.PurchaseReturnSourceDetail)
+async def purchase_return_source_detail(
+    source_type: str = Query(..., description="GRN | PO | INDENT | ITEM"),
+    source_id: int = Query(...),
+    item_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(RETURN_VIEW)),
+):
+    """Auto-fetch Vendor + Item + Purchase details for one source transaction."""
+    return await service.purchase_return_source_detail(
+        db, source_type=source_type, source_id=source_id, item_id=item_id)
+
+
+@router.post("/returns/{return_id}/send-to-vendor", response_model=s.ReturnDetail)
+async def send_to_vendor(
+    return_id: int,
+    body: s.PurchaseReturnSendToVendorIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(RETURN_CREATE)),
+):
+    """The primary commitment: validate, link original, create logistics leg, dispatch.
+
+    Warehouse → Existing Logistics → Vendor.
+    """
+    return await service.send_to_vendor(db, return_id, body, user)
+
+
 @router.get("/returns/{return_id}", response_model=s.ReturnDetail)
 async def get_return(return_id: int, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(RETURN_VIEW))):

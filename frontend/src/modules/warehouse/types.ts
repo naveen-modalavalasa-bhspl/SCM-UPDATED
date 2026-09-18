@@ -1596,9 +1596,21 @@ export interface PurchaseReturn {
   grn_no?: string | null;
   vendor_id?: number | null;
   vendor_name?: string | null;
+  vendor_code?: string | null;
+  vendor_contact_person?: string | null;
+  vendor_phone?: string | null;
+  vendor_email?: string | null;
+  vendor_address?: string | null;
+  vendor_city?: string | null;
+  vendor_state?: string | null;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  material_receipt_id?: number | null;
   reason?: string | null;
+  reason_label?: string | null;
+  remarks?: string | null;
   status: ReturnStatus;
   total_items: number;
   total_qty: number;
@@ -1610,6 +1622,10 @@ export interface PurchaseReturn {
   items?: PurchaseReturnItem[];
   /** See Issue.can_approve — whose turn it is, not who holds the permission. */
   can_approve?: boolean;
+  /** Served, and the SAME answer `send_to_vendor` enforces: APPROVED only. */
+  can_send_to_vendor?: boolean;
+  dispatch_id?: number | null;
+  dispatch_no?: string | null;
 }
 
 /** `pro_return_items`. */
@@ -1629,6 +1645,9 @@ export interface PurchaseReturnItem {
   rate?: number | null;
   amount?: number | null;
   reason?: string | null;
+  original_qty?: number | null;
+  previously_returned?: number | null;
+  returnable_qty?: number | null;
 }
 
 export interface PurchaseReturnItemWrite {
@@ -1650,6 +1669,102 @@ export interface PurchaseReturnWrite {
   warehouse_id?: number | null;
   reason?: string | null;
   items: PurchaseReturnItemWrite[];
+}
+
+/** Return reasons — served, never hard-coded. */
+export interface PurchaseReturnReason {
+  value: string;
+  label: string;
+}
+
+/** One eligible source transaction for the searchable dropdown. */
+export interface PurchaseReturnSourceOption {
+  source_type: string;
+  source_id: number;
+  source_no: string;
+  source_date?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  vendor_code?: string | null;
+  item_id?: number | null;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  po_id?: number | null;
+  po_no?: string | null;
+  grn_id?: number | null;
+  grn_no?: string | null;
+}
+
+export interface VendorDetail {
+  vendor_id?: number | null;
+  vendor_code?: string | null;
+  vendor_name?: string | null;
+  contact_person?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  pincode?: string | null;
+  gstin?: string | null;
+}
+
+export interface ItemDetail {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  description?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  batch_id?: number | null;
+  serial_no?: string | null;
+  original_qty: number;
+  previously_returned: number;
+  returnable_qty: number;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+}
+
+export interface PurchaseDetails {
+  po_id?: number | null;
+  po_no?: string | null;
+  grn_id?: number | null;
+  grn_no?: string | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  receipt_id?: number | null;
+  receipt_no?: string | null;
+  order_date?: string | null;
+  receipt_date?: string | null;
+}
+
+export interface PurchaseReturnSourceDetail {
+  source_type: string;
+  source_id: number;
+  source_no: string;
+  vendor: VendorDetail;
+  items: ItemDetail[];
+  purchase: PurchaseDetails;
+  warehouse_id?: number | null;
+  warehouse_name?: string | null;
+  total_original_qty: number;
+  total_previously_returned: number;
+  total_returnable_qty: number;
+}
+
+export interface PurchaseReturnSendToVendorPayload {
+  return_reason: string;
+  remarks?: string | null;
+  items: PurchaseReturnItemWrite[];
+  grn_id?: number | null;
+  po_id?: number | null;
+  indent_id?: number | null;
+  vendor_id?: number | null;
+  warehouse_id?: number | null;
 }
 
 /* ------------------------------------------------------- serials & batches -- */

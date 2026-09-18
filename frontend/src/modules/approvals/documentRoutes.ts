@@ -32,6 +32,15 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     case "DISPATCH": return `/logistics/consignments/${document.doc_id}`;
     case "QC_OUTWARD": return `/warehouse/qc-outward/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
+    // FIX 2026-09-07: a stock return landed in the inbox with no case here, so
+    // clicking it fell through to `default` and navigated back to /approvals — the
+    // approver saw the queue redraw and read that as a dead button. Both phases of
+    // the return (the reporting-line approval and the receipt at the point) carry the
+    // return's own id, and /returns/:id is the screen that offers the decision off
+    // `can_act` / `can_decide`, so both go there.
+    case "STOCK_RETURN":
+    case "STOCK_RETURN_RECEIPT":
+    case "STOCK_RETURN_LOGISTICS": return `/returns/${document.doc_id}`;
     // A transport approval acts on the transport request itself. Without this case,
     // clicking the item in the inbox returned to the same approvals page and looked
     // like the approval button was broken.
@@ -72,6 +81,11 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "DISPATCH": return `/logistics/consignments/${document.doc_id}`;
     case "QC_OUTWARD": return `/warehouse/qc-outward/${document.doc_id}`;
     case "PURCHASE_RETURN": return `/warehouse/purchase-returns/${document.doc_id}`;
+    // FIX 2026-09-07: same gap on the read-only side — a decision already taken on a
+    // stock return sent the approver to /approvals/decisions, the list they clicked from.
+    case "STOCK_RETURN":
+    case "STOCK_RETURN_RECEIPT":
+    case "STOCK_RETURN_LOGISTICS": return `/returns/${document.doc_id}`;
     case "TRANSPORT_REQUEST": return `/logistics/shipments/${document.doc_id}?decision=1`;
     case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?decision=1`;
     default: return "/approvals/decisions";

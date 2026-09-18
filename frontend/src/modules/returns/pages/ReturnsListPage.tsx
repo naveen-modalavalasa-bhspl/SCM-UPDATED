@@ -7,10 +7,8 @@ import {
   Select, StatusPill, type Column,
 } from "@/shared/components";
 import { returnsApi } from "../api";
-import { ReturnsNav } from "../components/ReturnsNav";
 import { STATUS_FILTER_OPTIONS } from "../constants";
 import type { StockReturn } from "../types";
-import { TONE_MINT } from "@/shared/components/tones";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
 
@@ -59,6 +57,12 @@ export default function ReturnsListPage() {
         <div>
           <div className="font-semibold text-ink">{row.return_no}</div>
           <div className="text-xs text-muted">{row.reason_label ?? row.reason ?? "—"}</div>
+          {/* ADDED 2026-09-07: the indent the return answers. It is what decided who is
+            * signing this row, so the approval queue has to say it — an approver seeing
+            * a return in their queue can otherwise not tell why it reached them. */}
+          {row.indent_no && (
+            <div className="text-xs text-muted">against {row.indent_no}</div>
+          )}
         </div>
       ),
     },
@@ -79,10 +83,9 @@ export default function ReturnsListPage() {
       render: (row) => (
         <div className="text-sm">
           <div className="text-ink">{row.raised_by_name ?? "—"}</div>
-          <div className="text-xs text-muted">
-            {row.raised_by_code ?? ""}
-            {row.office_name ? ` · ${row.office_name}` : ""}
-          </div>
+          {/* FIX 2026-09-05: the office label repeated the From column's warehouse.
+            * The employee id is what identifies the raiser here. */}
+          <div className="text-xs text-muted">{row.raised_by_code ?? ""}</div>
         </div>
       ),
     },
@@ -117,8 +120,6 @@ export default function ReturnsListPage() {
 
   return (
     <div>
-      <ReturnsNav />
-
       <PageHeader
         eyebrow="RETURN"
         title={title}
@@ -127,7 +128,7 @@ export default function ReturnsListPage() {
           // the whole point of the screen, and hiding the only way in left storekeepers
           // on an empty page with nothing to do. The endpoint is still permission-gated
           // — a login without the code is refused at submit, which is the real check.
-          <Button className={TONE_MINT} onClick={() => navigate("/returns/new")}>
+          <Button onClick={() => navigate("/returns/new")}>
             <Plus className="h-4 w-4" /> New return
           </Button>
         }
@@ -200,6 +201,7 @@ export default function ReturnsListPage() {
             <div className="mt-1 text-xs text-muted">
               {row.reason_label ?? row.reason ?? "—"} · {qty(row.total_qty)} across{" "}
               {row.total_items} {row.total_items === 1 ? "item" : "items"}
+              {row.indent_no ? ` · against ${row.indent_no}` : ""}
             </div>
             {row.current_approver_name && (
               <div className="mt-1 text-xs text-muted">

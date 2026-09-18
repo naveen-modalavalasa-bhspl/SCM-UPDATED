@@ -111,11 +111,18 @@ PAGES: list[PageDef] = [
             parent="grp_returns", module="returns", icon="scale", sort_order=5),
     PageDef("returns_sign_off", "/returns/sign-off", "Sign-off",
             parent="grp_returns", module="returns", icon="pen-line", sort_order=6),
+    # NEW 2026-09-17. The third desk: a return whose material TRAVELS waits here for
+    # the logistics leg to be arranged. `DecisionQueuePage` serves all three and reads
+    # which queue off the path, so the only thing that made this one reachable was a
+    # row here — navigation is derived from `rbac_pages` and nothing else (the
+    # module's own `ReturnsNav` was retired for drawing a second, unfiltered strip).
+    PageDef("returns_logistics", "/returns/logistics", "Return Logistics",
+            parent="grp_returns", module="returns", icon="truck", sort_order=7),
     PageDef("returns_purchase", "/returns/purchase", "Purchase Returns",
-            parent="grp_returns", module="returns", icon="package-x", sort_order=7),
+            parent="grp_returns", module="returns", icon="package-x", sort_order=8),
     PageDef("returns_receiving_config", "/returns/settings/receiving",
             "Receiving Points", parent="grp_returns", module="returns",
-            icon="map-pin", sort_order=8),
+            icon="map-pin", sort_order=9),
     # The module row itself, listed only to rename it: the menu said "Purchasing"
     # while the permission catalogue, the backend package and the table prefix all
     # said procurement, and the RBAC screen needed a hard-coded alias to reconcile

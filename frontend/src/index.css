@@ -327,6 +327,21 @@ html:not(.dark) body[data-module="grp_logistics"] {
   --wash-1: #FEF6F1;
   --wash-2: #FEFBF8;
 }
+html:not(.dark) body[data-module="grp_returns"] {
+  /* Returns     · pastel rose
+   *
+   * The one brand stop no other ground uses (`--grad-3: #CC004C`), which is why it was
+   * still free after six modules — and it suits the document: a return is the crimson
+   * end of the sweep, the leg that runs backwards. Added 2026-09-07 because Returns was
+   * the only module falling through to the warm greige default, so its screens read as
+   * plain white beside every other module's tinted page.
+   *
+   * Same saturation as the six above, base and both washes moving together, scoped
+   * `html:not(.dark)` — the three rules in the block comment, not a fourth idea. */
+  --color-surface: #FAEEF3;
+  --wash-1: #FDF6F9;
+  --wash-2: #FEFBFC;
+}
 html:not(.dark) body[data-module="grp_reports"] {
   /* Reports     · pastel violet */
   --color-surface: #F1EFFA;

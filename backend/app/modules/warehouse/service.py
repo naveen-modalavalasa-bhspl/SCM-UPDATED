@@ -11958,8 +11958,7 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
         cap = caps.get(line.grn_item_id) if line.grn_item_id else None
         if cap is not None and qty > cap:
             raise ValidationError(
-                f"{item.code}: only {cap} rejected quantity remains returnable; "
-                f"{qty} cannot be returned against it.")
+                f"Return quantity cannot exceed the available returnable quantity of {cap}.")
 
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
@@ -11998,6 +11997,10 @@ async def list_returns(db: AsyncSession, params: PageParams, *, status: str | No
 
 async def get_return(db: AsyncSession, return_id: int, user=None) -> m.PurchaseReturn:
     doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    # The vendor snapshot and each line's remaining returnable quantity. Served here
+    # rather than computed in the screen, so the register, the form and the guard on
+    # `send_to_vendor` cannot disagree about how much is still owed back.
+    await _decorate_purchase_return(db, doc)
     return await _decorate_can_approve(
         db, doc, WarehouseDocType.PURCHASE_RETURN.value, user)
 
@@ -12195,6 +12198,754 @@ async def returnable_lines(db: AsyncSession, grn_id: int) -> list[m.ReceiptItem]
     """The rejected lines of a GRN — the only ones a return may be raised against."""
     receipt = await _load(db, m.Receipt, grn_id, "Receipt", m.Receipt.items)
     return [l for l in receipt.items if _d(l.rejected_qty) > ZERO]
+
+
+# ---------------------------------------------------------------------------
+# Purchase Return — Warehouse → Vendor flow (auto-fetch + Send to Vendor)
+# ---------------------------------------------------------------------------
+
+def _vendor_address(vendor: Vendor | None) -> str | None:
+    if not vendor or not vendor.address:
+        return None
+    parts = [vendor.address, vendor.city, vendor.state, vendor.pincode]
+    return ", ".join(p for p in parts if p)
+
+
+async def _enrich_return_with_vendor(db: AsyncSession, doc: m.PurchaseReturn) -> m.PurchaseReturn:
+    """Auto-fetch vendor details from mst_vendors — never typed, always read."""
+    vendor = await db.get(Vendor, doc.vendor_id) if doc.vendor_id else None
+    if vendor:
+        doc.vendor_code = vendor.code  # transient for serializer
+        doc.vendor_contact_person = vendor.contact_person
+        doc.vendor_phone = vendor.phone
+        doc.vendor_email = vendor.email
+        doc.vendor_address = _vendor_address(vendor)
+        doc.vendor_city = vendor.city
+        doc.vendor_state = vendor.state
+        # override snapshot name/code with master truth where missing
+        if not doc.vendor_name:
+            doc.vendor_name = vendor.name
+    else:
+        doc.vendor_code = None
+        doc.vendor_contact_person = None
+        doc.vendor_phone = None
+        doc.vendor_email = None
+        doc.vendor_address = None
+        doc.vendor_city = None
+        doc.vendor_state = None
+    # reason label
+    if doc.reason:
+        for val, label in s.PURCHASE_RETURN_REASONS:
+            if val == doc.reason:
+                doc.reason_label = label
+                break
+        else:
+            doc.reason_label = doc.reason
+    else:
+        doc.reason_label = None
+    # transient can_send_to_vendor — DRAFT/APPROVED may be sent
+    doc.can_send_to_vendor = doc.status in {ReturnStatus.DRAFT.value,
+                                            ReturnStatus.APPROVED.value,
+                                            ReturnStatus.PENDING_APPROVAL.value}
+    return doc
+
+
+async def _decorate_purchase_return(db: AsyncSession, doc: m.PurchaseReturn) -> m.PurchaseReturn:
+    await _enrich_return_with_vendor(db, doc)
+    # Enrich each line with original / previously returned / returnable
+    # Caps already computed in _apply_return_lines; re-derive for read.
+    caps: dict[int, Decimal] = {}
+    originals: dict[int, Decimal] = {}
+    if doc.grn_id:
+        receipt = await db.get(m.Receipt, doc.grn_id)
+        if receipt:
+            # need items — load without selectinload for simplicity
+            stmt = select(m.ReceiptItem).where(m.ReceiptItem.receipt_id == doc.grn_id)
+            grn_items = (await db.execute(stmt)).scalars().all()
+            originals = {it.id: _d(it.rejected_qty) if _d(it.rejected_qty) > ZERO else _d(it.received_qty)
+                         for it in grn_items}
+            caps = dict(originals)
+            # subtract already returned except this doc
+            already = (await db.execute(
+                select(m.PurchaseReturnItem.grn_item_id,
+                       func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+                .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(m.PurchaseReturn.grn_id == doc.grn_id,
+                       m.PurchaseReturn.id != doc.id,
+                       m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                       m.PurchaseReturnItem.grn_item_id.isnot(None))
+                .group_by(m.PurchaseReturnItem.grn_item_id)
+            )).all()
+            for gid, qty in already:
+                caps[gid] = max(caps.get(gid, ZERO) - _d(qty), ZERO)
+    for line in doc.items or []:
+        gid = line.grn_item_id
+        orig = originals.get(gid, _d(line.quantity)) if gid else _d(line.quantity)
+        prev = max(orig - caps.get(gid, orig), ZERO) if gid else ZERO
+        ret = caps.get(gid, _d(line.quantity)) if gid else _d(line.quantity)
+        line.original_qty = orig
+        line.previously_returned = prev
+        line.returnable_qty = ret
+    return doc
+
+
+def purchase_return_reasons() -> list[dict]:
+    return [{"value": v, "label": l} for v, l in s.PURCHASE_RETURN_REASONS]
+
+
+async def purchase_return_source_options(db: AsyncSession, params: PageParams, *,
+                                         search: str | None = None,
+                                         warehouse_id: int | None = None,
+                                         user=None) -> dict:
+    """Searchable eligible source transactions: GRN / PO / Indent / Item.
+
+    Uses existing SCM data only — no duplicate master.
+    """
+    # Scope warehouses for this user
+    allowed = await warehouse_ids_for_user(db, user) if user else None
+    term = (search or "").strip()
+    like = f"%{term}%" if term else None
+
+    # --- GRNs (inb_receipts) — the primary purchase transaction with vendor ---
+    grn_stmt = select(m.Receipt).where(m.Receipt.status != ReceiptStatus.CANCELLED.value)
+    if allowed is not None:
+        grn_stmt = grn_stmt.where(m.Receipt.warehouse_id.in_(allowed or {0}))
+    if warehouse_id:
+        grn_stmt = grn_stmt.where(m.Receipt.warehouse_id == warehouse_id)
+    if like:
+        grn_stmt = grn_stmt.where(or_(
+            m.Receipt.grn_no.ilike(like),
+            m.Receipt.vendor_name.ilike(like),
+            m.Receipt.po_no.ilike(like),
+        ))
+    grn_stmt = grn_stmt.order_by(m.Receipt.id.desc()).limit(20)
+    grns = (await db.execute(grn_stmt)).scalars().all()
+
+    options: list[dict] = []
+    vendor_cache: dict[int, Vendor] = {}
+    for grn in grns:
+        vendor = vendor_cache.get(grn.vendor_id) if grn.vendor_id else None
+        if grn.vendor_id and grn.vendor_id not in vendor_cache:
+            vendor = await db.get(Vendor, grn.vendor_id)
+            vendor_cache[grn.vendor_id] = vendor
+        # first item snapshot for display
+        first_item = None
+        if grn.items:
+            first_item = grn.items[0]
+        else:
+            # load first line if not eagerly loaded
+            first_item = await db.scalar(
+                select(m.ReceiptItem).where(m.ReceiptItem.receipt_id == grn.id).limit(1))
+        options.append({
+            "source_type": "GRN",
+            "source_id": grn.id,
+            "source_no": grn.grn_no,
+            "source_date": grn.grn_date,
+            "vendor_id": grn.vendor_id,
+            "vendor_name": grn.vendor_name or (vendor.name if vendor else None),
+            "vendor_code": vendor.code if vendor else None,
+            "item_id": first_item.item_id if first_item else None,
+            "item_code": first_item.item_code if first_item else None,
+            "item_name": first_item.item_name if first_item else None,
+            "warehouse_id": grn.warehouse_id,
+            "warehouse_name": grn.warehouse_name,
+            "po_id": grn.po_id,
+            "po_no": grn.po_no,
+            "grn_id": grn.id,
+            "grn_no": grn.grn_no,
+            "indent_id": first_item.indent_id if first_item and hasattr(first_item, 'indent_id') else None,
+            "indent_no": first_item.indent_no if first_item and hasattr(first_item, 'indent_no') else None,
+        })
+
+    # --- POs (pro_purchase_orders) — where GRN not yet created ---
+    try:
+        from app.modules.procurement.models import PurchaseOrder, POItem
+        po_stmt = select(PurchaseOrder).where(PurchaseOrder.status != POStatus.CANCELLED.value)
+        if like:
+            po_stmt = po_stmt.where(or_(
+                PurchaseOrder.po_no.ilike(like),
+                PurchaseOrder.vendor_name.ilike(like),
+            ))
+        po_stmt = po_stmt.order_by(PurchaseOrder.id.desc()).limit(20)
+        pos = (await db.execute(po_stmt)).scalars().all()
+        for po in pos:
+            vendor = vendor_cache.get(po.vendor_id) if po.vendor_id else None
+            if po.vendor_id and po.vendor_id not in vendor_cache:
+                vendor = await db.get(Vendor, po.vendor_id)
+                vendor_cache[po.vendor_id] = vendor
+            first = po.items[0] if getattr(po, 'items', None) else None
+            options.append({
+                "source_type": "PO",
+                "source_id": po.id,
+                "source_no": po.po_no,
+                "source_date": po.po_date if hasattr(po, 'po_date') else None,
+                "vendor_id": po.vendor_id,
+                "vendor_name": po.vendor_name or (vendor.name if vendor else None),
+                "vendor_code": vendor.code if vendor else None,
+                "item_id": first.item_id if first else None,
+                "item_code": first.item_code if first else None,
+                "item_name": first.item_name if first else None,
+                "warehouse_id": None,
+                "warehouse_name": po.facility_name if hasattr(po, 'facility_name') else None,
+                "po_id": po.id,
+                "po_no": po.po_no,
+                "indent_id": po.indent_id if hasattr(po, 'indent_id') else None,
+                "indent_no": po.indent_no if hasattr(po, 'indent_no') else None,
+            })
+    except Exception:
+        logger.debug("PO source options skipped — procurement tables not reachable", exc_info=True)
+
+    # --- Indents (ind_indents) — for returns against original request ---
+    try:
+        from app.modules.indents.models import Indent, IndentItem as IItem
+        ind_stmt = select(Indent).where(Indent.status.in_([
+            IndentStatus.APPROVED.value, IndentStatus.ORDERED.value,
+            IndentStatus.CLOSED.value, IndentStatus.PARTIALLY_FULFILLED.value]))
+        if like:
+            ind_stmt = ind_stmt.where(or_(
+                Indent.indent_no.ilike(like),
+                Indent.remarks.ilike(like),
+            ))
+        ind_stmt = ind_stmt.order_by(Indent.id.desc()).limit(20)
+        inds = (await db.execute(ind_stmt)).scalars().all()
+        for ind in inds:
+            # try to resolve vendor via linked PO
+            vendor_id = None
+            vendor_name = None
+            po_id = None
+            po_no = None
+            try:
+                from app.modules.procurement.models import PurchaseOrder as _PO
+                po = await db.scalar(select(_PO).where(_PO.indent_id == ind.id).limit(1))
+                if po:
+                    vendor_id = po.vendor_id
+                    vendor_name = po.vendor_name
+                    po_id = po.id
+                    po_no = po.po_no
+            except Exception:
+                pass
+            first = ind.items[0] if getattr(ind, 'items', None) else None
+            options.append({
+                "source_type": "INDENT",
+                "source_id": ind.id,
+                "source_no": ind.indent_no,
+                "source_date": ind.indent_date if hasattr(ind, 'indent_date') else None,
+                "vendor_id": vendor_id,
+                "vendor_name": vendor_name,
+                "vendor_code": None,
+                "item_id": first.item_id if first and hasattr(first, 'item_id') else None,
+                "item_code": first.item_code if first and hasattr(first, 'item_code') else None,
+                "item_name": first.item_name if first and hasattr(first, 'item_name') else None,
+                "warehouse_id": None,
+                "warehouse_name": None,
+                "po_id": po_id,
+                "po_no": po_no,
+                "indent_id": ind.id,
+                "indent_no": ind.indent_no,
+            })
+    except Exception:
+        logger.debug("Indent source options skipped", exc_info=True)
+
+    # Filter by search if term but nothing matched — already filtered per query
+    # Sort: GRN first, then PO, then INDENT
+    order = {"GRN": 0, "PO": 1, "INDENT": 2}
+    options.sort(key=lambda r: (order.get(r["source_type"], 9), r["source_no"]))
+
+    # Paginate in-memory (small set)
+    total = len(options)
+    page = params.page or 1
+    size = params.size or 20
+    start = (page - 1) * size
+    sliced = options[start:start + size]
+    return {"items": sliced, "total": total, "page": page, "size": size}
+
+
+async def purchase_return_source_detail(db: AsyncSession, *,
+                                        source_type: str,
+                                        source_id: int,
+                                        item_id: int | None = None) -> dict:
+    """Auto-fetch full vendor + item + purchase details for one source.
+
+    Single call, single truth — no manual typing.
+    """
+    source_type = (source_type or "GRN").upper().strip()
+    if source_type not in ("GRN", "PO", "INDENT", "ITEM", "MATERIAL_RECEIPT"):
+        if source_type == "MATERIAL_RECEIPT":
+            source_type = "GRN"
+        else:
+            raise ValidationError(f"Unknown source type {source_type}")
+
+    vendor_out = s.VendorDetailOut()
+    purchase = s.PurchaseDetailsOut()
+    item_details: list[s.ItemDetailOut] = []
+    warehouse_id = None
+    warehouse_name = None
+    source_no = ""
+    # ---- GRN ----
+    if source_type == "GRN":
+        receipt = await _load(db, m.Receipt, source_id, "GRN/Material Receipt", m.Receipt.items)
+        source_no = receipt.grn_no
+        purchase.grn_id = receipt.id
+        purchase.grn_no = receipt.grn_no
+        purchase.receipt_id = receipt.id
+        purchase.receipt_no = receipt.grn_no
+        purchase.receipt_date = receipt.grn_date
+        purchase.po_id = receipt.po_id
+        purchase.po_no = receipt.po_no
+        purchase.indent_id = None
+        warehouse_id = receipt.warehouse_id
+        warehouse_name = receipt.warehouse_name
+        # indent linkage via first line
+        first_line = receipt.items[0] if receipt.items else None
+        if first_line and getattr(first_line, 'indent_id', None):
+            purchase.indent_id = first_line.indent_id
+            purchase.indent_no = getattr(first_line, 'indent_no', None)
+
+        # Vendor — full master auto-fetch
+        vendor = await db.get(Vendor, receipt.vendor_id) if receipt.vendor_id else None
+        if vendor:
+            vendor_out.vendor_id = vendor.id
+            vendor_out.vendor_code = vendor.code
+            vendor_out.vendor_name = vendor.name
+            vendor_out.contact_person = vendor.contact_person
+            vendor_out.phone = vendor.phone
+            vendor_out.email = vendor.email
+            vendor_out.address = vendor.address
+            vendor_out.city = vendor.city
+            vendor_out.state = vendor.state
+            vendor_out.pincode = vendor.pincode
+            vendor_out.gstin = vendor.gstin
+        else:
+            vendor_out.vendor_id = receipt.vendor_id
+            vendor_out.vendor_name = receipt.vendor_name
+            vendor_out.vendor_code = None
+
+        # Per-item returnable computation (reuse caps logic)
+        # original = rejected_qty >0 ? rejected_qty : received_qty
+        already_by_grn_item: dict[int, Decimal] = {}
+        already_rows = (await db.execute(
+            select(m.PurchaseReturnItem.grn_item_id,
+                   func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+            .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+            .where(m.PurchaseReturn.grn_id == receipt.id,
+                   m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                   m.PurchaseReturnItem.grn_item_id.isnot(None))
+            .group_by(m.PurchaseReturnItem.grn_item_id)
+        )).all()
+        for gid, qty in already_rows:
+            already_by_grn_item[gid] = _d(qty)
+
+        for line in receipt.items:
+            if item_id and line.item_id != item_id:
+                continue
+            item = await db.get(Item, line.item_id)
+            original = _d(line.rejected_qty) if _d(line.rejected_qty) > ZERO else _d(line.received_qty)
+            if original <= ZERO:
+                original = _d(line.ordered_qty) if hasattr(line, 'ordered_qty') else _d(line.received_qty)
+            previously = already_by_grn_item.get(line.id, ZERO)
+            returnable = max(original - previously, ZERO)
+            # batch/lot
+            batch = await db.get(m.Batch, line.batch_id) if getattr(line, 'batch_id', None) else None
+            item_details.append(s.ItemDetailOut(
+                item_id=line.item_id,
+                item_code=line.item_code or (item.code if item else None),
+                item_name=line.item_name or (item.name if item else None),
+                description=item.description if item else None,
+                uom_code=line.uom_code or (item.uom_code if item else None),
+                batch_no=line.batch_no or (batch.batch_no if batch else None),
+                batch_id=getattr(line, 'batch_id', None),
+                serial_no=None,
+                original_qty=original,
+                previously_returned=previously,
+                returnable_qty=returnable,
+                warehouse_id=receipt.warehouse_id,
+                warehouse_name=receipt.warehouse_name,
+            ))
+        if not item_details:
+            raise ValidationError(f"GRN {receipt.grn_no} has no eligible lines for the selected item")
+
+    elif source_type == "PO":
+        from app.modules.procurement.models import PurchaseOrder, POItem
+        po = await _get(db, PurchaseOrder, source_id, "Purchase Order")
+        source_no = po.po_no
+        purchase.po_id = po.id
+        purchase.po_no = po.po_no
+        purchase.order_date = po.po_date if hasattr(po, 'po_date') else None
+        purchase.indent_id = po.indent_id if hasattr(po, 'indent_id') else None
+        purchase.indent_no = po.indent_no if hasattr(po, 'indent_no') else None
+        # vendor
+        vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
+        if vendor:
+            vendor_out.vendor_id = vendor.id
+            vendor_out.vendor_code = vendor.code
+            vendor_out.vendor_name = vendor.name
+            vendor_out.contact_person = vendor.contact_person
+            vendor_out.phone = vendor.phone
+            vendor_out.email = vendor.email
+            vendor_out.address = vendor.address
+            vendor_out.city = vendor.city
+            vendor_out.state = vendor.state
+            vendor_out.pincode = vendor.pincode
+            vendor_out.gstin = vendor.gstin
+        else:
+            vendor_out.vendor_id = po.vendor_id
+            vendor_out.vendor_name = po.vendor_name
+        # linked warehouse via receipt or indent
+        # try receipt
+        receipt = await db.scalar(select(m.Receipt).where(m.Receipt.po_id == po.id).limit(1))
+        if receipt:
+            warehouse_id = receipt.warehouse_id
+            warehouse_name = receipt.warehouse_name
+            purchase.grn_id = receipt.id
+            purchase.grn_no = receipt.grn_no
+        # items: po lines
+        po_items_stmt = select(POItem).where(POItem.po_id == po.id)
+        if item_id:
+            po_items_stmt = po_items_stmt.where(POItem.item_id == item_id)
+        po_items = (await db.execute(po_items_stmt)).scalars().all()
+        # already returned per po_item
+        already_by_po_item: dict[int, Decimal] = {}
+        already_po = (await db.execute(
+            select(m.PurchaseReturnItem.po_item_id,
+                   func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+            .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+            .where(m.PurchaseReturn.po_id == po.id,
+                   m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                   m.PurchaseReturnItem.po_item_id.isnot(None))
+            .group_by(m.PurchaseReturnItem.po_item_id)
+        )).all()
+        for pid, qty in already_po:
+            already_by_po_item[pid] = _d(qty)
+        for line in po_items:
+            item = await db.get(Item, line.item_id)
+            original = _d(line.quantity)
+            previously = already_by_po_item.get(line.id, ZERO)
+            returnable = max(original - previously, ZERO)
+            item_details.append(s.ItemDetailOut(
+                item_id=line.item_id,
+                item_code=line.item_code or (item.code if item else None),
+                item_name=line.item_name or (item.name if item else None),
+                description=item.description if item else None,
+                uom_code=line.uom_code or (item.uom_code if item else None),
+                batch_no=None,
+                batch_id=None,
+                original_qty=original,
+                previously_returned=previously,
+                returnable_qty=returnable,
+                warehouse_id=warehouse_id,
+                warehouse_name=warehouse_name,
+            ))
+
+    elif source_type == "INDENT":
+        from app.modules.indents.models import Indent, IndentItem
+        indent = await _get(db, Indent, source_id, "Indent")
+        source_no = indent.indent_no
+        purchase.indent_id = indent.id
+        purchase.indent_no = indent.indent_no
+        # vendor via linked PO if any
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO
+            po = await db.scalar(select(_PO).where(_PO.indent_id == indent.id).limit(1))
+            if po:
+                vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
+                if vendor:
+                    vendor_out.vendor_id = vendor.id
+                    vendor_out.vendor_code = vendor.code
+                    vendor_out.vendor_name = vendor.name
+                    vendor_out.contact_person = vendor.contact_person
+                    vendor_out.phone = vendor.phone
+                    vendor_out.email = vendor.email
+                    vendor_out.address = vendor.address
+                    vendor_out.city = vendor.city
+                    vendor_out.state = vendor.state
+                else:
+                    vendor_out.vendor_id = po.vendor_id
+                    vendor_out.vendor_name = po.vendor_name
+                purchase.po_id = po.id
+                purchase.po_no = po.po_no
+        except Exception:
+            pass
+        # items
+        stmt = select(IndentItem).where(IndentItem.indent_id == indent.id)
+        if item_id:
+            stmt = stmt.where(IndentItem.item_id == item_id)
+        lines = (await db.execute(stmt)).scalars().all()
+        for line in lines:
+            item = await db.get(Item, line.item_id) if hasattr(line, 'item_id') else None
+            # indent quantity fields vary by version
+            original = _d(getattr(line, 'quantity', None) or getattr(line, 'approved_qty', None) or getattr(line, 'requested_qty', 0))
+            # previously returned via purchase returns linked to this indent (not direct; use po linkage)
+            previously = ZERO
+            returnable = max(original - previously, ZERO)
+            item_details.append(s.ItemDetailOut(
+                item_id=getattr(line, 'item_id', 0),
+                item_code=getattr(line, 'item_code', None) or (item.code if item else None),
+                item_name=getattr(line, 'item_name', None) or (item.name if item else None),
+                description=item.description if item else None,
+                uom_code=getattr(line, 'uom_code', None) or (item.uom_code if item else None),
+                batch_no=None,
+                batch_id=None,
+                original_qty=original,
+                previously_returned=previously,
+                returnable_qty=returnable,
+                warehouse_id=warehouse_id,
+                warehouse_name=warehouse_name,
+            ))
+
+    elif source_type == "ITEM":
+        if not item_id:
+            item_id = source_id
+        item = await _get(db, Item, int(item_id), "Item")
+        source_no = item.code
+        # vendor via preferred vendor_items
+        vendor_item = await db.scalar(
+            select(Vendor).join(s.Item, False)  # placeholder
+        ) if False else None
+        # find preferred vendor for item
+        from app.shared.models.master import VendorItem as _VI
+        vi = await db.scalar(select(_VI).where(_VI.item_id == item.id, _VI.is_preferred.is_(True)).limit(1))
+        if vi:
+            vendor = await db.get(Vendor, vi.vendor_id)
+            if vendor:
+                vendor_out.vendor_id = vendor.id
+                vendor_out.vendor_code = vendor.code
+                vendor_out.vendor_name = vendor.name
+                vendor_out.contact_person = vendor.contact_person
+                vendor_out.phone = vendor.phone
+                vendor_out.email = vendor.email
+                vendor_out.address = vendor.address
+                vendor_out.city = vendor.city
+                vendor_out.state = vendor.state
+        # warehouse: caller's primary location?
+        item_details.append(s.ItemDetailOut(
+            item_id=item.id,
+            item_code=item.code,
+            item_name=item.name,
+            description=item.description,
+            uom_code=item.uom_code,
+            batch_no=None,
+            batch_id=None,
+            original_qty=ZERO,
+            previously_returned=ZERO,
+            returnable_qty=ZERO,
+            warehouse_id=None,
+            warehouse_name=None,
+        ))
+
+    total_orig = sum((_d(it.original_qty) for it in item_details), ZERO)
+    total_prev = sum((_d(it.previously_returned) for it in item_details), ZERO)
+    total_ret = sum((_d(it.returnable_qty) for it in item_details), ZERO)
+
+    return {
+        "source_type": source_type,
+        "source_id": source_id,
+        "source_no": source_no,
+        "vendor": vendor_out.model_dump() if hasattr(vendor_out, 'model_dump') else vendor_out,
+        "items": [it.model_dump() if hasattr(it, 'model_dump') else it for it in item_details],
+        "purchase": purchase.model_dump() if hasattr(purchase, 'model_dump') else purchase,
+        "warehouse_id": warehouse_id,
+        "warehouse_name": warehouse_name,
+        "total_original_qty": total_orig,
+        "total_previously_returned": total_prev,
+        "total_returnable_qty": total_ret,
+    }
+
+
+async def send_to_vendor(db: AsyncSession, return_id: int, data: s.PurchaseReturnSendToVendorIn, user) -> m.PurchaseReturn:
+    """Warehouse → Vendor: the single 'Send to Vendor' commitment.
+
+    1. Validate return quantity ≤ returnable
+    2. Validate vendor, source transaction, stock eligibility
+    3. Create/link Purchase Return (update draft if needed)
+    4. Generate Return ID (already on doc)
+    5. Link to original transaction (po_id/grn_id/indent)
+    6. Create/link Existing Logistics transaction (out_dispatches VENDOR_RETURN)
+    7. Pass Vendor as destination, Warehouse as source, material & qty
+    8. Send through Existing Logistics workflow
+    9. Update Return status to DISPATCHED
+    """
+    doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    # Status guard — only draft / pending may be sent
+    if doc.status == ReturnStatus.CANCELLED.value:
+        raise ValidationError("A cancelled return cannot be sent to vendor")
+    if doc.status == ReturnStatus.COMPLETED.value:
+        raise ValidationError("This return is already completed")
+    if doc.status == ReturnStatus.DISPATCHED.value:
+        raise ValidationError("This return has already been dispatched to the vendor")
+
+    # Validate reason
+    valid_reasons = {v for v, _ in s.PURCHASE_RETURN_REASONS}
+    if data.return_reason not in valid_reasons:
+        raise ValidationError(f"Return reason must be one of: {', '.join(sorted(valid_reasons))}")
+    if data.return_reason == "OTHER" and not (data.remarks or "").strip():
+        raise ValidationError("Remarks are required when reason is Other")
+
+    # Bind source if provided
+    if data.grn_id:
+        receipt = await db.get(m.Receipt, data.grn_id)
+        if not receipt:
+            raise ValidationError(f"GRN {data.grn_id} not found")
+        doc.grn_id = receipt.id
+        doc.grn_no = receipt.grn_no
+        if not doc.po_id and receipt.po_id:
+            doc.po_id = receipt.po_id
+            doc.po_no = receipt.po_no
+        if not doc.vendor_id and receipt.vendor_id:
+            doc.vendor_id = receipt.vendor_id
+            doc.vendor_name = receipt.vendor_name
+        if not doc.warehouse_id and receipt.warehouse_id:
+            doc.warehouse_id = receipt.warehouse_id
+            doc.warehouse_name = receipt.warehouse_name
+    if data.po_id:
+        doc.po_id = data.po_id
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO2
+            po = await db.get(_PO2, data.po_id)
+            if po:
+                doc.po_no = po.po_no
+                if not doc.vendor_id:
+                    doc.vendor_id = po.vendor_id
+                    doc.vendor_name = po.vendor_name
+        except Exception:
+            pass
+    if data.vendor_id:
+        vendor = await db.get(Vendor, data.vendor_id)
+        if not vendor:
+            raise ValidationError(f"Vendor {data.vendor_id} not found")
+        doc.vendor_id = vendor.id
+        doc.vendor_name = vendor.name
+    if data.warehouse_id:
+        wh = await db.get(Warehouse, data.warehouse_id)
+        if not wh:
+            raise ValidationError(f"Warehouse {data.warehouse_id} not found")
+        doc.warehouse_id = wh.id
+        doc.warehouse_name = wh.name
+
+    # Final vendor/warehouse validation
+    if not doc.vendor_id:
+        raise ValidationError("Vendor is required — select a purchase transaction to auto-fetch vendor")
+    if not doc.warehouse_id:
+        raise ValidationError("Warehouse is required — select a purchase transaction to auto-fetch warehouse")
+
+    # Validate stock/return eligibility & apply lines with returnable check
+    # Build caps for validation message
+    caps: dict[int | None, Decimal] = {}
+    if doc.grn_id:
+        receipt = await _load(db, m.Receipt, doc.grn_id, "Receipt", m.Receipt.items)
+        caps_by_grn = {l.id: (_d(l.rejected_qty) if _d(l.rejected_qty) > ZERO else _d(l.received_qty)) for l in receipt.items}
+        already = (await db.execute(
+            select(m.PurchaseReturnItem.grn_item_id, func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+            .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+            .where(m.PurchaseReturn.grn_id == doc.grn_id,
+                   m.PurchaseReturn.id != doc.id,
+                   m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                   m.PurchaseReturnItem.grn_item_id.isnot(None))
+            .group_by(m.PurchaseReturnItem.grn_item_id)
+        )).all()
+        for gid, qty in already:
+            caps_by_grn[gid] = max(caps_by_grn.get(gid, ZERO) - _d(qty), ZERO)
+        caps = caps_by_grn
+        # Validate each incoming line against cap
+        for line in data.items:
+            cap = caps.get(line.grn_item_id) if line.grn_item_id else None
+            if cap is not None and _d(line.quantity) > cap:
+                raise ValidationError(
+                    f"Return quantity cannot exceed the available returnable quantity of {cap}.")
+
+    # Also validate requested qty not negative and item exists
+    for idx, line in enumerate(data.items, start=1):
+        if _d(line.quantity) <= ZERO:
+            raise ValidationError(f"Line {idx}: return quantity must be positive")
+        await _item_snapshot(db, line.item_id)
+
+    # Apply lines (also re-checks cap)
+    await _apply_return_lines(db, doc, data.items)
+    doc.reason = data.return_reason
+    # keep remarks in reason field or extra? Use reason column for reason, add audit remarks
+    doc_reason_remarks = data.remarks
+
+    # Create/link Existing Logistics transaction
+    # Use out_dispatches with VENDOR_RETURN type — the Existing Logistics path
+    vendor = await db.get(Vendor, doc.vendor_id)
+    wh = await db.get(Warehouse, doc.warehouse_id)
+    # Build dispatch items from return lines
+    dispatch = m.Dispatch(
+        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value) if hasattr(WarehouseDocType, 'DISPATCH') else f"DISP-{doc.return_no}",
+        dispatch_type=DispatchType.VENDOR_RETURN.value if hasattr(DispatchType, 'VENDOR_RETURN') else "VENDOR_RETURN",
+        dispatch_date=ist_today() if 'ist_today' in globals() else date.today(),
+        warehouse_id=doc.warehouse_id,
+        warehouse_name=wh.name if wh else doc.warehouse_name,
+        vendor_id=doc.vendor_id,
+        vendor_name=vendor.name if vendor else doc.vendor_name,
+        delivery_address=_vendor_address(vendor) if vendor else None,
+        contact_person=vendor.contact_person if vendor and vendor.contact_person else None,
+        contact_phone=vendor.phone if vendor else None,
+        ref_type="PURCHASE_RETURN",
+        ref_id=doc.id,
+        ref_no=doc.return_no,
+        status=DispatchStatus.APPROVED.value,
+        total_items=len(doc.items),
+        total_qty=sum((_d(l.quantity) for l in doc.items), ZERO),
+        total_packages=len(doc.items),
+        total_value=sum((_d(l.amount) for l in doc.items), ZERO),
+        remarks=f"Purchase Return {doc.return_no} → Vendor {vendor.name if vendor else doc.vendor_name} | Reason: {data.return_reason}" + (f" | {doc_reason_remarks}" if doc_reason_remarks else ""),
+        created_by_id=getattr(user, "id", None),
+        created_by_name=_name(user),
+    )
+    db.add(dispatch)
+    await db.flush()
+    # Dispatch items
+    for idx, line in enumerate(doc.items, start=1):
+        batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
+        db.add(m.DispatchItem(
+            dispatch_id=dispatch.id,
+            line_no=idx,
+            item_id=line.item_id,
+            item_code=line.item_code,
+            item_name=line.item_name,
+            uom_code=line.uom_code,
+            batch_id=line.batch_id,
+            batch_no=line.batch_no or (batch.batch_no if batch else None),
+            quantity=_d(line.quantity),
+            rate=_d(line.rate) if line.rate else None,
+            amount=_d(line.amount) if line.amount else None,
+            remarks=line.reason,
+        ))
+    await db.flush()
+
+    # Update return status — Existing Logistics transition
+    before = doc.status
+    doc.status = ReturnStatus.DISPATCHED.value
+    # snapshot dispatch link in reason/remarks or separate audit
+    doc.credit_note_no = doc.credit_note_no  # unchanged
+    # stash dispatch_id in a transient for serializer (or use credit_note_no field? use remarks)
+    doc.dispatch_id = dispatch.id
+    doc.dispatch_no = dispatch.dispatch_no
+
+    await write_audit(db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      before={"status": before},
+                      after={"status": doc.status, "dispatch_no": dispatch.dispatch_no,
+                             "dispatch_id": dispatch.id, "vendor_id": doc.vendor_id,
+                             "total_qty": str(doc.total_qty)},
+                      summary=f"Purchase Return {doc.return_no} sent to vendor {doc.vendor_name} via {dispatch.dispatch_no}")
+
+    # Also audit dispatch
+    await write_audit(db, entity="out_dispatches", entity_id=dispatch.id, entity_no=dispatch.dispatch_no,
+                      action=AuditAction.CREATE, actor=user,
+                      after={"ref_type": "PURCHASE_RETURN", "ref_no": doc.return_no,
+                             "vendor": doc.vendor_name, "warehouse": doc.warehouse_name})
+
+    await db.commit()
+    # Re-load and enrich
+    enriched = await _load(db, m.PurchaseReturn, doc.id, "Return", m.PurchaseReturn.items)
+    await _decorate_purchase_return(db, enriched)
+    # attach dispatch link for serializer
+    enriched.dispatch_id = dispatch.id
+    enriched.dispatch_no = dispatch.dispatch_no
+    # vendor fields already enriched
+    # decorate can_approve as well?
+    return await _decorate_can_approve(db, enriched, WarehouseDocType.PURCHASE_RETURN.value, user)
 
 
 # ---------------------------------------------------------------------------
@@ -12890,12 +13641,20 @@ _ON_THE_ROAD = (
 
 
 def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
-                  received: Decimal, indent_status: str) -> str | None:
+                  received: Decimal, indent_status: str,
+                  on_order: Decimal = ZERO) -> str | None:
     """Plain-English answer to "where is the rest of my stuff".
 
     Read top-down: the nearest place the goods have got to is the honest answer. Derived
     at read time from the issue and dispatch state, never stored, so it cannot go stale
     behind the documents it describes.
+
+    `on_order` is THIS LINE's quantity sitting with procurement, and it is asked before
+    the indent status because the indent status answers for the whole document. An
+    indent whose first line was served off the shelf and whose second went out to be
+    bought is PARTIALLY_FULFILLED, so the status branch below never fired and the
+    bought line was described as sitting "in the warehouse, not yet issued" — the one
+    place it certainly was not.
     """
     if received >= approved:
         return None
@@ -12903,6 +13662,8 @@ def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
         return "On the way to you"
     if issued > dispatched:
         return "Issued, waiting to be dispatched"
+    if on_order > ZERO:
+        return "With procurement"
     if indent_status in (IndentStatus.PENDING_PROCUREMENT.value,
                          IndentStatus.PARTIALLY_ORDERED.value,
                          IndentStatus.ORDERED.value):
@@ -12955,7 +13716,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     Shared by the requester's delivery list and by one indent's fulfilment trail, so the
     two can never disagree about how far an order has got.
     """
-    from app.modules.indents.service import owed_quantity
+    from app.modules.indents.models import IndentItem
+    from app.modules.indents.service import _on_order_by_lines, owed_quantity
 
     if not indents:
         return []
@@ -12993,6 +13755,148 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
 
+    # ------------------------------------------------------------------
+    # Which physical units left for each (indent, item)
+    # ------------------------------------------------------------------
+    # `whs_serial_numbers` is the only per-UNIT record there is, and it carries no
+    # foreign key to the document moving it — the link is `remarks`, a stamp that is
+    # REWRITTEN at every doorway the unit passes through. So the read has to name
+    # every stamp a unit may be wearing right now, and attribute it through the issue
+    # LINE rather than the issue header. Both halves failed silently as "Not recorded"
+    # on a line that plainly had serials:
+    #
+    #   * a consignment credited at its destination re-stamps its units
+    #     `Received by <dispatch_no>` (`_land_units`), so every delivery to an LIP or
+    #     an MDP lost its serials at the moment the goods arrived — which is exactly
+    #     when the requester opens this screen to acknowledge them;
+    #   * a reservation is stamped per LINE (`_issue_line_serial_marker`), not per
+    #     document, so units captured on an approved-but-unposted issue matched none
+    #     of the document-level markers;
+    #   * the issue HEADER names one indent and a consolidated issue serves several
+    #     on its lines, so one indent collected every unit on the issue and the others
+    #     were told nothing had been recorded.
+    issue_line_rows = (await db.execute(
+        select(m.MaterialIssueLine.issue_id, m.MaterialIssueLine.id,
+               m.MaterialIssueLine.item_id, IndentItem.indent_id)
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .join(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+        .where(IndentItem.indent_id.in_(indent_ids),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               ~relayed)
+    )).all()
+
+    # marker -> {item_id: {indent_id, ...}}. A per-line stamp resolves to exactly one
+    # line; the document-level ones are shared by the issue's lines, so the item is
+    # what tells them apart.
+    marker_targets: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+    issue_ids: set[int] = set()
+    for issue_id, line_id, item_id, indent_id in issue_line_rows:
+        issue_ids.add(issue_id)
+        for marker in (*_issue_serial_markers(issue_id),
+                       _issue_line_serial_marker(issue_id, line_id)):
+            marker_targets[marker][item_id].add(indent_id)
+
+    # The consignments carrying those issues. A credited arrival re-stamps the units
+    # with the consignment's number, which is the only trace left of where they came
+    # from — so the dispatch number is a marker like any other.
+    dispatch_rows = (await db.execute(
+        select(m.Dispatch.id, m.Dispatch.dispatch_no, m.MaterialIssue.id)
+        .join(m.MaterialIssue, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .where(m.MaterialIssue.id.in_(issue_ids or {0}),
+               m.Dispatch.status != DispatchStatus.CANCELLED.value)
+    )).all() if issue_ids else []
+    dispatch_ids: list[int] = []
+    for dispatch_id, dispatch_no, issue_id in dispatch_rows:
+        dispatch_ids.append(dispatch_id)
+        source = marker_targets.get(_shipped_unit_marker("issue", issue_id), {})
+        for marker in (_shipped_unit_marker("dispatch", dispatch_id),
+                       f"Received by {dispatch_no}" if dispatch_no else None):
+            if not marker:
+                continue
+            for item_id, indents_for_item in source.items():
+                marker_targets[marker][item_id] |= indents_for_item
+
+    serials_by_indent_item: dict[tuple[int, int], list[str]] = defaultdict(list)
+
+    def _record(indent_id: int, item_id: int, code: str | None) -> None:
+        value = str(code or "").strip()
+        if not value:
+            return
+        bucket = serials_by_indent_item[(indent_id, item_id)]
+        if value not in bucket:
+            bucket.append(value)
+
+    if marker_targets:
+        # Named by whichever identifier the unit actually carries — `serial_number`
+        # alone left an IMEI-tracked handset and an asset-coded unit reading "Not
+        # recorded" while their labels sat one column over. `_unit_keys` is the same
+        # answer the picker gives, so the acknowledgement and the issue speak about a
+        # unit with one name.
+        unit_rows = (await db.execute(
+            select(m.SerialNumber)
+            .where(m.SerialNumber.remarks.in_(list(marker_targets)),
+                   m.SerialNumber.is_active.is_(True))
+            .order_by(m.SerialNumber.id)
+        )).scalars().all()
+        modes: dict[int, str] = {}
+        for row in unit_rows:
+            targets = marker_targets.get(row.remarks or "", {}).get(row.item_id)
+            if not targets:
+                continue
+            if row.item_id not in modes:
+                modes[row.item_id] = _unit_mode(await db.get(Item, row.item_id))
+            keys = _unit_keys(row, modes[row.item_id])
+            code = keys[0] if keys else (row.serial_number or row.asset_code
+                                         or row.consumable_code or row.imei)
+            for indent_id in sorted(targets):
+                _record(indent_id, row.item_id, code)
+
+    # The consignment's own per-unit lines, for a load gated out without an issue
+    # behind it — those units are stamped against the dispatch, never against an issue.
+    if dispatch_ids:
+        dispatch_serial_rows = (await db.execute(
+            select(m.Dispatch.id, m.DispatchItem.item_id, m.DispatchItem.serial_no)
+            .join(m.DispatchItem, m.DispatchItem.dispatch_id == m.Dispatch.id)
+            .where(m.Dispatch.id.in_(dispatch_ids),
+                   m.Dispatch.status.in_(_ON_THE_ROAD),
+                   m.DispatchItem.serial_no.isnot(None))
+            .order_by(m.Dispatch.id, m.DispatchItem.item_id, m.DispatchItem.line_no)
+        )).all()
+        # (dispatch_id, dispatch_no, issue_id) — the issue is what the markers key on.
+        by_dispatch = {row[0]: row[2] for row in dispatch_rows}
+        for dispatch_id, item_id, serial_no in dispatch_serial_rows:
+            issue_id = by_dispatch.get(dispatch_id)
+            targets = (marker_targets
+                       .get(_shipped_unit_marker("issue", issue_id), {})
+                       .get(item_id, set())) if issue_id else set()
+            for indent_id in sorted(targets):
+                _record(indent_id, item_id, serial_no)
+
+    shipments = await _shipments_by_indent(db, indent_ids)
+
+    # What of each line somebody is already BUYING. The indents module owns the
+    # definition of "on order" (`_SETTLED_MR_STATUSES`) and the fulfilment desk's
+    # remainder is netted by the same function — reading it here rather than writing a
+    # second query is what keeps the requester's screen and the desk from disagreeing
+    # about whether a line went out to procurement.
+    on_order_by_line = await _on_order_by_lines(
+        db, [item.id for indent in indents for item in indent.items])
+    item_ids = {item.item_id for indent in indents for item in indent.items}
+    # WHICH identifier the requester is being asked to match, not merely whether one
+    # exists. `is_serial_tracked` alone answered for every item that names its units,
+    # so an IMEI-tracked handset and an asset-coded unit showed no panel at all —
+    # `_tracking_type` is the same served answer the picker uses, and it is asked per
+    # LINE because an item may be asset-coded in the master with nothing coded here.
+    item_rows = {
+        row.id: row
+        for row in (await db.execute(
+            select(Item).where(Item.id.in_(item_ids))
+        )).scalars().all()
+    } if item_ids else {}
+
     shipments = await _shipments_by_indent(db, indent_ids)
 
     out = []
@@ -13003,6 +13907,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             received = _d(item.received_quantity)
             issued = issued_by_line.get(item.id, ZERO)
             dispatched = dispatched_by_line.get(item.id, ZERO)
+            on_order = on_order_by_line.get(item.id, ZERO)
+            line_serials = serials_by_indent_item.get((indent.id, item.item_id), [])
             lines.append({
                 "indent_item_id": item.id,
                 "item_code": item.item_code,
@@ -13012,8 +13918,23 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
                 "received_quantity": float(received),
+                "is_serial_tracked": bool(getattr(
+                    item_rows.get(item.item_id), "is_serial_tracked", False)),
+                # Served, never inferred in a screen (same rule as the issue picker):
+                # a serial, an IMEI, an asset tag and a lot code are fifteen
+                # characters of upper case apiece, and only the item says which one
+                # the labels below are.
+                "tracking_type": _tracking_type(
+                    item_rows.get(item.item_id),
+                    has_units=bool(line_serials),
+                ) if item_rows.get(item.item_id) is not None else TrackingType.NONE.value,
+                "serial_numbers": line_serials,
+                # Served, not inferred: the screen cannot tell a line being bought in
+                # from one waiting on a shelf, and guessing it from the indent status
+                # is exactly what got a procurement line labelled "on the way".
+                "on_order_quantity": float(on_order),
                 "pending_with": _pending_with(approved, issued, dispatched, received,
-                                              indent.status),
+                                              indent.status, on_order),
             })
         out.append({
             "indent_id": indent.id,

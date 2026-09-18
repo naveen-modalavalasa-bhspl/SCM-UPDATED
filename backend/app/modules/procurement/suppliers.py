@@ -27,19 +27,24 @@ alone, exactly as the carrier register is.
 """
 import logging
 
+from pydantic import EmailStr, TypeAdapter
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.procurement.models import VendorUser
+from app.platform.mail import service as mail_service
+from app.platform.mail import template as mail_template
 from app.platform.settings.service import write_audit
-from app.shared.enums import CARRIER_VENDOR_TYPES, AuditAction
+from app.shared.enums import CARRIER_VENDOR_TYPES, AuditAction, MailKind
 from app.shared.models.master import Vendor
 
 logger = logging.getLogger(__name__)
 
 AUDIT_ENTITY = "mst_vendors"
+_EMAIL = TypeAdapter(EmailStr)
 
 #: What the screen offers in its type dropdown. `mst_vendors.vendor_type` is a plain
 #: String(30) defaulting to MATERIAL, so this is a convenience list rather than a
@@ -144,6 +149,95 @@ def _row(vendor: Vendor, account: VendorUser | None) -> dict:
     }
 
 
+def _portal_login_url() -> str:
+    """The supplier-facing frontend route, rooted at this deployment's public app URL."""
+    return f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
+
+
+def _invite_address(raw: str | None, supplier_name: str) -> str:
+    address = (raw or "").strip()
+    if not address:
+        raise ValidationError(
+            f"Add an email address for {supplier_name} before issuing a login.",
+            field="email",
+        )
+    try:
+        return str(_EMAIL.validate_python(address)).lower()
+    except ValueError as exc:
+        raise ValidationError(
+            f"{address!r} is not a valid supplier email address.",
+            field="email",
+        ) from exc
+
+
+def _require_mailbox_for_invite() -> None:
+    if not settings.mail_configured:
+        raise ValidationError(
+            "Mail is not configured, so the supplier invite cannot be sent.")
+
+
+async def _send_login_invite(db: AsyncSession, *, vendor: Vendor,
+                             account: VendorUser, password: str, actor) -> None:
+    """Send the first-login invite through the shared mailbox.
+
+    The account is already created when this runs. A failed send is still raised to
+    the buyer, and the failed mail row keeps the SMTP server's own error in Sent.
+    """
+    address = _invite_address(vendor.email, vendor.name)
+    login_url = _portal_login_url()
+    name = (vendor.contact_person or vendor.name or "Supplier").strip()
+    subject = "Bavya has invited you to SCM ERP"
+    text = (
+        f"Hello {name},\n\n"
+        f"Bavya has invited {vendor.name} to use the SCM ERP supplier portal.\n\n"
+        f"Open the supplier login page:\n{login_url}\n\n"
+        f"Username: {account.username}\n"
+        f"Initial password: {password}\n\n"
+        "You will be asked to change this password before RFQs, purchase orders or "
+        "despatch notes are shown.\n\n"
+        "If you were not expecting this invite, contact the Bavya procurement team.\n\n"
+        "- SCM ERP"
+    )
+    html = mail_template.render(
+        subject=subject,
+        eyebrow="Supplier portal",
+        heading="Bavya has invited you",
+        preheader="Use your username and initial password to open the supplier portal.",
+        blocks=[
+            mail_template.paragraph(f"Hello {name},"),
+            mail_template.paragraph(
+                f"Bavya has invited {vendor.name} to use the SCM ERP supplier "
+                "portal for RFQs, purchase orders and despatch notes."),
+            mail_template.button("Open supplier login", login_url),
+            mail_template.facts([
+                ("Supplier", vendor.name),
+                ("Username", account.username),
+                ("Initial password", password),
+                ("Portal", login_url),
+            ]),
+            mail_template.link_fallback(login_url),
+            mail_template.paragraph(
+                "You will be asked to change this password before RFQs, purchase "
+                "orders or despatch notes are shown.",
+                muted=True,
+            ),
+        ],
+        company=await mail_service._company(db),
+        footer_note="Keep this invite private. It contains first-login credentials.",
+    )
+    await mail_service._log_and_send(
+        db,
+        to_addrs=[address],
+        cc_addrs=None,
+        subject=subject,
+        body=text,
+        html=html,
+        kind=MailKind.VENDOR_LOGIN_INVITE,
+        actor=actor,
+        store_body=False,
+    )
+
+
 # --------------------------------------------------------------------------- #
 #  Read
 # --------------------------------------------------------------------------- #
@@ -224,6 +318,9 @@ async def create_supplier(db: AsyncSession, data, user) -> dict:
     passwords must not be able to make one quotable by accident. The row is created,
     the login can be issued, and approval stays where it always was.
     """
+    if getattr(data, "issue_login", False):
+        _invite_address(data.email, data.name)
+        _require_mailbox_for_invite()
     code = (data.code or "").strip().upper() or await _next_code(db, data.name)
     clash = (await db.execute(
         select(Vendor).where(func.upper(Vendor.code) == code)
@@ -306,18 +403,26 @@ async def deactivate_supplier(db: AsyncSession, vendor_id: int, user) -> dict:
 # vendor login is minted, and it is idempotent: pressing Issue login twice leaves the
 # password the supplier may already have changed exactly as it is.
 #
-# Every emailed default password is forced to change on first sign-in, for suppliers
-# and carriers alike.
+# A supplier KEEPS the forced first change that carriers are excused (see
+# `partners._clear_forced_change`): an RFQ carries prices, so the buyer who typed the
+# default must not stay able to sign in as the vendor and read them.
 
 async def issue_login(db: AsyncSession, vendor_id: int, username: str | None,
                       user) -> dict:
     from app.modules.procurement.schemas import VendorAccountIn
-    from app.modules.procurement.service import ensure_vendor_account
+    from app.modules.procurement.service import (
+        DEFAULT_VENDOR_PASSWORD, ensure_vendor_account,
+    )
 
     vendor = await _supplier(db, vendor_id)
-    await ensure_vendor_account(
+    _invite_address(vendor.email, vendor.name)
+    _require_mailbox_for_invite()
+    account = await ensure_vendor_account(
         db, VendorAccountIn(vendor_id=vendor.id,
                             username=(username or "").strip() or None), user)
+    await _send_login_invite(
+        db, vendor=vendor, account=account, password=DEFAULT_VENDOR_PASSWORD,
+        actor=user)
     logger.info("Issued a portal login for supplier %s", vendor.name)
     return await get_supplier(db, vendor.id)
 

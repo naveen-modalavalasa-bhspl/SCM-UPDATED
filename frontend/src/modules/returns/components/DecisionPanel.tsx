@@ -1,44 +1,66 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle, Gavel } from "lucide-react";
 import {
-  Button, Card, ConfirmModal, ErrorBanner, Field, Input, Select,
+  Button, ConfirmModal, ErrorBanner, Field, Input, Select,
 } from "@/shared/components";
+import { SectionCard } from "./DetailChrome";
 import { returnsApi } from "../api";
-import { DESTRUCTIVE_DISPOSITIONS, money } from "../constants";
-import type { Disposition, DispositionOption } from "../types";
+import { money } from "../constants";
+import { RelatedDocumentsSection } from "./RelatedDocumentsSection";
 
 /**
- * The decision desk — the heart of a field return.
+ * The decision desk: where does this material go, how does it travel, and whose vehicle.
  *
- * Six outcomes, two of which move nothing at all. That is the whole point of the screen:
- * before it existed every approved return moved stock, and refusing to spend freight on
- * material worth less than the freight is a call the business makes constantly.
+ * Every list on this screen is SERVED (`/decision-options`) and none of it is assembled
+ * here — the destinations with their stock, the four standard logistics methods off
+ * logistics' own mode rules, the vehicle arrangements, and the category the resulting
+ * purchase return will be filed under. The reviewer reads the same words the service
+ * stamps on the document, and a mode added to logistics appears here without this file
+ * changing.
  *
- * Everything on it is served by `GET /api/returns/{id}/decision-options` — the labels,
- * the one-line guidance under each button, which outcome the reason pre-selects, which
- * outcome this particular return may not take, the candidate points with how much of the
- * item each already holds, and the value. None of it is assembled here, so the words the
- * decider reads are the words the trail records.
+ * FIX 2026-09-10: the destination starts EMPTY. "Send to a stocking point" moves the
+ * material onto whichever point the reviewer picks — a warehouse, an MDP, any stocking
+ * point — so the screen must not answer that question on their behalf. The originating
+ * warehouse resolved from the paper trail is still served, and still shown: as a named
+ * suggestion under the picker and as an "originating" tag on its own row. It is a hint,
+ * not a selection. (Between 2026-09-08 and this change it was pre-filled and binding
+ * unless the reviewer noticed and switched it; before 2026-09-08 the pre-fill was
+ * `from_warehouse`, the one answer `decide` refuses outright.)
  *
- * The hazard guard greys out Scrap, and `service.decide` refuses it again. Hiding a
- * button was never the control (rule 6) — scrapping something the masters flag as
- * affecting handling is the one outcome that can hurt somebody.
+ * The related documents behind the item are rendered by `RelatedDocumentsSection`, which
+ * is the same component the detail page uses. It was duplicated inline here and the two
+ * copies had already drifted.
  */
 export function DecisionPanel({
   returnId,
   onDone,
+  onDestinationChange,
 }: {
   returnId: number;
   onDone?: () => void;
+  /**
+   * The point the reviewer has just picked, by name, or null when they have cleared the
+   * box. ADDED 2026-09-10 so the document band above this panel can say where the
+   * material is going as it is being decided, rather than going on showing the point the
+   * return was merely ADDRESSED to when it was raised.
+   *
+   * The name, not the id: the band prints a name, and resolving an id back to one there
+   * would need a second copy of `options.destinations` in the page. This panel already
+   * holds the only list, so it answers the question it is the only one able to answer.
+   *
+   * Reported from the picker's own `onChange` and never from an effect — an effect would
+   * have to carry a caller-supplied function in its dependencies, and an inline arrow
+   * from the page re-fires it on every render of the page.
+   */
+  onDestinationChange?: (warehouseName: string | null) => void;
 }) {
   const queryClient = useQueryClient();
 
-  const [choice, setChoice] = useState<Disposition | "">("");
   const [note, setNote] = useState("");
   const [destination, setDestination] = useState("");
-  const [vendor, setVendor] = useState("");
-  const [agency, setAgency] = useState("");
+  const [logisticsMode, setLogisticsMode] = useState("");
+  const [vehicleType, setVehicleType] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,28 +69,46 @@ export function DecisionPanel({
     queryFn: () => returnsApi.decisionOptions(returnId),
   });
 
-  // The reason's default, applied once the options arrive and never again — re-applying
-  // it on every render would undo the decider's own choice as they typed the reason.
+  // Pre-fill from the server's answer, once, and only where the reviewer has not already
+  // typed over it.
+  //
+  // CHANGED 2026-09-10: "How does it travel?" and "Whose vehicle?" are no longer ASKED
+  // here — the two pickers are gone from the form. The state and the effect stay because
+  // the shipment raised on confirm still needs a mode and a vehicle arrangement on it, and
+  // the server already names the right ones (`default_logistics_mode`,
+  // `default_vehicle_type`). So the decision posts exactly what it posted before for a
+  // desk that left the defaults alone, which was nearly every one of them; the logistics
+  // desk changes the leg on Logistics > Shipments, which is where it owns it.
+  //
+  // FIX 2026-09-10: the DESTINATION is deliberately not among them. The service still
+  // flags a row with `is_default` and still names `originating_warehouse_id`, and both
+  // are still read below — but only to describe the suggestion, never to select it. The
+  // reviewer picks the stocking point themselves, and `ready` keeps the button disabled
+  // until they have.
   useEffect(() => {
-    if (!options || choice) return;
-    if (options.default_disposition) setChoice(options.default_disposition);
-    const preferred = options.destinations.find((row) => row.is_default);
-    if (preferred) setDestination(String(preferred.warehouse_id));
-  }, [options]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!options) return;
+    setLogisticsMode((current) => current || options.default_logistics_mode || "");
+    setVehicleType((current) => current || options.default_vehicle_type || "");
+  }, [options]);
 
-  const selected: DispositionOption | undefined = useMemo(
-    () => options?.dispositions.find((row) => row.value === choice),
-    [options, choice],
-  );
+  /**
+   * The desk sends returned material back up the chain to a stocking point. The other
+   * five outcomes — vendor, branch use, scrap, controlled disposal, refusal — are not
+   * reachable from this panel and are pressed from the detail page's own actions; this
+   * screen exists for the one decision that ends in a dispatch.
+   */
+  const DISPOSITION = "SEND_TO_POINT" as const;
 
   const decide = useMutation({
     mutationFn: () =>
       returnsApi.decide(returnId, {
-        disposition: choice as Disposition,
+        disposition: DISPOSITION,
         note: note.trim(),
-        to_warehouse_id: selected?.needs_destination ? Number(destination) : null,
-        vendor_id: selected?.needs_vendor ? Number(vendor) : null,
-        disposal_agency: selected?.needs_agency ? agency.trim() : null,
+        to_warehouse_id: Number(destination) || null,
+        vendor_id: null,
+        disposal_agency: null,
+        logistics_mode: logisticsMode || null,
+        vehicle_type: vehicleType || null,
       }),
     onSuccess: () => {
       setError(null);
@@ -85,173 +125,130 @@ export function DecisionPanel({
   if (isLoading) return <p className="p-4 text-sm text-muted">Loading the desk…</p>;
   if (!options) return <ErrorBanner error="The decision options could not be loaded." />;
 
-  const ready =
-    Boolean(selected) &&
-    !selected!.is_blocked &&
-    note.trim().length > 0 &&
-    (!selected!.needs_destination || Boolean(destination)) &&
-    (!selected!.needs_vendor || Boolean(vendor)) &&
-    (!selected!.needs_agency || agency.trim().length > 0);
+  const ready = note.trim().length > 0 && Boolean(destination);
+  const chosen = options.destinations.find(
+    (row) => String(row.warehouse_id) === destination,
+  );
+
+  // FIX 2026-09-10: the originating point is described, not selected. It is worded as a
+  // suggestion, and worded differently when no document actually named it, so a guess
+  // reads as a guess on the screen the way it does in the payload.
+  const suggested = options.originating_warehouse_name;
+  const destinationHint = !suggested
+    ? "Pick the stocking point this material goes on to."
+    : options.originating_is_resolved && options.originating_source_doc
+      ? `Suggestion: ${suggested}, the point this came from, per ${options.originating_source_doc}. Nothing is chosen until you pick it.`
+      : `No issue or GRN names an originating point. ${suggested} is only where the return was addressed — a hint, not a choice.`;
 
   return (
-    <Card className="p-4">
-      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-display text-lg font-bold text-ink">Where does this go?</h2>
-        <span className="text-sm text-muted">
-          {/* An em dash, never ₹0: the freight-versus-value call is made against this
-            * number, and every valuation column is empty across the live data. */}
-          Worth {money(options.value)}
-        </span>
-      </div>
-      <p className="mb-4 text-sm text-muted">
-        {options.intent_label ?? "—"} · pick one and say why. The floor reads your reason.
-      </p>
+    <div className="space-y-4">
+      <RelatedDocumentsSection returnId={returnId} />
 
-      {options.hazard_features.length > 0 && (
-        <div className="mb-4 flex items-start gap-2 rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>
-            This material is flagged <strong>{options.hazard_features.join(", ")}</strong>.
-            It cannot be scrapped at a branch — use controlled disposal.
-          </span>
-        </div>
-      )}
+      <SectionCard
+        tone="action"
+        icon={<Gavel className="h-4 w-4" />}
+        title="Where does this go?"
+        subtitle={`${options.intent_label ?? "—"} · check the documents above, choose the stocking point it goes to, then send it to dispatch.`}
+        aside={<span className="text-sm text-muted">Worth {money(options.value)}</span>}
+      >
+        {options.hazard_features.length > 0 && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              This material is flagged <strong>{options.hazard_features.join(", ")}</strong>.
+              It cannot be scrapped at a branch — use controlled disposal.
+            </span>
+          </div>
+        )}
 
-      {error && <ErrorBanner error={error} />}
+        {error && <ErrorBanner error={error} />}
 
-      <div className="space-y-2" role="radiogroup" aria-label="What happens to the stock">
-        {options.dispositions.map((option) => {
-          const active = option.value === choice;
-          const destructive = DESTRUCTIVE_DISPOSITIONS.includes(option.value);
-          return (
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              disabled={option.is_blocked}
-              onClick={() => setChoice(option.value)}
-              className={`w-full rounded-xl border p-3 text-left transition-colors ${
-                option.is_blocked
-                  ? "cursor-not-allowed border-line bg-content2 opacity-60"
-                  : active
-                    ? destructive
-                      ? "border-bad bg-bad-bg"
-                      : "border-brand bg-brand/10"
-                    : "border-line hover:bg-content2"
-              }`}
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Field
+              label="Which stocking point does it go to?"
+              hint={destinationHint}
             >
-              <div className="flex items-center justify-between gap-2">
-                <span
-                  className={`text-sm font-semibold ${
-                    active ? (destructive ? "text-bad" : "text-brand") : "text-ink"
-                  }`}
-                >
-                  {option.label}
-                </span>
-                <span className="flex items-center gap-2">
-                  {option.is_default && !active && (
-                    <span className="rounded-full bg-content2 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                      Suggested
-                    </span>
-                  )}
-                  {!option.moves_stock && (
-                    <span className="rounded-full bg-content2 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                      Nothing moves
-                    </span>
-                  )}
-                  {active && <Check className="h-4 w-4 text-brand" />}
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-muted">
-                {option.is_blocked ? option.blocked_reason : option.hint}
-              </p>
-            </button>
-          );
-        })}
-      </div>
+              <Select
+                value={destination}
+                onChange={(value) => {
+                  setDestination(value);
+                  onDestinationChange?.(
+                    options.destinations.find(
+                      (row) => String(row.warehouse_id) === value,
+                    )?.warehouse_name ?? null,
+                  );
+                }}
+                options={options.destinations.map((row) => ({
+                  value: String(row.warehouse_id),
+                  label: [
+                    row.warehouse_name ?? row.warehouse_code ?? "—",
+                    row.tier_label,
+                    `holds ${Number(row.on_hand ?? 0).toLocaleString()}`,
+                    row.is_originating ? "originating" : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · "),
+                }))}
+                placeholder="Which stocking point?"
+                ariaLabel="Which stocking point"
+              />
+            </Field>
+            <Field
+              label="Where it is now"
+              hint="Where the stock physically stands. It cannot go back to this point."
+            >
+              <Input
+                value={options.current_warehouse_name ?? "—"}
+                readOnly
+                aria-label="Current warehouse"
+              />
+            </Field>
+          </div>
 
-      <div className="mt-4 space-y-4">
-        {selected?.needs_destination && (
-          <Field
-            label="Send it to"
-            hint="Whoever holds least of it is listed first — that is who needs it most."
-          >
-            <Select
-              value={destination}
-              onChange={setDestination}
-              options={options.destinations.map((row) => ({
-                value: String(row.warehouse_id),
-                label: `${row.warehouse_name ?? row.warehouse_code ?? "—"}${
-                  row.tier_label ? ` · ${row.tier_label}` : ""
-                } · holds ${Number(row.on_hand ?? 0).toLocaleString()}`,
-              }))}
-              placeholder="Which stocking point?"
-              ariaLabel="Destination stocking point"
-            />
-          </Field>
-        )}
-
-        {selected?.needs_vendor && (
-          <Field label="Vendor" hint="Whoever is liable — under warranty, or the recall.">
-            <Select
-              value={vendor}
-              onChange={setVendor}
-              options={options.vendors.map((row) => ({
-                value: String(row.id),
-                label: `${row.name ?? "—"}${row.code ? ` · ${row.code}` : ""}`,
-              }))}
-              placeholder="Which vendor?"
-              ariaLabel="Vendor the stock goes back to"
-            />
-          </Field>
-        )}
-
-        {selected?.needs_agency && (
-          <Field
-            label="Disposal agency"
-            hint="Licensed agency. The certificate has to be on file before this closes."
-          >
+          <Field label="Why" hint="Mandatory — the floor reads it.">
             <Input
-              value={agency}
-              onChange={(event) => setAgency(event.target.value)}
-              placeholder="Who is carrying out the disposal?"
-              aria-label="Disposal agency"
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              isInvalid={note.trim().length === 0}
+              placeholder="In your own words"
+              aria-label="Reason for the decision"
             />
           </Field>
-        )}
 
-        <Field label="Why" hint="Mandatory — the floor is about to read it.">
-          <Input
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            isInvalid={note.trim().length === 0}
-            placeholder="In your own words"
-            aria-label="Reason for the decision"
+          <div className="rounded-lg bg-content2 p-3 text-xs text-muted">
+            On confirm, a shipment draft is raised in Logistics and goes straight to
+            Dispatch — there is no consignment step. When the vehicle leaves, the
+            warehouse's own document is raised automatically, filed as{" "}
+            <strong className="text-ink">
+              {options.purchase_return_category_label ?? "—"}
+            </strong>
+            {options.qc_rejected_tag ? " and tagged QC rejected after GRN" : ""}. The
+            purchase return against it is raised when the receiving warehouse
+            acknowledges what arrived.
+          </div>
+
+          <Button disabled={!ready || decide.isPending} onClick={() => setConfirming(true)}>
+            {decide.isPending ? "Sending…" : "Send to dispatch"}
+          </Button>
+        </div>
+
+        {confirming && (
+          <ConfirmModal
+            isOpen
+            busy={decide.isPending}
+            title="Send to dispatch?"
+            message={
+              `This return goes to ${chosen?.warehouse_name ?? "the selected point"}. ` +
+              "A shipment draft is raised in Logistics and goes straight to Dispatch — " +
+              "no consignment step."
+            }
+            confirmLabel="Send to dispatch"
+            onConfirm={() => decide.mutate()}
+            onClose={() => setConfirming(false)}
           />
-        </Field>
-
-        <Button disabled={!ready || decide.isPending} onClick={() => setConfirming(true)}>
-          {decide.isPending ? "Recording…" : "Record decision"}
-        </Button>
-      </div>
-
-      {confirming && selected && (
-        <ConfirmModal
-          isOpen
-          danger={DESTRUCTIVE_DISPOSITIONS.includes(selected.value)}
-          busy={decide.isPending}
-          title={`${selected.label}?`}
-          message={
-            selected.moves_stock
-              ? `${selected.hint} Your reason goes to the floor, who either carries it out or sends it back to you.`
-              : `${selected.hint} The hold on the stock is released and nothing is shipped.`
-          }
-          confirmLabel="Record decision"
-          onConfirm={() => decide.mutate()}
-          onClose={() => setConfirming(false)}
-        />
-      )}
-    </Card>
+        )}
+      </SectionCard>
+    </div>
   );
 }

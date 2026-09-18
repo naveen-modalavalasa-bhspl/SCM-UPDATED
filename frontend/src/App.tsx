@@ -139,6 +139,7 @@ const RequisitionListPage = lazy(() => import("@/modules/procurement/pages/Requi
 const ResetPasswordPage = lazy(() => import("@/pages/PasswordResetPages").then((m) => ({ default: m.ResetPasswordPage })));
 const ReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnDetailPage })));
 const ReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnFormPage })));
+const ReturnJourneyPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnJourneyPage })));
 const ReturnsListPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsListPage })));
 const ReturnsOverviewPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsOverviewPage })));
 const RulesPage = lazy(() => import("@/modules/admin/pages/RulesPage").then((m) => ({ default: m.RulesPage })));
@@ -500,12 +501,14 @@ function AppRoutes() {
         {/* The two desks. One component, the queue read off the path. */}
         <Route path="returns/decisions" element={<DecisionQueuePage />} />
         <Route path="returns/sign-off" element={<DecisionQueuePage />} />
+        <Route path="returns/logistics" element={<DecisionQueuePage />} />
         {/* Read only — pro_returns is the warehouse module's table. */}
         <Route path="returns/purchase" element={<PurchaseReturnsPage />} />
         <Route path="returns/new" element={<ReturnFormPage />} />
         <Route path="returns/settings/receiving" element={<ReceivingConfigPage />} />
         <Route path="returns/:id" element={<ReturnDetailPage />} />
         <Route path="returns/:id/edit" element={<ReturnFormPage />} />
+        <Route path="returns/:id/journey" element={<ReturnJourneyPage />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
         <Route path="inventory/stock-balance" element={<StockBalanceView />} />
         <Route path="inventory/ledger" element={<StockLedgerView />} />
