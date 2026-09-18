@@ -40,6 +40,7 @@ import { ToastProvider, AppSplash } from "@/shared/components";
 // Named exports need the `.then(m => ({ default: m.X }))` shim because `lazy` resolves
 // a module whose DEFAULT export is the component, and most pages here are named.
 // ---------------------------------------------------------------------------
+const AcknowledgementDetailPage = lazy(() => import("@/modules/indents/pages/AcknowledgementDetailPage"));
 const AcknowledgementsPage = lazy(() => import("@/modules/indents/pages/AcknowledgementsPage"));
 const ActivityEventPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.ActivityEventPage })));
 const AdminPage = lazy(() => import("@/modules/admin/pages/AdminPage").then((m) => ({ default: m.AdminPage })));
@@ -355,6 +356,11 @@ function AppRoutes() {
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
         <Route path="indents/acknowledgements" element={<AcknowledgementsPage />} />
+        {/* Confirming one delivery is a screen, not a box over the list: a quantity per
+            line, the tracking trail, the photo and the damage report. No rbac_pages row
+            of its own — it is the list's detail, and the list's grant is what opens it. */}
+        <Route path="indents/acknowledgements/:indentId"
+               element={<AcknowledgementDetailPage />} />
         {/* The two addresses this screen used to answer on. `/indents/deliveries` was
             its own route; `/indents/acknowledgments` belonged to a duplicate page that
             was deleted while its rbac_pages row stayed active, so the rail advertised

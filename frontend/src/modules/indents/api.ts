@@ -303,6 +303,21 @@ export const indentApi = {
       .then((r) => r.data);
   },
 
+  /**
+   * The bytes of one receipt photo or bill.
+   *
+   * Nested under the indent because that is the only route the backend gates on this
+   * module's own visibility check — an attachment id on its own is a key to the whole
+   * store, which is the door `attachments.delete_attachment` was closed against.
+   */
+  downloadReceiptAttachment: (indentId: number, attachmentId: number) =>
+    api
+      .get<Blob>(
+        `/api/indents/${indentId}/receipt-attachments/${attachmentId}/download`,
+        { responseType: "blob" },
+      )
+      .then((r) => r.data),
+
   deleteReceiptAttachment: (attachmentId: number) =>
     api.delete<void>(`/api/indents/receipt-attachments/${attachmentId}`).then((r) => r.data),
 };
