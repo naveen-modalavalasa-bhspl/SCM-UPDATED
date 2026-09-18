@@ -445,14 +445,6 @@ function ReceiptHero({
       ? "The consignment trail fills in as the warehouse issues and dispatches. The count unlocks the moment goods leave for you."
       : "Everything sent to you has been acknowledged. The proof filed against the receipt is kept below.";
 
-  const nextAction = !anythingToConfirm
-    ? "Receipt is closed"
-    : photos <= 0
-      ? "Attach delivery photo"
-      : !entered
-        ? "Count arrived items"
-        : "Ready to acknowledge";
-
   const steps: Step[] = [
     {
       id: "delivery",
@@ -541,47 +533,7 @@ function ReceiptHero({
             <ReceiptMeter totals={totals} />
           </div>
 
-          <div className="border-t border-line/70 bg-content2/35 p-4 lg:border-l lg:border-t-0">
-            <div className="mb-3 rounded-xl border border-line bg-content1 p-3 shadow-sm">
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">
-                Next action
-              </div>
-              <div className="mt-1 flex items-center gap-2 text-sm font-semibold text-ink">
-                <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${
-                  !anythingToConfirm || (entered && photos > 0)
-                    ? "bg-ok-bg text-ok"
-                    : "bg-brand-050 text-brand"
-                }`}
-                >
-                  {!anythingToConfirm || (entered && photos > 0)
-                    ? <CheckCircle2 className="h-4 w-4" />
-                    : <ScanBarcode className="h-4 w-4" />}
-                </span>
-                <span className="min-w-0 truncate">{nextAction}</span>
-              </div>
-            </div>
-
-            <div className="mb-3 grid gap-2">
-              <HeroGate
-                icon={Truck}
-                label="Consignment opened"
-                met={!nothingSentYet}
-                detail={consignments === 1 ? "1 leg available" : `${consignments} legs available`}
-              />
-              <HeroGate
-                icon={ClipboardCheck}
-                label="Photo proof"
-                met={photos > 0}
-                detail={photos > 0 ? `${photos} filed` : "Required before submit"}
-              />
-              <HeroGate
-                icon={Boxes}
-                label="Arrived quantity"
-                met={entered || !anythingToConfirm}
-                detail={entered ? `${qty(totals.entering)} counted` : "Waiting for count"}
-              />
-            </div>
-
+          <div className="border-t border-line/70 p-4 lg:border-l lg:border-t-0">
             <div className="grid grid-cols-3 gap-2">
               <HeroMetric label="Legs" value={consignments} icon={Truck} />
               <HeroMetric label="Items" value={row.lines.length} icon={Boxes} />
@@ -682,30 +634,6 @@ function HeroMetric({ label, value, icon: Icon, tone }: {
         {value}
       </div>
       <div className="mt-1 truncate text-[10px] font-medium text-muted">{label}</div>
-    </div>
-  );
-}
-
-function HeroGate({ icon: Icon, label, met, detail }: {
-  icon: typeof Truck;
-  label: string;
-  met: boolean;
-  detail: string;
-}) {
-  return (
-    <div className={`flex items-center gap-2 rounded-xl border px-2.5 py-2 ${
-      met ? "border-ok/25 bg-ok-bg/50" : "border-line bg-content1"
-    }`}
-    >
-      <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${
-        met ? "bg-ok text-white" : "bg-brand-050 text-brand"}`}
-      >
-        {met ? <CheckCircle2 className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-semibold text-ink">{label}</span>
-        <span className="block truncate text-[10px] text-muted">{detail}</span>
-      </span>
     </div>
   );
 }
@@ -1158,7 +1086,6 @@ function ProofPanel({
   required: boolean;
 }) {
   const [dragging, setDragging] = useState(false);
-  const missingPhoto = required && photos.length === 0;
   // A dropped file carries no category, so it is read off the file itself: a picture
   // is what the goods looked like, anything else is paperwork that came with them.
   const drop = (files: FileList | null) => {
@@ -1167,13 +1094,13 @@ function ProofPanel({
   };
 
   return (
-    <Card className={`overflow-hidden p-0 ${missingPhoto ? "ring-1 ring-bad/25" : ""}`}>
+    <Card className="overflow-hidden p-0">
       <SectionHead
         id="proof"
         icon={ClipboardCheck}
         title="Proof of receipt"
         hint="What the goods looked like, and any bill that came with them."
-        right={missingPhoto ? (
+        right={required && photos.length === 0 ? (
           <span className="rounded-full bg-bad-bg px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-bad">
             Photo required
           </span>
@@ -1192,9 +1119,7 @@ function ProofPanel({
           className={`rounded-xl border-2 border-dashed px-3 py-5 text-center transition ${
             dragging
               ? "border-brand bg-brand-050"
-              : missingPhoto
-                ? "border-bad/35 bg-bad-bg/40"
-                : "border-line bg-content2/50"}`}
+              : "border-line bg-content2/50"}`}
         >
           <span className="mx-auto mb-2 grid h-10 w-10 place-items-center rounded-xl bg-content1 text-brand shadow-sm">
             {uploadPending
@@ -1353,19 +1278,9 @@ function ActionBar({
 }) {
   const jump = (id: string) =>
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
-  const readiness = !anythingToConfirm ? 100
-    : ((entered ? 1 : 0) + (hasPhoto ? 1 : 0)) * 50;
 
   return (
-    <div className="sticky bottom-0 z-20 border-t border-line bg-chrome-strong px-2 py-2.5 shadow-[0_-10px_30px_-24px_var(--color-ink)] backdrop-blur sm:px-3">
-      {anythingToConfirm && (
-        <div className="mb-2 h-1 overflow-hidden rounded-full bg-content3">
-          <div
-            className="h-full bg-brand transition-[width] duration-300 ease-out"
-            style={{ width: `${readiness}%` }}
-          />
-        </div>
-      )}
+    <div className="sticky bottom-0 z-20 border-t border-line bg-chrome-strong px-2 py-2.5 backdrop-blur sm:px-3">
       <div className="flex flex-wrap items-center gap-2">
         {anythingToConfirm && (
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
