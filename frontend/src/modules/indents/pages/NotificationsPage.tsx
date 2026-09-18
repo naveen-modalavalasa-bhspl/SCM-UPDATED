@@ -34,6 +34,7 @@ import {
   type NotificationsTab,
 } from "../context/NotificationsUrlState";
 import { formatIndentDateTime } from "../dateTime";
+import { pendingApprovalTargetFromMessage } from "../displayFormat";
 import { useIndentNotificationReads } from "../notificationReads";
 import type { IndentNotification } from "../types";
 import { NOTIFICATION_SUBNAV_PASTEL, TONE_BLUE } from "../buttonTones";
@@ -305,7 +306,10 @@ function IndentNotificationsContent({
                             <span className={`text-sm ${isRead ? "font-medium text-body" : "font-semibold text-ink"}`}>
                               {note.title}
                             </span>
-                            <IndentSummaryStatusBadge status={note.status} />
+                            <IndentSummaryStatusBadge
+                              status={note.status}
+                              currentApproverName={pendingApprovalTargetFromMessage(note.message)}
+                            />
                           </div>
                           <p className="mt-1 text-sm text-body">{note.message}</p>
                           <p className="mt-1 text-xs text-muted">

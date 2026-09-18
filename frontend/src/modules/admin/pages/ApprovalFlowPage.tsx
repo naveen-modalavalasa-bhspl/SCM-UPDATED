@@ -5,7 +5,7 @@
  *  modal's confirm.
  */
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Users } from "lucide-react";
 
@@ -15,23 +15,33 @@ import type { FlowRow } from "../types";
 import { PostsDrawer } from "../components/PostsDrawer";
 import { JourneyPanel } from "../components/JourneyPanel";
 
-/** The project picked here is remembered across visits. An admin configures one
- *  project's chains document by document, and coming back to "All projects" after every
- *  save meant re-picking it a dozen times in a row. */
-const PROJECT_KEY = "approval-flow.project";
+/** The project lives in the URL, NEVER in `localStorage`.
+ *
+ *  It decides what the screen says — a ladder is configured per project per document
+ *  type (rule 8) — so remembering it per browser meant two people on one deployment
+ *  reading different answers to "who signs a purchase return", with nothing on screen
+ *  saying why. `localStorage` is per origin and per browser profile, so the same admin
+ *  on `localhost:5173` and on `10.2.1.30:5173` is two different memories.
+ *
+ *  The URL keeps what the remembered value was there for: the chain editor is opened
+ *  with `?project=` already, and its `navigate(-1)` lands back on this URL, so
+ *  configuring one project document by document still never returns to "All projects".
+ *  And the link an admin sends a colleague now shows them the same screen. */
 
 export function ApprovalFlowPage() {
   const navigate = useNavigate();
-  const [projectId, setProjectId] = useState<number | null>(() => {
-    const saved = localStorage.getItem(PROJECT_KEY);
-    return saved ? Number(saved) : null;
-  });
+  const [params, setParams] = useSearchParams();
+  const raw = Number(params.get("project"));
+  const projectId = Number.isInteger(raw) && raw > 0 ? raw : null;
   const [showPosts, setShowPosts] = useState(false);
 
   function pickProject(next: number | null) {
-    setProjectId(next);
-    if (next == null) localStorage.removeItem(PROJECT_KEY);
-    else localStorage.setItem(PROJECT_KEY, String(next));
+    const nextParams = new URLSearchParams(params);
+    if (next == null) nextParams.delete("project");
+    else nextParams.set("project", String(next));
+    // `replace`: picking a project refines this view rather than making a place to come
+    // back to, or leaving the screen would cost one Back press per project tried.
+    setParams(nextParams, { replace: true });
   }
 
   const options = useQuery({

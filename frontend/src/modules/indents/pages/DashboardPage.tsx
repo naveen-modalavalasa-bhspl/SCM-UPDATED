@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   CalendarDays, CheckCircle2, ChevronRight, Clock, FileText, Package,
-  Percent, PencilLine, XCircle,
+  PackageCheck, PackageOpen, Percent, PencilLine, XCircle,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Card } from "@/shared/components";
@@ -24,7 +24,7 @@ import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterC
 import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 
 /* ---------------------------------------------------------------------------
- * The Overview answers two questions only: what needs MY action (the four
+ * The Overview answers two questions only: what needs MY action (the
  * queue tiles, each opening its own pre-filtered worklist), and how is the
  * pipeline shaped right now (context strip + status breakdown). Everything
  * else is decoration and was removed.
@@ -33,12 +33,15 @@ import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
  * same /indents list, whose rows and actions stay gated exactly as before.
  * ------------------------------------------------------------------------- */
 
+type DashboardStats = Awaited<ReturnType<typeof indentApi.stats>>;
+
 interface Queue {
-  key: keyof Awaited<ReturnType<typeof indentApi.stats>>;
+  key: string;
   label: string;
   icon: ReactNode;
   /** Chip tint = the urgency colour the rest of the app already uses. */
   chip: string;
+  value: (stats: DashboardStats | undefined) => number | undefined;
   /** Pre-filtered worklist the tile opens. Empty → opens the unfiltered list. */
   statuses?: string[];
 }
@@ -49,6 +52,7 @@ const QUEUES: Queue[] = [
     label: "Awaiting approval",
     icon: <Clock className="h-5 w-5" />,
     chip: "bg-warn-bg text-warn",
+    value: (stats) => stats?.awaiting_approval,
     statuses: ["PENDING_APPROVAL", "RETURNED_FOR_CORRECTION"],
   },
   {
@@ -56,13 +60,24 @@ const QUEUES: Queue[] = [
     label: "Approved active",
     icon: <CheckCircle2 className="h-5 w-5" />,
     chip: "bg-ok-bg text-ok",
-    statuses: ["AWAITING_ALLOCATION", "ALLOCATED", "PARTIALLY_FULFILLED"],
+    value: (stats) => (
+      stats ? stats.approved_active - (stats.by_status?.PARTIALLY_FULFILLED ?? 0) : undefined
+    ),
+    statuses: [
+      "APPROVED",
+      "AWAITING_ALLOCATION",
+      "ALLOCATED",
+      "PENDING_PROCUREMENT",
+      "PARTIALLY_ORDERED",
+      "ORDERED",
+    ],
   },
   {
     key: "draft",
     label: "In draft",
     icon: <PencilLine className="h-5 w-5" />,
     chip: "bg-neutral-bg text-neutral",
+    value: (stats) => stats?.draft,
     statuses: ["DRAFT"],
   },
   {
@@ -70,7 +85,24 @@ const QUEUES: Queue[] = [
     label: "Rejected",
     icon: <XCircle className="h-5 w-5" />,
     chip: "bg-bad-bg text-bad",
+    value: (stats) => stats?.rejected,
     statuses: ["REJECTED"],
+  },
+  {
+    key: "partially_fulfilled",
+    label: "Partially fulfilled",
+    icon: <PackageOpen className="h-5 w-5" />,
+    chip: "bg-brand-050 text-brand",
+    value: (stats) => stats?.by_status?.PARTIALLY_FULFILLED,
+    statuses: ["PARTIALLY_FULFILLED"],
+  },
+  {
+    key: "fulfilled",
+    label: "Fulfilled",
+    icon: <PackageCheck className="h-5 w-5" />,
+    chip: "bg-brand-050 text-brand",
+    value: (stats) => stats?.by_status?.CLOSED,
+    statuses: ["CLOSED"],
   },
 ];
 
@@ -229,7 +261,7 @@ function IndentDashboardContent() {
           <QueueTile
             key={queue.key}
             queue={queue}
-            value={stats?.[queue.key] as number | undefined}
+            value={queue.value(stats)}
             onOpen={openQueue}
           />
         ))}
@@ -304,7 +336,10 @@ function IndentDashboardContent() {
                   <span className="mono block truncate text-sm font-semibold text-ink">{indent.indent_no}</span>
                   <span className="block truncate text-xs text-muted">{indent.requested_by_name || indent.department_name || "Unknown"}</span>
                 </span>
-                <IndentSummaryStatusBadge status={indent.status} />
+                <IndentSummaryStatusBadge
+                  status={indent.status}
+                  currentApproverName={indent.current_approver_name}
+                />
               </button>
             ))}
             {!recentLoading && recent?.items.length === 0 && (

@@ -187,13 +187,13 @@ function IndentListContent({
     {
       key: "dept",
       header: "Department",
-      className: "w-[30%] overflow-hidden px-4 text-left align-middle lg:w-[16%]",
+      className: "w-[26%] overflow-hidden px-4 text-left align-middle lg:w-[14%]",
       render: (row) => <span className="block truncate">{row.department_name ?? "-"}</span>,
     },
     {
       key: "region",
       header: "Region",
-      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[16%]",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[15%]",
       hideOnNarrow: true,
       render: (row) => (
         <span className="block truncate" title={row.region_name ?? undefined}>
@@ -210,13 +210,18 @@ function IndentListContent({
     {
       key: "status",
       header: "Status",
-      className: "w-[32%] px-4 text-left align-middle lg:w-[16%]",
-      render: (row) => <IndentSummaryStatusBadge status={row.status} />,
+      className: "w-[36%] min-w-0 px-4 text-left align-middle lg:w-[19%]",
+      render: (row) => (
+        <IndentSummaryStatusBadge
+          status={row.status}
+          currentApproverName={row.current_approver_name}
+        />
+      ),
     },
     {
       key: "date",
       header: "Raised",
-      className: "w-0 px-4 text-left align-middle lg:w-[12%]",
+      className: "w-0 px-4 text-left align-middle lg:w-[10%]",
       hideOnNarrow: true,
       render: (row) => <span className="whitespace-nowrap text-muted">{formatIndentShortDate(row.created_at)}</span>,
     },
@@ -319,7 +324,10 @@ function IndentListContent({
                           {row.region_name ? ` · ${row.region_name}` : ""}
                         </span>
                       </span>
-                      <IndentSummaryStatusBadge status={row.status} />
+                      <IndentSummaryStatusBadge
+                        status={row.status}
+                        currentApproverName={row.current_approver_name}
+                      />
                     </div>
                     <div className="flex items-center justify-between gap-3 text-sm text-muted">
                       <span>{row.requested_by_name ?? "-"}</span>
