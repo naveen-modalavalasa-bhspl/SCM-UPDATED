@@ -24,6 +24,9 @@ export interface MasterItem {
   item_sub_class_id?: number | null;
   item_sub_class_code?: string | null;
   item_sub_class_name?: string | null;
+  /** HCM department responsible for item-related work and ticket routing. */
+  owner_department_id?: number | null;
+  owner_department_name?: string | null;
   item_type?: string | null;
   hsn_id?: number | null;
   hsn_code?: string | null;

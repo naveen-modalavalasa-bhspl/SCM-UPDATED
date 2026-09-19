@@ -16,8 +16,11 @@ from app.core.exceptions import ValidationError
 from app.modules.returns import router as returns_router
 from app.modules.returns import service
 from app.modules.returns.enums import (
-    AWAITING_ACK, CLOSED, EDITABLE, HOLDING_STOCK, PHASES, PHASES_APPROVAL_FIRST,
-    REASON_LABELS, SELECTABLE_REASONS, ReturnDocType, ReturnReason, ReturnStatus,
+    AWAITING_ACK, CHAPTER_BY_DOC_TYPE, CLOSED, EDITABLE, HOLDING_STOCK, PHASES,
+    PHASES_APPROVAL_FIRST,
+    PURCHASE_RETURN_SOURCE_LABELS, REASON_LABELS, SELECTABLE_REASONS, TRAIL_CHAPTERS,
+    TRAIL_LABELS,
+    TRAIL_ORDER, ReturnDocType, ReturnReason, ReturnStatus, TrailDocType,
 )
 from app.modules.returns.schemas import DecisionIn, ReturnLineIn, ReturnWrite
 
@@ -964,3 +967,365 @@ class TestTheTrip:
                           logistics_mode="HELICOPTER")
         assert body.logistics_mode == "HELICOPTER"
         assert body.logistics_mode not in service.LOGISTICS_MODES
+
+class TestTheWholeTrail:
+    """Every document the material touched, in the order the work happened.
+
+    ADDED 2026-09-12. The section resolved five kinds of document and the desk was told
+    that was the trail. It was not: an indent served from stock raises an ALLOCATION and
+    never a PO, so the commonest return in the system showed three rows and stopped, and
+    a dispatched issue named neither the CONSIGNMENT it left on nor the SHIPMENT that
+    carried it. These pin the two things that fail silently — a document type that
+    resolves but never reaches the screen, and rows arriving in the order the queries
+    happened to run rather than in the order the material moved.
+
+    No database: `_chain_documents` is a pure function over an already-resolved chain,
+    which is the half that decides what a reviewer sees.
+    """
+
+    @staticmethod
+    def _sto():
+        return SimpleNamespace(from_warehouse_id=30, from_warehouse_name="LIP A",
+                               to_warehouse_id=None, to_warehouse_name=None,
+                               remarks=None, items=[])
+
+    @staticmethod
+    def _chain(**overrides):
+        """An empty chain of every key the row builder reads, plus the overrides.
+
+        Spelled out rather than built with `defaultdict`, because a key the resolver
+        stops returning must break a test here rather than quietly render nothing.
+        """
+        chain = {
+            "indent": None, "indent_no": None, "allocations": [], "mrs": [],
+            "requisitions": [], "rfqs": [], "quotations": [], "despatch_notes": [],
+            "putaways": [], "issues": [], "picklists": [], "outward_qcs": [],
+            "consignments": [], "shipments": [], "return_transport_id": None,
+            "pos": [], "grns": [], "qcs": [], "po": None, "grn": None, "qc": None,
+            "qc_items": [], "qc_rejected": False, "item_ids": [],
+        }
+        chain.update(overrides)
+        return chain
+
+    def _rows(self, **overrides):
+        return service._chain_documents(self._sto(), self._chain(**overrides),
+                                        {"warehouse_id": None})
+
+    def test_every_document_type_on_the_trail_is_named(self):
+        """A type with no label renders as its own raw code on the screen.
+
+        The label is SERVED on the row, so a gap here is not a cosmetic one — the
+        frontend has nothing else to fall back to for a type it has never seen.
+        """
+        for doc_type in TrailDocType:
+            assert TRAIL_LABELS.get(doc_type.value), doc_type.value
+            assert doc_type.value in TRAIL_ORDER
+
+    def test_the_order_is_the_order_the_work_happens(self):
+        # The resolver walks outward from the indent in both directions, which is not a
+        # story. This map is what turns it back into one, so its shape is the contract.
+        order = [key for key, _ in sorted(TRAIL_ORDER.items(), key=lambda kv: kv[1])]
+        assert order.index(TrailDocType.INDENT.value) < order.index(
+            TrailDocType.ALLOCATION.value)
+        assert order.index(TrailDocType.MATERIAL_REQUEST.value) < order.index(
+            TrailDocType.PO.value)
+        assert order.index(TrailDocType.PO.value) < order.index(
+            TrailDocType.GRN.value) < order.index(TrailDocType.PUTAWAY.value)
+        assert order.index(TrailDocType.MATERIAL_ISSUE.value) < order.index(
+            TrailDocType.CONSIGNMENT.value) < order.index(TrailDocType.SHIPMENT.value)
+
+    def test_a_stock_served_indent_still_has_a_trail(self):
+        """The case the old resolver answered with three rows.
+
+        Nothing was bought, so there is no PO, no GRN and no vendor anywhere — and the
+        allocation is then the ONLY document that says why this branch got these units.
+        """
+        allocation = SimpleNamespace(id=7, allocation_no="ALL-0007", status="APPROVED",
+                                     created_at=None, allocated_by_name="Store Keeper",
+                                     indent_no="IND-0001")
+        issue = SimpleNamespace(id=9, issue_no="WHI-0009", status="DISPATCHED",
+                                issue_date=None, warehouse_name="Central WH",
+                                warehouse_id=12, issued_to_name="A Anil Kumar")
+        consignment = SimpleNamespace(
+            id=3, dispatch_no="DSP-0003", status="DISPATCHED", dispatch_date=None,
+            warehouse_name="Central WH", carrier_name=None, gate_pass_no="GP-3",
+            lr_no=None)
+        rows = self._rows(allocations=[allocation], issues=[issue],
+                          consignments=[consignment])
+        assert [row["doc_type"] for row in rows] == [
+            TrailDocType.INTENT.value, TrailDocType.ALLOCATION.value,
+            TrailDocType.MATERIAL_ISSUE.value, TrailDocType.CONSIGNMENT.value]
+        assert rows[1]["doc_label"] == "Material Allocation"
+        # The qualifier is what makes a row worth opening: who signed it.
+        assert rows[1]["note"] == "Store Keeper"
+
+    def test_the_returns_own_leg_says_so(self):
+        """Both legs of one journey are rows of the same table.
+
+        The one carrying the material back is the one the desk is deciding about, and
+        the outward one is evidence — telling them apart by reading the lane is exactly
+        what a reviewer should not have to do.
+        """
+        def shipment(shipment_id, lr=None):
+            return SimpleNamespace(id=shipment_id, tr_no=f"TR-{shipment_id:04d}",
+                                   status="IN_TRANSIT", tr_date=None,
+                                   from_warehouse_name="Central WH",
+                                   carrier_name="Blue Dart", lr_no=lr,
+                                   freight_amount=None, mode="THIRD_PARTY",
+                                   consignment_no=None)
+        rows = self._rows(shipments=[shipment(31, lr="54ij"), shipment(39)],
+                          return_transport_id=39)
+        legs = {row["doc_no"]: row for row in rows
+                if row["doc_type"] == TrailDocType.SHIPMENT.value}
+        assert legs["TR-0039"]["extra"]["is_return_leg"] is True
+        assert "This return's own leg" in legs["TR-0039"]["note"]
+        assert legs["TR-0031"]["extra"]["is_return_leg"] is False
+        assert legs["TR-0031"]["note"] == "LR 54ij"
+
+    def test_a_quotation_carries_the_rfq_it_answers(self):
+        """It has no screen of its own, so the row opens the comparison sheet.
+
+        `rfq_id` on the row is what that link is built from — a quote opened alone says
+        nothing, because its whole meaning is the prices it beat.
+        """
+        quotation = SimpleNamespace(id=23, quotation_no="QUO-0023", status="AWARDED",
+                                    quotation_date=None, vendor_name="Acme",
+                                    grand_total=1200, rfq_id=13, rfq_no="RFQ-0013")
+        row = next(row for row in self._rows(quotations=[quotation])
+                   if row["doc_type"] == TrailDocType.QUOTATION.value)
+        assert row["extra"]["rfq_id"] == 13
+        assert row["note"] == "Awarded · 1200"
+
+    def test_a_qc_row_counts_only_the_lines_for_these_items(self):
+        """"This GRN had a failure on it" is not "the item in front of me failed".
+
+        An inspection covering eight lines can have failed one of them, and a row that
+        reported the whole document's rejections would be answering a question nobody
+        asked about material that is not coming back.
+        """
+        qc = SimpleNamespace(id=5, inspection_no="QC-0005", status="COMPLETED",
+                             inspection_date=None, vendor_name="Acme",
+                             warehouse_name="Central WH", receipt_id=4,
+                             inspection_type="INCOMING")
+        mine = SimpleNamespace(inspection_id=5, rejected_qty=3, result="FAILED")
+        theirs = SimpleNamespace(inspection_id=6, rejected_qty=90, result="FAILED")
+        row = next(row for row in self._rows(qcs=[qc], qc_items=[mine, theirs])
+                   if row["doc_type"] == TrailDocType.QC.value)
+        assert row["extra"]["rejected_qty"] == "3"
+        assert row["note"] == "3 rejected on these items"
+
+
+class TestWhoReadsTheTrail:
+    """Who may read the history behind the returned MATERIAL, as opposed to the return.
+
+    ADDED 2026-09-14. The trail is a dozen OTHER modules' documents — the purchase order,
+    the vendor, the price, the GRN — and it was served to anybody holding `return.view`,
+    which is everybody who can open a return at all. It is the decision desk's own code
+    now: `return.decide`.
+
+    Asserted off the route's resolved dependency graph rather than off the source text, so
+    a route that imports `require_permission` and then stops applying it still fails here.
+    Rule 6: the screen leaving the panel out is not the control.
+    """
+
+    def test_the_route_asks_for_the_deciding_code_not_the_viewing_one(self):
+        route = next(r for r in returns_router.router.routes
+                     if getattr(r, "path", None)
+                     == "/api/returns/{return_id}/related-documents")
+        codes = {value for dependency in route.dependant.dependencies
+                 if dependency.call is not None
+                 for cell in getattr(dependency.call, "__closure__", None) or ()
+                 for value in [cell.cell_contents] if isinstance(value, str)}
+        assert "return.decide" in codes, codes
+        assert "return.view" not in codes, codes
+
+    def test_a_request_with_no_user_at_all_reads_nothing(self):
+        """The served flag is what the screen renders off, and its fail-closed default
+        matters: a caller that cannot say who is asking is told no."""
+        assert asyncio.run(service._may_read_trail(None, None)) is False
+
+
+class TestTheTrailReadsAsChapters:
+    """The six legs the trail is grouped under, and the two ways they fail silently.
+
+    ADDED 2026-09-14. Eighteen document types in one flat list is a correct answer to
+    "what is behind this item" and an unreadable one — the live desk was handed twenty-six
+    numbered rows and had to know from each row's name whether a Requisition came before
+    or after a GRN. The chapters are the question each run of documents answers.
+
+    Both of these are silent in production if they drift. A doc type in no chapter
+    vanishes off a screen that groups by chapter — the row is served, the heading it
+    belongs under is not, and nobody is told a document went missing. And a chapter whose
+    types are NOT contiguous in `TRAIL_ORDER` interleaves: the trail is sorted once, by
+    trail order, and the screen relies on that sort to produce the chapters in blocks, so
+    a stray type puts a second copy of a heading halfway down the list.
+    """
+
+    def test_every_document_type_on_the_trail_lands_in_a_chapter(self):
+        assert set(CHAPTER_BY_DOC_TYPE) == set(TRAIL_LABELS)
+
+    def test_no_document_type_is_claimed_by_two_chapters(self):
+        claimed = [doc_type for chapter in TRAIL_CHAPTERS
+                   for doc_type in chapter["doc_types"]]
+        assert len(claimed) == len(set(claimed))
+
+    def test_each_chapter_is_one_unbroken_run_of_the_trail_order(self):
+        positions = [TRAIL_ORDER[doc_type] for chapter in TRAIL_CHAPTERS
+                     for doc_type in chapter["doc_types"]]
+        assert positions == list(range(len(TRAIL_ORDER)))
+
+    def test_every_chapter_says_what_it_is_and_what_it_answers(self):
+        """Wording is SERVED — the screen renders the heading it is sent and composes
+        nothing — so an empty label is a blank heading on a live page."""
+        for chapter in TRAIL_CHAPTERS:
+            assert chapter["key"] and chapter["label"] and chapter["caption"], chapter
+
+
+class TestTheRungIsNamedProperly:
+    """What the desk is TOLD the material came off, against what it actually came off.
+
+    ADDED 2026-09-12. The screen said "From LIP / MDB" and there is no such thing as an
+    MDB in this system — `inventory.enums.LocationTier` has three rungs and they are
+    WAREHOUSE, MDP and LIP. Worse than the misspelling: every MDP return is filed under
+    `FROM_WAREHOUSE` by this function's own rule, so the bucket named for a distribution
+    point never held one, and the bucket that holds all of them called itself "From
+    warehouse" and said nothing about the rung at all. Both labels were wrong and a desk
+    reading either was misinformed.
+
+    The rule did not change — the stored categories are untouched and the register
+    filters on them exactly as before. What changed is that the WORDS now match, and the
+    rung actually resolved for the document is served beside the category, because two
+    buckets cannot name three rungs no matter how they are spelled.
+    """
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def first(self):
+            return self._row
+
+    class _Db:
+        """The one query `locations.describe_point` makes, answered from memory.
+
+        A stub rather than a database because what is under test is the naming, and the
+        naming must hold for a rung no fixture in this suite happens to have.
+        """
+
+        def __init__(self, warehouse_type, name):
+            self._row = SimpleNamespace(warehouse_type=warehouse_type, name=name)
+
+        async def execute(self, *_args, **_kwargs):
+            return TestTheRungIsNamedProperly._Result(self._row)
+
+    @staticmethod
+    def _resolve(warehouse_type, name, *, qc=False):
+        doc = _doc(reason=ReturnReason.EXPIRED.value)
+        doc.from_warehouse_id = 12
+        db = TestTheRungIsNamedProperly._Db(warehouse_type, name)
+        return asyncio.run(service._purchase_return_source(db, doc, {"qc_rejected": qc}))
+
+    def test_no_label_names_a_rung_the_system_does_not_have(self):
+        """The misspelling itself, pinned so it cannot come back.
+
+        MDB is not a warehouse type, not a `LocationTier`, and not a word anybody here
+        uses for anything — it only ever existed in this one label.
+        """
+        for label in PURCHASE_RETURN_SOURCE_LABELS.values():
+            assert "MDB" not in label.upper(), label
+
+    def test_the_bucket_that_holds_mdp_returns_says_mdp(self):
+        """An MDP return is filed under FROM_WAREHOUSE — so that label has to say so.
+
+        This is the half that was wrong in the other direction: the rule sent every MDP
+        return here, and the label mentioned only warehouses.
+        """
+        answer = self._resolve("MDP", "AP-104 Distribution Point")
+        assert answer["category"] == "FROM_WAREHOUSE"
+        assert "MDP" in answer["category_label"]
+        # And the rung is still named exactly, because "warehouse / MDP" is two rungs.
+        assert answer["source_tier"] == "MDP"
+        assert answer["source_detail"] == (
+            "AP-104 Distribution Point is a Material Distribution Point (MDP).")
+
+    def test_the_lip_bucket_claims_only_lip(self):
+        answer = self._resolve("LIP", "AP-104-MMU-Chilamathur")
+        assert answer["category"] == "FROM_LIP_MDB"     # the stored string, unchanged
+        assert answer["category_label"] == "From LIP"
+        assert answer["source_tier"] == "LIP"
+        assert answer["source_detail"] == (
+            "AP-104-MMU-Chilamathur is a Local Inventory Point (LIP).")
+
+    def test_a_main_warehouse_is_a_warehouse(self):
+        answer = self._resolve("MAIN", "CENTRAL WAREHOUSE-1")
+        assert answer["category"] == "FROM_WAREHOUSE"
+        assert answer["source_tier"] == "WAREHOUSE"
+        assert answer["source_is_resolved"] is True
+
+    def test_the_words_come_from_inventory_not_from_here(self):
+        """Rule: one place decides what a stocking point is called.
+
+        A second copy of "LIP means Local Inventory Point" in this module is how a stock
+        screen and a returns screen end up calling the same point two different things —
+        which is the class of defect this whole test exists for.
+        """
+        from app.modules.inventory import locations
+        from app.modules.inventory.enums import LocationTier
+
+        answer = self._resolve("LIP", "Anywhere")
+        assert answer["source_tier_label"] == locations.tier_label(LocationTier.LIP)
+        assert answer["source_point_label"] == locations.POINT_LABEL["LIP"]
+
+    def test_an_unidentifiable_point_reads_as_a_guess(self):
+        """It is still filed as a branch return — the safe end — but it SAYS so.
+
+        Unchanged behaviour, newly honest about itself: the category a desk acts on and
+        the confidence behind it are two different facts, and stating the first without
+        the second is what makes a fallback indistinguishable from a finding.
+        """
+        doc = _doc(reason=ReturnReason.EXPIRED.value)
+        doc.from_warehouse_id = None
+        answer = asyncio.run(
+            service._purchase_return_source(None, doc, {"qc_rejected": False}))
+        assert answer["category"] == "FROM_LIP_MDB"
+        assert answer["source_is_resolved"] is False
+        assert "could not be identified" in answer["source_detail"]
+
+    def test_a_qc_rejection_says_why_the_rung_did_not_decide(self):
+        # The material never reached a shelf, so naming the rung it would have sat on
+        # would be describing a journey it never made.
+        answer = self._resolve("LIP", "AP-104-MMU-Chilamathur", qc=True)
+        assert answer["category"] == "QC_REJECTED_GRN"
+        assert "does not decide this" in answer["source_detail"]
+
+
+class TestTheTrailSaysWhereItStopped:
+    """A capped list that admits it, against one that quietly ends.
+
+    ADDED 2026-09-12 alongside raising the per-kind cap from 5 to 25. Five was chosen
+    when the trail named one kind of document; with every kind on it, an indent served
+    in rounds was being cut off mid-story with nothing said — and a reader cannot tell a
+    complete trail from a truncated one by looking at it.
+    """
+
+    @staticmethod
+    def _rows(doc_type, count):
+        return [{"doc_type": doc_type, "doc_label": f"{doc_type} label"}
+                for _ in range(count)]
+
+    def test_a_short_trail_says_nothing(self):
+        # The normal case. A permanent "there may be more" would read as one.
+        assert service._cap_note(self._rows("MATERIAL_ISSUE", 3)) is None
+
+    def test_a_kind_that_came_back_full_is_named(self):
+        note = service._cap_note(self._rows("MATERIAL_ISSUE", service.CHAIN_LIMIT))
+        assert note is not None
+        assert str(service.CHAIN_LIMIT) in note
+        assert "MATERIAL_ISSUE label" in note
+
+    def test_only_the_kinds_that_filled_up_are_named(self):
+        rows = (self._rows("MATERIAL_ISSUE", service.CHAIN_LIMIT)
+                + self._rows("INDENT", 1))
+        note = service._cap_note(rows)
+        assert "MATERIAL_ISSUE label" in note
+        assert "INDENT label" not in note

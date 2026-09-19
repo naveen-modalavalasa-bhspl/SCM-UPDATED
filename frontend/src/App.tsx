@@ -103,6 +103,13 @@ const LogisticsVendorsPage = lazy(() => import("@/modules/logistics").then((m) =
 const MRConsolidationPage = lazy(() => import("@/modules/procurement/pages/MRConsolidationPage").then((m) => ({ default: m.MRConsolidationPage })));
 const MailPage = lazy(() => import("@/modules/admin/pages/MailPage").then((m) => ({ default: m.MailPage })));
 const MastersPage = lazy(() => import("@/modules/masters/pages/MastersPage").then((m) => ({ default: m.MastersPage })));
+// The same masters, split by the module that owns them. `/masters` stays whole and
+// unchanged; these are a second door on the same rows, each with its own page code so
+// RBAC can hand out (or withhold) one module's masters without touching another's.
+const InventoryMastersPage = lazy(() => import("@/modules/inventory/pages/InventoryMastersPage").then((m) => ({ default: m.InventoryMastersPage })));
+const ProcurementMastersPage = lazy(() => import("@/modules/procurement/pages/ProcurementMastersPage").then((m) => ({ default: m.ProcurementMastersPage })));
+const IndentMastersPage = lazy(() => import("@/modules/indents/pages/IndentMastersPage").then((m) => ({ default: m.IndentMastersPage })));
+const OrgMastersPage = lazy(() => import("@/modules/admin/pages/OrgMastersPage").then((m) => ({ default: m.OrgMastersPage })));
 const MaterialIssuePrintPage = lazy(() => import("@/modules/warehouse/pages/MaterialIssuePrintPage").then((m) => ({ default: m.MaterialIssuePrintPage })));
 const MaterialRequestDetailPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestDetailPage").then((m) => ({ default: m.MaterialRequestDetailPage })));
 const MaterialRequestFormPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestFormPage").then((m) => ({ default: m.MaterialRequestFormPage })));
@@ -126,6 +133,8 @@ const PurchaseConsolidationDetailPage = lazy(() => import("@/modules/procurement
 const PurchaseConsolidationFormPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationFormPage").then((m) => ({ default: m.PurchaseConsolidationFormPage })));
 const PurchaseConsolidationListPage = lazy(() => import("@/modules/procurement/pages/PurchaseConsolidationListPage").then((m) => ({ default: m.PurchaseConsolidationListPage })));
 const PurchaseReturnsPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnsPage })));
+const PurchaseReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnFormPage })));
+const PurchaseReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnDetailPage })));
 const PutawayPrintPage = lazy(() => import("@/modules/warehouse/pages/PutawayPrintPage").then((m) => ({ default: m.PutawayPrintPage })));
 const QuotationListPage = lazy(() => import("@/modules/procurement/pages/QuotationListPage").then((m) => ({ default: m.QuotationListPage })));
 const RFQDetailPage = lazy(() => import("@/modules/procurement/pages/RFQDetailPage").then((m) => ({ default: m.RFQDetailPage })));
@@ -140,6 +149,7 @@ const ResetPasswordPage = lazy(() => import("@/pages/PasswordResetPages").then((
 const ReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnDetailPage })));
 const ReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnFormPage })));
 const ReturnJourneyPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnJourneyPage })));
+const ReturnTrailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnTrailPage })));
 const ReturnsListPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsListPage })));
 const ReturnsOverviewPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.ReturnsOverviewPage })));
 const RulesPage = lazy(() => import("@/modules/admin/pages/RulesPage").then((m) => ({ default: m.RulesPage })));
@@ -159,6 +169,8 @@ const SupplierPODetailPage = lazy(() => import("@/modules/supplier/pages/Supplie
 const SupplierPOListPage = lazy(() => import("@/modules/supplier/pages/SupplierPOListPage").then((m) => ({ default: m.SupplierPOListPage })));
 const SupplierPasswordPage = lazy(() => import("@/modules/supplier/pages/SupplierPasswordPage").then((m) => ({ default: m.SupplierPasswordPage })));
 const SupplierProfilePage = lazy(() => import("@/modules/supplier/pages/SupplierProfilePage").then((m) => ({ default: m.SupplierProfilePage })));
+const SupplierReturnDetailPage = lazy(() => import("@/modules/supplier/pages/SupplierReturnDetailPage").then((m) => ({ default: m.SupplierReturnDetailPage })));
+const SupplierReturnListPage = lazy(() => import("@/modules/supplier/pages/SupplierReturnListPage").then((m) => ({ default: m.SupplierReturnListPage })));
 const SupplierRFQDetailPage = lazy(() => import("@/modules/supplier/pages/SupplierRFQDetailPage").then((m) => ({ default: m.SupplierRFQDetailPage })));
 const SupplierRFQListPage = lazy(() => import("@/modules/supplier/pages/SupplierRFQListPage").then((m) => ({ default: m.SupplierRFQListPage })));
 const SuppliersPage = lazy(() => import("@/modules/procurement/pages/SuppliersPage").then((m) => ({ default: m.SuppliersPage })));
@@ -244,6 +256,11 @@ function AppRoutes() {
             one before the vehicle leaves (doc B12). */}
         <Route path="pos" element={<SupplierPOListPage />} />
         <Route path="pos/:id" element={<SupplierPODetailPage />} />
+        {/* Goods coming BACK — their own tab beside the orders (2026-09-11). They used
+            to be a section under `SupplierPOListPage`, which meant scrolling the whole
+            order board to reach them and nowhere to go when told one was on its way. */}
+        <Route path="returns" element={<SupplierReturnListPage />} />
+        <Route path="returns/:id" element={<SupplierReturnDetailPage />} />
         <Route path="profile" element={<SupplierProfilePage />} />
       </Route>
 
@@ -358,6 +375,7 @@ function AppRoutes() {
         <Route path="indents/reports" element={<IndentReportsPage />} />
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />
+        <Route path="indents/masters" element={<IndentMastersPage />} />
         <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
         {/* A returned indent belongs to its requester, who is not an approver and
             cannot open /approvals at all — the ?correction= form there redirected
@@ -403,6 +421,7 @@ function AppRoutes() {
         {/* The supplier register — who we buy from, and the login each one answers
             an RFQ with. Inside the employee shell like every other procurement
             screen; /supplier/* is the vendors' own portal and stays outside it. */}
+        <Route path="procurement/masters" element={<ProcurementMastersPage />} />
         <Route path="procurement/suppliers" element={<SuppliersPage />} />
         <Route path="procurement/requisitions" element={<RequisitionListPage />} />
         <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
@@ -429,13 +448,9 @@ function AppRoutes() {
          * Consignments is the SAME screen the warehouse serves, mounted here as well
          * as under /warehouse/* — one implementation, two front doors. Dispatch is
          * this module's own: mode, provider, go. */}
-        {/* The module has its own Overview now, so /logistics lands on it rather
-            than bouncing into Consignments. The old redirect is gone, not kept
-            alongside — two answers to "what is /logistics" is how a rail ends up
-            highlighting one row and showing another. */}
-        {/* Landing is Shipments, not Overview: /logistics used to render the
-            Overview screen, whose own menu row now lives at /logistics/overview.
-            Shipments is where a logistics day is worked. */}
+        {/* Landing is Shipments, not Overview/Approval. /logistics used to land on
+            Overview which bounced to approvals, so clicking Logistics never showed
+            the shipments queue. Shipments is where a logistics day is worked. */}
         <Route path="logistics" element={<Navigate to="/logistics/shipments" replace />} />
         <Route path="logistics/overview" element={<LogisticsOverviewPage />} />
         <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
@@ -498,18 +513,33 @@ function AppRoutes() {
         <Route path="returns/dashboard" element={<ReturnsOverviewPage />} />
         <Route path="returns/approvals" element={<ReturnsListPage />} />
         <Route path="returns/mine" element={<ReturnsListPage />} />
-        {/* The two desks. One component, the queue read off the path. */}
+        {/* The return queues. One component, the queue read off the path. */}
         <Route path="returns/decisions" element={<DecisionQueuePage />} />
         <Route path="returns/sign-off" element={<DecisionQueuePage />} />
         <Route path="returns/logistics" element={<DecisionQueuePage />} />
-        {/* Read only — pro_returns is the warehouse module's table. */}
+        {/* The purchase-return register, and the form and review screen it opens.
+            `pro_returns` is still the warehouse module's table and the warehouse still
+            owns these two components — but a storekeeper who opened the register from
+            the Returns rail was being handed over to the Warehouse module the moment
+            they clicked a row or pressed New, and the rail, the tabs and the eyebrow
+            all changed under them. Same component, served on this side, exactly as
+            Consignments is served under /logistics. `/warehouse/purchase-returns/*`
+            still resolves and still behaves as it did. `new` before `:id` so the word
+            is never read as an id. */}
         <Route path="returns/purchase" element={<PurchaseReturnsPage />} />
+        <Route path="returns/purchase/new" element={<PurchaseReturnFormPage />} />
+        <Route path="returns/purchase/:id" element={<PurchaseReturnDetailPage />} />
+        <Route path="returns/purchase/:id/edit" element={<PurchaseReturnFormPage />} />
         <Route path="returns/new" element={<ReturnFormPage />} />
         <Route path="returns/settings/receiving" element={<ReceivingConfigPage />} />
         <Route path="returns/:id" element={<ReturnDetailPage />} />
         <Route path="returns/:id/edit" element={<ReturnFormPage />} />
         <Route path="returns/:id/journey" element={<ReturnJourneyPage />} />
+        {/* The material's history, not the document's: every other module's paperwork
+          * behind the returned items. Gated by the endpoint on `return.decide`. */}
+        <Route path="returns/:id/trail" element={<ReturnTrailPage />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
+        <Route path="inventory/masters" element={<InventoryMastersPage />} />
         <Route path="inventory/stock-balance" element={<StockBalanceView />} />
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
@@ -612,6 +642,7 @@ function AppRoutes() {
         <Route path="admin/integrations/activity/:id" element={<ActivityEventPage />} />
         <Route path="admin/integrations/webhooks/:source" element={<WebhookDetailPage />} />
         <Route path="admin/integrations/:code" element={<ApiClientDetailPage />} />
+        <Route path="admin/org-masters" element={<OrgMastersPage />} />
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}
         <Route path="reports" element={<Navigate to="/reports/indents" replace />} />

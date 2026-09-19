@@ -9,6 +9,7 @@ import {
 } from "@/shared/components";
 import { returnsApi } from "../api";
 import { STATUS_LABEL, STATUS_ORDER } from "../constants";
+import { originState } from "../origin";
 
 /**
  * The module's landing screen — the same shape as the indent Overview: KPI tiles, a
@@ -189,7 +190,7 @@ export default function ReturnsOverviewPage() {
               <li key={row.id}>
                 <button
                   type="button"
-                  onClick={() => navigate(`/returns/${row.id}`)}
+                  onClick={() => navigate(`/returns/${row.id}`, { state: originState("/returns/dashboard") })}
                   className="min-h-11 w-full rounded-lg px-2 py-2 text-left transition-colors hover:bg-content2"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">

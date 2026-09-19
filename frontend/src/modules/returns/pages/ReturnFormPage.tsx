@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CalendarDays, FileText, Layers, PackageCheck } from "lucide-react";
 import {
-  Button, ErrorBanner, Field, Input, PageHeader, Select,
+  Button, ErrorBanner, Field, Input, PageHeader, Select, StatusPill,
   TONE_DEEP_MINT, TONE_MINT, TONE_PINK,
 } from "@/shared/components";
 import { returnsApi } from "../api";
@@ -14,10 +15,9 @@ import { SubmitChecklist, type ChecklistItem } from "../components/SubmitCheckli
 import {
   BLANK_LINE, ReturnLinesEditor, holdingFor, isWholeUnit,
 } from "../components/ReturnLinesEditor";
-import { KIND_OPTIONS } from "../constants";
 import {
-  PHOTO_CATEGORY, type ReturnIntent, type ReturnKind, type ReturnLineWrite,
-  type ReturnWrite, type StagedAttachment,
+  PHOTO_CATEGORY, type IndentOption, type ReturnIntent, type ReturnKind,
+  type ReturnLineWrite, type ReturnWrite, type StagedAttachment,
 } from "../types";
 
 /**
@@ -71,6 +71,34 @@ import {
  * document id, so the files are held in state and posted the moment the draft is
  * created. A photograph of the stock is mandatory to submit — the approver is being
  * asked to believe material is damaged or expired, and the picture is the evidence.
+ *
+ * CHANGES 2026-09-12, all in step 1 and all for one reason — the gate was asking for
+ * things it could not honour:
+ *
+ *  - THE INDENT PICKER ONLY OFFERS INDENTS WITH SOMETHING LEFT TO RETURN. It listed
+ *    every indent past approval, so an indent whose only item had already come back was
+ *    still a choice — and taking it opened step 2 on an empty picker under "Nothing that
+ *    indent asked for is on your shelf to return". The raiser answered the one question
+ *    that gates the whole form and was told, only afterwards, that the answer was
+ *    worthless. The filter is the SERVER's (`returns.service.returnable_indents`), using
+ *    `my_stock`'s own shelf test, so the list and the picker cannot disagree; the option
+ *    label now counts what is still returnable rather than the indent's original lines.
+ *  - "(OPTIONAL)" IS OFF THE LABEL, and the field is marked required. The question has
+ *    to be ANSWERED — "Not against an indent" is one of the two answers, not the absence
+ *    of one — and step 2 stays locked until it is. The label said the opposite of what
+ *    the form enforces. The `NO_INDENT` answer itself is untouched: material coming off
+ *    a shelf did not all arrive on an indent.
+ *  - WHAT WAS PICKED IS DRAWN OUT under the field — number, status, date, project, and
+ *    how much of it is still on the shelf — off the option row already fetched. A
+ *    dropdown closes over its own answer, and one indent number looks like every other.
+ *    The three states that are not a live pick (a draft against an emptied indent, a
+ *    raiser with nothing returnable anywhere, and a deliberate "on its own") each say so
+ *    in their own sentence instead of leaving the reader to infer it from an empty
+ *    step 2.
+ *  - "WHAT KIND OF RETURN IS THIS?" IS NO LONGER ASKED. See `kind` below: it is still on
+ *    the document and still posted, it is simply not the branch's decision to make.
+ *    Reason and Description take the row it vacated rather than leaving a column of
+ *    white beside a lone dropdown.
  */
 /**
  * "Raised on its own" as a Select value. A sentinel rather than "" because "" is what a
@@ -110,8 +138,21 @@ export default function ReturnFormPage() {
    * choice having been ignored.
    */
   const [indentId, setIndentId] = useState("");
-  // Which family of return this is. Recorded on the document rather than assumed, so the
-  // register can say which it is without inferring it from the table the row came out of.
+  /**
+   * Which family of return this is. NO LONGER ASKED ON THE FORM (2026-09-12), for the
+   * same reason `intent` below stopped being asked: the branch answering it changed
+   * nothing about how the stock moves. Where the material actually ends up is the
+   * decision desk's call — `TO_VENDOR` is the disposition that sends it back to the
+   * supplier — so a storekeeper was being made to classify a document on a distinction
+   * that the next desk overrides anyway, and getting it wrong looked like a mistake.
+   *
+   * The field stays ON THE DOCUMENT and is still posted: the register shows both
+   * families and a row has to say which it is. A saved draft still hydrates its own
+   * value, so nothing already recorded is rewritten — a new return simply carries the
+   * FIELD default, which is what a branch shelf sending material back into our own
+   * network is. `KIND_OPTIONS` is untouched in `constants.ts` for the desk screens that
+   * still label it.
+   */
   const [kind, setKind] = useState<ReturnKind>("FIELD");
   // What the branch wants to happen next. No longer asked on the form (2026-09-07): the
   // branch answering it changed nothing about how the stock moves, and where the material
@@ -213,6 +254,30 @@ export default function ReturnFormPage() {
   const indents = indentPage?.items ?? [];
   const readOnly = existing ? !existing.can_edit : false;
 
+  /**
+   * The row behind the chosen id, so the form can SHOW what was picked rather than
+   * leaving a line of code in a closed dropdown as the only evidence. Read out of the
+   * list already fetched — no second request, and nothing here is derived state the
+   * server does not already hold.
+   *
+   * It can legitimately be undefined on an EDIT: a draft saved against an indent whose
+   * last item has since left the shelf still carries that indent id, but the picker no
+   * longer lists it. The strip below handles that case explicitly rather than rendering
+   * a row of blanks.
+   */
+  const pickedIndent: IndentOption | undefined = pickedIndentId
+    ? indents.find((row) => row.id === pickedIndentId)
+    : undefined;
+  /**
+   * Nothing left anywhere on the shelf that any of this person's requests asked for.
+   * Said out loud under the field: the list is now filtered (`returnable_indents`), so
+   * an empty dropdown is a real answer about the shelf and not a screen that failed to
+   * load. Only after the fetch has actually landed — `indentPage` undefined is still
+   * in flight, and "you have nothing to return" flashed during a load is alarming and
+   * also untrue a moment later.
+   */
+  const noReturnableIndents = Boolean(indentPage) && indents.length === 0;
+
   const validLines = useMemo(
     () => lines.filter((line) => line.item_id && Number(line.quantity) > 0),
     [lines],
@@ -255,9 +320,6 @@ export default function ReturnFormPage() {
     staged.filter((row) => row.category === PHOTO_CATEGORY).length;
 
   const noteRequired = reason === "OTHER";
-  // The dropdown shows only the label, so the sentence that says what the choice
-  // commits to is served under the field instead of being lost with the buttons.
-  const kindHint = KIND_OPTIONS.find((option) => option.value === kind)?.hint;
   const canSave =
     Boolean(reason) &&
     validLines.length > 0 &&
@@ -471,21 +533,31 @@ export default function ReturnFormPage() {
             current={currentStep === 1}
             required
           >
-            {/* Two columns from `sm`, and the two fields whose hints run long take the
-              * full width — a 340px box under a two-line hint reads as a cramped
-              * afterthought beside a short one. */}
+            {/* Two columns from `sm`. The gate spans both — it decides who signs the
+              * return and which items step 2 can offer, so it is not a half-width field
+              * beside something smaller — and Reason and Description share the row under
+              * it. They used to sit either side of "What kind of return is this?", which
+              * is gone (see `kind` above), and leaving Reason alone in a half-width cell
+              * would have left a column of white beside it. */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {/* Picked FIRST, above the reason: it decides who approves the return and
                 * which items step 2 can offer, so it is the most consequential thing on
-                * the form. The flow panel under this card updates as soon as it
-                * changes.
+                * the form. It is marked REQUIRED because the question must be ANSWERED —
+                * "Not against an indent" is one of the two answers, not the absence of
+                * one, and until one of them is chosen step 2 stays locked. The old
+                * "(optional)" said the opposite of what the form enforces.
+                *
+                * The list only carries indents with something still on this shelf
+                * (`returnable_indents`), so picking one can no longer land on an empty
+                * item picker.
                 *
                 * The return ladder now runs first (see returns/enums.py
                 * `PHASES_APPROVAL_FIRST`), and a picked indent limits it to approvers
                 * who existed on that indent's approval path. */}
               <div className="sm:col-span-2">
                 <Field
-                  label="Against indent (optional)"
+                  label="Against indent"
+                  required
                   hint="The return uses the Indent Return approval flow, limited to approvers from this indent's original approval path."
                 >
                   <Select
@@ -495,9 +567,13 @@ export default function ReturnFormPage() {
                       { value: NO_INDENT, label: "Not against an indent" },
                       ...indents.map((row) => ({
                         value: String(row.id),
-                        label: `${row.indent_no} · ${row.total_items} item${
-                          row.total_items === 1 ? "" : "s"
-                        }${row.indent_date ? ` · ${row.indent_date}` : ""}`,
+                        // The count is what is STILL RETURNABLE, not the indent's
+                        // original line count: an option reading "1 item" on a request
+                        // holding nothing is what made the empty picker in step 2 read
+                        // as a defect in the screen.
+                        label: `${row.indent_no} · ${row.returnable_items} item${
+                          row.returnable_items === 1 ? "" : "s"
+                        } to return${row.indent_date ? ` · ${row.indent_date}` : ""}`,
                       })),
                     ]}
                     placeholder="Pick the indent this is coming back from"
@@ -505,6 +581,75 @@ export default function ReturnFormPage() {
                     ariaLabel="Indent this return is raised against"
                   />
                 </Field>
+
+                {/* WHAT WAS PICKED, drawn out. A dropdown closes over its own answer, and
+                  * an indent number is fifteen characters that look like every other
+                  * indent number — so the request about to be filed against is confirmed
+                  * here in the terms a storekeeper would recognise it by. Every fact
+                  * comes off the option row already fetched: nothing extra is requested
+                  * and nothing is recomputed in the browser. */}
+                {pickedIndent && (
+                  <div className="mt-3 rounded-xl border border-line bg-content2/50 p-3">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <FileText aria-hidden="true" className="h-4 w-4 shrink-0 text-brand" />
+                      <span className="text-sm font-bold text-ink">
+                        {pickedIndent.indent_no}
+                      </span>
+                      <StatusPill status={pickedIndent.status} />
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+                      {pickedIndent.indent_date && (
+                        <span className="inline-flex items-center gap-1.5">
+                          <CalendarDays aria-hidden="true" className="h-3.5 w-3.5" />
+                          Raised {pickedIndent.indent_date}
+                        </span>
+                      )}
+                      {pickedIndent.project_name && (
+                        <span className="inline-flex min-w-0 items-center gap-1.5">
+                          <Layers aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate" title={pickedIndent.project_name}>
+                            {pickedIndent.project_name}
+                          </span>
+                        </span>
+                      )}
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-ok">
+                        <PackageCheck aria-hidden="true" className="h-3.5 w-3.5" />
+                        {pickedIndent.returnable_items} of {pickedIndent.total_items} item
+                        {pickedIndent.total_items === 1 ? "" : "s"} still on your shelf
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* A draft raised against an indent that has since emptied. The link is
+                  * still on the document and is still posted — it is not silently
+                  * dropped — but the picker cannot show a row it no longer lists, so the
+                  * form says which one it is and why it is not in the list. */}
+                {pickedIndentId && !pickedIndent && indentPage && (
+                  <p className="mt-3 rounded-xl border border-line bg-content2/50 px-3 py-2 text-xs text-muted">
+                    This return is filed against indent #{pickedIndentId}, which no longer
+                    has anything on your shelf to return. The link is kept — pick another
+                    indent, or “Not against an indent”, to change it.
+                  </p>
+                )}
+
+                {/* Nothing of this person's requests is left on the shelf at all. */}
+                {noReturnableIndents && !pickedIndentId && (
+                  <p className="mt-3 rounded-xl border border-line bg-content2/50 px-3 py-2 text-xs text-muted">
+                    None of your indents has anything left on your shelf to return, so
+                    only “Not against an indent” is available. That still raises a return
+                    — it travels the stock return’s own approval chain instead.
+                  </p>
+                )}
+
+                {/* Chosen deliberately, so the consequence is stated here rather than
+                  * discovered two steps later. */}
+                {indentId === NO_INDENT && (
+                  <p className="mt-3 rounded-xl border border-line bg-content2/50 px-3 py-2 text-xs text-muted">
+                    Step 2 offers everything on your shelf, and the return travels the
+                    stock return’s own approval chain.
+                  </p>
+                )}
               </div>
 
               <Field label="Reason" required>
@@ -518,47 +663,27 @@ export default function ReturnFormPage() {
                 />
               </Field>
 
-              {/* Which family of return this is — a plain dropdown, like Reason beside
-                * it, so the step reads as one set of fields rather than a stack of
-                * cards. It does NOT skip the decision desk — where the material ends up
-                * is still that desk's call — it records what the branch believes it is
-                * sending back. The hint under each option lives on `KIND_OPTIONS`; the
-                * selected one is shown beneath the field so the sentence is not lost. */}
-              <Field label="What kind of return is this?" hint={kindHint}>
-                <Select
-                  // An empty value is HeroUI deselecting: a single Select toggles its
-                  // own selected item off when it is clicked again, and the default
-                  // reads "Return" — so a raiser clicking "Return" to confirm the
-                  // answer they could already see CLEARED it, and the submit failed
-                  // 422 on a field the screen still looked like it had answered.
-                  // There is no "no kind" on this document; ignore the clear.
-                  value={kind}
-                  onChange={(value) => { if (value) setKind(value as ReturnKind); }}
-                  options={KIND_OPTIONS.map((option) => ({
-                    value: option.value,
-                    label: option.label,
-                  }))}
-                  isDisabled={readOnly}
-                  ariaLabel="Kind of return"
+              {/* Beside Reason rather than under it. It was full-width under a row of two
+                * fields; with the kind dropdown gone it is the natural partner for Reason
+                * — the two are one sentence, "why, and in your own words". */}
+              <Field
+                label={noteRequired ? "Description" : "Description (optional)"}
+                hint={
+                  noteRequired
+                    ? "Required when the reason is Others"
+                    : "Anything the approver should know"
+                }
+                required={noteRequired}
+              >
+                <Input
+                  value={reasonNote}
+                  onChange={(event) => setReasonNote(event.target.value)}
+                  disabled={readOnly}
+                  isInvalid={noteRequired && !reasonNote.trim()}
+                  placeholder="In your own words"
+                  aria-label="Description"
                 />
               </Field>
-
-              <div className="sm:col-span-2">
-                <Field
-                  label={noteRequired ? "Description" : "Description (optional)"}
-                  hint={noteRequired ? "Required when the reason is Others" : undefined}
-                  required={noteRequired}
-                >
-                  <Input
-                    value={reasonNote}
-                    onChange={(event) => setReasonNote(event.target.value)}
-                    disabled={readOnly}
-                    isInvalid={noteRequired && !reasonNote.trim()}
-                    placeholder="In your own words"
-                    aria-label="Description"
-                  />
-                </Field>
-              </div>
             </div>
           </FormSection>
 
@@ -588,10 +713,17 @@ export default function ReturnFormPage() {
                     + "return are the ones that request asked for."
               }
             />
+            {/* The picker is now filtered to indents that still have something on this
+              * shelf, so the first branch is no longer the routine outcome it was — it
+              * means the shelf moved since the list was fetched (somebody else issued
+              * the last of it, or a draft already claimed it). Kept, and worded as the
+              * stale answer it is, because a list cached for the length of a form fill
+              * can always be overtaken by the floor. */}
             {indentAnswered && stock.length === 0 && (
               <p className="text-sm text-muted">
                 {pickedIndentId
-                  ? "Nothing that indent asked for is on your shelf to return."
+                  ? "Nothing that indent asked for is on your shelf any more — it has "
+                    + "moved since this list was loaded. Reload, or pick another indent."
                   : "There is no stock on your point to return."}
               </p>
             )}
@@ -634,7 +766,13 @@ export default function ReturnFormPage() {
               items={checklist}
               summary={{ lines: validLines.length, quantity: totalQty }}
             />
-            <NextStepsCard />
+            {/* The route step 1 actually chose, so the rail stops promising the
+              * indent's approvers to a return that named no indent. */}
+            <NextStepsCard
+              route={
+                pickedIndentId ? "indent" : indentId === NO_INDENT ? "own" : "unanswered"
+              }
+            />
           </div>
         )}
       </div>

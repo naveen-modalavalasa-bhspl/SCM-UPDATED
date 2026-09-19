@@ -111,18 +111,11 @@ PAGES: list[PageDef] = [
             parent="grp_returns", module="returns", icon="scale", sort_order=5),
     PageDef("returns_sign_off", "/returns/sign-off", "Sign-off",
             parent="grp_returns", module="returns", icon="pen-line", sort_order=6),
-    # NEW 2026-09-17. The third desk: a return whose material TRAVELS waits here for
-    # the logistics leg to be arranged. `DecisionQueuePage` serves all three and reads
-    # which queue off the path, so the only thing that made this one reachable was a
-    # row here — navigation is derived from `rbac_pages` and nothing else (the
-    # module's own `ReturnsNav` was retired for drawing a second, unfiltered strip).
-    PageDef("returns_logistics", "/returns/logistics", "Return Logistics",
-            parent="grp_returns", module="returns", icon="truck", sort_order=7),
     PageDef("returns_purchase", "/returns/purchase", "Purchase Returns",
-            parent="grp_returns", module="returns", icon="package-x", sort_order=8),
+            parent="grp_returns", module="returns", icon="package-x", sort_order=7),
     PageDef("returns_receiving_config", "/returns/settings/receiving",
             "Receiving Points", parent="grp_returns", module="returns",
-            icon="map-pin", sort_order=9),
+            icon="map-pin", sort_order=8),
     # The module row itself, listed only to rename it: the menu said "Purchasing"
     # while the permission catalogue, the backend package and the table prefix all
     # said procurement, and the RBAC screen needed a hard-coded alias to reconcile
@@ -249,6 +242,36 @@ PAGES: list[PageDef] = [
     PageDef("inv_fulfilment_desk", "/inventory/fulfilment", "Fulfilment Desk",
             parent="grp_inventory", module="inventory", icon="check-circle",
             sort_order=56),
+
+    # ------------------------------------------------------------------ #
+    #  Masters, on the module that owns them
+    # ------------------------------------------------------------------ #
+    # `/masters` is NOT retired and is not listed here — it stays whole, and these are
+    # a second door on the same rows. What they add is RBAC reach: one page code per
+    # module, so a buyer can be given the vendor and HSN masters without also being
+    # handed the item catalogue, which one `page.masters.view` could never express.
+    #
+    # Every screen renders the masters module's own tab components with their own
+    # `<Can>` gating and calls the same `/api/masters/*` routes behind the same
+    # `master.*.manage` permissions, so nothing here widens what anybody may WRITE.
+    #
+    # All four sort LAST in their group. The left rail opens a module on its first
+    # child, and a master is never what somebody came to that module to do.
+    PageDef("inv_masters", "/inventory/masters", "Masters",
+            parent="grp_inventory", module="inventory", icon="database",
+            sort_order=65),
+    PageDef("pro_masters", "/procurement/masters", "Masters",
+            parent="grp_purchasing", module="procurement", icon="database",
+            sort_order=34),
+    PageDef("ind_masters", "/indents/masters", "Masters",
+            parent="grp_indents", module="indents", icon="database",
+            sort_order=17),
+    # Projects, facilities and departments — HCM mirrors, read-only (rule 10). Under
+    # Settings rather than a module, because filing them beside masters somebody can
+    # edit would imply these are editable too.
+    PageDef("admin_org_masters", "/admin/org-masters", "Organisation Masters",
+            parent="grp_settings", module="admin", icon="building-2",
+            sort_order=106),
 
     # ------------------------------------------------------------------ #
     #  Logistics — the outward transport leg

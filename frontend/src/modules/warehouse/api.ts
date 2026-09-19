@@ -276,17 +276,42 @@ export const cancelInspection = (id: number, reason?: string) =>
 
 /* ----------------------------------------------------------- qc outward -- */
 
+/** Older inspections store per-unit objects while the editor consumes identifiers. */
+const serialStrings = (value: unknown): string[] => {
+  const values = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? Object.values(value as Record<string, unknown>).flatMap((entry) =>
+          Array.isArray(entry) ? entry : [entry])
+      : [];
+  return [...new Set(values.map((entry) => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object") return "";
+    const unit = entry as Record<string, unknown>;
+    return String(unit.serial_number ?? unit.serial_no ?? unit.asset_code
+      ?? unit.consumable_code ?? unit.imei_no ?? "");
+  }).filter(Boolean))];
+};
+
+const normaliseOutboundInspection = (row: OutboundInspection): OutboundInspection => ({
+  ...row,
+  items: row.items?.map((line) => ({
+    ...line,
+    serial_numbers: serialStrings((line as { serial_numbers?: unknown }).serial_numbers),
+  })),
+});
+
 export const listOutboundInspections = (params: ListParams = {}) =>
   get<Page<OutboundInspection>>(`${BASE}/outbound-inspections`, params);
 
 export const getOutboundInspection = (id: number) =>
-  get<OutboundInspection>(`${BASE}/outbound-inspections/${id}`);
+  get<OutboundInspection>(`${BASE}/outbound-inspections/${id}`).then(normaliseOutboundInspection);
 
 export const createOutboundInspection = (body: OutboundInspectionWrite) =>
-  post<OutboundInspection>(`${BASE}/outbound-inspections`, body);
+  post<OutboundInspection>(`${BASE}/outbound-inspections`, body).then(normaliseOutboundInspection);
 
 export const updateOutboundInspection = (id: number, body: OutboundInspectionWrite) =>
-  put<OutboundInspection>(`${BASE}/outbound-inspections/${id}`, body);
+  put<OutboundInspection>(`${BASE}/outbound-inspections/${id}`, body).then(normaliseOutboundInspection);
 
 export const completeOutboundInspection = (id: number) =>
   post<OutboundInspection>(`${BASE}/outbound-inspections/${id}/complete`);
@@ -586,6 +611,10 @@ export const listReturns = (params: ListParams = {}) =>
 
 export const getReturn = (id: number) => get<PurchaseReturn>(`${BASE}/returns/${id}`);
 
+/** Every document behind a purchase return, and everything that has happened to it. */
+export const purchaseReturnDossier = (id: number) =>
+  get<import("./types").PurchaseReturnDossier>(`${BASE}/returns/${id}/dossier`);
+
 export const createReturn = (body: PurchaseReturnWrite) =>
   post<PurchaseReturn>(`${BASE}/returns`, body);
 
@@ -616,8 +645,19 @@ export const getReturnableLines = (grnId: number) =>
 export const purchaseReturnReasons = () =>
   get<{ value: string; label: string }[]>(`${BASE}/returns/reasons`);
 
+/** By Hand / Third Party / Own Vehicle, and which extra fields each one asks for. */
+export const purchaseReturnLogisticsModes = () =>
+  get<import("./types").LogisticsModeOption[]>(`${BASE}/returns/logistics-modes`);
+
 export const purchaseReturnSourceOptions = (params: ListParams & { warehouse_id?: number } = {}) =>
   get<import("./types").Page<import("./types").PurchaseReturnSourceOption>>(`${BASE}/returns/source-options`, params);
+
+/** Resolve an indent / PO / GRN number typed by hand, instead of picking from a list. */
+export const purchaseReturnSourceLookup = (doc_no: string, source_type?: string) =>
+  get<import("./types").PurchaseReturnSourceLookup>(`${BASE}/returns/source-lookup`, {
+    doc_no,
+    source_type: source_type || undefined,
+  });
 
 export const purchaseReturnSourceDetail = (source_type: string, source_id: number, item_id?: number) =>
   get<import("./types").PurchaseReturnSourceDetail>(`${BASE}/returns/source-detail`, {
@@ -628,6 +668,33 @@ export const purchaseReturnSourceDetail = (source_type: string, source_id: numbe
 
 export const sendPurchaseReturnToVendor = (returnId: number, body: import("./types").PurchaseReturnSendToVendorPayload) =>
   post<PurchaseReturn>(`${BASE}/returns/${returnId}/send-to-vendor`, body);
+
+/* --- after SENT_TO_VENDOR: the decision, and the leg that brings the material back --- */
+
+/**
+ * The two cards offered once the vendor has agreed a replacement. Served, never
+ * hard-coded — the sentence the desk decides against and the sentence the audit trail
+ * records have to be the same sentence.
+ */
+export const purchaseReturnVehicleArrangements = () =>
+  get<import("./types").VehicleArrangementOption[]>(`${BASE}/returns/vehicle-arrangements`);
+
+/**
+ * Who moves the goods to the vendor: their vehicle, or Logistics on our request.
+ *
+ * THE ONLY press this warehouse still makes on a sent return. Approve/Reject and
+ * Refund/Replacement moved to the supplier portal on 2026-09-12 — they are the vendor's
+ * answers, and `approveSentReturn` / `rejectSentReturn` / `resolveRefund` /
+ * `recordReturnVehicle` went with them. Answered once.
+ */
+export const arrangeReturnTransport = (
+  id: number, body: import("./types").ReturnVehicleArrangementPayload,
+) => post<PurchaseReturn>(`${BASE}/returns/${id}/transport`, body);
+
+/** Sign the replacement in at the warehouse gate. Posts no stock. */
+export const confirmReturnReceived = (
+  id: number, body: import("./types").ReturnReceivedPayload = {},
+) => post<PurchaseReturn>(`${BASE}/returns/${id}/receive`, body);
 
 /* ------------------------------------------------------- serials & batches -- */
 

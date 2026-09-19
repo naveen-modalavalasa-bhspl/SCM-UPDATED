@@ -326,6 +326,11 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         before = defn.serialize(row)
         await _apply_fields(db, defn, row, data, user)
         await _write(db, defn)
+        # Flush expires SQL expressions such as Bom.line_count. Serializing one here
+        # would otherwise start an implicit SELECT from async code and fail with
+        # MissingGreenlet/StatementError before the audit or commit can complete.
+        # Refresh while IO can be awaited, just as the create path does above.
+        await db.refresh(row)
         await _prepare_rows(db, defn, [row])
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.UPDATE, actor=user,

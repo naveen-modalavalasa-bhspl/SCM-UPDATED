@@ -266,6 +266,11 @@ class ReturnOut(BaseModel):
     can_receive: bool = False
     can_withdraw: bool = False
     can_approve_logistics: bool = False
+    # Whether the paper trail behind the MATERIAL may be read — the other modules'
+    # documents under the item, not this document. `return.decide`, served on the
+    # single-document read only. Default False, so a payload built by anything that does
+    # not set it leaves the section out rather than drawing it for everybody.
+    can_view_trail: bool = False
 
     # STORE or SUPPLIER, and the shipment carrying it. All three are None until the
     # decision desk has chosen an outcome that travels.
@@ -401,6 +406,15 @@ class DecisionOptionsOut(BaseModel):
     default_vehicle_type: str | None = None
     purchase_return_category: str | None = None
     purchase_return_category_label: str | None = None
+    #: The rung actually resolved for THIS document, said in a served sentence. The
+    #: category is a coarse three-way filter over a THREE-rung chain (WAREHOUSE / MDP /
+    #: LIP), so it cannot name the point on its own — this does, in the same words the
+    #: stock screens use (`inventory.locations`).
+    purchase_return_source_detail: str | None = None
+    purchase_return_source_tier: str | None = None
+    #: False when no warehouse row answered, so the category is a fallback rather than a
+    #: fact and the screen can say which it is reading.
+    purchase_return_source_resolved: bool = False
     qc_rejected_tag: bool = False
 
 
@@ -562,13 +576,19 @@ class ReceivingConfigIn(BaseModel):
 
 
 class IndentOptionOut(BaseModel):
-    """One indent a return may be raised against — the raiser's own, past approval."""
+    """One indent a return may be raised against — the raiser's own, past approval, and
+    still holding something of its own on the raiser's shelf."""
 
     id: int
     indent_no: str
     indent_date: str | None = None
     status: str
     total_items: int = 0
+    # How many of those items the raiser is still holding and could send back. Served
+    # rather than inferred: the picker labels the option with it, and an option that
+    # advertises the indent's ORIGINAL line count on an indent holding nothing is the
+    # dead end `service.returnable_indents` exists to remove.
+    returnable_items: int = 0
     total_qty: Decimal = Decimal("0")
     project_name: str | None = None
     position_name: str | None = None
@@ -677,14 +697,45 @@ class HistoryOut(BaseModel):
 
 
 class RelatedDocumentOut(BaseModel):
+    """One document on the trail behind the returned item.
+
+    The same fields whatever kind it is, so the section renders one way and branches on
+    nothing. `doc_label` is SERVED rather than mapped in the screen (`enums.TRAIL_LABELS`)
+    — a document type the frontend has never heard of still renders with its real name.
+    `note` is the one-line qualifier that makes a row worth opening: who signed the
+    allocation, the vendor's invoice number, the lot the stock stood in, the LR of the
+    truck. `extra` carries what a link or a badge needs and nothing a reader sees.
+    """
+
     doc_type: str
+    doc_label: str | None = None
+    #: Which leg of the material's life this row belongs to (`enums.TRAIL_CHAPTERS`).
+    #: Served on the row so the screen groups by a key it was given rather than by a
+    #: second copy of the doc-type-to-chapter map — the way `doc_label` already works.
+    chapter: str | None = None
     doc_id: int | None = None
     doc_no: str | None = None
     status: str | None = None
     date: str | None = None
     vendor_name: str | None = None
     warehouse_name: str | None = None
+    note: str | None = None
     extra: dict | None = None
+
+
+class TrailChapterOut(BaseModel):
+    """One leg of the material's life, and the question that leg answers.
+
+    Sent in the order the work happens, and sent COMPLETE — a chapter nothing landed in
+    still arrives, because "this material was never bought, it came off stock already on
+    the shelf" is a fact the reviewer needs and an absent heading cannot state it.
+    """
+
+    key: str
+    label: str
+    caption: str
+    #: How many rows of the trail landed here. Zero is meaningful, see above.
+    count: int = 0
 
 
 class RelatedDocumentsOut(BaseModel):
@@ -711,8 +762,26 @@ class RelatedDocumentsOut(BaseModel):
     intent_label: str | None = None
     items: list[dict] = []
     documents: list[RelatedDocumentOut] = []
+    #: The legs of the material's life, in order, every one of them — the headings the
+    #: `documents` above are read under. Served rather than held in the screen so a
+    #: document type added to the trail lands under a heading without the frontend
+    #: knowing it exists.
+    chapters: list[TrailChapterOut] = []
+    #: Set only when a kind of document hit the per-kind cap, so a reader can tell a
+    #: complete trail from a truncated one. Null is the normal case and means the list
+    #: below is everything.
+    documents_note: str | None = None
     purchase_return_category: str | None = None
     purchase_return_category_label: str | None = None
+    #: The rung actually resolved for THIS document, said in a served sentence. The
+    #: category is a coarse three-way filter over a THREE-rung chain (WAREHOUSE / MDP /
+    #: LIP), so it cannot name the point on its own — this does, in the same words the
+    #: stock screens use (`inventory.locations`).
+    purchase_return_source_detail: str | None = None
+    purchase_return_source_tier: str | None = None
+    #: False when no warehouse row answered, so the category is a fallback rather than a
+    #: fact and the screen can say which it is reading.
+    purchase_return_source_resolved: bool = False
     qc_rejected_tag: bool = False
     vehicle_options: list[OptionOut] = []
     vehicle_type: str | None = None

@@ -3,8 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   BarChart3, CheckCircle2, ChevronRight, ClipboardList, Download, FileText,
-  History, Package, Truck, Undo2, XCircle,
+  History, MinusCircle, Package, Truck, Undo2, XCircle,
 } from "lucide-react";
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import type { LucideIcon } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -13,7 +14,7 @@ import {
 import { fmtDate, fmtRelative, fmtTime } from "@/shared/datetime";
 import { approvalsApi } from "../api";
 import { approvalDecisionDocumentPath } from "../documentRoutes";
-import type { ApprovalDecisionRow } from "../types";
+import type { ApprovalDecisionExclusion, ApprovalDecisionRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
 import { TONE_BLUE } from "@/shared/components/tones";
 
@@ -124,6 +125,35 @@ function turnaround(hours?: number | null): string | null {
   return `took ${Math.round(hours / 24)} days`;
 }
 
+/** The lines this approver left out when they signed, if any.
+ *
+ *  An exclusion is part of the DECISION, not of the document that follows it: the
+ *  indent screen shows the dropped line at zero and never says who took it out. So
+ *  the ledger carries it, and a row that has one does not send the reader off to an
+ *  indent to work it out for themselves.
+ */
+const exclusionsOf = (row: ApprovalDecisionRow): ApprovalDecisionExclusion[] =>
+  row.excluded_items ?? [];
+
+const exclusionLabel = (line: ApprovalDecisionExclusion) =>
+  line.item_name ?? line.item_code ?? `Line #${line.line_id}`;
+
+/** Quantities come off the wire as numbers; drop a trailing `.000` so a countable
+ *  item reads as 10 rather than 10.000. Same shape the consolidation screen uses. */
+const formatQty = (value: number) =>
+  Number.isFinite(value) ? String(Number(value.toFixed(3))) : "—";
+
+/** The chip that says something was left out. Same words and same warn tint as the
+ *  Excluded column on the consolidation screen — one exclusion, one look. */
+function ExcludedChip({ count }: { count: number }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-warn-bg px-2.5 py-1 text-xs font-bold text-warn">
+      <MinusCircle className="h-3.5 w-3.5" />
+      {count} item{count === 1 ? "" : "s"} excluded
+    </span>
+  );
+}
+
 /** The buttons that stand in for the decision dropdown. Same values, all visible. */
 const DECISION_FILTERS: Array<{ value: string; label: string; icon: LucideIcon }> = [
   { value: "", label: "All", icon: History },
@@ -149,6 +179,10 @@ function exportExcel(rows: ApprovalDecisionRow[]) {
     Comments: row.comments ?? "",
     Requester: row.requester ?? "",
     "Workflow status": row.workflow_status,
+    Excluded: (row.excluded_items ?? [])
+      .map((line) => `${exclusionLabel(line)} (${formatQty(line.requested_quantity)}${
+        line.uom_code ? ` ${line.uom_code}` : ""})`)
+      .join("; "),
   })));
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, sheet, "My Decisions");
@@ -219,6 +253,7 @@ function DecisionCell({ row }: { row: ApprovalDecisionRow }) {
   const Icon = meta.icon;
   const took = turnaround(row.duration_hours);
   const stage = row.stage_name ?? `Stage ${row.stage_sequence}`;
+  const excluded = exclusionsOf(row);
   return (
     <div className="space-y-1.5">
       <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-bold ${meta.chip}`}>
@@ -228,7 +263,32 @@ function DecisionCell({ row }: { row: ApprovalDecisionRow }) {
       <p className="line-clamp-2 text-xs text-muted" title={stage}>
         as {stage}{took ? ` · ${took}` : ""}
       </p>
+      {excluded.length > 0 && <ExcludedChip count={excluded.length} />}
     </div>
+  );
+}
+
+/** What was left out, item by item — the panel behind a row that excluded something.
+ *  Deliberately a list and nothing else: the ledger is a record, and every action on
+ *  these items belongs to the document, not to the decision that is already signed. */
+function ExclusionList({ lines }: { lines: ApprovalDecisionExclusion[] }) {
+  return (
+    <ul className="divide-y divide-line rounded-xl border border-line">
+      {lines.map((line) => (
+        <li key={line.line_id} className="flex items-start justify-between gap-3 p-3">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-ink">{exclusionLabel(line)}</p>
+            {line.item_code && <p className="mono text-xs text-muted">{line.item_code}</p>}
+          </div>
+          <div className="shrink-0 text-right">
+            <p className="tabular text-sm font-semibold text-warn">
+              {formatQty(line.requested_quantity)}{line.uom_code ? ` ${line.uom_code}` : ""}
+            </p>
+            <p className="text-xs text-muted">left out</p>
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -271,7 +331,16 @@ export function MyDecisionsPage() {
       && (!term || [row.doc_no, row.requester, row.comments, row.doc_type]
         .some((value) => String(value ?? "").toLowerCase().includes(term))));
   }, [decision, query.data?.items, search]);
-  const openDecision = (row: ApprovalDecisionRow) => nav(approvalDecisionDocumentPath(row));
+  // A row that left something out opens its own panel rather than the document: the
+  // question being asked of this screen is "what did I exclude", and the indent shows
+  // the dropped line as a zero with nothing to say who zeroed it. Every other row is
+  // unchanged — straight to the document, as before.
+  const [detail, setDetail] = useState<ApprovalDecisionRow | null>(null);
+  const openDocument = (row: ApprovalDecisionRow) => nav(approvalDecisionDocumentPath(row));
+  const openDecision = (row: ApprovalDecisionRow) => {
+    if (exclusionsOf(row).length > 0) setDetail(row);
+    else openDocument(row);
+  };
   const filtered = Boolean(decision || search.trim());
   const total = query.data?.total ?? 0;
 
@@ -301,7 +370,8 @@ export function MyDecisionsPage() {
       key: "action", header: "", className: "w-[150px] text-right align-middle",
       render: (row) => (
         <Button variant="ghost" onClick={() => openDecision(row)}>
-          View details<ChevronRight className="h-4 w-4" />
+          {exclusionsOf(row).length > 0 ? "View excluded" : "View details"}
+          <ChevronRight className="h-4 w-4" />
         </Button>
       ),
     },
@@ -392,6 +462,7 @@ export function MyDecisionsPage() {
         const Icon = meta.icon;
         const { icon: DocIcon, tint } = family(row.doc_type);
         const took = turnaround(row.duration_hours);
+        const excluded = exclusionsOf(row);
         return (
           <div className="space-y-3">
             <div className="flex items-start gap-3">
@@ -414,6 +485,7 @@ export function MyDecisionsPage() {
               as {row.stage_name ?? `Stage ${row.stage_sequence}`}
               {took ? ` · ${took}` : ""}
             </p>
+            {excluded.length > 0 && <ExcludedChip count={excluded.length} />}
             {row.comments && (
               <p className="border-l-2 border-line pl-2.5 text-sm italic text-body">
                 {row.comments}
@@ -429,7 +501,8 @@ export function MyDecisionsPage() {
               <StatusPill status={row.workflow_status} />
             </div>
             <Button variant="soft" onClick={() => openDecision(row)}>
-              View details<ChevronRight className="h-4 w-4" />
+              {excluded.length > 0 ? "View excluded" : "View details"}
+              <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
         );
@@ -437,5 +510,43 @@ export function MyDecisionsPage() {
     />}
 
     {!query.error && <ApprovalPager page={page} size={size} total={total} onPage={setPage} />}
+
+    {/* What was excluded on this decision. The document is still one press away —
+      * the panel answers the question first rather than instead. */}
+    <Modal
+      isOpen={Boolean(detail)}
+      onClose={() => setDetail(null)}
+      size="lg"
+      scrollBehavior="inside"
+      classNames={{ base: "rounded-2xl border border-line/70" }}
+    >
+      <ModalContent>
+        <ModalHeader className="flex flex-col items-start gap-1 pb-2">
+          <span className="mono text-[13px] font-semibold text-ink">
+            {detail?.doc_no ?? (detail ? `#${detail.doc_id}` : "")}
+          </span>
+          <span className="text-xs font-normal text-muted">
+            {detail ? docLabel(detail.doc_type) : ""}
+            {detail?.requester ? ` · raised by ${detail.requester}` : ""}
+          </span>
+        </ModalHeader>
+        <ModalBody className="pt-0">
+          <p className="text-[13px] leading-5 text-muted">
+            You approved this on {fmtDate(detail?.decision_at)} and left the following
+            out of it. The rest of the document went on at the quantities you signed.
+          </p>
+          {detail && <ExclusionList lines={exclusionsOf(detail)} />}
+        </ModalBody>
+        <ModalFooter className="pt-2">
+          <Button variant="subtle" onClick={() => setDetail(null)}>Close</Button>
+          <Button
+            variant="soft"
+            onClick={() => { const row = detail; setDetail(null); if (row) openDocument(row); }}
+          >
+            Open document<ChevronRight className="h-4 w-4" />
+          </Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
   </>;
 }

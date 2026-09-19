@@ -883,7 +883,6 @@ async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
         raise NotFoundError(f"PO {po_id} not found")
     
     if not po.vendor_name and po.vendor_id:
-        from app.modules.master.models import Vendor
         vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
         if vendor_name:
             po.vendor_name = vendor_name

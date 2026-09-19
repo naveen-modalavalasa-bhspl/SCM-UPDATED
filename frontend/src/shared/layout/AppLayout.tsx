@@ -147,10 +147,18 @@ function Brand({ compact = false }: { compact?: boolean }) {
           go round — the label wrapped to three lines and ran under the button. The
           artwork's mark already says SCM; the name lives in `alt` for anyone who
           cannot see it. */}
-      <img
-        src={scmMark}
-        alt="SCM ERP — Supply Chain"
-        className={`w-auto shrink-0 object-contain ${compact ? "h-5" : "h-9"}`}
+      {/* Match AppSplash exactly: use the shared SCM asset as a mask and paint the
+          product's four brand colours through its letterforms. */}
+      <span
+        role="img"
+        aria-label="SCM ERP — Supply Chain"
+        style={{
+          WebkitMaskImage: `url(${scmMark})`,
+          maskImage: `url(${scmMark})`,
+        }}
+        className={`block shrink-0 bg-[image:var(--brand-gradient)] bg-cover bg-center [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain] [-webkit-mask-position:center] [-webkit-mask-repeat:no-repeat] [-webkit-mask-size:contain] ${
+          compact ? "h-5 w-[52px]" : "h-9 w-[94px]"
+        }`}
       />
     </div>
   );

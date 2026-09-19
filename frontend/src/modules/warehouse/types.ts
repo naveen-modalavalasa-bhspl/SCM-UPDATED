@@ -62,9 +62,48 @@ export type DispatchStatus =
   | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "PACKED" | "DISPATCHED"
   | "IN_TRANSIT" | "DELIVERED" | "ACKNOWLEDGED" | "CANCELLED";
 
+// Everything after SENT_TO_VENDOR is the vendor's decision and the journey the goods
+// then make — out to the vendor, and the replacement back. `StatusPill` has no tone for
+// them and falls back to grey on purpose: `shared/` is the lead's (rule 4) and the pill
+// takes its WORDING from the served `status_label` instead, which is where every one of
+// these is turned into a sentence.
+//
+// IN_TRANSIT is LEGACY. It meant "on the road back from the vendor" under the older flow
+// and is kept because rows may carry it; STOCK_PICKED_UP and REPLACEMENT_DISPATCHED are
+// what a new return uses, and between them they say which way the goods are moving.
 export type ReturnStatus =
   | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "DISPATCHED"
+  | "SENT_TO_VENDOR"
+  | "VENDOR_APPROVED" | "REPLACEMENT_AGREED"
+  | "AWAITING_VENDOR_VEHICLE" | "VENDOR_TRANSPORT_ACCEPTED" | "VEHICLE_REQUESTED"
+  | "STOCK_PICKED_UP" | "VENDOR_RECEIVED" | "REPLACEMENT_DISPATCHED"
+  | "IN_TRANSIT" | "RECEIVED_AT_WAREHOUSE" | "REFUNDED"
   | "COMPLETED" | "CANCELLED";
+
+/** Who moves an approved return's goods out to the vendor. */
+export type ReturnVehicleArrangement = "VENDOR_ARRANGES" | "WAREHOUSE_REQUESTS";
+
+/**
+ * One leg of the twelve-leg purchase-return tracker, exactly as the server decided it.
+ *
+ * The last four are the replacement's way back onto the shelf — `warehouse_received`,
+ * `grn`, `qc`, `putaway` — and every one of them is READ off a document the store
+ * already works, never off a status on the return.
+ */
+export interface PurchaseReturnJourneyLeg {
+  key: string;
+  label: string;
+  /**
+   * A leg this particular return will never reach — a refund never travels — reads
+   * `cancelled` with a caption saying why, rather than sitting at `pending` as though
+   * somebody still owed it.
+   */
+  state: "completed" | "current" | "pending" | "rejected" | "cancelled";
+  at?: string | null;
+  actor_name?: string | null;
+  detail?: string | null;
+  reference_no?: string | null;
+}
 
 /* --------------------------------------------------------------- warehouse -- */
 
@@ -1585,7 +1624,7 @@ export interface AcknowledgeWrite {
 
 /* ------------------------------------------------------- purchase returns -- */
 
-/** `pro_returns`. */
+/** `pro_returns`. Enriched with auto-fetched vendor snapshot — never typed. */
 export interface PurchaseReturn {
   id: number;
   return_no: string;
@@ -1594,6 +1633,10 @@ export interface PurchaseReturn {
   po_no?: string | null;
   grn_id?: number | null;
   grn_no?: string | null;
+  /** Off the GRN itself — the purchase reference the return is argued against. */
+  grn_date?: string | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
   vendor_id?: number | null;
   vendor_name?: string | null;
   vendor_code?: string | null;
@@ -1603,15 +1646,41 @@ export interface PurchaseReturn {
   vendor_address?: string | null;
   vendor_city?: string | null;
   vendor_state?: string | null;
+  vendor_gstin?: string | null;
+  vendor_pincode?: string | null;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
   indent_id?: number | null;
   indent_no?: string | null;
   material_receipt_id?: number | null;
+  /**
+   * THE QC THAT CONDEMNED THE GOODS — the evidence the vendor is asked to accept, and
+   * the one reference this document could not carry before 2026-09-12. Stored columns,
+   * resolved on read off the return's own GRN while blank and bound when it is sent, so
+   * the number survives the whole journey. Null where the return names no goods receipt,
+   * or where nobody inspected the one it names.
+   */
+  inspection_id?: number | null;
+  inspection_no?: string | null;
   reason?: string | null;
   reason_label?: string | null;
+  /**
+   * The served reason code, where the stored reason is one. Null on a return the
+   * returns module raised automatically (its reason is prose from the field) — the
+   * signal that Send to Vendor has to ask for a reason rather than reuse this one.
+   */
+  reason_code?: string | null;
   remarks?: string | null;
   status: ReturnStatus;
+  /**
+   * The stored status re-worded once the SUPPLIER has answered — "Replacement to
+   * warehouse" rather than "SENT_TO_VENDOR". Served, never mapped in a screen, so the
+   * register and the document cannot word one return two ways. Null while unanswered
+   * and null once the return is closed: write `status_label ?? status` and every row
+   * raised before the portal could be answered reads exactly as it did.
+   */
+  status_label?: string | null;
+  sent_at?: string | null;
   total_items: number;
   total_qty: number;
   total_value: number;
@@ -1622,10 +1691,295 @@ export interface PurchaseReturn {
   items?: PurchaseReturnItem[];
   /** See Issue.can_approve — whose turn it is, not who holds the permission. */
   can_approve?: boolean;
-  /** Served, and the SAME answer `send_to_vendor` enforces: APPROVED only. */
   can_send_to_vendor?: boolean;
   dispatch_id?: number | null;
   dispatch_no?: string | null;
+  /**
+   * The chain READ behind a return raised without one — a return the returns module
+   * raises off a branch consignment stores no GRN, PO or vendor. Kept separate from the
+   * stored fields above on purpose: traced is evidence, not a binding. Sending posts
+   * these back, which is what binds them.
+   */
+  chain_traced?: boolean;
+  chain_note?: string | null;
+  traced_grn_id?: number | null;
+  traced_grn_no?: string | null;
+  traced_po_id?: number | null;
+  traced_po_no?: string | null;
+  traced_vendor_id?: number | null;
+  traced_vendor_name?: string | null;
+  /**
+   * Where the material came from and what raised this document. Written by the returns
+   * module when a branch consignment lands at the warehouse and the purchase return
+   * against it is raised automatically — which is why a DRAFT can exist that nobody in
+   * the warehouse remembers typing.
+   */
+  source_category?: string | null;
+  source_category_label?: string | null;
+  source_return_id?: number | null;
+  source_return_no?: string | null;
+  /**
+   * The vendor and lines on this document were typed, not read off a purchase. The
+   * `vendor_*` fields above are then served from the typed values rather than from
+   * the vendor master, so the shape a reader gets is identical either way.
+   */
+  is_manual?: boolean;
+  /** The document number typed for reference on a manual return. */
+  source_ref_no?: string | null;
+  /**
+   * What the SUPPLIER said about the goods, and what their answer raised. Written by
+   * the supplier portal and read-only here. All null until they answer — which is the
+   * permanent state of every return sent before the portal could answer — so read "not
+   * yet" from null and never from a missing field.
+   */
+  vendor_response?: string | null;
+  /** Already worded by the server. Never map this in a screen. */
+  vendor_response_label?: string | null;
+  vendor_response_at?: string | null;
+  /** Why, in the supplier's own words. */
+  vendor_response_note?: string | null;
+  /** What they are crediting, on a refund only. */
+  vendor_refund_amount?: number | null;
+  /**
+   * The DRAFT inbound receipt the answer raised — the document the replacement (or the
+   * refused consignment) will actually be received against. Null for a refund, which
+   * raises none, and null on a legacy ACCEPTED row.
+   */
+  vendor_followup_receipt_id?: number | null;
+  vendor_followup_receipt_no?: string | null;
+
+  /* --- the decision on a SENT return, and the leg that brings the material back --- */
+
+  /**
+   * APPROVED | REJECTED, answered once after the return reached the vendor. Null is
+   * "nobody has answered yet", which is what puts the two buttons on the screen —
+   * read it from null, never from a missing field.
+   */
+  vendor_decision?: string | null;
+  vendor_decision_at?: string | null;
+  vendor_decision_by_name?: string | null;
+  vendor_decision_note?: string | null;
+
+  /** Who provides the vehicle. Null until the approval has been answered with one. */
+  vehicle_arrangement?: ReturnVehicleArrangement | null;
+  /** Already worded by the server. Never map this in a screen. */
+  vehicle_arrangement_label?: string | null;
+  vehicle_arrangement_at?: string | null;
+  vehicle_arrangement_by_name?: string | null;
+
+  /**
+   * THE VEHICLE BRINGING IT BACK — one shape over both arrangements. Typed by the desk
+   * where the vendor arranges it, read live off the Logistics transport request where
+   * we asked for one. The screen never asks which: that is the server's job and the
+   * whole reason these are not two sets of fields.
+   */
+  inbound_vehicle_no?: string | null;
+  inbound_driver_name?: string | null;
+  inbound_driver_phone?: string | null;
+  inbound_transporter_name?: string | null;
+  inbound_lr_no?: string | null;
+  inbound_expected_date?: string | null;
+  inbound_dispatched_at?: string | null;
+  /** The Logistics leg, on a warehouse-requested vehicle. */
+  inbound_tr_id?: number | null;
+  inbound_tr_no?: string | null;
+  /** Where that leg has got to, read off it rather than mirrored. */
+  inbound_tr_status?: string | null;
+  inbound_pickup_address?: string | null;
+  inbound_ready_date?: string | null;
+
+  /** THE OUTWARD LEG — our warehouse to the vendor, on a WAREHOUSE_REQUESTS arrangement. */
+  outbound_tr_id?: number | null;
+  outbound_tr_no?: string | null;
+
+  /** The vendor accepting the collection job, on a VENDOR_ARRANGES leg. */
+  vendor_transport_accepted_at?: string | null;
+  vendor_transport_accepted_by_name?: string | null;
+
+  /** The vendor signing for the returned goods at their own dock. */
+  vendor_receipt_confirmed_at?: string | null;
+  vendor_receipt_by_name?: string | null;
+  vendor_receipt_vehicle_no?: string | null;
+  vendor_receipt_remarks?: string | null;
+
+  /**
+   * THE REPLACEMENT DISPATCH NOTE. The per-line half — the batch, manufacturing date and
+   * expiry of the goods actually being sent — rides on the ITEM rows, because two items
+   * have two batches and one pair of fields here would be right only for a one-line
+   * return.
+   */
+  replacement_dispatched_at?: string | null;
+  replacement_dispatch_no?: string | null;
+  replacement_dispatch_date?: string | null;
+  replacement_expected_date?: string | null;
+  replacement_transporter_name?: string | null;
+  replacement_vehicle_no?: string | null;
+  replacement_lr_no?: string | null;
+  replacement_remarks?: string | null;
+
+  received_at?: string | null;
+  received_by_name?: string | null;
+  received_remarks?: string | null;
+
+  /**
+   * The internal refund's own stamp. The AMOUNT is `vendor_refund_amount` (one
+   * credit column whichever desk recorded it); these three say this desk did.
+   */
+  refunded_at?: string | null;
+  refunded_by_name?: string | null;
+  refund_remarks?: string | null;
+
+  /**
+   * WHICH PRESS THIS DOCUMENT IS STANDING AT. Served, never worked out here: the rungs
+   * are the service's own guards, and re-deriving them from the status string would be
+   * a second copy of the ladder drifting from the first. They say where the DOCUMENT
+   * stands and nothing about this user — keep the `<Can>` gate as well.
+   *
+   * ONE of them puts a button in front of an employee. Approve/Reject and
+   * Refund/Replacement are the VENDOR's answers on their own portal since 2026-09-12,
+   * so `can_decide`, `can_resolve_refund` and `can_record_vehicle` are gone with the
+   * presses they gated.
+   */
+  can_arrange_transport?: boolean;
+  can_confirm_receipt?: boolean;
+
+  /**
+   * WHAT THE VENDOR STILL OWES US. Read-only: these draw the "waiting on them" panel so
+   * a storekeeper chasing a return can tell "nobody has done anything" from "we are
+   * waiting on them", without offering to answer on their behalf.
+   */
+  awaiting_vendor_decision?: boolean;
+  awaiting_vendor_settlement?: boolean;
+  awaiting_vendor_transport?: boolean;
+  awaiting_vendor_receipt?: boolean;
+  awaiting_replacement_dispatch?: boolean;
+
+  /** RETAINED SPELLING of `can_arrange_transport`, served with the same value. */
+  can_arrange_vehicle?: boolean;
+
+  /**
+   * THE REPLACEMENT'S INTAKE — the goods receipt the dispatch note raised, its QC and its
+   * putaway. Read on the server off `inb_receipts`, `inb_inspections` and
+   * `whs_warehouse_items` on every load; nothing is mirrored onto the return, so the
+   * three rungs the tracker draws and the documents the store actually works are the
+   * same three rungs.
+   *
+   * All null / zero / false on a return with no replacement coming — a refund, a
+   * refusal, and every return raised before this flow existed.
+   */
+  replacement_grn_no?: string | null;
+  /** DRAFT | PENDING_QC | QC_PASSED | QC_FAILED | PARTIALLY_RECEIVED | COMPLETED. */
+  replacement_grn_status?: string | null;
+  replacement_inspection_no?: string | null;
+  replacement_putaway_total?: number;
+  replacement_putaway_done?: number;
+  /** Booked in, passed and placed. This is the fact that closes the return. */
+  replacement_intake_complete?: boolean;
+  /**
+   * What the store still owes, in ONE sentence, composed on the server. Never assembled
+   * here: the band on this screen and the journey tracker beside it must not word one
+   * document two ways. Null where there is no replacement, and once the return is closed.
+   */
+  replacement_intake_stage?: string | null;
+}
+
+/** One of the two cards offered after a sent return is approved. Served, never typed. */
+export interface VehicleArrangementOption {
+  value: ReturnVehicleArrangement;
+  label: string;
+  help: string;
+  /** This option hands the leg to Logistics — a vehicle request appears on their board. */
+  raises_vehicle_request: boolean;
+}
+
+/** `POST /returns/{id}/vehicle-arrangement`. */
+export interface ReturnVehicleArrangementPayload {
+  arrangement: ReturnVehicleArrangement;
+  /** Only read on a warehouse-requested vehicle. */
+  pickup_address?: string | null;
+  ready_date?: string | null;
+  remarks?: string | null;
+}
+
+/**
+ * `POST /returns/{id}/vehicle` — the vehicle the VENDOR named. Every field optional so
+ * a desk can record a number now and the driver when the vendor rings back; an omitted
+ * field means "nothing to say about this", never "erase what is there".
+ */
+export interface ReturnInboundVehiclePayload {
+  vehicle_no?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  expected_date?: string | null;
+  /** The vehicle has left the vendor. A vendor leg has no logistics document to say so. */
+  dispatched?: boolean;
+  remarks?: string | null;
+}
+
+/** `POST /returns/{id}/receive`. */
+export interface ReturnReceivedPayload {
+  received_by_name?: string | null;
+  remarks?: string | null;
+}
+
+/** `POST /returns/{id}/resolve-refund` — settle an approved return in money. */
+export interface ResolveRefundPayload {
+  refund_amount: number;
+  refund_remarks?: string | null;
+}
+
+/**
+ * One document on the trail behind a purchase return. Every kind carries the same
+ * keys, so the screen renders one row shape and never branches per type — `facts` is
+ * an ordered list of [label, value] pairs the SERVER chose.
+ */
+export interface PurchaseReturnTrailDoc {
+  doc_type: string;
+  doc_label: string;
+  doc_id?: number | null;
+  doc_no?: string | null;
+  status?: string | null;
+  doc_date?: string | null;
+  party?: string | null;
+  facts: [string, string][];
+  /** PURCHASE (how it was bought) | RETURN (how it came back) | DOCUMENT (this one). */
+  leg: string;
+  /** Read off the trail rather than named by the document — evidence, not a binding. */
+  traced: boolean;
+  /** Where it lives in the app. Null where no detail screen exists for that kind. */
+  route?: string | null;
+}
+
+/** One thing that happened, on one document, to one person's name. */
+export interface PurchaseReturnTimelineEvent {
+  at?: string | null;
+  entity: string;
+  doc_no?: string | null;
+  action: string;
+  title: string;
+  detail?: string | null;
+  actor_name?: string | null;
+  status_to?: string | null;
+}
+
+/** `GET /returns/{id}/dossier` — the whole trail and history in one call. */
+export interface PurchaseReturnDossier {
+  return_id: number;
+  return_no: string;
+  documents: PurchaseReturnTrailDoc[];
+  timeline: PurchaseReturnTimelineEvent[];
+  trail_note?: string | null;
+  /**
+   * The twelve-leg tracker. On THIS call rather than an endpoint of its own: the detail
+   * screen already fetches the dossier, and two round trips for facts drawn off one row
+   * is two chances for them to disagree about where the document is.
+   */
+  journey?: PurchaseReturnJourneyLeg[];
+  /** Which leg it is standing on (1-based), and the sentence that says so. */
+  current_sequence?: number;
+  current_stage_message?: string | null;
 }
 
 /** `pro_return_items`. */
@@ -1635,7 +1989,10 @@ export interface PurchaseReturnItem {
   line_no: number;
   po_item_id?: number | null;
   grn_item_id?: number | null;
-  item_id: number;
+  /** Null on a manually typed line — the item need not exist in `mst_items`. */
+  item_id?: number | null;
+  /** This line was typed rather than read off a source document. */
+  is_manual?: boolean;
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
@@ -1654,11 +2011,21 @@ export interface PurchaseReturnItemWrite {
   id?: number;
   po_item_id?: number | null;
   grn_item_id?: number | null;
-  item_id: number;
+  /** Optional only on a MANUAL line — a typed item need not exist in `mst_items`. */
+  item_id?: number | null;
   batch_id?: number | null;
   quantity: number;
   rate?: number | null;
   reason?: string | null;
+  /** This line was typed rather than read off a source document. */
+  is_manual?: boolean;
+  item_name?: string | null;
+  item_code?: string | null;
+  uom_code?: string | null;
+  /** Purchased / already returned / available, as typed. Stored verbatim. */
+  original_qty?: number | null;
+  previously_returned?: number | null;
+  returnable_qty?: number | null;
 }
 
 export interface PurchaseReturnWrite {
@@ -1668,7 +2035,27 @@ export interface PurchaseReturnWrite {
   vendor_id?: number | null;
   warehouse_id?: number | null;
   reason?: string | null;
+  remarks?: string | null;
   items: PurchaseReturnItemWrite[];
+  /**
+   * A return whose vendor and lines are TYPED rather than read off a purchase — for
+   * goods whose paperwork never reached this system. The sourced path is unchanged
+   * and remains the default; `is_manual` false means every existing rule applies,
+   * including the vendor lock.
+   */
+  is_manual?: boolean;
+  /** The document number typed for reference. Never resolved, never linked. */
+  source_ref_no?: string | null;
+  vendor_name?: string | null;
+  vendor_code?: string | null;
+  vendor_contact_person?: string | null;
+  vendor_phone?: string | null;
+  vendor_email?: string | null;
+  vendor_address?: string | null;
+  vendor_city?: string | null;
+  vendor_state?: string | null;
+  vendor_pincode?: string | null;
+  vendor_gstin?: string | null;
 }
 
 /** Return reasons — served, never hard-coded. */
@@ -1722,9 +2109,13 @@ export interface ItemDetail {
   batch_no?: string | null;
   batch_id?: number | null;
   serial_no?: string | null;
+  grn_item_id?: number | null;
+  po_item_id?: number | null;
   original_qty: number;
   previously_returned: number;
   returnable_qty: number;
+  unit_price?: number | null;
+  amount?: number | null;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
 }
@@ -1740,6 +2131,22 @@ export interface PurchaseDetails {
   receipt_no?: string | null;
   order_date?: string | null;
   receipt_date?: string | null;
+  invoice_no?: string | null;
+  invoice_date?: string | null;
+}
+
+/**
+ * `GET /returns/source-lookup` — the answer to a document number typed by hand.
+ *
+ * `found: false` is a 200, not an error: this is asked on every keystroke and a
+ * half-typed number is the field's ordinary state. `message` is the server's sentence
+ * for why a number did not resolve, or why a resolved one cannot be returned against.
+ */
+export interface PurchaseReturnSourceLookup {
+  found: boolean;
+  option?: PurchaseReturnSourceOption | null;
+  can_return: boolean;
+  message?: string | null;
 }
 
 export interface PurchaseReturnSourceDetail {
@@ -1756,6 +2163,55 @@ export interface PurchaseReturnSourceDetail {
   total_returnable_qty: number;
 }
 
+/** One card on the Send to Vendor wizard's Logistics step.
+ *
+ * Served from `/warehouse/returns/logistics-modes` and never hard-coded here: which
+ * modes exist, how they read and which extra fields each one asks for are business
+ * rules, and the `needs_*` flags are what the wizard branches on rather than testing
+ * the mode code in three separate places. */
+export interface LogisticsModeOption {
+  value: string;
+  label: string;
+  help: string;
+  needs_carrier: boolean;
+  needs_vehicle: boolean;
+  needs_bearer: boolean;
+  /** This mode hands the load to Logistics instead of finishing it at the gate, so the
+   *  trip still has to be arranged and the supplier cannot have signed for it yet — the
+   *  wizard therefore does not ask for an acknowledgement on it. Optional so a server
+   *  that predates the flag still deserialises; absent reads as false, which is the old
+   *  behaviour. */
+  raises_shipment?: boolean;
+}
+
+/** How the goods travel back, who signed for them, and everything in between.
+ *
+ * Every field lands on the `out_dispatches` row the send already raises. Optional on
+ * the endpoint — a send posted without it behaves exactly as it did before the
+ * wizard existed — but the wizard always sends a complete one. */
+export interface PurchaseReturnLogisticsPayload {
+  mode: string;
+  hand_carried_by?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  carrier_name?: string | null;
+  lr_no?: string | null;
+  freight_amount?: number | null;
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  total_packages?: number | null;
+  total_weight_kg?: number | null;
+  eway_bill_no?: string | null;
+  expected_delivery?: string | null;
+  gate_pass_no?: string | null;
+  dispatch_remarks?: string | null;
+  acknowledged_by_name?: string | null;
+  acknowledged_at?: string | null;
+  pod_url?: string | null;
+}
+
 export interface PurchaseReturnSendToVendorPayload {
   return_reason: string;
   remarks?: string | null;
@@ -1765,6 +2221,7 @@ export interface PurchaseReturnSendToVendorPayload {
   indent_id?: number | null;
   vendor_id?: number | null;
   warehouse_id?: number | null;
+  logistics?: PurchaseReturnLogisticsPayload | null;
 }
 
 /* ------------------------------------------------------- serials & batches -- */

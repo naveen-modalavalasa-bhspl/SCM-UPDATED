@@ -336,9 +336,21 @@ async def approval_flow(return_id: int, db: AsyncSession = Depends(get_db),
 
 @router.get("/{return_id}/related-documents", response_model=RelatedDocumentsOut)
 async def related_documents(return_id: int, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.RETURN_VIEW))):
-    """All related documents for that item - indent, material issue, PO, GRN, QC etc.
-    Pulled together under the item for decision desk review. Originating warehouse shown by default."""
+                            user=Depends(require_permission(perms.RETURN_DECIDE))):
+    """Everything behind the returned item — indent, allocation, PO, GRN, QC, issue.
+
+    `RETURN_DECIDE`, not `RETURN_VIEW` (CHANGED 2026-09-14). This is not a wider view of
+    the return: it is a dozen OTHER modules' documents, pulled together because the desk
+    choosing where the material goes has to check them. A LIP storekeeper holds
+    `return.view` so they can read the return they raised, and reading it used to hand
+    them the branch's purchase orders, the vendor who supplied it and what it cost — none
+    of which is theirs to see and none of which they can act on.
+
+    The document itself is unchanged for them: the header, the lines, the journey and the
+    approval trail are all still on `return.view`. Only the trail behind the MATERIAL
+    moved. `get_return` serves `can_view_trail` off the same code so the screen asks
+    rather than guesses, and this guard is what actually enforces it (rule 6).
+    """
     return await service.get_related_documents(db, return_id, user)
 
 

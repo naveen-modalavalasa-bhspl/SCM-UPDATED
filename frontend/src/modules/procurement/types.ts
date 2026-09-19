@@ -831,6 +831,373 @@ export interface VendorPOListRow {
   under_revision?: boolean;
 }
 
+/** One purchase return, as the SUPPLIER sees it — goods on their way back.
+ *
+ * Served from `/api/supplier/returns`, which lives in the WAREHOUSE module rather
+ * than beside the rest of the portal: it reads `pro_returns`, and procurement may
+ * not import a later module (rule 5). The portal path is what matters here — it is
+ * what makes the browser send the vendor token.
+ *
+ * The logistics fields are all null on a return that was entered by hand, because
+ * that raises no consignment at all. The screen must not read them as "not yet
+ * despatched". */
+export interface VendorReturnListRow {
+  id: number;
+  return_no: string;
+  return_date?: string | null;
+  po_no?: string | null;
+  grn_no?: string | null;
+  reason_code?: string | null;
+  reason_label?: string | null;
+  remarks?: string | null;
+  total_items: number;
+  total_qty: number;
+  total_value: number;
+  status: string;
+  sent_at?: string | null;
+  dispatch_no?: string | null;
+  transport_mode?: string | null;
+  transport_mode_label?: string | null;
+  carrier_name?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  lr_no?: string | null;
+  eway_bill_no?: string | null;
+  total_packages?: number | null;
+  expected_delivery?: string | null;
+  acknowledged_by_name?: string | null;
+  acknowledged_at?: string | null;
+
+  /** The supplier's own two acts, added 2026-09-11. Both are null until they answer,
+   *  which is the state every return raised before then is permanently in — so a screen
+   *  must read "not yet" from null and never from a missing field. */
+  vendor_receipt_confirmed_at?: string | null;
+  vendor_receipt_by_name?: string | null;
+  vendor_receipt_vehicle_no?: string | null;
+  vendor_receipt_remarks?: string | null;
+  /** REFUNDED | REPLACED | RETURNED, or legacy ACCEPTED. Null while unanswered. */
+  vendor_response?: VendorReturnResponse | null;
+  /** Already worded by the server — never map this in the screen, for the same reason
+   *  `reason_label` and `transport_mode_label` are served. */
+  vendor_response_label?: string | null;
+  vendor_response_at?: string | null;
+  vendor_response_note?: string | null;
+  /** What the supplier is crediting, on a REFUNDED answer only. Null on every other
+   *  answer — including legacy ACCEPTED, where no figure was ever captured — so read
+   *  "is there an amount" from this and never "is this settled in money". */
+  vendor_refund_amount?: number | null;
+  /** The refund set beside the value returned, worded by the server because a short
+   *  credit is the normal case and the document has to say so rather than leaving the
+   *  reader to subtract. Null when there is no refund. */
+  vendor_refund_label?: string | null;
+  /** The inbound receipt the answer raised. Null for a refund, which raises none. */
+  vendor_followup_receipt_no?: string | null;
+}
+
+/** The supplier's possible answers.
+ *
+ * RETURNED means the SUPPLIER is sending our goods back to us — the opposite direction
+ * to what "return" means everywhere else in this codebase, which is why the labels the
+ * server serves spell the direction out.
+ *
+ * Two questions in one value: does the supplier keep the goods, and if so what do we get
+ * instead. RETURNED is the refusal; REFUNDED and REPLACED are the two ways of keeping
+ * them. ACCEPTED is LEGACY (pre 2026-09-11) and is never sent by this portal any more —
+ * it said the goods were kept without saying what came back for them. It stays in the
+ * union because rows carry it and the screen must still render those. */
+export type VendorReturnResponse =
+  | "REFUNDED"
+  | "REPLACED"
+  | "RETURNED"
+  | "ACCEPTED";
+
+/** One line of a return, as the supplier sees it. Narrower than our own read: the
+ *  source line ids and the returnable-quantity arithmetic behind them are internal. */
+export interface VendorReturnItemRow {
+  line_no: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  quantity: number;
+  rate?: number | null;
+  amount?: number | null;
+  /** Already worded by the server, and falls back to the document's reason where the
+   *  line carries none — never compose this in the screen. */
+  reason_label?: string | null;
+
+  /** WHAT A REPLACEMENT OF THIS LINE HAS TO STATE, off the item master — the same two
+   *  rules the store's receiving desk will enforce when it submits the GRN. Served so
+   *  the form marks exactly the boxes that matter, instead of showing three on every
+   *  line and letting the supplier discover from a refusal which one counted. */
+  needs_batch?: boolean;
+  needs_expiry?: boolean;
+  /** What to call that date: "Expiry" on a consumable, "Warranty end" on an asset. One
+   *  column, and the item master picks the word. */
+  life_label?: string;
+
+  /** WHAT WE ORIGINALLY RECEIVED on this line, read off the GRN it came in on.
+   *
+   *  Reference and one-press fill, never a silent prefill: the replacement is different
+   *  physical stock and usually carries a different batch and a later expiry, so a box
+   *  filled in for the supplier is a box confirmed without reading. Null on a manual
+   *  return, which has no purchase behind it. */
+  original_batch_no?: string | null;
+  original_mfg_date?: string | null;
+  original_expiry_date?: string | null;
+}
+
+/** One return OPENED, from `/api/supplier/returns/{id}`.
+ *
+ * The list row plus what a row cannot carry: the lines, and the delivery point. The
+ * delivery fields come off the same consignment the logistics fields do, so they are
+ * null on a return entered by hand for exactly the same reason. */
+export interface VendorReturnDetail extends VendorReturnListRow, VendorReturnRungs {
+  items: VendorReturnItemRow[];
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  total_weight_kg?: number | null;
+
+  /** THE TWO PARTIES, for the acknowledgement receipt — a receipt that names only one
+   *  side is not a receipt. `warehouse_name` is ours (handing over); the `vendor_*`
+   *  fields are the supplier's own, shown back to them. Detail-only: a list row would
+   *  repeat the same supplier on every line. */
+  warehouse_name?: string | null;
+  vendor_name?: string | null;
+  vendor_code?: string | null;
+  vendor_gstin?: string | null;
+  vendor_address?: string | null;
+  vendor_contact_person?: string | null;
+  vendor_phone?: string | null;
+
+  /** HOW THE REPLACEMENT IS TRAVELLING, read back off the draft inbound receipt the
+   *  answer raised rather than stored on the return — so this page and the store's
+   *  receiving screen can never disagree about one lorry. Detail-only: a second query.
+   *
+   *  Null unless the answer was REPLACED. A RETURNED consignment raises a receipt too,
+   *  but that lorry is OURS and its facts are on the logistics leg, not here.
+   *
+   *  `replacement_mode` is the field to branch on. The two dates are each meaningful on
+   *  one leg only: `expected_date` is an arrival at OUR gate (delivery), `ready_date` is
+   *  goods ready on THEIR dock (collection) and must never be shown as an arrival. */
+  replacement_mode?: InboundTransportMode | null;
+  replacement_expected_date?: string | null;
+  replacement_ready_date?: string | null;
+  replacement_pickup_address?: string | null;
+
+  /** The loading image and the invoice, whichever are on file so far. The dispatch waits
+   *  only for the ones whose served type says `required` — today the image — and the
+   *  server checks these same rows, so the screen can disable its press off this list
+   *  without the two rules being able to drift apart. */
+  replacement_documents?: ReplacementDocumentRow[];
+  /** The whole leg as one sentence, worded by the server so every screen says it the
+   *  same way — an arrival with its carrier, or a collection with its ready date and
+   *  address. */
+  replacement_label?: string | null;
+}
+
+/** THE RUNGS THE SUPPLIER THEMSELVES ANSWER, served on their own copy of the return.
+ *
+ *  Added 2026-09-12, when Approve/Reject and Refund/Replacement stopped being the buyer
+ *  desk's presses and became the supplier's. Their portal has to be able to say which
+ *  rung the document is standing on and what they already answered — a screen that could
+ *  only see `vendor_response` could not tell "not yet approved" from "approved, awaiting
+ *  a settlement". */
+export interface VendorReturnRungs {
+  /** The stored status as a sentence. A supplier reading "REPLACEMENT_AGREED" is reading
+   *  the buyer's database. */
+  status_label?: string | null;
+  /** THE QC that condemned the goods — the evidence being claimed against, which the
+   *  supplier is expected to verify the return by. */
+  inspection_no?: string | null;
+  vendor_decision?: "APPROVED" | "REJECTED" | null;
+  vendor_decision_at?: string | null;
+  vendor_decision_note?: string | null;
+  /** Who moves the goods. VENDOR_ARRANGES means this supplier owes a vehicle. */
+  vehicle_arrangement?: string | null;
+  vehicle_arrangement_label?: string | null;
+  vendor_transport_accepted_at?: string | null;
+  replacement_dispatched_at?: string | null;
+  replacement_dispatch_no?: string | null;
+  replacement_dispatch_date?: string | null;
+  replacement_expected_date?: string | null;
+  replacement_transporter_name?: string | null;
+  replacement_vehicle_no?: string | null;
+  replacement_lr_no?: string | null;
+}
+
+/** What the supplier signs when the consignment is physically handed over. The moment
+ *  is never sent — the server stamps it, because a receipt whose time the signing party
+ *  chooses is not evidence. */
+export interface VendorReturnReceiptInput {
+  received_by_name: string;
+  vehicle_number?: string | null;
+  remarks?: string | null;
+}
+
+/** THE decision on a return, and the supplier's alone since 2026-09-12. Nothing has been
+ *  shipped when this is answered, so a rejection costs a conversation rather than a
+ *  wasted lorry. `remarks` is REQUIRED on a rejection — the storekeeper who raised the
+ *  return has to argue it, and an unexplained refusal is useless to them. */
+export interface VendorReturnDecisionInput {
+  action: "APPROVED" | "REJECTED";
+  remarks?: string | null;
+}
+
+/** Refund or replacement, once the supplier has approved. Two outcomes and no third:
+ *  refusing is the earlier press, not a settlement wearing its costume. */
+export interface VendorReturnSettlementInput {
+  settlement: "REFUNDED" | "REPLACED";
+  /** REQUIRED on a refund and REFUSED on a replacement. Capped server-side at the value
+   *  of the goods — a supplier cannot credit more than they received. */
+  refund_amount?: number | null;
+  remarks?: string | null;
+}
+
+/** The vehicle the supplier is sending to collect, named when they accept the job and
+ *  correctable when it actually turns up. Every field optional: a supplier accepts on
+ *  Monday and frequently does not know the truck until Thursday. */
+export interface VendorTransportInput {
+  vehicle_no?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  transporter_name?: string | null;
+  lr_no?: string | null;
+  expected_date?: string | null;
+  remarks?: string | null;
+}
+
+/** THE REPLACEMENT DISPATCH NOTE. The item, the quantity, the purchase return number and
+ *  the GRN/PO references are already on the return and print from it; what only the
+ *  supplier can state is here.
+ *
+ *  `lines` carries the batch and life dates of the goods ACTUALLY being sent — never the
+ *  return's own batch, which belongs to the faulty stock travelling the other way. The
+ *  server refuses a batch-tracked line with no batch and an expiry-tracked one with no
+ *  date, which are the same two rules that would otherwise stop the store's GRN days
+ *  later, with nobody able to answer them. */
+export interface ReplacementDispatchInput {
+  /** The supplier's own note number. Never resolved — it is their reference. */
+  dispatch_no?: string | null;
+  dispatch_date?: string | null;
+  /** When it should reach the buyer's warehouse. What their receiving queue sorts by. */
+  expected_date?: string | null;
+  transporter_name?: string | null;
+  vehicle_no?: string | null;
+  lr_no?: string | null;
+  remarks?: string | null;
+  lines: VendorReplacementLineInput[];
+}
+
+/** One of the files a replacement dispatch carries, as the form should draw it — and
+ *  `required` says whether the dispatch waits for it. SERVED
+ *  (`GET /api/supplier/returns/replacement-documents`), never a constant here: `accept`
+ *  and `required` are the same rules the upload and the dispatch guard enforce, and a
+ *  second copy in the screen would be free to offer something the server refuses. */
+export interface ReplacementDocumentType {
+  /** REPLACEMENT_PHOTO | REPLACEMENT_INVOICE. */
+  value: string;
+  /** The field caption — an instruction, e.g. "Upload image". */
+  label: string;
+  /** What a SENTENCE calls it, e.g. "image of the replacement goods". Used in the
+   *  "attach the …" message, where the caption would read as nonsense. The server's own
+   *  refusal uses this same value. */
+  noun: string;
+  hint: string;
+  /** Straight into the input's `accept`. The photo slot takes images only. */
+  accept: string;
+  /** Put `capture` on the input, which opens the camera on a phone rather than the
+   *  file browser. Ignored on desktop, where it falls back to a normal file picker. */
+  capture: boolean;
+  required: boolean;
+}
+
+/** A file already on the return. `file_path` is deliberately not served — the bytes are
+ *  reachable only through the download route. */
+export interface ReplacementDocumentRow {
+  id: number;
+  doc_category: string;
+  label?: string | null;
+  file_name: string;
+  file_size?: number | null;
+  mime_type?: string | null;
+  uploaded_by_name?: string | null;
+  created_at?: string | null;
+}
+
+/** The supplier's decision. `remarks` is REQUIRED for RETURNED and REPLACED — the
+ *  warehouse about to receive an unexpected consignment has nothing else to go on —
+ *  and the server enforces that, so the screen only mirrors it. */
+export interface VendorReturnResponseInput {
+  response: VendorReturnResponse;
+  remarks?: string | null;
+  /** REQUIRED when `response` is REFUNDED and REFUSED on every other answer — the
+   *  server rejects both mistakes rather than correcting them, because an amount stored
+   *  against an answer that pays nothing would show on screen as a credit nobody
+   *  agreed to. Capped at the return's own `total_value`. */
+  refund_amount?: number | null;
+
+  /** HOW THE REPLACEMENT TRAVELS. Only on a REPLACED answer, and refused on any other
+   *  for the same reason `refund_amount` is. These are written onto the draft inbound
+   *  receipt the answer raises — the document the store's receiving screen reads — so
+   *  the warehouse learns what is coming, when, and whether it has to go and fetch it.
+   *
+   *  TWO LEGS, picked by `replacement_mode`, and the server refuses each leg the other's
+   *  fields rather than storing them: a collection carrying an arrival date would have
+   *  the store waiting at the gate for a lorry nobody sent, and a delivery carrying a
+   *  pickup address would send a vehicle to fetch something already on its way. */
+  replacement_mode?: InboundTransportMode | null;
+
+  /** SUPPLIER_DELIVERS only. The date is REQUIRED and must not be in the past; the other
+   *  three are optional, because a supplier promising a replacement can promise a date
+   *  but frequently has not booked the lorry yet. ISO `yyyy-mm-dd`. */
+  replacement_expected_date?: string | null;
+  replacement_transporter_name?: string | null;
+  replacement_vehicle_no?: string | null;
+  replacement_lr_no?: string | null;
+
+  /** WE_COLLECT only, and BOTH required — "come and collect it" with no address is not
+   *  an instruction anybody can act on, and no ready date sends a vehicle before the
+   *  goods are packed. The ready date is when it is ready on THEIR dock, never an
+   *  arrival at ours. */
+  replacement_pickup_address?: string | null;
+  replacement_ready_date?: string | null;
+
+  /** WHAT IS IN THE CARTON, per line of the return. Belongs to neither leg: the batch
+   *  and expiry are the same facts whether the supplier drives them here or we collect.
+   *
+   *  Written straight onto the draft inbound receipt's lines. Without them that receipt
+   *  is raised blank and the store CANNOT finish it — an expiry-tracked line with no
+   *  expiry is refused when the GRN is submitted, and the storekeeper cannot read a date
+   *  off a carton standing in the supplier's warehouse. The server refuses a batch-
+   *  tracked line with no batch and an expiry-tracked line with no date, so send one
+   *  entry for every line that needs one; `line_no` is the number shown on this page. */
+  replacement_lines?: VendorReplacementLineInput[];
+}
+
+/** Batch and life dates for one line of the replacement. Every field optional on the
+ *  wire — what a line actually needs is a fact of the item master, which the server
+ *  holds and enforces (`needs_batch` / `needs_expiry` on `VendorReturnItemRow` say which
+ *  in advance). Dates are ISO `yyyy-mm-dd`; an expiry already in the past is refused,
+ *  and so is one before the manufacturing date. */
+export interface VendorReplacementLineInput {
+  line_no: number;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+}
+
+/** WHO MOVES GOODS COMING TOWARDS US.
+ *
+ * A different axis from the logistics module's `TransportMode` (DIRECT / COURIER /
+ * OWN_VEHICLE / THIRD_PARTY), which answers "how does it travel and who is paid" for a
+ * leg WE are sending. On an inbound leg the prior question is whether anything is coming
+ * at all or whether it is sitting on the supplier's dock waiting for our vehicle — and
+ * `OWN_VEHICLE` cannot answer it, because "own vehicle" is ambiguous between the
+ * supplier's truck and ours once the goods are heading our way. */
+export type InboundTransportMode = "SUPPLIER_DELIVERS" | "WE_COLLECT";
+
 
 // --------------------------------------------------------------------------- //
 //  Approval trail — the same shape for every procurement document

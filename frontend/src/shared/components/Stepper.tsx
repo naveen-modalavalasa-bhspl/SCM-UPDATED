@@ -34,28 +34,25 @@ function iconFor(status: Step["status"], index: number) {
   return index + 1;
 }
 
-/* The `--color-step-*` fills, shared with the indent, journey, shipment and return
- * rails: filled means done, outlined means not yet. Four rails in one product that
- * disagree about what "done" looks like is worse than any one of them being wrong. */
 function circleClass(status: Step["status"]) {
   const classes: Record<Step["status"], string> = {
-    complete: "border-transparent bg-step-done text-white",
-    current: "border-transparent bg-step-live text-white ring-4 ring-step-live/20",
+    complete: "border-ok bg-ok text-white",
+    current: "border-brand bg-brand text-white shadow-sm shadow-brand/20",
     upcoming: "border-line bg-content1 text-muted",
-    error: "border-transparent bg-step-bad text-white",
+    error: "border-bad bg-bad text-white",
   };
   return classes[status];
 }
 
 /** A leg is only "done" when the step behind it is, and nothing has gone wrong ahead. */
 function connectorClass(left: Step["status"], right: Step["status"]) {
-  if (left === "complete" && right !== "error") return "bg-step-done-rail";
+  if (left === "complete" && right !== "error") return "bg-ok";
   return "bg-line";
 }
 
 function labelClass(status: Step["status"]) {
-  if (status === "current") return "text-step-live";
-  if (status === "error") return "text-step-bad";
+  if (status === "current") return "text-brand";
+  if (status === "error") return "text-bad";
   if (status === "upcoming") return "text-muted";
   return "text-body";
 }

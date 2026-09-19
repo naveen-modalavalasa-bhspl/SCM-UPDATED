@@ -31,6 +31,8 @@ import StockMovements from "./pages/StockMovements";
 import StockMovementForm from "./pages/StockMovementForm";
 import StockMovementDetail from "./pages/StockMovementDetail";
 import PurchaseReturnForm from "./pages/PurchaseReturnForm";
+import PurchaseReturns from "./pages/PurchaseReturns";
+import PurchaseReturnDetail from "./pages/PurchaseReturnDetail";
 
 /**
  * The warehouse module's own router.
@@ -75,9 +77,11 @@ export function WarehouseModule() {
 
         <Route path="putaway" element={<Putaway />} />
         <Route path="putaway/:id" element={<PutawayForm />} />
-        {/* Warehouse → Vendor Purchase Return — the Storekeeper's single screen */}
+        {/* Warehouse → Vendor Purchase Return: draft list, form, review */}
+        <Route path="purchase-returns" element={<PurchaseReturns />} />
         <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
-        <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
+        <Route path="purchase-returns/:id" element={<PurchaseReturnDetail />} />
+        <Route path="purchase-returns/:id/edit" element={<PurchaseReturnForm />} />
         <Route path="stock-movements" element={<StockMovements />} />
         <Route path="stock-movements/new" element={<StockMovementForm />} />
         <Route path="stock-movements/view" element={<StockMovementDetail />} />
@@ -138,8 +142,10 @@ export function WarehouseModule() {
 
       <Route path="putaway" element={<Putaway />} />
       <Route path="putaway/:id" element={<PutawayForm />} />
+      <Route path="purchase-returns" element={<PurchaseReturns />} />
       <Route path="purchase-returns/new" element={<PurchaseReturnForm />} />
-      <Route path="purchase-returns/:id" element={<PurchaseReturnForm />} />
+      <Route path="purchase-returns/:id" element={<PurchaseReturnDetail />} />
+      <Route path="purchase-returns/:id/edit" element={<PurchaseReturnForm />} />
       <Route path="stock-movements" element={<StockMovements />} />
       <Route path="stock-movements/new" element={<StockMovementForm />} />
       <Route path="stock-movements/view" element={<StockMovementDetail />} />

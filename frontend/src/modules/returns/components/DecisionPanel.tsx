@@ -28,7 +28,7 @@ import { RelatedDocumentsSection } from "./RelatedDocumentsSection";
  * unless the reviewer noticed and switched it; before 2026-09-08 the pre-fill was
  * `from_warehouse`, the one answer `decide` refuses outright.)
  *
- * The related documents behind the item are rendered by `RelatedDocumentsSection`, which
+ * The material's history behind the item is rendered by `RelatedDocumentsSection`, which
  * is the same component the detail page uses. It was duplicated inline here and the two
  * copies had already drifted.
  */
@@ -36,6 +36,7 @@ export function DecisionPanel({
   returnId,
   onDone,
   onDestinationChange,
+  canViewTrail = true,
 }: {
   returnId: number;
   onDone?: () => void;
@@ -54,6 +55,15 @@ export function DecisionPanel({
    * from the page re-fires it on every render of the page.
    */
   onDestinationChange?: (warehouseName: string | null) => void;
+  /**
+   * Whether this login may read the material's history (`return.decide`, served as
+   * `can_view_trail`). Defaults to true because everybody who reaches this panel can
+   * normally press Decide, and `POST /decide` is gated on the same code — but the two
+   * are resolved differently (a live workflow task versus a permission), so the panel
+   * asks rather than assumes. Drawing a section that 403s would put an error banner
+   * directly above the decision it exists to inform.
+   */
+  canViewTrail?: boolean;
 }) {
   const queryClient = useQueryClient();
 
@@ -142,7 +152,7 @@ export function DecisionPanel({
 
   return (
     <div className="space-y-4">
-      <RelatedDocumentsSection returnId={returnId} />
+      {canViewTrail && <RelatedDocumentsSection returnId={returnId} />}
 
       <SectionCard
         tone="action"
@@ -226,6 +236,11 @@ export function DecisionPanel({
             {options.qc_rejected_tag ? " and tagged QC rejected after GRN" : ""}. The
             purchase return against it is raised when the receiving warehouse
             acknowledges what arrived.
+            {/* Which rung it actually resolved to, served — the category folds three
+              * rungs into two and so can never name the point on its own. */}
+            {options.purchase_return_source_detail && (
+              <span className="mt-1 block">{options.purchase_return_source_detail}</span>
+            )}
           </div>
 
           <Button disabled={!ready || decide.isPending} onClick={() => setConfirming(true)}>

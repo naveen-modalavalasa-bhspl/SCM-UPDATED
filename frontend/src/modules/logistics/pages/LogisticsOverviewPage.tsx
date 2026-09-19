@@ -107,8 +107,13 @@ export function LogisticsOverviewPage() {
     {
       key: "awaiting_ack", label: "Awaiting a signature", value: n(data?.awaiting_ack),
       icon: Clock, tone: data?.awaiting_ack ? "warn" : "neutral", failed,
-      hint: "Delivered by the carrier, not yet signed for by the site.",
-      onPress: () => shipments("DELIVERED"),
+      hint: "On the road or landed, and nobody at the site has signed for it yet.",
+      // BOTH statuses, because that is what the number counts (AWAITING_ACK_STATUSES).
+      // Opening DELIVERED alone handed the reader a shorter list than the tile they
+      // pressed and said nothing about the difference — a shipment is the site's to
+      // sign from the moment it leaves, which is the whole reason IN_TRANSIT is in the
+      // count. The register takes the two as one filter, so this stays one round trip.
+      onPress: () => shipments("IN_TRANSIT,DELIVERED"),
     },
     {
       key: "untracked", label: "No carrier yet", value: n(data?.untracked),

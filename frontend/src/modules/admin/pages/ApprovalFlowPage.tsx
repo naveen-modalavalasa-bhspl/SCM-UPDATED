@@ -43,18 +43,17 @@ export function ApprovalFlowPage() {
     queryFn: () => adminApi.flow.overview(projectId),
   });
 
-  const rows = useMemo(() => overview.data?.items ?? [], [overview.data]);
   const groups = useMemo(() => {
     const out: { module: string; rows: FlowRow[] }[] = [];
-    for (const row of rows) {
+    for (const row of overview.data?.items ?? []) {
       const last = out[out.length - 1];
       if (last && last.module === row.module) last.rows.push(row);
       else out.push({ module: row.module, rows: [row] });
     }
     return out;
-  }, [rows]);
+  }, [overview.data]);
 
-  const unset = rows.filter((row) => !row.is_configured).length;
+  const unset = (overview.data?.items ?? []).filter((row) => !row.is_configured).length;
   const projectName = (options.data?.projects ?? [])
     .find((project) => project.id === projectId)?.name ?? null;
 
@@ -116,7 +115,7 @@ export function ApprovalFlowPage() {
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium">{flowLabel(row)}</span>
+                        <span className="truncate text-sm font-medium">{row.label}</span>
                         {row.in_flight > 0 && (
                           <span className="shrink-0 rounded-full bg-content2 px-1.5 py-0.5 text-[11px] tabular-nums text-muted">
                             {row.in_flight}
@@ -134,9 +133,9 @@ export function ApprovalFlowPage() {
         </div>
       )}
 
-      {!overview.isLoading && rows.length > 0 && (
+      {!overview.isLoading && (overview.data?.items.length ?? 0) > 0 && (
         <JourneyPanel
-          rows={rows}
+          rows={overview.data?.items ?? []}
           projectName={projectName}
           onOpen={openChain}
         />
@@ -170,10 +169,3 @@ function ChainLine({ row }: { row: FlowRow }) {
     </>
   );
 }
-
-function flowLabel(row: FlowRow) {
-  if (row.code === "STOCK_RETURN") return "Indent Return";
-  if (row.code === "STOCK_RETURN_RECEIPT") return "Decision Desk";
-  return row.label;
-}
-

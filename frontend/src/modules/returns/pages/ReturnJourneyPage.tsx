@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft, Ban, Check, Circle, Clock, Loader2, Minus, RefreshCw, Undo2, X,
@@ -233,6 +233,8 @@ export default function ReturnJourneyPage() {
   const { id } = useParams<{ id: string }>();
   const returnId = Number(id);
   const nav = useNavigate();
+  /* Carried straight back, so the detail screen still knows which queue opened it. */
+  const { state } = useLocation();
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     // The same key the detail page's stepper uses, so opening the journey costs no
     // second fetch and both zooms of the rail move together.
@@ -271,7 +273,7 @@ export default function ReturnJourneyPage() {
               : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
             {isFetching ? "Retrying..." : "Try again"}
           </Button>
-          <Button variant="secondary" onClick={() => nav(`/returns/${returnId}`)}>
+          <Button variant="secondary" onClick={() => nav(`/returns/${returnId}`, { state })}>
             <ArrowLeft className="h-4 w-4" /> Back to return details
           </Button>
         </div>
@@ -285,7 +287,7 @@ export default function ReturnJourneyPage() {
     <div className="min-w-0 space-y-5">
       <button
         type="button"
-        onClick={() => nav(`/returns/${returnId}`)}
+        onClick={() => nav(`/returns/${returnId}`, { state })}
         className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-muted hover:text-body"
       >
         <ArrowLeft className="h-4 w-4" /> Back to return details

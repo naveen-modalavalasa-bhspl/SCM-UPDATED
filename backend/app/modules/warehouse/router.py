@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
@@ -868,6 +868,17 @@ async def purchase_return_reasons(user=Depends(require_permission(RETURN_VIEW)))
     return service.purchase_return_reasons()
 
 
+@router.get("/returns/logistics-modes", response_model=list[s.LogisticsModeOption])
+async def purchase_return_logistics_modes(user=Depends(require_permission(RETURN_VIEW))):
+    """The three cards on the Send to Vendor wizard's first step.
+
+    Served for the same reason the reasons are: the modes, their help text and which
+    extra fields each one asks for are a business rule, and a copy of a rule inside a
+    screen is a rule with two values.
+    """
+    return service.purchase_return_logistics_modes()
+
+
 @router.get("/returns/source-options", response_model=Page[s.PurchaseReturnSourceOption])
 async def purchase_return_source_options(
     params: PageParams = Depends(),
@@ -882,6 +893,22 @@ async def purchase_return_source_options(
     """
     return await service.purchase_return_source_options(
         db, params, search=search, warehouse_id=warehouse_id, user=user)
+
+
+@router.get("/returns/source-lookup", response_model=s.PurchaseReturnSourceLookupOut)
+async def purchase_return_source_lookup(
+    doc_no: str = Query(..., description="An indent, PO or GRN number, typed by hand"),
+    source_type: str | None = Query(None, description="GRN | PO | INDENT — narrows it"),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_permission(RETURN_VIEW)),
+):
+    """Resolve a document number a storekeeper typed, instead of picking from the list.
+
+    Exact match, and scoped to the same warehouses the picker is scoped to, so typing
+    a number can never reach a document the login could not have selected.
+    """
+    return await service.purchase_return_source_lookup(
+        db, doc_no=doc_no, source_type=source_type, user=user)
 
 
 @router.get("/returns/source-detail", response_model=s.PurchaseReturnSourceDetail)
@@ -904,11 +931,105 @@ async def send_to_vendor(
     db: AsyncSession = Depends(get_db),
     user=Depends(require_permission(RETURN_CREATE)),
 ):
-    """The primary commitment: validate, link original, create logistics leg, dispatch.
+    """The single commitment: validate, flip DRAFT -> SENT_TO_VENDOR, stamp sent_at.
 
-    Warehouse → Existing Logistics → Vendor.
+    Warehouse → Existing Logistics → Vendor. Only a DRAFT can be sent, and a
+    SENT_TO_VENDOR row can never be sent again.
     """
     return await service.send_to_vendor(db, return_id, body, user)
+
+
+# --- after SENT_TO_VENDOR: the vendor's decision, and the goods' journey -------------
+#
+# Declared BEFORE the bare `/returns/{return_id}` below, like the dossier route: FastAPI
+# matches in declaration order. Both are gated on codes that already exist in
+# `platform/rbac/permissions.py` — `return.approve` for the transport decision and
+# `return.create` for signing goods in — so no grant anybody holds changes and no new
+# code has to be seeded (rule 6).
+#
+# RETIRED HERE on 2026-09-12: `/decide-approve`, `/decide-reject`, `/resolve-refund` and
+# `/vehicle`. Those four let OUR desk answer questions that belong to the vendor —
+# whether the return is accepted, whether it settles in money or goods, and what vehicle
+# the vendor is sending. They are now presses on the supplier portal
+# (`supplier_router` below), which is the only place the party who can actually answer
+# them is standing. Keeping a second door would have meant two ways to answer one
+# question and an answered-once rule that had to police both.
+
+
+@router.get("/returns/vehicle-arrangements",
+            response_model=list[s.VehicleArrangementOption])
+async def purchase_return_vehicle_arrangements(
+        user=Depends(require_permission(RETURN_VIEW))):
+    """The two cards offered once the vendor has agreed a replacement — served, never
+    hard-coded in UI."""
+    return service.purchase_return_vehicle_arrangements()
+
+
+@router.post("/returns/{return_id}/transport", response_model=s.ReturnDetail)
+async def arrange_return_transport(return_id: int,
+                                   body: s.ReturnVehicleArrangementIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(RETURN_APPROVE))):
+    """Who moves the goods to the vendor: their vehicle, or Logistics on our request.
+
+    THE ONE DECISION this warehouse still makes on a sent return. `return.approve` rather
+    than `return.create`: it commits the company to freight, it decides whether the
+    logistics desk is given work, and it can be answered only once.
+    """
+    return await service.arrange_return_transport(db, return_id, body, user)
+
+
+@router.post("/returns/{return_id}/vehicle-arrangement", response_model=s.ReturnDetail)
+async def arrange_return_vehicle(return_id: int,
+                                 body: s.ReturnVehicleArrangementIn,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(RETURN_APPROVE))):
+    """RETAINED PATH for the route above, which was renamed when the leg changed
+    direction. Same body, same permission, same service call — kept so a screen or a
+    bookmark built against the old name does not 404."""
+    return await service.arrange_return_transport(db, return_id, body, user)
+
+
+@router.post("/returns/{return_id}/receive", response_model=s.ReturnDetail)
+async def confirm_return_received(return_id: int, body: s.ReturnReceivedIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(RETURN_CREATE))):
+    """Sign the replacement in at the warehouse gate. Posts no stock."""
+    return await service.confirm_return_received(db, return_id, body, user)
+
+
+@router.get("/returns/{return_id}/dossier", response_model=s.PurchaseReturnDossierOut)
+async def purchase_return_dossier(return_id: int, db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(RETURN_VIEW))):
+    """Every document behind this return, and everything that has happened to it.
+
+    Declared BEFORE `/returns/{return_id}` on purpose: FastAPI matches in declaration
+    order, and the bare path would otherwise swallow this one.
+
+    Read-only. Gated on `RETURN_VIEW` and, inside, on the same visibility check the
+    document itself runs — the trail behind a return is never wider than the return.
+    """
+    return await service.purchase_return_dossier(db, return_id, user)
+
+
+@router.get("/returns/{return_id}/documents/{attachment_id}/download")
+async def download_return_document(return_id: int, attachment_id: int,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(RETURN_VIEW))):
+    """One of the files the supplier dispatched the replacement on.
+
+    Declared BEFORE `/returns/{return_id}` for the reason the dossier route gives.
+
+    A ROUTE OF ITS OWN rather than the generic `/attachments/{id}/download`, because
+    that one is scoped through `_ATTACHMENT_PARENTS` — a map of documents that each
+    carry a warehouse id. A purchase return's is nullable (a manual return names no
+    warehouse), so adding it there would have made these files unreadable on exactly the
+    returns that have no warehouse rather than refusing them honestly. This scopes
+    through the return itself, which is the check that governs the document they hang on.
+    """
+    path, file_name, mime_type = await service.return_document_file(
+        db, return_id, attachment_id, user)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @router.get("/returns/{return_id}", response_model=s.ReturnDetail)
@@ -1459,3 +1580,226 @@ async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depe
                                      user=Depends(require_permission(QC_OUTWARD_DELETE))):
     await service.delete_draft(db, "whs_inspections", inspection_id, user)
     return None
+
+
+# ---------------------------------------------------------------------------
+# The supplier portal's half of a purchase return
+# ---------------------------------------------------------------------------
+#
+# No `require_permission` below: a supplier is a `mst_vendors` row, holds no RBAC role
+# and no position. `get_current_vendor` is the whole guard, and the vendor id comes
+# from the token — never from the caller — so this can only ever answer their own
+# returns.
+#
+# WHY THIS LIVES IN THE WAREHOUSE MODULE. The rest of the supplier portal is served by
+# `procurement/router.py`, and that is where this would naturally sit — except that it
+# reads `pro_returns`, a warehouse table, and procurement sits EARLIER in the import
+# chain and may never import warehouse (rule 5). The logistics module already solved
+# the same problem the same way for the carrier portal: a router of its own, mounted
+# under `/api/supplier`, using the `core` vendor dependency that any module may take.
+#
+# The prefix is not cosmetic. The browser holds the vendor token under its own key and
+# the axios interceptor picks it by URL segment — everything under `/api/supplier/`
+# gets the vendor token and everything else gets the employee one — so a route served
+# anywhere else would reach the portal with the wrong credentials.
+supplier_router = APIRouter(prefix="/api/supplier", tags=["supplier-portal"])
+
+
+@supplier_router.get("/returns", response_model=Page[s.VendorReturnListRow])
+async def vendor_list_returns(params: PageParams = Depends(),
+                              search: str | None = None,
+                              status: str | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    """Goods this supplier has been sent back, and how each consignment is travelling."""
+    return await service.vendor_list_returns(
+        db, account.vendor_id, params, search, status)
+
+
+# Declared BEFORE `/returns/{return_id}`: FastAPI matches in declaration order, and the
+# other way round "replacement-documents" is read as a return id and answered with a 422.
+@supplier_router.get("/returns/replacement-documents")
+async def vendor_replacement_document_types():
+    """The files a replacement dispatch carries, and what each field asks for.
+
+    SERVED so the screen and the save cannot disagree. The labels, the accepted types,
+    whether the field opens a camera and whether it is mandatory all come from
+    `enums.REPLACEMENT_DOCUMENT_META`, which is also what `vendor_dispatch_replacement`
+    checks against — a slot the screen offers as optional could not then be refused by
+    the server, and a type the screen accepts could not be rejected on upload.
+
+    No `response_model`: this is the shape of a form field, not a document, and pinning
+    it to a schema here would mean editing two files to add a third slot.
+    """
+    return list(service.replacement_document_types())
+
+
+@supplier_router.get("/returns/{return_id}", response_model=s.VendorReturnDetail)
+async def vendor_get_return(return_id: int,
+                            db: AsyncSession = Depends(get_db),
+                            account=Depends(get_current_vendor)):
+    """One return opened: what is in the consignment, and where it is being delivered.
+
+    The vendor id comes from the token and goes into the WHERE clause, so this can
+    only ever open the caller's own return — a return id belonging to another supplier
+    is a 404 here, not a redaction.
+    """
+    return await service.vendor_get_return(db, account.vendor_id, return_id)
+
+
+# --- the supplier's own presses on a return we have sent them ------------------------
+#
+# Five rungs, in the order the supplier works them: decide, settle, accept the
+# collection, record the pickup, sign for the goods, dispatch the replacement.
+#
+# NONE of them carries a permission code, and that is the portal's contract rather than
+# an omission (rule 6 is about employees). A vendor holds no RBAC grants at all: the
+# vendor id comes from their TOKEN at the router and goes straight into the WHERE clause
+# in `_vendor_return`, so a return belonging to another supplier is a 404 rather than a
+# redaction, and no request body can widen what this login can reach.
+
+
+@supplier_router.post("/returns/{return_id}/decide",
+                      response_model=s.VendorReturnDetail)
+async def vendor_decide_return(return_id: int,
+                               body: s.VendorReturnDecisionIn,
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    """Approve or reject a return we have sent. A rejection must say why.
+
+    THE decision on a purchase return, and the supplier's alone since 2026-09-12. Nothing
+    has travelled yet, so a rejection costs a conversation rather than a wasted lorry.
+    """
+    return await service.vendor_decide_return(
+        db, account.vendor_id, return_id, body)
+
+
+@supplier_router.post("/returns/{return_id}/settle",
+                      response_model=s.VendorReturnDetail)
+async def vendor_settle_return(return_id: int,
+                               body: s.VendorReturnSettlementIn,
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    """Refund or replacement — what we get back, once the supplier has approved.
+
+    A refund is terminal and carries its amount, capped at the value of the goods. A
+    replacement hands the document to the warehouse, whose only remaining decision is
+    whose vehicle carries the goods.
+    """
+    return await service.vendor_settle_return(
+        db, account.vendor_id, return_id, body)
+
+
+@supplier_router.post("/returns/{return_id}/accept-transport",
+                      response_model=s.VendorReturnDetail)
+async def vendor_accept_transport(return_id: int,
+                                  body: s.VendorTransportAcceptIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  account=Depends(get_current_vendor)):
+    """The supplier accepts the collection job and names the vehicle they are sending.
+
+    Only where the warehouse asked THEM to collect; refused where Logistics owns the
+    vehicle, because that truck is named on the transport request.
+    """
+    return await service.vendor_accept_transport(
+        db, account.vendor_id, return_id, body)
+
+
+@supplier_router.post("/returns/{return_id}/pickup",
+                      response_model=s.VendorReturnDetail)
+async def vendor_record_pickup(return_id: int,
+                               body: s.VendorPickupIn,
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    """The supplier's vehicle has loaded at our warehouse and left with the goods.
+
+    The gate-out on the vendor branch: the consignment is dispatched and the stock comes
+    off our books through the same `_apply_gate_out` a logistics release uses.
+    """
+    return await service.vendor_record_pickup(
+        db, account.vendor_id, return_id, body)
+
+
+@supplier_router.post("/returns/{return_id}/confirm-receipt",
+                      response_model=s.VendorReturnDetail)
+async def vendor_confirm_return_receipt(return_id: int,
+                                        body: s.VendorReturnReceiptIn,
+                                        db: AsyncSession = Depends(get_db),
+                                        account=Depends(get_current_vendor)):
+    """The supplier signing for the returned goods at their own dock.
+
+    Records the physical handover and ends our liability for the stock. It moves no
+    stock here and does not promise a replacement — that is `/dispatch-replacement`,
+    a separate act days later.
+    """
+    return await service.vendor_confirm_return_receipt(
+        db, account.vendor_id, return_id, body)
+
+
+@supplier_router.post("/returns/{return_id}/replacement-documents",
+                      response_model=s.VendorReturnDetail, status_code=201)
+async def vendor_upload_replacement_document(return_id: int,
+                                             doc_category: str = Form(...),
+                                             file: UploadFile = File(...),
+                                             db: AsyncSession = Depends(get_db),
+                                             account=Depends(get_current_vendor)):
+    """Attach the loading photograph, or the replacement invoice.
+
+    ONE FILE PER SLOT — uploading a second replaces the first, so a supplier who picked
+    the wrong file can correct it and the buyer never sees two invoices for one
+    consignment. Returns the whole return rather than the attachment row, so the screen
+    re-renders both slots off one answer.
+
+    `doc_category` is a form field and therefore caller-controlled, which is exactly the
+    hole that `POST /warehouse/attachments` had: the service refuses anything that is
+    not one of the two replacement categories, and the ENTITY the file is filed under is
+    never taken from the request at all.
+    """
+    return await service.vendor_upload_replacement_document(
+        db, account.vendor_id, return_id, doc_category=doc_category, upload=file)
+
+
+@supplier_router.delete("/returns/{return_id}/replacement-documents/{attachment_id}",
+                        response_model=s.VendorReturnDetail)
+async def vendor_delete_replacement_document(return_id: int, attachment_id: int,
+                                             db: AsyncSession = Depends(get_db),
+                                             account=Depends(get_current_vendor)):
+    """Remove one of the two, while the replacement is still to be dispatched."""
+    return await service.vendor_delete_replacement_document(
+        db, account.vendor_id, return_id, attachment_id)
+
+
+@supplier_router.get(
+    "/returns/{return_id}/replacement-documents/{attachment_id}/download")
+async def vendor_download_replacement_document(return_id: int, attachment_id: int,
+                                               db: AsyncSession = Depends(get_db),
+                                               account=Depends(get_current_vendor)):
+    """The stored bytes, so the supplier can check what they attached.
+
+    Scoped through the return first — an attachment id belonging to another supplier's
+    document never reaches the filesystem.
+    """
+    path, file_name, mime_type = await service.vendor_replacement_document_file(
+        db, account.vendor_id, return_id, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
+
+
+@supplier_router.post("/returns/{return_id}/dispatch-replacement",
+                      response_model=s.VendorReturnDetail)
+async def vendor_dispatch_replacement(return_id: int,
+                                      body: s.ReplacementDispatchIn,
+                                      db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    """The replacement dispatch note: what is on the vehicle, and when it left.
+
+    Raises the DRAFT inbound receipt the store will book the replacement against — a
+    draft, so no stock moves until the store inwards it the ordinary way. Refuses a
+    batch-tracked line with no batch and an expiry-tracked one with no date, which are
+    the same two rules that would otherwise stop the store's GRN days later.
+
+    REFUSES A DISPATCH WITH A REQUIRED FILE MISSING — today that is the image, and not
+    the invoice. Checked here, not only hidden behind a disabled button; which files are
+    required is `enums.REQUIRED_REPLACEMENT_DOCUMENTS`.
+    """
+    return await service.vendor_dispatch_replacement(
+        db, account.vendor_id, return_id, body)

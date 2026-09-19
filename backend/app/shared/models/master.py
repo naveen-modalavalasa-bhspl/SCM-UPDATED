@@ -141,6 +141,11 @@ class Item(Base):
                                nullable=True)
     item_sub_class_code = Column(String(10), nullable=True)
     item_sub_class_name = Column(String(200), nullable=True)
+    # HCM department responsible for this catalogue item. This is operational
+    # ownership for routing work (for example, laptop -> IT), not the project that
+    # owns a quantity of physical stock in stk_balance.
+    owner_department_id = Column(BigIntPortable, index=True, nullable=True)
+    owner_department_name = Column(String(200), nullable=True)  # HCM name snapshot
     uom_id = Column(ForeignKey("mst_uom.id"), index=True, nullable=True)
     uom_code = Column(String(20), nullable=True)          # snapshot
     item_type = Column(String(30), nullable=True)

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.shared.limits import MAX_BATCH_IDS
-from app.platform.hcm.models import HcmEmployee, HcmFacility, HcmOffice
+from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmFacility, HcmOffice
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
     ItemScope,
@@ -131,6 +131,9 @@ class ItemIn(BaseModel):
     manufacturer_id: int
     item_class_id: int
     item_sub_class_id: int | None = None
+    # Operational owner used by downstream ticket routing. This is separate from
+    # the project dimension that owns quantities in the stock ledger.
+    owner_department_id: int | None = None
     uom_id: int
     hsn_id: int
     # Asset or consumable. The asset/consumable code itself is generated during
@@ -179,6 +182,8 @@ def item_out(i: Item) -> dict:
             "item_sub_class_id": i.item_sub_class_id,
             "item_sub_class_code": i.item_sub_class_code,
             "item_sub_class_name": i.item_sub_class_name,
+            "owner_department_id": i.owner_department_id,
+            "owner_department_name": i.owner_department_name,
             "hsn_id": i.hsn_id, "hsn_code": i.hsn_code, "is_asset": i.is_asset,
             # A PREFILL for a document line, never the authority on the rate. Tax is a
             # property of the HSN classification and a PO or GRN reads it from there
@@ -223,6 +228,8 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         if data.item_sub_class_id else None
     dosage = await db.get(DosageForm, data.dosage_form_id) \
         if data.dosage_form_id else None
+    owner_department = await db.get(HcmDepartment, data.owner_department_id) \
+        if data.owner_department_id else None
     missing = []
     if category is None:
         missing.append("category")
@@ -240,6 +247,10 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         raise ValidationError(f"Missing required item fields: {', '.join(missing)}")
     if hsn is None:
         raise ValidationError("An HSN code is required")
+    if data.owner_department_id and (
+        owner_department is None or not owner_department.is_active
+    ):
+        raise ValidationError("Select an active ownership department from HCM")
     if category.level != 3:
         raise ValidationError("Select a Level 3 category with a six-digit category path")
     mapping = await db.scalar(select(BrandManufacturer.id).where(
@@ -276,6 +287,7 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     item.item_class_code, item.item_class_name = item_class.code, item_class.name
     item.item_sub_class_code = sub_class.code if sub_class else None
     item.item_sub_class_name = sub_class.name if sub_class else None
+    item.owner_department_name = owner_department.name if owner_department else None
     item.dosage_form_code = dosage.code if dosage else None
     item.dosage_form_name = dosage.name if dosage else None
     item.item_type = item_class.code
@@ -1907,6 +1919,7 @@ ITEM_LOOKUPS = (
     Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
     Lookup("item_class_id", ItemClass, "Item class"),
     Lookup("item_sub_class_id", ItemSubClass, "Item sub class"),
+    Lookup("owner_department_id", HcmDepartment, "Ownership department"),
     Lookup("uom_id", Uom, "Unit of measure"),
     # An HSN row has no `name` — it is a code and a description, and the code is
     # what is written on an invoice, so that is what the sheet asks for and matches
@@ -1934,7 +1947,8 @@ MASTERS: list[MasterDef] = [
               search_cols=("name", "code"), apply=apply_item,
               default_active_only=True,
               scope_to_user=restrict_items_to_my_groups,
-              filters=("category_id", "item_class_id", "brand_id", "hsn_id"),
+              filters=("category_id", "item_class_id", "brand_id", "hsn_id",
+                       "owner_department_id"),
               lookups=ITEM_LOOKUPS,
               usage=ITEM_USAGE),
 

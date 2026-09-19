@@ -362,30 +362,27 @@ function iconFor(state: StepState, index: number) {
   return index + 1;
 }
 
-/* FILLED means done, outlined means not yet — the one thing about a stepper a reader
- * should never have to work out. A solid disc with a white check against an empty
- * circle says it without a caption; see the `--color-step-*` block in `index.css` for
- * why a pale tint with a pale check in it does not, and for why this is one calm hue
- * rather than the four-stop brand sweep it replaced.
+/* The brand sweep, the same fill the shipment stepper uses (`logistics/components/
+ * FlowStepper`): `.bg-brand` carries `background-image: var(--brand-gradient)`, so a
+ * dot or a rail painted with it gets the four-stop Bavya gradient rather than a flat
+ * crimson. Progress reads as one continuous track this way, which green dots on a
+ * grey rail never did.
  *
- * Completed and current are told apart three ways over the colour — the glyph (a check
- * against a clock), the halo only the live step wears, and the caption beneath it —
- * because colour is never the only thing saying which step you are on.
- *
- * An OUTCOME is the one thing that breaks the emerald/indigo pair. Rejected, returned
- * and cancelled keep the semantic hues: a stopped indent must never wear the fill of
- * one still moving. */
-const DONE_FILL = "border-transparent bg-step-done text-white";
+ * Only completed and current take it. Rejected, returned, cancelled and skipped keep
+ * their semantic colours — a stopped indent must never wear the same fill as one that
+ * finished. A completed step is the check, a current step the ring; that is the same
+ * pair the shipment stepper distinguishes them by. */
+const BRAND_FILL = "border-transparent bg-brand text-white";
 
 function stateClasses(state: StepState) {
   const classes: Record<StepState, string> = {
-    completed: DONE_FILL,
-    current: "border-transparent bg-step-live text-white ring-4 ring-step-live/20",
-    pending: "border-line bg-content1 text-muted",
-    rejected: "border-transparent bg-step-bad text-white",
+    completed: BRAND_FILL,
+    current: `${BRAND_FILL} ring-4 ring-brand/20`,
+    pending: "border-line bg-white text-muted",
+    rejected: "border-bad bg-bad text-white",
     // Returned is recoverable and must never read as a rejection.
-    returned: "border-transparent bg-step-hold text-white",
-    cancelled: "border-transparent bg-step-off text-white",
+    returned: "border-warn bg-warn text-white",
+    cancelled: "border-neutral bg-neutral text-white",
     skipped: "border-line bg-content2 text-muted",
     unknown: "border-bad/40 bg-bad-bg text-bad",
   };
@@ -393,14 +390,15 @@ function stateClasses(state: StepState) {
 }
 
 /**
- * The rail between two dots — the one light value in the set, because a rail at the
- * dots' own strength turns the row into a bar chart. The horizontal and the mobile
- * vertical rail are now identical: the old split existed only because a 90deg
- * gradient compressed into a 2px-wide column came out a brown smear, and there is no
- * gradient here to compress.
+ * The rail between two dots. Horizontal rails take the sweep; the vertical rail of the
+ * mobile layout takes flat crimson, because the gradient runs at 90deg and a 2px-wide
+ * column of it is all four stops compressed into two pixels — a brown smear, not a
+ * gradient.
  */
-function connectorClass(left: StepState, right: StepState) {
-  if (left === "completed" && !isHalted(right)) return "bg-step-done-rail";
+function connectorClass(left: StepState, right: StepState, vertical = false) {
+  if (left === "completed" && !isHalted(right)) {
+    return vertical ? "bg-[var(--grad-3)]" : "bg-brand";
+  }
   return "bg-line";
 }
 
@@ -504,7 +502,7 @@ export function FlowStepper({
                   aria-hidden="true"
                 />
                 <span
-                  className={`absolute left-5 top-8 h-[calc(100%+0.5rem)] w-0.5 -translate-x-1/2 lg:hidden ${connectorClass(step.state, steps[index + 1].state)}`}
+                  className={`absolute left-5 top-8 h-[calc(100%+0.5rem)] w-0.5 -translate-x-1/2 lg:hidden ${connectorClass(step.state, steps[index + 1].state, true)}`}
                   aria-hidden="true"
                 />
               </>

@@ -46,6 +46,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.platform.rbac import permissions as perms
+from app.platform.rbac.service import get_user_permissions
 from app.shared.scope import scope_condition
 from app.modules.inventory import allocation, locations
 from app.modules.inventory import service as inventory
@@ -99,9 +101,11 @@ from .enums import (
     NUMBER_SERIES, PHASES, PHASES_APPROVAL_FIRST,
     PURCHASE_RETURN_SOURCE_LABELS, REASON_LABELS,
     SELECTABLE_DISPOSITIONS, SELECTABLE_PURCHASE_RETURN_SOURCES, SELECTABLE_REASONS,
-    VEHICLE_ARRANGEMENT_LABELS,
+    CHAPTER_BY_DOC_TYPE, TRAIL_CHAPTERS,
+    TRAIL_LABELS, TRAIL_ORDER, VEHICLE_ARRANGEMENT_LABELS,
     TRAVELS, WITHDRAWABLE, Disposition, Movement, PurchaseReturnSource, ReturnDocType,
-    ReturnIntent, ReturnKind, ReturnLeg, ReturnReason, ReturnStatus, VehicleArrangement,
+    ReturnIntent, ReturnKind, ReturnLeg, ReturnReason, ReturnStatus, TrailDocType,
+    VehicleArrangement,
 )
 
 # The four standard ways a load travels, taken straight off logistics' own enum rather
@@ -1226,8 +1230,47 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
     }
 
 
+async def _may_read_trail(db: AsyncSession, user) -> bool:
+    """Whether this login may read the paper trail behind the returned MATERIAL.
+
+    One condition: **`return.decide`**, the decision desk's own code, and deliberately
+    not `return.view`. The trail is a dozen other modules' documents (the purchase order,
+    the vendor, the price, the GRN, the inspection), gathered because the desk deciding
+    where material goes cannot make that call without them. Everyone who can open a
+    return holds `return.view`; almost none of them need the commercial history of the
+    item, which is why it used to be served to all of them.
+
+    Not a workflow test. `can_decide` is true only while the document is actually SITTING
+    on the desk, and the desk has to be able to look at a return it has already decided,
+    or one a colleague is holding. This asks whether the login is a decider at all — so
+    a decider who raised a return themselves still reads its trail, which is deliberate:
+    the desk's view of a return is the same view whoever is holding it.
+
+    Whether a given job profile SHOULD hold `return.decide` is an administrator's
+    decision on Job Profiles, not this function's — and the documents in the trail are
+    each gated by their own module besides, so a row this serves is still unopenable by
+    somebody with no right to that document.
+
+    The route is what enforces it (rule 6). This exists so the screen can leave the
+    section out rather than draw it and collect a 403 — a panel that renders an error for
+    most of the people who open the document reads as a broken screen, not a private one.
+    """
+    if user is None:
+        return False
+    from app.platform.rbac.service import get_user_permissions
+
+    codes = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    return perms.RETURN_DECIDE in codes
+
+
 async def get_return(db: AsyncSession, return_id: int, user=None) -> dict:
-    return await _out(db, await _load(db, return_id), user)
+    out = await _out(db, await _load(db, return_id), user)
+    # Only on the single-document read. `_out` also builds every row of a forty-row
+    # queue, and no list screen draws the trail.
+    out["can_view_trail"] = await _may_read_trail(db, user)
+    return out
 
 
 
@@ -1278,6 +1321,10 @@ async def list_returns(db: AsyncSession, params: PageParams, user, *,
     owner = _raised_by_me(user)
     if mine_only:
         stmt = stmt.where(owner)
+    elif await _sees_every_return(db, user):
+        # No narrowing at all. See `_sees_every_return` — this is the desks' own reach,
+        # applied to the register they were always missing from.
+        pass
     elif visible:
         # Either end of the move: a returner must keep seeing the document after it
         # leaves them, and the receiving MDP has to see what is coming.
@@ -1413,6 +1460,33 @@ def _matches_term(row: dict, fields: tuple[str, ...], term: str) -> bool:
     """Case-insensitive substring match over the row's own visible fields."""
     needle = term.casefold()
     return any(needle in str(_field(row, field) or "").casefold() for field in fields)
+
+
+async def _sees_every_return(db: AsyncSession, user) -> bool:
+    """Whether this login reads the whole register rather than their own subtree.
+
+    The subtree rule (`location_ids_for_user`) is written for the person standing at a
+    shelf: you see what came off a point you or your reportees hold. Every desk ABOVE a
+    shelf fails it — the SCM Head holds ONE nominal stocking point out of nine hundred,
+    so All Returns showed him nothing while his decision desk was full, and a document
+    he had just signed disappeared from every screen he could open.
+
+    This is not a widening. `_queue_page` already serves those desks every pending
+    return in the company regardless of location, deliberately and for this exact
+    reason. The register simply never got the same exemption, so the two screens
+    disagreed about which documents exist.
+
+    Gated on `return.view_all`, which inherits its grants from `return.decide`
+    (permissions.INHERITS_GRANTS_FROM), so the desks that already see these rows keep
+    them and nobody else gains anything. A storekeeper holding only `return.view` is
+    scoped exactly as before.
+    """
+    if user is None:
+        return False
+    held = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    return perms.RETURN_VIEW_ALL in held
 
 
 async def _queue_page(db: AsyncSession, params: PageParams, user,
@@ -2273,16 +2347,51 @@ async def approval_flow(db: AsyncSession, user, *, indent_id: int | None = None,
 
 async def returnable_indents(db: AsyncSession, params: PageParams, user, *,
                              search: str | None = None) -> dict:
-    """The indents this person may raise a return against — their own, past approval.
+    """The indents this person may raise a return against — their own, past approval,
+    AND with something of theirs still on the shelf to send back.
 
     ADDED 2026-09-07 for the indent picker on the return form. Scoped to the signed-in
     raiser rather than to everything they can see: a return answers a request THEY made.
     The return approval chain is configured on STOCK_RETURN, then resolved from the
     original request's project and post.
+
+    NARROWED 2026-09-12 to indents that still have a returnable item. The picker listed
+    every indent past approval, so an indent whose only item had already come back was
+    still offered — and choosing it opened step 2 on an empty picker under the sentence
+    "Nothing that indent asked for is on your shelf to return." That is a dead end
+    presented as a choice: the raiser answers the one question that gates the whole form
+    and is told, only afterwards, that the answer was worthless. An indent with nothing
+    left to return is not an option, so it is not offered.
+
+    The shelf test is `my_stock`'s, EXACTLY — the raiser's own point, `available_qty > 0`,
+    matched on `IndentItem.item_id`. The two must stay identical: anything this list
+    admits that `my_stock` then excludes is the same dead end again, one step later.
+    `returnable_items` is that same count per row, served so the option can say how much
+    is actually still returnable rather than repeating the indent's original line count —
+    "1 item" on an indent holding nothing is what made the empty picker read as a defect.
+
+    A raiser with no stocking point holds no shelf at all, so nothing is returnable and
+    the list is empty — the same answer `my_stock` gives, and the destination banner on
+    the form already says why.
     """
+    context = await _raiser_context(db, user)
+    source_id = context["from_warehouse_id"]
+    if source_id is None:
+        return {"items": [], "total": 0, "page": params.page, "size": params.size}
+
+    # Correlated by id rather than joined onto the outer select: an indent with four
+    # returnable items would otherwise come back four times, and `paginate` would count
+    # the duplicates as separate indents.
+    on_the_shelf = (
+        select(IndentItem.indent_id)
+        .join(Stock, Stock.item_id == IndentItem.item_id)
+        .where(Stock.warehouse_id == source_id, Stock.available_qty > 0)
+    )
+
     stmt = (select(Indent)
             .where(Indent.requested_by_id == getattr(user, "id", None),
-                   Indent.status.in_(RETURNABLE_INDENT_STATUSES))
+                   Indent.status.in_(RETURNABLE_INDENT_STATUSES),
+                   Indent.id.in_(on_the_shelf))
             .order_by(Indent.id.desc()))
     term = (search or "").strip()
     if term:
@@ -2292,16 +2401,37 @@ async def returnable_indents(db: AsyncSession, params: PageParams, user, *,
                               Indent.project_name.ilike(like)))
 
     page = await paginate(db, stmt, params)
+    rows = page["items"]
+
+    # One grouped query for the whole page, not one per row: a picker asks for 200 at a
+    # time and 200 round trips to label a dropdown is how a form takes four seconds to
+    # open. Distinct on the item, because a shelf holds an item in several batches and
+    # bins and the raiser is being told how many ITEMS are returnable, not how many lots.
+    returnable: dict[int, int] = {}
+    if rows:
+        counts = (await db.execute(
+            select(IndentItem.indent_id,
+                   func.count(func.distinct(IndentItem.item_id)))
+            .join(Stock, Stock.item_id == IndentItem.item_id)
+            .where(IndentItem.indent_id.in_([row.id for row in rows]),
+                   Stock.warehouse_id == source_id, Stock.available_qty > 0)
+            .group_by(IndentItem.indent_id)
+        )).all()
+        returnable = {indent_id: int(count or 0) for indent_id, count in counts}
+
     page["items"] = [{
         "id": row.id,
         "indent_no": row.indent_no,
         "indent_date": row.indent_date.isoformat() if row.indent_date else None,
         "status": row.status,
         "total_items": int(row.total_items or 0),
+        # How many of those are still on the shelf. Never derived in the browser from
+        # `total_items` — the gap between the two is the whole point of this field.
+        "returnable_items": returnable.get(row.id, 0),
         "total_qty": _d(row.total_qty),
         "project_name": row.project_name,
         "position_name": row.position_name,
-    } for row in page["items"]]
+    } for row in rows]
     return page
 
 
@@ -3730,6 +3860,12 @@ async def decision_options(db: AsyncSession, return_id: int, user=None) -> dict:
         # rather than discovered on the register afterwards.
         "purchase_return_category": source["category"],
         "purchase_return_category_label": source["category_label"],
+        # The rung actually resolved for THIS document, beside the coarse category. A
+        # three-rung chain cannot be named by a two-way filter, so the filter stays the
+        # filter and this says which point the material is really coming off.
+        "purchase_return_source_detail": source["source_detail"],
+        "purchase_return_source_tier": source["source_tier"],
+        "purchase_return_source_resolved": source["source_is_resolved"],
         "qc_rejected_tag": source["qc_rejected_after_grn"],
     }
 
@@ -5263,12 +5399,18 @@ async def delete_file(db: AsyncSession, return_id: int, attachment_id: int,
 # The paper trail behind the item
 # ---------------------------------------------------------------------------
 #
-# REWRITTEN 2026-09-08. The decision desk is being asked to make a commercial call on
-# material it has never seen, and the only thing it can go on is the documents that
-# brought that material to the branch: what was asked for, what was issued against the
-# ask, who it was bought from, what arrived, and what the inspection bench said about it.
-# Those five documents were spread across four modules and the desk was expected to open
-# four screens to see them.
+# REWRITTEN 2026-09-08, WIDENED 2026-09-12. The decision desk is being asked to make a
+# commercial call on material it has never seen, and the only thing it can go on is the
+# documents that brought that material to the branch: what was asked for, who decided
+# this branch got it, what was bought and from whom, what arrived, what the bench said,
+# where it was put down, what was picked, what was issued, what it left on and who
+# carried it. Those documents are spread across seven modules and the desk was expected
+# to open seven screens — so it did not, and the call was made on the number alone.
+#
+# All eighteen kinds are resolved here and served as one list. Which ones EXIST is the
+# answer to a real question: an indent served from stock has an allocation and no PO at
+# all, and a trail that showed three rows for it was not being brief, it was being
+# silent about the only decision document behind the material.
 #
 # `_document_chain` resolves them ONCE and everything else on this page reads its answer:
 # the desk's related-documents section, the destination default, the purchase-return
@@ -5282,9 +5424,20 @@ async def delete_file(db: AsyncSession, return_id: int, attachment_id: int,
 # issue line, receipt line and inspection line for these items across every warehouse —
 # is what made the panel hang before it was narrowed.
 
-#: How many issues to name per return. A desk reading a sixth material issue is not
-#: checking the item any more, and the queries stay cheap.
-CHAIN_LIMIT = 5
+#: How many documents of EACH KIND to name per return.
+#:
+#: RAISED from 5 to 25 on 2026-09-12. Five was chosen when this named one kind of
+#: document — "a desk reading a sixth material issue is not checking the item any more"
+#: — and it stopped being a reasonable ceiling the moment the trail became every kind:
+#: an indent served in rounds collects an allocation, an issue and a consignment per
+#: round, so a normal document was being cut off mid-story with nothing said.
+#:
+#: It is still a CAP rather than no limit, because each hop feeds the next one its ids
+#: and an unbounded trail would put an unbounded `IN` list on a screen the desk waits in
+#: front of. What changed is that hitting it is now SAID (`documents_note`) instead of
+#: silently truncating — a list that quietly stops is worse than a shorter one that
+#: admits where it stopped.
+CHAIN_LIMIT = 25
 
 #: An inspection line that says the vendor sent something unacceptable.
 QC_FAILED_RESULTS = ("FAILED", "PARTIAL")
@@ -5308,20 +5461,50 @@ async def _document_chain(db: AsyncSession, doc: StockTransferOrder) -> dict:
     """Every document behind this return's item(s), resolved in one pass.
 
     Backwards along the chain the business flow already runs forwards
-    (`Indent -> PO -> GRN -> QC -> Stock -> Issue`), starting from whichever end this
-    return can actually see. A field return names its indent, so the indent is the hinge:
-    the issue that served it, the PO raised off it, the GRN against that PO, and the
-    inspection of that GRN. A return raised with no indent behind it — stock that reached
-    the branch some other way — falls back to the issue lines for the same items, which is
+    (`Indent -> MR -> Requisition -> RFQ -> Quotation -> PO -> DN -> GRN -> QC ->
+    Putaway -> Stock -> Picklist -> Issue -> Outward QC -> Consignment -> Shipment`),
+    starting from whichever end this return can actually see. A field return names its
+    indent, so the indent is the hinge: everything the indent produced on the stock side
+    (its allocations, and the shortfall material requests that went to the buying desk),
+    everything the buying desk raised off those, and everything the warehouse then did
+    with what arrived. A return raised with no indent behind it — stock that reached the
+    branch some other way — falls back to the issue lines for the same items, which is
     weaker but is not nothing.
+
+    WIDENED 2026-09-12. It resolved five documents (indent, issue, PO, GRN, QC) and the
+    desk was told that was the trail. It was not. An indent served from stock raises an
+    ALLOCATION and never a PO, so the commonest return in the system showed three rows
+    and stopped; and a DISPATCHED issue named neither the CONSIGNMENT it left on nor the
+    SHIPMENT that carried it — the two documents a "where is it, who moved it, what did
+    the freight cost" call is actually about. Every hop below already exists as a
+    backward pointer on a table, which is this architecture's central rule; nothing new
+    is stored and nothing anywhere is written for this screen's benefit.
+
+    Every lookup is bounded (`.limit(CHAIN_LIMIT)`) and keyed on an indexed column, and
+    each hop is skipped outright when the one before it found nothing — an indent with no
+    requisition costs no RFQ query, and a return with no indent costs almost none of
+    this. That matters: this runs on a screen the desk waits in front of, and the honest
+    version — join every issue line, receipt line and inspection line for these items
+    across every warehouse — is what made the panel hang before it was narrowed.
 
     Returns plain values rather than a loaded object graph on purpose: the callers
     serialise this to a screen or copy fields off it onto a purchase return, and neither
     wants a lazy relationship it might touch after the session has moved on.
+
+    The singular `po`/`grn`/`qc` keys survive beside the new lists because
+    `create_purchase_return` and `_originating_warehouse` copy fields off exactly one of
+    each, and the newest is the one they mean.
     """
-    from app.modules.procurement.models import PurchaseOrder
+    from app.modules.inventory.models import Allocation, MaterialRequest
+    from app.modules.logistics.models import TransportRequest
+    from app.modules.procurement.models import (
+        RFQ, DespatchNote, PurchaseOrder, Quotation, Requisition, RequisitionItem,
+        RequisitionSource,
+    )
+    from app.modules.warehouse.enums import WarehouseDocType
     from app.modules.warehouse.models import (
-        Inspection, InspectionItem, MaterialIssue, MaterialIssueLine, Receipt,
+        Dispatch, Inspection, InspectionItem, MaterialIssue, MaterialIssueLine,
+        OutboundInspection, Picking, PutawayTask, Receipt,
     )
 
     lines = list(doc.items or [])
@@ -5331,57 +5514,203 @@ async def _document_chain(db: AsyncSession, doc: StockTransferOrder) -> dict:
 
     indent = await db.get(Indent, indent_id) if indent_id else None
 
-    # --- the issue that put this material on the branch's shelf -------------------
-    issues: list = []
-    if indent_id:
-        issues = list((await db.execute(
-            select(MaterialIssue)
-            .where(MaterialIssue.indent_id == indent_id)
-            .order_by(MaterialIssue.id.desc()).limit(CHAIN_LIMIT)
-        )).scalars().all())
-    if not issues and item_ids:
-        # No indent named. The issue lines for these items are the only link left, and
-        # they are NOT scoped to the return's own warehouse: an issue that put stock on a
-        # branch was raised by the point ABOVE it, so scoping to `from_warehouse_id` — the
-        # branch — is exactly the query that finds nothing.
-        issue_ids = list((await db.execute(
-            select(MaterialIssueLine.issue_id)
-            .where(MaterialIssueLine.item_id.in_(item_ids))
-            .order_by(MaterialIssueLine.issue_id.desc()).limit(CHAIN_LIMIT)
-        )).scalars().all())
-        if issue_ids:
-            issues = list((await db.execute(
-                select(MaterialIssue).where(MaterialIssue.id.in_(issue_ids))
-                .order_by(MaterialIssue.id.desc())
-            )).scalars().all())
+    async def newest(stmt, limit: int = CHAIN_LIMIT) -> list:
+        """The most recent `limit` rows of one kind, newest first.
 
-    # --- what it was bought on, what arrived, and what QC said about it -----------
-    po = grn = qc = None
-    qc_items: list = []
+        Ordered by `id` and never by a date column: the primary key is indexed, unique
+        and already the insert order, and several of these tables carry a JSON column
+        where a filesort over a non-indexed column raises MySQL 1038 whatever the row
+        count is.
+        """
+        return list((await db.execute(stmt.limit(limit))).scalars().all())
+
+    async def ids(stmt, limit: int = CHAIN_LIMIT) -> list[int]:
+        return [int(value) for value
+                in (await db.execute(stmt.limit(limit))).scalars().all()
+                if value]
+
+    # --- what the indent produced on the stock side -------------------------------
+    # Both are the indent's own children and both are documents a desk asks about: the
+    # allocation is WHY this branch got these units and who signed for that, and the
+    # material request is the part of the ask stock could not cover.
+    allocations: list = []
+    mrs: list = []
     if indent_id:
-        po = (await db.execute(
-            select(PurchaseOrder).where(PurchaseOrder.indent_id == indent_id)
-            .order_by(PurchaseOrder.id.desc()).limit(1)
-        )).scalars().first()
-    if po is not None:
-        grn = (await db.execute(
-            select(Receipt).where(Receipt.po_id == po.id)
-            .order_by(Receipt.id.desc()).limit(1)
-        )).scalars().first()
-    if grn is not None:
-        qc = (await db.execute(
-            select(Inspection).where(Inspection.receipt_id == grn.id)
-            .order_by(Inspection.id.desc()).limit(1)
-        )).scalars().first()
-    if qc is not None and item_ids:
+        allocations = await newest(select(Allocation)
+                                   .where(Allocation.indent_id == indent_id)
+                                   .order_by(Allocation.id.desc()))
+        mrs = await newest(select(MaterialRequest)
+                           .where(MaterialRequest.indent_id == indent_id)
+                           .order_by(MaterialRequest.id.desc()))
+
+    # --- the buying chain, where one ran ------------------------------------------
+    # A requisition reaches a material request three ways — one MR picked up whole
+    # (`source_mr_id`), a batch of them consolidated (`pro_requisition_sources`), or a
+    # buyer raising cold against the indent line (`pro_requisition_items.indent_id`).
+    # All three are read, because which one was used is the buyer's choice and the
+    # trail must not go dark depending on it.
+    mr_ids = [row.id for row in mrs]
+    req_ids: set[int] = set()
+    if mr_ids:
+        req_ids.update(await ids(select(Requisition.id)
+                                 .where(Requisition.source_mr_id.in_(mr_ids))
+                                 .order_by(Requisition.id.desc())))
+        req_ids.update(await ids(select(RequisitionSource.requisition_id)
+                                 .where(RequisitionSource.mr_id.in_(mr_ids))
+                                 .order_by(RequisitionSource.id.desc())))
+    if indent_id:
+        req_ids.update(await ids(select(RequisitionItem.requisition_id)
+                                 .where(RequisitionItem.indent_id == indent_id)
+                                 .order_by(RequisitionItem.id.desc())))
+
+    requisitions: list = []
+    rfqs: list = []
+    if req_ids:
+        ordered_reqs = sorted(req_ids, reverse=True)[:CHAIN_LIMIT]
+        requisitions = await newest(select(Requisition)
+                                    .where(Requisition.id.in_(ordered_reqs))
+                                    .order_by(Requisition.id.desc()))
+        rfqs = await newest(select(RFQ).where(RFQ.requisition_id.in_(ordered_reqs))
+                            .order_by(RFQ.id.desc()))
+    rfq_ids = [row.id for row in rfqs]
+
+    # --- what it was bought on ----------------------------------------------------
+    po_clauses = []
+    if indent_id:
+        po_clauses.append(PurchaseOrder.indent_id == indent_id)
+    if req_ids:
+        po_clauses.append(PurchaseOrder.requisition_id.in_(sorted(req_ids)))
+    if rfq_ids:
+        po_clauses.append(PurchaseOrder.rfq_id.in_(rfq_ids))
+    pos: list = []
+    if po_clauses:
+        pos = await newest(select(PurchaseOrder).where(or_(*po_clauses))
+                           .order_by(PurchaseOrder.id.desc()))
+    po_ids = [row.id for row in pos]
+
+    # Only the offers that WON — the ones the orders were actually written from. Every
+    # quote against the RFQ is the buyer's comparison sheet, not this item's trail, and
+    # a losing vendor's price is not something a returns desk is being asked about.
+    quote_ids = [int(row.quotation_id) for row in pos if row.quotation_id]
+    quotations: list = []
+    if quote_ids:
+        quotations = await newest(select(Quotation)
+                                  .where(Quotation.id.in_(quote_ids))
+                                  .order_by(Quotation.id.desc()))
+
+    # The vendor's own statement of the delivery, filed before it arrived. It carries
+    # the invoice and the e-way bill, which is what a "this was wrong on arrival" call
+    # has to quote back at them.
+    despatch_notes: list = []
+    if po_ids:
+        despatch_notes = await newest(select(DespatchNote)
+                                      .where(DespatchNote.po_id.in_(po_ids))
+                                      .order_by(DespatchNote.id.desc()))
+
+    # --- what arrived, what the bench said, and where it was put down -------------
+    grns: list = []
+    if po_ids:
+        grns = await newest(select(Receipt).where(Receipt.po_id.in_(po_ids))
+                            .order_by(Receipt.id.desc()))
+    grn_ids = [row.id for row in grns]
+
+    qcs: list = []
+    if grn_ids:
+        qcs = await newest(select(Inspection)
+                           .where(Inspection.receipt_id.in_(grn_ids))
+                           .order_by(Inspection.id.desc()))
+    qc_ids = [row.id for row in qcs]
+
+    qc_items: list = []
+    if qc_ids and item_ids:
         # Only the lines for the items actually coming back. An inspection covering eight
         # lines can have failed one of them, and "this GRN had a failure on it" is not the
         # same claim as "the item in front of me failed".
         qc_items = list((await db.execute(
             select(InspectionItem)
-            .where(InspectionItem.inspection_id == qc.id,
+            .where(InspectionItem.inspection_id.in_(qc_ids),
                    InspectionItem.item_id.in_(item_ids))
         )).scalars().all())
+
+    # Scoped to these items as well as to the GRN: a receipt of forty lines raises forty
+    # putaway tasks and thirty-nine of them are somebody else's material. The task is
+    # what carries the lot number — the only record of WHERE this stock stood.
+    putaways: list = []
+    if grn_ids and item_ids:
+        putaways = await newest(select(PutawayTask)
+                                .where(PutawayTask.grn_id.in_(grn_ids),
+                                       PutawayTask.item_id.in_(item_ids))
+                                .order_by(PutawayTask.id.desc()))
+
+    # --- the issue that put this material on the branch's shelf -------------------
+    issues: list = []
+    if indent_id:
+        issues = await newest(select(MaterialIssue)
+                              .where(MaterialIssue.indent_id == indent_id)
+                              .order_by(MaterialIssue.id.desc()))
+    if not issues and item_ids:
+        # No indent named. The issue lines for these items are the only link left, and
+        # they are NOT scoped to the return's own warehouse: an issue that put stock on a
+        # branch was raised by the point ABOVE it, so scoping to `from_warehouse_id` — the
+        # branch — is exactly the query that finds nothing.
+        found = await ids(select(MaterialIssueLine.issue_id)
+                          .where(MaterialIssueLine.item_id.in_(item_ids))
+                          .order_by(MaterialIssueLine.issue_id.desc()))
+        if found:
+            issues = list((await db.execute(
+                select(MaterialIssue).where(MaterialIssue.id.in_(found))
+                .order_by(MaterialIssue.id.desc())
+            )).scalars().all())
+    issue_ids = [row.id for row in issues]
+
+    # The picklist the issue was served off, read from the issue's own `picking_id`
+    # rather than by sweeping `out_picking.ref_id`, which carries no index.
+    pick_ids = [int(row.picking_id) for row in issues if row.picking_id]
+    picklists: list = []
+    if pick_ids:
+        picklists = await newest(select(Picking).where(Picking.id.in_(pick_ids))
+                                 .order_by(Picking.id.desc()))
+
+    # The outward check on a posted issue — `whs_inspections`, a different table from the
+    # inbound bench above, and the one that says whether we shipped it in good order. A
+    # branch claiming it arrived damaged is answered here or nowhere.
+    outward_qcs: list = []
+    if issue_ids:
+        outward_qcs = await newest(select(OutboundInspection)
+                                   .where(OutboundInspection.issue_id.in_(issue_ids))
+                                   .order_by(OutboundInspection.id.desc()))
+
+    # --- how it travelled ---------------------------------------------------------
+    # `out_dispatches.ref_id` carries no index, so this is deliberately the narrowest
+    # form it can take: an IN over at most CHAIN_LIMIT issue ids with `ref_type` pinned.
+    consignments: list = []
+    if issue_ids:
+        consignments = await newest(
+            select(Dispatch)
+            .where(Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+                   Dispatch.ref_id.in_(issue_ids))
+            .order_by(Dispatch.id.desc()))
+    dispatch_ids = [row.id for row in consignments]
+
+    # Both legs in one read: the outward shipment that brought the material down, and
+    # this return's OWN leg carrying it back up (`transport_request_id` on the marker
+    # payload). They are rows of the same table, they are the same journey in two
+    # directions, and the desk reads them as one trail.
+    payload = _unpack(doc.remarks)
+    return_tr_id = payload.get(TR_ID_KEY)
+    tr_clauses = []
+    if dispatch_ids:
+        tr_clauses.append(TransportRequest.dispatch_id.in_(dispatch_ids))
+    if issue_ids:
+        tr_clauses.append(TransportRequest.issue_id.in_(issue_ids))
+    if indent_id:
+        tr_clauses.append(TransportRequest.indent_id == indent_id)
+    if return_tr_id:
+        tr_clauses.append(TransportRequest.id == int(return_tr_id))
+    shipments: list = []
+    if tr_clauses:
+        shipments = await newest(select(TransportRequest).where(or_(*tr_clauses))
+                                 .order_by(TransportRequest.id.desc()))
 
     qc_rejected = any(
         (row.result or "").upper() in QC_FAILED_RESULTS or _d(row.rejected_qty) > ZERO
@@ -5391,10 +5720,26 @@ async def _document_chain(db: AsyncSession, doc: StockTransferOrder) -> dict:
     return {
         "indent": indent,
         "indent_no": (indent_ref or {}).get("indent_no"),
+        "allocations": allocations,
+        "mrs": mrs,
+        "requisitions": requisitions,
+        "rfqs": rfqs,
+        "quotations": quotations,
+        "despatch_notes": despatch_notes,
+        "putaways": putaways,
         "issues": issues,
-        "po": po,
-        "grn": grn,
-        "qc": qc,
+        "picklists": picklists,
+        "outward_qcs": outward_qcs,
+        "consignments": consignments,
+        "shipments": shipments,
+        "return_transport_id": int(return_tr_id) if return_tr_id else None,
+        "pos": pos,
+        "grns": grns,
+        "qcs": qcs,
+        # The newest of each, for the two callers that copy fields off exactly one.
+        "po": pos[0] if pos else None,
+        "grn": grns[0] if grns else None,
+        "qc": qcs[0] if qcs else None,
         "qc_items": qc_items,
         "qc_rejected": qc_rejected,
         "item_ids": item_ids,
@@ -5460,101 +5805,319 @@ async def _purchase_return_source(db: AsyncSession, doc: StockTransferOrder,
     under describes a journey it never made. What the vendor is answerable for is the
     rejection.
 
-    Otherwise it is the tier of the point the material is coming off — WAREHOUSE or MDP
-    reads as "from warehouse", LIP as "from LIP/MDB" — which is the split the buying desk
-    asked for, because our own upper-tier stock going back and a branch pushing material
-    up the chain are chased differently.
+    Otherwise it is the RUNG of the point the material is coming off. There are exactly
+    three (`inventory.enums.LocationTier`) and the category folds them into two:
+    WAREHOUSE and MDP are "our own upper-tier stock going back", LIP is "a branch pushing
+    material up the chain", and the buying desk chases those two differently.
+
+    FIXED 2026-09-12 — the naming, not the rule. The screen said "From LIP / MDB" for a
+    bucket that only ever holds LIP returns, and "From warehouse" for the bucket that
+    holds every MDP one; there is no MDB in this system at all. A two-word category
+    cannot name a three-rung chain, so it no longer tries to: the CATEGORY stays the
+    coarse three-way filter the register needs, and the rung actually resolved for THIS
+    document is served beside it.
+
+    `source_detail` is a SERVED sentence, not a label a screen composes. The rung, the
+    point's own name and the words for both come from `inventory.locations` — the one
+    place that owns what a stocking point is called — so this screen and the stock
+    screens can never call the same point two different things.
+
+    `source_is_resolved` says whether a warehouse row actually answered. It matters
+    because an unidentifiable point still has to be filed somewhere, and it is filed as
+    a branch return: the safe end, since a branch return mislabelled as warehouse stock
+    goes to the wrong desk and is chased by nobody. That is a fallback, and the screen
+    now says so instead of stating it as a fact.
     """
     chain = chain if chain is not None else await _document_chain(db, doc)
     reason = _unpack(doc.remarks).get("reason") or ""
     qc_rejected = bool(chain["qc_rejected"]) or reason in QC_REASONS
 
+    # One query, and the same one the stock screens use to name a point. It answers for
+    # a null id without touching the database, which is what lets this run on a document
+    # that names no source at all.
+    point = await locations.describe_point(db, doc.from_warehouse_id)
+    resolved = point["point_type"] is not None
+    tier = locations.tier_of(point["point_type"]) if resolved else LocationTier.LIP
+
     if qc_rejected:
         category = PurchaseReturnSource.QC_REJECTED_GRN.value
     else:
-        tier = LocationTier.LIP
-        if doc.from_warehouse_id:
-            warehouse_type = await db.scalar(
-                select(Warehouse.warehouse_type)
-                .where(Warehouse.id == doc.from_warehouse_id))
-            if warehouse_type:
-                tier = locations.tier_of(warehouse_type)
         category = (PurchaseReturnSource.FROM_WAREHOUSE.value
                     if tier.value <= LocationTier.MDP.value
                     else PurchaseReturnSource.FROM_LIP_MDB.value)
+
+    rung = f"{locations.tier_label(tier)} ({point['point_label']})"
+    if qc_rejected:
+        detail = ("Rejected on the inspection bench after the GRN, so the rung it sat "
+                  "in afterwards does not decide this — the vendor is answerable for "
+                  "the rejection.")
+    elif resolved:
+        detail = f"{point['point_name']} is a {rung}."
+    else:
+        detail = ("The point this is coming off could not be identified, so it is "
+                  "filed as a branch return — the safe end.")
 
     return {
         "category": category,
         "category_label": PURCHASE_RETURN_SOURCE_LABELS[category],
         "qc_rejected_after_grn": qc_rejected,
+        # The rung actually resolved, named the way every stock screen names it.
+        "source_tier": tier.name,
+        "source_tier_label": locations.tier_label(tier),
+        "source_point_type": point["point_type"],
+        "source_point_label": point["point_label"],
+        "source_point_name": point["point_name"],
+        "source_is_resolved": resolved,
+        "source_detail": detail,
     }
+
+
+def _trail_day(value):
+    """One date, off a column that may be a DATE or a DATETIME.
+
+    `inb_receipts` dates a receipt with a DATE and `inv_allocations` stamps a DATETIME,
+    and a row printing a timestamp beside six rows printing dates reads as a different
+    kind of fact.
+    """
+    if value is None:
+        return None
+    return value.date() if isinstance(value, datetime) else value
+
+
+def _joined(*parts) -> str | None:
+    """The non-empty parts of a one-line qualifier, or nothing at all.
+
+    Nothing rather than an empty string: the screen tests the field for truth, and a
+    blank note draws a blank line under the number.
+    """
+    return " · ".join(str(part) for part in parts if part) or None
+
+
+def _cap_note(documents: list[dict]) -> str | None:
+    """What to say when a kind of document hit `CHAIN_LIMIT`, or nothing at all.
+
+    Each kind is resolved with its own `.limit()`, so a kind that came back exactly full
+    is a kind that may have more behind it. That is worth one sentence and no more: a
+    list that quietly stops is worse than a shorter one that admits where it stopped,
+    and a reader who needs every last row of a 40-issue indent has the module's own
+    register for it.
+
+    Deliberately says "may be" rather than counting the rest. Proving there IS more
+    means running each of those queries a second time without the limit — on a screen a
+    desk waits in front of — to add nothing a reader would act on differently.
+    """
+    counts: dict[str, int] = {}
+    for row in documents:
+        counts[row["doc_type"]] = counts.get(row["doc_type"], 0) + 1
+    capped = sorted({row["doc_label"] or row["doc_type"] for row in documents
+                     if counts[row["doc_type"]] >= CHAIN_LIMIT})
+    if not capped:
+        return None
+    return (f"Showing the {CHAIN_LIMIT} most recent of each kind — there may be more "
+            f"behind {', '.join(capped)}.")
 
 
 def _chain_documents(doc: StockTransferOrder, chain: dict,
                      originating: dict) -> list[dict]:
     """The chain as rows a screen can render, in the order the flow happened.
 
-    Intent first, because it is what the return itself claims, then backwards along the
-    trail. Every row carries the same six fields whatever kind of document it is, so the
-    section renders one way and does not branch per type.
+    Intent first, because it is what the return itself claims, then forwards along the
+    trail the material actually travelled — ask, allocation, buying, arrival, bench,
+    putaway, pick, issue, outward check, consignment, shipment. Every row carries the
+    same fields whatever kind of document it is, so the section renders one way and
+    branches on nothing: `note` is the one line of qualifier that makes a row worth
+    opening, and `extra` carries whatever a link or a badge needs.
+
+    Sorted by `TRAIL_ORDER` at the end rather than built in order, so a new document
+    type is one member of `TrailDocType` and never a re-ordering of this function.
     """
     def row(doc_type: str, *, doc_id=None, doc_no=None, status=None, day=None,
-            vendor_name=None, warehouse_name=None, **extra) -> dict:
+            vendor_name=None, warehouse_name=None, note=None, **extra) -> dict:
+        day = _trail_day(day)
         return {
             "doc_type": doc_type,
+            "doc_label": TRAIL_LABELS.get(doc_type, doc_type),
             "doc_id": doc_id,
             "doc_no": doc_no,
             "status": status,
             "date": day.isoformat() if day else None,
             "vendor_name": vendor_name,
             "warehouse_name": warehouse_name,
+            "note": note,
             "extra": extra or None,
         }
 
     intent = _intent(doc)
-    rows = [row("INTENT", doc_no=INTENT_LABELS.get(intent, intent), status=intent,
+    rows = [row(TrailDocType.INTENT.value,
+                doc_no=INTENT_LABELS.get(intent, intent), status=intent,
                 warehouse_name=doc.from_warehouse_name, intent=intent)]
 
     indent = chain["indent"]
     if indent is not None:
-        rows.append(row("INDENT", doc_id=indent.id, doc_no=indent.indent_no,
-                        status=indent.status, day=indent.indent_date,
+        rows.append(row(TrailDocType.INDENT.value, doc_id=indent.id,
+                        doc_no=indent.indent_no, status=indent.status,
+                        day=indent.indent_date,
                         warehouse_name=getattr(indent, "project_name", None),
+                        note=getattr(indent, "requested_by_name", None),
                         project=getattr(indent, "project_name", None)))
     elif chain["indent_no"]:
         # The number was snapshotted onto the return when it was raised and the row has
         # since gone. Naming it is still better than a gap in the trail.
-        rows.append(row("INDENT", doc_no=chain["indent_no"]))
+        rows.append(row(TrailDocType.INDENT.value, doc_no=chain["indent_no"]))
+
+    for allocation_doc in chain["allocations"]:
+        # Why this branch got these units, and who signed for it. On a stock-served
+        # indent this is the ONLY decision document behind the material — there is no
+        # PO, no GRN and no vendor anywhere on the trail, which is exactly the case the
+        # section used to answer with three rows and a silence.
+        rows.append(row(TrailDocType.ALLOCATION.value, doc_id=allocation_doc.id,
+                        doc_no=allocation_doc.allocation_no,
+                        status=allocation_doc.status, day=allocation_doc.created_at,
+                        note=allocation_doc.allocated_by_name,
+                        indent_no=allocation_doc.indent_no))
+
+    for mr in chain["mrs"]:
+        rows.append(row(TrailDocType.MATERIAL_REQUEST.value, doc_id=mr.id,
+                        doc_no=mr.mr_no, status=mr.status,
+                        day=mr.mr_date or mr.created_at,
+                        warehouse_name=mr.project_name, note=mr.requested_by_name,
+                        indent_no=mr.indent_no))
+
+    for requisition in chain["requisitions"]:
+        rows.append(row(TrailDocType.REQUISITION.value, doc_id=requisition.id,
+                        doc_no=requisition.req_no, status=requisition.status,
+                        day=requisition.req_date or requisition.created_at,
+                        warehouse_name=requisition.warehouse_name,
+                        note=requisition.created_by_name,
+                        mr_no=requisition.source_mr_no))
+
+    for rfq in chain["rfqs"]:
+        rows.append(row(TrailDocType.RFQ.value, doc_id=rfq.id, doc_no=rfq.rfq_no,
+                        status=rfq.status, day=rfq.rfq_date,
+                        warehouse_name=rfq.warehouse_name,
+                        requisition_no=rfq.requisition_no))
+
+    for quotation in chain["quotations"]:
+        # It has no screen of its own: a quote means something only beside the ones it
+        # was compared against, so the row opens the RFQ's comparison sheet. `rfq_id`
+        # rides on the row for that, which is why that link is not built from `doc_id`.
+        rows.append(row(TrailDocType.QUOTATION.value, doc_id=quotation.id,
+                        doc_no=quotation.quotation_no, status=quotation.status,
+                        day=quotation.quotation_date,
+                        vendor_name=quotation.vendor_name,
+                        note=_joined("Awarded", quotation.grand_total),
+                        rfq_id=quotation.rfq_id, rfq_no=quotation.rfq_no))
+
+    for po in chain["pos"]:
+        rows.append(row(TrailDocType.PO.value, doc_id=po.id, doc_no=po.po_no,
+                        status=po.status, day=po.po_date, vendor_name=po.vendor_name,
+                        warehouse_name=po.facility_name, vendor_id=po.vendor_id))
+
+    for note_doc in chain["despatch_notes"]:
+        # The vendor's own claim about what they sent, filed before it arrived. It has
+        # no screen here — it is read on the GRN it prefills — so the row states the
+        # paperwork instead, which is the part a rejection has to quote back at them.
+        rows.append(row(TrailDocType.DESPATCH_NOTE.value, doc_id=note_doc.id,
+                        doc_no=note_doc.dn_no, status=note_doc.status,
+                        day=note_doc.dn_date, vendor_name=note_doc.vendor_name,
+                        note=_joined(
+                            f"Invoice {note_doc.invoice_no}"
+                            if note_doc.invoice_no else None,
+                            f"E-way {note_doc.eway_bill_no}"
+                            if note_doc.eway_bill_no else None),
+                        po_no=note_doc.po_no))
+
+    for grn in chain["grns"]:
+        rows.append(row(TrailDocType.GRN.value, doc_id=grn.id, doc_no=grn.grn_no,
+                        status=grn.status, day=grn.grn_date,
+                        vendor_name=grn.vendor_name,
+                        warehouse_name=grn.warehouse_name, po_id=grn.po_id))
+
+    for qc in chain["qcs"]:
+        # Per inspection, not per batch of them: "this GRN had a failure on it" and
+        # "the item in front of me failed" are different claims, and the note says
+        # which of the two this row is making.
+        items = [line for line in chain["qc_items"] if line.inspection_id == qc.id]
+        rejected = sum((_d(line.rejected_qty) for line in items), ZERO)
+        results = sorted({(line.result or "").upper() for line in items} - {""})
+        rows.append(row(TrailDocType.QC.value, doc_id=qc.id,
+                        doc_no=qc.inspection_no, status=qc.status,
+                        day=qc.inspection_date, vendor_name=qc.vendor_name,
+                        warehouse_name=qc.warehouse_name,
+                        note=(f"{rejected} rejected on these items"
+                              if rejected > ZERO else None),
+                        receipt_id=qc.receipt_id, inspection_type=qc.inspection_type,
+                        rejected_qty=str(rejected), results=results))
+
+    for putaway in chain["putaways"]:
+        # The lot number is the point of naming this one: it is the only record of where
+        # the stock physically stood, and a damaged-in-store claim is answered by it.
+        rows.append(row(TrailDocType.PUTAWAY.value, doc_id=putaway.id,
+                        doc_no=putaway.putaway_no or putaway.lot_no,
+                        status=putaway.status, day=putaway.completed_at,
+                        note=putaway.lot_no, lot_no=putaway.lot_no,
+                        grn_id=putaway.grn_id))
+
+    for picklist in chain["picklists"]:
+        rows.append(row(TrailDocType.PICKLIST.value, doc_id=picklist.id,
+                        doc_no=picklist.pick_no, status=picklist.status,
+                        day=picklist.pick_date,
+                        warehouse_name=picklist.warehouse_name,
+                        note=picklist.assigned_to_name))
 
     for issue in chain["issues"]:
         rows.append(row(
-            "MATERIAL_ISSUE", doc_id=issue.id, doc_no=issue.issue_no,
-            status=issue.status, day=issue.issue_date,
-            warehouse_name=issue.warehouse_name, warehouse_id=issue.warehouse_id,
+            TrailDocType.MATERIAL_ISSUE.value, doc_id=issue.id,
+            doc_no=issue.issue_no, status=issue.status, day=issue.issue_date,
+            warehouse_name=issue.warehouse_name, note=issue.issued_to_name,
+            warehouse_id=issue.warehouse_id,
             is_originating=issue.warehouse_id == originating["warehouse_id"]))
 
-    po = chain["po"]
-    if po is not None:
-        rows.append(row("PO", doc_id=po.id, doc_no=po.po_no, status=po.status,
-                        day=po.po_date, vendor_name=po.vendor_name,
-                        warehouse_name=po.facility_name, vendor_id=po.vendor_id))
+    for inspection in chain["outward_qcs"]:
+        # A different table from the inbound bench above (`whs_inspections`), and the
+        # document that answers "was it in good order when it left us" — the first thing
+        # asked of a damage claim raised at the far end.
+        rows.append(row(TrailDocType.QC_OUTWARD.value, doc_id=inspection.id,
+                        doc_no=inspection.inspection_no, status=inspection.status,
+                        day=inspection.inspection_date,
+                        warehouse_name=inspection.warehouse_name,
+                        note=_joined(inspection.inspector_name,
+                                     f"{inspection.failed_items} failed"
+                                     if inspection.failed_items else None),
+                        issue_id=inspection.issue_id))
 
-    grn = chain["grn"]
-    if grn is not None:
-        rows.append(row("GRN", doc_id=grn.id, doc_no=grn.grn_no, status=grn.status,
-                        day=grn.grn_date, vendor_name=grn.vendor_name,
-                        warehouse_name=grn.warehouse_name, po_id=grn.po_id))
+    for consignment in chain["consignments"]:
+        rows.append(row(TrailDocType.CONSIGNMENT.value, doc_id=consignment.id,
+                        doc_no=consignment.dispatch_no, status=consignment.status,
+                        day=consignment.dispatch_date,
+                        warehouse_name=consignment.warehouse_name,
+                        vendor_name=consignment.carrier_name,
+                        note=_joined(
+                            f"Gate pass {consignment.gate_pass_no}"
+                            if consignment.gate_pass_no else None,
+                            f"LR {consignment.lr_no}" if consignment.lr_no else None),
+                        gate_pass_no=consignment.gate_pass_no,
+                        lr_no=consignment.lr_no))
 
-    qc = chain["qc"]
-    if qc is not None:
-        rejected = sum((_d(line.rejected_qty) for line in chain["qc_items"]), ZERO)
-        results = sorted({(line.result or "").upper() for line in chain["qc_items"]}
-                         - {""})
-        rows.append(row("QC", doc_id=qc.id, doc_no=qc.inspection_no, status=qc.status,
-                        day=qc.inspection_date, vendor_name=qc.vendor_name,
-                        warehouse_name=qc.warehouse_name, receipt_id=qc.receipt_id,
-                        inspection_type=qc.inspection_type,
-                        rejected_qty=str(rejected), results=results))
+    for shipment in chain["shipments"]:
+        # Both legs of the same journey live in this table: the one that brought the
+        # material down, and this return's own leg taking it back. Which is which is
+        # SAID on the row rather than left to a reader to work out from the lane.
+        is_return_leg = shipment.id == chain.get("return_transport_id")
+        rows.append(row(TrailDocType.SHIPMENT.value, doc_id=shipment.id,
+                        doc_no=shipment.tr_no, status=shipment.status,
+                        day=shipment.tr_date,
+                        warehouse_name=shipment.from_warehouse_name,
+                        vendor_name=shipment.carrier_name,
+                        note=_joined(
+                            "This return's own leg" if is_return_leg else None,
+                            f"LR {shipment.lr_no}" if shipment.lr_no else None,
+                            f"Freight {shipment.freight_amount}"
+                            if shipment.freight_amount else None),
+                        is_return_leg=is_return_leg, mode=shipment.mode,
+                        consignment_no=shipment.consignment_no))
+
+    rows.sort(key=lambda entry: TRAIL_ORDER.get(entry["doc_type"], 99))
     return rows
 
 
@@ -5592,8 +6155,10 @@ async def get_related_documents(db: AsyncSession, return_id: int, user=None) -> 
     if payload.get(WAREHOUSE_DOC_ID_KEY):
         warehouse_doc = await db.get(PurchaseReturn, int(payload[WAREHOUSE_DOC_ID_KEY]))
     if warehouse_doc_no:
+        source_category = getattr(warehouse_doc, "source_category", None)
         documents.append({
-            "doc_type": "PURCHASE_RETURN",
+            "doc_type": TrailDocType.PURCHASE_RETURN.value,
+            "doc_label": TRAIL_LABELS[TrailDocType.PURCHASE_RETURN.value],
             "doc_id": getattr(warehouse_doc, "id", None),
             "doc_no": warehouse_doc_no,
             "status": getattr(warehouse_doc, "status", None),
@@ -5602,12 +6167,25 @@ async def get_related_documents(db: AsyncSession, return_id: int, user=None) -> 
                      else None),
             "vendor_name": getattr(warehouse_doc, "vendor_name", None),
             "warehouse_name": getattr(warehouse_doc, "warehouse_name", None),
+            "note": PURCHASE_RETURN_SOURCE_LABELS.get(source_category or ""),
             "extra": {
-                "source_category": getattr(warehouse_doc, "source_category", None),
+                "source_category": source_category,
                 "source_category_label": PURCHASE_RETURN_SOURCE_LABELS.get(
-                    getattr(warehouse_doc, "source_category", None) or ""),
+                    source_category or ""),
             },
         })
+
+    # The chapter each row is read under, stamped in ONE pass over the finished list so
+    # the appended purchase-return row above is covered too. Unknown types land nowhere
+    # rather than in the wrong place: the screen draws a row with no chapter at the end
+    # of the trail under its own heading, which is honest, where guessing a chapter for
+    # it would file a document under a leg it never travelled.
+    for row in documents:
+        row["chapter"] = CHAPTER_BY_DOC_TYPE.get(row.get("doc_type") or "")
+    counts: dict[str, int] = {}
+    for row in documents:
+        if row["chapter"]:
+            counts[row["chapter"]] = counts.get(row["chapter"], 0) + 1
 
     return {
         "return_id": doc.id,
@@ -5632,8 +6210,26 @@ async def get_related_documents(db: AsyncSession, return_id: int, user=None) -> 
             "uom_code": line.uom_code,
         } for line in list(doc.items or [])],
         "documents": documents,
+        # Every chapter, including the empty ones. A leg with nothing in it is a FACT
+        # about this material — "it was never bought, it came off stock already on the
+        # shelf" — and only a heading that is present can say so.
+        "chapters": [{
+            "key": chapter["key"],
+            "label": chapter["label"],
+            "caption": chapter["caption"],
+            "count": counts.get(chapter["key"], 0),
+        } for chapter in TRAIL_CHAPTERS],
+        # Said, never silent: the trail is capped per kind and a reader has to be able
+        # to tell a complete list from a truncated one.
+        "documents_note": _cap_note(documents),
         "purchase_return_category": source["category"],
         "purchase_return_category_label": source["category_label"],
+        # The rung actually resolved for THIS document, beside the coarse category. A
+        # three-rung chain cannot be named by a two-way filter, so the filter stays the
+        # filter and this says which point the material is really coming off.
+        "purchase_return_source_detail": source["source_detail"],
+        "purchase_return_source_tier": source["source_tier"],
+        "purchase_return_source_resolved": source["source_is_resolved"],
         "qc_rejected_tag": source["qc_rejected_after_grn"],
         "vehicle_options": [{
             "value": option.value,

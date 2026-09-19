@@ -187,8 +187,9 @@ class TestTheWholeRoad:
         stages = service._journey_steps(
             _doc(reason_note="Screen cracked in transit"),
             _phases(draft="completed", submitted="completed", decision="current"),
-            events=[], actions=[], receipt_actions=[], field_instance=None,
-            receipt_instance=None, decision=None, approver_names=["MAHENDRA"],
+            events=[], actions=[], receipt_actions=[], logistics_actions=[],
+            field_instance=None, receipt_instance=None, logistics_instance=None,
+            decision=None, approver_names=["MAHENDRA"],
             raised_by_position="STORE KEEPER LIP Chilamathur", travels=False,
             landed=False,
         )
@@ -215,7 +216,8 @@ class TestTheWholeRoad:
         ], rejected_stage_type=None)
         stages = service._journey_steps(
             _doc(), _phases(movement="completed"), events=events, actions=[],
-            receipt_actions=[], field_instance=None, receipt_instance=None,
+            receipt_actions=[], logistics_actions=[], field_instance=None,
+            receipt_instance=None, logistics_instance=None,
             decision=None, approver_names=[], raised_by_position=None,
             travels=False, landed=True,
         )

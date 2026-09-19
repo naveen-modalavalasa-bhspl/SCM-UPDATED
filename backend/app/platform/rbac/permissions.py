@@ -264,6 +264,16 @@ RETURN_ENDORSE = "return.endorse"
 # rather than with the document ones.
 RETURN_CONFIG_MANAGE = "return.config.manage"
 
+# Every return, not only the ones raised from a shelf this login owns (2026-09-19).
+#
+# The register (`returns.list_returns`) narrows to the raiser's own stocking-point
+# subtree, which is right for a storekeeper and wrong for every desk ABOVE one: the
+# SCM Head holds one nominal point out of nine hundred, so All Returns showed him
+# nothing while his decision desk was full — he could sign a document he could not
+# find. The desks already bypass that narrowing (`_queue_page`), so this widens the
+# REGISTER to the set those screens were always serving, and nothing beyond it.
+RETURN_VIEW_ALL = "return.view_all"
+
 # --- Integrations (the API console) ---
 # Not admin.settings.manage: that code also unscopes stock lists and covers the
 # company address. Minting a key that lets an outside system read the database is its
@@ -474,6 +484,8 @@ ALL_PERMISSIONS: list[Perm] = [
          "Endorse or object to a return decision"),
     Perm(RETURN_CONFIG_MANAGE, "returns", "return", "config_manage",
          "Set which posts receive returns"),
+    Perm(RETURN_VIEW_ALL, "returns", "return", "view_all",
+         "See every return, not only those from your own stocking points"),
     Perm(INTEGRATION_VIEW, "integrations", "integration", "view",
          "See connected applications and their endpoints"),
     Perm(INTEGRATION_MANAGE, "integrations", "integration", "manage",
@@ -663,6 +675,16 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_acknowledgements", "logistics", "Logistics · Acknowledgements"),
     ("logistics_exceptions", "logistics", "Logistics · Exceptions"),
     ("masters", "masters", "Masters"),
+    # The same masters, on the module that owns them (2026-09-18). `/masters` keeps
+    # its own code above and stays whole — these are a second door, catalogued here
+    # rather than left for `sync_pages` to invent, so each can be labelled by
+    # `sync_permission_labels` and can inherit its grants below instead of landing
+    # Admin-only. One code per module is the whole point: `page.masters.view` is a
+    # single tick that hands out every master in the company.
+    ("inv_masters", "inventory", "Inventory · Masters"),
+    ("pro_masters", "procurement", "Procurement · Masters"),
+    ("ind_masters", "indents", "Indents · Masters"),
+    ("admin_org_masters", "admin", "Settings · Organisation Masters"),
     ("grp_reports", "reports", "Reports"),
     ("rep_indents", "reports", "Reports · Indent Ledger"),
     ("rep_approvals", "reports", "Reports · Approval Ledger"),
@@ -812,6 +834,25 @@ INHERITS_GRANTS_FROM.update({
     # document a reader could not open one at a time from Reports today — it only
     # saves them doing it by hand — and its endpoints are gated on `report.view`
     # independently.
+    # The per-module Masters screens. They inherit from `page.masters.view` — the
+    # all-in-one screen — because they show a SUBSET of what that screen already
+    # shows to the same people: whoever can open Masters today opens these on the day
+    # they deploy, and nobody else. Fail-closed is right for a new capability and
+    # wrong here, where the capability is not new, only re-filed.
+    #
+    # The WRITE side is untouched either way: every tab is still gated by its own
+    # `master.*.manage` code, in the component and on the endpoint.
+    page_view_code("inv_masters"): page_view_code("masters"),
+    page_view_code("pro_masters"): page_view_code("masters"),
+    page_view_code("ind_masters"): page_view_code("masters"),
+    page_view_code("admin_org_masters"): page_view_code("masters"),
+    # The desks already show these people every pending return in the company,
+    # whatever point it came from, so handing them the register changes what they can
+    # SEE nowhere — only where they can see it. Inherited from `return.decide` because
+    # the decision desk is the role the gap was reported on and the one that cannot do
+    # its job without it; a storekeeper holding only `return.view` keeps the subtree
+    # scoping they have today.
+    RETURN_VIEW_ALL: RETURN_DECIDE,
     page_view_code("rep_traceability"): REPORT_VIEW,
     # Same reasoning as the Document Trail beside them. The Attachments register shows
     # files hanging off documents the other ledgers already show this login (and its

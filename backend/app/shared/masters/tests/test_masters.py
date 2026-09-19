@@ -1,15 +1,20 @@
 """Masters CRUD through the MasterDef factory: permissions, deactivation, snapshots,
 and the tree guards on categories and locations."""
+from types import SimpleNamespace
+
 import pytest
 
 from app.core.exceptions import ValidationError
+from app.platform.hcm.models import HcmDepartment
 from app.platform.rbac import permissions as perms
 from app.shared.masters.defs import ItemIn, apply_item, build_item_code
+from app.shared.masters.router import _ownership_department_options
 from app.shared.models.master import (
     Brand, BrandManufacturer, GeneralName, HsnCode, Item, ItemCategory, ItemClass,
     Manufacturer, Project, Uom,
 )
 from app.shared.enums import WarehouseType
+from app.shared.models.base import utcnow
 
 MANAGE_ALL = [perms.MASTER_ITEM_MANAGE, perms.MASTER_CATEGORY_MANAGE,
               perms.MASTER_UOM_MANAGE, perms.MASTER_LOCATION_MANAGE,
@@ -35,6 +40,21 @@ async def viewer(client, make_user, login):
 
 
 # ------------------------------- items ------------------------------- #
+def test_ownership_department_options_deduplicate_names_deterministically():
+    rows = [
+        SimpleNamespace(id=9, code=None, name="104"),
+        SimpleNamespace(id=3, code=None, name=" 104 "),
+        SimpleNamespace(id=8, code="IT", name="Information Technology"),
+        SimpleNamespace(id=7, code=None, name="information technology"),
+    ]
+
+    assert _ownership_department_options(rows) == [
+        {"id": 3, "code": None, "name": "104", "duplicate_count": 2},
+        {"id": 8, "code": "IT", "name": "Information Technology",
+         "duplicate_count": 2},
+    ]
+
+
 def test_generated_item_code_contains_all_identity_parts():
     assert build_item_code("101010", "slide", "lab", "acme", 1) == \
         "101010-SLIDE-LAB-ACME-0001"
@@ -177,6 +197,44 @@ async def test_create_item_snapshots_uom_and_category(client, admin):
     assert body["uom_code"] == "PCS"
     assert body["category_name"] == "Level 3"
     assert body["code"] == "000000-GEN-BR-MFR-0001"
+
+
+async def test_item_ownership_snapshots_active_hcm_department_and_filters(
+    client, admin, db,
+):
+    department = HcmDepartment(
+        id=501, code="IT", name="Information Technology", is_active=True,
+        synced_at=utcnow(),
+    )
+    db.add(department)
+    # The API request uses its own session, just as it does in production.
+    await db.commit()
+    payload = await item_payload(client, admin, name="Laptop")
+    payload["owner_department_id"] = department.id
+
+    response = await client.post("/api/items", json=payload, headers=admin)
+
+    assert response.status_code == 200, response.text
+    item = response.json()
+    assert item["owner_department_id"] == department.id
+    assert item["owner_department_name"] == "Information Technology"
+
+    filtered = (await client.get(
+        f"/api/items?owner_department_id={department.id}", headers=admin,
+    )).json()
+    assert [row["name"] for row in filtered["items"]] == ["Laptop"]
+
+
+async def test_item_ownership_rejects_department_not_in_active_hcm_mirror(
+    client, admin,
+):
+    payload = await item_payload(client, admin, name="Laptop")
+    payload["owner_department_id"] = 999999
+
+    response = await client.post("/api/items", json=payload, headers=admin)
+
+    assert response.status_code == 422
+    assert "active ownership department" in response.json()["detail"]
 
 
 async def test_item_list_is_paginated_and_searchable(client, admin):
@@ -1032,6 +1090,16 @@ async def test_a_bom_is_a_named_set_of_items_on_a_project(client, admin, db):
         "remarks": "One per bay"}, headers=admin)).json()
     assert (line["item_name"], line["quantity"], line["uom_code"]) == \
         ("Bolt", 3.0, "PCS")
+
+    # A flush expires the computed line_count column property. The update route must
+    # reload it before serializing the audit and response instead of lazy-loading it
+    # from async code (the production failure was StatementError / HTTP 500).
+    updated = await client.put(f"/api/boms/{bom['id']}", json={
+        "code": "STARTER", "name": "Updated site starter kit",
+        "project_id": project.id, "description": "Revised"}, headers=admin)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["total_items"] == 1
+    assert updated.json()["name"] == "Updated site starter kit"
 
 
 # ------------------------------- UOM -------------------------------- #

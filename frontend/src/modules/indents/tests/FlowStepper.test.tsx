@@ -64,7 +64,7 @@ describe("FlowStepper", () => {
   it("aggregates any resolved approval-chain length into Approvals", () => {
     render(<FlowStepper status="PENDING_APPROVAL" journey={journey()} />);
 
-    expect(screen.getByLabelText("Approvals, current: Area Coordinator Review")).toHaveClass("bg-step-live");
+    expect(screen.getByLabelText("Approvals, current: Area Coordinator Review")).toHaveClass("bg-brand");
     expect(screen.queryByText("OE Review")).not.toBeInTheDocument();
     expect(screen.queryByText("DM Review")).not.toBeInTheDocument();
     expect(screen.queryByText("Final Approval")).not.toBeInTheDocument();
@@ -97,9 +97,9 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="PENDING_APPROVAL" journey={runtime} />);
 
-    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-step-done");
-    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-step-done");
-    expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-step-live");
+    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-brand");
     expect(screen.getByText("Stage 3 of 7 · Approvals")).toBeInTheDocument();
     expect(screen.getByText("Waiting for OE review")).toBeInTheDocument();
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
@@ -159,7 +159,7 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="DRAFT" journey={draft} />);
 
-    expect(screen.getByLabelText("Draft, current")).toHaveClass("bg-step-live");
+    expect(screen.getByLabelText("Draft, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Submitted, pending")).toHaveClass("border-line");
     expect(screen.getByText("Stage 1 of 7 · Draft")).toBeInTheDocument();
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();
@@ -173,9 +173,9 @@ describe("FlowStepper", () => {
       6: phase(6, "Delivery", "PENDING", true),
     }))} />);
 
-    expect(screen.getByLabelText("Allocation, completed")).toHaveClass("bg-step-done");
-    expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-step-done");
-    expect(screen.getByLabelText("In-Transit, current")).toHaveClass("bg-step-live");
+    expect(screen.getByLabelText("Allocation, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("In-Transit, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Acknowledgement, pending")).toHaveClass("border-line");
   });
 
@@ -187,8 +187,8 @@ describe("FlowStepper", () => {
     render(<FlowStepper status="RETURNED" journey={returned} />);
 
     const step = screen.getByLabelText("Approvals, returned");
-    expect(step).toHaveClass("bg-step-hold");
-    expect(step).not.toHaveClass("bg-step-bad");
+    expect(step).toHaveClass("bg-warn");
+    expect(step).not.toHaveClass("bg-bad");
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
     expect(screen.getByText("Stage 3 of 7 · Approvals")).toBeInTheDocument();
     expect(screen.getByText("Returned for correction — update the indent and resubmit")).toBeInTheDocument();
@@ -201,7 +201,7 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="CANCELLED" journey={cancelled} />);
 
-    expect(screen.getByLabelText("Approvals, cancelled")).toHaveClass("bg-step-off");
+    expect(screen.getByLabelText("Approvals, cancelled")).toHaveClass("bg-neutral");
     expect(screen.getByLabelText("Allocation, pending")).toBeInTheDocument();
     expect(screen.getByText("Request cancelled")).toBeInTheDocument();
   });
@@ -217,7 +217,7 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status={status} journey={procurement} />);
 
-    expect(screen.getByLabelText("Allocation, current")).toHaveClass("bg-step-live");
+    expect(screen.getByLabelText("Allocation, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Warehouse, pending")).toHaveClass("border-line");
     expect(screen.getByText("Stage 4 of 7 · Allocation")).toBeInTheDocument();
     expect(screen.getByText(message)).toBeInTheDocument();
@@ -261,7 +261,7 @@ describe("FlowStepper", () => {
       3: phase(3, "Approvals", "REJECTED"),
     }))} />);
 
-    expect(screen.getByLabelText("Approvals, rejected")).toHaveClass("bg-step-bad");
+    expect(screen.getByLabelText("Approvals, rejected")).toHaveClass("bg-bad");
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
   });
 
@@ -310,9 +310,9 @@ describe("FlowStepper", () => {
 
     render(<FlowStepper status="PENDING_APPROVAL" journey={stale} />);
 
-    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-step-done");
-    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-step-done");
-    expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-step-live");
+    expect(screen.getByLabelText("Draft, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Submitted, completed")).toHaveClass("bg-brand");
+    expect(screen.getByLabelText("Approvals, current: OE Review")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Allocation, pending")).toHaveClass("border-line");
     expect(screen.getAllByRole("listitem")).toHaveLength(7);
     expect(screen.queryByText("Status unavailable")).not.toBeInTheDocument();

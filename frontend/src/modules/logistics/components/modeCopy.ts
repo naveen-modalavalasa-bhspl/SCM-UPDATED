@@ -69,6 +69,13 @@ export const TR_STATUSES = [
   { value: "READY", label: "Ready to dispatch" },
   { value: "IN_TRANSIT", label: "In transit" },
   { value: "DELIVERED", label: "Delivered" },
+  // One option for two statuses, because the desk works it as one queue: a leg is the
+  // receiving site's to sign from the moment it LEAVES, not from the moment this desk
+  // remembers to tick "delivered" (the backend's AWAITING_ACK_STATUSES). The register
+  // takes a comma-separated status, so the Overview's "Awaiting a signature" tile can
+  // land here and the filter can still NAME what it is showing — a Select sitting
+  // blank over a filtered list is how a reader concludes the screen is broken.
+  { value: "IN_TRANSIT,DELIVERED", label: "Awaiting a signature" },
   { value: "ACKNOWLEDGED", label: "Acknowledged" },
   { value: "CLOSED", label: "Closed" },
   { value: "REJECTED", label: "Rejected" },

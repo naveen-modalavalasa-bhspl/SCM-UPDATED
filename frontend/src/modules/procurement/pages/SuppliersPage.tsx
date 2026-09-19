@@ -20,8 +20,8 @@ const SUMMARY_KEY = ["suppliers", "summary"];
 const PORTAL_LOGIN = "/supplier/login";
 
 /** The shared first password every vendor account is minted with, server-side
- *  (`DEFAULT_VENDOR_PASSWORD`). Kept here only for the desk copy and success text;
- *  the invite itself is built and mailed by the server. */
+ *  (`DEFAULT_VENDOR_PASSWORD`). Printed here because a desk that issues a login has to
+ *  be able to tell the supplier what to type. */
 const DEFAULT_PASSWORD = "Bavya@123";
 
 /** A new tab, deliberately: the portal runs outside the employee shell on its own
@@ -124,7 +124,7 @@ export function SuppliersPage() {
     success: (row) => editing
       ? `${row.name} updated`
       : row.has_login
-        ? `${row.name} added — invite sent to ${row.email ?? "their email"}`
+        ? `${row.name} added — they sign in as ${row.username} with ${DEFAULT_PASSWORD}`
         : `${row.name} added. Issue a login before sending them an RFQ.`,
     invalidates,
     onDone: close,
@@ -133,7 +133,7 @@ export function SuppliersPage() {
   const issue = useAction({
     run: (row: Supplier) => supplierRegisterApi.issueLogin(row.id),
     success: (row) =>
-      `Invite sent to ${row.email ?? row.name} for username ${row.username}`,
+      `${row.name} signs in as ${row.username} with ${DEFAULT_PASSWORD}`,
     invalidates,
   });
   const reset = useAction({
@@ -525,8 +525,8 @@ export function SuppliersPage() {
                   Give them a portal login now
                 </label>
                 <p className="mt-1 text-xs text-muted">
-                  SCM emails their username, the supplier login link and the initial
-                  password <b>{DEFAULT_PASSWORD}</b>. They must change it before
+                  They sign in at <span className="font-mono">/supplier</span> with the
+                  shared password <b>{DEFAULT_PASSWORD}</b> and must change it before
                   anything is shown — an RFQ carries prices. A new supplier still has
                   to be approved on the vendor master before an RFQ can be sent.
                 </p>

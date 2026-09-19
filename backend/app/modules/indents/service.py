@@ -38,7 +38,7 @@ from app.platform.workflow.models import Action, Instance, Stage
 from app.platform.workflow.models import Pending
 from app.platform.settings import attachments
 from app.platform.settings.service import write_audit
-from app.platform.settings.models import AuditLog
+from app.platform.settings.models import AuditLog, Notification
 from app.platform.rbac import service as rbac_service
 from app.platform.rbac import permissions as perms
 from app.shared.models.base import utcnow
@@ -72,6 +72,7 @@ REQUIRED_BY_DATE_RANGE_ERROR = (
     "required_by_from must be the same as or earlier than required_by_to."
 )
 FILTER_DATE_RANGE_ERROR = "date_from must be the same as or earlier than date_to."
+INDENT_STATUS_NOTIFICATION_PREFIX = "INDENT_STATUS:"
 
 
 @dataclass(frozen=True)
@@ -380,6 +381,13 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
         after={"status": indent.status, "total_items": indent.total_items,
                "indent_type": indent.indent_type,
                "vehicle_number": indent.vehicle_number},
+    )
+    await notify_indent_status_event(
+        db,
+        indent,
+        IndentStatus.DRAFT.value,
+        [indent.requested_by_id],
+        actor=user,
     )
     await db.commit()
     await db.refresh(indent)
@@ -775,6 +783,36 @@ async def indent_access_condition(db: AsyncSession, user):
             Indent.project_id == project_id,
         ))
 
+    visible.append(await indent_participant_condition(db, user))
+
+    # Inventory works the fulfilment queue for requests it neither raised nor approved,
+    # and the SCM department sits on posts with no children, so no branch above can ever
+    # show them one. Holding the SCM read permissions does — and only from the point the
+    # request reaches inventory, never before approval.
+    scm_statuses = await _scm_stage_statuses(db, user)
+    if scm_statuses:
+        visible.append(Indent.status.in_(scm_statuses))
+
+    clause = or_(*visible)
+    cache[key] = clause
+    return clause
+
+
+async def indent_participant_condition(db: AsyncSession, user):
+    """Indents this login is a PARTY to: awaiting their signature, or carrying a
+    decision they took in the hat they are wearing.
+
+    One definition, read twice — by `indent_access_condition` as one of the ways a
+    document can be your business, and by `_indent_visibility` as the one thing no
+    rung may take away. Two copies that could disagree is how an approver comes to
+    be told a document they are holding does not exist.
+    """
+    cache = db.info.setdefault("indent_participant_memo", {})
+    key = (user.id, getattr(user, "active_position_id", None))
+    if key in cache:
+        return cache[key]
+
+    _, position = await _current_assignment(db, user)
     participant_conditions = [
         Instance.id.in_(select(Pending.instance_id).where(Pending.approver_id == user.id)),
     ]
@@ -788,21 +826,10 @@ async def indent_access_condition(db: AsyncSession, user):
                 Action.actor_position == position.name,
             )
         ))
-    participant_instances = select(Instance.doc_id).where(
+    clause = Indent.id.in_(select(Instance.doc_id).where(
         Instance.doc_type == DocType.INDENT.value,
         or_(*participant_conditions),
-    )
-    visible.append(Indent.id.in_(participant_instances))
-
-    # Inventory works the fulfilment queue for requests it neither raised nor approved,
-    # and the SCM department sits on posts with no children, so no branch above can ever
-    # show them one. Holding the SCM read permissions does — and only from the point the
-    # request reaches inventory, never before approval.
-    scm_statuses = await _scm_stage_statuses(db, user)
-    if scm_statuses:
-        visible.append(Indent.status.in_(scm_statuses))
-
-    clause = or_(*visible)
+    ))
     cache[key] = clause
     return clause
 
@@ -819,15 +846,26 @@ async def _indent_visibility(db: AsyncSession, user):
     technician open 102 indents on /indents while Home — which already ANDed the two —
     showed 2 for the same login. Every indent reader goes through here so the list,
     the dashboard and the tile can never drift apart again.
+
+    Except for one thing a rung may never take away: a document this login is a PARTY
+    to. The rung answers "whose rows may I read", and a document waiting on my
+    signature is not somebody else's row — it was handed to me. ANDing it away means
+    the inbox lists an approval the review screen then 404s, which is a document
+    stranded in the ladder with nobody able to move it. It is OR-ed OUTSIDE the AND
+    for the same reason `scope_condition` always OR-s in `mine`: narrow the rung and
+    you narrow whose work you see, never whether you can do your own.
     """
-    return and_(
-        await indent_access_condition(db, user),
-        await scope_condition(
-            db, user,
-            owner_col=Indent.requested_by_id,
-            position_col=Indent.position_id,
-            office_col=Indent.office_id,
-            project_col=Indent.project_id,
+    return or_(
+        await indent_participant_condition(db, user),
+        and_(
+            await indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
         ),
     )
 
@@ -1473,6 +1511,13 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         action=AuditAction.UPDATE, actor=user,
         before={"status": IndentStatus.DRAFT.value},
         after={"status": indent.status},
+    )
+    await notify_indent_status_event(
+        db,
+        indent,
+        indent.status,
+        [indent.requested_by_id],
+        actor=user,
     )
     await db.commit()
     await db.refresh(indent)
@@ -5161,7 +5206,8 @@ async def list_notifications(
     _validate_filter_date_range(date_from, date_to)
 
     supported_statuses = [
-        IndentStatus.PENDING_APPROVAL.value, IndentStatus.APPROVED.value,
+        IndentStatus.DRAFT.value, IndentStatus.PENDING_APPROVAL.value,
+        IndentStatus.APPROVED.value,
         IndentStatus.AWAITING_ALLOCATION.value, IndentStatus.ALLOCATED.value,
         IndentStatus.PARTIALLY_FULFILLED.value,
         IndentStatus.PENDING_PROCUREMENT.value,
@@ -5169,7 +5215,8 @@ async def list_notifications(
         IndentStatus.PARTIALLY_ORDERED.value,
         IndentStatus.ORDERED.value, IndentStatus.CLOSED.value,
     ]
-    title = case(
+    legacy_title = case(
+        (Indent.status == IndentStatus.DRAFT.value, "Draft created"),
         (Indent.status == IndentStatus.PENDING_APPROVAL.value, "Awaiting approval"),
         (Indent.status == IndentStatus.APPROVED.value, "Request approved"),
         (Indent.status == IndentStatus.AWAITING_ALLOCATION.value, "Request approved"),
@@ -5197,7 +5244,11 @@ async def list_notifications(
             else_=literal("."),
         )
     )
-    message = case(
+    legacy_message = case(
+        (
+            Indent.status == IndentStatus.DRAFT.value,
+            Indent.indent_no + literal(" is saved as a draft."),
+        ),
         (Indent.status == IndentStatus.PENDING_APPROVAL.value, pending_message),
         (
             Indent.status == IndentStatus.APPROVED.value,
@@ -5242,7 +5293,46 @@ async def list_notifications(
         ),
         else_="",
     )
-    stmt = (
+    visible = await _indent_visibility(db, user)
+    notification_status = case(
+        (
+            Notification.entity_type.startswith(INDENT_STATUS_NOTIFICATION_PREFIX),
+            func.substr(
+                Notification.entity_type,
+                len(INDENT_STATUS_NOTIFICATION_PREFIX) + 1,
+            ),
+        ),
+        else_=Indent.status,
+    )
+    indent_notification_type = or_(
+        Notification.entity_type == DocType.INDENT.value,
+        Notification.entity_type.startswith(INDENT_STATUS_NOTIFICATION_PREFIX),
+    )
+    has_persisted_notification = exists(
+        select(Notification.id).where(
+            Notification.employee_id == user.id,
+            Notification.entity_id == Indent.id,
+            indent_notification_type,
+        )
+    )
+    persisted_stmt = (
+        select(
+            (literal("notification:") + cast(Notification.id, String)).label("id"),
+            Indent.id.label("indent_id"),
+            Indent.indent_no,
+            Notification.title.label("title"),
+            func.coalesce(Notification.body, literal("")).label("message"),
+            cast(literal(None), String).label("_approver_name"),
+            notification_status.label("status"),
+            Notification.created_at.label("created_at"),
+            literal("notification").label("_source"),
+        )
+        .join(Indent, Indent.id == Notification.entity_id)
+        .where(Notification.employee_id == user.id)
+        .where(indent_notification_type)
+        .where(visible)
+    )
+    legacy_stmt = (
         select(
             (
                 literal("indent:") + cast(Indent.id, String)
@@ -5250,36 +5340,44 @@ async def list_notifications(
             ).label("id"),
             Indent.id.label("indent_id"),
             Indent.indent_no,
-            title.label("title"),
-            message.label("message"),
+            legacy_title.label("title"),
+            legacy_message.label("message"),
             Indent.current_approver_name.label("_approver_name"),
             Indent.status,
             Indent.updated_at.label("created_at"),
+            literal("legacy").label("_source"),
         )
-        .where(await _indent_visibility(db, user))
+        .where(visible)
         .where(Indent.status.in_(supported_statuses))
+        .where(~has_persisted_notification)
     )
+    notification_rows = union_all(persisted_stmt, legacy_stmt).subquery("notification_rows")
+    stmt = select(notification_rows)
     term = _clean_search(search)
     if term:
         pattern = _like_pattern(term)
         stmt = stmt.where(or_(
-            _matches(Indent.indent_no, pattern),
-            _matches(title, pattern),
-            _matches(message, pattern),
-            _matches(func.replace(Indent.status, "_", " "), pattern),
+            _matches(notification_rows.c.indent_no, pattern),
+            _matches(notification_rows.c.title, pattern),
+            _matches(notification_rows.c.message, pattern),
+            _matches(func.replace(notification_rows.c.status, "_", " "), pattern),
         ))
     if date_from:
         stmt = stmt.where(
-            Indent.updated_at >= datetime.combine(date_from, time.min)
+            notification_rows.c.created_at >= datetime.combine(date_from, time.min)
         )
     if date_to:
         stmt = stmt.where(
-            Indent.updated_at
+            notification_rows.c.created_at
             < datetime.combine(date_to + timedelta(days=1), time.min)
         )
     if statuses:
-        stmt = stmt.where(Indent.status.in_(_values(statuses)))
-    stmt = stmt.order_by(Indent.updated_at.desc(), Indent.id.desc())
+        stmt = stmt.where(notification_rows.c.status.in_(_values(statuses)))
+    stmt = stmt.order_by(
+        notification_rows.c.created_at.desc(),
+        notification_rows.c.indent_id.desc(),
+        notification_rows.c.id.desc(),
+    )
 
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = (
@@ -5291,6 +5389,7 @@ async def list_notifications(
         row["indent_id"]: row
         for row in items
         if row["status"] == IndentStatus.PENDING_APPROVAL.value
+        and row.get("_source") == "legacy"
         and row["_approver_name"]
     }
     if pending_items:
@@ -5337,6 +5436,7 @@ async def list_notifications(
             )
     for row in items:
         row.pop("_approver_name", None)
+        row.pop("_source", None)
     return {
         "items": items,
         "total": total or 0,
@@ -6191,26 +6291,61 @@ async def _settle_indent_approval(db: AsyncSession, indent: Indent, user,
 
 
 #: What an indent's status means to the people following it, in the words the bell
-#: shows. Only the states worth interrupting somebody for: DRAFT and PENDING_APPROVAL
-#: are already covered by the workflow engine's own "needs your approval", and
-#: re-announcing them here would double every approval.
+#: shows. Draft/submitted events are sent only to the requester; the workflow engine
+#: still owns the separate "needs your approval" rows for approvers.
 _LIFECYCLE_NOTICES: dict[str, tuple[str, str]] = {
+    IndentStatus.DRAFT.value: (
+        "{no} draft created", "{actor} created the draft."),
+    IndentStatus.PENDING_APPROVAL.value: (
+        "{no} submitted for approval", "{actor} submitted it."),
     IndentStatus.ALLOCATED.value: (
-        "Stock set aside for {no}", "The full quantity is reserved and waiting to be issued."),
+        "Stock set aside", "Stock for {no} has been set aside."),
     IndentStatus.PARTIALLY_FULFILLED.value: (
-        "{no} is partly covered from stock",
-        "Some of it is reserved; the rest is going to procurement."),
+        "Part of it is coming from stock",
+        "Some of {no} is from stock; the rest is on order."),
     IndentStatus.PENDING_PROCUREMENT.value: (
-        "{no} has gone to procurement", "No stock was available, so it will be bought in."),
+        "Going to procurement", "{no} is being bought in."),
     IndentStatus.ORDERED.value: (
-        "{no} has been ordered", "A purchase order is out with the vendor."),
+        "Items ordered", "All items for {no} have been ordered."),
     IndentStatus.PARTIALLY_ORDERED.value: (
-        "{no} is partly ordered", "Some lines are on a purchase order with the vendor."),
+        "Ordering started", "Items for {no} are being ordered."),
     IndentStatus.CLOSED.value: (
-        "{no} is complete", "Everything requested has been received."),
+        "Request completed", "{no} is complete."),
     IndentStatus.RETURNED_FOR_CORRECTION.value: (
-        "{no} needs correcting", "An approver sent it back for changes."),
+        "Correction requested", "{no} has been returned for correction."),
 }
+
+
+def _indent_notification_entity(status: str) -> str:
+    return f"{INDENT_STATUS_NOTIFICATION_PREFIX}{status}"
+
+
+async def notify_indent_status_event(
+    db: AsyncSession,
+    indent: Indent,
+    status: str,
+    employee_ids,
+    *,
+    actor=None,
+) -> int:
+    notice = _LIFECYCLE_NOTICES.get(status)
+    if notice is None:
+        return 0
+    title, body = notice
+    actor_name = (
+        getattr(actor, "full_name", None)
+        or getattr(actor, "name", None)
+        or "Someone"
+    )
+    return await notifications.notify(
+        db,
+        employee_ids,
+        title=title.format(no=indent.indent_no, actor=actor_name),
+        body=body.format(no=indent.indent_no, actor=actor_name),
+        deep_link=notifications.link_for(DocType.INDENT.value, indent.id),
+        entity_type=_indent_notification_entity(status),
+        entity_id=indent.id,
+    )
 
 
 async def notify_indent_followers(db: AsyncSession, indent: Indent, status: str) -> int:
@@ -6232,10 +6367,6 @@ async def notify_indent_followers(db: AsyncSession, indent: Indent, status: str)
     Never raises and never rolls anything back: `notify` swallows its own errors, and a
     status change must not fail because a courtesy message could not be written.
     """
-    notice = _LIFECYCLE_NOTICES.get(status)
-    if notice is None:
-        return 0
-    title, body = notice
     # The approvers who acted, from the same table the ledger reads. A document with no
     # workflow (a fallback, or an indent that never needed one) simply has no actors,
     # and the raiser alone is then the whole audience.
@@ -6247,15 +6378,7 @@ async def notify_indent_followers(db: AsyncSession, indent: Indent, status: str)
                Action.actor_id.isnot(None))
     )).scalars().all())
     actors.add(indent.requested_by_id)
-    return await notifications.notify(
-        db,
-        actors,
-        title=title.format(no=indent.indent_no),
-        body=body,
-        deep_link=notifications.link_for(DocType.INDENT.value, indent.id),
-        entity_type=DocType.INDENT.value,
-        entity_id=indent.id,
-    )
+    return await notify_indent_status_event(db, indent, status, actors)
 
 
 async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent) -> None:

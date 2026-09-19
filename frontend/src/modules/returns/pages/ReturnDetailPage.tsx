@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, BadgeCheck, CalendarClock, ChevronRight, ClipboardList, FileSignature,
@@ -23,6 +23,7 @@ import { ReceiptModal } from "../components/ReceiptModal";
 import { RelatedDocumentsSection } from "../components/RelatedDocumentsSection";
 import { ReturnStepper } from "../components/ReturnStepper";
 import { PHASE, money, roleOnly } from "../constants";
+import { originOf } from "../origin";
 import type { ReturnLine } from "../types";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
@@ -77,6 +78,11 @@ export default function ReturnDetailPage() {
   const { id } = useParams<{ id: string }>();
   const returnId = Number(id);
   const navigate = useNavigate();
+  /* The screen this document was opened from — the queue, not always the register.
+   * The same state keeps that tab lit in the module strip while this page is open,
+   * so the link back and the highlighted tab can never name two different places. */
+  const location = useLocation();
+  const origin = originOf(location.state);
   const queryClient = useQueryClient();
 
   const [comments, setComments] = useState("");
@@ -304,7 +310,7 @@ export default function ReturnDetailPage() {
 
   return (
     <div>
-      <BackLink to="/returns" label="All returns" />
+      <BackLink to={origin.path} label={origin.label} />
 
       <PageHeader
         eyebrow="RETURN"
@@ -312,7 +318,7 @@ export default function ReturnDetailPage() {
         actions={
           <>
             {doc.can_edit && (
-              <Button variant="soft" onClick={() => navigate(`/returns/${doc.id}/edit`)}>
+              <Button variant="soft" onClick={() => navigate(`/returns/${doc.id}/edit`, { state: location.state })}>
                 Edit
               </Button>
             )}
@@ -396,13 +402,13 @@ export default function ReturnDetailPage() {
       <button
         type="button"
         aria-label={`View complete return journey for ${doc.return_no}`}
-        onClick={() => navigate(`/returns/${doc.id}/journey`)}
+        onClick={() => navigate(`/returns/${doc.id}/journey`, { state: location.state })}
         onKeyDown={(event) => {
           // preventDefault stops the browser's own activation, so Enter/Space navigate
           // exactly once here rather than twice.
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            navigate(`/returns/${doc.id}/journey`);
+            navigate(`/returns/${doc.id}/journey`, { state: location.state });
           }
         }}
         className="group mb-5 block w-full cursor-pointer rounded-2xl text-left outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
@@ -470,6 +476,7 @@ export default function ReturnDetailPage() {
               returnId={returnId}
               onDone={() => setError(null)}
               onDestinationChange={setPickedDestination}
+              canViewTrail={Boolean(doc.can_view_trail)}
             />
           )}
 
@@ -624,11 +631,24 @@ export default function ReturnDetailPage() {
             />
           </SectionCard>
 
-          {/* The paper trail under the item — intent, indent, material issue, PO, GRN, QC.
-            * Suppressed for the decider, because `DecisionPanel` renders the same section
-            * directly above the decision it is there to inform, and two copies of it on
-            * one page is one of them being scrolled past. */}
-          {!doc.can_decide && <RelatedDocumentsSection returnId={returnId} />}
+          {/* The material's own history — indent, allocation, PO, GRN, QC, issue.
+            *
+            * Two gates, and they are different questions. `can_view_trail` is SERVED and
+            * asks whether this login may read it at all: `return.decide`, the decision
+            * desk's code, because this is a dozen OTHER modules' documents and not a
+            * wider view of the return. Everyone else keeps the whole document — header,
+            * lines, journey, approval trail — and is simply not shown the branch's
+            * purchase orders, its vendor or what the material cost. The route refuses
+            * them too (rule 6: this only keeps the screen from drawing a panel that
+            * would collect a 403).
+            *
+            * `can_decide` is the second: it suppresses the section for whoever is
+            * actually holding the document, because `DecisionPanel` renders the same
+            * section directly above the decision it is there to inform, and two copies
+            * of it on one page is one of them being scrolled past. */}
+          {doc.can_view_trail && !doc.can_decide && (
+            <RelatedDocumentsSection returnId={returnId} />
+          )}
 
           <AttachmentsPanel returnId={returnId} editable={doc.can_edit} />
         </div>

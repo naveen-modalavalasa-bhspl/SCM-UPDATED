@@ -8,6 +8,7 @@ import {
 } from "@/shared/components";
 import { returnsApi } from "../api";
 import { STATUS_FILTER_OPTIONS } from "../constants";
+import { originState } from "../origin";
 import type { StockReturn } from "../types";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
@@ -124,13 +125,28 @@ export default function ReturnsListPage() {
         eyebrow="RETURN"
         title={title}
         actions={
-          // Deliberately not wrapped in <Can do="stock.transfer">: raising a return is
-          // the whole point of the screen, and hiding the only way in left storekeepers
-          // on an empty page with nothing to do. The endpoint is still permission-gated
-          // — a login without the code is refused at submit, which is the real check.
-          <Button onClick={() => navigate("/returns/new")}>
-            <Plus className="h-4 w-4" /> New return
-          </Button>
+          // ONE FRONT DOOR PER KIND OF SCREEN (2026-09-12). This component serves three
+          // tabs and drew the button on all three, so "New return" also sat on top of
+          // To approve and My returns — two READING screens. An approver's queue is
+          // somebody else's work to sign, and My returns is a record of what has already
+          // been raised; a create button at the top of either invites the reader to
+          // start a document instead of finishing the one in front of them, and on To
+          // approve it is the wrong verb entirely for the person standing there.
+          //
+          // It stays on ALL RETURNS and on Overview — the two screens the module is
+          // entered through — and nowhere else. The route is untouched: `/returns/new`
+          // is still reachable, still linked from Overview, and a bookmark still works.
+          //
+          // Deliberately not wrapped in <Can do="stock.transfer"> where it IS drawn:
+          // raising a return is the whole point of that screen, and hiding the only way
+          // in left storekeepers on an empty page with nothing to do. The endpoint is
+          // still permission-gated — a login without the code is refused at submit,
+          // which is the real check.
+          scope === "all" ? (
+            <Button onClick={() => navigate("/returns/new")}>
+              <Plus className="h-4 w-4" /> New return
+            </Button>
+          ) : undefined
         }
       />
 
@@ -169,7 +185,7 @@ export default function ReturnsListPage() {
         columns={columns}
         keyOf={(row) => row.id}
         loading={isLoading}
-        onRowClick={(row) => navigate(`/returns/${row.id}`)}
+        onRowClick={(row) => navigate(`/returns/${row.id}`, { state: originState(pathname) })}
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
@@ -185,12 +201,18 @@ export default function ReturnsListPage() {
             hint={
               scope === "approvals"
                 ? "Returns raised by your reportees appear here when it is your turn to sign."
-                : "When stock has to go back up the chain — expired, damaged or not needed — raise it here."
+                : scope === "mine"
+                  // "Raise it here" was true while this tab carried the button. It does
+                  // not any more, so the hint says where the button actually is rather
+                  // than pointing at a corner of the screen with nothing in it.
+                  ? "When stock has to go back up the chain — expired, damaged or not "
+                    + "needed — raise it from All returns or Overview. It will appear here."
+                  : "When stock has to go back up the chain — expired, damaged or not needed — raise it here."
             }
           />
         }
         renderCard={(row) => (
-          <Link to={`/returns/${row.id}`} className="block p-4">
+          <Link to={`/returns/${row.id}`} state={originState(pathname)} className="block p-4">
             <div className="flex items-center justify-between gap-2">
               <span className="font-semibold text-ink">{row.return_no}</span>
               <StatusPill status={row.status} />

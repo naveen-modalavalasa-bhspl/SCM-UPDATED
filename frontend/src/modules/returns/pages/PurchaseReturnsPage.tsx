@@ -22,6 +22,19 @@ const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
  *
  * Unlike a field return this one IS costed — the rate came off the GRN line — so the
  * value column is a real number rather than an em dash.
+ *
+ * A row OPENS the review screen and New Purchase Return opens the form, both on
+ * `/returns/purchase/*` — the warehouse's own components, served on THIS side of the
+ * app (2026-09-10). They are where the whole chain behind the document is fetched and
+ * displayed — GRN, PO/invoice, items with their available and return quantities, and
+ * the vendor — and where a DRAFT is edited and sent. Until this the register was a dead
+ * end: a storekeeper could see that PRET0001 existed and had no way to open it. Then it
+ * linked at `/warehouse/purchase-returns/*`, which opened them but swapped the module
+ * rail, the tabs and the eyebrow out from under a reader who had never left Returns.
+ *
+ * It still deliberately does NOT re-implement any of that here; `pro_returns` is the
+ * warehouse module's table, acting on one belongs to its endpoints, and the warehouse's
+ * own door keeps working unchanged.
  */
 export default function PurchaseReturnsPage() {
   const navigate = useNavigate();
@@ -77,6 +90,10 @@ export default function PurchaseReturnsPage() {
         <div className="text-sm">
           <div className="text-ink">{row.po_no ?? "—"}</div>
           <div className="text-xs text-muted">{row.grn_no ? `GRN ${row.grn_no}` : ""}</div>
+          {/* A return raised off a branch consignment stores no GRN, PO or vendor: the
+            * three above were read off the purchase behind its stock. Said on the row,
+            * because traced is evidence and stored is a binding. */}
+          {row.chain_traced && <div className="text-[11px] text-amber-700">traced</div>}
         </div>
       ),
     },
@@ -132,12 +149,16 @@ export default function PurchaseReturnsPage() {
         eyebrow="RETURN"
         title="Purchase returns"
         actions={
-          <Button onClick={() => navigate("/warehouse/purchase-returns/new")}>New Purchase Return</Button>
+          <Button onClick={() => navigate("/returns/purchase/new")}>New Purchase Return</Button>
         }
       />
 
       <Card className="mb-4 p-3">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-[2fr_1fr]">
+        {/* items-end, because only the Source filter carries a label: without it the
+         * labelled control sits a label's height lower than the unlabelled search box
+         * and the filter bar reads as crooked. Both controls are min-h-11, so aligning
+         * their bottoms aligns their tops too. */}
+        <div className="grid grid-cols-1 items-end gap-3 md:grid-cols-[2fr_1fr]">
           <Input
             placeholder="Search by return no., vendor, PO or GRN…"
             value={search}
@@ -166,9 +187,10 @@ export default function PurchaseReturnsPage() {
           </Field>
         </div>
         <p className="mt-2 text-xs text-muted">
-          Warehouse → Vendor flow: pick a purchase transaction, vendor & item details auto-fetch, enter quantity, pick
-          reason and press <span className="font-semibold">Send to Vendor</span>. Existing Logistics carries it — no new
-          master, no duplicate logistics.
+          Open a return to see everything behind it — GRN, PO / vendor invoice, items with available and return
+          quantities, and the full vendor record, all fetched from the existing records. A DRAFT can be edited there and
+          sent: pick the reason and press <span className="font-semibold">Send to Vendor</span>. Existing Logistics
+          carries it — no new master, no duplicate logistics.
         </p>
       </Card>
 
@@ -178,6 +200,7 @@ export default function PurchaseReturnsPage() {
         data={rows}
         columns={columns}
         keyOf={(row) => row.id}
+        onRowClick={(row) => navigate(`/returns/purchase/${row.id}`)}
         loading={isLoading}
         page={page}
         totalPages={totalPages}

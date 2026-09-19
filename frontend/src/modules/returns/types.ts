@@ -153,6 +153,17 @@ export interface StockReturn {
   can_receive: boolean;
   can_withdraw: boolean;
   can_approve_logistics: boolean;
+  /**
+   * Whether the paper trail behind the MATERIAL may be read — the other modules'
+   * documents under the item, never this document. `return.decide`, the decision desk's
+   * own code, and served on the single-document read only.
+   *
+   * Asked rather than guessed: `GET /related-documents` is gated on the same code, so a
+   * screen that renders the section for everyone collects a 403 for most of the people
+   * who open a return, and an error panel reads as a broken screen rather than a private
+   * one. Optional so a payload from a backend older than this reads as false.
+   */
+  can_view_trail?: boolean;
 
   /** STORE or SUPPLIER. Null until a decision chose an outcome that travels. */
   leg: string | null;
@@ -287,6 +298,20 @@ export interface DecisionOptions {
   /** What the resulting purchase return will be filed under, shown before the press. */
   purchase_return_category: PurchaseReturnSource | null;
   purchase_return_category_label: string | null;
+  /**
+   * The rung actually resolved for THIS document, in a SERVED sentence.
+   *
+   * The category is a coarse three-way filter over a chain of THREE rungs — warehouse,
+   * MDP, LIP — so it cannot name the point on its own, and for years it named it wrong:
+   * "From LIP / MDB" for a bucket holding only LIP returns, "From warehouse" for the
+   * bucket holding every MDP one. This says which point the material really came off,
+   * in the same words the stock screens use.
+   */
+  purchase_return_source_detail: string | null;
+  /** WAREHOUSE | MDP | LIP — the resolved rung, for a screen that needs the code. */
+  purchase_return_source_tier: string | null;
+  /** False when no warehouse row answered: the category is then a fallback, not a fact. */
+  purchase_return_source_resolved: boolean;
   qc_rejected_tag: boolean;
 }
 
@@ -302,13 +327,35 @@ export interface DecisionWrite {
 
 export interface RelatedDocument {
   doc_type: string;
+  /** What this kind of document is CALLED, served with the row (`enums.TRAIL_LABELS`).
+   *  A type this screen has never heard of still renders with its real name. */
+  doc_label?: string | null;
+  /** Which leg of the material's life this row is read under (`enums.TRAIL_CHAPTERS`).
+   *  Served, like `doc_label`, so the screen groups by a key it was given rather than by
+   *  a second copy of the doc-type-to-chapter map. Null on a type the server could not
+   *  place, which the trail draws under its own heading at the end. */
+  chapter?: string | null;
   doc_id: number | null;
   doc_no: string | null;
   status: string | null;
   date: string | null;
   vendor_name: string | null;
   warehouse_name: string | null;
+  /** The one-line qualifier that makes a row worth opening: who signed the allocation,
+   *  the vendor's invoice number, the lot the stock stood in, the LR of the truck. */
+  note?: string | null;
   extra?: Record<string, unknown> | null;
+}
+
+/** One leg of the material's life, served with the trail (`enums.TRAIL_CHAPTERS`). */
+export interface TrailChapter {
+  key: string;
+  label: string;
+  /** The question this leg answers, in the words the served payload uses. Never
+   *  composed here — the same chapter is named by this screen and by the payload, and
+   *  two copies of that wording is how one of them goes stale. */
+  caption: string;
+  count: number;
 }
 
 export interface RelatedDocuments {
@@ -335,8 +382,31 @@ export interface RelatedDocuments {
     uom_code?: string | null;
   }[];
   documents: RelatedDocument[];
+  /** The legs of the material's life, in the order the work happens — EVERY one of
+   *  them, including the ones nothing landed in. A `count` of 0 is a fact about this
+   *  material ("never bought — it came off stock already on the shelf") and only a
+   *  heading that is present can say so. Optional: an older payload sends none, and the
+   *  screen then falls back to one flat list. */
+  chapters?: TrailChapter[];
+  /** Set only when a kind of document hit the per-kind cap. Null — the normal case —
+   *  means the list above is the whole trail. */
+  documents_note: string | null;
   purchase_return_category: PurchaseReturnSource | null;
   purchase_return_category_label: string | null;
+  /**
+   * The rung actually resolved for THIS document, in a SERVED sentence.
+   *
+   * The category is a coarse three-way filter over a chain of THREE rungs — warehouse,
+   * MDP, LIP — so it cannot name the point on its own, and for years it named it wrong:
+   * "From LIP / MDB" for a bucket holding only LIP returns, "From warehouse" for the
+   * bucket holding every MDP one. This says which point the material really came off,
+   * in the same words the stock screens use.
+   */
+  purchase_return_source_detail: string | null;
+  /** WAREHOUSE | MDP | LIP — the resolved rung, for a screen that needs the code. */
+  purchase_return_source_tier: string | null;
+  /** False when no warehouse row answered: the category is then a fallback, not a fact. */
+  purchase_return_source_resolved: boolean;
   qc_rejected_tag: boolean;
   vehicle_options: ServedOption[];
   vehicle_type: VehicleArrangement | null;
@@ -369,6 +439,12 @@ export interface PurchaseReturn {
    */
   source_category: PurchaseReturnSource | null;
   source_category_label: string | null;
+  /**
+   * True where the GRN / PO / vendor above were READ off the purchase behind the stock
+   * rather than stored on the document — every return raised automatically off a branch
+   * consignment stores none of them. Marked on the row, never presented as recorded.
+   */
+  chain_traced?: boolean;
   /** The branch stock return that produced this one, where one did. */
   source_return_id: number | null;
   source_return_no: string | null;
@@ -530,6 +606,14 @@ export interface IndentOption {
   indent_date: string | null;
   status: string;
   total_items: number;
+  /**
+   * How many of this indent's items are still on the raiser's shelf and could be sent
+   * back. SERVED (`returnable_indents`), never derived here from `total_items` — the gap
+   * between the two is exactly what the picker has to say. The list itself only ever
+   * carries indents where this is at least 1, so an indent whose items have all already
+   * come back is not offered at all.
+   */
+  returnable_items: number;
   total_qty: string | number;
   project_name: string | null;
   position_name: string | null;

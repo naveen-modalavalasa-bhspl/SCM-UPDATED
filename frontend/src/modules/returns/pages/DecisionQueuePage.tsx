@@ -11,6 +11,7 @@ import { AwaitingReceiptPanel } from "../components/AwaitingReceiptPanel";
 import { RaisedDateFilter } from "../components/RaisedDateFilter";
 import { returnsApi } from "../api";
 import { QUEUE, money } from "../constants";
+import { originState } from "../origin";
 import { formatReturnDate } from "../dateTime";
 import type { StockReturn } from "../types";
 
@@ -265,7 +266,7 @@ export default function DecisionQueuePage() {
         columns={columns}
         keyOf={(row) => row.id}
         loading={isLoading}
-        onRowClick={(row) => navigate(`/returns/${row.id}`)}
+        onRowClick={(row) => navigate(`/returns/${row.id}`, { state: originState(pathname) })}
         page={page}
         totalPages={totalPages}
         onPageChange={setPage}
@@ -294,7 +295,7 @@ export default function DecisionQueuePage() {
         renderCard={(row) => (
           <button
             type="button"
-            onClick={() => navigate(`/returns/${row.id}`)}
+            onClick={() => navigate(`/returns/${row.id}`, { state: originState(pathname) })}
             className="block w-full p-4 text-left"
           >
             <div className="flex items-center justify-between gap-2">

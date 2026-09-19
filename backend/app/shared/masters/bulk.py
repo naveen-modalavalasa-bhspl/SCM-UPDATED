@@ -749,6 +749,10 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
                 for key, value in data.model_dump().items():
                     setattr(row, key, value)
             await write(db, defn)
+            # Updates expire computed SQL expressions too. BOM imports hit the same
+            # line_count lazy-load failure as the single-row PUT unless the row is
+            # explicitly reloaded before audit serialization.
+            await db.refresh(row)
             await audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                         action=AuditAction.UPDATE, actor=user,
                         before=before, after=defn.serialize(row))

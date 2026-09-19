@@ -382,6 +382,26 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       </Card>
     );
   }
+  // A cached review can outlive the workflow task when another tab or approver moves
+  // the indent on. Never leave live decision buttons over a completed document.
+  if (indent.data && indent.data.status !== "PENDING_APPROVAL") {
+    return (
+      <Card className="p-5">
+        <div className="flex items-start gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-ok-bg text-ok">
+            <CheckCircle2 className="h-5 w-5" />
+          </span>
+          <div>
+            <p className="font-display text-base font-bold text-ink">This indent has already moved on</p>
+            <p className="mt-1 text-sm text-muted">It is now {indent.data.status.replace(/_/g, " ").toLowerCase()} and is no longer awaiting approval.</p>
+            <Button className="mt-3" variant="subtle" onClick={() => nav("/approvals")}>
+              <ArrowLeft className="h-4 w-4" /> Back to approvals
+            </Button>
+          </div>
+        </div>
+      </Card>
+    );
+  }
   if (!indent.data) return <p className="p-6 text-muted">Approval not found.</p>;
 
   const historyRows = history.data ?? [];

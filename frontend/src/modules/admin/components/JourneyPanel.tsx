@@ -90,12 +90,6 @@ export function JourneyPanel({ rows, projectName, onOpen }: {
 function Node({ row, onOpen }: { row: FlowRow; onOpen: (code: string) => void }) {
   const noApproval = row.self_approval_policy === "NO_APPROVAL";
   const selfOk = row.self_approval_policy === "CREATOR_ALLOWED";
-  const label =
-    row.code === "STOCK_RETURN"
-      ? "Indent Return"
-      : row.code === "STOCK_RETURN_RECEIPT"
-        ? "Decision Desk"
-        : row.label;
 
   return (
     <button
@@ -104,7 +98,7 @@ function Node({ row, onOpen }: { row: FlowRow; onOpen: (code: string) => void })
       title={row.summary || undefined}
       className="min-h-11 max-w-[13rem] rounded-lg border border-line/70 bg-content1 px-2.5 py-1.5 text-left transition-colors hover:border-primary hover:bg-content2"
     >
-      <span className="block truncate text-[13px] font-medium">{label}</span>
+      <span className="block truncate text-[13px] font-medium">{row.label}</span>
       {noApproval ? (
         <span className="block text-[11px] text-ok">No signature needed</span>
       ) : !row.is_configured ? (

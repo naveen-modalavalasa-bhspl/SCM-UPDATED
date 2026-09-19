@@ -12,6 +12,7 @@ import { rbacApi } from "../api";
 import { ReportingView } from "../components/ReportingView";
 import { AccessLookup } from "../components/AccessLookup";
 import type { AdminUserRow, GrantResult } from "../types";
+import { writeToClipboard } from "@/shared/clipboard";
 
 const PAGE_SIZE = 50;
 /** Departments and posts move only when HCM syncs — long enough that re-reading them
@@ -346,7 +347,7 @@ export function UsersPage() {
                         {issued.temporary_password}
                       </code>
                       <Button variant="ghost"
-                              onClick={() => navigator.clipboard?.writeText(
+                              onClick={() => void writeToClipboard(
                                 issued.temporary_password!)}>
                         <Copy className="h-4 w-4" />
                       </Button>
