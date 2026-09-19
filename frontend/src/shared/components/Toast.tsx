@@ -59,6 +59,8 @@ interface ToastApi {
   warning: (content: ToastInput) => void;
   /** Auto-dismisses. */
   info: (content: ToastInput) => void;
+  /** Remove one specific notice once the screen condition that raised it is fixed. */
+  dismiss: (tone: ToastTone, content: ToastInput) => void;
   /**
    * Announce a caught failure, worded by `shared/api/errors.ts`.
    *
@@ -82,6 +84,11 @@ const MAX_VISIBLE = 3;
 const asContent = (content: ToastInput): ToastContent =>
   typeof content === "string" ? { title: content } : content;
 
+const toastKey = (tone: ToastTone, content: ToastInput) => {
+  const { title, message } = asContent(content);
+  return `${tone}|${title}|${message ?? ""}`;
+};
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
@@ -102,7 +109,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback((tone: ToastTone, content: ToastInput) => {
     const { title, message } = asContent(content);
     if (!title && !message) return;
-    const key = `${tone}|${title}|${message ?? ""}`;
+    const key = toastKey(tone, content);
     const id = nextId.current++;
 
     setToasts((all) => {
@@ -120,11 +127,24 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     }
   }, [remove]);
 
+  const dismiss = useCallback((tone: ToastTone, content: ToastInput) => {
+    const key = toastKey(tone, content);
+    setToasts((all) =>
+      all.filter((toast) => {
+        if (toast.key !== key) return true;
+        const timer = timers.current.get(toast.id);
+        if (timer) clearTimeout(timer);
+        timers.current.delete(toast.id);
+        return false;
+      }));
+  }, []);
+
   const api = useMemo<ToastApi>(() => ({
     success: (content) => push("success", content),
     error: (content) => push("error", content),
     warning: (content) => push("warning", content),
     info: (content) => push("info", content),
+    dismiss,
     fromError: (error: unknown) => {
       const notice: Notice = describeError(error);
       // A cancelled request has no message and is nobody's news.
@@ -135,7 +155,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         // title would push the part worth reading into small print.
         : { title: notice.message });
     },
-  }), [push]);
+  }), [dismiss, push]);
 
   return (
     <ToastContext.Provider value={api}>

@@ -4,6 +4,7 @@ Every state change follows: load -> validate current status -> change -> commit.
 Approvals go ONLY through the workflow engine; there is no approval logic here.
 """
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -1518,6 +1519,33 @@ ACK_PHOTO_CATEGORY = "RECEIPT_PHOTO"
 ACK_BILL_CATEGORY = "RECEIPT_BILL"
 ACK_ENTITY_TYPE = "INDENT_RECEIPT"
 
+#: A delivery is photographed TWICE over, and the two are different evidence: the
+#: consignment as it was handed over, sealed, and then each package as it was opened.
+#: One indent's receipt therefore carries several photos that must not be read as
+#: copies of each other — "1 photo" on both packages, when the storekeeper had
+#: photographed one of them, is the state this scope removes.
+#:
+#: The scope rides on `doc_category` because `sys_attachments` is one flat table for
+#: every module and has no column for it, and adding one is a platform change for a
+#: fact only this module has (rule 4). Base category first, so every reader that asks
+#: "is this a photo" keeps working by asking `ack_category_base`; an unscoped value is
+#: the consignment's own, which is what every row written before today is.
+ACK_SCOPE_SEP = "::"
+#: `String(50)` on the column, and the longest base is 13 characters.
+ACK_SCOPE_MAX = 30
+_ACK_SCOPE_OK = re.compile(r"^[A-Z0-9_-]+$")
+
+
+def ack_category_base(value: str | None) -> str:
+    """`RECEIPT_PHOTO::DISPATCH-4-PACKAGE-9` -> `RECEIPT_PHOTO`."""
+    return (value or "").split(ACK_SCOPE_SEP, 1)[0]
+
+
+def ack_category_scope(value: str | None) -> str:
+    """Which package it hangs on, or "" for the consignment itself."""
+    parts = (value or "").split(ACK_SCOPE_SEP, 1)
+    return parts[1] if len(parts) == 2 else ""
+
 
 def owed_quantity(item) -> Decimal:
     """What the requester is entitled to on this line.
@@ -1555,8 +1583,14 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
     if indent.status not in _RECEIVABLE_STATUSES:
         raise ValidationError(
             f"{indent.indent_no} is not awaiting delivery (status {indent.status})")
-    if doc_category not in {ACK_PHOTO_CATEGORY, ACK_BILL_CATEGORY}:
+    if ack_category_base(doc_category) not in {ACK_PHOTO_CATEGORY, ACK_BILL_CATEGORY}:
         raise ValidationError("A delivery attachment is either a photo or a bill")
+    scope = ack_category_scope(doc_category)
+    if scope and (len(scope) > ACK_SCOPE_MAX or not _ACK_SCOPE_OK.match(scope)):
+        # The scope names a package of THIS receipt and nothing else. Refused rather
+        # than trimmed: a silently shortened scope files the proof against a package
+        # nobody can find again.
+        raise ValidationError("That is not a package this delivery was sent in")
     return await attachments.add_attachment(
         db, entity_type=ACK_ENTITY_TYPE, entity_id=indent.id,
         upload=upload, doc_category=doc_category, user=user)
@@ -1655,7 +1689,11 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
 
     photos = [
         row for row in await attachments.list_attachments(db, ACK_ENTITY_TYPE, indent.id)
-        if row.doc_category == ACK_PHOTO_CATEGORY
+        # Any photo of this delivery: the sealed handover, or one of the packages as
+        # it was opened. Matching the bare category counted only the first of those,
+        # so a requester who photographed every package and not the outside of the
+        # load was refused for having no proof.
+        if ack_category_base(row.doc_category) == ACK_PHOTO_CATEGORY
     ]
     if not photos:
         raise ValidationError(

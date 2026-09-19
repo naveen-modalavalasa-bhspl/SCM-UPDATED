@@ -297,26 +297,22 @@ export const indentApi = {
     body.append("file", file);
     return api
       .post<ReceiptAttachment>(
-        `/api/indents/${id}/receipt-attachments?doc_category=${docCategory}`,
+        // Encoded: a package-scoped category carries a "::" separator, and a raw
+        // colon in a query string is not ours to gamble on.
+        `/api/indents/${id}/receipt-attachments?doc_category=${encodeURIComponent(docCategory)}`,
         body,
       )
       .then((r) => r.data);
   },
 
-  /**
-   * The bytes of one receipt photo or bill.
-   *
-   * Nested under the indent because that is the only route the backend gates on this
-   * module's own visibility check — an attachment id on its own is a key to the whole
-   * store, which is the door `attachments.delete_attachment` was closed against.
-   */
-  downloadReceiptAttachment: (indentId: number, attachmentId: number) =>
+  // The bytes themselves, for the preview. Nested under the indent because that is
+  // the route indents gates — the viewer never builds a URL of its own.
+  downloadReceiptAttachment: (id: number, attachmentId: number) =>
     api
-      .get<Blob>(
-        `/api/indents/${indentId}/receipt-attachments/${attachmentId}/download`,
-        { responseType: "blob" },
-      )
-      .then((r) => r.data),
+      .get(`/api/indents/${id}/receipt-attachments/${attachmentId}/download`, {
+        responseType: "blob",
+      })
+      .then((r) => r.data as Blob),
 
   deleteReceiptAttachment: (attachmentId: number) =>
     api.delete<void>(`/api/indents/receipt-attachments/${attachmentId}`).then((r) => r.data),

@@ -625,6 +625,7 @@ def _raiser_view(doc: TransportRequest) -> dict:
     the freight, the losing quotes and who awarded it are none of the field's business.
     """
     return {
+        "dispatch_id": doc.dispatch_id,
         "tr_id": doc.id, "tr_no": doc.tr_no,
         "status": doc.status, "mode": doc.mode,
         # How it travels, in the raiser's words as well as ours. The LABELS travel with

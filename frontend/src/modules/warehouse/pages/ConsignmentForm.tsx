@@ -623,6 +623,7 @@ export default function ConsignmentForm() {
   const formIssues = useMemo(() => {
     const issues: string[] = [];
     if (!form.issue_id) issues.push("Select a material issue.");
+    if (!form.expected_delivery) issues.push("Enter expected delivery.");
     packages.forEach((pkg, index) => {
       packageErrors(pkg, index).forEach((message) => issues.push(`${pkg.package_no || `Package ${index + 1}`}: ${message}`));
       if (!pkg.locked) issues.push(`${pkg.package_no || `Package ${index + 1}`}: Lock the package before saving.`);
@@ -636,7 +637,7 @@ export default function ConsignmentForm() {
     selectedSerials.duplicates.forEach((serial) => issues.push(`${serial} is selected in more than one package.`));
     return Array.from(new Set(issues));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allocation, form.issue_id, lineProgress, packages, selectedSerials]);
+  }, [allocation, form.expected_delivery, form.issue_id, lineProgress, packages, selectedSerials]);
 
   const totals = {
     packages: packages.length,
@@ -815,7 +816,7 @@ export default function ConsignmentForm() {
                     raised. The load actually leaves later, on the shipment. Calling it
                     "Confirm dispatch" read as the final word on a consignment that had
                     not yet been offered to a carrier. */}
-                <Button variant="soft" onClick={() => nav(dispatchPath(doc.id))}>
+                <Button variant="soft" onClick={() => nav(dispatchPath(doc.id))} disabled={!doc.expected_delivery}>
                   <Truck className="h-4 w-4" /> Process dispatch
                 </Button>
               </Can>
@@ -931,11 +932,12 @@ export default function ConsignmentForm() {
               disabled
             />
           </Field>
-          <Field label="Expected delivery">
+          <Field label="Expected delivery" required>
             {/* Goods cannot arrive before they leave. `min` is the dispatch date, not
                 today: a consignment can be back-dated, and its delivery date has to
                 stay consistent with whatever date it actually went out on. */}
             <Input type="date" value={form.expected_delivery ?? ""} disabled={locked}
+                   aria-required="true"
                    min={form.dispatch_date || undefined}
                    onChange={(event) => setForm((f) => ({ ...f, expected_delivery: event.target.value || null }))} />
           </Field>

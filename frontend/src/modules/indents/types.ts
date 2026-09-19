@@ -210,8 +210,37 @@ export interface AcknowledgementLine {
    * which line is which. Absent on an older backend, hence optional.
    */
   on_order_quantity?: number;
+  package_quantities?: AcknowledgementPackageQuantity[];
   /** Derived server-side: "On the way to you", "With procurement", … */
   pending_with?: string | null;
+}
+
+/**
+ * How much of one line travelled in one physical package — and what that package IS.
+ *
+ * The description is served with the quantity because the person confirming the
+ * delivery is holding the carton: a number on a screen identifies it only if the
+ * label happens to be facing them, where "the 12.5 kg fragile carton, 60 x 40 x 30"
+ * is something they can check against the thing in their hands. Every measurement is
+ * nullable and a blank is drawn as nothing at all — an unweighed package is not a
+ * package weighing zero.
+ */
+export interface AcknowledgementPackageQuantity {
+  dispatch_id?: number | null;
+  dispatch_no?: string | null;
+  package_id?: number | null;
+  package_no?: string | null;
+  quantity: number;
+  package_type?: string | null;
+  barcode?: string | null;
+  weight_kg?: number | null;
+  length_cm?: number | null;
+  width_cm?: number | null;
+  height_cm?: number | null;
+  is_fragile?: boolean;
+  is_temp_controlled?: boolean;
+  packed_by_name?: string | null;
+  packed_at?: string | null;
 }
 
 /**
@@ -223,6 +252,7 @@ export interface AcknowledgementLine {
  * that answers "where is it today".
  */
 export interface ShipmentTrack {
+  dispatch_id?: number | null;
   tr_id: number;
   tr_no: string;
   mode: string;
@@ -255,6 +285,7 @@ export interface RaiserShipmentEvent {
 }
 
 export interface RaiserTracking {
+  dispatch_id?: number | null;
   tr_id: number;
   tr_no: string;
   status: string;
