@@ -813,6 +813,7 @@ def _approval_out(
         current_stage_name=instance.current_stage_name,
         current_approver_name=indent.current_approver_name,
         can_return_for_correction=can_return_for_correction,
+        required_date=indent.required_date,
         created_at=indent.created_at,
         items=items,
     )

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   CalendarDays, CheckCircle2, ChevronRight, Clock, FileText, Package,
-  PackageCheck, PackageOpen, Percent, PencilLine, XCircle,
+  PackageCheck, PackageOpen, Percent, PencilLine, TrendingDown, XCircle,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Card } from "@/shared/components";
@@ -22,6 +22,7 @@ import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge
 import { StatusBreakdownChart } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
 import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+import { getReplenishments } from "@/modules/inventory/api";
 
 /* ---------------------------------------------------------------------------
  * The Overview answers two questions only: what needs MY action (the
@@ -226,6 +227,13 @@ function IndentDashboardContent() {
     gcTime: INDENT_QUERY_GC_TIME,
   });
   const recentIndents = recent?.items ?? [];
+  const { data: replenishments, isLoading: replenishmentsLoading } = useQuery({
+    queryKey: ["indent-dashboard", "replenishment-low-stock"],
+    queryFn: () => getReplenishments(),
+  });
+  const replenishmentLowStock = Array.isArray(replenishments)
+    ? replenishments.length
+    : undefined;
 
   const openQueue = (statuses?: string[]) => {
     if (!statuses?.length) {
@@ -265,6 +273,25 @@ function IndentDashboardContent() {
             onOpen={openQueue}
           />
         ))}
+        <button
+          type="button"
+          onClick={() => nav("/inventory/replenishment")}
+          aria-label={`${replenishmentLowStock ?? 0} low-stock replenishment items. Open replenishment`}
+          className="group flex min-h-20 w-full items-center gap-3 rounded-xl border border-line/70 bg-content1 p-4 text-left shadow-sm transition duration-150 hover:-translate-y-px hover:border-brand/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 active:translate-y-0 active:scale-[0.99]"
+        >
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-warn-bg text-warn">
+            <TrendingDown className="h-5 w-5" />
+          </span>
+          <span className="min-w-0">
+            <span className="block font-display text-[26px] font-bold leading-none tabular text-ink">
+              {replenishmentsLoading ? "–" : replenishmentLowStock ?? "–"}
+            </span>
+            <span className="mt-1 block truncate text-xs font-medium text-muted">
+              Replenishment low stock
+            </span>
+          </span>
+          <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-brand opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+        </button>
       </section>
 
       {statsError && (
