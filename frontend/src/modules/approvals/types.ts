@@ -87,6 +87,7 @@ export interface ApprovalIndent {
   current_stage_name?: string | null;
   current_approver_name?: string | null;
   can_return_for_correction?: boolean;
+  required_date?: string | null;
   created_at: string;
   items: ApprovalIndentLine[];
 }

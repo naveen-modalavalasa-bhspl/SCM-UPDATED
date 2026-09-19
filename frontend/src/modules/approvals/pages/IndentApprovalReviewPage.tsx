@@ -426,10 +426,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       {/* Who is asking, and for what — the context the numbers below are judged
           against, on one strip instead of a paragraph of definition lists. */}
       <Card className="p-4 sm:p-5">
-        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <Fact icon={User} label="Requested by">{indent.data.requested_by_name ?? "—"}</Fact>
           <Fact icon={Building2} label="Department">{indent.data.department_name ?? "—"}</Fact>
           <Fact icon={CalendarDays} label="Raised on">{fmtDate(indent.data.created_at)}</Fact>
+          {/* When the goods are needed decides whether this is urgent, so it is read
+              beside the raise date. Nothing behind it is drawn as nothing — the raise
+              date under this label would say the goods were wanted the day it was asked. */}
+          <Fact icon={CalendarDays} label="Required date">
+            {indent.data.required_date ? fmtDate(indent.data.required_date) : "—"}
+          </Fact>
           <Fact icon={Flag} label="Priority">
             <StatusPill status={indent.data.priority} />
           </Fact>

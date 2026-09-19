@@ -416,6 +416,43 @@ That band needs `sourcesReady`, because an empty source list means two different
 — still loading, and nothing here — and drawing the second before the first has settled
 accuses a stocked warehouse of being empty.
 
+### A delivery is acknowledged in STOPS, and each stop keeps its own proof (2026-09-19)
+
+`/indents/acknowledgements/:id` is a journey, not a page of nested lists: the handover,
+then one stop per package, then sign-off. One stop is on screen at a time and the rail
+above says where you are — but nothing is locked, because a delivery is not a wizard
+and somebody re-checking package two is not doing anything wrong. The receipt action
+itself is unchanged and still SINGLE: one press, at the last stop, over everything
+counted at the stops behind it.
+
+**A photo belongs to the thing it is a photo OF.** The proof of a sealed load and the
+proof of what was inside a particular carton are different evidence, and they used to
+land in one pile — both packages read "1 photo" when one of them had been photographed,
+and a dispute about carton two was answered with a picture of carton one. The package
+rides on `doc_category` behind a separator (`RECEIPT_PHOTO::P-DISPATCH-4-PACKAGE-9`),
+because `sys_attachments` is one flat table for every module with no column for it and
+adding one is a platform change for a fact only this screen has (rule 4).
+
+Both sides read the BASE and neither compares the whole string:
+`service.ack_category_base` / `ack_category_scope` on the server,
+`attachmentBase` / `attachmentScope` on the screen. That is what keeps every receipt
+photo filed before this — all of them unscoped — a photo. Two consequences that fail
+silently if narrowed: `add_receipt_attachment` validates the base and refuses a
+malformed scope rather than trimming it (a shortened scope files proof against a
+package nobody can find again), and `acknowledge_receipt`'s "is there any proof" check
+reads the base too — matching the bare category counted only the handover, so a
+requester who photographed every package and not the outside of the load was refused
+for having no proof. Unscoped rows show at the FIRST handover stop, so nothing an
+earlier receipt attached disappears from view.
+
+What an approved item NOT in the opened package says is the list screen's own
+vocabulary (`lineStage` / `STAGE` / `STAGE_HINT` in `acknowledgementParts`), so "On
+order 8" carries its quantity here exactly as it does there. "With procurement" on its
+own answers where the goods are and not how much of the line is there, and an indent
+served in rounds — two of ten off the shelf, eight being bought in — is the common
+case, not the exception.
+
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

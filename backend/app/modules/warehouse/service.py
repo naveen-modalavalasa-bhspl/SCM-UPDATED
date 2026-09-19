@@ -181,6 +181,23 @@ async def _item_snapshot(db: AsyncSession, item_id: int) -> Item:
     return item
 
 
+async def _item_by_code(db: AsyncSession, code: str | None) -> Item | None:
+    """The master item a typed code names, or None.
+
+    A MANUAL return line is typed, not picked (`PurchaseReturnForm` sends
+    `item_id: null` on purpose), so the only thing it can carry about the master is
+    the code somebody wrote in the box. Everything downstream of the return —
+    `out_dispatch_items.item_id`, `move_stock_out`, the ledger — is keyed on the ID,
+    so a line that names a real item by code has to be reconnected to it here or the
+    load cannot leave the building.
+    """
+    code = (code or "").strip()
+    if not code:
+        return None
+    return (await db.execute(
+        select(Item).where(Item.code == code).limit(1))).scalars().first()
+
+
 async def _warehouse(db: AsyncSession, warehouse_id: int) -> Warehouse:
     wh = await db.get(Warehouse, warehouse_id)
     if wh is None:
@@ -12692,8 +12709,14 @@ async def _apply_manual_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
         if qty <= ZERO:
             raise ValidationError(f"Line {index}: return quantity must be greater than 0")
 
-        # An item from the masters where one was picked, the typed name where not.
-        item = await _item_snapshot(db, line.item_id) if line.item_id else None
+        # An item from the masters where one was picked, the one the typed CODE names
+        # where not, and the typed name where neither. The middle case is the common
+        # one: the screen sends `item_id: null` for every manual line, so a line whose
+        # code is a real master item used to be stored as if the item did not exist —
+        # and the consignment raised at `arrange_return_transport` then died on
+        # `out_dispatch_items.item_id`, which is NOT NULL.
+        item = (await _item_snapshot(db, line.item_id) if line.item_id
+                else await _item_by_code(db, line.item_code))
         name = (line.item_name or "").strip() or (item.name if item else "")
         if not name:
             raise ValidationError(f"Line {index}: enter an item name")
@@ -17809,10 +17832,28 @@ async def _build_return_consignment(db: AsyncSession, doc: m.PurchaseReturn, use
     # Dispatch items
     for idx, line in enumerate(doc.items, start=1):
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
+        # A manual line typed before the code was resolved at save carries no item id,
+        # and `out_dispatch_items.item_id` is NOT NULL — the raw database refusal came
+        # back to the desk as "item_id is required" on a form where the item was plainly
+        # filled in. Resolve the code here too, and say which line if it names nothing.
+        item_id = line.item_id
+        if not item_id:
+            found = await _item_by_code(db, line.item_code)
+            if found is not None:
+                item_id = line.item_id = found.id
+                line.item_code = found.code
+                line.uom_code = line.uom_code or found.uom_code
+        if not item_id:
+            named = f" - the code {line.item_code} matches none" if line.item_code else ""
+            raise ValidationError(
+                f"Line {idx} ({line.item_name or 'no name'}) is not linked to an item "
+                f"in the master{named}. Open the return, pick the item from the master "
+                "and save it, then arrange transport: the consignment and the stock "
+                "movement are both keyed on it.")
         db.add(m.DispatchItem(
             dispatch_id=dispatch.id,
             line_no=idx,
-            item_id=line.item_id,
+            item_id=item_id,
             item_code=line.item_code,
             item_name=line.item_name,
             uom_code=line.uom_code,

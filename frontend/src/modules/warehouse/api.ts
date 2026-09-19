@@ -859,6 +859,15 @@ export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options
 export const warehouseOptions = (_search?: string) =>
   get<WarehouseOption[]>(`${BASE}/options/warehouses`);
 
+/** Warehouses only — the LIP/MDP rungs of the distribution chain dropped.
+ *  For a field that names a WAREHOUSE (a load leaving the building, say) rather than
+ *  any stocking point: the two chain tiers hold real stock but are not the warehouse,
+ *  and `warehouse_type` is already on every row, so the line is drawn here rather
+ *  than in a screen. Same scoping as `warehouseOptions` — this login's points only. */
+export const warehouseTierOptions = async (search?: string) =>
+  (await warehouseOptions(search)).filter(
+    (w) => w.warehouse_type !== "LIP" && w.warehouse_type !== "MDP");
+
 /** Every active point in the network. ONLY for a destination field — you transfer
  *  or dispatch TO somewhere you do not hold, so scoping those would break transfers. */
 export const allWarehouseOptions = (search?: string) =>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2, Clock, MapPin, Package, Phone, Truck, UserRound, Warehouse, XCircle,
@@ -6,7 +6,10 @@ import {
 import {
   Button, Can, Card, ErrorBanner, Field, Input, useToast, TONE_DEEP_MINT,
 } from "@/shared/components";
-import { arrangeReturnTransport, purchaseReturnVehicleArrangements } from "../api";
+import {
+  arrangeReturnTransport, purchaseReturnVehicleArrangements, warehouseTierOptions,
+} from "../api";
+import { Lookup } from "./Lookup";
 import { fmtDate, fmtDateTime, fmtMoney, today } from "../format";
 import type {
   PurchaseReturn, PurchaseReturnJourneyLeg, ReturnVehicleArrangement,
@@ -181,7 +184,23 @@ export function PurchaseReturnLeg(
   const toast = useToast();
 
   const [picked, setPicked] = useState<ReturnVehicleArrangement | "">("");
+  // The load leaves a STOCKING POINT, not an address somebody types: the goods are on
+  // a shelf this system knows about, and a free-text dock never matched a warehouse
+  // Logistics could be sent to. The name is carried on as `pickup_address` because
+  // that is what the return leg records; the id is only what the field is set to.
+  const [pickupId, setPickupId] = useState<number | "">(doc.warehouse_id ?? "");
   const [pickupAddress, setPickupAddress] = useState(doc.warehouse_name ?? "");
+  // Memoised: a new array identity on every render is what un-memoises the Lookup.
+  const pickupFallback = useMemo(
+    () => (doc.warehouse_id
+      ? [{ id: doc.warehouse_id, name: doc.warehouse_name ?? "This warehouse" }]
+      : []),
+    [doc.warehouse_id, doc.warehouse_name],
+  );
+  const onPickWarehouse = useCallback((id: number | "", option?: { name: string }) => {
+    setPickupId(id);
+    setPickupAddress(option?.name ?? "");
+  }, []);
   const [readyDate, setReadyDate] = useState("");
 
   const invalidate = () => {
@@ -396,10 +415,11 @@ export function PurchaseReturnLeg(
 
               {picked && (
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="Collect from" hint="Where the vehicle loads.">
-                    <Input value={pickupAddress}
-                           onChange={(e) => setPickupAddress(e.target.value)}
-                           placeholder="Dock / gate the load is ready at" />
+                  <Field label="Leaving from" hint="The warehouse the vehicle loads at.">
+                    <Lookup name="warehouses-tier" load={warehouseTierOptions}
+                            value={pickupId} onChange={onPickWarehouse}
+                            fallback={pickupFallback}
+                            placeholder="Search warehouses" />
                   </Field>
                   <Field label="Ready from"
                          hint="The earliest the load may leave. Not a delivery date.">

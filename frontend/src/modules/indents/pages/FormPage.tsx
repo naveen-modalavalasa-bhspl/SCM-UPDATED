@@ -106,6 +106,7 @@ export function IndentFormPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const initializedDraftId = useRef<number | null>(null);
+  const initializedPrefill = useRef<string | null>(null);
   const [priority, setPriority] = useState("NORMAL");
   const [indentType, setIndentType] = useState<IndentType>(INDENT_TYPE.REGULAR);
   const [vehicleId, setVehicleId] = useState<number | "">("");
@@ -208,6 +209,29 @@ export function IndentFormPage() {
       quantity: Number(item.quantity),
     })));
   }, [canEditLoadedIndent, draft]);
+
+  // Replenishment sends a shortage here as ?item_id=&quantity=. Guarded rather than
+  // trusted: a non-numeric or non-positive id prefills nothing, and an unusable
+  // quantity leaves the box EMPTY rather than writing a zero — a zero reads as a
+  // decision somebody made. The key is the parameters themselves, so it runs once and
+  // never fights the user's own edits on a re-render; editing is left alone entirely.
+  useEffect(() => {
+    if (isEditing) return;
+    const itemParam = searchParams.get("item_id");
+    const quantityParam = searchParams.get("quantity");
+    const prefillKey = `${itemParam ?? ""}:${quantityParam ?? ""}`;
+    if (initializedPrefill.current === prefillKey) return;
+
+    const itemId = Number(itemParam);
+    if (!Number.isFinite(itemId) || itemId <= 0) return;
+
+    const quantity = Number(quantityParam);
+    initializedPrefill.current = prefillKey;
+    setLines([{
+      item_id: itemId,
+      quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : "",
+    }]);
+  }, [isEditing, searchParams]);
 
   const payload = (): IndentCreate => ({
     priority,

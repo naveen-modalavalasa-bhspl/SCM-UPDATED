@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, Barcode, Camera, Check, CheckCircle2, Circle,
-  Eye, FileText, Package, Ruler, ScanBarcode, Snowflake, Trash2, Truck, Weight,
+  AlertTriangle, ArrowLeft, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
+  Camera, Check, CheckCircle2, Circle, ExternalLink, Eye, FileText, Lock, MapPin,
+  Package, Phone, RectangleHorizontal, Ruler, ScanBarcode, Signature, Snowflake,
+  Trash2, Truck, UserRound, Weight,
 } from "lucide-react";
 import {
   Button, Card, EmptyState, ErrorBanner, Input, PageHeader,
@@ -19,8 +21,7 @@ import type {
   RaiserTracking, ReceiptAttachment, ShipmentTrack,
 } from "../types";
 import {
-  BILL, PHOTO, STAGE, STAGE_HINT, ShipmentCard, TRACKING, lineStage, onOrder, qty,
-  receivable,
+  BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, lineStage, onOrder, qty, receivable,
 } from "../components/acknowledgementParts";
 
 /**
@@ -974,7 +975,11 @@ function StepSheet({
   kicker: string;
   headline: string;
   note: string;
-  code: string;
+  /** The document this step is about. Omitted where the step draws the document
+   *  itself underneath — the gate stop puts the consignment number on a slip at the
+   *  size it is printed, and an 11px copy of it in the header is the same fact
+   *  twice, the smaller one first. */
+  code?: string;
   meta?: string;
   tasks: StepTask[];
   children: ReactNode;
@@ -998,10 +1003,17 @@ function StepSheet({
           {headline}
         </h2>
         <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-muted">{note}</p>
-        <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
-          <span className="rounded-md bg-content2 px-1.5 py-0.5 font-mono text-body">{code}</span>
-          {meta && <><span aria-hidden>&middot;</span><span>{meta}</span></>}
-        </p>
+        {(code || meta) && (
+          <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+            {code && (
+              <span className="rounded-md bg-content2 px-1.5 py-0.5 font-mono text-body">
+                {code}
+              </span>
+            )}
+            {code && meta && <span aria-hidden>&middot;</span>}
+            {meta && <span>{meta}</span>}
+          </p>
+        )}
         <p className={`mt-4 flex items-start gap-2 text-sm font-medium ${
           left.length > 0 ? "text-warn" : "text-ok"
         }`}>
@@ -1024,6 +1036,24 @@ function StepSheet({
  * Stop 1..n-1 -- the handover, then one package at a time.
  * ------------------------------------------------------------------------ */
 
+/**
+ * The first stop: a load is at the gate and nothing has been opened yet.
+ *
+ * It read "Consignment photos" over two grey dropzones, with the consignment number
+ * as an 11px chip in the header and everything about the vehicle -- carrier, driver,
+ * docket, when it left, when it was due -- as muted grey at the very bottom under
+ * "How it travelled". That is the wrong way round for the two minutes this step
+ * covers. Somebody is standing in front of a truck with a delivery note in their
+ * hand: the first thing they do is match the paper to the load, and the second is
+ * photograph it before a single box moves.
+ *
+ * So the SLIP is first (the number at the size it is printed on the paperwork, and
+ * who brought it -- including the driver's phone number, which was served on this row
+ * all along and drawn nowhere), then the camera, then the packages, then the trail of
+ * how it got here. The camera has not moved down the page in any way that matters:
+ * the slip is four lines and a strip of facts, where the tracking card it replaces
+ * was the tallest thing on the step.
+ */
 function GateStop({
   stop, stepNo, stepTotal, indentId, tasks, files, loading, failed, uploadPending,
   removePending, onUpload, onView, onDelete, onOpenPackage, packageLabel,
@@ -1052,18 +1082,27 @@ function GateStop({
     <StepSheet
       stepNo={stepNo}
       stepTotal={stepTotal}
-      kicker="Consignment received"
-      headline="Consignment photos"
-      note="Before anything is opened: walk around the consignment, look for damage or a broken seal, and photograph it exactly as it was received. These pictures are filed against the consignment number below."
-      code={stop.consignment?.no ?? "Consignment"}
-      meta={`${packages.length} package${packages.length === 1 ? "" : "s"} in this consignment`}
+      kicker="At the gate"
+      headline="Check the load before anything is opened"
+      note="Walk round it once. A broken seal, a crushed corner, a wet carton, a pallet that has shifted — photograph whatever you find, and photograph the load as it stands before the first box comes off. These pictures are the only record of how it turned up."
       tasks={tasks}
     >
-      {/* The whole reason this step exists, so it is the first thing under the
-          heading -- not a panel below a tracking card the person did not ask for. */}
+      {/* What is in front of the person, and who brought it: the one thing to check
+          against the paper in the driver's hand before anything else happens. */}
+      <ConsignmentSlip
+        no={stop.consignment?.no ?? "Consignment"}
+        leg={leg}
+        packages={packages}
+        loading={loading}
+        failed={failed}
+      />
+
+      {/* The whole reason this step exists, so it is the first thing after the slip
+          -- not a panel below a tracking card the person did not ask for. */}
       <ProofPanel
-        title="Consignment photos"
-        note="The consignment as received, sealed and unopened. Each package gets its own photos at the steps after this one."
+        title="Photograph it as it arrived"
+        note="Filed against the consignment above. Each package gets its own photos at the steps after this one."
+        shots={GATE_SHOTS}
         indentId={indentId}
         files={files}
         uploadPending={uploadPending}
@@ -1093,26 +1132,536 @@ function GateStop({
         </section>
       )}
 
-      <section>
-        <SectionLabel>How it travelled</SectionLabel>
-        <div className="mt-2 text-xs text-muted">
-          {loading ? (
-            "Checking with logistics..."
-          ) : failed ? (
-            <span className="text-warn">
-              Tracking is temporarily unavailable. You can still count and acknowledge.
-            </span>
-          ) : isFullTracking(leg) ? (
-            <ul className="list-none"><ShipmentCard leg={leg} /></ul>
-          ) : leg ? (
-            <CompactShipmentCard leg={leg} />
-          ) : (
-            "No logistics shipment has been created for this indent yet."
-          )}
-        </div>
-      </section>
+      {leg && <ArrivalTrail leg={leg} loading={loading} failed={failed} />}
     </StepSheet>
   );
+}
+
+/* ---------------------------------------------------------------------------
+ * The load, and how it got here.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The consignment, drawn as the slip that came with it.
+ *
+ * Everything on it was already being served and almost none of it was being shown.
+ * The number was an 11px chip; the carrier, the vehicle, the docket and the dates
+ * were one grey sentence at the bottom of the step; and `driver_phone` and
+ * `handed_over_by_name` were on the row and drawn NOWHERE -- which is the one thing
+ * somebody at a gate actually needs when a load is two cartons short and the truck is
+ * still outside. The driver's number is a `tel:` link now, at a size a thumb can hit
+ * while holding a clipboard.
+ *
+ * A fact with nothing behind it is not drawn, on the same rule the package card
+ * keeps: a hand-over has no carrier and no docket, and four empty cells would say the
+ * paperwork is missing rather than that there never was any.
+ *
+ * The tape across the top is the card's own state -- green once the carrier has
+ * marked it delivered, blue while it is still their responsibility, grey before it
+ * leaves -- read off the DATES on the row rather than off the status word, so this
+ * module never keeps a second private vocabulary for logistics' statuses. The status
+ * itself is printed exactly as it was served.
+ */
+function ConsignmentSlip({ no, leg, packages, loading, failed }: {
+  no: string;
+  leg?: ReceiptLeg;
+  packages: ReceiptPackage[];
+  loading: boolean;
+  failed: boolean;
+}) {
+  const landed = leg?.delivered_at ?? leg?.acknowledged_at ?? null;
+  const moving = Boolean(leg?.dispatched_at);
+  const stripe = landed
+    ? "var(--color-step-done)"
+    : moving ? "var(--color-step-live)" : "var(--color-step-off)";
+  const pill = landed
+    ? "bg-ok-bg text-ok"
+    : moving ? "bg-info-bg text-info" : "bg-content2 text-muted";
+
+  const packed = packages.some((pack) => Boolean(pack.detail));
+  const itemCount = new Set(
+    packages.flatMap((pack) => pack.lines.map((line) => line.indent_item_id))).size;
+  const weight = consignmentWeight(packages);
+  const summary = [
+    // The fallback "manifest" package is not a package: it is a delivery the
+    // warehouse never packed, and calling it "1 package" sends somebody looking for
+    // a carton with a number printed on it that was never printed.
+    packed
+      ? `${packages.length} package${packages.length === 1 ? "" : "s"}`
+      : "Not packed into cartons",
+    itemCount > 0 ? `${itemCount} item${itemCount === 1 ? "" : "s"}` : "",
+    weight,
+  ].filter(Boolean).join(" \u00b7 ");
+
+  const handle = leg?.lr_no ?? leg?.docket_no ?? null;
+  // How it travels in words, and who signed it out, exist only on the LIVE tracking
+  // payload -- the copy carried on the acknowledgement row itself is the smaller
+  // shape. Read through the narrowing so a leg served either way still draws, minus
+  // whatever that shape does not carry.
+  const rich = leg && isFullTracking(leg) ? leg : undefined;
+  const carrier = (leg?.carrier_name ?? "").trim();
+  const own = !carrier && Boolean(leg?.vehicle_number || leg?.driver_name);
+  const due = dueNote(leg);
+  const facts = [
+    (carrier || own) && {
+      key: "carrier",
+      icon: carrier ? Building2 : Truck,
+      label: carrier ? "Carrier" : "Brought by",
+      value: carrier || "Company vehicle",
+      note: [rich?.mode_label ?? leg?.mode, rich?.carriage_label]
+        .filter(Boolean).join(" \u00b7 "),
+    },
+    leg?.vehicle_number && {
+      key: "vehicle", icon: RectangleHorizontal, label: "Vehicle",
+      value: leg.vehicle_number, mono: true,
+    },
+    leg?.driver_name && {
+      key: "driver", icon: UserRound, label: "Driver", value: leg.driver_name,
+      link: leg.driver_phone
+        ? {
+          href: `tel:${leg.driver_phone.replace(/\s+/g, "")}`,
+          label: leg.driver_phone, icon: Phone,
+        }
+        : undefined,
+    },
+    handle && {
+      key: "docket", icon: FileText, label: "Docket", value: handle, mono: true,
+      link: leg?.tracking_url
+        ? { href: leg.tracking_url, label: "Track", icon: ExternalLink, external: true }
+        : undefined,
+    },
+    leg?.dispatched_at && {
+      key: "sent", icon: CalendarClock, label: "Left the warehouse",
+      value: shortDate(leg.dispatched_at),
+    },
+    leg?.expected_delivery && {
+      key: "due", icon: CalendarClock, label: "Due here",
+      value: shortDate(leg.expected_delivery),
+      note: due?.text, noteTone: due?.tone,
+    },
+    rich?.handed_over_by_name && {
+      key: "handover", icon: Signature, label: "Handed over by",
+      value: rich.handed_over_by_name,
+    },
+  ].filter(Boolean) as SlipFactRow[];
+
+  const footnote = loading
+    ? "Checking with logistics for the carrier and the docket..."
+    : failed
+      ? "Tracking is temporarily unavailable. You can still count and acknowledge."
+      : leg
+        ? ""
+        // No leg at all: `receiptConsignments` then names the stop after the INDENT,
+        // because there is no consignment number to name it after. Say so, rather
+        // than letting an indent number sit under a heading reading "consignment".
+        : "No logistics shipment was raised for this delivery, so there is no carrier"
+          + " or docket to show. You can still count it and sign.";
+
+  return (
+    <section
+      aria-label={leg ? `Consignment ${no}` : `Delivery for indent ${no}`}
+      className="overflow-hidden rounded-2xl border border-line bg-content1"
+    >
+      {/* Freight tape. The one piece of decoration on the card, and it carries the
+          state, the same way the packing tape on a package card does. */}
+      <span
+        aria-hidden
+        className="block h-2 w-full bg-content2"
+        style={{
+          backgroundImage:
+            `repeating-linear-gradient(45deg, ${stripe} 0 9px, transparent 9px 18px)`,
+        }}
+      />
+
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 pb-3.5 pt-3.5">
+        <div className="min-w-0">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">
+            {leg ? "Consignment note" : "Indent"}
+          </div>
+          {/* At the size it is printed on the paperwork. It is the one string on this
+              screen matched character by character against a piece of paper. */}
+          <div className="mt-0.5 break-all font-mono text-lg font-bold leading-tight tracking-tight text-ink sm:text-xl">
+            {no}
+          </div>
+          {summary && <div className="mt-1 text-xs text-muted">{summary}</div>}
+        </div>
+        <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${pill}`}>
+          {leg ? humanise(leg.status) : "No shipment"}
+        </span>
+      </div>
+
+      {facts.length > 0 && (
+        <dl className="grid grid-cols-2 gap-px border-t border-line bg-line sm:[grid-template-columns:repeat(auto-fit,minmax(168px,1fr))]">
+          {facts.map(({ key, ...fact }) => <SlipFact key={key} {...fact} />)}
+        </dl>
+      )}
+
+      {footnote && (
+        <p className={`border-t border-line px-4 py-2.5 text-xs ${
+          failed ? "text-warn" : "text-muted"
+        }`}>
+          {footnote}
+        </p>
+      )}
+    </section>
+  );
+}
+
+interface SlipFactRow {
+  key: string;
+  icon: typeof Truck;
+  label: string;
+  value: string;
+  mono?: boolean;
+  note?: string;
+  noteTone?: string;
+  /** A number to ring or a carrier page to open -- the two things on this card that
+   *  are an action rather than a fact, at a size a thumb can hit. */
+  link?: { href: string; label: string; icon: typeof Phone; external?: boolean };
+}
+
+function SlipFact({
+  icon: Icon, label, value, mono, note, noteTone, link,
+}: Omit<SlipFactRow, "key">) {
+  const LinkIcon = link?.icon;
+  return (
+    <div className="bg-content1 px-3 py-2.5">
+      <dt className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">
+        <Icon className="h-3 w-3" aria-hidden />
+        {label}
+      </dt>
+      <dd className="mt-1">
+        <span
+          title={value}
+          className={`block truncate text-sm font-semibold text-ink ${
+            mono ? "font-mono text-[13px]" : ""
+          }`}
+        >
+          {value}
+        </span>
+        {note && (
+          <span className={`mt-0.5 block truncate text-[11px] ${noteTone ?? "text-muted"}`}>
+            {note}
+          </span>
+        )}
+        {link && LinkIcon && (
+          <a
+            href={link.href}
+            {...(link.external ? { target: "_blank", rel: "noreferrer noopener" } : {})}
+            className="mt-1.5 inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-line bg-content2/60 px-3 text-[12px] font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
+          >
+            <LinkIcon className="h-3.5 w-3.5" aria-hidden />
+            {link.label}
+          </a>
+        )}
+      </dd>
+    </div>
+  );
+}
+
+/** One thing that happened to the load on the way here. */
+interface TrailMark {
+  key: string;
+  at: string;
+  title: string;
+  where?: string;
+  detail?: string;
+  bad?: boolean;
+}
+
+/**
+ * How it got here, in order.
+ *
+ * The step used to show the carrier's details and the single LATEST event. The
+ * details are on the slip above now, so what is left is the part that was missing:
+ * the whole trail, oldest first, ending where the person is standing. An exception
+ * keeps its own colour, because "held at Hyderabad hub, seal replaced" is the one
+ * line on this screen that explains a load turning up two days late and two cartons
+ * short -- and it is the line a claim is written from.
+ *
+ * Nothing is composed here that the shipment does not carry: every mark is a date on
+ * the row or an event off `lgs_shipment_events`, and a leg with neither draws nothing
+ * at all rather than an empty timeline suggesting the trail was lost.
+ */
+function ArrivalTrail({ leg, loading, failed }: {
+  leg: ReceiptLeg;
+  loading: boolean;
+  failed: boolean;
+}) {
+  const marks: TrailMark[] = [];
+  if (leg.dispatched_at) {
+    marks.push({ key: "sent", at: leg.dispatched_at, title: "Left the warehouse" });
+  }
+  if (isFullTracking(leg)) {
+    [...leg.events]
+      .sort((left, right) => Date.parse(left.event_at) - Date.parse(right.event_at))
+      .forEach((event, index) => marks.push({
+        key: `event-${index}`,
+        at: event.event_at,
+        title: humanise(event.event_type),
+        where: event.location_name ?? "",
+        detail: event.description ?? "",
+        bad: event.is_exception,
+      }));
+  }
+  if (leg.delivered_at) {
+    marks.push({
+      key: "delivered", at: leg.delivered_at,
+      title: "Marked delivered by the carrier",
+    });
+  }
+  if (marks.length === 0 || loading || failed) return null;
+
+  return (
+    <section>
+      <SectionLabel>How it got here</SectionLabel>
+      <ol className="mt-3">
+        {marks.map((mark, index) => {
+          const last = index === marks.length - 1;
+          return (
+            <li key={mark.key} className="relative flex gap-3 pb-4 last:pb-0">
+              {!last && (
+                <span
+                  aria-hidden
+                  className="absolute bottom-0 left-[6px] top-4 w-px bg-line"
+                />
+              )}
+              <span
+                aria-hidden
+                className={`mt-1 h-3.5 w-3.5 shrink-0 rounded-full border-2 ${
+                  mark.bad
+                    ? "border-bad bg-bad"
+                    : last
+                      ? "border-step-done bg-step-done"
+                      : "border-step-done-rail bg-content1"
+                }`}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className={`text-sm font-semibold ${mark.bad ? "text-bad" : "text-ink"}`}>
+                    {mark.title}
+                  </span>
+                  <span className="text-[11px] tabular-nums text-muted">
+                    {stamp(mark.at)}
+                  </span>
+                </div>
+                {(mark.where || mark.detail) && (
+                  <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted">
+                    {mark.where && (
+                      <span className="inline-flex items-center gap-1">
+                        <MapPin className="h-3 w-3 shrink-0" aria-hidden />
+                        {mark.where}
+                      </span>
+                    )}
+                    {mark.where && mark.detail && <span aria-hidden>&middot;</span>}
+                    {mark.detail && <span>{mark.detail}</span>}
+                  </p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * The four pictures a freight claim is settled with.
+ *
+ * "Take a photo" on its own gets one picture of a pallet from three feet away, which
+ * proves that something was delivered and nothing whatever about what condition it
+ * arrived in or who brought it. Named shots get the load as it stood, the seal, the
+ * plate that ties the load to the truck, and the damage itself.
+ *
+ * NOTHING here blocks. The sign-off asks for one photo of the delivery, exactly as it
+ * always did; this list only says which ones are worth having.
+ * ------------------------------------------------------------------------ */
+
+interface GateShot {
+  key: string;
+  /** Written into the FILE NAME on the way up and read back off it, so keep it short,
+   *  ASCII and stable: rewording one orphans the tick on every photo already filed
+   *  under the old words. They stay photos and stay on screen, drawn by their own
+   *  name -- nothing is lost, but the tile forgets them. */
+  label: string;
+  hint: string;
+  icon: typeof Camera;
+}
+
+const GATE_SHOTS: GateShot[] = [
+  {
+    key: "LOAD", label: "The load as it stands", icon: Boxes,
+    hint: "Sealed and unopened, before the first box comes off",
+  },
+  {
+    key: "SEAL", label: "The seal or lock", icon: Lock,
+    hint: "Intact or broken \u2014 photograph it either way",
+  },
+  {
+    key: "PLATE", label: "The number plate", icon: RectangleHorizontal,
+    hint: "Ties this load to the vehicle that brought it",
+  },
+  {
+    key: "DAMAGE", label: "Anything damaged", icon: AlertTriangle,
+    hint: "A crushed corner, a wet carton, torn wrap. Skip it if there is none",
+  },
+];
+
+const SHOT_SEP = " - ";
+
+/**
+ * `IMG_4821.jpg` -> `The seal or lock - IMG_4821.jpg`.
+ *
+ * The shot rides on the file name because `sys_attachments` has ONE category column
+ * and this screen has already spent it on which package a photo belongs to -- a
+ * column for a fact only this screen has is a platform change (rule 4). The extension
+ * is left exactly as it was (the server whitelists on the extension AND on the file's
+ * own leading bytes) and the whole name is capped well under the column's 300.
+ */
+function renameForShot(file: File, shot: GateShot) {
+  const dot = file.name.lastIndexOf(".");
+  const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
+  const ext = dot > 0 ? file.name.slice(dot) : "";
+  const named = `${shot.label}${SHOT_SEP}${stem}`.slice(0, 200) + ext;
+  return new File([file], named, { type: file.type });
+}
+
+/** Which shot a filed photo was taken for, or nothing. Every photo filed before today,
+ *  and every one added at a package step, reads as nothing and is drawn by its own
+ *  file name exactly as it was. */
+function shotOf(fileName?: string | null) {
+  const name = (fileName ?? "").toLowerCase();
+  return GATE_SHOTS.find(
+    (shot) => name.startsWith(`${shot.label.toLowerCase()}${SHOT_SEP}`));
+}
+
+/**
+ * One named shot, as a tile that opens the camera.
+ *
+ * The tick is REAL state, not something the browser remembers: it is "a photo filed
+ * under this name exists on this delivery", read back off the stored file name. The
+ * same fact makes the gallery underneath say what each picture is OF, where
+ * `IMG_20260919_101422.jpg` said nothing and had to be opened to find out.
+ */
+function ShotTile({ shot, count, onUpload }: {
+  shot: GateShot;
+  count: number;
+  onUpload: (file: File, base: string) => void;
+}) {
+  const Icon = shot.icon;
+  const done = count > 0;
+  return (
+    <li>
+      <label className={`flex h-full min-h-[116px] cursor-pointer flex-col gap-1.5 rounded-2xl border px-3 py-3 transition ${
+        done
+          ? "border-ok/45 bg-ok-bg/40 hover:border-ok"
+          : "border-dashed border-line bg-content2/40 hover:border-ink-500/40 hover:bg-content2"
+      }`}>
+        <span className="flex items-center justify-between gap-2">
+          <span className={`grid h-8 w-8 place-items-center rounded-lg ${
+            done ? "bg-ok/12 text-ok" : "bg-content1 text-ink-500"
+          }`}>
+            <Icon className="h-4 w-4" aria-hidden />
+          </span>
+          {done ? (
+            <span className="inline-flex items-center gap-0.5 rounded-full bg-ok px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-white">
+              <Check className="h-3 w-3" strokeWidth={3} aria-hidden />
+              {count}
+            </span>
+          ) : (
+            <Camera className="h-4 w-4 text-muted" aria-hidden />
+          )}
+        </span>
+        <span className="text-[13px] font-semibold leading-tight text-body">
+          {shot.label}
+        </span>
+        <span className={`text-[11px] leading-snug ${done ? "text-ok" : "text-muted"}`}>
+          {done ? `${count} photo${count === 1 ? "" : "s"} \u00b7 add another` : shot.hint}
+        </span>
+        <input
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) onUpload(renameForShot(file, shot), PHOTO);
+            event.target.value = "";
+          }}
+        />
+      </label>
+    </li>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * Reading the load, and the clock.
+ * ------------------------------------------------------------------------ */
+
+/** The load's weight, only when EVERY package in it was weighed: a sum over three of
+ *  five packages is a number that looks like the whole load and is not. */
+function consignmentWeight(packages: ReceiptPackage[]) {
+  const weights = packages.map((pack) => Number(pack.detail?.weight_kg ?? 0));
+  if (weights.length === 0 || weights.some((weight) => !(weight > 0))) return "";
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  return `${Number(total.toFixed(2)).toLocaleString()} kg`;
+}
+
+/** `IN_TRANSIT` -> `In transit`. The status is PRINTED, never re-worded: a private map
+ *  of logistics' statuses kept inside indents is a second vocabulary for the same
+ *  rungs, and the two drift the first time logistics adds one. */
+const humanise = (value: string) =>
+  value.replace(/_/g, " ").toLowerCase().replace(/^./, (first) => first.toUpperCase());
+
+/** Local midnight of a date or a timestamp, so `2026-09-18` never lands on the 17th
+ *  west of Greenwich. NaN for anything unparseable, and every caller checks. */
+function dayStamp(value?: string | null) {
+  const parts = (value ?? "").slice(0, 10).split("-").map(Number);
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return NaN;
+  return new Date(parts[0], parts[1] - 1, parts[2]).getTime();
+}
+
+function shortDate(value?: string | null) {
+  const stamped = dayStamp(value);
+  if (!Number.isFinite(stamped)) return (value ?? "").slice(0, 10);
+  return new Date(stamped).toLocaleDateString(undefined, {
+    day: "numeric", month: "short",
+  });
+}
+
+function stamp(value: string) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Date(parsed).toLocaleString(undefined, {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+/**
+ * Early, late, or still to come.
+ *
+ * A promised date on its own is a date; "3 days overdue" is the reason somebody is
+ * being asked about it. Measured against the day the carrier marked it delivered
+ * where there is one and against today where there is not -- so a load still on the
+ * road reads as overdue, and the same load once delivered reads as how late it was.
+ */
+function dueNote(leg?: ReceiptLeg) {
+  const due = dayStamp(leg?.expected_delivery);
+  if (!Number.isFinite(due)) return null;
+  const landed = dayStamp(leg?.delivered_at ?? leg?.acknowledged_at);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const arrived = Number.isFinite(landed);
+  const days = Math.round(((arrived ? landed : today) - due) / 86_400_000);
+  const plural = (count: number) => `${count} day${count === 1 ? "" : "s"}`;
+  if (arrived) {
+    if (days > 0) return { text: `${plural(days)} late`, tone: "text-warn" };
+    if (days < 0) return { text: `${plural(-days)} early`, tone: "text-ok" };
+    return { text: "On time", tone: "text-ok" };
+  }
+  if (days > 0) return { text: `${plural(days)} overdue`, tone: "text-bad" };
+  if (days === 0) return { text: "Due today", tone: "text-warn" };
+  return { text: `In ${plural(-days)}`, tone: "text-muted" };
 }
 
 function PackageStop({
@@ -1854,10 +2403,16 @@ function ReviewStop({
  * Two dropzones, one required and one not, and the captions say which. They were
  * identical grey chips reading "0 photo" and "0 bill" though only one of the two
  * stands between the storekeeper and the sign-off.
+ *
+ * Given `shots`, the photo half becomes that list of NAMED pictures instead of one
+ * blank "Take a photo" -- the gate asks for four, a package asks for none and keeps
+ * the plain tile. Either way the gallery, the bill and the delete rule below are the
+ * one implementation, so the two kinds of stop cannot drift on how a filed photo is
+ * drawn or taken back.
  */
 function ProofPanel({
   title, note, indentId, files, uploadPending, removePending, onUpload, onView,
-  onDelete,
+  onDelete, shots,
 }: {
   title: string;
   note: string;
@@ -1870,6 +2425,9 @@ function ProofPanel({
   onUpload: (file: File, base: string) => void;
   onView: (files: ReceiptAttachment[], index: number) => void;
   onDelete: (attachmentId: number) => void;
+  /** The named pictures worth having at this stop. Guidance, never a gate: the
+   *  sign-off asks for one photo of the delivery and nothing here changes that. */
+  shots?: GateShot[];
 }) {
   const photos = files.filter((file) => attachmentBase(file.doc_category) === PHOTO);
   const bills = files.filter((file) => attachmentBase(file.doc_category) === BILL);
@@ -1878,6 +2436,27 @@ function ProofPanel({
   // row because of its category would be the screen ignoring what it can see.
   const images = files.filter(isImage);
   const documents = files.filter((file) => !isImage(file));
+  // How many photos are filed under each named shot, off the stored file name --
+  // so the tick survives a reload, a second device and somebody else's session.
+  const taken = new Map<string, number>();
+  photos.forEach((file) => {
+    const shot = shotOf(file.file_name);
+    if (shot) taken.set(shot.key, (taken.get(shot.key) ?? 0) + 1);
+  });
+  const shotsDone = (shots ?? []).filter((shot) => taken.has(shot.key)).length;
+
+  const billTile = (
+    <UploadTile
+      icon={<FileText className="h-5 w-5" />}
+      label="Add the bill"
+      caption={bills.length > 0 ? `${bills.length} attached` : "Optional"}
+      done={bills.length > 0}
+      accept="image/*,application/pdf"
+      category={BILL}
+      onUpload={onUpload}
+    />
+  );
+
   return (
     <section>
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
@@ -1886,28 +2465,50 @@ function ProofPanel({
       </div>
       <p className="mt-1 max-w-prose text-xs text-muted">{note}</p>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <UploadTile
-          icon={<Camera className="h-5 w-5" />}
-          label={photos.length > 0 ? "Add another photo" : "Take a photo"}
-          caption={photos.length > 0
-            ? `${photos.length} attached`
-            : "Needed before you can sign"}
-          done={photos.length > 0}
-          accept="image/*"
-          category={PHOTO}
-          onUpload={onUpload}
-        />
-        <UploadTile
-          icon={<FileText className="h-5 w-5" />}
-          label="Add the bill"
-          caption={bills.length > 0 ? `${bills.length} attached` : "Optional"}
-          done={bills.length > 0}
-          accept="image/*,application/pdf"
-          category={BILL}
-          onUpload={onUpload}
-        />
-      </div>
+      {shots ? (
+        <>
+          <ul className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+            {shots.map((shot) => (
+              <ShotTile
+                key={shot.key}
+                shot={shot}
+                count={taken.get(shot.key) ?? 0}
+                onUpload={onUpload}
+              />
+            ))}
+          </ul>
+          {/* Two different facts, and only the first of them is a rule: one photo
+              lets you sign, and the rest are what an argument with a carrier is
+              settled with three weeks later. */}
+          <p className="mt-2.5 text-[11px] leading-relaxed">
+            <span className={`font-semibold ${photos.length > 0 ? "text-ok" : "text-warn"}`}>
+              {photos.length > 0
+                ? `${photos.length} photo${photos.length === 1 ? "" : "s"} filed`
+                : "No photo yet — one is needed before you can sign"}
+            </span>
+            <span className="text-muted">
+              {` · ${shotsDone} of ${shots.length} suggested shots taken. Any one photo`}
+              {" lets you sign; the others are what a claim is settled with."}
+            </span>
+          </p>
+          <div className="mt-3 sm:max-w-[340px]">{billTile}</div>
+        </>
+      ) : (
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <UploadTile
+            icon={<Camera className="h-5 w-5" />}
+            label={photos.length > 0 ? "Add another photo" : "Take a photo"}
+            caption={photos.length > 0
+              ? `${photos.length} attached`
+              : "Needed before you can sign"}
+            done={photos.length > 0}
+            accept="image/*"
+            category={PHOTO}
+            onUpload={onUpload}
+          />
+          {billTile}
+        </div>
+      )}
 
       {/* What was actually photographed, as pictures. A receipt screen that lists
           "IMG_20260919_101422.jpg" makes the person open each file to find out
@@ -1986,6 +2587,9 @@ function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
   }, [indentId, file.id]);
 
   const isBill = attachmentBase(file.doc_category) === BILL;
+  // What it is a picture OF, where the shot was named on the way up. A file name is
+  // what the phone called it, which is the one thing nobody needs to read back.
+  const shot = shotOf(file.file_name);
   return (
     <li className="group relative overflow-hidden rounded-xl border border-line bg-content2">
       <button
@@ -2007,8 +2611,10 @@ function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
       <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-5 text-[10px] font-medium text-white">
         {isBill
           ? <FileText className="h-3 w-3 shrink-0" aria-hidden />
-          : <Camera className="h-3 w-3 shrink-0" aria-hidden />}
-        <span className="truncate">{file.file_name}</span>
+          : shot
+            ? <shot.icon className="h-3 w-3 shrink-0" aria-hidden />
+            : <Camera className="h-3 w-3 shrink-0" aria-hidden />}
+        <span className="truncate">{shot?.label ?? file.file_name}</span>
       </span>
       <button
         type="button"
@@ -2173,31 +2779,5 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
         </div>
       </div>
     </li>
-  );
-}
-
-/** The shipment in one line, for a leg with no event trail to show. */
-function CompactShipmentCard({ leg }: { leg: ReceiptLeg }) {
-  const handle = leg.lr_no ?? leg.docket_no ?? null;
-  const who = leg.carrier_name
-    || [leg.vehicle_number, leg.driver_name].filter(Boolean).join(" | ");
-  return (
-    <div className="flex items-start gap-2.5">
-      <Truck className="mt-0.5 h-4 w-4 shrink-0 text-brand" aria-hidden />
-      <div className="min-w-0">
-        <div className="text-sm text-body">{who || "Hand delivery"}</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted">
-          <span className="font-mono">{leg.tr_no}</span>
-          <span aria-hidden>&middot;</span>
-          <span>{leg.status.replace(/_/g, " ").toLowerCase()}</span>
-          {handle && (
-            <>
-              <span aria-hidden>&middot;</span>
-              <span>docket <span className="font-mono text-body">{handle}</span></span>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
