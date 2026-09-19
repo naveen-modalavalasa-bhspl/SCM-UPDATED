@@ -41,6 +41,7 @@ import { ToastProvider, AppSplash } from "@/shared/components";
 // a module whose DEFAULT export is the component, and most pages here are named.
 // ---------------------------------------------------------------------------
 const AcknowledgementsPage = lazy(() => import("@/modules/indents/pages/AcknowledgementsPage"));
+const AcknowledgementDetailPage = lazy(() => import("@/modules/indents/pages/AcknowledgementDetailPage"));
 const ActivityEventPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.ActivityEventPage })));
 const AdminPage = lazy(() => import("@/modules/admin/pages/AdminPage").then((m) => ({ default: m.AdminPage })));
 const AlertProvider = lazy(() => import("@/modules/alerts").then((m) => ({ default: m.AlertProvider })));
@@ -362,6 +363,7 @@ function AppRoutes() {
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
         <Route path="indents/acknowledgements" element={<AcknowledgementsPage />} />
+        <Route path="indents/acknowledgements/:indentId" element={<AcknowledgementDetailPage />} />
         {/* The two addresses this screen used to answer on. `/indents/deliveries` was
             its own route; `/indents/acknowledgments` belonged to a duplicate page that
             was deleted while its rbac_pages row stayed active, so the rail advertised

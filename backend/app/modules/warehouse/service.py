@@ -19217,6 +19217,85 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
 
+    # Preserve the physical packing split for the requester. This query is scoped to
+    # the same visible indents and posted outbound issues as the delivery totals above;
+    # it does not widen RBAC access, it only describes packages already in those rows.
+    package_rows = (await db.execute(
+        select(
+            m.MaterialIssueLine.indent_item_id,
+            m.Dispatch.id,
+            m.Dispatch.dispatch_no,
+            m.DispatchItem.package_id,
+            m.DispatchPackage.package_no,
+            func.sum(m.DispatchItem.quantity),
+            m.DispatchPackage.package_type,
+            m.DispatchPackage.barcode,
+            m.DispatchPackage.weight_kg,
+            m.DispatchPackage.length_cm,
+            m.DispatchPackage.width_cm,
+            m.DispatchPackage.height_cm,
+            m.DispatchPackage.is_fragile,
+            m.DispatchPackage.is_temp_controlled,
+            m.DispatchPackage.packed_by_name,
+            m.DispatchPackage.packed_at,
+        )
+        .select_from(m.DispatchItem)
+        .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
+        .join(m.MaterialIssue, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .join(m.MaterialIssueLine, and_(
+            m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+            m.MaterialIssueLine.item_id == m.DispatchItem.item_id,
+            m.MaterialIssueLine.indent_item_id.isnot(None)))
+        .join(IndentItem, and_(
+            IndentItem.id == m.MaterialIssueLine.indent_item_id,
+            IndentItem.indent_id == m.DispatchItem.indent_id,
+            IndentItem.item_id == m.DispatchItem.item_id))
+        .join(m.DispatchPackage, m.DispatchPackage.id == m.DispatchItem.package_id)
+        .where(IndentItem.indent_id.in_(indent_ids),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.Dispatch.status.in_(_ON_THE_ROAD),
+               m.DispatchItem.package_id.isnot(None),
+               ~relayed)
+        .group_by(m.MaterialIssueLine.indent_item_id,
+                  m.Dispatch.id,
+                  m.Dispatch.dispatch_no,
+                  m.DispatchItem.package_id,
+                  m.DispatchPackage.package_no,
+                  m.DispatchPackage.package_type,
+                  m.DispatchPackage.barcode,
+                  m.DispatchPackage.weight_kg,
+                  m.DispatchPackage.length_cm,
+                  m.DispatchPackage.width_cm,
+                  m.DispatchPackage.height_cm,
+                  m.DispatchPackage.is_fragile,
+                  m.DispatchPackage.is_temp_controlled,
+                  m.DispatchPackage.packed_by_name,
+                  m.DispatchPackage.packed_at)
+        .order_by(m.Dispatch.id, m.DispatchPackage.id)
+    )).all()
+    packages_by_line: dict[int, list[dict]] = defaultdict(list)
+    for row in package_rows:
+        packages_by_line[row[0]].append({
+            "dispatch_id": row[1],
+            "dispatch_no": row[2],
+            "package_id": row[3],
+            "package_no": row[4],
+            "quantity": float(_d(row[5])),
+            "package_type": row[6],
+            "barcode": row[7],
+            "weight_kg": float(_d(row[8])) if row[8] is not None else None,
+            "length_cm": float(_d(row[9])) if row[9] is not None else None,
+            "width_cm": float(_d(row[10])) if row[10] is not None else None,
+            "height_cm": float(_d(row[11])) if row[11] is not None else None,
+            "is_fragile": bool(row[12]),
+            "is_temp_controlled": bool(row[13]),
+            "packed_by_name": row[14],
+            "packed_at": row[15],
+        })
+
     # ------------------------------------------------------------------
     # Which physical units left for each (indent, item)
     # ------------------------------------------------------------------
@@ -19395,6 +19474,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 # from one waiting on a shelf, and guessing it from the indent status
                 # is exactly what got a procurement line labelled "on the way".
                 "on_order_quantity": float(on_order),
+                "package_quantities": packages_by_line.get(item.id, []),
                 "pending_with": _pending_with(approved, issued, dispatched, received,
                                               indent.status, on_order),
             })
@@ -19460,6 +19540,7 @@ async def _shipments_by_indent(db: AsyncSession,
         if indent_id not in indent_ids:
             continue
         by_indent.setdefault(indent_id, []).append({
+            "dispatch_id": leg.dispatch_id,
             "tr_id": leg.id,
             "tr_no": leg.tr_no,
             "mode": leg.mode,

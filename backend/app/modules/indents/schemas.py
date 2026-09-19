@@ -255,6 +255,35 @@ class AcknowledgeIn(BaseModel):
     remarks: str | None = None
 
 
+class AcknowledgementPackageQuantityRow(BaseModel):
+    """How much of one acknowledgement line travelled in one physical package.
+
+    The package's OWN description travels with the quantity — what kind of container
+    it is, what it weighs, how big it is, whether it is fragile or cold-chain, and who
+    sealed it. A person standing in front of a delivery identifies the carton they are
+    holding by those things and not by `package_id`: the screen used to name a package
+    only by its number, so two identical-looking cartons were told apart by reading a
+    label that may be on the side facing the wall. Every field is optional because
+    every column behind it is — a load packed in a hurry carries a number and nothing
+    else, and a blank is simply not drawn.
+    """
+    dispatch_id: int | None = None
+    dispatch_no: str | None = None
+    package_id: int | None = None
+    package_no: str | None = None
+    quantity: float
+    package_type: str | None = None
+    barcode: str | None = None
+    weight_kg: float | None = None
+    length_cm: float | None = None
+    width_cm: float | None = None
+    height_cm: float | None = None
+    is_fragile: bool = False
+    is_temp_controlled: bool = False
+    packed_by_name: str | None = None
+    packed_at: datetime | None = None
+
+
 class AcknowledgementLineRow(BaseModel):
     """One indent line on the "what is owed to me" screen."""
     indent_item_id: int
@@ -281,6 +310,9 @@ class AcknowledgementLineRow(BaseModel):
     #: the whole document, so a mixed indent — one line off the shelf, one out to be
     #: bought — says nothing about which line is which.
     on_order_quantity: float = 0
+    #: Physical package split for this line. The acknowledgement itself is still per
+    #: indent line, but the receipt desk has to open the packages warehouse labelled.
+    package_quantities: list[AcknowledgementPackageQuantityRow] = Field(default_factory=list)
     # Plain-English answer to "why hasn't my stuff come yet", derived at read time from
     # the issue and dispatch state — never stored, so it cannot go stale.
     pending_with: str | None = None
@@ -294,6 +326,7 @@ class ShipmentTrackRow(BaseModel):
     with, and the carrier's tracking page is the only thing that answers "where is it
     today". Read-only — the leg itself belongs to Logistics.
     """
+    dispatch_id: int | None = None
     tr_id: int
     tr_no: str
     mode: str

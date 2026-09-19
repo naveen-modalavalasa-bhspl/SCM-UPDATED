@@ -149,7 +149,7 @@ async def transport_flow(mode: str | None = None,
 @transport_router.get("/summary", response_model=dict)
 async def transport_summary(db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.TRANSPORT_VIEW))):
-    return await service.transport_summary(db)
+    return await service.transport_summary(db, user)
 
 
 # `ids` as a comma-separated string, not repeated query params: the Consignments
