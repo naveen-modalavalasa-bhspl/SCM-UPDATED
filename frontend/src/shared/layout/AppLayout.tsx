@@ -21,6 +21,7 @@ import { ModuleTabs } from "@/shared/layout/ModuleTabs";
 import { ForbiddenPage } from "@/pages/NotFoundPage";
 import { NotificationBell } from "@/shared/layout/NotificationBell";
 import type { MenuItem } from "@/shared/types";
+import { APP_VERSION } from "@/shared/version";
 import { IndentsNav } from "@/modules/indents/components/IndentsNav";
 
 const matches = (path: string, loc: string) =>
@@ -190,6 +191,17 @@ function PoweredBy({ className = "", compact = false }: { className?: string; co
         alt="Bavya"
         className={`w-auto object-contain ${compact ? "h-[11px]" : "h-[15px]"}`}
       />
+      {/* Which build is on screen — the first thing anybody is asked when they report
+          something, and the one fact the UI never carried. Muted and plain: it sits
+          beside a brand mark, so it must read as a footnote to it and never compete
+          with it. */}
+      <span
+        className={`font-bold tabular-nums text-muted ${
+          compact ? "text-[8px]" : "text-[9px]"
+        }`}
+      >
+        v{APP_VERSION}
+      </span>
     </div>
   );
 }
@@ -511,12 +523,17 @@ export function AppLayout() {
             18px the squares alone name nothing to somebody who has not seen the
             logo before. */}
         {collapsed ? (
-          <img
-            src={bavyaGlyph}
-            alt="Powered by Bavya"
-            title="Powered by Bavya"
-            className="mt-2.5 h-[18px] w-auto shrink-0 self-center object-contain"
-          />
+          <div className="mt-2.5 flex shrink-0 flex-col items-center gap-1">
+            <img
+              src={bavyaGlyph}
+              alt="Powered by Bavya"
+              title={`Powered by Bavya · v${APP_VERSION}`}
+              className="h-[18px] w-auto object-contain"
+            />
+            <span className="text-[8px] font-bold tabular-nums text-muted">
+              v{APP_VERSION}
+            </span>
+          </div>
         ) : (
           <PoweredBy className="mt-2.5 shrink-0" />
         )}
