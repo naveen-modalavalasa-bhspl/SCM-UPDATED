@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { poApi, requisitionApi } from "../api";
+import { poApi, requisitionApi, rfqApi } from "../api";
 
 // Module-scoped smoke: the procurement API surface exists and is callable.
 describe("procurement api", () => {
@@ -26,5 +26,6 @@ describe("procurement api", () => {
   it("closes the chain from an MR and from an awarded quotation", () => {
     expect(typeof requisitionApi.createFromMr).toBe("function");
     expect(typeof poApi.createFromQuotation).toBe("function");
+    expect(typeof rfqApi.awardSplit).toBe("function");
   });
 });

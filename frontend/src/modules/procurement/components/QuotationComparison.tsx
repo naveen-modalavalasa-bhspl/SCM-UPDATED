@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Award, Check, Search, Trophy, ChevronDown, ChevronRight, Star } from "lucide-react";
 import { Can, Card, ScrollBox, StatusPill } from "@/shared/components";
 import { Button } from "./ActionButton";
@@ -135,18 +135,34 @@ function FooterRow({ label, columns, render, strong = false }: {
 }
 
 export function QuotationComparison({
-  comparison, pos, busy, onAward, onAwardSplit, onCreatePo, onOpenPo,
+  comparison, awardedQuotationIds = [], purchaseOrders = [], busy,
+  reawardable = false, liveAllocatedQuantities = {},
+  onAward, onAwardSplit, onCreatePo, onOpenPo,
 }: {
   comparison: Comparison;
-  pos?: { po_id: number; po_no: string; quotation_id?: number | null }[];
+  awardedQuotationIds?: number[];
+  purchaseOrders?: {
+    id: number; po_no: string; quotation_id?: number | null;
+    vendor_id?: number | null;
+    /** Quantity saved on this specific PO, keyed by RFQ item id. */
+    item_quantities?: Record<string, number>;
+  }[];
   busy?: boolean;
-  onAward: (quotationId: number) => void;
-  /** Share the tender out: one entry per (item, supplier) the buyer gave a quantity. */
+  /** An awarded tender with a share nobody holds an order against — a purchase order
+   *  was rejected or cancelled, so that quantity is buyable again and the split may be
+   *  reopened. Decided on the server's own list of live orders, never here. */
+  reawardable?: boolean;
+  /** vendor id -> (item id -> quantity on a live PO). This is deliberately not the
+   * saved award: a rejected/cancelled PO frees its quantity without any screen-side
+   * bookkeeping, and a re-share begins with only the quantities that remain ordered. */
+  liveAllocatedQuantities?: Record<number, Record<string, number>>;
+  onAward: (quotationIds: number[]) => void;
   onAwardSplit?: (allocations: { item_id: number; vendor_id: number; quantity: number }[]) => void;
   onCreatePo: (quotationId: number) => void;
   onOpenPo: (poId: number) => void;
 }) {
   const totals = comparison.totals ?? [];
+  const isAnyAwarded = awardedQuotationIds.length > 0;
   // Which columns are open. Empty state means "the default window" rather than
   // "nothing", so the sheet is never blank on arrival.
   const [shown, setShown] = useState<number[] | null>(null);
@@ -161,22 +177,22 @@ export function QuotationComparison({
   // Rows this vendor did not quote at all. Off by default: "did not quote" is itself
   // an answer a buyer needs to see.
   const [quotedOnly, setQuotedOnly] = useState(false);
-  const [linesExpanded, setLinesExpanded] = useState(false);
-  /**
-   * How much of each item each supplier is being given, keyed `itemId:vendorId`.
-   *
-   * THE SPLIT IS DECIDED HERE, against the prices, and not on the RFQ form where it
-   * used to live — at the moment a tender is raised nobody knows what anything costs,
-   * so the buyer was being asked to guess the answer to the question the RFQ exists to
-   * ask. Every invited supplier quotes the whole line; this is where the line is
-   * shared out between the answers that came back.
-   *
-   * Held as typed text, not numbers: a half-typed "1" on the way to "10" must not be
-   * re-rendered as 1, and an emptied box must stay empty rather than snapping to 0.
-   */
+  // An awarded sheet is normally opened to answer "how much is already ordered?".
+  // Keep the rows visible on arrival; an unawarded comparison stays compact.
+  const [linesExpanded, setLinesExpanded] = useState(isAnyAwarded);
   const [split, setSplit] = useState<Record<string, string>>({});
   const [splitting, setSplitting] = useState(false);
   const splitKey = (itemId: number, vendorId: number) => `${itemId}:${vendorId}`;
+  // A column is a QUOTATION; a split is per VENDOR. A supplier who revised their offer
+  // holds two columns that share one split key, so adding the columns up counted their
+  // share twice — the allocated line read double what was typed and items went red as
+  // over-allocated on numbers that were right. Dedupe before summing anything.
+  const splitVendorIds = useMemo(
+    () => Array.from(new Set(totals.map((total) => total.vendor_id))), [totals]);
+
+  useEffect(() => {
+    if (isAnyAwarded) setLinesExpanded(true);
+  }, [isAnyAwarded]);
 
   const columns = useMemo(() => {
     if (shown === null) return totals.slice(0, VISIBLE);
@@ -219,8 +235,29 @@ export function QuotationComparison({
     });
   }, [comparison.items, itemQuery, quotedOnly, columns]);
 
-  const isAnyAwarded = comparison.quotations.some((q) => q.status === "ACCEPTED");
-  const isSplitAward = comparison.quotations.filter((q) => q.status === "ACCEPTED").length > 1;
+  const formatQuantity = (value: number) => Number(value).toLocaleString(undefined, {
+    maximumFractionDigits: 3,
+  });
+  const liveAllocation = (itemId: number, vendorId: number) => {
+    const reported = liveAllocatedQuantities[vendorId]?.[String(itemId)];
+    if (reported != null) return Number(reported);
+    // The RFQ read normally supplies `liveAllocatedQuantities`.  The PO references
+    // are an intentional fallback: if an older/stale response omits that derived map,
+    // a visible previous PO must still not be shown as "Allocated 0".
+    return purchaseOrders.reduce((sum, po) => (
+      po.vendor_id === vendorId
+        ? sum + Number(po.item_quantities?.[String(itemId)] ?? 0)
+        : sum
+    ), 0);
+  };
+  /** What the buyer is adding now. This is deliberately separate from the live PO
+   * quantity: a re-share is an increment, never an edit to a sent PO. */
+  const additionalAward = (itemId: number, vendorId: number) => {
+    const value = Number(split[splitKey(itemId, vendorId)] ?? 0);
+    // `min=0` is only a browser affordance; a pasted negative value must not turn
+    // an "additional" award into an attempt to reduce a live PO allocation.
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  };
 
   return (
     <Card className="p-0 overflow-hidden shadow-lg border-line">
@@ -385,42 +422,83 @@ export function QuotationComparison({
                   <div className="mt-1 text-xs text-body">
                     {row.quantity} {row.uom_code ?? ""}
                   </div>
-                  {splitting && (() => {
-                    // What this row has been shared out so far, against what it asks
-                    // for. Over-allocating is shown here rather than only refused at
-                    // the save: the buyer is typing into a grid and the row is where
-                    // the arithmetic they are doing actually lives.
-                    const given = columns.reduce((sum, total) =>
-                      sum + (Number(split[splitKey(row.item_id, total.vendor_id)]) || 0), 0);
-                    const over = given > Number(row.quantity);
+                  {(isAnyAwarded || splitting) && (() => {
+                    // Allocation is historical PO state. It must never be calculated
+                    // from an editable re-share box: clearing a draft value must not
+                    // make a quantity that is already on a PO look unallocated.
+                    const allocated = splitVendorIds.reduce((sum, vendorId) =>
+                      sum + liveAllocation(row.item_id, vendorId), 0);
+                    const added = splitVendorIds.reduce((sum, vendorId) =>
+                      sum + additionalAward(row.item_id, vendorId), 0);
+                    const afterThisAward = allocated + added;
+                    const over = afterThisAward > Number(row.quantity);
                     return (
-                      <div className={`mt-1 text-[11px] font-semibold ${over ? "text-danger" : "text-muted"}`}>
-                        Allocated {given} / {row.quantity}
+                      <div className="mt-1 text-[11px] font-semibold text-muted">
+                        <div>
+                          Allocated {formatQuantity(allocated)} / {formatQuantity(Number(row.quantity))}
+                        </div>
+                        {splitting && (
+                          <div className={over ? "text-danger" : "text-body"}>
+                            After this award {formatQuantity(afterThisAward)} / {formatQuantity(Number(row.quantity))}
+                          </div>
+                        )}
                       </div>
                     );
                   })()}
                 </th>
                 {columns.map((total) => {
                   const cell = row.cells.find((c) => c.quotation_id === total.quotation_id);
+                  // Keep every earlier PO visible below the exact item it covered. A
+                  // vendor can now receive a second balance PO, so a single header
+                  // link does not tell the buyer which quantity was already sent.
+                  const earlierPos = purchaseOrders.filter((po) =>
+                    po.quotation_id === total.quotation_id
+                    && Number(po.item_quantities?.[String(row.item_id)] ?? 0) > 0,
+                  );
                   return (
                     <td key={total.quotation_id} className={`${COL} border-t border-line p-2`}>
                       {cell
                         ? <Cell cell={cell} />
                         : <div className="py-3 text-center text-xs text-muted">Not quoted</div>}
-                      {/* Only against a cell that was actually quoted: a supplier who
-                        * did not answer for this item cannot be given any of it, and
-                        * the server refuses it, so there is no box to type into. */}
+                      {cell && isAnyAwarded && (
+                        <div className="mt-2 space-y-1 text-right text-[11px] font-semibold text-muted">
+                          <div>
+                            Allocated {formatQuantity(liveAllocation(row.item_id, total.vendor_id))}
+                          </div>
+                          {earlierPos.map((po) => {
+                            const quantity = Number(
+                              po.item_quantities?.[String(row.item_id)] ?? 0,
+                            );
+                            return (
+                              <button
+                                key={po.id}
+                                type="button"
+                                onClick={() => onOpenPo(po.id)}
+                                title={`Open ${po.po_no}`}
+                                className="block ml-auto text-brand hover:underline"
+                              >
+                                {po.po_no} · previously sent {formatQuantity(quantity)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                       {splitting && cell && (
-                        <input
-                          type="number" min="0" step="0.001"
-                          value={split[splitKey(row.item_id, total.vendor_id)] ?? ""}
-                          aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
-                          onChange={(e) => setSplit((current) => ({
-                            ...current,
-                            [splitKey(row.item_id, total.vendor_id)]: e.target.value,
-                          }))}
-                          className="mt-2 min-h-9 w-full rounded-md border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
-                        />
+                        <div className="mt-2">
+                          <div className="mb-1 text-right text-[10px] font-medium uppercase tracking-wide text-muted">
+                            {isAnyAwarded ? "Additional quantity" : "Award quantity"}
+                          </div>
+                          <input
+                            type="number" min="0" step="0.001"
+                            value={split[splitKey(row.item_id, total.vendor_id)] ?? ""}
+                            aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
+                            onChange={(e) => setSplit((current) => ({
+                              ...current,
+                              [splitKey(row.item_id, total.vendor_id)]: e.target.value,
+                            }))}
+                            className="min-h-9 w-full rounded-md border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
+                          />
+                        </div>
                       )}
                     </td>
                   );
@@ -456,42 +534,60 @@ export function QuotationComparison({
             <FooterRow label="Grand total" columns={columns} strong
                        render={(t) => money(t.grand_total)} />
 
-            {/* Sharing the tender out. A row of its own above the decision, because it
-              * is a different decision from "who wins the lot": one is a column, the
-              * other is a grid. Only offered while nothing has been awarded, and only
-              * when the caller wired it. */}
-            {onAwardSplit && !isAnyAwarded && (
+            {onAwardSplit && (!isAnyAwarded || reawardable) && (
               <tr>
                 <th scope="row" className={`${PINNED} border-t border-line px-3 py-3 text-left text-xs font-medium text-muted`}>
-                  Split
+                  {isAnyAwarded ? "Re-award" : "Split award"}
                 </th>
                 <td colSpan={columns.length} className="border-t border-line px-3 py-3">
                   {!splitting ? (
                     <Can do="rfq.award">
-                      <Button variant="subtle" disabled={busy} onClick={() => setSplitting(true)}>
-                        Share between suppliers
+                      <Button variant="subtle" disabled={busy} onClick={() => {
+                        // A re-share asks only for NEW quantity. Existing PO lines
+                        // remain in `liveAllocation`, are shown as Allocated, and are
+                        // added back to the final request at submit time. Starting the
+                        // boxes at zero means entering 5 after a live 5 really creates
+                        // another PO for 5 and makes the item 10/10 allocated.
+                        setSplit({});
+                        // Every supplier that quoted an item is eligible for the new
+                        // share. Open every quotation while editing so no eligible
+                        // supplier is hidden behind the four-column default window.
+                        setShown(totals.map((total) => total.quotation_id));
+                        setSplitting(true);
+                        setLinesExpanded(true);
+                      }}>
+                        {isAnyAwarded ? "Re-share the unordered items" : "Share items between suppliers"}
                       </Button>
                     </Can>
                   ) : (() => {
-                    const allocations = Object.entries(split)
-                      .map(([key, value]) => {
-                        const [itemId, vendorId] = key.split(":").map(Number);
-                        return { item_id: itemId, vendor_id: vendorId, quantity: Number(value) };
-                      })
-                      .filter((row) => row.quantity > 0);
-                    // Refused here as well as at the server, because the buyer is
-                    // typing into a grid and should not have to press Award to find
-                    // out that one row of it does not add up.
-                    const over = rows.filter((row) => {
-                      const given = columns.reduce((sum, total) =>
-                        sum + (Number(split[splitKey(row.item_id, total.vendor_id)]) || 0), 0);
-                      return given > Number(row.quantity);
-                    });
+                    // The API stores the complete award total, but this screen accepts
+                    // only the ADDITION. Include every already-live quantity here so
+                    // it stays protected, then add the buyer's new number on top.
+                    const allocations = (comparison.items ?? []).flatMap((item) =>
+                      splitVendorIds.map((vendorId) => {
+                        const quantity = liveAllocation(item.item_id, vendorId)
+                          + additionalAward(item.item_id, vendorId);
+                        return quantity > 0
+                          ? { item_id: item.item_id, vendor_id: vendorId, quantity }
+                          : null;
+                      }).filter((row): row is {
+                        item_id: number; vendor_id: number; quantity: number;
+                      } => row !== null),
+                    );
+                    const hasAdditionalQuantity = Object.entries(split).some(([, value]) =>
+                      Number(value) > 0);
+                    // Search may hide rows, but it must not hide an over-allocation
+                    // check for a value already in the draft split.
+                    const over = (comparison.items ?? []).filter((row) => splitVendorIds.reduce((sum, vendorId) =>
+                      sum + liveAllocation(row.item_id, vendorId)
+                        + additionalAward(row.item_id, vendorId), 0)
+                      > Number(row.quantity));
                     return (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs text-muted">
-                          Type each supplier&rsquo;s share against their quoted price.
-                          An item nobody is given stays unordered.
+                          Enter each supplier&apos;s share against the item they quoted.
+                          Unallocated quantities remain open for a later purchase.
+                          {isAnyAwarded && " Allocated is already on a PO and cannot be changed here. Enter only the additional quantity; it becomes a new PO and is added to the allocated total."}
                         </span>
                         <span className="flex-1" />
                         {over.length > 0 && (
@@ -501,14 +597,19 @@ export function QuotationComparison({
                               : `${over.length} items are over-allocated.`}
                           </span>
                         )}
-                        <Button variant="subtle" onClick={() => { setSplitting(false); setSplit({}); }}>
-                          Cancel
-                        </Button>
-                        <Button
-                          disabled={busy || !allocations.length || over.length > 0}
-                          onClick={() => onAwardSplit(allocations)}
-                        >
-                          Split and award POs
+                        <Button variant="subtle" onClick={() => {
+                          setSplitting(false);
+                          setSplit({});
+                        }}>Cancel</Button>
+                        {/* One press, two acts: the split is awarded and every order it
+                            decided is raised. Four suppliers used to mean four more
+                            presses down the sheet, and a buyer who stopped halfway left
+                            a decided tender part-ordered with nothing saying so. Each
+                            order still lands in DRAFT and climbs the PO ladder. */}
+                        <Button disabled={busy || over.length > 0 || (!allocations.length
+                          || (isAnyAwarded && !hasAdditionalQuantity))}
+                                onClick={() => onAwardSplit(allocations)}>
+                          Award &amp; generate POs
                         </Button>
                       </div>
                     );
@@ -517,30 +618,30 @@ export function QuotationComparison({
               </tr>
             )}
 
-            {/* The decision row. Awarding and raising the order stay two acts with two
-              * permissions: picking a winner is not approving a spend. */}
+            {/* Award and PO creation remain separate permission-controlled acts. */}
             <tr>
               <th scope="row" className={`${PINNED} border-t border-line px-3 py-3 text-left text-xs font-medium text-muted`}>
                 Decision
               </th>
               {columns.map((total) => {
-                const isAwarded = total.status === "ACCEPTED";
-                const isAnyAwarded = comparison.quotations.some((q) => q.status === "ACCEPTED");
-                const createdPo = pos?.find((p) => p.quotation_id === total.quotation_id);
+                const won = awardedQuotationIds.includes(total.quotation_id);
+                const pos = purchaseOrders.filter(
+                  (row) => row.quotation_id === total.quotation_id);
                 return (
                   <td key={total.quotation_id} className={`${COL} border-t border-line px-3 py-3`}>
-                    {isAwarded ? (
+                    {won ? (
                       <div className="space-y-2">
                         <div className="flex items-center justify-end gap-1 text-xs font-semibold text-success">
                           <Award className="h-3.5 w-3.5" /> Awarded
                         </div>
-                        {createdPo ? (
-                          <Button variant="subtle" className="w-full" onClick={() => onOpenPo(createdPo.po_id)}>
-                            {createdPo.po_no ?? "Purchase order"}
-                          </Button>
-                        ) : isSplitAward ? (
-                          <div className="text-center text-xs text-muted">
-                            Processing PO...
+                        {pos.length > 0 ? (
+                          <div className="space-y-1">
+                            {pos.map((po) => (
+                              <Button key={po.id} variant="subtle" className="w-full"
+                                      onClick={() => onOpenPo(po.id)}>
+                                {po.po_no}
+                              </Button>
+                            ))}
                           </div>
                         ) : (
                           <Can do="po.create">
@@ -558,13 +659,9 @@ export function QuotationComparison({
                       <p className="text-right text-xs text-muted">Not selected</p>
                     ) : (
                       <Can do="rfq.award">
-                        <Button
-                          variant="subtle"
-                          className="w-full"
-                          disabled={busy}
-                          onClick={() => onAward(total.quotation_id)}
-                        >
-                          Select this quote
+                        <Button variant="subtle" className="w-full" disabled={busy}
+                                onClick={() => onAward([total.quotation_id])}>
+                          Award complete quote
                         </Button>
                       </Can>
                     )}

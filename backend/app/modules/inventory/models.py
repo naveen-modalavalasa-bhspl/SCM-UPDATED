@@ -545,3 +545,4 @@ class PositionLocationAccess(Base):
 doc_registry.register(DocType.MR.value, "inv_material_requests")
 doc_registry.register(DocType.ALLOCATION.value, "inv_allocations")
 doc_registry.register(DocType.OWN_STOCK_ALLOCATION.value, "inv_allocations")
+doc_registry.register(DocType.STOCK_MOVEMENT_ORDER.value, "inv_sto")

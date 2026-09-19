@@ -702,6 +702,7 @@ export const featureHint = (feature: MatrixFeature) =>
     + "request, so it is the real permission, not just a visible button.";
 
 export function featureGroup(code: string): string {
+  if (code === "movement.view" || code === "movement.approve") return "Actions and settings";
   if (/(^|\.)view([._]|$)/.test(code)) return "Visibility and data access";
   if (/(^|\.)(approve|reject)([._]|$)/.test(code)) return "Approval decisions";
   return "Actions and settings";
@@ -720,6 +721,9 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "rfq.create": { button: "New RFQ", where: "Procurement > RFQs (also [Create RFQ] on an approved requisition or consolidation)" },
   "transport.create": { button: "Dispatch", where: "Logistics > Dispatch > a consignment row" },
   "stock.points.manage": { button: "Tag / Access / Grant access", where: "Inventory > Stocking Points > Position row > Access" },
+  "movement.view": { button: "View Stock Movements", where: "Warehouse > Stock Movements" },
+  "movement.create": { button: "Complete movement", where: "Warehouse > Stock Movements > New Order" },
+  "movement.approve": { button: "Approve & move", where: "Warehouse > Stock Movements > Open a pending order" },
 };
 
 /* A picture of the control, for the profile builder who has never opened the screen.

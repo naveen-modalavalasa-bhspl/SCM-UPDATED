@@ -53,7 +53,7 @@ export function StockMovementPrintPage() {
     <div key={`src-${line.id}`}>
       <div className="font-mono text-[11px] text-neutral-700">{line.source_bin_code ?? "—"}</div>
       {line.batch_id && (
-        <div className="mt-0.5 text-[10px] text-neutral-500">Batch: {line.batch_id}</div>
+        <div className="mt-0.5 text-[10px] text-neutral-500">Batch: {line.batch_no ?? "—"}</div>
       )}
     </div>,
     <div key={`dst-${line.id}`}>

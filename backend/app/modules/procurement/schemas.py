@@ -531,6 +531,16 @@ class RFQVendorOut(BaseModel):
     responded_at: datetime | None = None
     mapped_item_ids: list[int] | None = None
     item_quantities: dict[str, float] | None = None
+    #: What this supplier WON, item id -> quantity, once the tender is awarded. Null on
+    #: a whole-quote award, where the winner took every line as quoted. Served so the
+    #: comparison sheet can restate an existing split when a dead purchase order sends
+    #: part of the award back to be re-split — a re-award has to say what everybody
+    #: keeps, not only what is moving.
+    awarded_quantities: dict[str, float] | None = None
+    #: What is currently covered by a live purchase order, item id -> quantity.
+    #: Computed from the PO lines on every RFQ read rather than stored beside the
+    #: award: rejecting or cancelling an order must release its quantity immediately.
+    live_allocated_quantities: dict[str, float] | None = None
 
 
 class RFQListRow(BaseModel):
@@ -561,12 +571,17 @@ class RFQListRow(BaseModel):
     created_at: datetime
 
 
-class RFQPoRef(BaseModel):
-    po_id: int
+class RFQPurchaseOrderRef(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
     po_no: str
-    po_status: str
-    vendor_id: int
-    quotation_id: int | None
+    status: str
+    quotation_id: int | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    # The original PO quantity for each item. This lets the comparison screen show
+    # exactly what was already sent before the buyer awards an additional balance.
+    item_quantities: dict[str, float] = Field(default_factory=dict)
 
 
 class RFQOut(RFQListRow):
@@ -582,12 +597,12 @@ class RFQOut(RFQListRow):
     evaluation_method: str | None = None
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
-    # The purchase orders this award became.
-    pos: list[RFQPoRef] = []
-    # Backward compatibility for the single-PO logic.
+    # The purchase order this award became. Not stored on pro_rfqs — the PO points
+    # backward at the RFQ and this is read from there, so there is one link, not two.
     po_id: int | None = None
     po_no: str | None = None
     po_status: str | None = None
+    purchase_orders: list[RFQPurchaseOrderRef] = []
     # Carried from the requisition behind it, so a tender reads on its own. Derived at
     # request time (service.get_rfq) and empty on the vendor-facing routes, which read
     # the RFQ by a different path — a supplier has no business with our indent numbers.
@@ -821,34 +836,27 @@ class QuoteOut(QuoteListRow):
 
 
 class RFQAwardAllocationIn(BaseModel):
-    """One supplier's share of one item, decided against the quoted prices."""
+    """One supplier's share of one RFQ item, decided against submitted prices."""
     item_id: int
     vendor_id: int
     quantity: float = Field(gt=0)
 
 
 class AwardIn(BaseModel):
-    """Who won, and how much of it.
-
-    Two shapes, because there are two decisions. `quotation_id` alone awards the whole
-    tender to one supplier, which is what it always did and still the common case.
-    `allocations` splits it: several suppliers each take a share of each item, and each
-    winning quotation becomes its own purchase order for exactly that share.
-
-    Exactly one of the two — an award that says both "all of it to them" and "a third
-    of it to them" is not a decision anybody can act on, and silently preferring one
-    would hide half of what the buyer pressed.
-    """
+    """Award one quotation in full, or split items between suppliers."""
     quotation_id: int | None = None
+    # Compatibility with the earlier UI. The service accepts exactly one id here;
+    # a genuine multi-supplier award must state its per-item quantities.
+    quotation_ids: Annotated[list[int], BatchIds] = []
     allocations: Annotated[list[RFQAwardAllocationIn], BatchIds] | None = None
     comments: str = ""
 
     @model_validator(mode="after")
     def _one_shape(self):
-        if bool(self.quotation_id) == bool(self.allocations):
+        if sum((bool(self.quotation_id), bool(self.quotation_ids),
+                bool(self.allocations))) != 1:
             raise ValueError(
-                "Award either one quotation or a split across suppliers, not both "
-                "and not neither.")
+                "Award one quotation or provide item allocations, not both or neither")
         return self
 
 

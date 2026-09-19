@@ -34,8 +34,10 @@ depends on it renders as black text on black for somebody.
 """
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from html import escape, unescape
 from pathlib import Path
 
@@ -46,6 +48,45 @@ LOGO_CIDS: dict[str, Path] = {
     "scm-mark": ASSET_DIR / "scm-mark.png",
     "bavya-logo": ASSET_DIR / "bavya-logo.png",
 }
+
+
+@lru_cache(maxsize=1)
+def _logo_data_uris() -> dict[str, str]:
+    """Each logo as a `data:` URI, read from disk once for the life of the process.
+
+    Two constant PNGs of about 20 KB apiece; re-reading and re-encoding them per
+    message would be pure waste. A file that cannot be read is left out rather than
+    raised, exactly as `client._attach_logos` leaves it out — a lost image must never
+    be the reason a screen 500s.
+    """
+    uris: dict[str, str] = {}
+    for cid, path in LOGO_CIDS.items():
+        try:
+            uris[cid] = ("data:image/png;base64,"
+                         + base64.b64encode(path.read_bytes()).decode("ascii"))
+        except OSError:
+            continue
+    return uris
+
+
+def inline_logos(html: str | None) -> str | None:
+    """The same markup with `cid:` logo references swapped for `data:` URIs.
+
+    WHY: `cid:` names a MIME part of the message, which only a mail client can
+    resolve. The Sent tab renders the stored html in a browser frame, where every
+    `cid:` src is a broken image — which is what the company's own letterhead looked
+    like on that screen.
+
+    Applied on the READ and never on the write: the row keeps the markup that was
+    actually sent, because that is what the log is for. Swapping at rest would put a
+    50 KB base64 blob in the database and leave the row describing a message nobody
+    received.
+    """
+    if not html:
+        return html
+    for cid, uri in _logo_data_uris().items():
+        html = html.replace(f"cid:{cid}", uri)
+    return html
 
 # The brand sweep, and the ink it is read against. Same values as `PrintPage.tsx`
 # BRAND — a printed indent and an email from the same system are the same letterhead.

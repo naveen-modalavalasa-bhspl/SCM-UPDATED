@@ -25,6 +25,7 @@ from datetime import timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
@@ -34,7 +35,7 @@ from app.platform.hcm.models import HcmEmployee
 from app.platform.mail import client, template
 from app.platform.mail.schemas import MailComposeIn, MailSendIn
 from app.platform.settings.models import (
-    EmailClaim, MailMessage, PasswordReset, UserCredential,
+    EmailClaim, MailAttachment, MailMessage, PasswordReset, UserCredential,
 )
 from app.shared.enums import EmailClaimStatus, MailKind, MailStatus
 from app.shared.models.base import utcnow
@@ -44,6 +45,12 @@ log = logging.getLogger(__name__)
 #: Same floor as `auth.service.change_password`. One rule for a password, wherever
 #: it is set — a reset that accepted a weaker one would be the way around the other.
 MIN_PASSWORD_LENGTH = 8
+
+#: The largest attachment kept in the Sent log. Everything this system attaches today
+#: is a generated PDF of a few dozen KB, so the cap is not a limit anybody meets — it
+#: is there so one oversized file can never be the reason a send fails to be recorded.
+#: Over it the manifest row is still written with `content` NULL; see the model.
+MAX_STORED_BYTES = 10 * 1024 * 1024
 
 
 def _digest(token: str) -> str:
@@ -75,23 +82,41 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
 
     `store_body=False` for password-reset mail: that body carries a live reset link
     and the Sent tab is readable by anyone holding `mail.view`, so logging it would
-    hand every reader a working takeover link for whoever asked for one.
+    hand every reader a working takeover link for whoever asked for one. It suppresses
+    the HTML and the attachments too — the markup carries the same link, and one flag
+    meaning "keep nothing of this message" is the only version of this that cannot be
+    got half right by a later caller.
 
-    The row logs `body`, the plain-text half, and never `html`: the Sent tab is a
-    record of what was said, the markup around it says nothing a reader of that tab
-    needs, and a table column holding 12 KB of inline styles per message is a cost
-    with no reader.
+    BOTH halves are logged (2026-09-11). The row used to keep `body` alone, on the
+    reasoning that the markup said nothing a reader of the tab needed. It does: for a
+    purchase order the text half is a flat list of codes and figures, and the message
+    the supplier received was a letterheaded table — so the one tab that exists to
+    answer "what did we actually send them" was answering with a document nobody sent.
+    The attachments are kept for the same reason, and by the same rule: what the
+    recipient got, not what we could rebuild today.
     """
     row = MailMessage(
         to_addrs=", ".join(to_addrs),
         cc_addrs=", ".join(cc_addrs) if cc_addrs else None,
         subject=subject,
         body=body if store_body else None,
+        body_html=html if store_body else None,
         status=MailStatus.QUEUED.value,
         kind=kind.value,
         sent_by_id=getattr(actor, "id", None),
         sent_by_name=getattr(actor, "full_name", None),
     )
+    if store_body:
+        for filename, content, content_type in attachments or []:
+            row.attachments.append(MailAttachment(
+                filename=filename,
+                content_type=content_type,
+                size_bytes=len(content or b""),
+                # Over the cap the manifest is still written — see the model. A file
+                # that went and cannot be re-read is a different fact from no file.
+                content=content if len(content or b"") <= MAX_STORED_BYTES else None,
+            ))
+    row.attachment_count = len(row.attachments)
     db.add(row)
     # Flushed, not committed: the row must exist before the send is attempted so a
     # crash leaves it QUEUED, but the transaction still belongs to the caller.
@@ -197,6 +222,73 @@ async def list_sent(db: AsyncSession, params: PageParams,
             MailMessage.sent_by_name.ilike(term),
         ))
     return await paginate(db, stmt.order_by(MailMessage.id.desc()), params)
+
+
+async def get_sent(db: AsyncSession, message_id: int) -> dict:
+    """One sent message, opened — the html half and the attachment manifest included.
+
+    A separate read from `list_sent` on purpose: the markup is the bulk of the row and
+    the list draws none of it. `selectinload` rather than a lazy relationship, because
+    the attachments are reached after the session hands the row back and a lazy load
+    under async raises MissingGreenlet.
+
+    The attachment BYTES are excluded here (`defer`): a manifest of three files must
+    not drag three PDFs through the reading pane. `download_sent_attachment` is where
+    the bytes are read, one file at a time.
+    """
+    row = await db.scalar(
+        select(MailMessage)
+        .where(MailMessage.id == message_id)
+        .options(selectinload(MailMessage.attachments)
+                 .defer(MailAttachment.content))
+    )
+    if row is None:
+        raise NotFoundError(f"Message {message_id} not found")
+    return {
+        **{c.name: getattr(row, c.name) for c in MailMessage.__table__.columns},
+        # `cid:` names a MIME part only a mail client can resolve, so the stored
+        # markup draws the letterhead as two broken boxes in a browser frame. Swapped
+        # on the way OUT; the row keeps what was sent. See `template.inline_logos`.
+        "body_html": template.inline_logos(row.body_html),
+        # Who it went out AS. The log records the recipients and the person who
+        # pressed send, never the From — there is one mailbox for the deployment and
+        # it is configuration, not a per-message fact. Served here so the reading pane
+        # can head the message the way every mail client does, rather than showing a
+        # To with no From above it.
+        "from_addr": settings.mail_from_address,
+        "from_name": settings.MAIL_FROM_NAME,
+        "attachments": [{
+            "id": a.id,
+            "filename": a.filename,
+            "content_type": a.content_type,
+            "size_bytes": a.size_bytes or 0,
+            "is_stored": a.size_bytes is not None and a.size_bytes <= MAX_STORED_BYTES,
+        } for a in row.attachments],
+    }
+
+
+async def sent_attachment(db: AsyncSession, message_id: int,
+                          attachment_id: int) -> MailAttachment:
+    """One stored file, for download. Gated on `mail.view` in the router.
+
+    Keyed on BOTH ids. `sys_mail_attachments` is one table for every message, so a
+    route taking a bare attachment id would serve any file the system has ever sent
+    to anyone — the same defect `warehouse.attachments` was fixed for, and the same
+    fix: the parent is stated and checked, never inferred from the child.
+    """
+    row = await db.scalar(
+        select(MailAttachment).where(
+            MailAttachment.id == attachment_id,
+            MailAttachment.message_id == message_id,
+        )
+    )
+    if row is None:
+        raise NotFoundError(f"Attachment {attachment_id} not found")
+    if row.content is None:
+        raise NotFoundError(
+            f"{row.filename} was sent but is not retained — it was over the "
+            f"{MAX_STORED_BYTES // (1024 * 1024)} MB the Sent log keeps")
+    return row
 
 
 async def inbox(search: str | None = None, limit: int = client.INBOX_FETCH_LIMIT):

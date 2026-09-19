@@ -356,6 +356,38 @@ PAGES: list[PageDef] = [
     PageDef("wh_qc_outward", "/warehouse/qc-outward", "Outward QC",
             parent="grp_warehouse", module="warehouse",
             icon="clipboard-check", sort_order=51),
+
+    # ------------------------------------------------------------------ #
+    #  Reports — ledgers that already existed with no way in
+    # ------------------------------------------------------------------ #
+    # `reports/ledgers.py` carries thirteen specs; the rail carried four. The rest
+    # rendered perfectly for anybody who typed the URL and were invisible to
+    # everybody else. `grp_reports` and its first four children predate this
+    # catalogue and are left exactly as they are; these three only add to the group.
+    #
+    # Stock, Assets, Consumption, Indent Tracker, Approval SLA and Acknowledgements
+    # are deliberately NOT rows here. Each is a different cut of the SAME documents
+    # the ledger above it already lists, so each is a sub-tab inside rep_inventory /
+    # rep_indents / rep_approvals — one screen, several cuts — rather than six more
+    # rail entries on a menu that is already long. Adding them here would give the
+    # same data two front doors and the menu a thirteenth row.
+    #
+    # These three are different: each draws on a document class the Reports rail does
+    # not otherwise show at all, which is also why each inherits its grant from the
+    # permission that reads that document rather than from `report.view`
+    # (permissions.INHERITS_GRANTS_FROM), and why `reports.service.readable_spec`
+    # refuses the rows to a login without it. The menu and the endpoint agree.
+    #
+    # 76-78 sits them after Live Tracking and nowhere near 71, so none of them can
+    # become the front door the left rail opens Reports on.
+    PageDef("rep_procurement", "/reports/procurement", "Procurement Ledger",
+            parent="grp_reports", module="reports", icon="shopping-cart",
+            sort_order=77),
+    PageDef("rep_transport", "/reports/transport", "Logistics Ledger",
+            parent="grp_reports", module="reports", icon="truck", sort_order=78),
+    PageDef("rep_returns", "/reports/returns", "Returns Ledger",
+            parent="grp_reports", module="reports", icon="rotate-ccw",
+            sort_order=79),
 ]
 
 

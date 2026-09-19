@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, Clock, ImageOff, Inbox, Mail,
-  MoreHorizontal, PenLine, Search, Send, ShieldCheck, X, XCircle,
+  AlertTriangle, ArrowLeft, CheckCircle2, ChevronDown, Clock, Download, ImageOff,
+  Inbox, Mail, MoreHorizontal, Paperclip, PenLine, Search, Send, ShieldCheck, X,
+  XCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button, Input, Textarea } from "@heroui/react";
@@ -80,6 +81,28 @@ interface SentMessage {
   sent_by_name?: string | null;
   sent_at?: string | null;
   created_at?: string | null;
+  /** Drawn as a paperclip on the row. On the list payload; the manifest is not. */
+  attachment_count?: number;
+  /** The html half as the recipient received it. Present only on the DETAIL read —
+   *  the list leaves it out, because an order copy is 10-15 KB of inline styles and
+   *  a page is fifty rows. Rendered in the same sandboxed frame inbound mail is. */
+  body_html?: string | null;
+  attachments?: SentAttachment[];
+  /** The mailbox it went out as. Served, not stored: one mailbox per deployment, and
+   *  it is configuration. Detail read only. */
+  from_addr?: string | null;
+  from_name?: string | null;
+}
+
+/** One file that travelled with a sent message. `is_stored` is false where the file
+ *  was over the retention cap: it went, and it is not kept — which the pane says,
+ *  rather than offering a download that would 404. */
+interface SentAttachment {
+  id: number;
+  filename: string;
+  content_type?: string | null;
+  size_bytes: number;
+  is_stored: boolean;
 }
 
 /** An address somebody typed into "forgot password", waiting to be confirmed as
@@ -108,6 +131,15 @@ const mailApi = {
   sent: (search?: string) =>
     api.get<Paginated<SentMessage>>("/api/mail/sent", {
       params: { search: search || undefined, size: 50 },
+    }).then((r) => r.data),
+  sentMessage: (id: number) =>
+    api.get<SentMessage>(`/api/mail/sent/${id}`).then((r) => r.data),
+  /* Through the api client, NOT a plain `<a href>`: this app authenticates with a
+     bearer token out of localStorage, which a browser-initiated navigation does not
+     carry — a direct link would 401 with no way for the screen to say why. */
+  attachment: (messageId: number, attachmentId: number) =>
+    api.get<Blob>(`/api/mail/sent/${messageId}/attachments/${attachmentId}`, {
+      responseType: "blob",
     }).then((r) => r.data),
   send: (body: { to: string[]; cc: string[]; subject: string; body: string }) =>
     api.post<SentMessage>("/api/mail", body).then((r) => r.data),
@@ -223,6 +255,9 @@ interface ListRow {
   /** Sent rows only: FAILED has to be visible in the LIST, not just on open. A
    *  message the server refused is the one somebody came here to find. */
   status?: string;
+  /** Sent rows only: how many files went with it, drawn as a paperclip. Whether a
+   *  purchase order carried its PDF is a thing people scan the list for. */
+  attachments?: number;
 }
 
 export function MailPage() {
@@ -322,6 +357,7 @@ export function MailPage() {
         // Nothing in the Sent log is "unread"; FAILED is what earns the bold row.
         unread: m.status === "FAILED",
         status: m.status,
+        attachments: m.attachment_count ?? 0,
       }));
 
   const shown = unreadOnly ? rows.filter((r) => r.unread) : rows;
@@ -565,6 +601,15 @@ export function MailPage() {
                             <span className="min-w-0 flex-1 truncate text-xs text-muted">
                               {row.preview || "—"}
                             </span>
+                            {!!row.attachments && (
+                              <span
+                                className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted"
+                                title={`${row.attachments} attachment${row.attachments === 1 ? "" : "s"}`}
+                              >
+                                <Paperclip className="h-3 w-3" />
+                                {row.attachments > 1 && row.attachments}
+                              </span>
+                            )}
                             {row.status && row.status !== "SENT" && (
                               <StatusChip status={row.status} />
                             )}
@@ -1052,9 +1097,29 @@ function ReadingPane({ message, onClose }: {
   const isInbox = "uid" in message;
   const [showImages, setShowImages] = useState(false);
 
+  /* A sent message is opened, not listed: the html half and the attachment manifest
+     are on the detail read alone, because the markup is the bulk of the row and the
+     list draws none of it. While it is in flight the pane still renders — off the
+     plain text the list already carried — so opening a message is never a blank
+     panel that fills in a beat later. */
+  const detail = useQuery({
+    queryKey: ["mail-sent", isInbox ? 0 : message.id],
+    queryFn: () => mailApi.sentMessage((message as SentMessage).id),
+    enabled: !isInbox,
+    staleTime: 5 * 60 * 1000,
+  });
+  const sent: SentMessage | null = isInbox
+    ? null
+    : (detail.data ?? (message as SentMessage));
+
   const subject = isInbox ? message.subject : (message.subject || "(no subject)");
   const when = isInbox ? message.date : (message.sent_at ?? message.created_at);
-  const html = isInbox ? (message.body_html || "") : "";
+  /* Our own markup for a sent message, the sender's for an inbound one — and both go
+     through `HtmlBody`. Ours is generated and inbound is not, but the frame costs
+     nothing and a sandbox that applies to only half the messages on a screen is one
+     nobody can reason about. */
+  const html = isInbox ? (message.body_html || "") : (sent?.body_html || "");
+  const attachments = sent?.attachments ?? [];
   const text = isInbox
     ? (message.body || "")
     : (message.body
@@ -1091,27 +1156,55 @@ function ReadingPane({ message, onClose }: {
           </Button>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+        {/* The envelope, labelled. It was a run of unlabelled fragments on one line,
+            so the person who pressed Send read as a stray name beside the recipient
+            and there was no From at all — on a screen whose whole job is to show
+            what left the building and who it went to. */}
+        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
           {isInbox ? (
             <>
-              <span className="font-semibold text-ink">{senderName(message.from_addr)}</span>
-              <span className="truncate">{message.from_addr}</span>
-              <span className="truncate">to {message.to_addr}</span>
+              <EnvelopeRow label="From">
+                <span className="font-semibold text-ink">{senderName(message.from_addr)}</span>
+                <span className="text-muted"> &lt;{message.from_addr}&gt;</span>
+              </EnvelopeRow>
+              <EnvelopeRow label="To">{message.to_addr}</EnvelopeRow>
+              <EnvelopeRow label="Received">{fmtDateTime(when ?? undefined)}</EnvelopeRow>
             </>
-          ) : (
+          ) : sent ? (
+            /* Read off `sent`, not off the prop: the From is on the DETAIL payload
+               alone, and `sent` falls back to the list row so every other field is
+               on screen from the first paint rather than after the fetch lands. */
             <>
-              <span className="truncate">To <span className="text-ink">{message.to_addrs}</span></span>
-              {message.cc_addrs && <span className="truncate">cc {message.cc_addrs}</span>}
-              <span>{message.sent_by_name ?? "System"}</span>
-              <StatusChip status={message.status} />
+              <EnvelopeRow label="From">
+                <span className="font-semibold text-ink">
+                  {sent.from_name || "This mailbox"}
+                </span>
+                {sent.from_addr && (
+                  <span className="text-muted"> &lt;{sent.from_addr}&gt;</span>
+                )}
+              </EnvelopeRow>
+              <EnvelopeRow label="To">{sent.to_addrs}</EnvelopeRow>
+              {sent.cc_addrs && <EnvelopeRow label="Cc">{sent.cc_addrs}</EnvelopeRow>}
+              <EnvelopeRow label="Sent">
+                {fmtDateTime(when ?? undefined)}
+                {/* Who pressed the button, which for anything a document raised is
+                    nobody — said as "the system" rather than left blank. */}
+                <span className="text-muted"> · by {sent.sent_by_name || "the system"}</span>
+                <span className="ml-2 inline-block align-middle">
+                  <StatusChip status={sent.status} />
+                </span>
+              </EnvelopeRow>
             </>
-          )}
-          <span className="ml-auto whitespace-nowrap">{fmtDateTime(when ?? undefined)}</span>
-        </div>
+          ) : null}
+        </dl>
 
-        {html && !showImages && (
+        {isInbox && html && !showImages && (
           /* Said out loud rather than silently swallowed: a message whose pictures
-             are missing with no explanation reads as a broken screen. */
+             are missing with no explanation reads as a broken screen.
+             INBOUND ONLY: the reason to block is that loading a stranger's image
+             tells them this mailbox was read. A message WE sent has our own
+             letterhead in it, there is nobody to tell, and blocking it would show
+             the company's own mail as a broken box. */
           <div className="mt-3 flex items-center gap-2 rounded-lg bg-content2 px-3 py-1.5 text-[11px] text-muted">
             <ImageOff className="h-3.5 w-3.5 shrink-0" />
             <span className="min-w-0 flex-1">
@@ -1126,6 +1219,14 @@ function ReadingPane({ message, onClose }: {
             </button>
           </div>
         )}
+
+        {attachments.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {attachments.map((file) => (
+              <SentAttachmentChip key={file.id} messageId={(message as SentMessage).id} file={file} />
+            ))}
+          </div>
+        )}
       </header>
 
       {!isInbox && message.status === "FAILED" && message.error && (
@@ -1138,10 +1239,98 @@ function ReadingPane({ message, onClose }: {
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {html
-          ? <HtmlBody html={html} showImages={showImages} />
+          ? <HtmlBody html={html} showImages={isInbox ? showImages : true} />
           : <TextBody text={text || "(no readable text in this message)"} />}
       </div>
     </>
+  );
+}
+
+/** One labelled line of the envelope — From, To, Cc, Sent.
+ *
+ *  A `dl` rather than a row of chips: these are label/value pairs and a screen reader
+ *  should read them as such. The value wraps rather than truncating, because a Cc
+ *  list cut at the pane's width is a list nobody can check. */
+function EnvelopeRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="whitespace-nowrap font-semibold uppercase tracking-wider text-[10px] leading-5 text-muted">
+        {label}
+      </dt>
+      <dd className="min-w-0 break-words leading-5 text-body">{children}</dd>
+    </>
+  );
+}
+
+/** One attachment, as a chip that downloads it.
+ *
+ *  Fetched through the api client and saved from a blob, because this app's token
+ *  lives in localStorage and a plain `<a href>` navigation carries no Authorization
+ *  header — the link would 401 and the chip would look broken. The route is gated on
+ *  `mail.view`, the same as everything else on this screen.
+ *
+ *  A file over the retention cap is drawn dead rather than hidden — it went, and
+ *  saying so is the point of keeping the manifest at all. */
+function SentAttachmentChip({ messageId, file }: {
+  messageId: number; file: SentAttachment;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const size = file.size_bytes >= 1024 * 1024
+    ? `${(file.size_bytes / (1024 * 1024)).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(file.size_bytes / 1024))} KB`;
+
+  if (!file.is_stored) {
+    return (
+      <span
+        title="Sent, but too large to keep in this log"
+        className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-line/70 bg-content2 px-2.5 py-1.5 text-[11px] text-muted"
+      >
+        <Paperclip className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{file.filename}</span>
+        <span className="shrink-0">· {size} · not kept</span>
+      </span>
+    );
+  }
+
+  const save = async () => {
+    setBusy(true);
+    setFailed(false);
+    try {
+      const blob = await mailApi.attachment(messageId, file.id);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={save}
+      disabled={busy}
+      title={failed ? "Could not download this file" : `Download ${file.filename}`}
+      className={`inline-flex min-h-9 max-w-full items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-60 ${
+        failed
+          ? "border-bad/40 bg-bad-bg text-bad"
+          : "border-line/70 bg-content1 text-ink hover:border-brand/50 hover:text-brand"
+      }`}
+    >
+      <Paperclip className="h-3.5 w-3.5 shrink-0" />
+      <span className="truncate">{file.filename}</span>
+      <span className="shrink-0 font-normal text-muted">· {size}</span>
+      {busy
+        ? <Clock className="h-3.5 w-3.5 shrink-0" />
+        : <Download className="h-3.5 w-3.5 shrink-0" />}
+    </button>
   );
 }
 

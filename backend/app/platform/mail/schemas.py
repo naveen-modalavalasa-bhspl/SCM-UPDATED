@@ -51,7 +51,13 @@ class MailSendIn(MailComposeIn):
 
 class MailMessageOut(BaseModel):
     """One row of the Sent log. `body` is present for a manual message and empty for
-    a password reset — see `MailKind`."""
+    a password reset — see `MailKind`.
+
+    Deliberately WITHOUT `body_html`: an order copy is 10-15 KB of inline styles and a
+    page of this list is 25 rows, so carrying the markup here would ship a third of a
+    megabyte to draw a list of subjects. The reading pane fetches one message at a
+    time — see `MailMessageDetailOut`.
+    """
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -65,6 +71,36 @@ class MailMessageOut(BaseModel):
     sent_by_name: str | None = None
     sent_at: datetime | None = None
     created_at: datetime | None = None
+    #: Drawn as a paperclip on the row. A plain column, never a count over the
+    #: relationship — see the model.
+    attachment_count: int = 0
+
+
+class MailAttachmentOut(BaseModel):
+    """One file that travelled with a sent message. The BYTES are not here: they are
+    fetched from the download route, one file at a time, so a reading pane never
+    carries a PDF it may not be asked for."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    filename: str
+    content_type: str | None = None
+    size_bytes: int = 0
+    #: False where the file was over the retention cap. The screen says so rather than
+    #: offering a download that would 404.
+    is_stored: bool = True
+
+
+class MailMessageDetailOut(MailMessageOut):
+    """One message, opened. Carries the html half as the recipient received it, and
+    the manifest of what went with it."""
+    body_html: str | None = None
+    attachments: list[MailAttachmentOut] = []
+    #: The address it went out as. Not a column — there is one mailbox per deployment
+    #: and it is configuration — so it is served rather than stored, which also means
+    #: a row keeps reading correctly after the mailbox is changed.
+    from_addr: str | None = None
+    from_name: str | None = None
 
 
 class InboxMessageOut(BaseModel):

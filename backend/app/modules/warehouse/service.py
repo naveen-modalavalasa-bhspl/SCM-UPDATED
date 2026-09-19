@@ -19,6 +19,7 @@ import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -3526,7 +3527,8 @@ async def _raise_inspection_for(
 
 async def list_inspections(db: AsyncSession, params: PageParams, *,
                            inspection_type: str | None = None, status: str | None = None,
-                           warehouse_id: int | None = None, search: str | None = None, user=None) -> dict:
+                           warehouse_id: int | None = None, receipt_id: int | None = None,
+                           search: str | None = None, user=None) -> dict:
     stmt = select(m.Inspection)
     if user is not None:
         # Warehouse scope, plus the inspections this person ran. Every other document
@@ -3546,6 +3548,11 @@ async def list_inspections(db: AsyncSession, params: PageParams, *,
         stmt = stmt.where(m.Inspection.status.in_(_any_case(status)))
     if warehouse_id:
         stmt = stmt.where(m.Inspection.warehouse_id == warehouse_id)
+    if receipt_id:
+        # Which inspections were raised off one receipt — what the GRN's own linked
+        # documents panel reads. Scoped by the same `scope_condition` above, so the
+        # panel can never name an inspection the login could not open on its own.
+        stmt = stmt.where(m.Inspection.receipt_id == receipt_id)
     if search:
         like = f"%{search}%"
         stmt = stmt.where(or_(
@@ -4993,6 +5000,162 @@ async def _pick_bin_for(db: AsyncSession, *, item_id: int, warehouse_id: int,
     return rows[0].bin_id
 
 
+def _unit_name_clause(mode: str, values):
+    """The named units, found through whichever column this item names them by.
+
+    The same ladder `_reserve_issue_serials` applies: a serial item is matched on its
+    serial, an IMEI item on its IMEI, and everything else on its minted asset or
+    consumable code — or the serial column, where `_place_unit_codes` writes the same
+    string for an unserialised unit.
+    """
+    if mode == UNIT_MODE_SERIAL:
+        return m.SerialNumber.serial_number.in_(values)
+    if mode == UNIT_MODE_IMEI:
+        return m.SerialNumber.imei.in_(values)
+    return or_(m.SerialNumber.asset_code.in_(values),
+               m.SerialNumber.consumable_code.in_(values),
+               m.SerialNumber.serial_number.in_(values))
+
+
+def _unit_scope_clause(*, item_id: int, warehouse_id: int, bin_id: int,
+                       batch_id: int | None):
+    """One (item, warehouse, location, batch) — exactly, unbatched included.
+
+    `whs_serial_numbers` writes NULL where `stk_balance` writes NO_BATCH, so an
+    unbatched line is `IS NULL` here. Leaving the batch out instead would let a
+    movement of the unbatched lot name units of every batch in the bay.
+    """
+    return and_(
+        m.SerialNumber.item_id == item_id,
+        m.SerialNumber.warehouse_id == warehouse_id,
+        m.SerialNumber.bin_id == bin_id,
+        m.SerialNumber.is_active.is_(True),
+        (m.SerialNumber.batch_id == batch_id) if batch_id
+        else m.SerialNumber.batch_id.is_(None),
+    )
+
+
+async def _movement_units(
+    db: AsyncSession,
+    *,
+    item,
+    warehouse_id: int,
+    bin_id: int,
+    batch_id: int | None,
+    values,
+    quantity,
+    code_config: dict | None = None,
+    doc_no: str | None = None,
+) -> tuple[list[str], list[m.SerialNumber]]:
+    """The units one movement line takes, validated against the ITEM MASTER.
+
+    The one check behind every door a movement goes through — the single move, the
+    order on the press, and the order on approval — so the three can never disagree
+    about what a line may name.
+
+    Until 2026-09-18 a movement asked only `is_serial_tracked`, matched only the
+    serial column, and asked nothing of an IMEI, asset or consumable item. Two
+    consequences: an approved order of an IMEI item was refused on approval because
+    its IMEIs were looked up as serials, and every coded unit a movement did not name
+    stayed filed at the SOURCE location after its stock had left — so Stock Balance
+    and Stock Segregation showed the units in one bay and the quantity in another.
+
+    The rule is now the issue's (`_unit_codes_required`, which mirrors the putaway
+    mint): if putaway gives this item's units an identifier, a movement names exactly
+    one per unit moved. Each must be THIS item's, at THIS location and batch,
+    available, and held by nothing else. Every refusal names the offending values.
+
+    Returns the names as given and the locked rows, in the same order.
+    """
+    names = [str(v).strip() for v in (values or []) if v and str(v).strip()]
+    label = f"{doc_no}: {item.code}" if doc_no else item.code
+    mode = _unit_mode(item)
+    noun = _UNIT_NOUN[mode]
+
+    seen: set[str] = set()
+    repeated = sorted({v for v in names if v in seen or seen.add(v)})
+    if repeated:
+        raise ValidationError(
+            f"{label}: {', '.join(repeated[:5])} named more than once")
+
+    if not await _unit_codes_required(db, item, config=code_config):
+        if names:
+            raise ValidationError(
+                f"{label} is not tracked by serial, IMEI or unit code in the item "
+                "master, so a movement of it names no units")
+        return [], []
+
+    qty = _d(quantity)
+    if qty != qty.to_integral_value():
+        raise ValidationError(
+            f"{label}: a quantity named by {noun} must be a whole number")
+    wanted = int(qty)
+    if len(names) != wanted:
+        raise ValidationError(
+            f"{label}: select exactly {wanted} {noun} for this movement "
+            f"— {len(names)} selected")
+
+    scope = _unit_scope_clause(item_id=item.id, warehouse_id=warehouse_id,
+                               bin_id=bin_id, batch_id=batch_id)
+    rows: list[m.SerialNumber] = []
+    for chunk in _in_chunks(names):
+        rows.extend((await db.execute(
+            select(m.SerialNumber).where(scope, _unit_name_clause(mode, chunk))
+            .with_for_update()
+        )).scalars().all())
+
+    by_name: dict[str, m.SerialNumber] = {}
+    for row in rows:
+        for key in _unit_keys(row, mode):
+            by_name.setdefault(key, row)
+
+    missing = [v for v in names if v not in by_name]
+    if missing:
+        # Say WHERE they are, when they exist at all — "not available" sends a
+        # storekeeper back to a shelf he has just read the label off.
+        elsewhere = (await db.execute(
+            select(m.SerialNumber).where(
+                m.SerialNumber.item_id == item.id,
+                m.SerialNumber.warehouse_id == warehouse_id,
+                _unit_name_clause(mode, missing[:50]))
+        )).scalars().all()
+        where: dict[str, m.SerialNumber] = {}
+        for row in elsewhere:
+            for key in _unit_keys(row, mode):
+                where.setdefault(key, row)
+        placed = [v for v in missing if v in where]
+        if placed:
+            bins = {where[v].bin_id for v in placed if where[v].bin_id}
+            codes = {b.id: b.code for b in (await db.execute(
+                select(Bin).where(Bin.id.in_(bins)))).scalars()} if bins else {}
+            detail = ", ".join(
+                f"{v} (at {codes.get(where[v].bin_id, 'no location')}"
+                f"{', another batch' if (where[v].batch_id or None) != (batch_id or None) else ''})"
+                for v in placed[:5])
+            raise ValidationError(
+                f"{label}: not at the source location and batch — {detail}")
+        raise ValidationError(
+            f"{label}: no such {noun} for this item — {', '.join(missing[:5])}")
+
+    chosen = [by_name[v] for v in names]
+    if len({row.id for row in chosen}) != len(chosen):
+        raise ValidationError(
+            f"{label}: two of the values name the same physical unit")
+
+    gone = [v for v, row in zip(names, chosen)
+            if row.status != SerialStatus.AVAILABLE.value]
+    if gone:
+        raise ValidationError(
+            f"{label}: no longer available — {', '.join(gone[:5])}")
+    held = [v for v, row in zip(names, chosen)
+            if any((row.remarks or "").startswith(prefix)
+                   for prefix in _CLAIMED_REMARK_PREFIXES)]
+    if held:
+        raise ValidationError(
+            f"{label}: reserved for a material issue — {', '.join(held[:5])}")
+    return names, chosen
+
+
 async def stock_availability(
     db: AsyncSession,
     *,
@@ -5001,8 +5164,13 @@ async def stock_availability(
     item_id: int,
     batch_id: int | None = None,
 ) -> dict:
+    """What one movement line can take from its source, and how it must name it.
+
+    `serial_numbers` is no longer filled: it was the whole bay's list in one response,
+    and one bay here holds 464,981 units. The screen pages them through `/serials`;
+    this says how many there are, bounded, and which identifier the line wants.
+    """
     from app.modules.inventory.models import Stock
-    from app.shared.models.master import Item
 
     item = await _get(db, Item, item_id, "Item")
 
@@ -5014,26 +5182,37 @@ async def stock_availability(
     if batch_id:
         stmt = stmt.where(Stock.batch_id == batch_id)
     available = _d(await db.scalar(stmt))
-    serial_stmt = select(m.SerialNumber).where(
-        m.SerialNumber.warehouse_id == warehouse_id,
-        m.SerialNumber.bin_id == source_bin_id,
-        m.SerialNumber.item_id == item_id,
-        m.SerialNumber.status == SerialStatus.AVAILABLE.value,
-        m.SerialNumber.is_active.is_(True),
-    )
-    if batch_id:
-        serial_stmt = serial_stmt.where(m.SerialNumber.batch_id == batch_id)
-    serials = (await db.execute(
-        serial_stmt.order_by(m.SerialNumber.serial_number)
-    )).scalars().all()
+
+    required = await _unit_codes_required(db, item)
+    units = None
+    if required:
+        # Stops at the ceiling for the reason `_issue_unit_supply` gives: a plain
+        # COUNT of a half-million-unit bay is ten seconds for a number nobody reads
+        # past "enough".
+        probe = (select(m.SerialNumber.id).where(
+            _unit_scope_clause(item_id=item_id, warehouse_id=warehouse_id,
+                               bin_id=source_bin_id, batch_id=batch_id),
+            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+            _unit_claim_free_clause(None),
+        ).limit(_SUPPLY_PROBE_CEILING + 1)).subquery()
+        units = int(await db.scalar(select(func.count()).select_from(probe)) or 0)
+
+    index = await _location_index(db, warehouse_id)
+    node = index.get(source_bin_id) or {}
+    batch = await db.get(m.Batch, batch_id) if batch_id else None
     return {
         "available_qty": available,
-        "is_serial_tracked": item.is_serial_tracked,
-        "serial_numbers": [
-            row.serial_number
-            for row in serials
-            if not (row.remarks or "").startswith("Reserved for issue ")
-        ],
+        "is_serial_tracked": bool(item.is_serial_tracked),
+        "serial_numbers": [],
+        "units_required": required,
+        "unit_mode": _unit_mode(item),
+        "tracking_type": (_tracking_type(item, has_units=True) if required
+                          else TrackingType.NONE.value),
+        "units_available": units,
+        "units_capped": units is not None and units > _SUPPLY_PROBE_CEILING,
+        "bin_code": node.get("code"),
+        "bin_path": node.get("path"),
+        "batch_no": batch.batch_no if batch else None,
     }
 
 
@@ -5073,38 +5252,10 @@ async def create_stock_movement(
             f"Only {available} is available in source bin {source.code}"
         )
 
-    serial_numbers = [
-        value.strip() for value in (data.serial_numbers or []) if value.strip()
-    ]
-    if len(serial_numbers) != len(set(serial_numbers)):
-        raise ValidationError("Movement serial numbers must be unique")
-    serial_rows: list[m.SerialNumber] = []
-    if item.is_serial_tracked:
-        quantity = _d(data.quantity)
-        if quantity != quantity.to_integral_value() \
-                or len(serial_numbers) != int(quantity):
-            raise ValidationError(
-                f"Select exactly {int(quantity)} serial numbers for this movement"
-            )
-        serial_rows = (await db.execute(
-            select(m.SerialNumber).where(
-                m.SerialNumber.item_id == item.id,
-                m.SerialNumber.warehouse_id == wh.id,
-                m.SerialNumber.bin_id == source.id,
-                m.SerialNumber.batch_id == (data.batch_id if data.batch_id else None),
-                m.SerialNumber.serial_number.in_(serial_numbers),
-                m.SerialNumber.status == SerialStatus.AVAILABLE.value,
-                m.SerialNumber.is_active.is_(True),
-            ).with_for_update()
-        )).scalars().all()
-        if len(serial_rows) != len(serial_numbers):
-            raise ValidationError(
-                "One or more serial numbers are not available in the source bin"
-            )
-        if any((row.remarks or "").startswith("Reserved for issue ") for row in serial_rows):
-            raise ValidationError("A selected serial is reserved for a material issue")
-    elif serial_numbers:
-        raise ValidationError(f"{item.code} is not serial tracked")
+    serial_numbers, serial_rows = await _movement_units(
+        db, item=item, warehouse_id=wh.id, bin_id=source.id,
+        batch_id=data.batch_id or None, values=data.serial_numbers,
+        quantity=data.quantity)
 
     movement_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT.value)
     await move_stock(
@@ -5120,6 +5271,7 @@ async def create_stock_movement(
         bin_id=source.id,
         batch_id=batch_id,
         project_id=0,
+        serial_numbers=serial_numbers,
     )
     await move_stock(
         db,
@@ -5134,6 +5286,7 @@ async def create_stock_movement(
         bin_id=destination.id,
         batch_id=batch_id,
         project_id=0,
+        serial_numbers=serial_numbers,
     )
     # One statement for the units this movement carries, whatever its size.
     await _set_unit_fields(db, [row.id for row in serial_rows],
@@ -5183,8 +5336,83 @@ async def create_stock_movement(
     }
 
 
+async def _smo_approver(db: AsyncSession, order) -> str | None:
+    """Who a pending movement is waiting on, read from the engine each time.
+
+    `inv_sto` carries no approver column — a stored name goes stale the moment a rung
+    is acted on elsewhere — so it is derived, and only for an order still waiting.
+    """
+    if order.status != MovementOrderStatus.PENDING_APPROVAL.value:
+        return None
+    return _approver_label(
+        await engine.current_approvers(db, DocType.STOCK_MOVEMENT_ORDER.value, order.id),
+        await _approver_rank(db, DocType.STOCK_MOVEMENT_ORDER.value, order.id))
+
+
+async def _smo_read(db: AsyncSession, order) -> dict:
+    """One `inv_sto` SMO row, in the `StockMovementOrderRead` shape.
+
+    Bin codes and batch numbers are read in one query each for the whole document.
+    """
+    lines = list(order.items)
+    bin_ids = {i for line in lines for i in (line.source_bin_id, line.destination_bin_id) if i}
+    bin_codes = {b.id: b.code for b in (await db.execute(
+        select(Bin).where(Bin.id.in_(bin_ids)))).scalars()} if bin_ids else {}
+    batch_ids = {line.batch_id for line in lines if line.batch_id}
+    batch_nos = {b.id: b.batch_no for b in (await db.execute(
+        select(m.Batch).where(m.Batch.id.in_(batch_ids)))).scalars()} if batch_ids else {}
+    return {
+        "id": order.id,
+        "order_no": order.sto_no,
+        "warehouse_id": order.from_warehouse_id,
+        "warehouse_name": order.from_warehouse_name,
+        "status": order.status,
+        "current_approver_name": await _smo_approver(db, order),
+        "reason": order.remarks,
+        "total_lines": len(lines),
+        "created_by_name": order.requested_by_name,
+        "created_at": order.created_at,
+        "items": [{
+            "id": line.id,
+            "order_id": order.id,
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "source_bin_id": line.source_bin_id,
+            "source_bin_code": bin_codes.get(line.source_bin_id),
+            "destination_bin_id": line.destination_bin_id,
+            "destination_bin_code": bin_codes.get(line.destination_bin_id),
+            "quantity": line.requested_qty,
+            "batch_id": line.batch_id or None,
+            "batch_no": batch_nos.get(line.batch_id) if line.batch_id else None,
+            "serial_numbers": line.serial_numbers or [],
+        } for line in lines],
+    }
+
+
+async def _smo_by(db: AsyncSession, *, order_id: int | None = None,
+                  order_no: str | None = None, lock: bool = False):
+    from app.modules.inventory.models import StockTransferOrder, STO_KIND_MOVEMENT
+
+    q = select(StockTransferOrder).where(StockTransferOrder.doc_kind == STO_KIND_MOVEMENT)
+    q = q.options(selectinload(StockTransferOrder.items))
+    q = q.where(StockTransferOrder.id == order_id) if order_id is not None \
+        else q.where(StockTransferOrder.sto_no == order_no)
+    if lock:
+        q = q.with_for_update()
+    return (await db.execute(q)).scalars().first()
+
+
 async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
+    """An SMO is read off its `inv_sto` row — the only place a DRAFT or a pending
+    order exists. The ledger reconstruction below is kept for movements completed
+    before the header row was written, which have nothing else."""
     from app.modules.inventory.models import StockMovement
+
+    order = await _smo_by(db, order_no=order_no)
+    if order is not None:
+        return await _smo_read(db, order)
 
     rows = (await db.execute(
         select(StockMovement)
@@ -5194,15 +5422,33 @@ async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
     )).scalars().all()
 
     if not rows:
-        raise ValidationError("Stock movement order not found")
+        raise NotFoundError("Stock movement order not found")
 
     items = []
     out_rows = [r for r in rows if r.direction == StockDirection.OUT.value]
     in_rows = [r for r in rows if r.direction == StockDirection.IN.value]
 
+    # The batch NUMBER, which is what is printed on the goods. The ledger snapshots
+    # it, but not on every path, so a row without one is read off the batch master —
+    # one query for the document. NO_BATCH (0) is "unbatched", never a batch.
+    batch_ids = {r.batch_id for r in out_rows if r.batch_id and not r.batch_no}
+    batch_nos = {b.id: b.batch_no for b in (await db.execute(
+        select(m.Batch).where(m.Batch.id.in_(batch_ids)))).scalars()} if batch_ids else {}
+
     for i in range(min(len(out_rows), len(in_rows))):
         out_r = out_rows[i]
         in_r = in_rows[i]
+        serial_strings = out_r.serial_numbers or []
+        if not serial_strings:
+            serials = (await db.execute(select(m.SerialNumber).where(
+                m.SerialNumber.remarks == f"Moved by {order_no}"
+            ))).scalars().all()
+            serial_strings = [
+                row.serial_number or row.imei or row.asset_code or row.consumable_code
+                for row in serials
+            ]
+            serial_strings = [s for s in serial_strings if s]
+
         items.append({
             "id": i + 1,
             "order_id": 0,
@@ -5215,8 +5461,10 @@ async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
             "destination_bin_id": in_r.bin_id,
             "destination_bin_code": in_r.bin_code,
             "quantity": out_r.quantity,
-            "batch_id": out_r.batch_id,
-            "serial_numbers": []
+            "batch_id": out_r.batch_id or None,
+            "batch_no": (out_r.batch_no or batch_nos.get(out_r.batch_id))
+                        if out_r.batch_id else None,
+            "serial_numbers": serial_strings
         })
 
     first = rows[0]
@@ -5225,7 +5473,7 @@ async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
         "order_no": order_no,
         "warehouse_id": first.warehouse_id,
         "warehouse_name": first.warehouse_name,
-        "status": "COMPLETED",
+        "status": MovementOrderStatus.COMPLETED.value,
         "reason": first.remarks,
         "created_by_name": first.created_by_name,
         "created_at": first.created_at,
@@ -5235,61 +5483,107 @@ async def get_stock_movement_order(db: AsyncSession, order_no: str) -> dict:
 
 async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
                                      search: str | None = None, user=None) -> dict:
-    """Multi-line bin-to-bin movements, rebuilt from the ledger.
+    """Every stock movement order, newest first, whatever its status.
 
-    There is no header table. `whs_stock_movement_orders` and its items table were
-    mapped and queried but have never existed on this database, so both endpoints
-    answered 1054. They are not needed: every line of a movement already writes its
-    OUT and IN through `move_stock` under one `ref_no` drawn from `sys_doc_series`,
-    which is what makes it one document — the same way `list_stock_movements` reads
-    the single-line version back. A second copy of the same fact could only drift
-    from `stk_ledger`, and the ledger is the append-only record (rule 7).
+    Two sources, one list. An SMO has an `inv_sto` row (doc_kind SMO) from the moment
+    it is saved as a DRAFT, and that row is the only place a draft, a pending or a
+    rejected order exists. Movements completed before the header row was written have
+    only their ledger lines, grouped by `ref_no` as before; a `ref_no` that has a
+    header row is taken from the header and never counted twice.
     """
-    from app.modules.inventory.models import StockMovement
+    from app.modules.inventory.models import (
+        StockMovement, StockTransferOrder, StockTransferOrderItem, STO_KIND_MOVEMENT,
+    )
 
-    grouped = (
+    line_count = (
+        select(func.count()).select_from(StockTransferOrderItem)
+        .where(StockTransferOrderItem.sto_id == StockTransferOrder.id)
+        .correlate(StockTransferOrder).scalar_subquery()
+    )
+    headers = (
+        select(
+            StockTransferOrder.sto_no.label("order_no"),
+            StockTransferOrder.id.label("id"),
+            StockTransferOrder.from_warehouse_id.label("warehouse_id"),
+            StockTransferOrder.from_warehouse_name.label("warehouse_name"),
+            line_count.label("total_lines"),
+            StockTransferOrder.status.label("status"),
+            StockTransferOrder.created_at.label("created_at"),
+            StockTransferOrder.requested_by_name.label("created_by_name"),
+            StockTransferOrder.remarks.label("reason"),
+        )
+        .where(StockTransferOrder.doc_kind == STO_KIND_MOVEMENT)
+    )
+    header_nos = select(StockTransferOrder.sto_no).where(
+        StockTransferOrder.doc_kind == STO_KIND_MOVEMENT)
+    legacy = (
         select(
             StockMovement.ref_no.label("order_no"),
-            func.max(StockMovement.id).label("last_id"),
+            literal(0).label("id"),
             func.max(StockMovement.warehouse_id).label("warehouse_id"),
             func.max(StockMovement.warehouse_name).label("warehouse_name"),
             func.count().label("total_lines"),
+            literal(MovementOrderStatus.COMPLETED.value).label("status"),
             func.max(StockMovement.created_at).label("created_at"),
             func.max(StockMovement.created_by_name).label("created_by_name"),
             func.max(StockMovement.remarks).label("reason"),
         )
         .where(StockMovement.ref_type == InventoryRefType.STOCK_MOVEMENT.value,
-               StockMovement.direction == StockDirection.OUT.value)
+               StockMovement.direction == StockDirection.OUT.value,
+               StockMovement.ref_no.not_in(header_nos))
         .group_by(StockMovement.ref_no)
     )
     # FIXED 2026-08-20 — same leak as `list_stock_movements`, and it has to be applied
     # BEFORE the GROUP BY: filtering afterwards would still count another warehouse's
     # lines into this login's totals even where the row itself was hidden.
     if user is not None:
-        grouped = grouped.where(await scope_condition(
+        wh_ids = await warehouse_ids_for_user(db, user)
+        headers = headers.where(await scope_condition(
+            db, user,
+            warehouse_col=StockTransferOrder.from_warehouse_id,
+            warehouse_ids=wh_ids,
+            owner_col=StockTransferOrder.requested_by_id,
+        ))
+        legacy = legacy.where(await scope_condition(
             db, user,
             warehouse_col=StockMovement.warehouse_id,
-            warehouse_ids=await warehouse_ids_for_user(db, user),
+            warehouse_ids=wh_ids,
             project_col=StockMovement.project_id,
             owner_col=StockMovement.created_by_id,
         ))
     if search:
         like = f"%{search}%"
-        grouped = grouped.having(or_(
+        headers = headers.where(or_(
+            StockTransferOrder.sto_no.ilike(like),
+            StockTransferOrder.from_warehouse_name.ilike(like),
+            StockTransferOrder.remarks.ilike(like)))
+        legacy = legacy.having(or_(
             StockMovement.ref_no.ilike(like),
             func.max(StockMovement.warehouse_name).ilike(like)))
-    grouped = grouped.order_by(func.max(StockMovement.id).desc())
 
-    total = await db.scalar(select(func.count()).select_from(grouped.subquery()))
+    # Both halves are narrow and JSON-free by now, so ordering the union is cheap.
+    both = headers.union_all(legacy).subquery()
+    total = await db.scalar(select(func.count()).select_from(both))
     rows = (await db.execute(
-        grouped.offset(params.offset).limit(params.size))).all()
+        select(both).order_by(both.c.created_at.desc(), both.c.order_no.desc())
+        .offset(params.offset).limit(params.size))).all()
+
+    pending = [r.id for r in rows
+               if r.id and r.status == MovementOrderStatus.PENDING_APPROVAL.value]
+    waiting_on: dict[int, str | None] = {}
+    for order_id in pending:
+        waiting_on[order_id] = _approver_label(
+            await engine.current_approvers(db, DocType.STOCK_MOVEMENT_ORDER.value, order_id),
+            await _approver_rank(db, DocType.STOCK_MOVEMENT_ORDER.value, order_id))
     return {
         "items": [{
+            "id": r.id or 0,
             "order_no": r.order_no,
             "warehouse_id": r.warehouse_id,
             "warehouse_name": r.warehouse_name,
-            "total_lines": r.total_lines,
-            "status": "COMPLETED",
+            "total_lines": r.total_lines or 0,
+            "status": r.status,
+            "current_approver_name": waiting_on.get(r.id),
             "reason": r.reason,
             "created_by_name": r.created_by_name,
             "created_at": r.created_at,
@@ -5301,14 +5595,16 @@ async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
 #: What an SMO can be. Deliberately NOT the STO status set: a transfer has DISPATCHED
 #: and RECEIVED rungs that a bin-to-bin move has no meaning for, and reusing them would
 #: leave a movement able to sit in a state nothing can act on.
-class MovementOrderStatus:
-    PENDING_APPROVAL = IssueStatus.PENDING_APPROVAL
-    COMPLETED = IssueStatus.APPROVED
-    REJECTED = IssueStatus.REJECTED
+class MovementOrderStatus(str, Enum):
+    DRAFT = IssueStatus.DRAFT.value
+    PENDING_APPROVAL = IssueStatus.PENDING_APPROVAL.value
+    #: Stored as APPROVED: approval is the moment the bins change hands.
+    COMPLETED = IssueStatus.APPROVED.value
+    REJECTED = IssueStatus.REJECTED.value
 
 
 async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
-                              batch_id, quantity, serial_rows, order_no, user) -> None:
+                              batch_id, quantity, serial_rows, serial_numbers, order_no, user) -> None:
     """Move ONE line out of its source bin and into its destination bin.
 
     The physical half of a movement, in one place so the immediate path (no ladder
@@ -5324,6 +5620,7 @@ async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
             ref_type=InventoryRefType.STOCK_MOVEMENT.value,
             ref_id=0, ref_no=order_no, user=user,
             warehouse_id=wh.id, bin_id=bin_row.id, batch_id=batch_id, project_id=0,
+            serial_numbers=serial_numbers,
         )
     # One statement for the units this order carries, whatever its size.
     await _set_unit_fields(db, [row.id for row in serial_rows],
@@ -5344,6 +5641,7 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
     from app.modules.inventory.models import Stock
 
     wh = await _warehouse(db, order.from_warehouse_id)
+    code_config = await codeformat.code_settings(db)
     for line in order.items:
         item = await _item_snapshot(db, line.item_id)
         source = await _get(db, Bin, line.source_bin_id, "Source bin")
@@ -5363,32 +5661,20 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
                 f"{source.code} — this order was raised for {_d(line.requested_qty)}. "
                 "The stock moved after it was raised; reject it and raise it again."
             )
-        serial_rows: list[m.SerialNumber] = []
-        wanted = [v for v in (line.serial_numbers or []) if str(v).strip()]
-        if wanted:
-            serial_rows = (await db.execute(
-                select(m.SerialNumber).where(
-                    m.SerialNumber.item_id == item.id,
-                    m.SerialNumber.warehouse_id == wh.id,
-                    m.SerialNumber.bin_id == source.id,
-                    m.SerialNumber.serial_number.in_(wanted),
-                    m.SerialNumber.status == SerialStatus.AVAILABLE.value,
-                    m.SerialNumber.is_active.is_(True),
-                ).with_for_update()
-            )).scalars().all()
-            if len(serial_rows) != len(wanted):
-                raise ValidationError(
-                    f"{order.sto_no}: one or more units of {item.code} are no longer "
-                    "available in the source bin."
-                )
+        # The same check the order passed when it was raised, run again: between the
+        # press and the signature a named unit can be issued, reserved or moved.
+        serial_numbers, serial_rows = await _movement_units(
+            db, item=item, warehouse_id=wh.id, bin_id=source.id,
+            batch_id=line.batch_id or None, values=line.serial_numbers or [],
+            quantity=line.requested_qty, code_config=code_config,
+            doc_no=order.sto_no)
         await _move_movement_line(
             db, wh, item, source, destination, batch_id,
-            line.requested_qty, serial_rows, order.sto_no, user)
+            line.requested_qty, serial_rows, serial_numbers, order.sto_no, user)
 
     order.status = MovementOrderStatus.COMPLETED.value
     order.approved_by_name = _name(user)
     order.approved_at = utcnow()
-    order.current_approver_name = None
 
 
 async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: str,
@@ -5399,14 +5685,7 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
     what finally moves anything — see `_perform_movement_order`, which re-checks the
     shelf before it does.
     """
-    from app.modules.inventory.models import StockTransferOrder, STO_KIND_MOVEMENT
-
-    order = (await db.execute(
-        select(StockTransferOrder).where(
-            StockTransferOrder.id == order_id,
-            StockTransferOrder.doc_kind == STO_KIND_MOVEMENT,
-        )
-    )).scalars().first()
+    order = await _smo_by(db, order_id=order_id, lock=True)
     if order is None:
         raise NotFoundError(f"Stock movement order {order_id} not found")
     _guard(order.status, {MovementOrderStatus.PENDING_APPROVAL.value},
@@ -5421,14 +5700,7 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
         await _perform_movement_order(db, order, user)
     elif instance.status == InstanceStatus.REJECTED.value:
         order.status = MovementOrderStatus.REJECTED.value
-        order.current_approver_name = None
-    else:
-        # More rungs to climb: the next approver's name goes on the document.
-        order.current_approver_name = _approver_label(
-            await engine.current_approvers(
-                db, DocType.STOCK_MOVEMENT_ORDER.value, order.id),
-            await _approver_rank(
-                db, DocType.STOCK_MOVEMENT_ORDER.value, order.id))
+    # Otherwise more rungs to climb; the next approver is read, never stored.
 
     await write_audit(
         db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
@@ -5439,7 +5711,7 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
     await db.commit()
     return {
         "id": order.id, "order_no": order.sto_no, "status": order.status,
-        "current_approver_name": order.current_approver_name,
+        "current_approver_name": await _smo_approver(db, order),
     }
 
 
@@ -5462,20 +5734,6 @@ async def create_stock_movement_order(
 
     wh = await _warehouse(db, data.warehouse_id)
 
-    # Does anybody have to sign for this? Asked BEFORE anything is written, which is
-    # the same guard `dispatch_consignment` and `submit_receipt` use, and for the same
-    # reason: with no ladder configured — which is every project today — this function
-    # behaves EXACTLY as it always did, moves the stock on the press and returns
-    # COMPLETED. Only a project that has deliberately built a chain gets the extra rung.
-    #
-    # `engine.start` is deliberately NOT called unconditionally. With nothing configured
-    # the engine climbs the raiser's reporting line, which would put every bin-to-bin
-    # movement into a stranger's queue.
-    project_id, project_name = await wf_ladder.project_for(
-        db, getattr(user, "active_position_id", None), user)
-    needs_approval = await wf_ladder.find_ladder(
-        db, project_id, DocType.STOCK_MOVEMENT_ORDER.value) is not None
-
     # Its OWN series (2026-08-21). This drew on STOCK_MOVEMENT, which meant two
     # things at once: an order and a plain bin-to-bin movement shared one running
     # number, and the three-letter prefix fallback rendered both as "STO" — the
@@ -5484,6 +5742,14 @@ async def create_stock_movement_order(
     # different meaning. An SMO now reads SMO.
     order_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value)
     moved: list[dict] = []
+    # Read once: the code toggle cannot differ between two lines of one order.
+    code_config = await codeformat.code_settings(db)
+
+    allowed_bins = await floor_scope_ids(db, user)
+    if allowed_bins is not None and not allowed_bins:
+        raise ValidationError("No warehouse floor is assigned to your HCM position")
+
+    is_cross_floor = False
 
     for line in data.items:
         source = await _get(db, Bin, line.source_bin_id, "Source bin")
@@ -5492,6 +5758,11 @@ async def create_stock_movement_order(
             raise ValidationError("Source and destination bins must be different")
         if source.warehouse_id != wh.id or destination.warehouse_id != wh.id:
             raise ValidationError("Both bins must belong to the selected warehouse")
+        if allowed_bins is not None:
+            if source.id not in allowed_bins or destination.id not in allowed_bins:
+                raise ValidationError("You can only move stock within your assigned floors")
+        if getattr(source, "floor_level", None) != getattr(destination, "floor_level", None):
+            is_cross_floor = True
         # Not restricted to BIN rungs: putaway may place stock on a lane or a rack
         # (see `confirm_putaway`), and stock that can be put somewhere has to be
         # movable off it again or it is stranded there for good.
@@ -5515,53 +5786,12 @@ async def create_stock_movement_order(
                 f"Only {available} is available in source bin {source.code} for item {item.code}"
             )
 
-        serial_numbers = [
-            value.strip() for value in (line.serial_numbers or []) if value.strip()
-        ]
-        if len(serial_numbers) != len(set(serial_numbers)):
-            raise ValidationError("Movement serial numbers must be unique")
-        serial_rows: list[m.SerialNumber] = []
-        if item.is_serial_tracked:
-            quantity = _d(line.quantity)
-            if quantity != quantity.to_integral_value() \
-                    or len(serial_numbers) != int(quantity):
-                raise ValidationError(
-                    f"Select exactly {int(quantity)} serial numbers for {item.code}"
-                )
-            serial_rows = (await db.execute(
-                select(m.SerialNumber).where(
-                    m.SerialNumber.item_id == item.id,
-                    m.SerialNumber.warehouse_id == wh.id,
-                    m.SerialNumber.bin_id == source.id,
-                    m.SerialNumber.batch_id == (line.batch_id if line.batch_id else None),
-                    m.SerialNumber.serial_number.in_(serial_numbers),
-                    m.SerialNumber.status == SerialStatus.AVAILABLE.value,
-                    m.SerialNumber.is_active.is_(True),
-                ).with_for_update()
-            )).scalars().all()
-            if len(serial_rows) != len(serial_numbers):
-                raise ValidationError(
-                    f"One or more serial numbers are not available in the source bin for {item.code}"
-                )
-            if any((row.remarks or "").startswith("Reserved for issue ") for row in serial_rows):
-                raise ValidationError(f"A selected serial is reserved for a material issue on {item.code}")
-        elif serial_numbers:
-            raise ValidationError(f"{item.code} is not serial tracked")
+        serial_numbers, serial_rows = await _movement_units(
+            db, item=item, warehouse_id=wh.id, bin_id=source.id,
+            batch_id=line.batch_id or None, values=line.serial_numbers,
+            quantity=line.quantity, code_config=code_config,
+            doc_no=order_no)
 
-        # THE MOVE, only when nobody has to sign for it.
-        #
-        # Everything above this line is validation and runs either way: an order that
-        # will be refused for a bad bin or missing stock must be refused NOW, at the
-        # desk, not after somebody has approved it. What is deferred is the physical
-        # move, and only that.
-        #
-        # `_perform_movement_order` runs the identical two calls on approval and
-        # re-checks availability first, because the shelf can move between the press
-        # and the signature.
-        if not needs_approval:
-            await _move_movement_line(
-                db, wh, item, source, destination, batch_id,
-                line.quantity, serial_rows, order_no, user)
         moved.append({
             "item_id": item.id,
             "item_code": item.code,
@@ -5576,66 +5806,32 @@ async def create_stock_movement_order(
             "serial_numbers": serial_numbers,
         })
 
-    order = None
-    if needs_approval:
-        # The document, so there is something to approve. Written only on this branch:
-        # a project with no ladder has nothing to hold and keeps the old behaviour of
-        # leaving no header row, exactly as before.
-        order = StockTransferOrder(
-            sto_no=order_no,
-            doc_kind=STO_KIND_MOVEMENT,
-            # Both ends are the same warehouse — a movement never leaves the building.
-            # Kept NOT NULL so no reader of `inv_sto` has to special-case a null.
-            from_warehouse_id=wh.id, from_warehouse_name=wh.name,
-            to_warehouse_id=wh.id, to_warehouse_name=wh.name,
-            status=MovementOrderStatus.PENDING_APPROVAL.value,
-            requested_by_id=getattr(user, "id", None),
-            requested_by_name=_name(user),
-            remarks=data.reason,
-            items=[StockTransferOrderItem(
-                item_id=row["item_id"], item_code=row["item_code"],
-                item_name=row["item_name"], uom_code=row["uom_code"],
-                requested_qty=_d(row["quantity"]),
-                source_bin_id=row["source_bin_id"],
-                destination_bin_id=row["destination_bin_id"],
-                batch_id=row["batch_id"],
-                serial_numbers=row["serial_numbers"] or None,
-            ) for row in moved],
-        )
-        db.add(order)
-        await db.flush()
-
-        instance = await engine.start(
-            db, doc_type=DocType.STOCK_MOVEMENT_ORDER.value, doc_id=order.id,
-            context={
-                "doc_no": order_no,
-                "doc_summary": f"Stock movement in {wh.name}",
-                "warehouse_id": wh.id,
-                "project_id": project_id,
-                "project_name": project_name,
-                "requester_position_id": getattr(user, "active_position_id", None),
-            },
-            user=user,
-        )
-        # The ladder can finish AT SUBMIT — a warehouse manager raising a movement in
-        # his own warehouse is the top of a self-owned chain, and any ladder set to
-        # NO_APPROVAL comes back approved too. Recording PENDING_APPROVAL anyway would
-        # leave the document and its workflow disagreeing: nothing in anybody's queue,
-        # and stock that never moved. Same branch `allocations.create` has carried
-        # since it was written.
-        if instance.status == InstanceStatus.APPROVED.value:
-            await _perform_movement_order(db, order, user)
-        else:
-            order.current_approver_name = _approver_label(
-                await engine.current_approvers(
-                    db, DocType.STOCK_MOVEMENT_ORDER.value, order.id),
-                await _approver_rank(
-                    db, DocType.STOCK_MOVEMENT_ORDER.value, order.id))
+    order = StockTransferOrder(
+        sto_no=order_no,
+        doc_kind=STO_KIND_MOVEMENT,
+        from_warehouse_id=wh.id, from_warehouse_name=wh.name,
+        to_warehouse_id=wh.id, to_warehouse_name=wh.name,
+        status=MovementOrderStatus.DRAFT.value,
+        requested_by_id=getattr(user, "id", None),
+        requested_by_name=_name(user),
+        remarks=data.reason,
+        items=[StockTransferOrderItem(
+            item_id=row["item_id"], item_code=row["item_code"],
+            item_name=row["item_name"], uom_code=row["uom_code"],
+            requested_qty=_d(row["quantity"]),
+            source_bin_id=row["source_bin_id"],
+            destination_bin_id=row["destination_bin_id"],
+            batch_id=row["batch_id"],
+            serial_numbers=row["serial_numbers"] or None,
+        ) for row in moved],
+    )
+    db.add(order)
+    await db.flush()
 
     await write_audit(
         db,
-        entity="inv_sto" if order is not None else "whs_stock_movements",
-        entity_id=order.id if order is not None else 0,
+        entity="inv_sto",
+        entity_id=order.id,
         entity_no=order_no,
         action=AuditAction.CREATE,
         actor=user,
@@ -5643,25 +5839,75 @@ async def create_stock_movement_order(
             "warehouse_id": wh.id,
             "lines": len(data.items),
             "remarks": data.reason,
-            "status": order.status if order is not None else "COMPLETED",
+            "status": order.status,
         },
     )
     await db.commit()
+    return await _smo_read(db, order)
 
-    return {
-        "order_no": order_no,
-        "id": order.id if order is not None else 0,
-        "warehouse_id": wh.id,
-        "warehouse_name": wh.name,
-        "status": order.status if order is not None else "COMPLETED",
-        "current_approver_name": (order.current_approver_name
-                                  if order is not None else None),
-        "reason": data.reason,
-        "total_lines": len(moved),
-        "items": moved,
-        "created_by_name": _name(user),
-        "created_at": utcnow(),
-    }
+
+async def submit_stock_movement_order(db: AsyncSession, order_id: int, user) -> dict:
+    """Send a DRAFT movement into its approval ladder.
+
+    Saving an SMO moves nothing; this press starts the workflow. When the engine
+    settles the instance at once — no ladder configured, or every rung resolving to the
+    submitter — the order is performed right here, through the same
+    `_perform_movement_order` an approver's signature reaches, so the shelf is re-checked
+    under lock before a single unit moves. Otherwise it waits in PENDING_APPROVAL.
+    """
+    order = await _smo_by(db, order_id=order_id, lock=True)
+    if order is None:
+        raise NotFoundError(f"Stock movement order {order_id} not found")
+    _guard(order.status, {MovementOrderStatus.DRAFT.value}, "submit", "stock movement order")
+
+    bin_ids = {i for line in order.items
+               for i in (line.source_bin_id, line.destination_bin_id) if i}
+    floors = {b.id: getattr(b, "floor_level", None) for b in (await db.execute(
+        select(Bin).where(Bin.id.in_(bin_ids)))).scalars()} if bin_ids else {}
+    is_cross_floor = any(floors.get(line.source_bin_id) != floors.get(line.destination_bin_id)
+                         for line in order.items)
+
+    project_id, project_name = await wf_ladder.project_for(
+        db, getattr(user, "active_position_id", None), user)
+
+    before = order.status
+    # `engine.start` is deliberately NOT called without a ladder: with nothing
+    # configured the engine climbs the raiser's reporting line, which would put every
+    # bin-to-bin movement into a stranger's queue. No ladder -> the press is the
+    # approval, exactly as a movement behaved before drafts existed.
+    if await wf_ladder.find_ladder(
+            db, project_id, DocType.STOCK_MOVEMENT_ORDER.value) is None:
+        await _perform_movement_order(db, order, user)
+    else:
+        order.status = MovementOrderStatus.PENDING_APPROVAL.value
+        instance = await engine.start(
+            db, doc_type=DocType.STOCK_MOVEMENT_ORDER.value, doc_id=order.id,
+            context={
+                "doc_no": order.sto_no,
+                "doc_summary": f"Stock movement in {order.from_warehouse_name}",
+                "warehouse_id": order.from_warehouse_id,
+                "project_id": project_id,
+                "project_name": project_name,
+                "requester_position_id": getattr(user, "active_position_id", None),
+                "is_cross_floor": str(is_cross_floor).lower(),
+            },
+            user=user,
+        )
+        # The ladder can finish AT SUBMIT — the submitter at the top of a self-owned
+        # chain, or a ladder set to NO_APPROVAL. Then the stock moves now.
+        if instance.status == InstanceStatus.APPROVED.value:
+            await _perform_movement_order(db, order, user)
+        elif instance.status == InstanceStatus.REJECTED.value:
+            order.status = MovementOrderStatus.REJECTED.value
+
+    await write_audit(
+        db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before}, after={"status": order.status},
+        summary="Submitted stock movement order",
+    )
+    await db.commit()
+    return await _smo_read(db, order)
 
 
 async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) -> dict:
@@ -5693,9 +5939,17 @@ async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) 
             StockMovement.ref_no == outward.ref_no,
             StockMovement.direction == StockDirection.IN.value,
         ).limit(1))
-        serials = (await db.execute(select(m.SerialNumber).where(
-            m.SerialNumber.remarks == f"Moved by {outward.ref_no}"
-        ))).scalars().all()
+        serial_strings = outward.serial_numbers or []
+        if not serial_strings:
+            serials = (await db.execute(select(m.SerialNumber).where(
+                m.SerialNumber.remarks == f"Moved by {outward.ref_no}"
+            ))).scalars().all()
+            serial_strings = [
+                row.serial_number or row.imei or row.asset_code or row.consumable_code
+                for row in serials
+            ]
+            serial_strings = [s for s in serial_strings if s]
+
         rows.append({
             "movement_no": outward.ref_no,
             "movement_type": "BIN_TO_BIN",
@@ -5711,7 +5965,7 @@ async def list_stock_movements(db: AsyncSession, params: PageParams, user=None) 
             "batch_id": outward.batch_id or None,
             "batch_no": outward.batch_no,
             "quantity": outward.quantity,
-            "serial_numbers": [row.serial_number for row in serials],
+            "serial_numbers": serial_strings,
             "status": "COMPLETED",
             "moved_by_name": outward.created_by_name,
             "moved_at": outward.created_at,
@@ -6811,8 +7065,11 @@ async def _issue_units_by_line(
     return by_line
 
 
-def _unit_claim_free_clause(marker: str):
+def _unit_claim_free_clause(marker: str | None):
     """A unit nothing else is holding — or one this very line already holds.
+
+    `marker` None asks only the first half: a document that holds no units of its
+    own (a stock movement) may name only what nobody is holding.
 
     `_CLAIMED_REMARK_PREFIXES` is the same set `_claim_units` skips on; stating it
     once here keeps "what may I still pick" and "what may I still auto-claim" the
@@ -6823,6 +7080,8 @@ def _unit_claim_free_clause(marker: str):
         ~m.SerialNumber.remarks.like(f"{prefix}%")
         for prefix in _CLAIMED_REMARK_PREFIXES
     ]))
+    if marker is None:
+        return or_(*unclaimed)
     return or_(m.SerialNumber.remarks == marker, *unclaimed)
 
 
@@ -12205,8 +12464,14 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
-                       issue_line_id: int | None = None, user=None) -> dict:
+                       issue_line_id: int | None = None, unbatched: bool = False,
+                       claim_free: bool = False, user=None) -> dict:
     """Units, optionally narrowed to what one issue line may still pick.
+
+    `unbatched` narrows to units with no batch — a bare `batch_id` of None means
+    "any batch", which is wrong for a pick off the unbatched lot. `claim_free` drops
+    every unit a document is holding, for a picker with no line of its own (a stock
+    movement).
 
     `issue_id` + `issue_line_id` drop every unit another document — or another line
     of this same issue — is already holding, while keeping the ones this line holds
@@ -12229,6 +12494,10 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
         stmt = stmt.where(m.SerialNumber.item_id == item_id)
     if batch_id:
         stmt = stmt.where(m.SerialNumber.batch_id == batch_id)
+    elif unbatched:
+        stmt = stmt.where(m.SerialNumber.batch_id.is_(None))
+    if claim_free and not issue_id:
+        stmt = stmt.where(_unit_claim_free_clause(None))
     if warehouse_id:
         stmt = stmt.where(m.SerialNumber.warehouse_id == warehouse_id)
     if bin_id:
@@ -14062,6 +14331,7 @@ async def receipt_options(
     *,
     warehouse_id: int | None = None,
     for_putaway: bool = False,
+    for_qc: bool = False,
     user=None,
 ) -> list[dict]:
     stmt = select(m.Receipt).where(m.Receipt.status != ReceiptStatus.CANCELLED.value)
@@ -14104,6 +14374,30 @@ async def receipt_options(
                 m.Receipt.is_stock_posted.is_(False),
                 m.Receipt.id.in_(waiting),
             )
+        )
+    if for_qc:
+        # Only the deliveries an inspection could still be raised against. Narrowed the
+        # same way `for_putaway` is, and for the same reason: the picker listed every
+        # receipt ever booked in, so an inspector chose a GRN whose QC had finished
+        # months ago and typed a second inspection over it.
+        #
+        # The test is the LINE, not the receipt's status. `qc_status` is what QC itself
+        # writes, so a line still at PENDING is the one statement of "this has not been
+        # inspected" that cannot go stale — where `status == PENDING_QC` is a rung a
+        # receipt passes through and leaves. On this database not one receipt is sitting
+        # at PENDING_QC while thirty lines are still PENDING, so narrowing on the status
+        # would have emptied the picker and taken the screen with it.
+        #
+        # Plus RECEIVED_RECEIPT_STATUSES, because QC comes after the goods are declared
+        # received: a DRAFT receipt's lines read PENDING having never been inspected,
+        # and offering one would have an inspector sign for a count nobody has submitted.
+        pending = (
+            select(m.ReceiptItem.receipt_id)
+            .where(m.ReceiptItem.qc_status == QcStatus.PENDING.value)
+        )
+        stmt = stmt.where(
+            m.Receipt.status.in_(RECEIVED_RECEIPT_STATUSES),
+            m.Receipt.id.in_(pending),
         )
     if search:
         like = f"%{search}%"
@@ -14948,10 +15242,36 @@ DRAFT_KINDS: dict[str, _Draft] = {
         m.PurchaseReturn, "pro_returns", "return_no",
         {ReturnStatus.DRAFT.value}, "purchase return",
     ),
-    # No "movement" entry: a bin-to-bin movement posts its stock as it is created and
-    # is COMPLETED the moment it exists, so there has never been a draft to discard —
-    # and there is no header row to delete. Undoing one means moving the stock back.
+    # No "movement" entry here: an SMO lives on `inv_sto`, shared with transfers, and
+    # has no `warehouse_id`/`created_by_id` for `_draft_in_scope` to read — see
+    # `_delete_movement_draft`. A saved SMO is a DRAFT until it is submitted, and
+    # nothing moves before that, so a draft is safe to discard.
 }
+
+
+async def _delete_movement_draft(db: AsyncSession, order_id: int, user) -> None:
+    from app.modules.inventory.models import StockTransferOrder
+
+    order = await _smo_by(db, order_id=order_id, lock=True)
+    if order is None:
+        raise NotFoundError(f"Stock movement order {order_id} not found")
+    if user is not None:
+        visible = await db.scalar(
+            select(func.count()).select_from(StockTransferOrder).where(
+                StockTransferOrder.id == order.id,
+                await scope_condition(
+                    db, user,
+                    warehouse_col=StockTransferOrder.from_warehouse_id,
+                    warehouse_ids=await warehouse_ids_for_user(db, user),
+                    owner_col=StockTransferOrder.requested_by_id)))
+        if not visible:
+            raise NotFoundError(f"Stock movement order {order_id} not found")
+    _guard(order.status, {MovementOrderStatus.DRAFT.value}, "delete", "stock movement order")
+    await write_audit(db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
+                      action=AuditAction.DEACTIVATE, actor=user,
+                      before={"status": order.status, "deleted": True}, after=None)
+    await db.delete(order)
+    await db.commit()
 
 
 async def _draft_in_scope(db: AsyncSession, row, user) -> bool:
@@ -14977,6 +15297,8 @@ async def _draft_in_scope(db: AsyncSession, row, user) -> bool:
 
 async def delete_draft(db: AsyncSession, kind: str, doc_id: int, user) -> None:
     """Deletes one abandoned draft. Refuses anything that is not one."""
+    if kind == "movement":
+        return await _delete_movement_draft(db, doc_id, user)
     spec = DRAFT_KINDS.get(kind)
     if spec is None:
         raise ValidationError(f"{kind} is not a document that can be deleted.")

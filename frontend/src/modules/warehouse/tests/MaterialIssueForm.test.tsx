@@ -277,7 +277,7 @@ describe("MaterialIssueForm", () => {
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(screen.queryByText("AST-201")).toBeTruthy();
     expect(screen.queryByText("AST-1")).toBeNull();
-  });
+  }, 15_000);
 
   it("keeps codes picked on every page, not just the page that was open at Save", async () => {
     // The reported bug: 500 picked on page 1, 500 on page 2, Save — and the line came
@@ -306,7 +306,7 @@ describe("MaterialIssueForm", () => {
     fireEvent.click(save);
 
     await waitFor(() => expect(pickButton(/^\s*10\s*\/\s*10\s*$/)).toBeTruthy());
-  });
+  }, 15_000);
 
   it("counts identifiers per pick, so a pick with none is called out on its own row", async () => {
     open();

@@ -6,6 +6,7 @@ import { Can, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill, useTo
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
+import { errorMessage } from "@/shared/api/errors";
 import { approvalTrailApi, approvalTrailKey, poApi, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
@@ -148,32 +149,86 @@ export function RFQDetailPage() {
   const reject = useMutation({ mutationFn: () => rfqApi.reject(rfqId), onSuccess: refresh("Rejected") });
   const close = useMutation({ mutationFn: () => rfqApi.close(rfqId), onSuccess: refresh("Closed to further quotes") });
   const award = useMutation({
-    mutationFn: (quotationId: number) => rfqApi.award(rfqId, quotationId),
-    onSuccess: refresh("Awarded"),
+    mutationFn: (quotationIds: number[]) => rfqApi.award(rfqId, quotationIds),
+    onSuccess: refresh("Selected quotations awarded"),
   });
-
-  const awardSplit = useMutation({
-    mutationFn: async (allocations: { item_id: number; vendor_id: number; quantity: number }[]) => {
-      const res = await rfqApi.awardSplit(rfqId, allocations);
-      
-      const vendorIds = new Set(allocations.map((a) => a.vendor_id));
-      const winningQuotations = (comparison?.quotations ?? []).filter((q) => vendorIds.has(q.vendor_id));
-      
-      for (const quote of winningQuotations) {
-        await poApi.createFromQuotation(quote.id);
+  /** Raise the order for one winning quotation after another, reporting PER VENDOR.
+   *
+   *  Sequential on purpose: the PO number is minted under a row lock, so firing them
+   *  together only queues them behind each other in the database. A split can refuse on
+   *  one supplier and be fine on the rest, and a single toast would hide which. */
+  const raisePosFor = async (
+    winners: { id: number; vendor_name?: string | null }[],
+  ) => {
+    const raised: string[] = [];
+    const failed: string[] = [];
+    for (const winner of winners) {
+      const who = winner.vendor_name ?? `Quotation ${winner.id}`;
+      try {
+        const po = await poApi.createFromQuotation(winner.id);
+        raised.push(`${po.po_no} (${po.vendor_name ?? who})`);
+      } catch (error) {
+        failed.push(`${who}: ${errorMessage(error)}`);
       }
-      return res;
+    }
+    return { raised, failed };
+  };
+
+  /** Award the split AND raise every order it decided, in one press.
+   *
+   *  The two acts stay separate on the server — awarding picks the offer, `po.create`
+   *  raises the order, and each order still lands in DRAFT and climbs the PO ladder.
+   *  What is joined here is only the BUTTON: a split award across four suppliers meant
+   *  four more presses down the sheet, and a buyer who stopped halfway left part of a
+   *  decided tender unordered with nothing saying so.
+   *
+   *  The winners are read back off the sheet rather than taken from the allocations just
+   *  sent: a supplier can hold more than one offer on an RFQ, and only the server knows
+   *  which of them it accepted. Vendors already on a live order are skipped — on a
+   *  re-award they keep what they won, and it is already ordered. */
+  const awardSplit = useMutation({
+    mutationFn: async (
+      allocations: { item_id: number; vendor_id: number; quantity: number }[],
+    ) => {
+      const awarded = await rfqApi.awardSplit(rfqId, allocations);
+      const sheet = await rfqApi.comparison(rfqId, method || undefined);
+      const hasNewBalance = (quotationId: number, vendorId: number) => {
+        const vendor = (awarded.vendors ?? []).find((row) => row.vendor_id === vendorId);
+        const target = vendor?.awarded_quantities;
+        // A split award can make a second PO for the amount added above this
+        // supplier's live PO quantity. A whole-quote award still only gets one PO.
+        if (!target) {
+          return !(awarded.purchase_orders ?? []).some(
+            (po) => po.quotation_id === quotationId,
+          );
+        }
+        const alreadySent = vendor?.live_allocated_quantities ?? {};
+        return Object.entries(target).some(([itemId, quantity]) =>
+          Number(quantity) > Number(alreadySent[itemId] ?? 0));
+      };
+      return raisePosFor((sheet.quotations ?? [])
+        .filter((quote) => quote.status === "ACCEPTED"
+          && hasNewBalance(quote.id, quote.vendor_id)));
     },
-    onSuccess: () => {
+    onSuccess: ({ raised, failed }) => {
+      queryClient.invalidateQueries({ queryKey: ["rfq", id] });
+      queryClient.invalidateQueries({ queryKey: ["rfqs"] });
+      queryClient.invalidateQueries({ queryKey: ["rfq-comparison", id] });
       queryClient.invalidateQueries({ queryKey: ["pos"] });
-      refresh("Shared between suppliers and POs raised")();
+      toast.success(raised.length
+        ? `Items awarded — raised ${raised.join(", ")}`
+        : "Items awarded between suppliers");
+      // Named one by one rather than counted: "2 failed" leaves the buyer opening every
+      // vendor's column to find out which two.
+      failed.forEach((line) => toast.error(line));
     },
   });
 
   // The offer that won. Read off the comparison rather than off the RFQ's awarded
   // vendor id: a vendor can hold more than one quotation on an RFQ (they revise), and
   // the PO is raised against the exact quote that was accepted, not against the vendor.
-  const awardedQuote = (comparison?.quotations ?? []).find((q) => q.status === "ACCEPTED");
+  const awardedQuoteIds = (comparison?.quotations ?? [])
+    .filter((q) => q.status === "ACCEPTED").map((q) => q.id);
 
   /** The last hop of the chain: accept the chosen offer as a purchase order.
    *
@@ -185,11 +240,57 @@ export function RFQDetailPage() {
     mutationFn: (quotationId: number) => poApi.createFromQuotation(quotationId),
     onSuccess: (po) => {
       queryClient.invalidateQueries({ queryKey: ["rfq", id] });
+      queryClient.invalidateQueries({ queryKey: ["rfq-comparison", id] });
       queryClient.invalidateQueries({ queryKey: ["pos"] });
       toast.success(`${po.po_no} raised from ${po.vendor_name ?? "the winner"}`);
-      nav(`/pos/${po.id}`);
     },
   });
+
+  /** Awarded vendors with no live purchase order against them yet, in column order.
+   *
+   *  The server decides what "live" means — a rejected or cancelled order stops being
+   *  listed on the RFQ, which is what puts its vendor back in this list. */
+  const pendingPoQuotes = awardedQuoteIds.filter((quotationId) =>
+    !(rfq?.purchase_orders ?? []).some((po) => po.quotation_id === quotationId));
+
+  /** An awarded tender can be awarded again while some of it is unordered: a purchase
+   *  order rejected in approval hands its quantity back, and the only prices anybody
+   *  quoted for that work are on this sheet. Vendors already on a live order keep what
+   *  they won — the server enforces that; this only decides whether to offer the sheet. */
+  // A supplier can already have PO-A for 6 and still need PO-B for the extra 4
+  // after the buyer increases its split award to 10. That unfinished balance must
+  // reopen the re-share action even though the original PO remains live.
+  const hasUnorderedSplitBalance = (rfq?.vendors ?? []).some((vendor) =>
+    Object.entries(vendor.awarded_quantities ?? {}).some(([itemId, awardedQuantity]) =>
+      Number(awardedQuantity) > Number(
+        vendor.live_allocated_quantities?.[itemId] ?? 0,
+      )));
+  // An RFQ can still have room even when every accepted quotation already has a PO.
+  // Example: the first PO bought 5 of 10 paper. The buyer must be able to re-share
+  // the remaining 5, which will make a new balance PO; testing only "has a PO" hid
+  // that action and incorrectly forced a cancellation of the valid first order.
+  const hasRemainingRfqQuantity = (rfq?.items ?? []).some((item) => {
+    const reportsLiveAllocation = (rfq?.vendors ?? []).some(
+      (vendor) => vendor.live_allocated_quantities != null,
+    );
+    const allocated = reportsLiveAllocation
+      ? (rfq?.vendors ?? []).reduce((sum, vendor) => sum + Number(
+        vendor.live_allocated_quantities?.[String(item.item_id)] ?? 0,
+      ), 0)
+      : (rfq?.purchase_orders ?? []).reduce((sum, po) =>
+        sum + Number(po.item_quantities?.[String(item.item_id)] ?? 0), 0);
+    return allocated < Number(item.quantity);
+  });
+  const reawardable = rfq?.status === "AWARDED"
+    && (pendingPoQuotes.length > 0 || hasUnorderedSplitBalance || hasRemainingRfqQuantity);
+  /** The quantity a supplier currently holds on live PO lines.  Unlike the saved
+   * award split, this immediately drops a PO that is rejected or cancelled. */
+  const liveAllocatedQuantities = Object.fromEntries(
+    (rfq?.vendors ?? [])
+      .filter((vendor) => vendor.live_allocated_quantities)
+      .map((vendor) => [vendor.vendor_id,
+        vendor.live_allocated_quantities as Record<string, number>]),
+  );
 
   const busy = submit.isPending || approve.isPending || reject.isPending
     || close.isPending || award.isPending || awardSplit.isPending || raisePo.isPending;
@@ -327,23 +428,12 @@ export function RFQDetailPage() {
             {/* Once the order exists the offer to raise one is wrong, not merely
               * redundant: the backend refuses the second, so the button could only
               * ever produce an error. It becomes the way to the order instead. */}
-            {rfq?.status === "AWARDED" && rfq.po_id && (
-              <Button variant="subtle" onClick={() => nav(`/pos/${rfq.po_id}`)}>
-                {rfq.po_no ?? "Purchase order"}
-              </Button>
-            )}
-            {rfq?.status === "AWARDED" && !rfq.po_id && awardedQuote && (
-              <Can do="po.create">
-                <Button disabled={busy} onClick={() => raisePo.mutate(awardedQuote.id)}>
-                  {raisePo.isPending ? "Raising…" : "Create purchase order"}
-                </Button>
-              </Can>
-            )}
           </>
         }
       />
 
-      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error ?? award.error ?? awardSplit.error ?? raisePo.error ?? saveQuantities.error} />
+      <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error
+        ?? award.error ?? awardSplit.error ?? raisePo.error ?? saveQuantities.error} />
 
       <DetailShell
         main={(
@@ -491,11 +581,7 @@ export function RFQDetailPage() {
               >
                 {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
                   <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-                    {/* `rfq?.` like every other read of it on this page: the query
-                        behind it is not guaranteed resolved here, and the two bare
-                        reads were what stopped the branch compiling. */}
-                    {comparison.responded} of {rfq?.vendor_count ?? 0}{" "}
-                    quote{rfq?.vendor_count === 1 ? "" : "s"} on file.
+                    {comparison.responded} of {comparison.rfq.vendor_count} quote{comparison.rfq.vendor_count === 1 ? "" : "s"} on file.
                   </p>
                 )}
                 {/* The sheet decides nothing. It flags the cheapest cell per item and
@@ -504,9 +590,12 @@ export function RFQDetailPage() {
                   ? (
                     <QuotationComparison
                       comparison={comparison}
-                      pos={rfq?.pos ?? []}
+                      awardedQuotationIds={awardedQuoteIds}
+                      purchaseOrders={rfq?.purchase_orders ?? []}
                       busy={busy}
-                      onAward={(quotationId) => award.mutate(quotationId)}
+                      reawardable={reawardable}
+                      liveAllocatedQuantities={liveAllocatedQuantities}
+                      onAward={(quotationIds) => award.mutate(quotationIds)}
                       onAwardSplit={(allocations) => awardSplit.mutate(allocations)}
                       onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
                       onOpenPo={(poId) => nav(`/pos/${poId}`)}
@@ -536,14 +625,15 @@ export function RFQDetailPage() {
               </div>
               {/* Where the award went next. Without it an AWARDED RFQ is a dead end on
                   screen even though the order exists \u2014 the chain only reads forward. */}
-              {rfq.po_id && (
-                <div className="mt-4 flex items-center justify-between gap-2 border-t border-line/60 pt-4">
-                  <DocRef
-                    label="Order"
-                    no={rfq.po_no ?? `#${rfq.po_id}`}
-                    onOpen={() => nav(`/pos/${rfq.po_id}`)}
-                  />
-                  <StatusPill status={rfq.po_status ?? "DRAFT"} />
+              {(rfq.purchase_orders ?? []).length > 0 && (
+                <div className="mt-4 space-y-3 border-t border-line/60 pt-4">
+                  {(rfq.purchase_orders ?? []).map((po) => (
+                    <div key={po.id} className="flex items-center justify-between gap-2">
+                      <DocRef label={po.vendor_name ?? "Order"} no={po.po_no}
+                              onOpen={() => nav(`/pos/${po.id}`)} />
+                      <StatusPill status={po.status} />
+                    </div>
+                  ))}
                 </div>
               )}
             </SectionCard>

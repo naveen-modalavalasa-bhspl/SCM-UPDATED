@@ -1,11 +1,21 @@
 """sys_ tables — mapped to the canonical scm_rebuild schema (database-first)."""
 from sqlalchemy import (
-    JSON, BigInteger, Boolean, Column, DateTime, Integer, String, Text,
+    JSON, BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary,
+    String, Text,
 )
+from sqlalchemy.dialects.mysql import LONGBLOB, LONGTEXT
+from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 from app.shared.enums import EmailClaimStatus
 from app.shared.models.base import utcnow
+
+#: A body of markup or of bytes that MySQL's 64 KB TEXT/BLOB cannot hold. Declared as
+#: a variant rather than as the MySQL type outright so the models still describe
+#: themselves on any other dialect — the same shape `shared.models.base.BigIntPortable`
+#: already uses for BIGINT.
+LONG_TEXT = Text().with_variant(LONGTEXT(), "mysql")
+LONG_BLOB = LargeBinary().with_variant(LONGBLOB(), "mysql")
 
 
 class Setting(Base):
@@ -290,6 +300,14 @@ class MailMessage(Base):
     cc_addrs = Column(String(1000), nullable=True)
     subject = Column(String(500), nullable=True)
     body = Column(Text, nullable=True)
+    #: The html half, as the recipient received it. Stored because the Sent tab is
+    #: read to answer "what did the vendor actually get", and the plain-text fallback
+    #: is not that: a purchase order's text half is a flat list of codes and figures
+    #: where the message on the wire was a letterheaded table. NULL where none was
+    #: sent, and NULL for password-reset mail for the same reason `body` is (see
+    #: `mail.service._log_and_send`) — the markup carries the same live link.
+    #: LONGTEXT: an order copy with inline styles runs past MySQL's 64 KB TEXT.
+    body_html = Column(LONG_TEXT, nullable=True)
     #: QUEUED -> SENT | FAILED. See `shared.enums.MailStatus`.
     status = Column(String(20), nullable=False, index=True)
     error = Column(Text, nullable=True)
@@ -301,3 +319,42 @@ class MailMessage(Base):
     sent_by_name = Column(String(200), nullable=True)
     sent_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utcnow, index=True)
+    #: How many files went with it. A plain column, not a count over the relationship:
+    #: the Sent LIST draws a paperclip per row, and reaching the relationship from a
+    #: paginated read is either a lazy load (MissingGreenlet, under async) or a join
+    #: that drags every stored blob through the query.
+    attachment_count = Column(Integer, nullable=False, default=0)
+
+    attachments = relationship(
+        "MailAttachment", back_populates="message",
+        cascade="all, delete-orphan", order_by="MailAttachment.id",
+    )
+
+
+class MailAttachment(Base):
+    """`sys_mail_attachments` — the files that travelled with one sent message.
+
+    The BYTES are kept, not just the filename. The question this tab is opened to
+    answer is "what did the vendor actually receive", and a row reading
+    `PO0025.pdf` with nothing behind it answers a different, easier question. The
+    document a business module generates at send time is built from the order AS IT
+    WAS: a PO amended twice since would regenerate into a different PDF from the one
+    the supplier is holding, so re-deriving it is not the same file and must not be
+    offered as though it were.
+
+    Bytes over `MAX_STORED_BYTES` are NOT kept — the row is written with `content`
+    NULL and `size_bytes` still set, so the screen can say the file went and that it
+    was too large to retain. Silently storing nothing would read as "no attachment".
+    """
+    __tablename__ = "sys_mail_attachments"
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    message_id = Column(ForeignKey("sys_mail_messages.id", ondelete="CASCADE"),
+                        index=True, nullable=False)
+    filename = Column(String(255), nullable=False)
+    content_type = Column(String(150), nullable=True)
+    #: What was sent, always — even where `content` is NULL for being over the cap.
+    size_bytes = Column(BigInteger, nullable=False, default=0)
+    content = Column(LONG_BLOB, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+    message = relationship("MailMessage", back_populates="attachments")

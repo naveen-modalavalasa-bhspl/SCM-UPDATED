@@ -9,6 +9,20 @@ import { listBatches, listSerials, warehouseOptions, itemOptions, getItemLocatio
 import { daysUntil, fmtDate, fmtQty, normaliseStatus } from "../format";
 import type { Batch, SerialNumber } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { ScanLine } from "lucide-react";
+import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
+
+/** One lot whose units are on screen: an item, at one location, in one batch. */
+interface UnitsView {
+  itemId: number;
+  itemLabel: string;
+  binId: number;
+  binCode: string;
+  binPath: string;
+  batchId: number;
+  batchNo?: string | null;
+  available: number;
+}
 
 /** Where a unit physically is. The floor comes off the bin master (`floor_level`,
  *  the same value the Floor plan draws), so "which floor is this on" is answered
@@ -69,6 +83,9 @@ function LocationsTab() {
   const [warehouseId, setWarehouseId] = useState<number | null>(null);
   const [itemId, setItemId] = useState<number | null>(null);
   const [selectedLocationId, setSelectedLocationId] = useState<number | null>(null);
+  /** The lot whose units are open. A stock movement re-files every unit it names
+   *  onto its destination, so this is where the moved units are found afterwards. */
+  const [viewing, setViewing] = useState<UnitsView | null>(null);
 
   const locationsQuery = useQuery({
     queryKey: ["wh-locations", warehouseId],
@@ -307,9 +324,28 @@ function LocationsTab() {
                                           <span className="w-1.5 h-1.5 rounded-full bg-primary/40 group-hover/batch:bg-primary transition-colors" />
                                           <span className="font-mono font-bold text-ink">{b.batch_no || b.serial_number || b.asset_code || "Bulk"}</span>
                                         </div>
-                                        {b.days_to_expiry !== null && (
-                                          <Chip size="sm" variant="flat" color={tone.color} className="font-semibold shadow-sm">{tone.label}</Chip>
-                                        )}
+                                        <div className="flex items-center gap-2">
+                                          {b.days_to_expiry !== null && (
+                                            <Chip size="sm" variant="flat" color={tone.color} className="font-semibold shadow-sm">{tone.label}</Chip>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => setViewing({
+                                              itemId: itemGroup.item_id,
+                                              itemLabel: [itemGroup.item_code, itemGroup.item_name].filter(Boolean).join(" — "),
+                                              binId: loc.bin_id,
+                                              binCode: loc.bin_code,
+                                              binPath: loc.location_path.slice(1).join(" / "),
+                                              batchId: b.batch_id,
+                                              batchNo: b.batch_no,
+                                              available: b.available_qty,
+                                            })}
+                                            className="inline-flex min-h-8 items-center gap-1 rounded-md border border-line px-2 text-[11px] font-semibold text-body transition-colors hover:border-primary hover:text-primary"
+                                            aria-label={`Units in ${b.batch_no || "this lot"} at ${loc.bin_code}`}
+                                          >
+                                            <ScanLine className="h-3.5 w-3.5" /> Units
+                                          </button>
+                                        </div>
                                       </div>
                                       <div className="text-xs text-muted flex justify-between items-center pl-3.5">
                                         <span>
@@ -336,6 +372,34 @@ function LocationsTab() {
           </div>
         </div>
       )}
+
+      {/* The units of one lot, by name — the same screen a movement picks them on,
+        * opened as a viewer. Read off each unit's own location, so units a movement
+        * re-filed show under the bay they were moved to. */}
+      <CodeAssignmentScreen
+        open={!!viewing}
+        browse
+        onClose={() => setViewing(null)}
+        onSave={() => undefined}
+        backLabel="Back to segregation"
+        initial={[]}
+        quantity={0}
+        itemLabel={viewing?.itemLabel ?? ""}
+        trackingType="NONE"
+        noun="unit"
+        unitMode="CODE"
+        itemId={viewing?.itemId}
+        warehouseId={warehouseId ?? undefined}
+        binId={viewing?.binId}
+        batchId={viewing?.batchId || undefined}
+        unbatched
+        scope={viewing ? {
+          batchNo: viewing.batchNo,
+          binCode: viewing.binCode,
+          binPath: viewing.binPath,
+          available: viewing.available,
+        } : undefined}
+      />
     </div>
   );
 }

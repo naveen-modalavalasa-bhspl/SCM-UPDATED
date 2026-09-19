@@ -201,8 +201,8 @@ export function QtyInput({
       inputMode="decimal"
       min={0}
       max={max}
-      step="0.001"
-      value={value === 0 ? "0" : value === "" || value == null ? "" : String(Number(value))}
+      step="0.01"
+      value={value === 0 ? "0.00" : value === "" || value == null ? "" : Number(value).toFixed(2)}
       disabled={disabled}
       aria-label={ariaLabel}
       onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}

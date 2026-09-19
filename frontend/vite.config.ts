@@ -4,7 +4,13 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 // Dev API target comes from env (no hardcoded host); falls back to local backend.
-const apiTarget = process.env.VITE_API_PROXY || "http://localhost:8000";
+//
+// Use the IPv4 loopback address rather than `localhost`. On Windows `localhost`
+// may resolve to `::1`, where another development Uvicorn process can be listening
+// on the same port. That made the sign-in POST reach the wrong API and receive a 404
+// even though this SCM backend was healthy on 127.0.0.1:8000.
+const apiTarget = (process.env.VITE_API_PROXY || "http://127.0.0.1:8000")
+  .replace(/^http:\/\/localhost(?=[:/]|$)/, "http://127.0.0.1");
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

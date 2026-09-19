@@ -255,8 +255,9 @@ export const getDespatchPrefill = (noteId: number, receiptId?: number | null) =>
 
 // `inspection_type` is this list's own filter (the endpoint takes it), not something
 // every warehouse list understands — so it widens here rather than in ListParams.
-export const listInspections = (params: ListParams & { inspection_type?: string } = {}) =>
-  get<Page<Inspection>>(`${BASE}/inspections`, params);
+export const listInspections = (
+  params: ListParams & { inspection_type?: string; receipt_id?: number } = {},
+) => get<Page<Inspection>>(`${BASE}/inspections`, params);
 
 export const getInspection = (id: number) => get<Inspection>(`${BASE}/inspections/${id}`);
 
@@ -356,6 +357,9 @@ export const getStockMovementOrder = (order_no: string) =>
 
 export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders`, body);
+
+export const submitStockMovementOrder = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/submit`);
 
 /** Approve or reject a movement waiting on a signature. Only reachable when the
  *  project has an approval ladder configured for STOCK_MOVEMENT_ORDER — with none
@@ -618,6 +622,10 @@ export const listSerials = (
     // Scope the list to one issue line: units another document — or another line of
     // the same issue — is already holding drop out, the ones this line holds stay.
     issue_id?: number; issue_line_id?: number;
+    // No batch named means the UNBATCHED lot, not any batch in the bay.
+    unbatched?: boolean;
+    // Only units no document is holding — a stock movement's picker.
+    claim_free?: boolean;
   } = {},
 ) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
@@ -821,9 +829,9 @@ export const poOptions = (search?: string, warehouse_id?: number) =>
 /** GRNs this login can see. `for_putaway` narrows it to the ones with stock actually
  *  standing on the floor at a bin-managed point — the only ones a putaway can be
  *  raised against. */
-export const grnOptions = (search?: string, for_putaway?: boolean) =>
+export const grnOptions = (search?: string, for_putaway?: boolean, for_qc?: boolean) =>
   get<Option[]>(`${BASE}/options/receipts`, {
-    search, receipt_type: "GRN", for_putaway,
+    search, receipt_type: "GRN", for_putaway, for_qc,
   });
 
 export const gateEntryOptions = (search?: string) =>

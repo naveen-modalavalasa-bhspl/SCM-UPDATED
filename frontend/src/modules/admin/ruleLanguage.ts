@@ -59,6 +59,7 @@ export const FIELD_LABEL: Record<string, string> = {
   status: "Resulting status",
   reorder_level: "Reorder level",
   item_code: "Item code",
+  is_cross_floor: "Is cross-floor movement",
 };
 
 export const fieldLabel = (field: string) =>

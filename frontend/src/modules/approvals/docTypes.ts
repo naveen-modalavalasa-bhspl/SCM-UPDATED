@@ -16,6 +16,7 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
   RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
   TRANSPORT_REQUEST: "Shipment",
+  STOCK_MOVEMENT_ORDER: "Stock movement order",
 };
 
 export const docTypeLabel = (value: string) =>

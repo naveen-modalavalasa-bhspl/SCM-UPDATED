@@ -7,6 +7,7 @@ import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
+import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
@@ -1036,16 +1037,28 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     <div>
       <PageHeader
         eyebrow={pointLabel}
-        title={editing ? `${label} ${doc?.grn_no ?? ""}` : `New ${label.toLowerCase()}`}
+        title={
+          editing
+            ? `${label} ${(isGrn ? doc?.grn_no : doc?.gate_entry_no ?? doc?.grn_no) ?? ""}`
+            : `New ${label.toLowerCase()}`
+        }
         actions={
           <>
             <Button variant="ghost" onClick={() => nav(isGrn ? "/warehouse/grn" : "/warehouse/material-inward")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
-            {editing && isGrn && (
+            {/* A gate entry prints too — it is the paper the driver is handed at the
+                gate, and it was the one inward document with no sheet at all. Same
+                route component either way; it heads itself off `receipt_type`. */}
+            {editing && (
               <Button
                 variant="ghost"
-                onClick={() => window.open(`/warehouse/grn/${id}/print`, "_blank")}
+                onClick={() => window.open(
+                  isGrn
+                    ? `/warehouse/grn/${id}/print`
+                    : `/warehouse/gate-entries/${id}/print`,
+                  "_blank",
+                )}
                 title="Download PDF"
               >
                 <FileText className="h-4 w-4" /> Download PDF
@@ -1073,6 +1086,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 </Button>
               </Can>
             )}
+            {/* The door into QC from the delivery itself. Submitting a GRN raises the
+                inspection automatically (`_raise_inspection_for`), so this is for the
+                receipt whose inspection was never raised or was cancelled — before it,
+                the only way in was to open QC and find the GRN in a picker. The form
+                prefills off `?receipt_id=`; the ladder and every write stay on
+                `/api/warehouse/inspections`, which is gated on inspection.execute. */}
+            {editing && isGrn
+              && ["SUBMITTED", "PENDING_QC", "QC_FAILED"].includes(doc?.status ?? "") && (
+              <Can do="inspection.execute">
+                <Button
+                  variant="ghost"
+                  onClick={() => nav(`/warehouse/quality-inspection/new?receipt_id=${id}`)}
+                >
+                  Raise QC
+                </Button>
+              </Can>
+            )}
             {editing && isGrn && ["QC_PASSED", "PARTIALLY_RECEIVED"].includes(doc?.status ?? "") && (
               <Can do="grn.qc">
                 <Button onClick={() => setConfirming("complete")}>Post to stock</Button>
@@ -1094,7 +1124,18 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
       {doc && (
         <MetaCard title="Document">
-          <MetaRow label="Number" value={<span className="font-mono">{doc.grn_no}</span>} />
+          {/* A gate entry is identified by `gate_entry_no` — the number the gate wrote
+              down and the register lists it under. Its `grn_no` is a REC that gets
+              re-minted the moment it converts, so showing that here named the document
+              something nobody could find it by. */}
+          <MetaRow
+            label="Number"
+            value={
+              <span className="font-mono">
+                {isGrn ? doc.grn_no : (doc.gate_entry_no ?? doc.grn_no)}
+              </span>
+            }
+          />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
           <MetaRow label="Received by" value={doc.received_by_name} />
           <MetaRow label="Stock" value={doc.is_stock_posted ? "Posted" : "Not posted"} />
@@ -1386,6 +1427,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           onStagedChange={setStagedFiles}
         />
       </Section>
+
+      {/* The paper trail, read off the pointers this row already carries — the gate
+          entry it arrived as, the order, the vendor's despatch note, and the inspection
+          its submission raised. Only on a saved document: an unsaved one has no trail. */}
+      {doc && <ReceiptLinkedDocuments receipt={doc} />}
 
       <SerialNumbersModal
         isOpen={serialLine !== null}

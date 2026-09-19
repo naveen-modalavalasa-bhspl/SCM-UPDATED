@@ -119,10 +119,10 @@ export function RFQFormPage() {
       companyName: existing.company_name ?? "",
     });
     // Who was invited, which is now the whole of what this form holds about vendors.
-    // An RFQ saved before the split moved to the comparison still carries its
-    // per-item quantities on `vendor.item_quantities`; they are left untouched on the
-    // record and simply not re-edited here, so re-saving an old tender neither loses
-    // them nor pretends this screen is where they are decided.
+    // An RFQ saved before allocation moved to the comparison may still carry old
+    // per-supplier invitation quantities. Re-saving a draft intentionally normalizes
+    // those invitations to the current rule: every selected supplier quotes each full
+    // mapped line, and the actual shares are decided only after prices arrive.
     setChosenVendors([...new Set(existing.vendors.map((vendor) => vendor.vendor_id))]);
     setLines(existing.items.map((item) => ({
       item_id: item.item_id,

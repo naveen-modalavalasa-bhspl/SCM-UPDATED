@@ -383,6 +383,11 @@ export interface RFQVendor {
   responded_at?: string | null;
   mapped_item_ids?: number[] | null;
   item_quantities?: Record<string, number> | null;
+  /** What this supplier won, item id -> quantity. Null on a whole-quote award. */
+  awarded_quantities?: Record<string, number> | null;
+  /** Quantity currently covered by this supplier's live PO lines. This is derived
+   * server-side, so rejected/cancelled orders disappear from the allocation. */
+  live_allocated_quantities?: Record<string, number> | null;
 }
 
 export interface RFQListRow {
@@ -431,7 +436,16 @@ export interface RFQ extends RFQListRow {
   po_id?: number | null;
   po_no?: string | null;
   po_status?: string | null;
-  pos?: { po_id: number; po_no: string; po_status: string; vendor_id: number; quotation_id?: number | null }[];
+  purchase_orders?: {
+    id: number;
+    po_no: string;
+    status: string;
+    quotation_id?: number | null;
+    vendor_id?: number | null;
+    vendor_name?: string | null;
+    /** Saved quantities on this particular earlier PO, keyed by RFQ item id. */
+    item_quantities?: Record<string, number>;
+  }[];
   /** Carried across from the requisition behind it, so a tender reads on its own. */
   department_id?: number | null;
   department_name?: string | null;

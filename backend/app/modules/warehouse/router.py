@@ -302,10 +302,12 @@ async def cancel_receipt(receipt_id: int, body: s.ReasonIn, db: AsyncSession = D
 @router.get("/inspections", response_model=Page[s.InspectionRead])
 async def list_inspections(params: PageParams = Depends(), inspection_type: str | None = None,
                            status: str | None = None, warehouse_id: int | None = None,
+                           receipt_id: int | None = None,
                            search: str | None = None, db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(INSPECTION_VIEW))):
     return await service.list_inspections(db, params, inspection_type=inspection_type,
                                           status=status, warehouse_id=warehouse_id,
+                                          receipt_id=receipt_id,
                                           search=search, user=user)
 
 
@@ -455,6 +457,13 @@ async def create_stock_movement_order(data: s.StockMovementOrderWrite,
                                       db: AsyncSession = Depends(get_db),
                                       user=Depends(require_permission(MOVEMENT_CREATE))):
     return await service.create_stock_movement_order(db, data, user)
+
+
+@router.post("/stock-movement-orders/{order_id}/submit", response_model=s.StockMovementOrderRead)
+async def submit_stock_movement_order(order_id: int,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(MOVEMENT_CREATE))):
+    return await service.submit_stock_movement_order(db, order_id, user)
 
 
 # The approval door. `movement.approve` was defined months ago and NO route used it, so
@@ -925,13 +934,15 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
-                       issue_line_id: int | None = None,
+                       issue_line_id: int | None = None, unbatched: bool = False,
+                       claim_free: bool = False,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
                                       bin_id=bin_id, search=search, issue_id=issue_id,
-                                      issue_line_id=issue_line_id, user=user)
+                                      issue_line_id=issue_line_id, unbatched=unbatched,
+                                      claim_free=claim_free, user=user)
 
 
 @router.get("/serials/lookup")
@@ -1195,11 +1206,13 @@ async def despatch_prefill(note_id: int = Query(...), receipt_id: int | None = N
 @router.get("/options/receipts", response_model=list[s.Option])
 async def receipt_options(search: str | None = None, receipt_type: str | None = None,
                           warehouse_id: int | None = None, for_putaway: bool = False,
+                          for_qc: bool = False,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(require_permission(RECEIPT_VIEW))):
     return await service.receipt_options(db, search, receipt_type,
                                          warehouse_id=warehouse_id,
-                                         for_putaway=for_putaway, user=user)
+                                         for_putaway=for_putaway, for_qc=for_qc,
+                                         user=user)
 
 
 @router.get("/options/incoming-dispatches", response_model=list[s.Option])

@@ -28,12 +28,6 @@ const columns: Column<StockMovementOrder>[] = [
     render: (row) => <div className="text-sm">{row.reason ?? "—"}</div>,
   },
   {
-    key: "lines",
-    header: "Lines",
-    className: "text-right",
-    render: (row) => <span className="tabular">{row.items?.length ?? 0}</span>,
-  },
-  {
     key: "status",
     header: "Status",
     render: (row) => <StatusPill status={row.status} />,
@@ -116,7 +110,7 @@ export default function StockMovements() {
           </div>
           <div className="mt-1 text-sm">{row.warehouse_name}</div>
           <div className="text-xs text-muted">
-            {row.items?.length ?? 0} lines · {row.reason ?? ""}
+            {row.reason ?? "—"}
           </div>
         </div>
       )}

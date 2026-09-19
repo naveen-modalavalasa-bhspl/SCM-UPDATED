@@ -41,9 +41,11 @@ export function renderValue(value: ReportRow[string], kind: ColumnKind) {
       return (
         <span
           className={`inline-flex min-w-11 justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${
+            // The design tokens, not HeroUI's own scale: `success-50` is a fixed
+            // light swatch, so the pill kept its daylight background in dark mode.
             String(value) === "IN"
-              ? "bg-success-50 text-success-700"
-              : "bg-danger-50 text-danger-700"
+              ? "bg-ok-bg text-ok"
+              : "bg-bad-bg text-bad"
           }`}
         >
           {String(value)}

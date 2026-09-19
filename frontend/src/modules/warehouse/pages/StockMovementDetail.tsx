@@ -4,11 +4,49 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button, Can, Card, ErrorBanner, PageHeader, StatusPill, ResponsiveList, useToast,
 } from "@/shared/components";
-import { actOnStockMovementOrder, getStockMovementOrder } from "../api";
+import { actOnStockMovementOrder, getStockMovementOrder, submitStockMovementOrder } from "../api";
+import { Modal, ModalBody, ModalContent, ModalHeader, ModalFooter } from "@heroui/react";
+import { useState } from "react";
 import { Section } from "../components/DocumentMeta";
 import { fmtDateTime, fmtQty } from "../format";
 import type { StockMovementOrderItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
+
+function ViewSerials({ serials }: { serials: string[] | null | undefined }) {
+  const [open, setOpen] = useState(false);
+  if (!serials || serials.length === 0) return null;
+
+  return (
+    <>
+      <button 
+        type="button" 
+        onClick={() => setOpen(true)}
+        className="mt-1 inline-flex items-center text-[11px] font-medium text-brand hover:underline"
+      >
+        View {serials.length} identifier{serials.length !== 1 ? 's' : ''}
+      </button>
+      <Modal isOpen={open} onClose={() => setOpen(false)} size="md" scrollBehavior="inside">
+        <ModalContent>
+          <ModalHeader className="border-b border-line/50 pb-3 font-display text-lg text-ink">
+            Identifiers
+          </ModalHeader>
+          <ModalBody className="py-4">
+            <div className="flex flex-wrap gap-2">
+              {serials.map((s, i) => (
+                <span key={i} className="inline-flex items-center rounded-md bg-neutral-100 px-2 py-1 font-mono text-xs text-ink border border-neutral-200">
+                  {s}
+                </span>
+              ))}
+            </div>
+          </ModalBody>
+          <ModalFooter className="border-t border-line/50">
+            <Button variant="subtle" onClick={() => setOpen(false)}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+    </>
+  );
+}
 
 export default function StockMovementDetail() {
   const [params] = useSearchParams();
@@ -23,9 +61,6 @@ export default function StockMovementDetail() {
     enabled: !!orderNo,
   });
 
-  // Approving is what MOVES the stock — `_perform_movement_order` re-checks the shelf
-  // first, because the units can be issued or picked between the press and the
-  // signature. A refusal there means the order is stale, not that the approval failed.
   const act = useMutation({
     mutationFn: (action: "APPROVED" | "REJECTED") =>
       actOnStockMovementOrder((data as { id: number }).id, action),
@@ -36,6 +71,19 @@ export default function StockMovementDetail() {
       toast.success(result.status === "REJECTED"
         ? `${result.order_no} rejected — nothing moved`
         : `${result.order_no} approved — the stock has moved`);
+    },
+  });
+
+  const submit = useMutation({
+    mutationFn: () => submitStockMovementOrder((data as { id: number }).id),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-order"] });
+      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
+      queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
+      toast.success(result.status === "APPROVED"
+        ? `${result.order_no} approved — the stock has moved`
+        : `${result.order_no} submitted for approval${
+            result.current_approver_name ? ` — waiting on ${result.current_approver_name}` : ""}`);
     },
   });
 
@@ -67,11 +115,21 @@ export default function StockMovementDetail() {
             >
               <FileText className="h-4 w-4" /> Print
             </Button>
-            {/* Only on an order that is actually waiting. `id` is 0 when no ladder is
-                configured — that path moves the stock on the press and writes no
-                document, so there is nothing to sign and no button to show. Gated on
-                `movement.approve`, which is also what the endpoint checks: hiding a
-                button is not security, the backend is. */}
+            {/* A saved order is a DRAFT and moves nothing until it is submitted.
+                `id` is 0 only on a movement completed before orders were stored,
+                which has no document to act on. Gated on the same codes the
+                endpoints check: hiding a button is not security, the backend is. */}
+            {data.status === "DRAFT" && data.id > 0 && (
+              <Can do="movement.create">
+                <Button
+                  disabled={submit.isPending}
+                  onClick={() => submit.mutate()}
+                >
+                  <Check className="h-4 w-4" />
+                  {submit.isPending ? "Submitting…" : "Submit for approval"}
+                </Button>
+              </Can>
+            )}
             {data.status === "PENDING_APPROVAL" && data.id > 0 && (
               <Can do="movement.approve">
                 <Button className={TONE_REJECT}
@@ -137,6 +195,7 @@ export default function StockMovementDetail() {
                 <div>
                   <div className="font-semibold text-ink">{row.item_name}</div>
                   <div className="font-mono text-[11px] text-muted">{row.item_code}</div>
+                  <ViewSerials serials={row.serial_numbers} />
                 </div>
               ),
             },
@@ -147,7 +206,7 @@ export default function StockMovementDetail() {
                 <div>
                   <div className="font-mono text-[11px] text-ink">{row.source_bin_code ?? "—"}</div>
                   {row.batch_id ? (
-                    <div className="text-[10px] text-muted">Batch: {row.batch_id}</div>
+                    <div className="text-[10px] text-muted">Batch: <span className="font-mono text-ink">{row.batch_no ?? "—"}</span></div>
                   ) : null}
                 </div>
               ),
@@ -181,11 +240,12 @@ export default function StockMovementDetail() {
               </div>
               <div className="text-sm">
                 <span className="text-muted">From:</span> {row.source_bin_code ?? "—"}
-                {row.batch_id ? ` (Batch: ${row.batch_id})` : ""}
+                {row.batch_id ? ` (Batch: ${row.batch_no ?? "—"})` : ""}
               </div>
               <div className="text-sm">
                 <span className="text-muted">To:</span> {row.destination_bin_code ?? "—"}
               </div>
+              <ViewSerials serials={row.serial_numbers} />
             </div>
           )}
         />

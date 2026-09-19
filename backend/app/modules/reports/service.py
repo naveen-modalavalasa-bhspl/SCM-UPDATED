@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.modules.reports.ledgers import LEDGERS, Col, LedgerSpec
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import iso as ist_iso
@@ -35,6 +35,38 @@ def get_spec(key: str) -> LedgerSpec:
     spec = LEDGERS.get((key or "").strip().lower())
     if spec is None:
         raise NotFoundError(f"Unknown report ledger: {key}")
+    return spec
+
+
+async def readable_spec(db: AsyncSession, key: str, user=None) -> LedgerSpec:
+    """The ledger, if this login may read it at all.
+
+    `report.view` is the door to the Reports screen. It is not a right to every
+    document in the company, and the ledgers do not all draw on the same one: Stock
+    and Assets are `stock.view`, Procurement is `po.view`, Transport is
+    `transport.view`. `/ledgers` already drops the ones a login does not hold the
+    source permission for, so the tab never appears — but the rows, filters and
+    export routes never asked, and a URL typed by hand is a door too. A profile
+    holding nothing but `report.view` could read every purchase order's value that
+    way, and the data scope below would not have stopped it: a rung says WHOSE rows,
+    never WHICH ledger.
+
+    Checked here rather than in each route because all four entry points already come
+    through `get_spec`, so a ledger added later cannot forget to be guarded.
+    """
+    spec = get_spec(key)
+    # No user is a script or a test calling the service directly; the routes always
+    # pass one, exactly as `_scope_conditions` reads it.
+    if user is None:
+        return spec
+
+    from app.platform.rbac.service import get_user_permissions
+
+    held = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    if spec.permission not in held:
+        raise PermissionError_(f"Missing permission: {spec.permission}")
     return spec
 
 
@@ -183,6 +215,24 @@ async def _scope_conditions(db: AsyncSession, spec: LedgerSpec, cols, user) -> l
     if spec.scope_actor_col and spec.scope_actor_col in cols.keys():
         conditions.append(cols[spec.scope_actor_col] == user.id)
 
+    # The generic profile rung, for a document that is none of the three above. The
+    # spec names the columns the OWNING module's own list passes, so the ledger and
+    # the source screen answer "whose rows?" identically; a column the spec leaves
+    # out is one `scope_condition` then narrows on rather than opening up.
+    if spec.scope_owner_col and spec.scope_owner_col in cols.keys():
+        from app.shared.scope import scope_condition
+
+        def column(name: str | None):
+            return cols[name] if name and name in cols.keys() else None
+
+        conditions.append(await scope_condition(
+            db, user,
+            owner_col=cols[spec.scope_owner_col],
+            position_col=column(spec.scope_position_col),
+            office_col=column(spec.scope_office_col),
+            project_col=column(spec.scope_project_col),
+        ))
+
     return conditions
 
 
@@ -200,7 +250,7 @@ def _clean(value: Any) -> Any:
 async def list_rows(db: AsyncSession, key: str, page: int, size: int,
                     query: Mapping[str, str], user=None) -> dict:
     """One page of a ledger: {items, total, page, size, columns, applied}."""
-    spec = get_spec(key)
+    spec = await readable_spec(db, key, user)
     stmt, applied = await _filtered(db, spec, query, user)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     result = await db.execute(stmt.offset((page - 1) * size).limit(size))
@@ -219,7 +269,7 @@ async def filter_options(db: AsyncSession, key: str, user=None) -> list[dict]:
     enum has since dropped would otherwise be unfilterable — and unfilterable is
     exactly where a bad row hides.
     """
-    spec = get_spec(key)
+    spec = await readable_spec(db, key, user)
     sq = spec.source().subquery()
     # Scoped like the rows are: a dropdown that offers a project or a warehouse whose
     # rows the ledger then refuses to show reads as a broken filter, and names places
@@ -341,7 +391,7 @@ async def export_csv(db: AsyncSession, key: str, query: Mapping[str, str],
                      actor: str | None = None, user=None) -> tuple[str, str]:
     """(filename, csv text) for the current filter set. Same rows, same order as the
     screen — an export that does not match what was on screen is not evidence."""
-    spec = get_spec(key)
+    spec = await readable_spec(db, key, user)
     rows, applied = await _export_rows(db, spec, query, user)
     columns = export_columns(spec, query)
 
@@ -380,7 +430,7 @@ async def export_xlsx(db: AsyncSession, key: str, query: Mapping[str, str],
     200-column-wide audit extract readable. Frozen panes and an autofilter come with
     it because the first thing anybody does with this file is sort it.
     """
-    spec = get_spec(key)
+    spec = await readable_spec(db, key, user)
     rows, applied = await _export_rows(db, spec, query, user)
     columns = export_columns(spec, query)
     # Off the event loop, for the same reason as the CSV: building an openpyxl

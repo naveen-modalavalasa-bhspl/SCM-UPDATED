@@ -22,6 +22,7 @@ from sqlalchemy.orm import aliased
 from app.modules.indents.models import Indent
 from app.modules.inventory.models import Stock, StockMovement, StockTransferOrder
 from app.modules.logistics.models import TransportRequest
+from app.modules.procurement.models import PurchaseOrder
 from app.modules.reports.enums import AgeBucket, Breach, ExpiryBucket, LedgerKey
 from app.modules.returns.enums import MARKER as RETURNS_MARKER
 from app.modules.warehouse.enums import IssueDirection, IssueStatus
@@ -81,6 +82,21 @@ class LedgerSpec:
     scope_indent_col: str | None = None      # holds ind_indents.id
     scope_warehouse_name_col: str | None = None  # holds a warehouse NAME
     scope_actor_col: str | None = None       # holds the acting employee's id
+    # The generic profile-rung scope (`shared.scope.scope_condition`) for a document
+    # that is neither an indent, a warehouse fact, nor a personal action — a purchase
+    # order belongs to whoever raised it, in their office and project. `scope_owner_col`
+    # is required for the other three to apply; a rung whose column this table cannot
+    # answer narrows to "mine" rather than opening up, exactly as `scope_condition`
+    # does everywhere else it is called.
+    #
+    # Declare the SAME columns the owning module's own list passes, and no more. A
+    # ledger that hands `project_col` to a rung the source screen does not is a wider
+    # view of the same documents reached through a different door, which is the hole
+    # these fields exist to close.
+    scope_owner_col: str | None = None       # holds the raiser's employee id
+    scope_office_col: str | None = None      # holds hcm office id
+    scope_project_col: str | None = None     # holds hcm project id
+    scope_position_col: str | None = None    # holds the raiser's position id
 
     @property
     def column_keys(self) -> list[str]:
@@ -511,6 +527,73 @@ STOCK = LedgerSpec(
         Filt("batch_no", "Batch", kind="text"),
     ],
     search=["item_code", "item_name", "warehouse", "bin_code", "batch_no", "project"],
+    date_col="updated_at",
+    order_col="updated_at",
+    key_cols=["id"],
+    scope_warehouse_name_col="warehouse",
+)
+
+
+# --------------------------------------------------------------------------- #
+# Assets — the asset-tagged half of stock. `stk_balance.asset_code` is written only
+# by warehouse putaway for an item flagged `mst_items.is_asset`, so a row here
+# already IS an asset unit; there is nothing left to join or flag.
+#
+# Scoped exactly as STOCK is — same table, same warehouse bound — so the two can
+# never disagree about which shelves this login may read.
+# --------------------------------------------------------------------------- #
+
+def _assets_source() -> Select:
+    return select(
+        Stock.id.label("id"),
+        Stock.asset_code.label("asset_code"),
+        Stock.item_code.label("item_code"),
+        Stock.item_name.label("item_name"),
+        Stock.warehouse_name.label("warehouse"),
+        Stock.bin_code.label("bin_code"),
+        Stock.batch_no.label("batch_no"),
+        Stock.project_name.label("project"),
+        Stock.uom_code.label("uom"),
+        Stock.total_qty.label("total_qty"),
+        Stock.available_qty.label("available_qty"),
+        Stock.reserved_qty.label("reserved_qty"),
+        Stock.valuation_rate.label("rate"),
+        Stock.stock_value.label("stock_value"),
+        Stock.last_movement_at.label("last_movement_at"),
+        Stock.updated_at.label("updated_at"),
+    ).where(Stock.asset_code.isnot(None))
+
+
+ASSETS = LedgerSpec(
+    key=LedgerKey.ASSETS.value,
+    label="Assets",
+    subtitle="Asset-tagged stock — one row per asset code, with its warehouse, bin "
+             "and value",
+    permission=perms.STOCK_VIEW,
+    source=_assets_source,
+    columns=[
+        Col("asset_code", "Asset code"),
+        Col("item_code", "Item code"),
+        Col("item_name", "Item"),
+        Col("warehouse", "Warehouse"),
+        Col("bin_code", "Bin", narrow=True),
+        Col("batch_no", "Batch", narrow=True),
+        Col("project", "Project", narrow=True),
+        Col("total_qty", "Total", "qty", narrow=True),
+        Col("available_qty", "Available", "qty"),
+        Col("reserved_qty", "Reserved", "qty", narrow=True),
+        Col("uom", "UoM", narrow=True),
+        Col("rate", "Rate", "number", narrow=True),
+        Col("stock_value", "Value", "number"),
+        Col("last_movement_at", "Last movement", "datetime"),
+    ],
+    filters=[
+        Filt("warehouse", "Warehouse"),
+        Filt("project", "Project"),
+        Filt("asset_code", "Asset code", kind="text"),
+        Filt("item_code", "Item code", kind="text"),
+    ],
+    search=["asset_code", "item_code", "item_name", "warehouse", "bin_code"],
     date_col="updated_at",
     order_col="updated_at",
     key_cols=["id"],
@@ -1023,10 +1106,95 @@ TRANSPORT = LedgerSpec(
 )
 
 
+# --------------------------------------------------------------------------- #
+# Procurement — one row per purchase order, from raise to the vendor's answer.
+#
+# `pending_with` and `approved_at` are the order's own snapshot of the ladder, written
+# by the workflow engine onto the document (rule 8): the ledger reads where a PO
+# stands in approval, it never derives it. So a buyer can sit on "Pending with" and
+# see exactly the queue the approvals inbox would show them.
+#
+# Scoped on the SAME two columns `procurement.service.list_pos` passes — raiser and
+# office, deliberately not project. `scope_condition` reads the rungs as exclusive
+# branches, so handing it a project column here would let a PROJECT-rung login read a
+# whole project's order values off the ledger while `/procurement/pos` still showed
+# them only their own. One door may not be wider than the other.
+# --------------------------------------------------------------------------- #
+
+def _procurement_source() -> Select:
+    return select(
+        PurchaseOrder.id.label("id"),
+        PurchaseOrder.po_no.label("doc_no"),
+        PurchaseOrder.po_date.label("doc_date"),
+        PurchaseOrder.status.label("status"),
+        PurchaseOrder.vendor_status.label("vendor_status"),
+        PurchaseOrder.vendor_name.label("vendor"),
+        PurchaseOrder.indent_no.label("indent_no"),
+        PurchaseOrder.requisition_no.label("requisition_no"),
+        PurchaseOrder.rfq_no.label("rfq_no"),
+        PurchaseOrder.project_name.label("project"),
+        PurchaseOrder.facility_name.label("facility"),
+        PurchaseOrder.total_amount.label("total_amount"),
+        PurchaseOrder.revision_no.label("revision_no"),
+        PurchaseOrder.expected_date.label("expected_date"),
+        PurchaseOrder.current_approver_name.label("pending_with"),
+        PurchaseOrder.approved_at.label("approved_at"),
+        PurchaseOrder.created_by_id.label("created_by_id"),
+        PurchaseOrder.created_by_name.label("raised_by"),
+        PurchaseOrder.office_id.label("office_id"),
+        PurchaseOrder.created_at.label("created_at"),
+    )
+
+
+PROCUREMENT = LedgerSpec(
+    key=LedgerKey.PROCUREMENT.value,
+    label="Procurement",
+    subtitle="Every purchase order raised, where it stands in approval and the "
+             "vendor's answer",
+    permission=perms.PO_VIEW,
+    source=_procurement_source,
+    columns=[
+        Col("doc_no", "PO No"),
+        Col("doc_date", "PO date", "date"),
+        Col("status", "Status", "status"),
+        Col("vendor_status", "Vendor status", "status", narrow=True),
+        Col("vendor", "Vendor"),
+        Col("indent_no", "Indent No", narrow=True),
+        Col("requisition_no", "Requisition", narrow=True),
+        Col("rfq_no", "RFQ", narrow=True),
+        Col("project", "Project"),
+        Col("facility", "Facility", narrow=True),
+        Col("total_amount", "Value", "number"),
+        Col("revision_no", "Rev", "number", narrow=True),
+        Col("expected_date", "Expected", "date", narrow=True),
+        Col("pending_with", "Pending with"),
+        Col("approved_at", "Approved at", "datetime", narrow=True),
+        Col("raised_by", "Raised by"),
+    ],
+    filters=[
+        Filt("status", "Status"),
+        Filt("vendor_status", "Vendor status"),
+        Filt("vendor", "Vendor"),
+        Filt("project", "Project"),
+        Filt("pending_with", "Pending with"),
+        Filt("raised_by", "Raised by"),
+    ],
+    search=["doc_no", "vendor", "indent_no", "requisition_no", "rfq_no", "raised_by"],
+    # Ranged on the PO date, which is what a buyer means by "orders in September",
+    # but ORDERED on created_at: po_date is a date, so a day's orders all tie on it
+    # and the rows that tie shuffle between one page and the next.
+    date_col="doc_date",
+    order_col="created_at",
+    key_cols=["id"],
+    scope_owner_col="created_by_id",
+    scope_office_col="office_id",
+)
+
+
 LEDGERS: dict[str, LedgerSpec] = {
     spec.key: spec for spec in (
         INDENTS, APPROVALS, INVENTORY, WAREHOUSE,
-        STOCK, ACKNOWLEDGEMENTS, INDENT_TRACKER, APPROVAL_SLA, CONSUMPTION,
-        RETURNS, TRANSPORT,
+        STOCK, ASSETS, ACKNOWLEDGEMENTS, INDENT_TRACKER, APPROVAL_SLA, CONSUMPTION,
+        RETURNS, TRANSPORT, PROCUREMENT,
     )
 }

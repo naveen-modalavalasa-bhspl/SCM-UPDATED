@@ -8,6 +8,7 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "composite": true,
+    "outDir": "./.vite-config",
     "strict": true,
     "types": ["node"]
   },

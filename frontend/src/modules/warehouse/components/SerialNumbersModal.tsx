@@ -481,16 +481,6 @@ export function SerialNumbersModal({
 
             {selectMode && !readOnly && (available ?? []).length > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-2">
-                {/* `disabled`, not `isDisabled`: the shared Button forwards only the
-                  * former, so the latter is dropped and the button stays pressable at
-                  * the ceiling. Bounded by what the pick still has room for. */}
-                <Button
-                  variant="subtle"
-                  disabled={willAdd <= 0}
-                  onClick={selectAll}
-                >
-                  Select {willAdd > 0 ? willAdd : "all"}
-                </Button>
                 <Button
                   variant="subtle"
                   disabled={selected.size === 0}
