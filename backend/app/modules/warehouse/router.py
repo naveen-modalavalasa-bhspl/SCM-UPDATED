@@ -31,7 +31,7 @@ from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
-    MOVEMENT_APPROVE, MOVEMENT_CREATE, MOVEMENT_VIEW,
+    MOVEMENT_APPROVE, MOVEMENT_COMPLETE, MOVEMENT_CREATE, MOVEMENT_INSPECT, MOVEMENT_VIEW,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
     ISSUE_SPLIT,
@@ -459,6 +459,13 @@ async def create_stock_movement_order(data: s.StockMovementOrderWrite,
     return await service.create_stock_movement_order(db, data, user)
 
 
+@router.post("/stock-movement-orders/{order_id}/submit", response_model=s.StockMovementOrderRead)
+async def submit_stock_movement_order(order_id: int,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(MOVEMENT_CREATE))):
+    return await service.submit_stock_movement_order(db, order_id, user)
+
+
 # The approval door. `movement.approve` was defined months ago and NO route used it, so
 # a stock movement went through no ladder at all: pressing create moved the stock. It
 # now behaves like every other document — with no chain configured (every project
@@ -470,6 +477,22 @@ async def act_on_stock_movement_order(order_id: int, body: s.MovementOrderAction
                                       user=Depends(require_permission(MOVEMENT_APPROVE))):
     return await service.act_on_stock_movement_order(
         db, order_id, body.action, body.comments, user)
+
+
+@router.post("/stock-movement-orders/{order_id}/complete-inspection",
+             response_model=s.StockMovementOrderRead)
+async def complete_stock_movement_inspection(
+        order_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(MOVEMENT_INSPECT))):
+    return await service.complete_stock_movement_inspection(db, order_id, user)
+
+
+@router.post("/stock-movement-orders/{order_id}/complete",
+             response_model=s.StockMovementOrderRead)
+async def complete_stock_movement_order(
+        order_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(MOVEMENT_COMPLETE))):
+    return await service.complete_stock_movement_order(db, order_id, user)
 
 
 @router.get("/stock-movements/availability", response_model=s.StockAvailabilityRead)
@@ -1097,13 +1120,15 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
-                       issue_line_id: int | None = None,
+                       issue_line_id: int | None = None, unbatched: bool = False,
+                       claim_free: bool = False,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
                                       bin_id=bin_id, search=search, issue_id=issue_id,
-                                      issue_line_id=issue_line_id, user=user)
+                                      issue_line_id=issue_line_id, unbatched=unbatched,
+                                      claim_free=claim_free, user=user)
 
 
 @router.get("/serials/lookup")

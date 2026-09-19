@@ -44,7 +44,13 @@ def _memo(db: AsyncSession, bucket: str) -> dict:
     rung and the subtree are still computed from the database, still per login, still
     per active position. Nothing about who may see what moves.
     """
-    return db.info.setdefault(f"scope_memo_{bucket}", {})
+    session_info = getattr(db, "info", None)
+    if isinstance(session_info, dict):
+        return session_info.setdefault(f"scope_memo_{bucket}", {})
+    # Lightweight read adapters and unit-test doubles do not necessarily expose
+    # SQLAlchemy's session scratchpad. They still get the same scoped predicate;
+    # only the per-request optimization is skipped.
+    return {}
 
 
 async def descendant_position_ids(

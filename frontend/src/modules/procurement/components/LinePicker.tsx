@@ -50,6 +50,7 @@ export function LinePicker({
   freezeRateAndTax = false,
   allowRepricing = false,
   capQuantityAtOriginal = true,
+  hideAddLine = false,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
@@ -69,6 +70,8 @@ export function LinePicker({
   /** Source-backed RFQs cannot exceed their authorised quantity. Amendments are
    * re-approved, so their revised quantity stays open for the approver to decide. */
   capQuantityAtOriginal?: boolean;
+  /** Amendments may revise existing quantities but cannot introduce new items. */
+  hideAddLine?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const toast = useToast();
@@ -238,13 +241,15 @@ export function LinePicker({
         </div>
       ))}
 
-      <Button
-        variant="subtle"
-        disabled={disabled}
-        onClick={() => onChange([...lines, blankLine()])}
-      >
-        Add line
-      </Button>
+      {!hideAddLine && (
+        <Button
+          variant="subtle"
+          disabled={disabled}
+          onClick={() => onChange([...lines, blankLine()])}
+        >
+          Add line
+        </Button>
+      )}
     </div>
   );
 }

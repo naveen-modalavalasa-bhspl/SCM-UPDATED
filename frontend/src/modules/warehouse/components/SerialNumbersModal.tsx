@@ -269,31 +269,6 @@ export function SerialNumbersModal({
     const selectMode = pickMode === "select";
     const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
-    /**
-     * Tick the whole list in one press.
-     *
-     * Issuing 200 handsets off one bin was 200 clicks, or 200 scans, for a decision
-     * the storekeeper had already made — they are all in the same bay and the line is
-     * for all of them. Bounded exactly as a scan is: never more than the line asks
-     * for, so it fills the remaining slots and stops.
-     *
-     * It follows the search box, so with a filter typed "all" means the units on
-     * screen — how one batch is picked out of a mixed bin — and clearing the search
-     * offers the rest. Units already chosen are left alone rather than re-added.
-     *
-     * qa deleted this on the reasonable evidence that nothing rendered it and the
-     * build called it dead. The button exists (below, beside Clear); it was the
-     * BUTTON that had gone missing, not this arithmetic, so the fix is to keep both
-     * rather than to drop the half that was still correct.
-     */
-    const addable = visible.filter((s) => !selected.has(s));
-    const room = required - selected.size;
-    const willAdd = Math.max(0, Math.min(room, addable.length));
-    const selectAll = () => {
-      if (willAdd <= 0) return;
-      setError(null);
-      setSerials((rows) => [...rows, ...addable.slice(0, willAdd)]);
-    };
     const clearAll = () => {
       setError(null);
       setSerials([]);
@@ -481,16 +456,6 @@ export function SerialNumbersModal({
 
             {selectMode && !readOnly && (available ?? []).length > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-2">
-                {/* `disabled`, not `isDisabled`: the shared Button forwards only the
-                  * former, so the latter is dropped and the button stays pressable at
-                  * the ceiling. Bounded by what the pick still has room for. */}
-                <Button
-                  variant="subtle"
-                  disabled={willAdd <= 0}
-                  onClick={selectAll}
-                >
-                  Select {willAdd > 0 ? willAdd : "all"}
-                </Button>
                 <Button
                   variant="subtle"
                   disabled={selected.size === 0}
@@ -498,7 +463,7 @@ export function SerialNumbersModal({
                 >
                   Clear
                 </Button>
-                {willAdd <= 0 && selected.size >= required && (
+                {selected.size >= required && (
                   <span className="text-xs text-muted">
                     This pick is full at {required}.
                   </span>

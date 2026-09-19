@@ -1,8 +1,8 @@
 import { Button, Can, Card, ErrorBanner, Field, Input, PageHeader, Select } from "@/shared/components";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Plus, ScanLine, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Plus, ScanLine, Trash2 } from "lucide-react";
 import {
   batchOptions,
   binOptions,
@@ -16,21 +16,73 @@ import {
 import { CapacityMeter, fmtCount, volume, weight } from "../components/CapacityMeter";
 import { Lookup } from "../components/Lookup";
 import { Section } from "../components/DocumentMeta";
-import { SerialNumbersModal } from "../components/SerialNumbersModal";
+import { TrackingBadge, useTrackingMeta } from "../components/TrackingBadge";
+import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import { fmtQty, num } from "../format";
-import type { StockMovementOrderItemWrite, OccupancyMove } from "../types";
+import type {
+  OccupancyMove, StockAvailability, StockMovementOrderItemWrite, StorageType,
+  TrackingType, UnitMode,
+} from "../types";
 import { usePointLabel } from "../usePointLabel";
-import { useMemo } from "react";
+
+/**
+ * One line as the form holds it: the write shape, plus a stable key and the
+ * destination's label. The key is what the per-line availability and the unit picker
+ * address a line by — an index shifts under them the moment a line above is removed.
+ * Everything prefixed `_` is stripped before the write.
+ */
+type DraftLine = StockMovementOrderItemWrite & {
+  _key: string;
+  _destCode?: string | null;
+  _destName?: string | null;
+};
+
+let nextKey = 0;
+const newKey = () => `line-${++nextKey}`;
+
+/** The noun for one unit when the served catalogue has not landed yet. */
+const fallbackNoun = (mode?: UnitMode | null) =>
+  mode === "SERIAL" ? "serial" : mode === "IMEI" ? "IMEI" : "unit code";
+
+/**
+ * What is still wrong with a line, in the words the storekeeper acts on — or null.
+ *
+ * Whether a line must name its units is SERVED (`units_required`, read off the item
+ * master by `service._movement_units`), never inferred here: the server applies the
+ * identical rule at save and on approval, and this only says so before the press.
+ */
+function lineProblem(line: DraftLine, avail: StockAvailability | undefined, noun: string): string | null {
+  if (!line.item_id) return "Pick the item.";
+  if (!line.source_bin_id) return "Pick the source location.";
+  if (!line.destination_bin_id) return "Pick the destination location.";
+  if (line.source_bin_id === line.destination_bin_id) return "The destination must differ from the source.";
+  const qty = num(line.quantity);
+  if (qty <= 0) return "Enter the quantity to move.";
+  if (avail && qty > num(avail.available_qty)) {
+    return `Only ${fmtQty(avail.available_qty)} is available at the source.`;
+  }
+  if (avail?.units_required) {
+    if (!Number.isInteger(qty)) return `A quantity named by ${noun}s must be a whole number.`;
+    const picked = line.serial_numbers?.length ?? 0;
+    if (picked !== qty) return `Select exactly ${qty} ${noun}${qty === 1 ? "" : "s"} — ${picked} selected.`;
+  }
+  return null;
+}
 
 export default function StockMovementForm() {
   const pointLabel = usePointLabel();
   const nav = useNavigate();
   const queryClient = useQueryClient();
+  const trackingMeta = useTrackingMeta();
 
   const [warehouseId, setWarehouseId] = useState<number>(0);
   const [isBinManaged, setIsBinManaged] = useState<boolean>(true);
   const [reason, setReason] = useState<string>("");
-  const [lines, setLines] = useState<StockMovementOrderItemWrite[]>([]);
+  const [lines, setLines] = useState<DraftLine[]>([]);
+  /** Each line's source, as the server describes it. Keyed by `_key`. */
+  const [sources, setSources] = useState<Record<string, StockAvailability | undefined>>({});
+  /** The line whose units are being picked — the picker is a whole screen. */
+  const [pickKey, setPickKey] = useState<string | null>(null);
 
   const [touched, setTouched] = useState(false);
 
@@ -40,16 +92,27 @@ export default function StockMovementForm() {
   });
 
   const save = useMutation({
-    mutationFn: () => createStockMovementOrder({ warehouse_id: warehouseId, reason, items: lines }),
-    onSuccess: () => {
+    mutationFn: () => createStockMovementOrder({
+      warehouse_id: warehouseId,
+      reason,
+      items: lines.map(({ _key, _destCode, _destName, ...line }) => line),
+    }),
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
       queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
-      nav("/warehouse/stock-movements", { replace: true });
+      // The units now stand somewhere else; every cached page of them is stale.
+      queryClient.invalidateQueries({ queryKey: ["wh-issue-codes"] });
+      queryClient.invalidateQueries({ queryKey: ["wh-serials"] });
+      queryClient.invalidateQueries({ queryKey: ["wh-item-locations"] });
+
+      const base = window.location.pathname.replace(/\/new$/, "");
+      nav(`${base}/view?order_no=${encodeURIComponent(result.order_no)}`, { replace: true });
     },
   });
 
   const addLine = () => {
     setLines([...lines, {
+      _key: newKey(),
       item_id: 0,
       source_bin_id: 0,
       destination_bin_id: 0,
@@ -59,37 +122,52 @@ export default function StockMovementForm() {
     }]);
   };
 
-  const removeLine = (index: number) => {
-    setLines(lines.filter((_, i) => i !== index));
+  const removeLine = (key: string) => {
+    setLines(lines.filter((l) => l._key !== key));
+    setSources(({ [key]: _gone, ...rest }) => rest);
   };
 
-  const setLine = <K extends keyof StockMovementOrderItemWrite>(index: number, key: K, value: StockMovementOrderItemWrite[K]) => {
-    const newLines = [...lines];
-    newLines[index] = { ...newLines[index], [key]: value };
-    // Clear serial numbers if dimensions change
-    if (key === "item_id" || key === "source_bin_id" || key === "batch_id") {
-      newLines[index].serial_numbers = [];
-    }
-    // A source bin is only offered because it holds the item that was chosen. Change
-    // the item and the bin underneath it is a bin for something else — kept, it was
-    // posted as a source with no stock in it and the save came back "Only 0 is
-    // available". Same for the batch, which is read off the source.
-    if (key === "item_id") {
-      newLines[index].source_bin_id = 0;
-      newLines[index].batch_id = null;
-    }
-    // Never leave the destination sitting on the bin just chosen as the source.
-    if (key === "source_bin_id" && value === newLines[index].destination_bin_id) {
-      newLines[index].destination_bin_id = 0;
-    }
-    setLines(newLines);
+  const patchLine = (key: string, patch: Partial<DraftLine>) => {
+    setLines((current) => current.map((line) => {
+      if (line._key !== key) return line;
+      const next = { ...line, ...patch };
+      // The units belong to one (item, source, batch). Change any of them and the
+      // ones already picked are units of somewhere else.
+      if ("item_id" in patch || "source_bin_id" in patch || "batch_id" in patch) {
+        next.serial_numbers = [];
+      }
+      // A source bin is only offered because it holds the item that was chosen.
+      // Change the item and the bin underneath it is a bin for something else — kept,
+      // it was posted as a source with no stock in it and the save came back "Only 0
+      // is available". Same for the batch, which is read off the source.
+      if ("item_id" in patch) {
+        next.source_bin_id = 0;
+        next.batch_id = null;
+      }
+      // Never leave the destination sitting on the bin just chosen as the source.
+      if ("source_bin_id" in patch && patch.source_bin_id === next.destination_bin_id) {
+        next.destination_bin_id = 0;
+        next._destCode = null;
+        next._destName = null;
+      }
+      // Lowering the quantity takes the surplus identifiers with it, from the tail —
+      // the last ones scanned. Otherwise correcting 10 to 6 sends the storekeeper back
+      // into the picker to unpick four by hand.
+      if ("quantity" in patch) {
+        const room = Math.max(0, Math.floor(num(next.quantity)));
+        if ((next.serial_numbers?.length ?? 0) > room) {
+          next.serial_numbers = (next.serial_numbers ?? []).slice(0, room);
+        }
+      }
+      return next;
+    }));
   };
 
-  const isInvalid = !warehouseId || lines.length === 0 || lines.some(l =>
-    !l.item_id || !l.source_bin_id || !l.destination_bin_id || l.quantity <= 0 || l.source_bin_id === l.destination_bin_id ||
-    // Strict validation if it's a known serial-tracked line:
-    (l as any)._is_serial_tracked && (l.serial_numbers?.length ?? 0) !== Math.floor(l.quantity)
-  );
+  const nounFor = (avail?: StockAvailability) =>
+    trackingMeta(avail?.tracking_type as TrackingType | null)?.unit ?? fallbackNoun(avail?.unit_mode);
+
+  const problems = lines.map((line) => lineProblem(line, sources[line._key], nounFor(sources[line._key])));
+  const isInvalid = !warehouseId || lines.length === 0 || problems.some(Boolean);
 
   const outwardMoves = useMemo<OccupancyMove[]>(
     () => lines
@@ -145,6 +223,9 @@ export default function StockMovementForm() {
     worst: consumedCapacity.find((row) => row.status === "OVER" || row.status === "WONT_FIT"),
   }), [consumedCapacity]);
 
+  const picking = pickKey ? lines.find((l) => l._key === pickKey) : undefined;
+  const pickingSource = picking ? sources[picking._key] : undefined;
+  const pickingType = (pickingSource?.tracking_type ?? "NONE") as TrackingType;
 
   return (
     <div>
@@ -164,7 +245,7 @@ export default function StockMovementForm() {
                 }}
                 disabled={save.isPending}
               >
-                {save.isPending ? "Moving…" : "Complete movement"}
+                {save.isPending ? "Saving…" : "Save draft"}
               </Button>
             </Can>
           </>
@@ -172,7 +253,18 @@ export default function StockMovementForm() {
       />
 
       <ErrorBanner error={save.error} />
-      {touched && isInvalid && <ErrorBanner error="Complete all fields for the warehouse and lines. Ensure destination differs from source and quantity is valid." />}
+      {touched && isInvalid && (
+        <div className="mb-4 rounded-xl border border-bad/40 bg-bad-bg/30 px-4 py-3 text-sm text-ink">
+          <b>Not ready to move yet.</b>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {!warehouseId && <li>Pick the warehouse.</li>}
+            {warehouseId > 0 && lines.length === 0 && <li>Add at least one item.</li>}
+            {problems.map((problem, i) => problem && (
+              <li key={lines[i]._key}>Line {i + 1}: {problem}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <Section title="Header Details">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-2">
@@ -185,6 +277,7 @@ export default function StockMovementForm() {
                 setWarehouseId(value === "" ? 0 : value);
                 setIsBinManaged((option as any)?.is_bin_managed ?? true);
                 setLines([]);
+                setSources({});
               }}
               placeholder="Warehouse"
             />
@@ -202,7 +295,7 @@ export default function StockMovementForm() {
       <div className="mt-8 mb-4 flex items-center justify-between">
         <h3 className="text-lg font-medium text-body">Movement Lines</h3>
         {/* "flat" is a raw HeroUI variant; this project's Button exposes its own set. */}
-        <Button variant="subtle" onClick={addLine}>
+        <Button variant="subtle" onClick={addLine} disabled={!warehouseId}>
           <Plus className="mr-2 h-4 w-4" />
           Add Item
         </Button>
@@ -211,19 +304,26 @@ export default function StockMovementForm() {
       <div className="space-y-6">
         {lines.map((line, index) => (
           <MovementLineEditor
-            key={index}
+            key={line._key}
             index={index}
             line={line}
             warehouseId={warehouseId}
             isBinManaged={isBinManaged}
             storageTypes={storageTypes.data ?? []}
-            onChange={(key, value) => setLine(index, key, value)}
-            onRemove={() => removeLine(index)}
+            problem={touched ? problems[index] : null}
+            onPatch={(patch) => patchLine(line._key, patch)}
+            onRemove={() => removeLine(line._key)}
+            onSource={(data) => setSources((current) => (
+              current[line._key] === data ? current : { ...current, [line._key]: data }
+            ))}
+            onPickUnits={() => setPickKey(line._key)}
           />
         ))}
         {lines.length === 0 && (
           <div className="rounded-lg border border-dashed p-8 text-center text-muted">
-            No items added yet. Click "Add Item" to start.
+            {warehouseId
+              ? "No items added yet. Click \"Add Item\" to start."
+              : "Pick the warehouse first, then add the items to move."}
           </div>
         )}
       </div>
@@ -306,6 +406,43 @@ export default function StockMovementForm() {
           )}
         </Section>
       )}
+
+      {/* Naming the units is a SCREEN, not a dialog — the same one a material issue
+        * uses. Scoped to the SOURCE location and batch, where the units physically
+        * stand; its "At destination" view lists what the target bay already holds of
+        * this item and batch, which is where these units will be found afterwards. */}
+      <CodeAssignmentScreen
+        open={!!picking}
+        onClose={() => setPickKey(null)}
+        backLabel="Back to the movement"
+        quantity={picking ? num(picking.quantity) : 0}
+        initial={picking?.serial_numbers ?? []}
+        trackingType={pickingType}
+        trackingMeta={trackingMeta(pickingType)}
+        noun={nounFor(pickingSource)}
+        unitMode={(pickingSource?.unit_mode ?? "SERIAL") as UnitMode}
+        itemId={picking?.item_id || undefined}
+        warehouseId={warehouseId || undefined}
+        binId={picking?.source_bin_id || undefined}
+        batchId={picking?.batch_id || undefined}
+        unbatched
+        claimFree
+        scope={{
+          batchNo: pickingSource?.batch_no,
+          binCode: pickingSource?.bin_code,
+          binPath: pickingSource?.bin_path,
+          available: pickingSource ? num(pickingSource.available_qty) : null,
+        }}
+        destination={picking?.destination_bin_id ? {
+          binId: picking.destination_bin_id,
+          binCode: picking._destCode,
+          binPath: picking._destName,
+          batchId: picking.batch_id,
+          batchNo: pickingSource?.batch_no,
+        } : undefined}
+        itemLabel={picking ? `Line ${lines.indexOf(picking) + 1}` : ""}
+        onSave={(codes) => picking && patchLine(picking._key, { serial_numbers: codes })}
+      />
     </div>
   );
 }
@@ -316,26 +453,25 @@ function MovementLineEditor({
   warehouseId,
   isBinManaged,
   storageTypes,
-  onChange,
-  onRemove
+  problem,
+  onPatch,
+  onRemove,
+  onSource,
+  onPickUnits,
 }: {
   index: number;
-  line: StockMovementOrderItemWrite;
+  line: DraftLine;
   warehouseId: number;
   isBinManaged: boolean;
-  storageTypes: any[];
-  onChange: <K extends keyof StockMovementOrderItemWrite>(key: K, val: StockMovementOrderItemWrite[K]) => void;
+  storageTypes: StorageType[];
+  problem: string | null;
+  onPatch: (patch: Partial<DraftLine>) => void;
   onRemove: () => void;
+  onSource: (data: StockAvailability | undefined) => void;
+  onPickUnits: () => void;
 }) {
-  const [serialsOpen, setSerialsOpen] = useState(false);
   const [storageType, setStorageType] = useState<number | string | "">("");
-
-  /* Only the storage types stock is actually counted in. The full BinType list was on
-   * offer — BLOCK, FLOOR, LANE, RACK, SHELF — and every one of them is structure you
-   * walk past on the way to a bin: picking one gave an empty destination list, and
-   * `all_locations` let a rack be chosen anyway, which the service then rejected with
-   * "Stock can move only between stock-holding bins". Mirrors BIN_TYPES on the server. */
-  const STORAGE_ENUMS = ["BIN", "COLD_STORAGE_BIN"];
+  const trackingMeta = useTrackingMeta();
 
   const availability = useQuery({
     queryKey: ["wh-stock-movement-availability", warehouseId, line.source_bin_id, line.item_id, line.batch_id],
@@ -343,23 +479,32 @@ function MovementLineEditor({
     enabled: !!warehouseId && (line.source_bin_id !== undefined && (isBinManaged ? !!line.source_bin_id : true)) && !!line.item_id,
   });
 
-  // Track it locally so the top-level form can validate
+  // Handed up so the form can validate the whole document and open the picker.
+  // Through a ref, because the parent passes a fresh closure every render.
+  const report = useRef(onSource);
+  report.current = onSource;
+  const ready = availability.isSuccess && !!line.item_id && !!line.source_bin_id;
   useEffect(() => {
-    if (availability.data?.is_serial_tracked !== undefined) {
-      (line as any)._is_serial_tracked = availability.data.is_serial_tracked;
-    }
-  }, [availability.data?.is_serial_tracked, line]);
+    report.current(ready ? availability.data : undefined);
+  }, [ready, availability.data]);
+
+  const avail = ready ? availability.data : undefined;
+  const type = (avail?.tracking_type ?? "NONE") as TrackingType;
+  const meta = trackingMeta(type);
 
   return (
-    <Card className="relative p-6 bg-content1 shadow-sm transition-all hover:shadow-md">
+    <Card className={`relative p-6 bg-content1 shadow-sm transition-all hover:shadow-md ${
+      problem ? "ring-1 ring-bad/40" : ""
+    }`}>
       <div className="absolute right-4 top-4">
-        <Button variant="ghost" className="text-danger h-8 w-8 p-0" onClick={onRemove}>
+        <Button variant="ghost" className="text-danger h-8 w-8 p-0" onClick={onRemove} aria-label={`Remove line ${index + 1}`}>
           <Trash2 className="h-4 w-4" />
         </Button>
       </div>
 
-      <div className="mb-4 text-sm font-semibold text-muted uppercase tracking-wider">
+      <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-muted uppercase tracking-wider">
         Line {index + 1}
+        {avail?.units_required && <TrackingBadge type={type} meta={meta} size="sm" />}
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -368,13 +513,10 @@ function MovementLineEditor({
             name={`line-item-${index}`}
             load={itemOptions}
             value={line.item_id || ""}
-            onChange={(value) => {
-              onChange("item_id", value === "" ? 0 : value);
-              if (!isBinManaged) {
-                onChange("source_bin_id", 0);
-                onChange("destination_bin_id", 0);
-              }
-            }}
+            onChange={(value) => onPatch({
+              item_id: value === "" ? 0 : value,
+              ...(!isBinManaged ? { source_bin_id: 0, destination_bin_id: 0 } : {}),
+            })}
             placeholder="Select Item"
           />
         </Field>
@@ -391,7 +533,7 @@ function MovementLineEditor({
               load={(search) => binOptions(warehouseId, search, line.item_id, line.batch_id)}
               value={line.source_bin_id || ""}
               isDisabled={!warehouseId || !line.item_id}
-              onChange={(value) => onChange("source_bin_id", value === "" ? 0 : value)}
+              onChange={(value) => onPatch({ source_bin_id: value === "" ? 0 : value })}
               placeholder={line.item_id ? "Source location" : "Select the item first"}
             />
           </Field>
@@ -403,36 +545,37 @@ function MovementLineEditor({
             load={() => batchOptions(line.item_id, warehouseId, line.source_bin_id)}
             value={line.batch_id ?? ""}
             isDisabled={!line.item_id || (isBinManaged && !line.source_bin_id)}
-            onChange={(value) => onChange("batch_id", value === "" ? null : value)}
+            onChange={(value) => onPatch({ batch_id: value === "" ? null : value })}
             placeholder="Batch"
           />
         </Field>
 
         <Field
           label="Quantity"
-          hint={availability.data ? `Available: ${fmtQty(availability.data.available_qty)}` : undefined}
+          hint={avail ? `Available: ${fmtQty(avail.available_qty)}` : undefined}
         >
           <Input
             type="number"
             value={String(line.quantity || "")}
-            onChange={(event) => onChange("quantity", Number(event.target.value))}
+            onChange={(event) => onPatch({ quantity: Number(event.target.value) })}
             placeholder="Qty"
-            className={availability.data && Number(line.quantity) > num(availability.data.available_qty) ? "border-danger text-danger" : ""}
+            className={avail && Number(line.quantity) > num(avail.available_qty) ? "border-danger text-danger" : ""}
           />
         </Field>
 
-        <Field label="Destination Storage Type">
+        <Field label="Destination storage type"
+               hint="Choose a type to narrow the destination locations.">
           <Select
             value={String(storageType)}
             onChange={(val) => {
               setStorageType(val || "");
               // The bin below no longer belongs to the type now selected.
-              onChange("destination_bin_id", 0);
+              onPatch({ destination_bin_id: 0, _destCode: null, _destName: null });
             }}
-            options={[
-              ...STORAGE_ENUMS.map(e => ({ value: e, label: e })),
-              ...storageTypes.map(st => ({ value: String(st.id), label: st.name }))
-            ]}
+            options={storageTypes
+              .filter((type) => type.is_active)
+              .map((type) => ({ value: String(type.id), label: type.name }))}
+            placeholder="Select storage type"
             ariaLabel="Storage type filter"
           />
         </Field>
@@ -446,7 +589,8 @@ function MovementLineEditor({
            * rather than in a bay (see `confirm_putaway`), and a destination the service
            * accepts has to be one the picker offers — otherwise stock that CAN be put
            * on a rack can never be moved onto one. */
-          <Field label="Destination location">
+          <Field label="Destination location"
+                 hint={!storageType ? "Select the destination storage type first." : undefined}>
             <Lookup
               name={`line-dest-${index}-${warehouseId}-${storageType || "any"}-${line.source_bin_id}`}
               load={(search) => binOptions(
@@ -454,37 +598,122 @@ function MovementLineEditor({
                 true, line.source_bin_id || undefined,
               )}
               value={line.destination_bin_id || ""}
-              isDisabled={!warehouseId}
-              onChange={(value) => onChange("destination_bin_id", value === "" ? 0 : value)}
-              placeholder="Destination location"
+              isDisabled={!warehouseId || !storageType}
+              onChange={(value, option) => onPatch({
+                destination_bin_id: value === "" ? 0 : value,
+                _destCode: option?.code ?? null,
+                _destName: option?.name ?? null,
+              })}
+              placeholder={storageType ? "Select destination location" : "Select storage type first"}
             />
-          </Field>
-        )}
-
-        {availability.data?.is_serial_tracked && (
-          <Field label="Serial Numbers">
-            <Button
-              variant="subtle"
-              onClick={() => setSerialsOpen(true)}
-              className={`w-full justify-start ${(line.serial_numbers?.length ?? 0) !== Math.floor(line.quantity) ? 'border-danger text-danger' : ''}`}
-            >
-              <ScanLine className="mr-2 h-4 w-4" />
-              {line.serial_numbers?.length ?? 0} selected (needs {Math.floor(line.quantity)})
-            </Button>
           </Field>
         )}
       </div>
 
-      <SerialNumbersModal
-        isOpen={serialsOpen}
-        onClose={() => setSerialsOpen(false)}
-        quantity={line.quantity}
-        initial={line.serial_numbers ?? []}
-        itemLabel="Serials in source bin"
-        onSave={(serials) => onChange("serial_numbers", serials)}
-        available={availability.data?.serial_numbers ?? []}
-        pickMode="select"
-      />
+      {avail?.units_required && (
+        <UnitsTile
+          line={line}
+          avail={avail}
+          type={type}
+          noun={meta?.unit ?? fallbackNoun(avail.unit_mode)}
+          hint={meta?.hint}
+          onPick={onPickUnits}
+        />
+      )}
+
+      {problem && (
+        <p className="mt-4 flex items-center gap-2 text-xs font-medium text-bad">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {problem}
+        </p>
+      )}
     </Card>
+  );
+}
+
+/**
+ * The units a line carries, stated where the line is — how many are named, how many
+ * are wanted, what the source can give, where they go — with the one button that
+ * opens the picker. The storekeeper should never have to open the screen to find out
+ * whether the line is finished.
+ */
+function UnitsTile({ line, avail, type, noun, hint, onPick }: {
+  line: DraftLine;
+  avail: StockAvailability;
+  type: TrackingType;
+  noun: string;
+  hint?: string | null;
+  onPick: () => void;
+}) {
+  const qty = num(line.quantity);
+  const wanted = Number.isInteger(qty) ? qty : Math.floor(qty);
+  const picked = line.serial_numbers ?? [];
+  const complete = wanted > 0 && picked.length === wanted;
+  const supply = avail.units_available ?? null;
+  const short = supply !== null && !avail.units_capped && wanted > supply;
+  const plural = (n: number) => `${noun}${n === 1 ? "" : "s"}`;
+  const PREVIEW = 6;
+
+  return (
+    <div className={`mt-5 rounded-xl border px-4 py-3 transition-colors ${
+      complete ? "border-ok/40 bg-ok/5" : short ? "border-bad/40 bg-bad-bg/20" : "border-line bg-content2/50"
+    }`}>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex items-center gap-2">
+          {complete
+            ? <CheckCircle2 className="h-5 w-5 text-ok" />
+            : <ScanLine className="h-5 w-5 text-muted" />}
+          <div>
+            <p className="text-sm font-semibold text-ink">
+              <span className="tabular">{picked.length}</span>
+              <span className="text-muted"> / {wanted || "—"}</span> {plural(wanted)} selected
+            </p>
+            <p className="text-[11px] text-muted">
+              {hint ?? `One ${noun} per unit moved, required by the item master.`}
+            </p>
+          </div>
+        </div>
+
+        <div className="h-1.5 min-w-24 flex-1 overflow-hidden rounded-full bg-content3">
+          <div className={`h-full transition-all duration-300 ${complete ? "bg-ok" : "bg-warn"}`}
+               style={{ width: `${wanted ? Math.min(100, (picked.length / wanted) * 100) : 0}%` }} />
+        </div>
+
+        <div className="flex items-center gap-1.5 text-xs text-muted">
+          <span className="font-mono text-ink">{avail.bin_code ?? "source"}</span>
+          <ArrowRight className="h-3.5 w-3.5 text-ok" />
+          <span className="font-mono text-ink">{line._destCode ?? "destination"}</span>
+        </div>
+
+        <Button variant={complete ? "subtle" : "soft"} onClick={onPick} disabled={wanted <= 0}>
+          <ScanLine className="h-4 w-4" />
+          {wanted <= 0 ? "Enter the quantity first" : complete ? `Review ${plural(2)}` : `Select ${plural(2)}`}
+        </Button>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+        <span className="text-muted">
+          Source holds{" "}
+          <b className="tabular text-ink">
+            {supply === null ? "—" : `${supply.toLocaleString()}${avail.units_capped ? "+" : ""}`}
+          </b>{" "}
+          {plural(supply ?? 0)} free to move
+          {avail.batch_no ? <> in batch <b className="font-mono text-ink">{avail.batch_no}</b></> : null}.
+        </span>
+        {picked.slice(0, PREVIEW).map((code) => (
+          <span key={code} className="rounded-md border border-line bg-content1 px-1.5 py-0.5 font-mono text-ink">
+            {code}
+          </span>
+        ))}
+        {picked.length > PREVIEW && (
+          <span className="text-muted">+{picked.length - PREVIEW} more</span>
+        )}
+        {type !== "NONE" && short && (
+          <span className="basis-full font-medium text-bad">
+            Only {supply} {plural(supply ?? 0)} of this item and batch are at this location —
+            lower the quantity, or move the rest from another source.
+          </span>
+        )}
+      </div>
+    </div>
   );
 }

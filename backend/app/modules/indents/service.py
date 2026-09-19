@@ -751,7 +751,8 @@ async def indent_access_condition(db: AsyncSession, user):
     A batch approval asked for the identical clause once per indent and paid nine
     round trips each time to rebuild it.
     """
-    cache = db.info.setdefault("indent_access_memo", {})
+    session_info = getattr(db, "info", None)
+    cache = session_info.setdefault("indent_access_memo", {}) if isinstance(session_info, dict) else {}
     key = (user.id, getattr(user, "active_position_id", None))
     if key in cache:
         return cache[key]
@@ -808,7 +809,8 @@ async def indent_participant_condition(db: AsyncSession, user):
     rung may take away. Two copies that could disagree is how an approver comes to
     be told a document they are holding does not exist.
     """
-    cache = db.info.setdefault("indent_participant_memo", {})
+    session_info = getattr(db, "info", None)
+    cache = session_info.setdefault("indent_participant_memo", {}) if isinstance(session_info, dict) else {}
     key = (user.id, getattr(user, "active_position_id", None))
     if key in cache:
         return cache[key]

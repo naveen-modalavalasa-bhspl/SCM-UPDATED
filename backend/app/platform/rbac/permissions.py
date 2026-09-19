@@ -148,6 +148,8 @@ MOVEMENT_VIEW = "movement.view"
 MOVEMENT_CREATE = "movement.create"
 MOVEMENT_UPDATE = "movement.update"
 MOVEMENT_APPROVE = "movement.approve"
+MOVEMENT_INSPECT = "movement.inspect"
+MOVEMENT_COMPLETE = "movement.complete"
 
 # --- Masters ---
 MASTER_ITEM_MANAGE = "master.item.manage"
@@ -398,6 +400,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MOVEMENT_CREATE, "warehouse", "movement", "create", "Create stock movements"),
     Perm(MOVEMENT_UPDATE, "warehouse", "movement", "update", "Update stock movements"),
     Perm(MOVEMENT_APPROVE, "warehouse", "movement", "approve", "Approve stock movements"),
+    Perm(MOVEMENT_INSPECT, "warehouse", "movement", "inspect",
+         "Complete stock movement inspections"),
+    Perm(MOVEMENT_COMPLETE, "warehouse", "movement", "complete",
+         "Complete approved stock movements"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
     Perm(MASTER_VENDOR_MANAGE, "masters", "vendor", "manage", "Manage vendors"),
     Perm(MASTER_CATEGORY_MANAGE, "masters", "category", "manage", "Manage item categories"),
@@ -526,6 +532,8 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
+    MOVEMENT_INSPECT: MOVEMENT_CREATE,
+    MOVEMENT_COMPLETE: MOVEMENT_CREATE,
     # Splitting is a way of DOING the issue, not a new authority over it: whoever
     # could post the whole issue yesterday can hand its pieces to the floors today.
     # Fail-closed would leave the button on nobody's profile and the feature unused.

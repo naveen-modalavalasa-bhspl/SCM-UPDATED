@@ -1170,9 +1170,24 @@ class StockMovementRead(BaseModel):
 
 
 class StockAvailabilityRead(BaseModel):
+    """One movement line's source, and how its units must be named.
+
+    `units_required`, `unit_mode` and `tracking_type` are read off the item master
+    (see `service._movement_units`), so a screen never decides for itself whether an
+    item is serial, IMEI, asset or consumable tracked. `units_available` is bounded:
+    with `units_capped` it means "at least this many".
+    """
     available_qty: Decimal = Decimal("0")
     serial_numbers: list[str] = Field(default_factory=list)
     is_serial_tracked: bool = False
+    units_required: bool = False
+    unit_mode: str | None = None
+    tracking_type: str | None = None
+    units_available: int | None = None
+    units_capped: bool = False
+    bin_code: str | None = None
+    bin_path: str | None = None
+    batch_no: str | None = None
 
 
 class StockMovementOrderItemWrite(BaseModel):
@@ -1224,6 +1239,7 @@ class StockMovementOrderItemRead(BaseModel):
     destination_bin_code: str | None = None
     quantity: Decimal
     batch_id: int | None = None
+    batch_no: str | None = None
     serial_numbers: list[str] | str | None = Field(default_factory=list)
 
     @field_validator("serial_numbers", mode="before")

@@ -2543,13 +2543,27 @@ export interface StockMovementOrderItem {
   destination_bin_code?: string | null;
   quantity: number;
   batch_id?: number | null;
+  /** The batch number printed on the goods — never show `batch_id` in its place. */
+  batch_no?: string | null;
   serial_numbers?: string[] | null;
 }
 
 export interface StockAvailability {
   available_qty: number;
   is_serial_tracked: boolean;
+  /** No longer filled — the units are paged through `/serials`. */
   serial_numbers: string[];
+  /** Read off the item master: must this line name one identifier per unit? */
+  units_required?: boolean;
+  unit_mode?: UnitMode | null;
+  tracking_type?: TrackingType | null;
+  /** Unclaimed units at this location and batch, counted only to a ceiling. */
+  units_available?: number | null;
+  /** True when `units_available` is "at least" rather than exact. */
+  units_capped?: boolean;
+  bin_code?: string | null;
+  bin_path?: string | null;
+  batch_no?: string | null;
 }
 
 export interface StockMovementOrder {

@@ -199,6 +199,7 @@ def item_out(i: Item) -> dict:
             "is_batch_tracked": i.is_batch_tracked,
             "is_serial_tracked": i.is_serial_tracked,
             "is_imei_tracked": i.is_imei_tracked, "has_expiry": i.has_expiry,
+            "tax_percent": float(i.tax_percent) if i.tax_percent is not None else 0,
             "requires_qi": i.requires_qi,
             "dosage_form_id": i.dosage_form_id,
             "dosage_form_code": i.dosage_form_code,

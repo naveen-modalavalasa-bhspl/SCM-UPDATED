@@ -383,6 +383,15 @@ export const getStockMovementOrder = (order_no: string) =>
 export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders`, body);
 
+export const submitStockMovementOrder = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/submit`);
+
+export const completeStockMovementInspection = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/complete-inspection`);
+
+export const completeStockMovementOrder = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/complete`);
+
 /** Approve or reject a movement waiting on a signature. Only reachable when the
  *  project has an approval ladder configured for STOCK_MOVEMENT_ORDER — with none
  *  (every project today) a movement completes on the press and never lands here. */
@@ -704,6 +713,10 @@ export const listSerials = (
     // Scope the list to one issue line: units another document — or another line of
     // the same issue — is already holding drop out, the ones this line holds stay.
     issue_id?: number; issue_line_id?: number;
+    // No batch named means the UNBATCHED lot, not any batch in the bay.
+    unbatched?: boolean;
+    // Only units no document is holding — a stock movement's picker.
+    claim_free?: boolean;
   } = {},
 ) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
