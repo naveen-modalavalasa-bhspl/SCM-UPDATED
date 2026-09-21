@@ -6,7 +6,11 @@ import type {
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
   MRCandidate, POAmend, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
   PurchaseOrder, VendorPO,
-  VendorPOListRow,
+  VendorPOListRow, VendorReturnDetail, VendorReturnListRow,
+  VendorReturnReceiptInput,
+  VendorReturnDecisionInput, VendorReturnSettlementInput,
+  VendorTransportInput, ReplacementDispatchInput,
+  ReplacementDocumentType,
   Quotation, QuoteListRow, QuoteOtpSent, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   ProcurementLedgerFilters, ProcurementLedgerRow,
@@ -267,13 +271,83 @@ export const supplierApi = {
   /* --- orders, and what the vendor says they have sent against them --- */
   pos: (params: { search?: string; status?: string; page?: number; size?: number } = {}) =>
     api.get<Paginated<VendorPOListRow>>("/api/supplier/pos", { params }).then((r) => r.data),
+  /** Goods sent BACK to this supplier. Served by the warehouse module on the portal's
+   *  own prefix — see `VendorReturnListRow` for why it is not beside the orders. */
+  returns: (params: { search?: string; status?: string; page?: number; size?: number } = {}) =>
+    api.get<Paginated<VendorReturnListRow>>("/api/supplier/returns", { params })
+      .then((r) => r.data),
+  /** One return opened — its lines and where it is being delivered. Scoped on the
+   *  vendor in the token, so somebody else's return id is a 404 rather than a leak. */
+  return: (id: number) =>
+    api.get<VendorReturnDetail>(`/api/supplier/returns/${id}`).then((r) => r.data),
+  /* --- the six presses a supplier makes on a return, in the order they make them ---
+   *
+   * The buyer's desk used to make the first four of these on the supplier's behalf, from
+   * a phone call, on goods that had already been shipped. They are the supplier's now
+   * (2026-09-12) and the goods do not move until the supplier has approved the return and
+   * the warehouse has arranged a vehicle. Every one is answered ONCE and scoped to the
+   * vendor in the token — somebody else's return id is a 404, not a leak. */
+
+  /** Approve or reject a return. A rejection must say why; nothing has travelled yet. */
+  decideReturn: (id: number, body: VendorReturnDecisionInput) =>
+    api.post<VendorReturnDetail>(`/api/supplier/returns/${id}/decide`, body)
+      .then((r) => r.data),
+  /** Refund or replacement — what the buyer gets back, once the return is approved. */
+  settleReturn: (id: number, body: VendorReturnSettlementInput) =>
+    api.post<VendorReturnDetail>(`/api/supplier/returns/${id}/settle`, body)
+      .then((r) => r.data),
+  /** Accept the collection job and name the vehicle. Vendor-arranged transport only. */
+  acceptReturnTransport: (id: number, body: VendorTransportInput) =>
+    api.post<VendorReturnDetail>(`/api/supplier/returns/${id}/accept-transport`, body)
+      .then((r) => r.data),
+  /** The vehicle has loaded at the buyer's warehouse and left with the goods. */
+  recordReturnPickup: (id: number, body: VendorTransportInput) =>
+    api.post<VendorReturnDetail>(`/api/supplier/returns/${id}/pickup`, body)
+      .then((r) => r.data),
+  /** Sign for the returned goods at the supplier's own dock. Signed once. */
+  confirmReturnReceipt: (id: number, body: VendorReturnReceiptInput) =>
+    api.post<VendorReturnDetail>(`/api/supplier/returns/${id}/confirm-receipt`, body)
+      .then((r) => r.data),
+  /** The files a replacement dispatch carries, and what each field asks for — including
+   *  which of them are mandatory. Served rather than written into the screen, so the
+   *  fields drawn and the rule the save enforces come from one place. */
+  replacementDocumentTypes: () =>
+    api.get<ReplacementDocumentType[]>("/api/supplier/returns/replacement-documents")
+      .then((r) => r.data),
+  /** Attach the loading photo or the invoice. One file per slot — a second upload of
+   *  the same category REPLACES the first, so a wrong pick can be corrected. Answers
+   *  with the whole return, so both slots re-render off one response. */
+  uploadReplacementDocument: async (id: number, doc_category: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("doc_category", doc_category);
+    return (await api.post<VendorReturnDetail>(
+      `/api/supplier/returns/${id}/replacement-documents`, form)).data;
+  },
+  deleteReplacementDocument: (id: number, attachmentId: number) =>
+    api.delete<VendorReturnDetail>(
+      `/api/supplier/returns/${id}/replacement-documents/${attachmentId}`)
+      .then((r) => r.data),
+  /** Fetched through axios rather than linked to, so the supplier token goes with it —
+   *  a bare href carries no Authorization header and would answer 401. */
+  replacementDocumentBlob: (id: number, attachmentId: number) =>
+    api.get<Blob>(
+      `/api/supplier/returns/${id}/replacement-documents/${attachmentId}/download`,
+      { responseType: "blob" }).then((r) => r.data),
+  /** The replacement dispatch note. Raises the receipt the store books it in against.
+   *  REFUSED while a REQUIRED file above is missing — the server checks, not just the
+   *  screen. */
+  dispatchReplacement: (id: number, body: ReplacementDispatchInput) =>
+    api.post<VendorReturnDetail>(`/api/supplier/returns/${id}/dispatch-replacement`, body)
+      .then((r) => r.data),
   po: (id: number) => api.get<VendorPO>(`/api/supplier/pos/${id}`).then((r) => r.data),
   revisions: (poId: number) =>
     api.get<PORevision[]>(`/api/supplier/pos/${poId}/revisions`).then((r) => r.data),
   /** Accept the order, or decline it with a reason. Nothing may be despatched against
-   *  an order that has not been accepted. */
-  respondToPo: (id: number, accept: boolean, note = "", lines?: { id: number; rate: number }[]) =>
-    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note, lines })
+   *  an order that has not been accepted, and an acceptance carries NO PRICES - see
+   *  `POVendorResponseIn` on the server for why a counter-offer is not an answer. */
+  respondToPo: (id: number, accept: boolean, note = "") =>
+    api.post<VendorPO>(`/api/supplier/pos/${id}/respond`, { accept, note })
       .then((r) => r.data),
   createDespatch: (poId: number, body: DespatchNoteWrite) =>
     api.post<DespatchNote>(`/api/supplier/pos/${poId}/despatch-notes`, body)

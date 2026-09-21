@@ -5,6 +5,7 @@ import { Check, Copy, Download } from "lucide-react";
 import { getUnits } from "../api";
 import type { UnitRow } from "../types";
 import { TONE_BLUE } from "@/shared/components/tones";
+import { writeToClipboard } from "@/shared/clipboard";
 
 /**
  * The units standing in one lot, by name.
@@ -40,7 +41,7 @@ function CopyDownload({ values, filename, disabled }: {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(values.join("\n"));
+      if (!await writeToClipboard(values.join("\n"))) throw new Error("copy failed");
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch {

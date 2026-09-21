@@ -30,11 +30,35 @@ export { fmtDate, fmtDateTime, fmtTime } from "@/shared/datetime";
  *  `toISOString()` is UTC, so after 18:30 it handed back yesterday. */
 export { todayIst as today } from "@/shared/datetime";
 
-/** Quantities carry 3 decimals in the schema; trailing zeros are noise on screen. */
+/** Quantities carry 3 decimals in the schema and are shown at TWO, always.
+ *
+ *  Trimming the trailing zeros reads as tidier and is worse on a warehouse screen:
+ *  a column of 12.5, 3, 7.25 has its decimal point in a different place on every
+ *  row, so a storekeeper scanning it cannot compare two figures at a glance, and
+ *  `12.5` beside `12.05` is one keystroke away from being read as the same number.
+ *  A fixed two is what every quantity on a printed picking list has. */
 export const fmtQty = (value?: number | string | null) => {
   const n = Number(value ?? 0);
   if (!Number.isFinite(n)) return "0.00";
-  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n.toLocaleString(undefined,
+                          { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+/** A rate, at the two decimals money is written in.
+ *
+ *  `whs` rate columns are `NUMERIC(16, 4)` and Pydantic serialises a Decimal at the
+ *  scale the database holds, so every rate arrives as `125.0000` and a plain number
+ *  box shows it that way. Four decimals on a purchase rate is not extra accuracy on
+ *  a screen, it is two digits of noise on every line of a GRN, and an invoice has
+ *  two. Returns null for a blank so an empty box stays empty rather than becoming 0,
+ *  which is a price somebody would have had to agree to.
+ *
+ *  The COLUMN keeps its four: this rounds what a person reads and types, and a rate
+ *  already stored finer than this is only re-rounded if the line is edited. */
+export const rate2 = (value?: number | string | null) => {
+  if (value === "" || value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
 };
 
 export const fmtMoney = (value?: number | string | null) => {

@@ -44,6 +44,7 @@ from app.platform.hcm.models import HcmDepartment, HcmEmployee
 from app.platform.mail import service as mail_service
 from app.platform.mail import template as mail_template
 from app.platform.mail.schemas import MailSendIn
+from app.platform.notifications import service as notifications
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import (
@@ -882,7 +883,6 @@ async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
         raise NotFoundError(f"PO {po_id} not found")
     
     if not po.vendor_name and po.vendor_id:
-        from app.modules.master.models import Vendor
         vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
         if vendor_name:
             po.vendor_name = vendor_name
@@ -1309,6 +1309,21 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
                     raise ValidationError(
                         f"{existing.item_code or existing.item_id}: {already} has "
                         "already been received, so the quantity cannot go below that")
+                # An amendment MAY reprice - that is the point of it, and the new
+                # total goes back up the ladder before it reaches the vendor. What it
+                # may not do is reprice goods that are already on the shelf: the GRN
+                # valued them at the rate on the order at the time, and moving that
+                # rate afterwards leaves the stock and the paperwork disagreeing about
+                # what the same delivery was worth. Same reason, same gate, as the
+                # quantity check immediately above.
+                if already > 0 and (_d(incoming.rate) != _d(existing.rate)
+                                    or _d(incoming.tax_percent)
+                                    != _d(existing.tax_percent)):
+                    raise ValidationError(
+                        f"{existing.item_code or existing.item_id}: {already} has "
+                        "already been received at the current rate, so the rate and "
+                        "tax cannot be changed. Amend the quantity, or raise a new "
+                        "order for the rest at the new price.")
                 existing.quantity = _d(incoming.quantity)
                 existing.rate = _d(incoming.rate)
                 existing.tax_percent = _d(incoming.tax_percent)
@@ -4482,9 +4497,133 @@ async def _vendor_po(db: AsyncSession, vendor_id: int, po_id: int) -> PurchaseOr
     return po
 
 
+async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
+                                     note: str) -> bool:
+    """Put an amended order back to the version the supplier had already agreed to.
+
+    An amendment is a question, and no is one of its two answers. Before this, a
+    declined revision simply sat there REJECTED: the order on file carried numbers
+    nobody had ever agreed to, the version the supplier HAD accepted survived only
+    inside a `pro_po_revisions` snapshot, and the buyer's way back was to raise a fresh
+    order and leave the receipt history behind on the old one.
+
+    Only a REVISION can be reverted - `revision_no > 0`, with a filed snapshot of the
+    revision below it. A first-issue order that is declined is simply declined; there
+    is nothing behind it to go back to, so this returns False and the caller records
+    the plain rejection it always did.
+
+    NOTHING IS DELETED. `pro_po_revisions` is append-only (rule 9, and the model says
+    so): the declined revision is filed like any other BEFORE the older one is put
+    back, or a revert would erase the only record of what the supplier was asked.
+    That is also why the snapshot to restore is found by `revision_no` and then by
+    `id` - one revision number can carry several rows once reverts are in play, and
+    the newest of them is the one that describes the order.
+
+    `received_quantity` is the one figure NOT taken from the snapshot: it is what is
+    physically on the shelf, `_sync_po_receipt_status` is its writer, and no filed
+    snapshot outranks either.
+    """
+    declined = po.revision_no or 0
+    if declined <= 0:
+        return False
+    previous = (await db.execute(
+        select(PORevision)
+        .where(PORevision.po_id == po.id, PORevision.revision_no == declined - 1)
+        .order_by(PORevision.id.desc()).limit(1)
+    )).scalars().first()
+    if previous is None or not previous.snapshot:
+        return False
+
+    po = (await db.execute(
+        select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.id == po.id)
+    )).scalars().first()
+
+    reason = (f"Declined by {po.vendor_name or 'the supplier'} - reverted to revision "
+              f"{previous.revision_no}")
+    if (note or "").strip():
+        reason += f": {note.strip()}"
+    db.add(PORevision(
+        po_id=po.id, revision_no=declined, reason=reason, status=po.status,
+        vendor_status=POVendorStatus.REJECTED.value, snapshot=_po_snapshot(po),
+    ))
+
+    snap = previous.snapshot
+    po.expected_date = (date.fromisoformat(snap["expected_date"])
+                        if snap.get("expected_date") else None)
+    for field in ("remarks", "payment_terms", "delivery_terms", "material_terms",
+                  "logistics_terms", "billing_address", "shipping_address"):
+        setattr(po, field, snap.get(field))
+    po.sub_total = _d(snap.get("sub_total", 0))
+    po.discount_amount = _d(snap.get("discount_amount", 0))
+    po.tax_amount = _d(snap.get("tax_amount", 0))
+    po.freight_amount = _d(snap.get("freight_amount", 0))
+    po.total_amount = _d(snap.get("total_amount", 0))
+
+    # Lines are matched on the ITEM, because that is all a snapshot carries - and as a
+    # LIST per item, since one order may legitimately name the same item twice and a
+    # plain dict would drop one of them.
+    wanted: dict[int, list[dict]] = {}
+    for row in snap.get("items", []):
+        wanted.setdefault(row["item_id"], []).append(row)
+    for line in list(po.items):
+        rows = wanted.get(line.item_id) or []
+        if rows:
+            row = rows.pop(0)
+            line.quantity = _d(row.get("quantity", 0))
+            line.rate = _d(row.get("rate", 0))
+            line.tax_percent = _d(row.get("tax_percent", 0))
+            line.amount = _d(row.get("amount", 0))
+        else:
+            # Added by the amendment the supplier has just refused. It can only be a
+            # line nothing has been received against: amendment is closed once the
+            # vendor has despatched, and an order back at DRAFT cannot be received.
+            await db.delete(line)
+    for rows in wanted.values():
+        for row in rows:
+            db.add(POItem(
+                po_id=po.id, item_id=row["item_id"], item_code=row.get("item_code"),
+                item_name=row.get("item_name"), uom_code=row.get("uom_code"),
+                quantity=_d(row.get("quantity", 0)), rate=_d(row.get("rate", 0)),
+                tax_percent=_d(row.get("tax_percent", 0)),
+                amount=_d(row.get("amount", 0)),
+                received_quantity=_d(row.get("received_quantity", 0)),
+            ))
+    await db.flush()
+
+    # Standing where it stood, including the supplier's own yes - which the amendment
+    # cleared and which this puts back. No workflow is started: the agreement being
+    # restored was approved once already, and re-approving an unchanged order would
+    # put a decision nobody took into somebody's queue.
+    po.revision_no = previous.revision_no
+    po.status = previous.status or POStatus.ACCEPTED_BY_SUPPLIER.value
+    po.vendor_status = previous.vendor_status
+    po.vendor_responded_at = utcnow() if previous.vendor_status else None
+    po.vendor_response_note = None
+    po.amended_at = utcnow()
+    po.amendment_reason = None
+
+    body = f"{po.vendor_name or 'The supplier'} declined revision {declined}"
+    if (note or "").strip():
+        body += f": {note.strip()}"
+    body += f". The order is back to revision {po.revision_no}."
+    await notifications.notify(
+        db, [po.created_by_id], title=f"{po.po_no} - amendment declined", body=body,
+        entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+    logger.info("%s revision %s declined by vendor; reverted to revision %s",
+                po.po_no, declined, po.revision_no)
+    return True
+
+
 async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
-                               accept: bool, note: str = "", lines: list | None = None) -> PurchaseOrder:
+                               accept: bool, note: str = "") -> PurchaseOrder:
     """The vendor's answer to an order: yes, or no with a reason.
+
+    Yes means yes TO THIS ORDER. It took a list of rates once, so a supplier could
+    accept at their own prices and the order went back up our own ladder carrying
+    them; that is a counter-offer, not an acceptance, and it is gone. A price that has
+    to move is the buyer amending the order - their decision, with a reason on it, and
+    approved before it reaches the supplier.
 
     This is the step that turns an order into an agreement. Until it is given, the
     vendor cannot despatch against the order and the buyer cannot receive against it —
@@ -4504,70 +4643,22 @@ async def vendor_respond_to_po(db: AsyncSession, vendor_id: int, po_id: int,
     if not accept and not (note or "").strip():
         raise ValidationError("Say why the order is being declined")
 
+    if not accept and await _revert_rejected_amendment(db, po, note):
+        # The order went back to the revision they had already accepted, and that
+        # revision's own answer went back with it - so the REJECTED stamp below, which
+        # describes a version that is no longer the order, is deliberately not applied.
+        await db.commit()
+        await db.refresh(po)
+        logger.info("%s amendment declined by vendor %s", po.po_no, vendor_id)
+        return po
+
     po.vendor_status = (POVendorStatus.ACCEPTED.value if accept
                         else POVendorStatus.REJECTED.value)
     po.vendor_responded_at = utcnow()
     po.vendor_response_note = (note or "").strip() or None
-    
+
     if accept:
-        if lines:
-            # Vendor has provided updated rates for the items
-            po = (await db.execute(
-                select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
-                .where(PurchaseOrder.id == po.id)
-            )).scalars().first()
-            
-            sub_total = Decimal(0)
-            tax_total = Decimal(0)
-            lines_by_id = {line.id: line for line in lines}
-            
-            for item in po.items:
-                if item.id in lines_by_id:
-                    item.rate = _d(lines_by_id[item.id].rate)
-                
-                amount = _d(item.quantity) * item.rate
-                item.amount = amount
-                sub_total += amount
-                tax_total += amount * _d(item.tax_percent or 0) / Decimal(100)
-                
-            _apply_po_totals(po, sub_total, tax_total)
-            
-            # If the supplier changed the rates, the PO needs internal re-approval
-            from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
-            from app.platform.workflow import engine
-            from app.shared.enums import DocType, InstanceStatus
-            
-            creator = await db.get(HcmEmployee, po.created_by_id)
-            if not creator:
-                raise ValidationError("Cannot route for approval: order creator not found")
-                
-            # Get the creator's active position to resolve the correct ladder
-            assignment = (await db.execute(
-                select(HcmPositionAssignment).where(
-                    HcmPositionAssignment.employee_id == creator.id,
-                    HcmPositionAssignment.is_active == True
-                )
-            )).scalars().first()
-            position_id = assignment.position_id if assignment else None
-            
-            # Monkeypatch the active_position_id onto the creator object for the engine
-            creator.active_position_id = position_id
-                
-            instance = await engine.start(
-                db, DocType.PO.value, po.id,
-                context={"total_amount": float(po.total_amount),
-                         "project_id": po.project_id or None,
-                         "requester_position_id": position_id,
-                         "doc_no": po.po_no},
-                user=creator
-            )
-            
-            if instance.status == InstanceStatus.APPROVED.value:
-                po.status = POStatus.APPROVED.value
-            else:
-                po.status = POStatus.PENDING_APPROVAL.value
-        else:
-            po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
+        po.status = POStatus.ACCEPTED_BY_SUPPLIER.value
 
     await db.commit()
     await db.refresh(po)

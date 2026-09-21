@@ -77,6 +77,16 @@ class WarehouseSettings(BaseModel):
     requires_inward_default: bool = False
 
 
+class LogisticsSettings(BaseModel):
+    """Company-wide choices for the dispatch desk.
+
+    Manual courier dispatch is deliberately opt-in.  Some companies book a courier
+    from the vendor register and use that courier's portal; others hand parcels to a
+    counter and only need to record the name written on the receipt.
+    """
+    manual_courier_dispatch: bool = False
+
+
 class SecuritySettings(BaseModel):
     """How long a one-time code stays good for.
 
@@ -154,6 +164,7 @@ class SettingsOut(BaseModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     fallback: FallbackSettings = Field(default_factory=FallbackSettings)
     warehouse: WarehouseSettings = Field(default_factory=WarehouseSettings)
+    logistics: LogisticsSettings = Field(default_factory=LogisticsSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     # `codes` is deliberately NOT here. It has its own endpoints and its own
     # permission, so editing the company address cannot re-shape every asset code.

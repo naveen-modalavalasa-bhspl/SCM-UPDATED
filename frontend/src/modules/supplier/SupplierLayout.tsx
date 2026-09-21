@@ -1,6 +1,6 @@
 import { Link, Navigate, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { FileText, LogOut, Truck, User } from "lucide-react";
+import { FileText, LogOut, PackageOpen, Truck, User } from "lucide-react";
 import { clearVendorToken, vendorToken } from "@/shared/api/client";
 import { supplierApi } from "@/modules/procurement/api";
 import { VendorBell } from "./VendorBell";
@@ -68,6 +68,14 @@ export function SupplierLayout() {
             </NavLink>
             <NavLink to="/supplier/pos" className={tab}>
               <Truck className="h-4 w-4" /> Orders
+            </NavLink>
+            {/* Goods coming BACK, beside the orders rather than buried under them:
+                the two travel in opposite directions and a supplier looking for one
+                should not have to read the other first. Always shown, even to a
+                supplier with no returns — a tab that appears only once something has
+                gone wrong is a tab nobody knows to look for. */}
+            <NavLink to="/supplier/returns" className={tab}>
+              <PackageOpen className="h-4 w-4" /> Returns
             </NavLink>
             <NavLink to="/supplier/profile" className={tab}>
               <User className="h-4 w-4" /> Profile

@@ -69,14 +69,14 @@ export function CarrierLoginPage() {
           className="space-y-4"
           onSubmit={(e) => { e.preventDefault(); signIn.mutate(); }}
         >
-          <Field label="Username">
+          <Field label="Username" required>
             <Input
               value={username}
               autoComplete="username"
               onChange={(e) => setUsername(e.target.value)}
             />
           </Field>
-          <Field label="Password">
+          <Field label="Password" required>
             <Input
               type="password"
               value={password}

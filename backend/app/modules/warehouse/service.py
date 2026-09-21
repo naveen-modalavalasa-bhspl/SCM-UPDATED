@@ -14,9 +14,11 @@ Snapshot columns (`item_code`, `item_name`, `uom_code`, every `*_name`) are writ
 creation from the masters and never refreshed, so a document keeps saying what things
 were called when it was raised.
 """
+import json
 import logging
 import re
 from collections import defaultdict
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -45,7 +47,21 @@ from app.modules.warehouse.enums import (
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
     PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
-    ReturnStatus, SerialStatus, TRACKING_META, TrackingType, WarehouseDocType,
+    PURCHASE_RETURN_PHASES,
+    REPLACEMENT_DOCUMENT_META, REPLACEMENT_PHOTO_SUFFIXES,
+    REQUIRED_REPLACEMENT_DOCUMENTS, ReplacementDocument,
+    RETURN_ARRANGEMENTS_RAISING_REQUEST,
+    RETURN_ATTACHMENT_ENTITY,
+    RETURN_CLOSED_STATUSES,
+    RETURN_DECIDABLE_STATUSES, RETURN_INBOUND_STATUSES,
+    RETURN_REPLACEMENT_DISPATCHABLE_STATUSES, RETURN_REPLACEMENT_INTAKE_STATUSES,
+    RETURN_SETTLEABLE_STATUSES,
+    RETURN_TRANSPORTABLE_STATUSES, RETURN_VENDOR_ACCEPTABLE_STATUSES,
+    RETURN_VENDOR_PICKUP_STATUSES, RETURN_VENDOR_RECEIVABLE_STATUSES,
+    RETURN_VEHICLE_ARRANGEMENTS, RETURN_VEHICLE_ARRANGEMENT_LABELS,
+    ReturnStatus, ReturnVehicleArrangement, SerialStatus, TRACKING_META, TrackingType,
+    VENDOR_RETURN_INBOUND_RESPONSES, VendorReturnResponse, WarehouseDocType,
+    return_stage_label, vendor_return_stage_label,
 )
 from app.platform.settings import attachments, codeformat
 from app.platform.settings import service as settings_service
@@ -163,6 +179,23 @@ async def _item_snapshot(db: AsyncSession, item_id: int) -> Item:
     if item is None:
         raise NotFoundError(f"Item {item_id} not found")
     return item
+
+
+async def _item_by_code(db: AsyncSession, code: str | None) -> Item | None:
+    """The master item a typed code names, or None.
+
+    A MANUAL return line is typed, not picked (`PurchaseReturnForm` sends
+    `item_id: null` on purpose), so the only thing it can carry about the master is
+    the code somebody wrote in the box. Everything downstream of the return —
+    `out_dispatch_items.item_id`, `move_stock_out`, the ledger — is keyed on the ID,
+    so a line that names a real item by code has to be reconnected to it here or the
+    load cannot leave the building.
+    """
+    code = (code or "").strip()
+    if not code:
+        return None
+    return (await db.execute(
+        select(Item).where(Item.code == code).limit(1))).scalars().first()
 
 
 async def _warehouse(db: AsyncSession, warehouse_id: int) -> Warehouse:
@@ -2121,7 +2154,7 @@ async def create_receipt(db: AsyncSession, data: s.ReceiptWrite, user) -> m.Rece
         warehouse_id=wh.id,
     )
 
-    vendor_id, vendor_name, vendor_gstin = await _receipt_vendor(db, data)
+    vendor_id, vendor_name, vendor_gstin = await _receipt_write_vendor(db, data)
     if data.project_id:
         from app.shared.models.master import Project
         project = await db.get(Project, data.project_id)
@@ -2209,7 +2242,7 @@ async def update_receipt(db: AsyncSession, receipt_id: int, data: s.ReceiptWrite
         warehouse_id=wh.id,
         receipt_id=receipt.id,
     )
-    vendor_id, vendor_name, vendor_gstin = await _receipt_vendor(db, data)
+    vendor_id, vendor_name, vendor_gstin = await _receipt_write_vendor(db, data)
     if data.project_id:
         from app.shared.models.master import Project
         project = await db.get(Project, data.project_id)
@@ -2470,8 +2503,166 @@ async def _process_submitted_receipt(db: AsyncSession, receipt: m.Receipt,
                           "qc_lines": len(qc_lines),
                           "direct_putaway_lines": len(direct_lines),
                       })
+    # A purchase return waiting on this receipt is now back in the building — see
+    # `_settle_return_on_receipt`. Runs before the commit so the receipt and the return
+    # it closes land together.
+    await _settle_return_on_receipt(db, receipt, user)
+    # …and where this submit finished the receipt outright — no QC owed and no bins to
+    # put anything into — the intake is over in the same press, so the return closes
+    # here too. The hook re-checks the receipt's status itself, so a submit that landed
+    # on PENDING_QC or QC_PASSED passes straight through it.
+    await _close_return_on_intake_complete(db, receipt, user)
     await db.commit()
     return await get_receipt(db, receipt.id)
+
+
+async def _settle_return_on_receipt(db: AsyncSession, receipt: m.Receipt, user) -> None:
+    """A replacement has been booked in — bring the purchase return waiting on it home.
+
+    ADDED 2026-09-14, replacing a button. The return detail screen used to carry its own
+    "Received at the warehouse" press, which recorded an arrival the store was ALREADY
+    recording on this receipt minutes later through the ordinary GRN path. Two documents
+    for one lorry, and the return's copy was the one nobody had a reason to open — so a
+    replacement could be received, inspected and put away with the return still reading
+    "Replacement dispatched".
+
+    THE RECEIPT IS THE INTAKE, so the receipt is what settles it. `vendor_followup_receipt_id`
+    is the link the dispatch note already stamped; submitting the receipt is the moment the
+    store says what physically arrived, which is exactly what the old button asserted.
+
+    IDEMPOTENT and SILENT where it does not apply: a receipt no return names, or a return
+    already received, changes nothing.
+
+    Runs inside the caller's transaction and never commits. It also never raises — the
+    goods are on the floor and the GRN is the document that matters; refusing to submit a
+    receipt because the return behind it is in an unexpected state would be the tail
+    wagging the dog.
+    """
+    if not getattr(receipt, "id", None):
+        return
+    try:
+        row = (await db.execute(
+            select(m.PurchaseReturn)
+            .where(m.PurchaseReturn.vendor_followup_receipt_id == receipt.id)
+        )).scalars().first()
+        if row is None:
+            return
+        if row.status in {ReturnStatus.RECEIVED_AT_WAREHOUSE.value,
+                          ReturnStatus.COMPLETED.value,
+                          ReturnStatus.CANCELLED.value}:
+            return
+        before = row.status
+        row.status = ReturnStatus.RECEIVED_AT_WAREHOUSE.value
+        row.received_at = utcnow()
+        row.received_by_name = _name(user)
+        row.received_remarks = (
+            f"Booked in on goods receipt {receipt.grn_no}.")
+        await write_audit(
+            db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+            action=AuditAction.UPDATE, actor=user,
+            before={"status": before},
+            after={"status": row.status, "grn_no": receipt.grn_no,
+                   "received_by": row.received_by_name},
+            summary=(f"Purchase Return {row.return_no}: the replacement was received at "
+                     f"{row.warehouse_name or 'the warehouse'} on goods receipt "
+                     f"{receipt.grn_no}"))
+        logger.info("Purchase Return %s closed by receipt %s",
+                    row.return_no, receipt.grn_no)
+    except Exception:
+        logger.exception(
+            "A purchase return waiting on receipt %s could not be marked received",
+            getattr(receipt, "grn_no", receipt.id))
+
+
+async def _close_return_on_intake_complete(db: AsyncSession, receipt: m.Receipt,
+                                           user) -> None:
+    """The replacement is on the shelf — close the purchase return behind it.
+
+    ADDED 2026-09-14, and it is the last rung of the vendor-led flow:
+
+        REPLACEMENT_DISPATCHED -> RECEIVED_AT_WAREHOUSE -> GRN -> QC -> putaway
+                               -> COMPLETED
+
+    THE PUTAWAY IS WHAT CLOSES IT, not the arrival. Submitting the receipt says the goods
+    are in the building (`_settle_return_on_receipt`); it says nothing about whether they
+    were any good or where they ended up. A replacement that failed QC or is still standing
+    on the dock is not a return anybody should be able to call finished, and until this the
+    document simply stopped at RECEIVED_AT_WAREHOUSE and waited for somebody to remember to
+    press Complete — so the tail of every replacement was an open document with no work on
+    it.
+
+    CALLED WHEREVER THE RECEIPT REACHES `COMPLETED`, which is the one fact this needs and
+    the four paths that produce it already agree on: the last putaway confirmed
+    (`confirm_putaway`), QC completing on a warehouse that keeps no bins
+    (`complete_inspection`), a submit that needed neither (`_process_submitted_receipt`),
+    and the manual post (`complete_receipt`). It re-checks the status itself rather than
+    trusting the caller, so a fifth path cannot close a return off a receipt that is not
+    finished.
+
+    IT MOVES NO STOCK, and that is the difference between it and `complete_return`. The
+    faulty material left the books when the consignment was gated out, and the replacement
+    came ON to them through the putaway that just finished — both through `move_stock`
+    (rule 7). There is nothing left for a close to post, and posting anything here would
+    take the replacement straight back out again.
+
+    EVERY ORIGINAL REFERENCE SURVIVES IT. `grn_id`, `po_id`, `indent_id`, `qc_*`, the
+    consignment, both transport legs and `vendor_followup_receipt_id` are untouched — the
+    close writes one column, and the audit row names the whole chain so the trail reads
+    end to end from the document that closed it.
+
+    IDEMPOTENT, SILENT where it does not apply, and it NEVER RAISES: the stock is on the
+    shelf and the receipt is the document that matters, so refusing to complete a putaway
+    because the return behind it is in an unexpected state would be the tail wagging the
+    dog. Runs inside the caller's transaction and never commits.
+    """
+    if not getattr(receipt, "id", None):
+        return
+    if receipt.status != ReceiptStatus.COMPLETED.value:
+        return
+    try:
+        row = (await db.execute(
+            select(m.PurchaseReturn)
+            .where(m.PurchaseReturn.vendor_followup_receipt_id == receipt.id)
+        )).scalars().first()
+        if row is None:
+            return
+        # Already closed, refused or cancelled — nothing a putaway can add. This is what
+        # makes a second confirmation (a split putaway's last task, a re-posted receipt)
+        # do nothing rather than re-close a document and write a second audit row.
+        if row.status not in RETURN_REPLACEMENT_INTAKE_STATUSES:
+            logger.info("Purchase Return %s is %s — receipt %s is not closing it again",
+                        row.return_no, row.status, receipt.grn_no)
+            return
+
+        before = row.status
+        row.status = ReturnStatus.COMPLETED.value
+        await write_audit(
+            db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+            action=AuditAction.UPDATE, actor=user,
+            before={"status": before},
+            after={"status": row.status,
+                   # The whole chain on the row that closes it, so the trail reads end to
+                   # end from here without opening five other documents.
+                   "closed_by_grn_no": receipt.grn_no,
+                   "replacement_dispatch_no": row.replacement_dispatch_no,
+                   "original_grn_no": row.grn_no, "po_no": row.po_no,
+                   "credit_note_no": row.credit_note_no,
+                   # `getattr`, because `dispatch_no` is a TRANSIENT assigned by
+                   # `_decorate_return_dispatch` and this row was loaded raw. Reading it
+                   # directly is an AttributeError, which the try/except below then
+                   # swallows — so the close silently did not happen and the return sat
+                   # at RECEIVED_AT_WAREHOUSE for ever. The other two are real columns.
+                   "dispatch_no": getattr(row, "dispatch_no", None),
+                   "outbound_tr_no": row.outbound_tr_no,
+                   "inbound_tr_no": row.inbound_tr_no},
+            summary=(f"Purchase Return {row.return_no} closed: the replacement was "
+                     f"inspected and put away against goods receipt {receipt.grn_no}"))
+        logger.info("Purchase Return %s closed by the putaway on receipt %s",
+                    row.return_no, receipt.grn_no)
+    except Exception:
+        logger.exception(
+            "A purchase return waiting on receipt %s could not be closed",
+            getattr(receipt, "grn_no", receipt.id))
 
 
 async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
@@ -2524,6 +2715,8 @@ async def complete_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt
                       before={"is_stock_posted": False},
                       after={"is_stock_posted": True,
                              "total_accepted_qty": str(receipt.total_accepted_qty)})
+    # The intake behind a purchase return's replacement is finished — close the return.
+    await _close_return_on_intake_complete(db, receipt, user)
     await db.commit()
     return await get_receipt(db, receipt_id)
 
@@ -3286,7 +3479,8 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
     )
 
 
-async def _receipt_vendor(db: AsyncSession, data) -> tuple[int | None, str | None, str | None]:
+async def _receipt_write_vendor(db: AsyncSession,
+                                data) -> tuple[int | None, str | None, str | None]:
     """Who the goods came from — id, name and GSTIN, for the receipt's snapshot.
 
     What the gate chose wins; failing that it is a fact of the order, not a choice at
@@ -3296,6 +3490,14 @@ async def _receipt_vendor(db: AsyncSession, data) -> tuple[int | None, str | Non
 
     Two columns, not the mapped row — see `_po_number`: selecting `PurchaseOrder`
     itself is a 1054 against the live schema.
+
+    NAMED FOR ITS ARGUMENT, and not `_receipt_vendor`, because a second function by that
+    name already exists lower in this module and reads a SAVED `inb_receipts` ROW. Python
+    keeps the last definition, so this one was silently dead: every create and every
+    update of a receipt reached the row reader instead, handed it a `ReceiptWrite`, and
+    died on `AttributeError: 'ReceiptWrite' object has no attribute 'vendor_name'` the
+    moment the payload named a vendor — a bare 500 on Save and on Submit for QC. A
+    payload and a saved row are different things and must not share a name.
     """
     vendor_id, po_vendor_name = data.vendor_id, None
     if not vendor_id and data.po_id:
@@ -3868,6 +4070,12 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                       after={"status": inspection.status,
                              "passed": inspection.passed_items,
                              "failed": inspection.failed_items})
+    # On a warehouse that keeps no bins there is no putaway to wait for: QC passing IS the
+    # end of the intake, and the receipt was completed above. A purchase return waiting on
+    # that receipt closes with it. The hook re-checks the receipt's status, so a bin-managed
+    # warehouse — where the putaway is still owed — passes straight through it.
+    if inspection.receipt_id:
+        await _close_return_on_intake_complete(db, receipt, user)
     await db.commit()
     return await get_inspection(db, inspection_id)
 
@@ -4611,6 +4819,12 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             receipt.is_stock_posted = True
             receipt.posted_at = utcnow()
             await _sync_po_receipt_status(db, receipt.po_id)
+        # THE LAST RUNG OF A PURCHASE RETURN'S REPLACEMENT. Every task on the receipt is
+        # placed, so the replacement is on the shelf and the return behind it is finished.
+        # Inside the `receipt is not None` branch because the link is the receipt; the hook
+        # itself does nothing while any task is still open, since the status above is what
+        # it tests.
+        await _close_return_on_intake_complete(db, receipt, user)
     await db.commit()
     placed = await get_putaway(db, task_id)
     # The picture as it was when the press landed, so the screen can announce an
@@ -5598,8 +5812,9 @@ async def list_stock_movement_orders(db: AsyncSession, params: PageParams, *,
 class MovementOrderStatus(str, Enum):
     DRAFT = IssueStatus.DRAFT.value
     PENDING_APPROVAL = IssueStatus.PENDING_APPROVAL.value
-    #: Stored as APPROVED: approval is the moment the bins change hands.
-    COMPLETED = IssueStatus.APPROVED.value
+    APPROVED = IssueStatus.APPROVED.value
+    INSPECTED = "INSPECTED"
+    COMPLETED = "COMPLETED"
     REJECTED = IssueStatus.REJECTED.value
 
 
@@ -5607,8 +5822,8 @@ async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
                               batch_id, quantity, serial_rows, serial_numbers, order_no, user) -> None:
     """Move ONE line out of its source bin and into its destination bin.
 
-    The physical half of a movement, in one place so the immediate path (no ladder
-    configured) and the approved path run identically. Out then in, both through
+    The physical half of a movement, in one place for the final completion action.
+    Out then in, both through
     `move_stock`, because rule 7 says physical stock changes only ever go through it —
     and each call writes its own `stk_ledger` row, which is what makes a movement
     traceable afterwards.
@@ -5628,15 +5843,64 @@ async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
                            remarks=f"Moved by {order_no}")
 
 
+async def _assert_movement_order_floor_access(db: AsyncSession, order, user) -> None:
+    """The operator may inspect/complete only movements on assigned floors."""
+    allowed = await floor_scope_ids(db, user)
+    if allowed is None:
+        return
+    if not allowed:
+        raise ValidationError(
+            "Your HCM floor-in-charge position is linked to this warehouse but not "
+            "to a physical floor. Assign the position to a warehouse floor first.")
+    outside = {
+        int(location_id)
+        for line in order.items
+        for location_id in (line.source_bin_id, line.destination_bin_id)
+        if location_id and int(location_id) not in allowed
+    }
+    if outside:
+        raise ValidationError(
+            "This movement contains a source or destination outside your assigned floor(s).")
+
+
+async def _validate_movement_order(db: AsyncSession, order) -> None:
+    """Inspect live quantities and unit identifiers without moving stock."""
+    from app.modules.inventory.models import Stock
+
+    wh = await _warehouse(db, order.from_warehouse_id)
+    code_config = await codeformat.code_settings(db)
+    for line in order.items:
+        item = await _item_snapshot(db, line.item_id)
+        source = await _get(db, Bin, line.source_bin_id, "Source bin")
+        await _get(db, Bin, line.destination_bin_id, "Destination bin")
+        batch_id = line.batch_id or m.NO_BATCH
+        stock = (await db.execute(
+            select(Stock).where(
+                Stock.warehouse_id == wh.id, Stock.bin_id == source.id,
+                Stock.item_id == item.id, Stock.batch_id == batch_id,
+                Stock.project_id == 0,
+            ).with_for_update()
+        )).scalar_one_or_none()
+        available = _d(stock.available_qty) if stock else ZERO
+        if available < _d(line.requested_qty):
+            raise ValidationError(
+                f"{order.sto_no}: only {available} of {item.code} remains in "
+                f"{source.code}; {_d(line.requested_qty)} is required for inspection.")
+        await _movement_units(
+            db, item=item, warehouse_id=wh.id, bin_id=source.id,
+            batch_id=line.batch_id or None, values=line.serial_numbers or [],
+            quantity=line.requested_qty, code_config=code_config,
+            doc_no=order.sto_no)
+
+
 async def _perform_movement_order(db: AsyncSession, order, user) -> None:
-    """Do what an approved movement order says, then mark it done.
+    """Do what an inspected movement order says, then mark it completed.
 
     Availability is re-checked HERE and not trusted from create time. The order was
     validated against the shelf when it was raised, and between that press and this
     signature the same units can be issued, picked or moved by somebody else — so
-    approving a stale order would either move stock that is gone or move units that are
-    now reserved for a material issue. Refusing is right: the approver is told what
-    changed and the order stays pending rather than half-applying.
+    completing a stale order would either move stock that is gone or move units that
+    are now reserved for a material issue. Refusing before posting is right.
     """
     from app.modules.inventory.models import Stock
 
@@ -5673,6 +5937,10 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
             line.requested_qty, serial_rows, serial_numbers, order.sto_no, user)
 
     order.status = MovementOrderStatus.COMPLETED.value
+
+
+def _approve_movement_order(order, user) -> None:
+    order.status = MovementOrderStatus.APPROVED.value
     order.approved_by_name = _name(user)
     order.approved_at = utcnow()
 
@@ -5681,9 +5949,8 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
                                       comments: str, user) -> dict:
     """Approve or reject a movement waiting on a signature.
 
-    The engine owns the chain; this owns the document status and the stock. Approval is
-    what finally moves anything — see `_perform_movement_order`, which re-checks the
-    shelf before it does.
+    The engine owns the chain; this owns the document status. Final approval unlocks
+    inspection, but inventory changes only through `complete_stock_movement_order`.
     """
     order = await _smo_by(db, order_id=order_id, lock=True)
     if order is None:
@@ -5697,7 +5964,7 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
         context={"doc_no": order.sto_no, "warehouse_id": order.from_warehouse_id},
     )
     if instance.status == InstanceStatus.APPROVED.value:
-        await _perform_movement_order(db, order, user)
+        _approve_movement_order(order, user)
     elif instance.status == InstanceStatus.REJECTED.value:
         order.status = MovementOrderStatus.REJECTED.value
     # Otherwise more rungs to climb; the next approver is read, never stored.
@@ -5713,6 +5980,45 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
         "id": order.id, "order_no": order.sto_no, "status": order.status,
         "current_approver_name": await _smo_approver(db, order),
     }
+
+
+async def complete_stock_movement_inspection(db: AsyncSession, order_id: int, user) -> dict:
+    order = await _smo_by(db, order_id=order_id, lock=True)
+    if order is None:
+        raise NotFoundError(f"Stock movement order {order_id} not found")
+    _guard(order.status, {MovementOrderStatus.APPROVED.value},
+           "complete inspection for", "stock movement order")
+    await _assert_movement_order_floor_access(db, order, user)
+    await _validate_movement_order(db, order)
+    before = order.status
+    order.status = MovementOrderStatus.INSPECTED.value
+    await write_audit(
+        db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before}, after={"status": order.status},
+        summary="Completed stock movement inspection",
+    )
+    await db.commit()
+    return await _smo_read(db, order)
+
+
+async def complete_stock_movement_order(db: AsyncSession, order_id: int, user) -> dict:
+    order = await _smo_by(db, order_id=order_id, lock=True)
+    if order is None:
+        raise NotFoundError(f"Stock movement order {order_id} not found")
+    _guard(order.status, {MovementOrderStatus.INSPECTED.value},
+           "complete", "stock movement order")
+    await _assert_movement_order_floor_access(db, order, user)
+    before = order.status
+    await _perform_movement_order(db, order, user)
+    await write_audit(
+        db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before}, after={"status": order.status},
+        summary="Completed stock movement",
+    )
+    await db.commit()
+    return await _smo_read(db, order)
 
 
 async def create_stock_movement_order(
@@ -8633,7 +8939,7 @@ async def _forward_drafts(db: AsyncSession, *, warehouse_id: int, source_no: str
             continue
 
         draft = await _build_issue(db, s.IssueWrite(
-            issue_type=IssueType.DEPARTMENT,
+            issue_type=IssueType.INDENT_BASED,
             issue_date=ist_today(),
             indent_id=indent_id,
             warehouse_id=warehouse_id,
@@ -12172,17 +12478,73 @@ def _return_totals(doc: m.PurchaseReturn) -> None:
     doc.total_value = sum((_d(l.amount) for l in doc.items), ZERO)
 
 
+async def _purchase_return_source_vendor(db: AsyncSession, *, grn_id: int | None,
+                                           po_id: int | None) -> tuple[int | None, str | None, str | None]:
+    """Vendor the selected Purchase Invoice/PO belongs to — the single truth.
+
+    Returns (vendor_id, vendor_name, source_no). Used to lock the draft's vendor
+    to its source: the form never offers a vendor picker, and the service refuses
+    a payload naming any other vendor.
+    """
+    if grn_id:
+        receipt = await db.get(m.Receipt, grn_id)
+        if receipt is None:
+            raise NotFoundError(f"Purchase Invoice/GRN {grn_id} not found")
+        return receipt.vendor_id, receipt.vendor_name, receipt.grn_no
+    if po_id:
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO
+        except Exception:  # pragma: no cover - procurement always importable
+            return None, None, None
+        po = await db.get(_PO, po_id)
+        if po is None:
+            raise NotFoundError(f"Purchase Order {po_id} not found")
+        return po.vendor_id, po.vendor_name, po.po_no
+    return None, None, None
+
+
+def _assert_vendor_locked(payload_vendor_id: int | None, source_vendor_id: int | None,
+                          source_no: str | None) -> None:
+    """The draft's vendor must come from its Invoice/PO — never typed, never swapped."""
+    if source_vendor_id and payload_vendor_id and int(payload_vendor_id) != int(source_vendor_id):
+        raise ValidationError(
+            f"Vendor must come from the selected Purchase Invoice/PO"
+            f"{f' {source_no}' if source_no else ''} and cannot be changed.")
+
+
+def _grn_line_returnable(line: m.ReceiptItem) -> Decimal:
+    """How much of one GRN line may go back to the vendor, before earlier returns.
+
+    A QC rejection is the obvious case and used to be the only one this function's
+    callers agreed on: `_apply_return_lines` capped every line at `rejected_qty`, while
+    the served availability (`purchase_return_source_detail`, `_decorate_purchase_return`
+    and `send_to_vendor`) all read `rejected_qty` where there was one and `received_qty`
+    otherwise. So a fully-ACCEPTED line was offered on the screen with its received
+    quantity available and then refused on save with "cannot exceed the available
+    returnable quantity of 0" — the whole Warehouse → Vendor flow was unusable on any
+    receipt QC had passed, which is most of them. One definition, read by all four.
+    """
+    rejected = _d(line.rejected_qty)
+    return rejected if rejected > ZERO else _d(line.received_qty)
+
+
 async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
                               lines: list[s.ReturnItemWrite]) -> None:
-    """Replaces the lines, capped at what the GRN actually rejected.
+    """Replaces the lines, capped at what the source document still allows back.
 
     Returning more than was received is the mistake this document exists to prevent,
     so the cap is enforced here rather than trusted from the screen.
     """
     caps: dict[int, Decimal] = {}
+    item_caps: dict[int, Decimal] = {}
+    po_caps: dict[int, Decimal] = {}
+    po_item_caps: dict[int, Decimal] = {}
     if doc.grn_id:
         receipt = await _load(db, m.Receipt, doc.grn_id, "Receipt", m.Receipt.items)
-        caps = {l.id: _d(l.rejected_qty) for l in receipt.items}
+        caps = {l.id: _grn_line_returnable(l) for l in receipt.items}
+        for line in receipt.items:
+            item_caps[line.item_id] = (
+                item_caps.get(line.item_id, ZERO) + _grn_line_returnable(line))
         already_rows = (await db.execute(
             select(
                 m.PurchaseReturnItem.grn_item_id,
@@ -12204,21 +12566,111 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
             caps[grn_item_id] = max(
                 caps.get(grn_item_id, ZERO) - _d(returned), ZERO
             )
+        # Already-returned quantities posted without a grn_item_id link still count:
+        # without this a line saved without the link silently re-opens the cap.
+        already_unlinked = (await db.execute(
+            select(
+                m.PurchaseReturnItem.item_id,
+                func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0),
+            )
+            .join(
+                m.PurchaseReturn,
+                m.PurchaseReturn.id == m.PurchaseReturnItem.return_id,
+            )
+            .where(
+                m.PurchaseReturn.grn_id == doc.grn_id,
+                m.PurchaseReturn.id != doc.id,
+                m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                m.PurchaseReturnItem.grn_item_id.is_(None),
+            )
+            .group_by(m.PurchaseReturnItem.item_id)
+        )).all()
+        for item_id, returned in already_unlinked:
+            item_caps[item_id] = max(item_caps.get(item_id, ZERO) - _d(returned), ZERO)
+        for grn_item_id, returned in already_rows:
+            receipt_line = next((l for l in receipt.items if l.id == grn_item_id), None)
+            if receipt_line is not None:
+                item_caps[receipt_line.item_id] = max(
+                    item_caps.get(receipt_line.item_id, ZERO) - _d(returned), ZERO)
+    elif doc.po_id:
+        try:
+            from app.modules.procurement.models import POItem as _POItem
+            po_items = (await db.execute(
+                select(_POItem).where(_POItem.po_id == doc.po_id))).scalars().all()
+            po_caps = {l.id: _d(l.quantity) for l in po_items}
+            for line in po_items:
+                po_item_caps[line.item_id] = po_item_caps.get(line.item_id, ZERO) + _d(line.quantity)
+            already_po = (await db.execute(
+                select(
+                    m.PurchaseReturnItem.po_item_id,
+                    func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0),
+                )
+                .join(m.PurchaseReturn,
+                      m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(
+                    m.PurchaseReturn.po_id == doc.po_id,
+                    m.PurchaseReturn.id != doc.id,
+                    m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                    m.PurchaseReturnItem.po_item_id.isnot(None),
+                )
+                .group_by(m.PurchaseReturnItem.po_item_id)
+            )).all()
+            for po_item_id, returned in already_po:
+                po_caps[po_item_id] = max(po_caps.get(po_item_id, ZERO) - _d(returned), ZERO)
+            already_po_unlinked = (await db.execute(
+                select(
+                    m.PurchaseReturnItem.item_id,
+                    func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0),
+                )
+                .join(m.PurchaseReturn,
+                      m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(
+                    m.PurchaseReturn.po_id == doc.po_id,
+                    m.PurchaseReturn.id != doc.id,
+                    m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                    m.PurchaseReturnItem.po_item_id.is_(None),
+                )
+                .group_by(m.PurchaseReturnItem.item_id)
+            )).all()
+            for item_id, returned in already_po_unlinked:
+                po_item_caps[item_id] = max(
+                    po_item_caps.get(item_id, ZERO) - _d(returned), ZERO)
+            for po_item_id, returned in already_po:
+                src = next((l for l in po_items if l.id == po_item_id), None)
+                if src is not None:
+                    po_item_caps[src.item_id] = max(
+                        po_item_caps.get(src.item_id, ZERO) - _d(returned), ZERO)
+        except Exception:
+            logger.debug("PO returnable caps skipped — procurement tables not reachable",
+                         exc_info=True)
 
     doc.items.clear()
     await db.flush()
 
     for index, line in enumerate(lines, start=1):
+        if not line.item_id:
+            # Optional on the schema since manual lines exist; still required here,
+            # because the cap this function enforces is computed against it.
+            raise ValidationError(
+                f"Line {index}: pick the item from the source document.")
         item = await _item_snapshot(db, line.item_id)
         qty = _d(line.quantity)
         if qty <= ZERO:
-            raise ValidationError(f"Line {index}: quantity must be positive")
+            raise ValidationError(f"Line {index}: return quantity must be greater than 0")
 
         cap = caps.get(line.grn_item_id) if line.grn_item_id else None
+        if cap is None and doc.grn_id and not line.grn_item_id:
+            cap = item_caps.get(line.item_id)
         if cap is not None and qty > cap:
             raise ValidationError(
-                f"{item.code}: only {cap} rejected quantity remains returnable; "
-                f"{qty} cannot be returned against it.")
+                f"Return quantity cannot exceed the available returnable quantity of {cap}.")
+        if doc.grn_id is None and doc.po_id:
+            po_cap = po_caps.get(line.po_item_id) if line.po_item_id else None
+            if po_cap is None and not line.po_item_id:
+                po_cap = po_item_caps.get(line.item_id)
+            if po_cap is not None and qty > po_cap:
+                raise ValidationError(
+                    f"Return quantity cannot exceed the available returnable quantity of {po_cap}.")
 
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
@@ -12228,6 +12680,73 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
             batch_id=line.batch_id, batch_no=batch.batch_no if batch else None,
             quantity=qty, rate=rate or None, amount=(qty * rate) if rate else None,
             reason=line.reason,
+        ))
+    _return_totals(doc)
+
+
+async def _apply_manual_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
+                                     lines: list[s.ReturnItemWrite]) -> None:
+    """Replaces the lines of a MANUAL return with what was typed.
+
+    ADDED 2026-09-10. Deliberately a separate function from `_apply_return_lines` rather
+    than a branch inside it: that one exists to cap every line at what the source
+    document still allows back, and a manual return HAS no source document, so every
+    cap it computes would be computed against a purchase this return never claimed to
+    come from. Splitting them keeps the sourced path — the default, and the one every
+    existing return uses — exactly as it was.
+
+    What is NOT relaxed: a quantity still has to be a positive number, a line still has
+    to name something, and the totals are still computed here rather than trusted from
+    the screen. `original_qty` / `previously_returned` / `returnable_qty` are stored as
+    typed because nothing can derive them, but the return quantity is checked against
+    the typed availability so the document does not contradict itself on its own face.
+    """
+    doc.items.clear()
+    await db.flush()
+
+    for index, line in enumerate(lines, start=1):
+        qty = _d(line.quantity)
+        if qty <= ZERO:
+            raise ValidationError(f"Line {index}: return quantity must be greater than 0")
+
+        # An item from the masters where one was picked, the one the typed CODE names
+        # where not, and the typed name where neither. The middle case is the common
+        # one: the screen sends `item_id: null` for every manual line, so a line whose
+        # code is a real master item used to be stored as if the item did not exist —
+        # and the consignment raised at `arrange_return_transport` then died on
+        # `out_dispatch_items.item_id`, which is NOT NULL.
+        item = (await _item_snapshot(db, line.item_id) if line.item_id
+                else await _item_by_code(db, line.item_code))
+        name = (line.item_name or "").strip() or (item.name if item else "")
+        if not name:
+            raise ValidationError(f"Line {index}: enter an item name")
+
+        available = line.returnable_qty
+        if available is not None and _d(available) > ZERO and qty > _d(available):
+            raise ValidationError(
+                f"Line {index} ({name}): return quantity {qty} is more than the "
+                f"available quantity {_d(available)} entered beside it.")
+
+        rate = _d(line.rate)
+        doc.items.append(m.PurchaseReturnItem(
+            line_no=index,
+            # No source document, so no source line to point at.
+            po_item_id=None, grn_item_id=None, batch_id=None, batch_no=None,
+            item_id=item.id if item else None,
+            item_code=(item.code if item else line.item_code) or None,
+            item_name=name,
+            uom_code=(item.uom_code if item else line.uom_code) or None,
+            quantity=qty,
+            rate=rate or None,
+            # Return amount = return qty x unit price. Computed here and not accepted
+            # from the screen, the same way the sourced path computes it.
+            amount=(qty * rate) if rate else None,
+            reason=line.reason,
+            is_manual=True,
+            original_qty=_d(line.original_qty) if line.original_qty is not None else None,
+            previously_returned=(_d(line.previously_returned)
+                                 if line.previously_returned is not None else None),
+            returnable_qty=_d(available) if available is not None else None,
         ))
     _return_totals(doc)
 
@@ -12250,37 +12769,261 @@ async def list_returns(db: AsyncSession, params: PageParams, *, status: str | No
         like = f"%{search}%"
         stmt = stmt.where(or_(
             m.PurchaseReturn.return_no.ilike(like), m.PurchaseReturn.grn_no.ilike(like),
+            m.PurchaseReturn.po_no.ilike(like),
             m.PurchaseReturn.vendor_name.ilike(like),
             m.PurchaseReturn.credit_note_no.ilike(like)))
-    return await paginate(db, stmt.order_by(m.PurchaseReturn.id.desc()), params)
+    page = await paginate(db, stmt.order_by(m.PurchaseReturn.id.desc()), params)
+    # The GRN, PO and vendor behind the rows that store none — read for the page in a
+    # fixed number of queries, served on the `traced_*` fields and never written. The
+    # register showed nothing but the return number on those rows otherwise.
+    traced = await trace_purchase_sources(db, page["items"])
+    for row in page["items"]:
+        # Same field the detail serves, filled the same way — a register row carrying
+        # `source_category` and a null label would read as "no category" on one screen
+        # and "From LIP / MDB" on the other.
+        row.source_category_label = PURCHASE_RETURN_SOURCE_LABELS.get(
+            row.source_category or "")
+        # And the supplier's answer, worded the same way the document words it — a
+        # register that still read "SENT_TO_VENDOR" against a return the supplier had
+        # accepted was the whole complaint.
+        _apply_vendor_answer(row)
+        found = traced.get(row.id) or {}
+        row.chain_traced = bool(found)
+        row.traced_grn_id = found.get("grn_id")
+        row.traced_grn_no = found.get("grn_no")
+        row.traced_po_id = found.get("po_id")
+        row.traced_po_no = found.get("po_no")
+        row.traced_vendor_id = found.get("vendor_id")
+        row.traced_vendor_name = found.get("vendor_name")
+    return page
 
 
 async def get_return(db: AsyncSession, return_id: int, user=None) -> m.PurchaseReturn:
     doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    # Enrich with vendor auto-fetch + line returnable quantities
+    await _decorate_purchase_return(db, doc)
+    # The supplier's loading photograph and invoice, on our side of the document too —
+    # see `ReturnDetail.replacement_documents`. Empty on every return whose replacement
+    # has not been dispatched, and on every return that never had one.
+    doc.replacement_documents = await _replacement_documents(db, doc.id)
     return await _decorate_can_approve(
         db, doc, WarehouseDocType.PURCHASE_RETURN.value, user)
 
 
-async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.PurchaseReturn:
+async def return_document_file(db: AsyncSession, return_id: int, attachment_id: int,
+                               user=None):
+    """One of the replacement's files, for OUR store to open.
+
+    SCOPED THROUGH THE RETURN, not through the attachment id. `get_return` is what
+    decides whether this login may read the document at all, and it runs first — so an
+    attachment id belonging to a return this user cannot see is refused before the
+    filesystem is touched. `require_attachment` then proves the file hangs on THIS
+    return, which is what stops an id from another document being passed in.
+    """
+    await get_return(db, return_id, user)
+    await attachments.require_attachment(
+        db, attachment_id, entity_type=RETURN_ATTACHMENT_ENTITY, entity_id=return_id)
+    return await attachments.attachment_file(db, attachment_id)
+
+
+def _manual_vendor_fields(data: s.ReturnWrite) -> dict:
+    """The typed vendor, trimmed, ready to write onto a manual return."""
+    def clean(value: str | None) -> str | None:
+        return (value or "").strip() or None
+    return {
+        "manual_vendor_code": clean(data.vendor_code),
+        "manual_vendor_contact_person": clean(data.vendor_contact_person),
+        "manual_vendor_phone": clean(data.vendor_phone),
+        "manual_vendor_email": clean(data.vendor_email),
+        "manual_vendor_address": clean(data.vendor_address),
+        "manual_vendor_city": clean(data.vendor_city),
+        "manual_vendor_state": clean(data.vendor_state),
+        "manual_vendor_pincode": clean(data.vendor_pincode),
+        "manual_vendor_gstin": clean(data.vendor_gstin),
+    }
+
+
+#: The punctuation a company name is written with on one screen and without on another.
+#: "Amara Raja Batteries Ltd." and "Amara Raja Batteries Ltd" are one company; so are
+#: "ABC Pvt Ltd" and "ABC  Pvt  Ltd". Folded away on BOTH sides of every comparison
+#: below, so a typed name only has to name the right company, not copy the master's
+#: punctuation character for character. NOT a fuzzy match: every letter and digit still
+#: has to be there, in order, which is what keeps two genuinely different suppliers apart.
+_COMPANY_NOISE = (" ", ".", ",", "-", "&", "'")
+
+
+def _fold_company(value: str | None) -> str:
+    """A company name reduced to what actually identifies it, or "" if there is none."""
+    folded = (value or "").strip().lower()
+    for ch in _COMPANY_NOISE:
+        folded = folded.replace(ch, "")
+    return folded
+
+
+def _fold_company_sql(column):
+    """`_fold_company` as SQL, so the fold happens on the database's side of the match.
+
+    The two MUST agree character for character — a Python fold compared against a raw
+    column silently matches nothing — so they are written next to each other and read
+    from the same tuple.
+    """
+    expr = func.lower(func.trim(column))
+    for ch in _COMPANY_NOISE:
+        expr = func.replace(expr, ch, "")
+    return expr
+
+
+async def _match_manual_vendor(db: AsyncSession, name: str | None,
+                               code: str | None = None,
+                               gstin: str | None = None) -> Vendor | None:
+    """The `mst_vendors` row the TYPED vendor names, where one and only one exists.
+
+    A manual return may name a company that is not in the masters at all — that is the
+    whole point of one — but where it names a company that IS, the document has to be
+    BOUND to it. `vendor_id` is the only handle the supplier portal has:
+    `vendor_list_returns` scopes every read to `PurchaseReturn.vendor_id`, so a manual
+    return that stored nothing but a typed `vendor_name` was invisible to the very
+    supplier it was addressed to, before AND after it was sent to them.
+
+    Matched in order of how strongly the value identifies a company — GSTIN, then the
+    vendor code (unique in the master), then the name — and only ever bound on an
+    UNAMBIGUOUS hit: two suppliers trading under the same name must leave the return
+    unbound rather than have it silently addressed to whichever row came back first.
+    Inactive vendors are excluded; a return cannot be sent to a supplier we have closed.
+
+    Returns None whenever nothing matches, which is the pre-existing behaviour — every
+    manual return naming a company outside the master keeps working exactly as before.
+    """
+    for column, value in ((Vendor.gstin, gstin),
+                          (Vendor.code, code),
+                          (Vendor.name, name)):
+        folded = _fold_company(value)
+        if not folded:
+            continue
+        rows = (await db.execute(
+            select(Vendor).where(
+                _fold_company_sql(column) == folded,
+                Vendor.is_active.is_(True),
+            ).limit(2)
+        )).scalars().all()
+        if len(rows) == 1:
+            return rows[0]
+    return None
+
+
+async def _create_manual_return(db: AsyncSession, data: s.ReturnWrite,
+                                user) -> m.PurchaseReturn:
+    """A purchase return typed from scratch, for goods with no paperwork in the system.
+
+    ADDED 2026-09-10 at the business owner's request. The sourced path — everything in
+    `create_return` below — is untouched and remains the default; this is reached only
+    when the screen sets `is_manual`.
+
+    The one rule that cannot be relaxed is that the document has to say who it is going
+    to: a return with no vendor is a pile of goods with nowhere to send them. A NAME is
+    enough here, because the whole reason for a manual return is that the vendor may
+    not be in `mst_vendors` either — but where a real `vendor_id` IS supplied it is
+    validated against the master like any other.
+    """
     if not data.items:
         raise ValidationError("A return with no lines sends nothing back")
-
-    receipt = await db.get(m.Receipt, data.grn_id) if data.grn_id else None
+    vendor_name = (data.vendor_name or "").strip()
+    if not vendor_name and not data.vendor_id:
+        raise ValidationError(
+            "Enter the vendor's name — a manual return still has to say who the goods "
+            "are going back to.")
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
+    if data.vendor_id and vendor is None:
+        raise NotFoundError(f"Vendor {data.vendor_id} not found")
+    # The screen posts no `vendor_id` in manual mode — it types a company name. Where
+    # that name (or code, or GSTIN) is one of our own suppliers, BIND it, so the return
+    # reaches that supplier's portal. See `_match_manual_vendor`. The typed values are
+    # still what the document shows; only the link is added.
+    if vendor is None:
+        vendor = await _match_manual_vendor(
+            db, vendor_name, data.vendor_code, data.vendor_gstin)
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
 
     doc = m.PurchaseReturn(
         items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
         return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
         return_date=data.return_date,
-        po_id=data.po_id or (receipt.po_id if receipt else None),
-        po_no=receipt.po_no if receipt else None,
+        # No purchase transaction behind it — that is what makes it manual. The typed
+        # number, if any, is kept as a reference and is never resolved to a document.
+        po_id=None, po_no=None, grn_id=None, grn_no=None,
+        source_ref_no=(data.source_ref_no or "").strip() or None,
+        vendor_id=vendor.id if vendor else None,
+        vendor_name=vendor_name or (vendor.name if vendor else None),
+        warehouse_id=data.warehouse_id,
+        warehouse_name=wh.name if wh else None,
+        reason=data.reason,
+        remarks=(data.remarks or "").strip() or None,
+        status=ReturnStatus.DRAFT.value,
+        is_manual=True,
+        created_by_id=getattr(user, "id", None), created_by_name=_name(user),
+        **_manual_vendor_fields(data),
+    )
+    db.add(doc)
+    await db.flush()
+
+    await _apply_manual_return_lines(db, doc, data.items)
+    await db.flush()
+
+    await write_audit(db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+                      action=AuditAction.CREATE, actor=user,
+                      after={"status": doc.status, "total_qty": str(doc.total_qty),
+                             "is_manual": True,
+                             "vendor_name": doc.vendor_name,
+                             "source_ref_no": doc.source_ref_no})
+    await db.commit()
+    return await get_return(db, doc.id)
+
+
+async def create_return(db: AsyncSession, data: s.ReturnWrite, user) -> m.PurchaseReturn:
+    if data.is_manual:
+        return await _create_manual_return(db, data, user)
+    if not data.items:
+        raise ValidationError("A return with no lines sends nothing back")
+    if not data.grn_id and not data.po_id:
+        raise ValidationError("Select a Purchase Invoice/GRN or Purchase Order first")
+
+    receipt = await db.get(m.Receipt, data.grn_id) if data.grn_id else None
+    if data.grn_id and receipt is None:
+        raise NotFoundError(f"Purchase Invoice/GRN {data.grn_id} not found")
+    po = None
+    if data.po_id or (receipt is not None and receipt.po_id):
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO
+            po = await db.get(_PO, data.po_id or (receipt.po_id if receipt else None))
+        except Exception:
+            po = None
+        if data.po_id and po is None:
+            raise NotFoundError(f"Purchase Order {data.po_id} not found")
+    # Vendor must come from the selected Invoice/PO — never typed, never swapped.
+    source_vendor_id = (receipt.vendor_id if receipt else None) or (po.vendor_id if po else None)
+    source_vendor_name = (receipt.vendor_name if receipt else None) or (po.vendor_name if po else None)
+    source_no = (receipt.grn_no if receipt else None) or (po.po_no if po else None)
+    _assert_vendor_locked(data.vendor_id, source_vendor_id, source_no)
+    if source_vendor_id is None and not data.vendor_id:
+        raise ValidationError("Vendor is required — select a purchase transaction to auto-fetch vendor")
+    vendor = await db.get(Vendor, data.vendor_id or source_vendor_id) if (data.vendor_id or source_vendor_id) else None
+    if (data.vendor_id or source_vendor_id) and vendor is None:
+        raise NotFoundError(f"Vendor {data.vendor_id or source_vendor_id} not found")
+    wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
+
+    doc = m.PurchaseReturn(
+        items=[],   # see create_issue: keeps _apply_*_lines()'s clear() off a lazy load
+        return_no=await next_number(db, WarehouseDocType.PURCHASE_RETURN.value),
+        return_date=data.return_date,
+        po_id=data.po_id or (receipt.po_id if receipt else None) or (po.id if po else None),
+        po_no=(po.po_no if po else None) or (receipt.po_no if receipt else None),
         grn_id=data.grn_id, grn_no=receipt.grn_no if receipt else None,
-        vendor_id=data.vendor_id or (receipt.vendor_id if receipt else None),
-        vendor_name=vendor.name if vendor else (receipt.vendor_name if receipt else None),
+        vendor_id=vendor.id if vendor else None,
+        vendor_name=vendor.name if vendor else source_vendor_name,
         warehouse_id=data.warehouse_id or (receipt.warehouse_id if receipt else None),
         warehouse_name=wh.name if wh else (receipt.warehouse_name if receipt else None),
         reason=data.reason,
+        remarks=(data.remarks or "").strip() or None,
         status=ReturnStatus.DRAFT.value,
         created_by_id=getattr(user, "id", None), created_by_name=_name(user),
     )
@@ -12305,10 +13048,87 @@ async def update_return(db: AsyncSession, return_id: int, data: s.ReturnWrite,
     before = {"total_qty": str(doc.total_qty)}
     doc.return_date = data.return_date
     doc.reason = data.reason
+    doc.remarks = (data.remarks or "").strip() or None
+
+    # A MANUAL draft edits its own typed vendor and its own typed lines. It never falls
+    # through to the source-binding below: there is no GRN or PO to re-lock the vendor
+    # against, and the vendor lock is the whole of what that code is protecting.
+    if doc.is_manual:
+        vendor_name = (data.vendor_name or "").strip()
+        if not vendor_name and not (data.vendor_id or doc.vendor_id):
+            raise ValidationError(
+                "Enter the vendor's name — a manual return still has to say who the "
+                "goods are going back to.")
+        if data.vendor_id:
+            vendor = await db.get(Vendor, data.vendor_id)
+            if vendor is None:
+                raise NotFoundError(f"Vendor {data.vendor_id} not found")
+            doc.vendor_id = vendor.id
+        else:
+            # RE-DERIVED on every edit rather than bound once at birth, and it may clear
+            # the link as well as set it. The name on a manual draft is editable, so a
+            # draft typed against one supplier and retyped against another has to follow:
+            # leaving the old `vendor_id` in place would go on showing the return on the
+            # first supplier's portal after the document stopped naming them.
+            matched = await _match_manual_vendor(
+                db, vendor_name or doc.vendor_name,
+                data.vendor_code, data.vendor_gstin)
+            doc.vendor_id = matched.id if matched else None
+        if vendor_name:
+            doc.vendor_name = vendor_name
+        doc.source_ref_no = (data.source_ref_no or "").strip() or None
+        for field, value in _manual_vendor_fields(data).items():
+            setattr(doc, field, value)
+        await _apply_manual_return_lines(db, doc, data.items)
+        await db.flush()
+        await write_audit(db, entity="pro_returns", entity_id=doc.id,
+                          entity_no=doc.return_no, action=AuditAction.UPDATE,
+                          actor=user, before=before,
+                          after={"total_qty": str(doc.total_qty), "is_manual": True,
+                                 "vendor_name": doc.vendor_name})
+        await db.commit()
+        return await get_return(db, return_id)
+
     if data.grn_id and data.grn_id != doc.grn_id:
         receipt = await db.get(m.Receipt, data.grn_id)
+        if receipt is None:
+            raise NotFoundError(f"Purchase Invoice/GRN {data.grn_id} not found")
+        # Switching source re-locks the vendor to the new source.
+        if receipt.vendor_id and doc.vendor_id and int(receipt.vendor_id) != int(doc.vendor_id):
+            raise ValidationError(
+                "Vendor must come from the selected Purchase Invoice/PO and cannot be changed. "
+                f"This GRN belongs to a different vendor.")
         doc.grn_id = data.grn_id
         doc.grn_no = receipt.grn_no if receipt else None
+        if receipt.po_id and not doc.po_id:
+            doc.po_id = receipt.po_id
+            doc.po_no = receipt.po_no
+        if not doc.vendor_id:
+            # Through the PO where the GRN names no vendor of its own — a gate entry
+            # typed in at the barrier routinely doesn't. See `_receipt_vendor`.
+            doc.vendor_id, doc.vendor_name = await _receipt_vendor(db, receipt)
+    if data.po_id and data.po_id != doc.po_id and not data.grn_id:
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _POU
+            po = await db.get(_POU, data.po_id)
+            if po is None:
+                raise NotFoundError(f"Purchase Order {data.po_id} not found")
+            if po.vendor_id and doc.vendor_id and int(po.vendor_id) != int(doc.vendor_id):
+                raise ValidationError(
+                    "Vendor must come from the selected Purchase Invoice/PO and cannot be changed.")
+            doc.po_id = po.id
+            doc.po_no = po.po_no
+            if po.vendor_id and not doc.vendor_id:
+                doc.vendor_id = po.vendor_id
+                doc.vendor_name = po.vendor_name
+        except (NotFoundError, ValidationError):
+            raise
+        except Exception:
+            pass
+    # A payload naming a different vendor than the locked one is refused — the
+    # vendor section is read-only once auto-fetched.
+    if data.vendor_id and doc.vendor_id and int(data.vendor_id) != int(doc.vendor_id):
+        raise ValidationError("Vendor must come from the selected Purchase Invoice/PO and cannot be changed.")
 
     await _apply_return_lines(db, doc, data.items)
     await db.flush()
@@ -12396,8 +13216,52 @@ async def complete_return(db: AsyncSession, return_id: int, credit_note_no: str 
     moves OUT through move_stock().
     """
     doc = await get_return(db, return_id)
-    _guard(doc.status, {ReturnStatus.APPROVED.value, ReturnStatus.DISPATCHED.value},
+    # RECEIVED_AT_WAREHOUSE joined the set on 2026-09-11: a return whose material has
+    # come back from the vendor and been signed in at the gate is exactly a return that
+    # is ready to be closed with its credit note. The three that were already here are
+    # untouched, so every return in flight under the older flow closes as it always did.
+    _guard(doc.status, {ReturnStatus.APPROVED.value, ReturnStatus.DISPATCHED.value,
+                        ReturnStatus.SENT_TO_VENDOR.value,
+                        ReturnStatus.RECEIVED_AT_WAREHOUSE.value},
            "complete", "return")
+
+    # A RETURN WITH A REPLACEMENT COMING CLOSES ITSELF, and must not be closed by hand
+    # (2026-09-14). Two things go wrong if it is.
+    #
+    # It closes EARLY: this press would finish the document while the replacement is
+    # still in a draft GRN, or failing QC, or standing on the dock — the three rungs the
+    # intake exists to work through (`_close_return_on_intake_complete`).
+    #
+    # And it moves stock that has already moved. The loop below posts every line OUT of
+    # the warehouse, which is right for a return whose goods are still on our floor and
+    # wrong for this one: the faulty material left the books when the consignment was
+    # gated out, so a manual close here would take the quantity out a second time and
+    # leave the balance short by the whole return.
+    #
+    # Refused rather than quietly turned into a no-op, because the presser is asking for
+    # something that will happen on its own and needs to be told where to look for it.
+    if doc.vendor_followup_receipt_id:
+        intake = await _replacement_intake(db, doc)
+        if not intake["intake_complete"]:
+            raise ValidationError(
+                f"{doc.return_no} closes itself once the replacement is put away. Book "
+                f"it in on goods receipt {intake['grn_no'] or doc.vendor_followup_receipt_no}"
+                f" and take it through QC and putaway"
+                + (" — the goods receipt has not been submitted yet."
+                   if not intake["grn_booked"]
+                   else f" — {intake['putaway_open']} putaway task(s) are still open."
+                   if intake["putaway_open"]
+                   else " — QC has not passed it yet." if not intake["qc_passed"]
+                   else "."))
+        # The intake IS finished and the return is somehow still open — the hook is a
+        # never-raising one and a failed read leaves exactly this. Close it through the
+        # SAME closer rather than falling into the stock loop below, so the recovery
+        # path and the automatic one write the same thing.
+        receipt = await db.get(m.Receipt, doc.vendor_followup_receipt_id)
+        doc.credit_note_no = credit_note_no or doc.credit_note_no
+        await _close_return_on_intake_complete(db, receipt, user)
+        await db.commit()
+        return await get_return(db, return_id)
 
     rejected_line_ids: set[int] = set()
     if doc.grn_id:
@@ -12425,8 +13289,9 @@ async def complete_return(db: AsyncSession, return_id: int, credit_note_no: str 
 
     await write_audit(db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
                       action=AuditAction.UPDATE, actor=user,
-                      before={"status": ReturnStatus.APPROVED.value},
-                      after={"status": doc.status, "credit_note_no": doc.credit_note_no,
+                      before={"status": doc.status},
+                      after={"status": ReturnStatus.COMPLETED.value,
+                             "credit_note_no": doc.credit_note_no,
                              "total_qty": str(doc.total_qty)})
     await db.commit()
     return await get_return(db, return_id)
@@ -12454,6 +13319,5560 @@ async def returnable_lines(db: AsyncSession, grn_id: int) -> list[m.ReceiptItem]
     """The rejected lines of a GRN — the only ones a return may be raised against."""
     receipt = await _load(db, m.Receipt, grn_id, "Receipt", m.Receipt.items)
     return [l for l in receipt.items if _d(l.rejected_qty) > ZERO]
+
+
+# ---------------------------------------------------------------------------
+# Purchase Return — Warehouse → Vendor flow (auto-fetch + Send to Vendor)
+# ---------------------------------------------------------------------------
+
+def _vendor_address(vendor: Vendor | None) -> str | None:
+    if not vendor or not vendor.address:
+        return None
+    parts = [vendor.address, vendor.city, vendor.state, vendor.pincode]
+    return ", ".join(p for p in parts if p)
+
+
+
+async def _po_of(db: AsyncSession, po_id: int | None):
+    """One purchase order, or None where procurement cannot be reached."""
+    if not po_id:
+        return None
+    try:
+        from app.modules.procurement.models import PurchaseOrder as _PO
+        return await db.get(_PO, po_id)
+    except Exception:
+        logger.debug("PO %s not reachable", po_id, exc_info=True)
+        return None
+
+
+async def _receipt_vendor(db: AsyncSession, receipt: m.Receipt | None,
+                          po_id: int | None = None) -> tuple[int | None, str | None]:
+    """Whose delivery this was: the GRN's own vendor, else the vendor on its PO.
+
+    The fallback is not a nicety. A goods receipt raised as a gate entry — the driver's
+    paperwork typed in at the barrier — frequently carries no `vendor_id` of its own,
+    and the only place the supplier is named is the purchase order it was received
+    against. `create_return` has always read the two in this order; `update_return` and
+    `send_to_vendor` did not, so binding such a GRN to a return left the vendor null and
+    the send then refused the document for having no vendor.
+
+    Takes a SAVED ROW. The payload equivalent is `_receipt_write_vendor`, which used to
+    be called `_receipt_vendor` too and was shadowed by this one — see the note in its
+    docstring before renaming either of them back.
+    """
+    if receipt is not None and receipt.vendor_id:
+        return receipt.vendor_id, receipt.vendor_name
+    po = await _po_of(db, po_id or (receipt.po_id if receipt is not None else None))
+    if po is not None and po.vendor_id:
+        return po.vendor_id, po.vendor_name
+    return None, (receipt.vendor_name if receipt is not None else None)
+
+
+async def _receipt_indent(db: AsyncSession, receipt: m.Receipt | None,
+                          po=None) -> tuple[int | None, str | None]:
+    """The request the material was bought against: the GRN's lines, else its PO.
+
+    `inb_receipt_items.indent_id` is only filled where the receipt was raised FROM an
+    indent-linked purchase order line, and a great many receipts — anything received
+    against a PO whose lines were not stamped, and every gate entry typed in at the
+    barrier — carry it on no line at all. The purchase order keeps the same backward
+    pointer (`pro_purchase_orders.indent_id`, the link procurement writes when a PO is
+    raised off an indent), so where the receipt is silent the PO still answers, and the
+    Indent field on a return stopped reading as "there wasn't one".
+    """
+    if receipt is not None:
+        line = (await db.execute(
+            select(m.ReceiptItem)
+            .where(m.ReceiptItem.receipt_id == receipt.id,
+                   m.ReceiptItem.indent_id.isnot(None))
+            .order_by(m.ReceiptItem.line_no).limit(1))).scalars().first()
+        if line is not None:
+            return line.indent_id, line.indent_no
+    if po is None and receipt is not None:
+        po = await _po_of(db, receipt.po_id)
+    if po is not None and getattr(po, "indent_id", None):
+        # `pro_purchase_orders.indent_no` is a snapshot procurement only fills on some
+        # doors — a PO raised through the requisition/RFQ/quotation route carries the id
+        # and leaves the number NULL. Returning that pair unread put an indent_id on the
+        # screen with an empty Indent field beside it, which reads as "there wasn't one".
+        return po.indent_id, getattr(po, "indent_no", None) or await _indent_no(
+            db, po.indent_id)
+    return None, None
+
+
+async def _indent_no(db: AsyncSession, indent_id: int | None) -> str | None:
+    """The indent's own number, for the trails that hold only its id."""
+    if not indent_id:
+        return None
+    try:
+        from app.modules.indents.models import Indent as _Indent
+        indent = await db.get(_Indent, indent_id)
+    except Exception:
+        logger.debug("Indent %s not reachable", indent_id, exc_info=True)
+        return None
+    return getattr(indent, "indent_no", None)
+
+
+async def _trace_purchase_source(db: AsyncSession, doc: m.PurchaseReturn) -> dict:
+    """The purchase behind a return that was raised without one.
+
+    A return the returns module raises off a branch consignment stores no `grn_id`, no
+    `po_id` and often no vendor: at gate-out it resolves those by asking whether a PO was
+    raised against the INDENT the field return names, and where the branch was served out
+    of stock bought on some other indent's order — the ordinary case — that query finds
+    nothing and the document is saved with the whole chain null. The review screen then
+    had nothing to show and the send had no vendor to send to.
+
+    So the chain is read here instead, backwards from the only thing such a document
+    reliably carries: the stock itself. A line's batch names the GRN it arrived on
+    (`stk_batches.grn_id`), and failing that the receipts for that item at this return's
+    own warehouse do. The GRN names its PO and the PO names the vendor.
+
+    NOTHING here is written to the document. Every value goes onto transient `traced_*`
+    fields the schema serves separately from the stored ones, because `get_return` is
+    called at the top of `update_return`, `submit_return` and `act_on_return`, each of
+    which commits — assigning to a real column here would silently persist a traced guess
+    as though the storekeeper had bound it. Binding is a WRITE and belongs to the send,
+    where a person has read the vendor's name on a confirm and pressed the button.
+
+    Returns `{}` when the trail cannot be read, which is an honest answer: the screen says
+    the return was raised without a purchase transaction and offers Edit, where the
+    existing source picker binds one properly.
+    """
+    if doc.grn_id or doc.po_id:
+        return {}
+    item_ids = [line.item_id for line in (doc.items or []) if line.item_id]
+    batch_ids = [line.batch_id for line in (doc.items or []) if line.batch_id]
+    if not item_ids:
+        return {}
+
+    receipt: m.Receipt | None = None
+    how = ""
+    # 1. The batch is the strongest evidence there is — it IS the delivery this stock
+    #    came in on, recorded when the GRN was posted.
+    if batch_ids:
+        grn_ids = list((await db.execute(
+            select(m.Batch.grn_id).where(m.Batch.id.in_(batch_ids),
+                                         m.Batch.grn_id.isnot(None))
+        )).scalars().all())
+        if len(set(grn_ids)) == 1:
+            receipt = await db.get(m.Receipt, grn_ids[0])
+            how = "the batch this stock was received under"
+    # 2. Otherwise the receipts that brought this item into the warehouse now sending it
+    #    back. The most recent is used where there are several, and the note says so —
+    #    a traced answer the screen labels as traced beats an empty vendor block.
+    if receipt is None:
+        stmt = (select(m.Receipt)
+                .join(m.ReceiptItem, m.ReceiptItem.receipt_id == m.Receipt.id)
+                .where(m.ReceiptItem.item_id.in_(item_ids),
+                       m.Receipt.status != ReceiptStatus.CANCELLED.value))
+        if doc.warehouse_id:
+            stmt = stmt.where(m.Receipt.warehouse_id == doc.warehouse_id)
+        # Deduplicated by receipt: the join yields one row per matching LINE, so a GRN
+        # carrying two of the returned items would otherwise look like two GRNs and be
+        # described as ambiguous when it is not.
+        rows = list((await db.execute(
+            stmt.order_by(m.Receipt.id.desc()).limit(20))).scalars().all())
+        found: list[m.Receipt] = []
+        for candidate in rows:
+            if all(candidate.id != seen.id for seen in found):
+                found.append(candidate)
+        if found:
+            receipt = found[0]
+            how = ("the goods receipt this item arrived on" if len(found) == 1
+                   else "the most recent goods receipt for this item")
+    if receipt is None:
+        return {}
+
+    vendor_id, vendor_name = await _receipt_vendor(db, receipt)
+    po = await _po_of(db, receipt.po_id)
+    indent_id, indent_no = await _receipt_indent(db, receipt, po)
+    return {
+        "grn_id": receipt.id, "grn_no": receipt.grn_no, "grn_date": receipt.grn_date,
+        "invoice_no": receipt.invoice_no or None, "invoice_date": receipt.invoice_date,
+        "po_id": receipt.po_id or (po.id if po is not None else None),
+        "po_no": receipt.po_no or (po.po_no if po is not None else None),
+        "vendor_id": vendor_id, "vendor_name": vendor_name,
+        "indent_id": indent_id, "indent_no": indent_no,
+        "how": how,
+    }
+
+
+async def trace_purchase_sources(db: AsyncSession,
+                                 rows: list[m.PurchaseReturn]) -> dict[int, dict]:
+    """`_trace_purchase_source` for a whole page, in a fixed number of queries.
+
+    The register has the same problem the review screen had: a return the returns module
+    raised off a branch consignment stores no GRN, PO or vendor, so the GRN and Vendor
+    columns were empty on every one of those rows and only the PRET number read. Tracing
+    them one at a time would be a query per row per column; this reads the lot in six,
+    whatever the page size.
+
+    Keyed by return id, and only for the rows that name no purchase of their own —
+    a row with a stored GRN is already answering the question. Same contract as the
+    single-document version: nothing is written, and the caller must present the values
+    as traced rather than as the document's own.
+    """
+    pending = [row for row in rows if not row.grn_id and not row.po_id]
+    if not pending:
+        return {}
+    ids = [row.id for row in pending]
+    warehouse_of = {row.id: row.warehouse_id for row in pending}
+
+    lines = list((await db.execute(
+        select(m.PurchaseReturnItem.return_id, m.PurchaseReturnItem.item_id,
+               m.PurchaseReturnItem.batch_id)
+        .where(m.PurchaseReturnItem.return_id.in_(ids)))).all())
+    if not lines:
+        return {}
+    item_ids = {item_id for _, item_id, _ in lines if item_id}
+    batch_ids = {batch_id for _, _, batch_id in lines if batch_id}
+
+    # batch -> the GRN it was received under
+    batch_grn: dict[int, int] = {}
+    if batch_ids:
+        batch_grn = {bid: gid for bid, gid in (await db.execute(
+            select(m.Batch.id, m.Batch.grn_id)
+            .where(m.Batch.id.in_(batch_ids), m.Batch.grn_id.isnot(None)))).all()}
+
+    # (item, warehouse) -> the receipts that brought it in, newest first
+    by_item: dict[tuple[int, int | None], list[m.Receipt]] = {}
+    receipts: dict[int, m.Receipt] = {}
+    if item_ids:
+        for receipt, item_id in (await db.execute(
+            select(m.Receipt, m.ReceiptItem.item_id)
+            .join(m.ReceiptItem, m.ReceiptItem.receipt_id == m.Receipt.id)
+            .where(m.ReceiptItem.item_id.in_(item_ids),
+                   m.Receipt.status != ReceiptStatus.CANCELLED.value)
+            .order_by(m.Receipt.id.desc())
+        )).all():
+            receipts[receipt.id] = receipt
+            seen = by_item.setdefault((item_id, receipt.warehouse_id), [])
+            if all(receipt.id != other.id for other in seen):
+                seen.append(receipt)
+    for grn_id in set(batch_grn.values()):
+        if grn_id not in receipts:
+            found = await db.get(m.Receipt, grn_id)
+            if found is not None:
+                receipts[grn_id] = found
+
+    # the POs and vendors behind whichever receipts got picked
+    pos: dict[int, object] = {}
+    po_ids = {r.po_id for r in receipts.values() if r.po_id}
+    if po_ids:
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO
+            pos = {po.id: po for po in (await db.execute(
+                select(_PO).where(_PO.id.in_(po_ids)))).scalars().all()}
+        except Exception:
+            logger.debug("POs behind traced returns not reachable", exc_info=True)
+    vendors: dict[int, Vendor] = {}
+    vendor_ids = {r.vendor_id for r in receipts.values() if r.vendor_id}
+    vendor_ids |= {getattr(po, "vendor_id", None) for po in pos.values()}
+    vendor_ids.discard(None)
+    if vendor_ids:
+        vendors = {v.id: v for v in (await db.execute(
+            select(Vendor).where(Vendor.id.in_(vendor_ids)))).scalars().all()}
+
+    out: dict[int, dict] = {}
+    for return_id in ids:
+        mine = [(i, b) for r, i, b in lines if r == return_id]
+        receipt = None
+        # The batch first, exactly as the single-document trace does.
+        batch_hits = {batch_grn[b] for _, b in mine if b and b in batch_grn}
+        if len(batch_hits) == 1:
+            receipt = receipts.get(next(iter(batch_hits)))
+        if receipt is None:
+            candidates: list[m.Receipt] = []
+            for item_id, _ in mine:
+                for found in by_item.get((item_id, warehouse_of.get(return_id)), []):
+                    if all(found.id != other.id for other in candidates):
+                        candidates.append(found)
+            candidates.sort(key=lambda r: r.id, reverse=True)
+            receipt = candidates[0] if candidates else None
+        if receipt is None:
+            continue
+        po = pos.get(receipt.po_id) if receipt.po_id else None
+        vendor_id = receipt.vendor_id or getattr(po, "vendor_id", None)
+        vendor = vendors.get(vendor_id) if vendor_id else None
+        out[return_id] = {
+            "grn_id": receipt.id, "grn_no": receipt.grn_no,
+            "po_id": receipt.po_id or getattr(po, "id", None),
+            "po_no": receipt.po_no or getattr(po, "po_no", None),
+            "vendor_id": vendor_id,
+            "vendor_name": (vendor.name if vendor else None)
+            or receipt.vendor_name or getattr(po, "vendor_name", None),
+        }
+    return out
+
+
+# A purchase return may be handed to the vendor from either of two states, and it has
+# to be both (2026-09-19).
+#
+# DRAFT is the original path: raise it and send it, no approval anywhere. APPROVED is
+# what `submit_return` produces once a PURCHASE_RETURN ladder has signed — and until
+# now `send_to_vendor` refused everything but DRAFT, so submitting a return for
+# approval permanently foreclosed sending it. The two were rival lifecycles on one
+# table and taking the second was a one-way door into a document that could never
+# leave. BHS/NA/2026-27/PRET0001 is sitting in exactly that state.
+#
+# Deliberately NOT here: PENDING_APPROVAL. A return waiting on a signature has not been
+# agreed yet, and sending it would be the send racing the ladder — which is the whole
+# point of having asked for one.
+SENDABLE_RETURN_STATUSES = frozenset({
+    ReturnStatus.DRAFT.value, ReturnStatus.APPROVED.value,
+})
+
+
+async def _enrich_return_with_vendor(db: AsyncSession, doc: m.PurchaseReturn,
+                                     vendor_id: int | None = None) -> m.PurchaseReturn:
+    """Auto-fetch vendor details from mst_vendors — never typed, always read.
+
+    `vendor_id` overrides the document's own only where the document HAS none and the
+    chain was traced (`_trace_purchase_source`); the master is still the one source of
+    the vendor's details either way.
+    """
+    vendor_id = doc.vendor_id or vendor_id
+    vendor = await db.get(Vendor, vendor_id) if vendor_id else None
+    # A MANUAL return's vendor was typed and there may be no `mst_vendors` row behind
+    # it at all. Served out of the document's own `manual_vendor_*` columns onto the
+    # same `vendor_*` names the sourced path uses, so the API shape does not change and
+    # no reader has to branch. Where a manual return DOES name a real vendor the master
+    # still wins for anything left blank — the typed value is the override, not a
+    # second copy of the master.
+    if doc.is_manual:
+        doc.vendor_code = doc.manual_vendor_code or (vendor.code if vendor else None)
+        doc.vendor_contact_person = doc.manual_vendor_contact_person or (
+            vendor.contact_person if vendor else None)
+        doc.vendor_phone = doc.manual_vendor_phone or (vendor.phone if vendor else None)
+        doc.vendor_email = doc.manual_vendor_email or (vendor.email if vendor else None)
+        doc.vendor_address = doc.manual_vendor_address or _vendor_address(vendor)
+        doc.vendor_city = doc.manual_vendor_city or (vendor.city if vendor else None)
+        doc.vendor_state = doc.manual_vendor_state or (vendor.state if vendor else None)
+        doc.vendor_pincode = doc.manual_vendor_pincode or (
+            vendor.pincode if vendor else None)
+        doc.vendor_gstin = doc.manual_vendor_gstin or (vendor.gstin if vendor else None)
+        doc.traced_vendor_name = None
+    elif vendor:
+        doc.vendor_code = vendor.code  # transient for serializer
+        doc.vendor_contact_person = vendor.contact_person
+        doc.vendor_phone = vendor.phone
+        doc.vendor_email = vendor.email
+        doc.vendor_address = _vendor_address(vendor)
+        doc.vendor_city = vendor.city
+        doc.vendor_state = vendor.state
+        doc.vendor_gstin = vendor.gstin
+        doc.vendor_pincode = vendor.pincode
+        # The master's name, served beside the document's own snapshot rather than
+        # written over it. `vendor_name` is a COLUMN: assigning to it here would be
+        # persisted by whichever caller commits next (`update_return`, `submit_return`
+        # and `act_on_return` all call `get_return` first), which for a TRACED vendor
+        # would stamp a guess onto the document as though somebody had bound it.
+        doc.traced_vendor_name = vendor.name
+    else:
+        doc.traced_vendor_name = None
+        doc.vendor_code = None
+        doc.vendor_contact_person = None
+        doc.vendor_phone = None
+        doc.vendor_email = None
+        doc.vendor_address = None
+        doc.vendor_city = None
+        doc.vendor_state = None
+        doc.vendor_gstin = None
+        doc.vendor_pincode = None
+    # Reason label, and whether the stored reason IS one of the served codes.
+    #
+    # `reason_code` is null far more often than it looks: a return the returns module
+    # raises automatically off a branch consignment stores the reason's LABEL ("Damaged
+    # in transit"), because on that document the reason is prose written by the field.
+    # `send_to_vendor` only accepts one of the codes, so a screen that posted the stored
+    # reason back was refused on exactly those documents. Served, so the review screen
+    # knows to ask for a reason instead of guessing one.
+    doc.reason_code = None
+    if doc.reason:
+        for val, label in s.PURCHASE_RETURN_REASONS:
+            if val == doc.reason:
+                doc.reason_label = label
+                doc.reason_code = val
+                break
+        else:
+            doc.reason_label = doc.reason
+    else:
+        doc.reason_label = None
+    # Only a DRAFT can be sent to the vendor. A SENT_TO_VENDOR/DISPATCHED/
+    # COMPLETED row must never offer the button again (duplicate-send guard).
+    # A draft with no vendor at all or no lines is refused by `send_to_vendor` too —
+    # offering the button there only produces an error the storekeeper cannot act on.
+    # A TRACED vendor counts: the send posts it back and binds it, which is the press
+    # that turns a traced chain into a bound one.
+    #
+    # On a MANUAL return the vendor is a NAME and frequently has no `mst_vendors` row —
+    # that is the whole point of one — so the name is what the send is gated on there.
+    doc.can_send_to_vendor = (
+        doc.status in SENDABLE_RETURN_STATUSES
+        and (vendor_id is not None
+             or (doc.is_manual and bool((doc.vendor_name or "").strip())))
+        and bool(doc.items)
+    )
+    return doc
+
+
+# Where the material a purchase return sends back came FROM. The values are written by
+# the returns module (`returns.enums.PurchaseReturnSource`) and the labels are repeated
+# here rather than imported: the dependency runs returns -> warehouse and must not be
+# turned around for a display string. An unknown value serves no label rather than a
+# guess, so a category added there shows as its raw code until it is named here too.
+PURCHASE_RETURN_SOURCE_LABELS: dict[str, str] = {
+    "FROM_WAREHOUSE": "From warehouse",
+    "FROM_LIP_MDB": "From LIP / MDB",
+    "QC_REJECTED_GRN": "QC rejected after GRN",
+}
+
+
+async def _decorate_purchase_return(db: AsyncSession, doc: m.PurchaseReturn) -> m.PurchaseReturn:
+    # Where the material came from, named. The column has been written since 2026-09-08
+    # and nothing served it.
+    doc.source_category_label = PURCHASE_RETURN_SOURCE_LABELS.get(
+        doc.source_category or "")
+    # What the supplier answered, worded for the pill. FIRST, before the manual branch
+    # returns early below: an answer belongs to a return that has been SENT, and a
+    # manual return is sent to a vendor exactly as a sourced one is.
+    _apply_vendor_answer(doc)
+    # A MANUAL return names no purchase because there is none to name — the goods'
+    # paperwork never reached this system. Tracing one would go looking for a GRN
+    # behind stock the document never claimed came from a GRN, and dress whatever it
+    # found up as this return's chain. Its vendor and its per-line quantities are
+    # already on the document; nothing here is derived.
+    if doc.is_manual:
+        doc.chain_traced = False
+        doc.chain_note = None
+        doc.traced_grn_id = doc.traced_grn_no = None
+        doc.traced_po_id = doc.traced_po_no = None
+        doc.traced_vendor_id = doc.traced_vendor_name = None
+        # The rest of the chain's transient fields, set to nothing rather than left
+        # unset: they are plain attributes on the ORM object, so a reader that skips
+        # this branch's assignments gets AttributeError and not None.
+        doc.grn_date = None
+        doc.invoice_no = doc.invoice_date = None
+        doc.indent_id = doc.indent_no = None
+        doc.material_receipt_id = None
+        await _enrich_return_with_vendor(db, doc)
+        # A manual line's purchased / already-returned / available were TYPED and are
+        # stored on the row; the sourced path derives them and must overwrite nothing
+        # here. They are already on `doc.items` as columns, so there is nothing to do.
+        return await _decorate_return_dispatch(db, doc)
+    # Where the document names no purchase at all, read the one behind its stock. Served
+    # under `traced_*` and never written (see `_trace_purchase_source`).
+    traced = await _trace_purchase_source(db, doc)
+    doc.chain_traced = bool(traced)
+    doc.chain_note = (
+        f"This return was raised without a purchase transaction on it. The details below "
+        f"are read from {traced['how']} — sending binds them to the return."
+        if traced else None)
+    doc.traced_grn_id = traced.get("grn_id")
+    doc.traced_grn_no = traced.get("grn_no")
+    doc.traced_po_id = traced.get("po_id")
+    doc.traced_po_no = traced.get("po_no")
+    doc.traced_vendor_id = traced.get("vendor_id")
+    await _enrich_return_with_vendor(db, doc, vendor_id=traced.get("vendor_id"))
+    if traced:
+        doc.grn_date = traced.get("grn_date")
+        doc.invoice_no = traced.get("invoice_no")
+        doc.invoice_date = traced.get("invoice_date")
+        doc.indent_id = traced.get("indent_id")
+        doc.indent_no = traced.get("indent_no")
+        if doc.traced_vendor_name is None:
+            doc.traced_vendor_name = traced.get("vendor_name")
+    # Enrich each line with original / previously returned / returnable
+    # Caps already computed in _apply_return_lines; re-derive for read.
+    caps: dict[int, Decimal] = {}
+    originals: dict[int, Decimal] = {}
+    po_caps: dict[int, Decimal] = {}
+    po_originals: dict[int, Decimal] = {}
+    # Keyed by item_id rather than by source line, for the lines that carry no
+    # `grn_item_id`/`po_item_id` — every return the returns module raises automatically
+    # off a branch consignment is one of those (it knows the item and the quantity that
+    # went on the truck, not which GRN line it came off). Without these the read path
+    # reported each such line's own quantity as its availability while
+    # `_apply_return_lines` validated the save against the real per-item cap, so the
+    # screen could offer a quantity the save then refused.
+    item_caps: dict[int, Decimal] = {}
+    item_originals: dict[int, Decimal] = {}
+    po_item_caps: dict[int, Decimal] = {}
+    po_item_originals: dict[int, Decimal] = {}
+    # The GRN the availability is measured against: the one bound to the document, or
+    # the one traced behind its stock. Availability has to answer the same question
+    # either way, or the screen offers a quantity the save refuses.
+    grn_for_caps = doc.grn_id or doc.traced_grn_id
+    po_for_caps = doc.po_id or (doc.traced_po_id if not grn_for_caps else None)
+    if grn_for_caps:
+        receipt = await db.get(m.Receipt, grn_for_caps)
+        if receipt:
+            # The purchase the return answers — the GRN's own date and the vendor's
+            # invoice behind it, which is the reference the vendor argues about.
+            doc.grn_date = receipt.grn_date
+            doc.invoice_no = receipt.invoice_no or None
+            doc.invoice_date = receipt.invoice_date
+            doc.material_receipt_id = receipt.id
+            # `po_no` is a COLUMN — served beside the stored one, never written over it
+            # (see the note in `_enrich_return_with_vendor`).
+            if not doc.po_no and receipt.po_no:
+                doc.traced_po_no = doc.traced_po_no or receipt.po_no
+            # need items — load without selectinload for simplicity
+            stmt = select(m.ReceiptItem).where(m.ReceiptItem.receipt_id == grn_for_caps)
+            grn_items = (await db.execute(stmt)).scalars().all()
+            # The request the material was bought against — the GRN's own lines where
+            # they carry it, the purchase order behind it where they do not.
+            doc.indent_id, doc.indent_no = await _receipt_indent(db, receipt)
+            originals = {it.id: _grn_line_returnable(it) for it in grn_items}
+            caps = dict(originals)
+            for it in grn_items:
+                item_originals[it.item_id] = (
+                    item_originals.get(it.item_id, ZERO) + _grn_line_returnable(it))
+            item_caps = dict(item_originals)
+            # subtract already returned except this doc
+            already = (await db.execute(
+                select(m.PurchaseReturnItem.grn_item_id,
+                       func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+                .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(m.PurchaseReturn.grn_id == grn_for_caps,
+                       m.PurchaseReturn.id != doc.id,
+                       m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                       m.PurchaseReturnItem.grn_item_id.isnot(None))
+                .group_by(m.PurchaseReturnItem.grn_item_id)
+            )).all()
+            for gid, qty in already:
+                caps[gid] = max(caps.get(gid, ZERO) - _d(qty), ZERO)
+                grn_line = next((it for it in grn_items if it.id == gid), None)
+                if grn_line is not None:
+                    item_caps[grn_line.item_id] = max(
+                        item_caps.get(grn_line.item_id, ZERO) - _d(qty), ZERO)
+            # Quantities already returned on lines carrying no link count too — the same
+            # correction `_apply_return_lines` makes, or the cap silently re-opens.
+            already_unlinked = (await db.execute(
+                select(m.PurchaseReturnItem.item_id,
+                       func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+                .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(m.PurchaseReturn.grn_id == grn_for_caps,
+                       m.PurchaseReturn.id != doc.id,
+                       m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                       m.PurchaseReturnItem.grn_item_id.is_(None))
+                .group_by(m.PurchaseReturnItem.item_id)
+            )).all()
+            for iid, qty in already_unlinked:
+                item_caps[iid] = max(item_caps.get(iid, ZERO) - _d(qty), ZERO)
+    elif po_for_caps:
+        try:
+            from app.modules.procurement.models import POItem as _POItemR
+            po_items = (await db.execute(
+                select(_POItemR).where(_POItemR.po_id == po_for_caps))).scalars().all()
+            po_originals = {it.id: _d(it.quantity) for it in po_items}
+            po_caps = dict(po_originals)
+            for it in po_items:
+                po_item_originals[it.item_id] = (
+                    po_item_originals.get(it.item_id, ZERO) + _d(it.quantity))
+            po_item_caps = dict(po_item_originals)
+            already_po = (await db.execute(
+                select(m.PurchaseReturnItem.po_item_id,
+                       func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+                .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(m.PurchaseReturn.po_id == po_for_caps,
+                       m.PurchaseReturn.id != doc.id,
+                       m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                       m.PurchaseReturnItem.po_item_id.isnot(None))
+                .group_by(m.PurchaseReturnItem.po_item_id)
+            )).all()
+            for pid, qty in already_po:
+                po_caps[pid] = max(po_caps.get(pid, ZERO) - _d(qty), ZERO)
+                po_line = next((it for it in po_items if it.id == pid), None)
+                if po_line is not None:
+                    po_item_caps[po_line.item_id] = max(
+                        po_item_caps.get(po_line.item_id, ZERO) - _d(qty), ZERO)
+            already_po_unlinked = (await db.execute(
+                select(m.PurchaseReturnItem.item_id,
+                       func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+                .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+                .where(m.PurchaseReturn.po_id == po_for_caps,
+                       m.PurchaseReturn.id != doc.id,
+                       m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                       m.PurchaseReturnItem.po_item_id.is_(None))
+                .group_by(m.PurchaseReturnItem.item_id)
+            )).all()
+            for iid, qty in already_po_unlinked:
+                po_item_caps[iid] = max(po_item_caps.get(iid, ZERO) - _d(qty), ZERO)
+        except Exception:
+            logger.debug("PO returnable decoration skipped", exc_info=True)
+    for line in doc.items or []:
+        gid = line.grn_item_id
+        pid = line.po_item_id
+        if gid:
+            orig = originals.get(gid, _d(line.quantity))
+            prev = max(orig - caps.get(gid, orig), ZERO)
+            ret = caps.get(gid, _d(line.quantity))
+        elif pid and po_originals:
+            orig = po_originals.get(pid, _d(line.quantity))
+            prev = max(orig - po_caps.get(pid, orig), ZERO)
+            ret = po_caps.get(pid, _d(line.quantity))
+        elif line.item_id in item_originals:
+            # No source line on the row, but the GRN knows this item: report what the
+            # save will actually allow, which is the item's own cap plus what this
+            # document is already holding (its own quantity is not "already returned").
+            orig = item_originals[line.item_id]
+            prev = max(orig - item_caps.get(line.item_id, orig), ZERO)
+            ret = item_caps.get(line.item_id, _d(line.quantity))
+        elif line.item_id in po_item_originals:
+            orig = po_item_originals[line.item_id]
+            prev = max(orig - po_item_caps.get(line.item_id, orig), ZERO)
+            ret = po_item_caps.get(line.item_id, _d(line.quantity))
+        else:
+            orig = _d(line.quantity)
+            prev = ZERO
+            ret = _d(line.quantity)
+        line.original_qty = orig
+        line.previously_returned = prev
+        line.returnable_qty = ret
+    return await _decorate_return_dispatch(db, doc)
+
+
+async def _decorate_return_dispatch(db: AsyncSession,
+                                    doc: m.PurchaseReturn) -> m.PurchaseReturn:
+    """The logistics leg carrying this return, where it has already been sent.
+
+    Read back off `out_dispatches` rather than stored on the return: `send_to_vendor`
+    set the two transient fields on its own response only, so the Dispatch reference
+    vanished from the screen on the next refresh of a return that plainly had one.
+
+    Its own function because a MANUAL return leaves `_decorate_purchase_return` early —
+    it has no chain to trace and no caps to compute — and would otherwise skip this and
+    lose the dispatch link the moment it was sent.
+    """
+    if getattr(doc, "dispatch_id", None) is None:
+        # SET TO NOTHING FIRST, rather than left unset when there is no consignment.
+        # These are plain transient attributes on the ORM object, so a reader that hits
+        # the no-consignment path gets AttributeError and not None — which is exactly what
+        # took the journey down on every DRAFT the first time it was run against the live
+        # database. The same reason `_decorate_purchase_return`'s manual branch assigns
+        # its whole set explicitly.
+        doc.dispatch_id = None
+        doc.dispatch_no = None
+        leg = await db.scalar(
+            select(m.Dispatch)
+            .where(m.Dispatch.ref_type == "PURCHASE_RETURN", m.Dispatch.ref_id == doc.id)
+            .order_by(m.Dispatch.id.desc()).limit(1))
+        if leg is not None:
+            doc.dispatch_id = leg.id
+            doc.dispatch_no = leg.dispatch_no
+    return await _decorate_return_inbound_leg(db, doc)
+
+
+async def _decorate_return_inbound_leg(db: AsyncSession,
+                                       doc: m.PurchaseReturn) -> m.PurchaseReturn:
+    """The vehicle bringing an approved return's material back, and which press is next.
+
+    ONE SERVED SHAPE OVER TWO SOURCES, which is the whole point of it. On a
+    VENDOR_ARRANGES leg the vendor stated a vehicle over the phone and the columns on
+    this row are the only record of it. On a WAREHOUSE_REQUESTS leg the vehicle belongs
+    to the Logistics transport request the desk assigned it on, and it is READ off that
+    leg here rather than mirrored onto `pro_returns` — a stored copy would go stale the
+    first time logistics re-assigned a truck, and the return would then name a vehicle
+    that was never coming. Same reason `_decorate_return_dispatch` above reads the
+    consignment back instead of trusting what `send_to_vendor` stamped on its response.
+
+    `collection_tr_id` is reused rather than a second pair of columns added: it already
+    means "the Logistics trip fetching goods from this supplier for this return", which
+    is exactly what a warehouse-requested vehicle is. The supplier-collection path
+    (`_raise_collection_shipment`) writes the same pair, and the two can never both
+    apply — a return whose desk requested a vehicle is past the rung the supplier
+    portal's answer can be given on (`VENDOR_ANSWERABLE_RETURN_STATUSES`).
+
+    The `can_*` flags are served for the same reason the labels are: the rungs a press
+    is legal on are the service's own guards, and a screen re-deriving them from the
+    status string would be a second copy of the ladder drifting from the first. They say
+    where the DOCUMENT stands, never whether this user may press — the permission is
+    checked on the route, and hiding a button is not the control (rule 6).
+    """
+    from app.modules.logistics.models import TransportRequest
+
+    doc.inbound_tr_status = None
+    # What the desk recorded off the vendor, as the starting answer. On a vendor-arranged
+    # leg it is the ONLY answer — there is no transport request to overwrite it.
+    doc.inbound_vehicle_no = doc.arranged_vehicle_no
+    doc.inbound_driver_name = doc.arranged_driver_name
+    doc.inbound_driver_phone = doc.arranged_driver_phone
+    doc.inbound_transporter_name = doc.arranged_transporter_name
+    doc.inbound_lr_no = doc.arranged_lr_no
+    doc.inbound_expected_date = doc.arranged_expected_date
+    doc.inbound_dispatched_at = doc.arranged_dispatched_at
+
+    if doc.inbound_tr_id:
+        leg = await db.get(TransportRequest, doc.inbound_tr_id)
+        if leg is not None:
+            doc.inbound_tr_status = leg.status
+            # Only where the leg says something. A DRAFT request carries no vehicle
+            # yet, and blanking the answer because logistics has not filled its own
+            # column in would lose the only one anybody had.
+            doc.inbound_vehicle_no = leg.vehicle_number or doc.inbound_vehicle_no
+            doc.inbound_driver_name = leg.driver_name or doc.inbound_driver_name
+            doc.inbound_driver_phone = leg.driver_phone or doc.inbound_driver_phone
+            doc.inbound_transporter_name = (leg.carrier_name
+                                            or doc.inbound_transporter_name)
+            doc.inbound_lr_no = leg.lr_no or doc.inbound_lr_no
+            doc.inbound_expected_date = (leg.expected_delivery
+                                         or doc.inbound_expected_date)
+            doc.inbound_dispatched_at = (leg.dispatched_at
+                                         or doc.inbound_dispatched_at)
+
+    # The one rung that covers two things a person distinguishes — see
+    # `enums.ReturnStatus.VEHICLE_REQUESTED`. Refined here because only this function
+    # has the leg; `_apply_vendor_answer` worded it off the status alone for the
+    # register, and the more specific answer replaces it on the document.
+    doc.status_label = (
+        return_stage_label(doc.status,
+                           vehicle_assigned=bool(doc.inbound_vehicle_no
+                                                 or doc.inbound_driver_name))
+        or getattr(doc, "status_label", None))
+
+    # WHICH RUNG THIS DOCUMENT IS STANDING AT, served rather than worked out in a screen.
+    #
+    # Every flag reads the SAME frozenset the matching service guard reads, which is what
+    # makes the button a screen draws and the press the server accepts provably the same
+    # thing. Re-deriving them from the status string in the browser would be a second copy
+    # of the ladder, free to drift from the first.
+    #
+    # ONE of these puts a button in front of an employee — `can_arrange_transport`, the
+    # single decision this warehouse still makes. The `awaiting_*` flags below are
+    # READ-ONLY: they say which press the VENDOR owes us, so our screen can show where the
+    # return is standing without offering to answer for them.
+    doc.can_arrange_transport = doc.status in RETURN_TRANSPORTABLE_STATUSES
+    # Retained spelling of the flag above — see `schemas.ReturnDetail`.
+    doc.can_arrange_vehicle = doc.can_arrange_transport
+    doc.can_confirm_receipt = doc.status in RETURN_INBOUND_STATUSES
+
+    doc.awaiting_vendor_decision = doc.status in RETURN_DECIDABLE_STATUSES
+    doc.awaiting_vendor_settlement = doc.status in RETURN_SETTLEABLE_STATUSES
+    # Only the vendor-arranged branch waits on the vendor for a vehicle; on the other one
+    # it is Logistics' to assign and nothing is owed by the vendor at all.
+    doc.awaiting_vendor_transport = (
+        doc.vehicle_arrangement == ReturnVehicleArrangement.VENDOR_ARRANGES.value
+        and doc.status in RETURN_VENDOR_ACCEPTABLE_STATUSES)
+    doc.awaiting_vendor_receipt = doc.status in RETURN_VENDOR_RECEIVABLE_STATUSES
+    doc.awaiting_replacement_dispatch = (
+        doc.status in RETURN_REPLACEMENT_DISPATCHABLE_STATUSES)
+
+    # WHERE THE REPLACEMENT'S INTAKE HAS GOT TO — the GRN, its QC and its putaway.
+    #
+    # Served for the same reason everything else here is: those three rungs live on
+    # `inb_receipts`, `inb_inspections` and `whs_warehouse_items`, and a screen that went
+    # and read them itself would be re-deriving the ladder the journey already describes.
+    # This is the same intake `_journey_legs` draws, so the sentence on the return's own
+    # band and the tracker beside it cannot say two different things.
+    #
+    # DETAIL PATH ONLY, and deliberately: `_decorate_purchase_return` runs on `get_return`
+    # and on the vendor's copy, never on `list_returns`. Three more queries on a register
+    # of two hundred rows would be six hundred queries to say something no register column
+    # shows.
+    intake = await _replacement_intake(db, doc)
+    doc.replacement_grn_no = intake["grn_no"] or doc.vendor_followup_receipt_no
+    doc.replacement_grn_status = intake["grn_status"]
+    doc.replacement_inspection_no = intake["inspection_no"]
+    doc.replacement_putaway_total = intake["putaway_total"]
+    doc.replacement_putaway_done = intake["putaway_done"]
+    doc.replacement_intake_complete = intake["intake_complete"]
+    doc.replacement_intake_stage = _replacement_intake_stage(doc, intake)
+    return doc
+
+
+def _replacement_intake_stage(doc: m.PurchaseReturn, intake: dict) -> str | None:
+    """What the store still owes on the replacement, in one sentence, or None.
+
+    None — not a fallback string — on a return with no replacement coming, so a screen
+    writes `replacement_intake_stage && <panel>` and a refund, a refusal and every return
+    raised before this flow existed render exactly as they did.
+
+    Composed HERE rather than in the screen for the reason every label in this module is:
+    the register, the detail band and the tracker must not word one document three ways.
+    """
+    if not intake["grn_no"] or doc.status in RETURN_CLOSED_STATUSES:
+        return None
+    grn = intake["grn_no"]
+    if not intake["grn_booked"]:
+        return (f"The replacement is booked in on goods receipt {grn}. Submit it when the "
+                f"lorry arrives — the return moves on with it.")
+    if intake["qc_failed"]:
+        return (f"QC rejected the replacement on {grn}. Nothing will be put away and this "
+                f"return stays open until the vendor is asked again.")
+    if not intake["qc_passed"]:
+        return (f"{grn} is booked in and waiting on QC"
+                + (f" ({intake['inspection_no']})" if intake["inspection_no"] else "")
+                + ". Putaway opens once QC passes.")
+    if intake["putaway_open"]:
+        return (f"QC passed {grn}. {intake['putaway_done']} of "
+                f"{intake['putaway_total']} putaway task(s) placed — this return closes "
+                f"itself when the last one is confirmed.")
+    return f"The replacement is on the shelf against {grn}; this return is closing."
+
+
+def purchase_return_reasons() -> list[dict]:
+    return [{"value": v, "label": l} for v, l in s.PURCHASE_RETURN_REASONS]
+
+
+def purchase_return_vehicle_arrangements() -> list[dict]:
+    """The two cards offered once a sent return has been approved.
+
+    Served rather than written into the screen for the reason every catalogue in this
+    module is: the sentence a desk decides against and the sentence the audit trail
+    records have to be the same sentence.
+    """
+    return [{"value": value, "label": label, "help": help_text,
+             "raises_vehicle_request": raises}
+            for value, label, help_text, raises in RETURN_VEHICLE_ARRANGEMENTS]
+
+
+def purchase_return_logistics_modes() -> list[dict]:
+    """The three ways a return travels back, and what each one asks for.
+
+    The `needs_*` flags travel WITH the option rather than being restated in the
+    screen: the wizard renders the carrier fields because the mode it is on said it
+    needs a carrier, so turning COURIER on later is one row in the catalogue.
+    """
+    return [
+        {"value": v, "label": label, "help": help_,
+         "needs_carrier": v in s.LOGISTICS_MODES_NEEDING_CARRIER,
+         "needs_vehicle": v in s.LOGISTICS_MODES_NEEDING_VEHICLE,
+         "needs_bearer": v in s.LOGISTICS_MODES_NEEDING_BEARER,
+         # The one mode that hands the load on instead of finishing it at the gate.
+         # Read off the same constant `send_to_vendor` raises the shipment from, so the
+         # wizard cannot ask for a signature on a leg that has not travelled yet.
+         "raises_shipment": v == LOGISTICS_MODE_RAISING_SHIPMENT}
+        for v, label, help_ in s.PURCHASE_RETURN_LOGISTICS_MODES
+    ]
+
+
+def _validate_return_logistics(data: "s.PurchaseReturnLogisticsIn") -> str:
+    """Check a posted logistics block and hand back the canonical mode.
+
+    Split out from `_apply_return_logistics` below because a MANUAL return raises no
+    dispatch to apply anything to and still has to be checked — the storekeeper
+    answered the same questions on the same wizard, and a value that would have been
+    refused on a sourced return cannot be quietly accepted on a manual one just
+    because there is no row waiting for it.
+    """
+    valid = {v for v, _, _ in s.PURCHASE_RETURN_LOGISTICS_MODES}
+    mode = (data.mode or "").strip().upper()
+    if mode not in valid:
+        raise ValidationError(
+            f"Choose how the return travels — one of: {', '.join(sorted(valid))}.")
+
+    # Mode-specific. The wizard asks these on the Logistics step and will not move
+    # past it without them; repeated here because the endpoint is reachable without
+    # the wizard and an unattributed leg is the thing this flow exists to stop.
+    if mode in s.LOGISTICS_MODES_NEEDING_BEARER and not (data.hand_carried_by or "").strip():
+        raise ValidationError(
+            "Enter who is carrying the goods — a hand-over has no carrier and no "
+            "vehicle, so the person's name is the whole record of who took them.")
+    if mode in s.LOGISTICS_MODES_NEEDING_VEHICLE and not (data.vehicle_number or "").strip():
+        raise ValidationError(
+            "Enter the vehicle number — an own-vehicle leg is identified by which "
+            "vehicle went.")
+    if mode in s.LOGISTICS_MODES_NEEDING_CARRIER and not (data.carrier_name or "").strip():
+        raise ValidationError(
+            "Enter the carrier — a third-party leg has to say who is carrying it.")
+
+    # The supplier's signature — on the two modes where the goods are ALREADY GONE by
+    # the time this endpoint is reached. A hand-over and a third-party handover both
+    # happen at the gate in the same breath as the send: somebody walked out with the
+    # carton, or the hired truck drove off with it, and the wizard records who signed.
+    #
+    # AN OWN VEHICLE LEG IS NOT THAT, and demanding a signature on it was the defect
+    # (2026-09-11). Our own truck has not left the yard when the send is pressed — the
+    # whole point of the mode is that the trip still has to be ARRANGED, which is why it
+    # is the one mode that raises a shipment in Logistics
+    # (`LOGISTICS_MODE_RAISING_SHIPMENT`). Requiring the supplier's acknowledgement here
+    # forced the storekeeper to certify a signature that could not exist yet, and
+    # `_apply_return_logistics` then stamped the consignment ACKNOWLEDGED on the
+    # strength of it — which put it outside the statuses `transport_released` will act
+    # on, so the logistics desk could never gate it out. The load was finished on paper
+    # in the warehouse and its shipment was a ghost. The signature is taken later, on
+    # the leg, where it actually happens.
+    if mode != LOGISTICS_MODE_RAISING_SHIPMENT:
+        if not (data.acknowledged_by_name or "").strip():
+            raise ValidationError(
+                "Enter who at the supplier acknowledged the return — the acknowledgement "
+                "is what closes the handover.")
+        if data.acknowledged_at is None:
+            raise ValidationError("Enter the date and time the supplier acknowledged it.")
+    return mode
+
+
+def _apply_return_logistics(dispatch, data: "s.PurchaseReturnLogisticsIn", mode: str) -> None:
+    """Write a validated logistics block onto the consignment the send just raised.
+
+    Every column here already existed on `out_dispatches` — transport mode, vehicle,
+    driver, LR, e-way bill, freight, the delivery point, the acknowledgement and the
+    POD. The send simply never filled any of them, so a purchase return left the gate
+    as a consignment that said who it was for and nothing about how it got there.
+
+    ONLY THE FIELDS THE CHOSEN MODE OWNS ARE WRITTEN. A leg that was switched from
+    third-party to own-vehicle halfway through the wizard must not arrive carrying a
+    carrier name from the abandoned branch — the shipments board would show a hired
+    truck that was never hired.
+    """
+    dispatch.transport_mode = mode
+
+    if mode in s.LOGISTICS_MODES_NEEDING_CARRIER:
+        dispatch.carrier_name = (data.carrier_name or "").strip() or None
+        dispatch.lr_no = (data.lr_no or "").strip() or None
+        if data.freight_amount is not None:
+            dispatch.freight_amount = _d(data.freight_amount)
+    elif mode in s.LOGISTICS_MODES_NEEDING_VEHICLE:
+        dispatch.vehicle_number = (data.vehicle_number or "").strip() or None
+        dispatch.driver_name = (data.driver_name or "").strip() or None
+        dispatch.driver_phone = (data.driver_phone or "").strip() or None
+        # An own vehicle is one already going that way — it costs the job nothing, and
+        # ZERO is the honest figure rather than a null that reads as "not captured".
+        dispatch.freight_amount = ZERO
+    else:
+        # By hand. Nobody was hired, so there is no carrier field to fill and no
+        # freight — the bearer is recorded where every other mode records its driver,
+        # which keeps "who physically had the goods" in one column across all three.
+        dispatch.driver_name = (data.hand_carried_by or "").strip() or None
+        dispatch.freight_amount = ZERO
+
+    # The delivery point. Only overwritten when the wizard actually supplied one —
+    # `send_to_vendor` already seeded these from the vendor master, and a blank box
+    # that was never edited must not wipe the address it was pre-filled with.
+    if (data.delivery_address or "").strip():
+        dispatch.delivery_address = data.delivery_address.strip()
+    if (data.contact_person or "").strip():
+        dispatch.contact_person = data.contact_person.strip()
+    if (data.contact_phone or "").strip():
+        dispatch.contact_phone = data.contact_phone.strip()
+
+    # What left the gate. `total_packages` was defaulted to the line count by the
+    # send; a counted figure from the packing bench replaces it.
+    if data.total_packages is not None:
+        dispatch.total_packages = int(data.total_packages)
+    if data.total_weight_kg is not None:
+        dispatch.total_weight_kg = _d(data.total_weight_kg)
+    if (data.eway_bill_no or "").strip():
+        dispatch.eway_bill_no = data.eway_bill_no.strip()
+    if (data.gate_pass_no or "").strip():
+        dispatch.gate_pass_no = data.gate_pass_no.strip()
+    if data.expected_delivery is not None:
+        dispatch.expected_delivery = data.expected_delivery
+    if (data.dispatch_remarks or "").strip():
+        dispatch.remarks = f"{dispatch.remarks} | {data.dispatch_remarks.strip()}"
+
+    # AN OWN VEHICLE LEG IS HANDED TO LOGISTICS, NOT CLOSED HERE (2026-09-11).
+    #
+    # Our own truck has not left the yard when the send is pressed, so there is nothing
+    # to acknowledge and nothing has been delivered. The consignment is left at
+    # APPROVED — which is precisely the status `transport_released` and `gate_out` both
+    # accept — and `_raise_return_shipment` puts the trip on the Logistics Dispatch
+    # board as a DRAFT. The desk then arranges the vehicle, releases the leg, and THAT
+    # is what gates the consignment out and moves the stock.
+    #
+    # Stamping ACKNOWLEDGED here was the defect. It read as delivered-and-signed the
+    # instant the return was sent, which put the consignment outside the three statuses
+    # `transport_released` acts on, so the release hook returned at its first guard and
+    # `_apply_gate_out` never ran: no gate-out, no stock movement, no `stk_ledger` row.
+    # The document was finished inside the warehouse and its shipment could never do
+    # anything — the load "stayed in the warehouse" instead of going to Logistics.
+    #
+    # `pod_url` is still taken if one was somehow supplied, because a proof of delivery
+    # is evidence and discarding it would lose a fact; it simply does not close the
+    # consignment on its own.
+    if (data.pod_url or "").strip():
+        dispatch.pod_url = data.pod_url.strip()
+    if mode == LOGISTICS_MODE_RAISING_SHIPMENT:
+        dispatch.status = DispatchStatus.APPROVED.value
+        return
+
+    # The signature, and the status that follows from it, on the two modes where the
+    # goods genuinely have gone. `_validate_return_logistics` guarantees both values are
+    # present on these, so the consignment is genuinely acknowledged and saying APPROVED
+    # — where it used to stop forever — would understate it.
+    #
+    # SAFE ON A VENDOR RETURN, and only on one: every path that treats an ACKNOWLEDGED
+    # consignment as stock already credited (`_dispatch_for_receipt`,
+    # `can_forward_dispatch`, the inwardable list) is gated on
+    # `_lands_on_internal_shelf`, which excludes `_LEAVES_THE_COMPANY` types and
+    # requires a destination warehouse. A VENDOR_RETURN leg is in that tuple and
+    # carries no `to_warehouse_id`, so it can never be offered for inward or forward.
+    dispatch.acknowledged_by_name = data.acknowledged_by_name.strip()
+    dispatch.acknowledged_at = data.acknowledged_at
+    dispatch.delivered_at = data.acknowledged_at    # signed for means it arrived
+    dispatch.status = DispatchStatus.ACKNOWLEDGED.value
+
+
+# ---------------------------------------------------------------------------
+# The return shipment: an Own Vehicle return, on the Logistics Dispatch board
+# ---------------------------------------------------------------------------
+
+#: The one delivery method on the Send to Vendor wizard that raises a shipment of its
+#: own in Logistics.
+#:
+#: "Own Vehicle" is the WAREHOUSE's own truck. Nobody is hired, so there is no tender
+#: and no carrier portal to wait on — but a vehicle still has to be assigned, the load
+#: still leaves the gate, and the vendor still signs for it. That is a logistics leg,
+#: and it was the only one of the three with nowhere to be worked from: a hand-over has
+#: no vehicle to arrange, and a third-party leg goes out with the carrier the
+#: storekeeper already named on the wizard.
+LOGISTICS_MODE_RAISING_SHIPMENT = "OWN_VEHICLE"
+
+#: What the leg is raised AS when the send said nothing about how it travels.
+#:
+#: The ordinary case since 2026-09-11: filling in a purchase return and pressing Send
+#: puts it in front of the supplier immediately, and the transport is arranged
+#: afterwards by the people who arrange transport. Nobody has stated a mode at that
+#: point, so one has to be assumed for the draft — and the desk changes it on the
+#: Dispatch screen before anything is booked.
+#:
+#: THIRD_PARTY is that assumption, taken from `returns._release_to_logistics`, which
+#: made the same call for the same reason: a return leg is a hired truck unless
+#: somebody says otherwise. It is only ever a DRAFT's starting value — no carrier is
+#: invited and no tender runs until the desk dispatches it.
+LOGISTICS_MODE_UNSTATED = "THIRD_PARTY"
+
+
+def _split_packages(total: int | None, count: int) -> list[int]:
+    """`total` cartons spread over `count` lines, remainder to the earliest lines.
+
+    The leg's header totals are DERIVED from its lines and nothing may set them
+    directly (`transport._recompute_totals`), so the counted figure from the packing
+    bench only survives onto the shipment if it is distributed. Spread rather than
+    stacked on line one, because the carrier reads the per-line count off the same
+    document. Nothing counted falls back to one carton per line, which is what the
+    consignment beside it already assumes (`total_packages=len(doc.items)`).
+    """
+    if count <= 0:
+        return []
+    if not total or total < 1:
+        return [1] * count
+    base, extra = divmod(int(total), count)
+    return [base + (1 if i < extra else 0) for i in range(count)]
+
+
+def _return_shipment_seed(doc, dispatch, vendor, mode: str) -> dict:
+    """Everything the return leg needs, read while the send's objects are still live.
+
+    `transport.create_tr` COMMITS, so it cannot be called before `send_to_vendor` has
+    committed its own work — and after that commit every instance here is expired.
+    Reading the values out first is what keeps the leg from touching a closed
+    transaction, and is the same order `returns._release_to_logistics` runs in.
+    """
+    lines = list(doc.items or [])
+    packages = _split_packages(dispatch.total_packages, len(lines))
+    total_qty = sum((_d(l.quantity) for l in lines), ZERO)
+    counted_weight = _d(dispatch.total_weight_kg) if dispatch.total_weight_kg else None
+    return {
+        "mode": mode,
+        "return_id": doc.id,
+        "return_no": doc.return_no,
+        "vendor_name": (vendor.name if vendor else doc.vendor_name) or "the vendor",
+        "delivery_address": dispatch.delivery_address,
+        "contact_person": dispatch.contact_person,
+        "contact_phone": dispatch.contact_phone,
+        "warehouse_id": doc.warehouse_id,
+        "warehouse_name": doc.warehouse_name,
+        "dispatch_id": dispatch.id,
+        "dispatch_no": dispatch.dispatch_no,
+        "vehicle_number": dispatch.vehicle_number,
+        "driver_name": dispatch.driver_name,
+        "driver_phone": dispatch.driver_phone,
+        "gate_pass_no": dispatch.gate_pass_no,
+        "eway_bill_no": dispatch.eway_bill_no,
+        "expected_delivery": dispatch.expected_delivery,
+        "lines": [{
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "quantity": float(_d(line.quantity)),
+            "package_count": packages[index],
+            # Apportioned by quantity share so the derived header equals what was
+            # weighed. Left as None when nothing was weighed — an unweighed line has
+            # NO weight, and zero reads as "it weighs nothing".
+            "weight_kg": (float(counted_weight * _d(line.quantity) / total_qty)
+                          if counted_weight and total_qty > ZERO else None),
+            "remarks": line.reason,
+        } for index, line in enumerate(lines)],
+    }
+
+
+async def _raise_return_shipment(db: AsyncSession, seed: dict, user, *,
+                                 stamp_outbound: bool = False) -> None:
+    """Put a purchase return's outward leg on the Logistics Dispatch board as a DRAFT.
+
+    THE SAME DOOR FIELD RETURNS ALREADY COME THROUGH. `DispatchPage` reads a second
+    board below the consignment queue — `source_type=RETURN`, every status from DRAFT
+    through IN_TRANSIT — and a DRAFT row there gets the Dispatch press that opens
+    `/logistics/dispatch/new?tr_id=`. So this raises an ordinary transport request and
+    nothing else: no new table, no new status, no screen to build. The rungs the leg
+    then climbs are the ones every shipment climbs, which is what the return has to
+    walk through — the vehicle assigned and the leg readied, the gate pass written and
+    the load dispatched, the trip tracked, the vendor receiving it, and the
+    acknowledgement that closes it.
+
+    `source_id` IS DELIBERATELY LEFT NULL, and it is the one subtle thing here. Every
+    hook the returns module registers on a shipment starts at `_return_behind`, which
+    takes `source_type=RETURN` plus `source_id` and looks the id up in `inv_sto` —
+    field returns' own table. A purchase return's id comes from `pro_returns`, an
+    unrelated sequence, so passing it would eventually name somebody else's field
+    return and let `_transport_released` debit a shelf this return never touched.
+    `_return_behind` lets go of a leg with no `source_id` at its first line, so leaving
+    it null is what makes this leg provably not theirs. Nothing in logistics reads the
+    column — the board and the confirm screen both show `source_no` — so the Return ID
+    still travels, as the number a person actually reads, and `dispatch_id` keeps the
+    machine-readable link back through the consignment.
+
+    Raised AFTER the caller has committed, and never allowed to undo it: the transport
+    decision has been taken and a leg that could not be raised must not un-take it. It is
+    logged and the return still stands — the desk can raise one by hand from the Shipments
+    register, which is exactly the position every return was in before this.
+
+    `stamp_outbound` WRITES THE LEG'S ID BACK onto the return, and that link is what makes
+    the release hook able to find it: `_outbound_return_released` matches `outbound_tr_id`
+    and moves the return to STOCK_PICKED_UP when the load actually goes. Its own column
+    rather than `inbound_tr_id` or `collection_tr_id`, which two other settlements match
+    on — see the model. Off by default so the historical caller, which raised this leg at
+    send time and had no rung to move, behaves exactly as it did.
+    """
+    from app.modules.logistics import transport as lgs_transport
+    from app.modules.logistics.enums import TransportSource
+    from app.modules.logistics.schemas import TRCreate, TRLineIn
+
+    tr = await lgs_transport.create_tr(db, TRCreate(
+        mode=seed["mode"],
+        source_type=TransportSource.RETURN.value,
+        source_id=None,                       # see the docstring — load-bearing
+        source_no=seed["return_no"],
+        dispatch_id=seed["dispatch_id"],
+        consignment_no=seed["dispatch_no"],
+        from_warehouse_id=seed["warehouse_id"],
+        from_warehouse_name=seed["warehouse_name"],
+        # `create_tr` refuses an inbound leg that does not name where it is going, and
+        # for a purchase return that is the vendor rather than one of our warehouses.
+        to_location_name=seed["vendor_name"],
+        delivery_address=seed["delivery_address"],
+        contact_person=seed["contact_person"],
+        contact_phone=seed["contact_phone"],
+        vehicle_number=seed["vehicle_number"],
+        driver_name=seed["driver_name"],
+        driver_phone=seed["driver_phone"],
+        gate_pass_no=seed["gate_pass_no"],
+        eway_bill_no=seed["eway_bill_no"],
+        expected_delivery=seed["expected_delivery"],
+        remarks=(f"Purchase Return {seed['return_no']} → {seed['vendor_name']} — "
+                 f"arrange the outward leg"
+                 + (f" · vehicle {seed['vehicle_number']}"
+                    if seed["vehicle_number"] else "")),
+        lines=[TRLineIn(**line) for line in seed["lines"]],
+    ), user)
+
+    if stamp_outbound:
+        # A plain UPDATE rather than loading the row: `create_tr` has just committed and
+        # the caller's instance is expired. Same device `_raise_collection_shipment` uses.
+        await db.execute(
+            update(m.PurchaseReturn)
+            .where(m.PurchaseReturn.id == seed["return_id"])
+            .values(outbound_tr_id=tr.id, outbound_tr_no=tr.tr_no))
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=seed["return_id"],
+        entity_no=seed["return_no"], action=AuditAction.UPDATE, actor=user,
+        after={"transport_request_no": tr.tr_no, "transport_request_id": tr.id,
+               "outbound_tr_no": tr.tr_no if stamp_outbound else None,
+               "status": tr.status},
+        summary=f"Purchase Return {seed['return_no']}: return leg {tr.tr_no} "
+                f"raised in Logistics as a draft")
+    await db.commit()
+    logger.info("Purchase Return %s raised return leg %s (%s)",
+                seed["return_no"], tr.tr_no, tr.status)
+
+
+def _collection_shipment_seed(row, vendor) -> dict:
+    """Everything the collection leg needs, read while the answer's objects are live.
+
+    Same ordering, and for the same reason, as `_return_shipment_seed` above:
+    `transport.create_tr` COMMITS, so it cannot be called before
+    `vendor_respond_to_return` has committed its own work — and after that commit every
+    instance here is expired.
+
+    Reads the collection's facts off the RETURN rather than off an inbound receipt,
+    because on this path there is no receipt: the trip is the only document the answer
+    raises, and the receipt follows when the trip lands. See `PurchaseReturn.collection_tr_id`.
+    """
+    return {
+        "return_id": row.id,
+        "return_no": row.return_no,
+        "vendor_name": (vendor.name if vendor else row.vendor_name) or "the supplier",
+        "warehouse_name": row.warehouse_name,
+        "pickup_address": row.collection_pickup_address,
+        "ready_date": row.collection_ready_date,
+        # Who the driver calls when the vehicle reaches the supplier's gate.
+        "contact_person": vendor.contact_person if vendor else None,
+        "contact_phone": vendor.phone if vendor else None,
+        "lines": [{
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "quantity": float(_d(line.quantity)),
+            # One carton per line, which is what the consignment beside an outward
+            # return already assumes. Nothing has been packed or weighed: the cartons
+            # are standing on the SUPPLIER's dock and nobody here has counted them, so
+            # `weight_kg` is deliberately left unsaid rather than invented — an
+            # unweighed line has no weight, and zero reads as "it weighs nothing".
+            "package_count": 1,
+            "remarks": line.reason,
+        } for line in (row.items or [])],
+    }
+
+
+async def _raise_collection_shipment(db: AsyncSession, seed: dict, user) -> None:
+    """Put a WE_COLLECT replacement on the Logistics Dispatch board as a DRAFT.
+
+    THE OTHER HALF OF `_raise_return_shipment`, and the leg that had nowhere to be
+    worked from. When the supplier answers REPLACED they also say how the replacement
+    travels: SUPPLIER_DELIVERS puts it on their own vehicle and it simply arrives, and
+    the store inwards it through the ordinary receipt → QC → putaway path — that branch
+    is untouched here and behaves exactly as it always has. WE_COLLECT is the other
+    answer, and it means the goods are sitting ready on the supplier's dock and
+    somebody HERE has to send a vehicle for them.
+
+    Until now nothing did. `_raise_vendor_return_inbound` raised the draft receipt with
+    the words "COLLECTION REQUIRED — somebody here must send a vehicle" in its remarks,
+    left `expected_delivery` null on purpose because no vehicle had been scheduled, and
+    that was the end of it: no trip existed anywhere, on any board, and the collection
+    was remembered or it was not.
+
+    THE SAME DOOR EVERY OTHER RETURN LEG COMES THROUGH. `DispatchPage` reads a second
+    board below the consignment queue — `source_type=RETURN`, every status from DRAFT
+    through IN_TRANSIT — and a DRAFT row there gets the Dispatch press that opens
+    `/logistics/dispatch/new?tr_id=`. So this raises an ordinary transport request and
+    nothing else: no new table, no new status, no screen to build, and the rungs the
+    leg then climbs are the ones every shipment climbs.
+
+    `source_id` IS DELIBERATELY LEFT NULL, for exactly the reason `_raise_return_shipment`
+    gives: the returns module's hooks start at `_return_behind`, which takes
+    `source_type=RETURN` plus `source_id` and looks the id up in `inv_sto` — field
+    returns' own table, an unrelated sequence from `pro_returns`. Leaving it null is
+    what makes this leg provably not theirs. The return number still travels as
+    `source_no`, which is what the board and the confirm screen actually show.
+
+    WHICH WAY ROUND THE ENDS GO. This leg runs supplier → our warehouse, so the pickup
+    end is the supplier and `to_location_name` is our own warehouse — which is also the
+    check that makes it safe, since `create_tr` refuses an inbound leg that does not
+    name where it is coming back to. `from_warehouse_id` stays NULL: the load starts on
+    a dock that is not a warehouse of ours, and writing an id there would have the board
+    claim one of our own sites shipped it. The pickup ADDRESS goes in the remarks rather
+    than `delivery_address`, because that column renders under "To" on the dispatch
+    confirm screen and the supplier's dock is where this vehicle comes FROM.
+
+    Raised AFTER the answer has committed, and never allowed to undo it: the supplier
+    has answered and the answer is final. A leg that could not be raised is logged and
+    the answer still stands — the desk can raise one by hand from the Shipments
+    register, which is exactly the position every collection was in before this.
+
+    THE LEG'S ID IS STAMPED BACK ONTO THE RETURN, and that link is load-bearing rather
+    than decorative: the inbound receipt is no longer raised when the supplier answers,
+    so something has to raise it when our vehicle actually gets back.
+    `transport_acknowledged` matches the signed leg to `collection_tr_id` to find the
+    return waiting on it. Without the stamp the goods arrive against nothing.
+    """
+    from app.modules.logistics import transport as lgs_transport
+    from app.modules.logistics.enums import TransportSource
+    from app.modules.logistics.schemas import TRCreate, TRLineIn
+
+    tr = await lgs_transport.create_tr(db, TRCreate(
+        mode=LOGISTICS_MODE_RAISING_SHIPMENT,
+        source_type=TransportSource.RETURN.value,
+        source_id=None,                       # see the docstring — load-bearing
+        source_no=seed["return_no"],
+        from_warehouse_id=None,               # see the docstring — not a site of ours
+        from_warehouse_name=seed["vendor_name"],
+        to_location_name=seed["warehouse_name"],
+        contact_person=seed["contact_person"],
+        contact_phone=seed["contact_phone"],
+        # `expected_delivery` IS DELIBERATELY LEFT NULL, for the same reason
+        # `_raise_vendor_return_inbound` leaves it null on the receipt: the only date
+        # anybody has stated about this trip is the supplier's GOODS READY date, and
+        # that is the earliest the vehicle may collect — not when the load is due back
+        # at our gate. Nobody can know that until the desk arranges the vehicle, which
+        # is the press this draft exists to put in front of them. The ready date travels
+        # in the remarks below, worded as what it actually is.
+        remarks=(
+            f"Purchase Return {seed['return_no']} — collect the replacement from "
+            f"{seed['vendor_name']}."
+            + (f" Collect from: {seed['pickup_address']}."
+               if seed["pickup_address"] else "")
+            + (f" Goods ready from {seed['ready_date']:%d %b %Y}."
+               if seed["ready_date"] else "")
+            + " The inbound receipt is raised when this leg is acknowledged."),
+        lines=[TRLineIn(**line) for line in seed["lines"]],
+    ), user)
+
+    # The link back, without which the goods arrive against nothing — see the docstring.
+    # A plain UPDATE rather than loading the row: `create_tr` has just committed and the
+    # return instance the caller held is expired.
+    await db.execute(
+        update(m.PurchaseReturn)
+        .where(m.PurchaseReturn.id == seed["return_id"])
+        .values(collection_tr_id=tr.id, collection_tr_no=tr.tr_no))
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=seed["return_id"],
+        entity_no=seed["return_no"], action=AuditAction.UPDATE, actor=user,
+        after={"collection_tr_no": tr.tr_no, "collection_tr_id": tr.id,
+               "status": tr.status},
+        summary=f"Purchase Return {seed['return_no']}: collection shipment {tr.tr_no} "
+                f"raised in Logistics as a draft")
+    await db.commit()
+    logger.info("Purchase Return %s raised collection shipment %s (%s)",
+                seed["return_no"], tr.tr_no, tr.status)
+
+
+#: What a SUPPLIER may see of a purchase return: only one that has actually been sent
+#: to them. A draft, a return waiting on our own approval and a rejected one are all
+#: internal — the supplier is not a party to them and must never be shown one, exactly
+#: as `_vendor_visible_po` refuses to show a vendor an unissued order. CANCELLED is out
+#: too: a return cancelled before it went was never sent, and one cannot be cancelled
+#: after (see the status guards at the top of `send_to_vendor`).
+#
+# WIDENED 2026-09-11, and this is load-bearing rather than cosmetic. A sent return no
+# longer stops at SENT_TO_VENDOR: the decision desk answers it, picks how the material
+# comes back, and the document walks on through the inbound rungs. Leaving those out
+# would have the consignment VANISH off the supplier's own board the moment we approved
+# it — the supplier is still holding the goods and is still a party to every one of
+# those rungs. What they may DO with it is a separate question and deliberately
+# unchanged: `VENDOR_ANSWERABLE_RETURN_STATUSES` is still only SENT_TO_VENDOR and
+# DISPATCHED, so once our desk has taken the decision the portal's answer is closed and
+# a supplier reply can no longer raise a second trip for one load.
+# WIDENED AGAIN 2026-09-12, and load-bearing rather than cosmetic. The supplier is now
+# the party who ANSWERS this document — they approve or reject it, choose refund or
+# replacement, accept the collection, sign for the goods and dispatch the replacement —
+# so every rung between the send and the close is a rung they are standing on. Leaving
+# one out does not merely hide a row: it 404s the press that rung exists for, because
+# `_vendor_return` scopes reads and writes through this same tuple.
+#
+# REJECTED is in it for the first time. A return the supplier themselves refused must
+# stay readable to them — it is their own answer, and a document that vanishes the moment
+# you answer it reads as the answer having failed. REJECTED is still unreachable by every
+# write press, which guard on their own narrower rungs.
+_VENDOR_VISIBLE_RETURN_STATUSES = (
+    ReturnStatus.SENT_TO_VENDOR.value,
+    ReturnStatus.DISPATCHED.value,
+    ReturnStatus.VENDOR_APPROVED.value,
+    ReturnStatus.REPLACEMENT_AGREED.value,
+    ReturnStatus.AWAITING_VENDOR_VEHICLE.value,
+    ReturnStatus.VENDOR_TRANSPORT_ACCEPTED.value,
+    ReturnStatus.VEHICLE_REQUESTED.value,
+    ReturnStatus.STOCK_PICKED_UP.value,
+    ReturnStatus.VENDOR_RECEIVED.value,
+    ReturnStatus.REPLACEMENT_DISPATCHED.value,
+    ReturnStatus.IN_TRANSIT.value,
+    ReturnStatus.RECEIVED_AT_WAREHOUSE.value,
+    ReturnStatus.REFUNDED.value,
+    ReturnStatus.REJECTED.value,
+    ReturnStatus.COMPLETED.value,
+)
+
+
+def _vendor_owns_return_clause(vendor: Vendor | None, vendor_id: int):
+    """Whose return this is, as one WHERE clause shared by the list and the detail.
+
+    `vendor_id` — the bound link — is the whole of the answer for every return raised off
+    a purchase, and it is the answer for a MANUAL return too now that
+    `_match_manual_vendor` binds the typed company name at create, at edit and at send.
+
+    THE SECOND ARM IS FOR THE ROWS THAT PREDATE THAT BINDING. Every manual return already
+    in `pro_returns` was saved with a typed `vendor_name` and a NULL `vendor_id` — the
+    screen never posted one — so those documents have no link to bind and never will
+    without being reopened. Matching them on the typed name is what lets a supplier see a
+    return that was sent to them last week, rather than only the ones raised from now on.
+
+    NARROW ON PURPOSE. It reaches only a MANUAL return, only one with NO `vendor_id` at
+    all, and only where the typed name IS this supplier's own name. A bound return is
+    never re-matched, so the name can never pull in somebody else's document, and a
+    return bound to vendor A can never surface for vendor B.
+    """
+    owned = [m.PurchaseReturn.vendor_id == vendor_id]
+    folded = _fold_company(vendor.name if vendor else None)
+    if folded:
+        owned.append(and_(
+            m.PurchaseReturn.is_manual.is_(True),
+            m.PurchaseReturn.vendor_id.is_(None),
+            _fold_company_sql(m.PurchaseReturn.vendor_name) == folded,
+        ))
+    return or_(*owned)
+
+
+async def vendor_list_returns(db: AsyncSession, vendor_id: int, params: PageParams,
+                              search: str | None = None,
+                              status: str | None = None) -> dict:
+    """The goods this supplier has been sent back. Never anyone else's, never a draft.
+
+    LIVES IN THE WAREHOUSE MODULE, and is mounted on the supplier portal's own prefix
+    from `router.supplier_router`. It reads `pro_returns`, which this module owns, and
+    procurement — where the rest of the portal lives — sits EARLIER in the import chain
+    and may not import warehouse (rule 5). Putting the query there would have inverted
+    the chain; putting the route here costs nothing, because `get_current_vendor` is a
+    `core` dependency any module may use, and the carrier portal in logistics already
+    mounts its own routes under `/api/supplier` the same way.
+
+    The vendor id comes from the token at the router, never from the request, so this
+    can only ever answer the caller's own returns.
+    """
+    # Read for the ownership clause below, and for nothing else — a manual return raised
+    # before the typed name was bound carries the name and no id. See
+    # `_vendor_owns_return_clause`.
+    vendor = await db.get(Vendor, vendor_id)
+    stmt = (select(m.PurchaseReturn)
+            .where(_vendor_owns_return_clause(vendor, vendor_id),
+                   m.PurchaseReturn.status.in_(_VENDOR_VISIBLE_RETURN_STATUSES)))
+    if search:
+        like = f"%{search}%"
+        # The numbers a supplier actually has written on their own paperwork.
+        stmt = stmt.where(or_(m.PurchaseReturn.return_no.ilike(like),
+                              m.PurchaseReturn.po_no.ilike(like),
+                              m.PurchaseReturn.grn_no.ilike(like)))
+    if status:
+        # Narrowing only, and only WITHIN what this supplier may already read: an
+        # unknown or internal status filters to nothing rather than widening scope.
+        stmt = stmt.where(m.PurchaseReturn.status == status,
+                          m.PurchaseReturn.status.in_(_VENDOR_VISIBLE_RETURN_STATUSES))
+    stmt = stmt.order_by(m.PurchaseReturn.return_date.desc(),
+                         m.PurchaseReturn.id.desc())
+    page = await paginate(db, stmt, params)
+
+    rows = page["items"]
+    if not rows:
+        return page
+
+    # The consignment behind each one, in ONE query rather than per row. A manual
+    # return raises none, so its logistics fields stay null and the portal says the
+    # goods are on their way without inventing a lorry for them.
+    legs = {
+        leg.ref_id: leg
+        for leg in (await db.execute(
+            select(m.Dispatch).where(
+                m.Dispatch.ref_type == "PURCHASE_RETURN",
+                m.Dispatch.ref_id.in_([r.id for r in rows]),
+                m.Dispatch.status != DispatchStatus.CANCELLED.value,
+            )
+        )).scalars()
+    }
+    for row in rows:
+        _apply_vendor_return_leg(row, legs.get(row.id))
+    return page
+
+
+def _vendor_reason_label(reason: str | None) -> str | None:
+    """A stored reason code as the supplier should read it, or whatever was stored.
+
+    Falls back to the raw value rather than to null: a reason typed before the
+    catalogue existed is still a reason, and blanking it would say the goods came back
+    for no stated cause.
+    """
+    return dict(s.PURCHASE_RETURN_REASONS).get(reason or "", reason)
+
+
+def _vendor_refund_label(row) -> str | None:
+    """The refund set beside what was sent back, as one sentence.
+
+    Worded HERE and not in the portal because the comparison is the whole point. A
+    supplier crediting less than the consignment was worth is the normal case — freight
+    deducted, a restocking charge kept back, a disputed line — and a screen that printed
+    the refund on its own would leave the buyer subtracting two numbers by eye to find
+    out whether a return had been settled short. Saying it in words means every screen
+    that shows a refund says the same thing about it.
+
+    Null unless there is a figure: a REPLACED or RETURNED answer settles in goods, and a
+    legacy ACCEPTED row never captured an amount at all.
+    """
+    amount = row.vendor_refund_amount
+    if amount is None:
+        return None
+    returned = _d(row.total_value)
+    amount = _d(amount)
+    if amount >= returned:
+        return "the full value of the return"
+    shortfall = returned - amount
+    return f"of {returned:,.2f} returned — {shortfall:,.2f} less than the full value"
+
+
+def _vendor_response_label(value: str | None) -> str | None:
+    """The supplier's answer as a sentence, or None while they have not given one.
+
+    THE ONE PLACE an answer becomes words, shared by the supplier's portal and by our
+    own screens. Falls back to the stored value rather than to null for the same reason
+    `_vendor_reason_label` does — a value nobody has worded yet must still show as
+    SOMETHING — and stays null when there is no answer, which is every return raised
+    before the portal could give one.
+    """
+    if not value:
+        return None
+    return dict(s.VENDOR_RETURN_RESPONSES).get(value, value)
+
+
+def _apply_vendor_answer(row) -> None:
+    """What the supplier said, worded for OUR screens, onto one internal return row.
+
+    Shared by the register (`list_returns`) and the document (`_decorate_purchase_return`)
+    so the two cannot word the same return differently — the failure this fixes was a
+    screen saying nothing at all, and two screens saying different things is the same
+    failure wearing a hat.
+
+    `status_label` is wording over the STORED status, which is deliberately not touched:
+    `vendor_response` is its own axis (see the enum's docstring), and a return the
+    supplier has accepted is still, on our books, a return we have sent them. Null while
+    unanswered, so a screen writes `status_label ?? status` and every pre-portal row
+    renders exactly as it did.
+    """
+    # The INBOUND LEG's own wording wins where it says anything, and it can only say
+    # anything on a rung the supplier's answer cannot reach: `vendor_return_stage_label`
+    # is null outside `VENDOR_ANSWERABLE_RETURN_STATUSES` (SENT_TO_VENDOR / DISPATCHED)
+    # and every rung `return_stage_label` words is past both. So the two never both
+    # answer, and `or` is the order they are read in rather than a precedence rule —
+    # written as a chain anyway, because "the newest thing that happened wins" is the
+    # property that has to survive the next status being added to either map.
+    row.status_label = (return_stage_label(row.status)
+                        or vendor_return_stage_label(row.status, row.vendor_response))
+    row.vendor_response_label = _vendor_response_label(row.vendor_response)
+    row.vehicle_arrangement_label = RETURN_VEHICLE_ARRANGEMENT_LABELS.get(
+        row.vehicle_arrangement or "")
+
+
+def _apply_vendor_return_leg(row, leg) -> None:
+    """Hang the reason wording and the consignment's facts onto one portal row.
+
+    Shared by the supplier portal's LIST and its DETAIL so the two cannot drift — the
+    detail is the same row with its lines attached, and a field enriched in one place
+    only would have gone null the moment the supplier opened it.
+
+    `leg` is None on a manual return, which raises no consignment at all. Every
+    logistics field then stays null, and the portal says the goods are on their way
+    without inventing a lorry for them.
+    """
+    row.reason_code = row.reason
+    row.reason_label = _vendor_reason_label(row.reason)
+    # The supplier's own answer, worded for them. Falls back to the stored value rather
+    # than to null for the same reason `_vendor_reason_label` does, and stays null while
+    # the return is unanswered — which is every row raised before 2026-09-11.
+    row.vendor_response_label = _vendor_response_label(row.vendor_response)
+    row.vendor_refund_label = _vendor_refund_label(row)
+    # WHERE THE RETURN IS STANDING, as a sentence. The supplier now answers five of the
+    # rungs themselves, so their copy has to say which one it is on — a portal showing
+    # "REPLACEMENT_AGREED" is showing them our database. Worded by the same function our
+    # own screens use, so the two sides cannot describe one document differently.
+    row.status_label = (return_stage_label(row.status)
+                        or vendor_return_stage_label(row.status, row.vendor_response))
+    row.vehicle_arrangement_label = RETURN_VEHICLE_ARRANGEMENT_LABELS.get(
+        row.vehicle_arrangement or "")
+    modes = {v: label for v, label, _ in s.PURCHASE_RETURN_LOGISTICS_MODES}
+    row.dispatch_no = leg.dispatch_no if leg else None
+    row.transport_mode = leg.transport_mode if leg else None
+    row.transport_mode_label = (
+        modes.get(leg.transport_mode or "", leg.transport_mode) if leg else None)
+    row.carrier_name = leg.carrier_name if leg else None
+    row.vehicle_number = leg.vehicle_number if leg else None
+    row.driver_name = leg.driver_name if leg else None
+    row.lr_no = leg.lr_no if leg else None
+    row.eway_bill_no = leg.eway_bill_no if leg else None
+    row.total_packages = leg.total_packages if leg else None
+    row.expected_delivery = leg.expected_delivery if leg else None
+    row.acknowledged_by_name = leg.acknowledged_by_name if leg else None
+    row.acknowledged_at = leg.acknowledged_at if leg else None
+    # Detail-only, and harmless on a list row: `VendorReturnListRow` does not declare
+    # these, so they are simply not serialised there.
+    row.delivery_address = leg.delivery_address if leg else None
+    row.contact_person = leg.contact_person if leg else None
+    row.contact_phone = leg.contact_phone if leg else None
+    row.total_weight_kg = leg.total_weight_kg if leg else None
+
+
+async def _vendor_return(db: AsyncSession, vendor_id: int,
+                         return_id: int) -> m.PurchaseReturn:
+    """One return, scoped to the supplier asking for it, or a 404.
+
+    THE ONE PLACE the portal's scoping rule is written, shared by the read and by both
+    of the supplier's write actions. Extracted on 2026-09-11 when those writes landed:
+    a second copy of this WHERE clause is how one endpoint quietly ends up able to
+    answer another supplier's document.
+
+    Scoped in the WHERE clause rather than by fetching and then checking, so a return
+    belonging to somebody else and one that has not been sent are the SAME 404 —
+    telling the caller which would confirm that a guessed return number exists.
+    """
+    # Scoped with the SAME ownership clause the list uses, for the same reason this
+    # function exists at all: a manual return the list showed off its typed name would
+    # otherwise 404 the moment the supplier clicked it.
+    vendor = await db.get(Vendor, vendor_id)
+    row = (await db.execute(
+        select(m.PurchaseReturn)
+        # The lines come with the header rather than in a query of their own: the
+        # relationship is `delete-orphan`, so assigning a separately fetched list to
+        # `row.items` would hand SQLAlchemy an orphan set to reconcile on the next
+        # flush. Eager-loading it is read-only and already ordered by `line_no`.
+        .options(selectinload(m.PurchaseReturn.items))
+        .where(
+            m.PurchaseReturn.id == return_id,
+            _vendor_owns_return_clause(vendor, vendor_id),
+            m.PurchaseReturn.status.in_(_VENDOR_VISIBLE_RETURN_STATUSES),
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError(f"Return {return_id} not found")
+    return row
+
+
+async def vendor_get_return(db: AsyncSession, vendor_id: int, return_id: int):
+    """One purchase return, with its lines, as the SUPPLIER sees it.
+
+    The list could say a consignment existed but never what was in it, so a supplier
+    could not check the carton against their own paperwork without telephoning the
+    store. This is that document.
+
+    SCOPED EXACTLY AS THE LIST IS, and deliberately in the same WHERE clause rather
+    than by fetching and then checking: the vendor id comes from the token at the
+    router, and `_VENDOR_VISIBLE_RETURN_STATUSES` keeps a draft, a return still in our
+    own approval and a rejected one out of reach. A return belonging to somebody else
+    and one that has not been sent are the SAME 404 — telling the caller which would
+    confirm that a return number they guessed exists.
+    """
+    row = await _vendor_return(db, vendor_id, return_id)
+
+    leg = (await db.execute(
+        select(m.Dispatch).where(
+            m.Dispatch.ref_type == "PURCHASE_RETURN",
+            m.Dispatch.ref_id == row.id,
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+        )
+    )).scalars().first()
+    _apply_vendor_return_leg(row, leg)
+
+    for line in row.items:
+        # The line's own reason where it has one, else the document's — a consignment
+        # usually comes back for one cause and repeating it per line would be noise,
+        # but a mixed one must not show blank cells against the odd line out.
+        line.reason_label = _vendor_reason_label(line.reason) or row.reason_label
+
+    # The supplier's own identity, for the acknowledgement receipt: a receipt has to
+    # name both parties, and `warehouse_name` (ours) is already a column on the row.
+    # Reused rather than re-read so a manual return's TYPED vendor arrives under the
+    # same names as a sourced one's — see `_enrich_return_with_vendor`. Read-only here:
+    # nothing on this path commits, which is the condition that function's docstring
+    # warns about.
+    await _enrich_return_with_vendor(db, row)
+    await _apply_vendor_replacement_leg(db, row)
+    await _apply_replacement_line_prefill(db, row)
+    row.replacement_documents = await _replacement_documents(db, row.id)
+    return row
+
+
+#: The label each stored category is shown under, off the served meta rather than
+#: written twice. A category with no entry (one retired later) falls back to its own
+#: value instead of rendering blank.
+_REPLACEMENT_DOC_LABELS = {str(d["value"]): str(d["label"])
+                           for d in REPLACEMENT_DOCUMENT_META}
+
+
+def replacement_document_types() -> tuple[dict, ...]:
+    """The two mandatory replacement files, as the form should draw them.
+
+    A plain read of `REPLACEMENT_DOCUMENT_META`. It exists so the router does not import
+    the enum directly: the screen's fields and the dispatch guard then have exactly one
+    source, and adding a third document is one edit in one file.
+    """
+    return REPLACEMENT_DOCUMENT_META
+
+
+async def _replacement_documents(db: AsyncSession, return_id: int) -> list:
+    """The replacement's paperwork on file, newest first, labelled for the screen.
+
+    Reads `sys_attachments` filed under `RETURN_ATTACHMENT_ENTITY` and narrowed to the
+    two replacement categories, so an unrelated file attached to the same return — a
+    photograph of the damage that caused it, say — can never be mistaken for the
+    invoice the dispatch is waiting on.
+    """
+    rows = await attachments.list_attachments(db, RETURN_ATTACHMENT_ENTITY, return_id)
+    out = []
+    for row in rows:
+        category = (row.doc_category or "").upper()
+        if category not in _REPLACEMENT_DOC_LABELS:
+            continue
+        out.append(s.ReplacementDocumentRead(
+            id=row.id, doc_category=category,
+            label=_REPLACEMENT_DOC_LABELS[category],
+            file_name=row.file_name, file_size=row.file_size,
+            mime_type=row.mime_type, uploaded_by_name=row.uploaded_by_name,
+            created_at=row.created_at,
+        ))
+    return out
+
+
+async def _assert_replacement_docs_editable(row) -> None:
+    """The paperwork may only be changed while the dispatch is still to come.
+
+    Once the replacement has gone the files are evidence of what left the supplier's
+    dock, and the buyer's store has been told they exist. Swapping one afterwards would
+    rewrite the record of a consignment already on the road.
+    """
+    if row.replacement_dispatched_at:
+        raise ValidationError(
+            f"The replacement for {row.return_no} was already dispatched on "
+            f"{row.replacement_dispatched_at:%d %b %Y} — its paperwork can no longer be "
+            "changed. Raise the discrepancy with the buyer instead.")
+    if row.status not in RETURN_REPLACEMENT_DISPATCHABLE_STATUSES:
+        _decision_guard(row, "the replacement's paperwork can only be attached once the "
+                             "returned goods are on their way to you")
+
+
+async def vendor_upload_replacement_document(db: AsyncSession, vendor_id: int,
+                                             return_id: int, *, doc_category: str,
+                                             upload):
+    """The supplier attaching the loading photograph, or the replacement invoice.
+
+    ONE FILE PER SLOT, and re-uploading REPLACES rather than adds. A supplier who picked
+    the wrong file from their phone has to be able to correct it, and "the most recent
+    one is the real one" is a rule the buyer's store would have to be told; two invoices
+    against one consignment is an argument, not a record. The superseded row and its
+    bytes go together, through the platform's own delete so the audit trail carries it.
+
+    THE PHOTO SLOT TAKES IMAGES ONLY (`REPLACEMENT_PHOTO_SUFFIXES`). The platform
+    whitelist is wider on purpose — a PDF is a perfectly good attachment in general —
+    but it is not a photograph of a loaded pallet, and accepting one here would leave
+    the requirement satisfiable by the thing it exists to stop.
+
+    Everything else about the upload is the platform's: the extension and leading-byte
+    check, the 20 MB cap enforced while the bytes stream, the generated storage name and
+    the audit row. This function adds the scoping and the slot rules and nothing more.
+    """
+    category = (doc_category or "").upper()
+    if category not in _REPLACEMENT_DOC_LABELS:
+        raise ValidationError(
+            f"{doc_category!r} is not a replacement document. Attach the "
+            + " or the ".join(str(d["noun"]) for d in REPLACEMENT_DOCUMENT_META) + ".")
+
+    row = await _vendor_return(db, vendor_id, return_id)
+    await _assert_replacement_docs_editable(row)
+
+    if category == ReplacementDocument.PHOTO.value:
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix not in REPLACEMENT_PHOTO_SUFFIXES:
+            raise ValidationError(
+                f"{suffix or 'That file'} is not an image. Photograph the goods, or "
+                "attach a JPG or PNG — the invoice goes in the slot below.")
+
+    # The previous file for THIS slot only, and read before the new one is written so a
+    # failed upload leaves the old one in place rather than the slot empty.
+    existing = [a for a in await attachments.list_attachments(
+        db, RETURN_ATTACHMENT_ENTITY, row.id)
+        if (a.doc_category or "").upper() == category]
+
+    saved = await attachments.add_attachment(
+        db, entity_type=RETURN_ATTACHMENT_ENTITY, entity_id=row.id,
+        upload=upload, doc_category=category, user=None)
+
+    for old in existing:
+        await attachments.delete_attachment(
+            db, old.id, None, entity_type=RETURN_ATTACHMENT_ENTITY, entity_id=row.id)
+
+    logger.info("Purchase Return %s: %s attached by vendor %s (%s)",
+                row.return_no, category, vendor_id, saved.file_name)
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def vendor_delete_replacement_document(db: AsyncSession, vendor_id: int,
+                                             return_id: int, attachment_id: int):
+    """Remove one of the two files before the replacement goes.
+
+    Scoped twice over: the return must be this supplier's, and the attachment must hang
+    on that return — `require_attachment` inside the platform delete proves the second,
+    which is what stops an id from another document being passed in here.
+    """
+    row = await _vendor_return(db, vendor_id, return_id)
+    await _assert_replacement_docs_editable(row)
+    await attachments.delete_attachment(
+        db, attachment_id, None,
+        entity_type=RETURN_ATTACHMENT_ENTITY, entity_id=row.id)
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def vendor_replacement_document_file(db: AsyncSession, vendor_id: int,
+                                           return_id: int, attachment_id: int):
+    """The stored bytes of one of them, for the supplier to check what they sent.
+
+    The return is scoped BEFORE the attachment is opened, so an id belonging to another
+    supplier's document never reaches the filesystem.
+    """
+    row = await _vendor_return(db, vendor_id, return_id)
+    await attachments.require_attachment(
+        db, attachment_id, entity_type=RETURN_ATTACHMENT_ENTITY, entity_id=row.id)
+    return await attachments.attachment_file(db, attachment_id)
+
+
+async def _apply_replacement_line_prefill(db: AsyncSession, row) -> None:
+    """What a replacement of each line must state, and what we originally received.
+
+    DETAIL ONLY, and only while the return is unanswered — this exists to fill in the
+    form on the Accept screen, and a queue row has no form on it. Once the supplier has
+    answered there is nothing left to prefill and the queries are skipped.
+
+    TWO DIFFERENT FACTS, from two different places, and they must not be confused:
+
+    * `needs_batch` / `needs_expiry` are the ITEM MASTER's, and they are the same two
+      flags `_apply_receipt_lines` enforces when the store submits the GRN. Served so the
+      portal asks for exactly what the receiving desk will insist on — the supplier finds
+      out before they press rather than from a refusal afterwards.
+    * `original_*` are the GRN LINE's — the batch and dates of the goods we are sending
+      back. A PREFILL, never a binding: the replacement is different physical stock and
+      the supplier is expected to correct them. They are handed over because on the
+      ordinary one-batch replacement correcting a prefilled date is one keystroke and
+      typing it from a delivery note is a phone call, and because seeing the batch they
+      shipped us is half of what a supplier needs to investigate the complaint.
+
+    A MANUAL return has no GRN line and frequently no item master row either, so every
+    field here stays at its default and the portal simply asks for the lot in free text.
+    """
+    if row.vendor_response:
+        return
+    grn_line_ids = {line.grn_item_id for line in row.items if line.grn_item_id}
+    grn_lines = {}
+    if grn_line_ids:
+        grn_lines = {r.id: r for r in (await db.execute(
+            select(m.ReceiptItem).where(m.ReceiptItem.id.in_(grn_line_ids)))
+        ).scalars()}
+    for line in row.items:
+        if line.item_id:
+            item = await db.get(Item, line.item_id)
+            if item is not None:
+                line.needs_batch = bool(item.is_batch_tracked)
+                line.needs_expiry = bool(item.has_expiry)
+                # One flag, two words for it — the same choice `_apply_receipt_lines`
+                # makes when it refuses the line for want of this date.
+                line.life_label = "Warranty end" if item.is_asset else "Expiry"
+        source = grn_lines.get(line.grn_item_id)
+        if source is not None:
+            # The return line's own `batch_no` is the same batch, and is preferred where
+            # the GRN line has none: a return raised against a specific batch names it,
+            # and falling back the other way would blank a field the reader can see on
+            # the document above.
+            line.original_batch_no = source.batch_no or line.batch_no
+            line.original_mfg_date = source.mfg_date
+            line.original_expiry_date = source.expiry_date
+        else:
+            line.original_batch_no = line.batch_no
+
+
+async def _apply_vendor_replacement_leg(db: AsyncSession, row) -> None:
+    """How the replacement is travelling, read back off the receipt it raised.
+
+    Stored on `inb_receipts` and READ here rather than copied onto the return, so the
+    supplier's page and the store's receiving screen cannot show two different dates for
+    one lorry. Costs one query by primary key, and only on a detail — a queue row says
+    "replacement being sent" and that is the whole answer at that level.
+
+    Silent when there is no follow-up receipt (a refund, a legacy ACCEPTED row, an
+    unanswered return) and when there is one but it carries no date — a RETURNED
+    consignment raises a receipt too, and that lorry is ours, not theirs.
+    """
+    row.replacement_expected_date = None
+    row.replacement_label = None
+    row.replacement_mode = None
+    row.replacement_ready_date = None
+    row.replacement_pickup_address = None
+    if row.vendor_response != VendorReturnResponse.REPLACED.value:
+        return
+
+    # A COLLECTION HAS NO RECEIPT YET, and is still the thing the reader most wants
+    # described (2026-09-11). The answer raises the trip and the receipt follows when
+    # our vehicle gets back, so between those two moments the facts live on the return
+    # itself — and reading them only off the receipt left the screen silent for exactly
+    # the stretch when somebody is chasing the collection.
+    if row.collection_tr_id and not row.vendor_followup_receipt_id:
+        row.replacement_mode = s.INBOUND_MODES_COLLECTED[0]
+        row.replacement_ready_date = row.collection_ready_date
+        row.replacement_pickup_address = row.collection_pickup_address
+        parts = ["we will collect"]
+        if row.collection_ready_date:
+            parts.append(f"ready from {row.collection_ready_date:%d %b %Y}")
+        if row.collection_pickup_address:
+            parts.append(f"from {row.collection_pickup_address}")
+        if row.collection_tr_no:
+            parts.append(f"on {row.collection_tr_no}")
+        row.replacement_label = " · ".join(parts)
+        return
+
+    if not row.vendor_followup_receipt_id:
+        return
+
+    receipt = await db.get(m.Receipt, row.vendor_followup_receipt_id)
+    if receipt is None:
+        # The store cancelled or deleted it. The return still records that a replacement
+        # was promised; it simply cannot say how it travels any more.
+        return
+
+    row.replacement_expected_date = receipt.expected_delivery
+    row.replacement_mode = receipt.inbound_transport_mode
+    row.replacement_ready_date = receipt.goods_ready_date
+    row.replacement_pickup_address = receipt.pickup_address
+
+    # Two legs, two sentences, because the supplier is owed a different assurance by
+    # each: a delivery tells them what we are expecting and when, and a collection tells
+    # them we accepted the job of fetching it — which is the half a supplier asking us to
+    # collect actually wants confirmed.
+    parts = []
+    if receipt.inbound_transport_mode in s.INBOUND_MODES_COLLECTED:
+        parts.append("we will collect")
+        if receipt.goods_ready_date:
+            parts.append(f"ready from {receipt.goods_ready_date:%d %b %Y}")
+        if receipt.pickup_address:
+            parts.append(f"from {receipt.pickup_address}")
+    else:
+        if receipt.expected_delivery:
+            parts.append(f"expected {receipt.expected_delivery:%d %b %Y}")
+        if receipt.transporter_name:
+            parts.append(receipt.transporter_name)
+        if receipt.vehicle_no:
+            parts.append(f"vehicle {receipt.vehicle_no}")
+        if receipt.lr_no:
+            parts.append(f"LR {receipt.lr_no}")
+    row.replacement_label = " · ".join(parts) or None
+
+
+async def vendor_confirm_return_receipt(db: AsyncSession, vendor_id: int,
+                                        return_id: int,
+                                        data: "s.VendorReturnReceiptIn"):
+    """The supplier signing for the returned goods at their own dock.
+
+    THE RUNG THIS MOVES CHANGED on 2026-09-12. It used to be a record of the handover and
+    nothing else — it moved no status, because under the old flow the goods went out with
+    the paperwork and the supplier's answer was a separate, ungated act. Now the signature
+    IS a rung: the return has travelled to them (on their vehicle or ours), and their
+    signature is what ends our liability for the stock and opens the replacement dispatch.
+
+    Still a record of the HANDOVER and still moves no stock. What the supplier sends back
+    is `vendor_dispatch_replacement`, a separate press, because signing for a carton and
+    having packed its replacement are different statements days apart.
+
+    Reachable from BOTH transport branches — their own vehicle arriving home, or ours
+    delivering — which is why `RETURN_VENDOR_RECEIVABLE_STATUSES` holds two rungs.
+
+    Signed ONCE. A second signature is refused rather than ignored: the first carries a
+    timestamp somebody may already have quoted, and silently overwriting it would destroy
+    the only evidence of when the goods actually landed.
+    """
+    row = await _vendor_return(db, vendor_id, return_id)
+    if row.vendor_receipt_confirmed_at is not None:
+        raise ValidationError(
+            f"{row.return_no} was already signed for on "
+            f"{row.vendor_receipt_confirmed_at:%d %b %Y at %H:%M}"
+            f"{f' by {row.vendor_receipt_by_name}' if row.vendor_receipt_by_name else ''}.")
+    if row.status not in RETURN_VENDOR_RECEIVABLE_STATUSES:
+        _decision_guard(row, "goods can only be signed for once they are on their way to "
+                             "you")
+
+    before = row.status
+    row.vendor_receipt_confirmed_at = utcnow()
+    row.vendor_receipt_by_name = data.received_by_name.strip()
+    row.vendor_receipt_vehicle_no = (data.vehicle_number or "").strip() or None
+    row.vendor_receipt_remarks = (data.remarks or "").strip() or None
+    row.status = ReturnStatus.VENDOR_RECEIVED.value
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        before={"status": before},
+        summary=(f"Purchase Return {row.return_no}: "
+                 f"{row.vendor_name or 'the vendor'} signed for the returned goods"
+                 + (f" — received by {row.vendor_receipt_by_name}"
+                    if row.vendor_receipt_by_name else "")),
+        after={
+            "status": row.status,
+            "vendor_receipt_by_name": row.vendor_receipt_by_name,
+            "vendor_receipt_vehicle_no": row.vendor_receipt_vehicle_no,
+            "vendor_receipt_remarks": row.vendor_receipt_remarks,
+            "acting_vendor_id": vendor_id,
+        })
+    await db.commit()
+    logger.info("Purchase Return %s signed for by the vendor", row.return_no)
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+def _dispatch_as_answer(data: "s.ReplacementDispatchIn") -> SimpleNamespace:
+    """The dispatch note in the shape `_raise_vendor_return_inbound` already reads.
+
+    An ADAPTER, not a second copy of the receipt builder. That function has read
+    `replacement_*` off the supplier's answer since the day it was written, and it is
+    long, careful and correct — rewriting it to take two request shapes would be two
+    chances to get a batch number onto the wrong line. Mapping the field names here costs
+    eight lines and leaves it untouched.
+
+    The mode is always SUPPLIER_DELIVERS. On this rung the vendor HAS dispatched — the
+    goods are on a vehicle they chose — so there is nothing to collect and the two
+    collection fields are unset. That is also why `expected_date` is a real promise of
+    arrival here rather than the ready date a collection would carry.
+    """
+    return SimpleNamespace(
+        replacement_mode=s.INBOUND_MODES_ARRIVING[0],
+        replacement_expected_date=data.expected_date,
+        replacement_transporter_name=(data.transporter_name or "").strip() or None,
+        replacement_vehicle_no=(data.vehicle_no or "").strip() or None,
+        replacement_lr_no=(data.lr_no or "").strip() or None,
+        replacement_pickup_address=None,
+        replacement_ready_date=None,
+        replacement_lines=data.lines,
+    )
+
+
+async def vendor_dispatch_replacement(db: AsyncSession, vendor_id: int, return_id: int,
+                                      data: "s.ReplacementDispatchIn"):
+    """THE REPLACEMENT DISPATCH NOTE — the vendor has put replacement goods on a vehicle.
+
+    The last thing the vendor does, and the document the store receives against. It
+    carries what the business requires a dispatch note to carry: the items and quantities
+    off this return, the batch, manufacturing date and expiry of the goods ACTUALLY being
+    sent, the dispatch date, the purchase return number and the GRN/PO references — all of
+    which are either on the return already or stated here.
+
+    THE BATCH IS NOT THIS RETURN'S BATCH, and that is the whole reason the per-line
+    columns exist. `PurchaseReturnItem.batch_no` is the lot of the FAULTY goods travelling
+    the other way: different physical stock, a different expiry, and inheriting it would
+    prefill the store's GRN with a wrong lot number. Only the vendor packing the carton
+    knows the replacement's, so they are asked here, and refused if an item the master
+    says is batch- or expiry-tracked arrives without one — the same rule
+    `_apply_receipt_lines` will apply when the store books it in, applied early enough
+    that somebody can still answer it.
+
+    IT RAISES THE INBOUND RECEIPT, and raises it HERE rather than when the replacement was
+    promised. Until the goods are on a vehicle the warehouse has nothing to do: no lorry
+    has gone, no date exists, and a dateless draft receipt sitting in their queue is a
+    document pretending to be work.
+
+    REUSES AN EXISTING RECEIPT where one is already there. Returns answered under the old
+    flow had their receipt raised at answer time and carried into this one by the
+    migration; raising a second would have the store expecting two lorries for one
+    replacement.
+
+    IT CARRIES THE REPLACEMENT'S PAPERWORK (2026-09-16) — a picture of the goods as they
+    were loaded, which is REQUIRED, and the supplier's invoice or bill, which is not.
+    Both are `sys_attachments` rows filed against this return; which of them the dispatch
+    waits for is `REQUIRED_REPLACEMENT_DOCUMENTS` and nothing else, and it is enforced
+    here rather than only hidden behind a disabled button. See `ReplacementDocument` for
+    why the picture is the half that cannot wait.
+
+    IT ALSO SIGNS FOR THE RETURNED GOODS (2026-09-16). The vendor's separate "sign for the
+    goods" press is gone from the portal, and this one absorbed it: dispatching a
+    replacement is itself the statement that the faulty stock arrived, so the rung it used
+    to gate is now reachable directly and this function stamps the receipt on the way
+    through. `vendor_confirm_return_receipt` is still served and still moves the same
+    status — an integration calling it keeps working, and a return signed that way arrives
+    here already stamped.
+
+    ANSWERED ONCE, by `RETURN_REPLACEMENT_DISPATCHABLE_STATUSES`.
+    """
+    row = await _vendor_return(db, vendor_id, return_id)
+    if row.status not in RETURN_REPLACEMENT_DISPATCHABLE_STATUSES:
+        if row.replacement_dispatched_at:
+            raise ValidationError(
+                f"The replacement for {row.return_no} was already dispatched on "
+                f"{row.replacement_dispatched_at:%d %b %Y}"
+                f"{f' ({row.replacement_dispatch_no})' if row.replacement_dispatch_no else ''}"
+                f" — it cannot be dispatched twice.")
+        _decision_guard(row, "a replacement can only be dispatched once the returned goods "
+                             "are on their way to you")
+
+    # THE REQUIRED FILES, REFUSED HERE AND NOT ONLY ON THE SCREEN (2026-09-16). The
+    # portal disables its own press until they are uploaded; this is the check that means
+    # it. A requirement enforced only in the browser is a requirement the next client — a
+    # retry, a script, a second tab left open from before the files were swapped — does
+    # not have.
+    #
+    # Reads `REQUIRED_REPLACEMENT_DOCUMENTS`, so a slot the business later makes optional
+    # (as the invoice became) stops being demanded here with no edit to this function.
+    #
+    # Checked BEFORE anything is written, so a dispatch refused for missing paperwork
+    # leaves the return exactly where it stood rather than half-stamped.
+    on_file = {(d.doc_category or "").upper()
+               for d in await _replacement_documents(db, row.id)}
+    missing = [str(meta["noun"]) for meta in REPLACEMENT_DOCUMENT_META
+               if str(meta["value"]) in REQUIRED_REPLACEMENT_DOCUMENTS
+               and str(meta["value"]) not in on_file]
+    if missing:
+        raise ValidationError(
+            f"{row.return_no} cannot be dispatched yet — attach the "
+            + " and the ".join(missing) + " first.")
+
+    # Refused NOW if it could never raise a receipt, and the cartons checked NOW against
+    # the item master — finding either out after the lorry has left would be too late,
+    # with the vendor long gone from the screen.
+    _assert_inbound_raisable(row)
+    stated = await _validate_replacement_cartons(db, row, data.lines)
+    for line in row.items:
+        answer = stated.get(line.line_no)
+        if answer is not None:
+            line.replacement_batch_no = answer.batch_no
+            line.replacement_mfg_date = answer.mfg_date
+            line.replacement_expiry_date = answer.expiry_date
+
+    before = row.status
+    now = utcnow()
+
+    # THE SIGNATURE, where nobody has given one. Dispatching the replacement is the
+    # statement that the faulty goods arrived, so the "Vendor received" leg of the buyer's
+    # tracker is stamped from here rather than sitting on "waiting on the vendor to sign"
+    # forever behind a press that no longer exists.
+    #
+    # A RETURN ALREADY SIGNED KEEPS ITS OWN STAMP. Rows answered under the old two-press
+    # flow carry a timestamp and a name from the day the goods actually landed, and the
+    # dispatch can be days later — overwriting it would move the end of the buyer's
+    # liability to a date nothing happened on and destroy the only record of the real one.
+    signed_here = row.vendor_receipt_confirmed_at is None
+    if signed_here:
+        row.vendor_receipt_confirmed_at = now
+        # Said out loud rather than left to read as a dock signature that was never given.
+        row.vendor_receipt_remarks = (row.vendor_receipt_remarks
+                                      or "Confirmed by the replacement dispatch note")
+
+    row.replacement_dispatched_at = now
+    row.replacement_dispatch_no = (data.dispatch_no or "").strip() or None
+    row.replacement_dispatch_date = data.dispatch_date
+    row.replacement_expected_date = data.expected_date
+    row.replacement_transporter_name = (data.transporter_name or "").strip() or None
+    row.replacement_vehicle_no = (data.vehicle_no or "").strip() or None
+    row.replacement_lr_no = (data.lr_no or "").strip() or None
+    row.replacement_remarks = (data.remarks or "").strip() or None
+    row.status = ReturnStatus.REPLACEMENT_DISPATCHED.value
+
+    # The document the store will book the replacement in against — see the docstring for
+    # why it is raised at this moment and why an existing one is reused.
+    if not row.vendor_followup_receipt_id:
+        receipt = await _raise_vendor_return_inbound(db, row, _dispatch_as_answer(data))
+        row.vendor_followup_receipt_id = receipt.id
+        row.vendor_followup_receipt_no = receipt.grn_no
+    else:
+        logger.info("Purchase Return %s already has inbound receipt %s — not raising a "
+                    "second one for the replacement",
+                    row.return_no, row.vendor_followup_receipt_no)
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        before={"status": before},
+        after={
+            "status": row.status,
+            "replacement_dispatch_no": row.replacement_dispatch_no,
+            "replacement_dispatch_date": (str(row.replacement_dispatch_date)
+                                          if row.replacement_dispatch_date else None),
+            "replacement_expected_date": (str(row.replacement_expected_date)
+                                          if row.replacement_expected_date else None),
+            "replacement_transporter_name": row.replacement_transporter_name,
+            "replacement_vehicle_no": row.replacement_vehicle_no,
+            "replacement_lr_no": row.replacement_lr_no,
+            "vendor_followup_receipt_no": row.vendor_followup_receipt_no,
+            # WHAT THEY SAID IS IN THE CARTON, on the trail as well as on the lines: the
+            # receipt is a draft the store edits as the goods turn up, so the batch and
+            # expiry the VENDOR stated would otherwise be overwritten with no record that
+            # it had ever been different — and on a batch dispute that record is the whole
+            # argument.
+            "replacement_lines": [
+                {"line_no": answer.line_no, "batch_no": answer.batch_no,
+                 "mfg_date": str(answer.mfg_date) if answer.mfg_date else None,
+                 "expiry_date": str(answer.expiry_date) if answer.expiry_date else None}
+                for answer in data.lines
+            ] or None,
+            "remarks": row.replacement_remarks,
+            # Only when THIS press was the signature. On a return signed separately the
+            # trail already carries that act as its own audit row, and repeating it here
+            # would read as a second signing.
+            "vendor_receipt_confirmed_at": (str(row.vendor_receipt_confirmed_at)
+                                            if signed_here else None),
+            # WHICH FILES THE DISPATCH WENT OUT ON. The rows carry their own upload
+            # audit, but only this says which ones were on file at the moment the
+            # consignment was released — the question asked months later when a
+            # short delivery is being argued.
+            "replacement_documents": sorted(on_file) or None,
+            "acting_vendor_id": vendor_id,
+        },
+        summary=(f"Purchase Return {row.return_no}: replacement dispatched by "
+                 f"{row.vendor_name or 'the vendor'}"
+                 + (" (receipt of the returned goods confirmed by the same note)"
+                    if signed_here else "")
+                 + (f" ({row.replacement_dispatch_no})"
+                    if row.replacement_dispatch_no else "")
+                 + (f", expected {row.replacement_expected_date:%d %b %Y}"
+                    if row.replacement_expected_date else "")))
+    await db.commit()
+    logger.info("Purchase Return %s: replacement dispatched, receipt %s",
+                row.return_no, row.vendor_followup_receipt_no)
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def vendor_respond_to_return(db: AsyncSession, vendor_id: int, return_id: int,
+                                   data: "s.VendorReturnResponseIn"):
+    """The supplier's decision about the goods: refund, replace, or send them back.
+
+    RETIRED 2026-09-12 — no route reaches this any more. It answered THREE questions in
+    one press (do you accept, what do we get, and how does the replacement travel) on a
+    return whose goods had already gone out with the paperwork. Those are now four
+    separate presses on the rungs the business actually works them:
+    `vendor_decide_return`, `vendor_settle_return`, `vendor_accept_transport` /
+    `vendor_record_pickup`, and `vendor_dispatch_replacement`.
+
+    Kept rather than deleted because `_raise_collection_shipment` and `_collection_arrived`
+    still settle the collection legs it raised, and a reader tracing a live
+    `collection_tr_id` back to the press that created it needs to find it.
+
+    ANSWERED ONCE, exactly as `vendor_respond_to_po` is and for the same reason: a
+    supplier who has answered and wants to change it is a conversation with the buyer,
+    not a button. Re-pressing is refused rather than ignored, because the second press
+    would otherwise raise a SECOND inbound receipt against the same consignment and the
+    store would be expecting two lorries.
+
+    RETURNED and REPLACED both mean goods are travelling back to us, so each raises a
+    DRAFT inbound receipt (`_raise_vendor_return_inbound`). REFUNDED settles in money and
+    raises nothing — the consignment is finished where it stands and the figure is the
+    only thing left of it.
+
+    THE REFUND IS CAPPED AT WHAT WAS SENT BACK, and the cap is checked HERE rather than
+    in the schema because only this function has the row. `total_value` is ours — it is
+    what we valued the consignment at when we raised it — and a supplier cannot credit
+    more than that: the overage would be a payment against nothing, and it would arrive
+    through a route where the counterparty controls the number. The schema has already
+    refused zero, a negative, an amount on a non-refund answer and a refund with no
+    amount, so the only thing left to check is the one thing it could not see.
+    """
+    row = await _vendor_return(db, vendor_id, return_id)
+    if row.vendor_response:
+        answered = dict(s.VENDOR_RETURN_RESPONSES).get(row.vendor_response,
+                                                       row.vendor_response)
+        raise ValidationError(
+            f'{row.return_no} was already answered "{answered}"'
+            f"{f' on {row.vendor_response_at:%d %b %Y}' if row.vendor_response_at else ''}. "
+            "Ask the buyer to raise a fresh document if something needs to change.")
+
+    refund = data.refund_amount
+    if refund is not None and _d(refund) > _d(row.total_value):
+        raise ValidationError(
+            f"A refund of {_d(refund):,.2f} is more than the {_d(row.total_value):,.2f} "
+            f"of goods on {row.return_no}. Credit that value or less.")
+
+    row.vendor_response = data.response.value
+    row.vendor_response_at = utcnow()
+    row.vendor_response_note = (data.remarks or "").strip() or None
+    row.vendor_refund_amount = refund
+
+    # The document the answer produces, where it produces one. Created BEFORE the
+    # commit so the receipt and the answer that caused it land in one transaction —
+    # a rollback must not leave a return claiming a receipt that was never raised.
+    # WHICH DOCUMENT THIS ANSWER RAISES, and it is one or the other (2026-09-11).
+    #
+    # A COLLECTION — the supplier is replacing the goods and has asked us to come and
+    # fetch them — raises the TRIP, and nothing in the warehouse at all. There is
+    # nothing for the store to do yet: no vehicle has gone, no date exists, and nobody
+    # knows when the goods will be in the building. A draft receipt sitting in their
+    # queue for goods nobody has collected is a document pretending to be work.
+    #
+    # Everything else — a SUPPLIER_DELIVERS replacement, a RETURNED consignment — raises
+    # the inbound receipt exactly as it always has, the instant the supplier answers.
+    # Their goods are already on a vehicle heading towards us; there is no trip to
+    # arrange and nothing to wait for. That path is byte-for-byte unchanged.
+    collecting = (row.vendor_response == VendorReturnResponse.REPLACED.value
+                  and data.replacement_mode in s.INBOUND_MODES_COLLECTED)
+
+    receipt = None
+    leg_seed = None
+    if collecting:
+        # Refused NOW if it could never raise a receipt, and the supplier's cartons
+        # checked NOW against the item master — the receipt is deferred, the questions
+        # are not. Finding either out after our vehicle has driven there and back would
+        # be finding out far too late, with the supplier long gone from the screen.
+        _assert_inbound_raisable(row)
+        stated = await _validate_replacement_cartons(db, row, data.replacement_lines)
+        # What the supplier said, kept until there is a receipt to write it onto.
+        row.collection_pickup_address = data.replacement_pickup_address
+        row.collection_ready_date = data.replacement_ready_date
+        for line in row.items:
+            answer = stated.get(line.line_no)
+            line.replacement_batch_no = answer.batch_no if answer else None
+            line.replacement_mfg_date = answer.mfg_date if answer else None
+            line.replacement_expiry_date = answer.expiry_date if answer else None
+        # Read while these instances are still live: the commit below expires every one
+        # of them, and `create_tr` cannot run before it.
+        collect_from = await db.get(Vendor, row.vendor_id) if row.vendor_id else None
+        leg_seed = _collection_shipment_seed(row, collect_from)
+    elif row.vendor_response in VENDOR_RETURN_INBOUND_RESPONSES:
+        receipt = await _raise_vendor_return_inbound(db, row, data)
+        row.vendor_followup_receipt_id = receipt.id
+        row.vendor_followup_receipt_no = receipt.grn_no
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        summary=f"Supplier answered {row.return_no}: {row.vendor_response}",
+        after={
+            "vendor_response": row.vendor_response,
+            "vendor_response_note": row.vendor_response_note,
+            # str(), not float(): this is the money figure the buyer will reconcile a
+            # credit note against, and the audit row must not be the place a decimal
+            # turns into a binary approximation of itself.
+            "vendor_refund_amount": (str(row.vendor_refund_amount)
+                                     if row.vendor_refund_amount is not None else None),
+            "vendor_followup_receipt_no": row.vendor_followup_receipt_no,
+            # The replacement's promised arrival, recorded on the TRAIL even though it
+            # is stored on the receipt: the receipt is a draft the store will edit as the
+            # goods actually turn up, so what the supplier originally promised would
+            # otherwise be overwritten with no record that it had ever been different.
+            "replacement_mode": data.replacement_mode,
+            "replacement_expected_date": (str(data.replacement_expected_date)
+                                          if data.replacement_expected_date else None),
+            "replacement_transporter_name": data.replacement_transporter_name,
+            "replacement_vehicle_no": data.replacement_vehicle_no,
+            "replacement_lr_no": data.replacement_lr_no,
+            # A collection is the supplier asking US to do the moving, so what they asked
+            # for has to survive on the trail even after the store edits the draft.
+            "replacement_ready_date": (str(data.replacement_ready_date)
+                                       if data.replacement_ready_date else None),
+            "replacement_pickup_address": data.replacement_pickup_address,
+            # WHAT THEY SAID IS IN THE CARTON, on the trail for the same reason the
+            # travel facts are: the receipt is a draft the store will edit as the goods
+            # actually turn up, so the batch and expiry the SUPPLIER stated would
+            # otherwise be overwritten with no record that it had ever been different —
+            # and on a batch dispute that record is the whole argument.
+            "replacement_lines": [
+                {"line_no": answer.line_no,
+                 "batch_no": answer.batch_no,
+                 "mfg_date": str(answer.mfg_date) if answer.mfg_date else None,
+                 "expiry_date": str(answer.expiry_date) if answer.expiry_date else None}
+                for answer in data.replacement_lines
+            ] or None,
+            "acting_vendor_id": vendor_id,
+        })
+    await db.commit()
+
+    # The collection leg, dropped on the Logistics Dispatch board as a DRAFT — the same
+    # board an outward Own Vehicle return already lands on, so nothing is created by
+    # hand there. Swallowed on failure ON PURPOSE: the answer above has committed, it
+    # is final and the inbound receipt exists, and none of that may be undone because a
+    # shipment could not be raised. See `_raise_collection_shipment`.
+    #
+    # `user` is None here and correctly so — this is the SUPPLIER's press on their own
+    # portal, and there is no employee behind it to attribute the leg to.
+    if leg_seed is not None:
+        try:
+            await _raise_collection_shipment(db, leg_seed, None)
+        except Exception:
+            logger.exception(
+                "Purchase Return %s was answered, but its collection shipment could "
+                "not be raised in Logistics", leg_seed["return_no"])
+            await db.rollback()
+
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+def _assert_inbound_raisable(row: m.PurchaseReturn) -> None:
+    """Can an inbound receipt be raised against this return at all?
+
+    Split out of `_raise_vendor_return_inbound` (2026-09-11) because a COLLECTION no
+    longer raises its receipt at answer time and still has to be refused at answer time
+    if it could never raise one. Finding out at acknowledgement — after our vehicle has
+    driven to the supplier and back — would be finding out far too late.
+    """
+    if not row.warehouse_id:
+        raise ValidationError(
+            f"{row.return_no} names no warehouse, so there is nowhere to send the "
+            "goods back to. Ask the buyer to complete the return first.")
+    unnamed = [line.line_no for line in row.items if not line.item_id]
+    if unnamed:
+        raise ValidationError(
+            f"Line{'s' if len(unnamed) > 1 else ''} "
+            f"{', '.join(str(n) for n in unnamed)} of {row.return_no} "
+            f"name{'' if len(unnamed) > 1 else 's'} an item that is not in the item "
+            "master, so no inbound receipt can be raised against it. Contact the buyer.")
+
+
+async def _validate_replacement_cartons(db: AsyncSession, row: m.PurchaseReturn,
+                                        replacement_lines) -> dict:
+    """What the supplier says is in each carton, checked against the item master.
+
+    Split out for the same reason `_assert_inbound_raisable` is: on a collection the
+    receipt these answers are written onto is not raised until our vehicle brings the
+    goods back, and the checks must still happen in the press that makes the promise —
+    while the only person who can read a lot number off a carton in their own warehouse
+    is still on the screen.
+
+    The two rules are exactly the two `_apply_receipt_lines` will apply when the store
+    submits the GRN. Applying them here is what stops a receipt being raised that can be
+    opened and never finished.
+
+    Returns the supplier's answers keyed on `line_no`, for whichever caller needs them.
+    """
+    stated = {answer.line_no: answer for answer in replacement_lines}
+    # A number that is on no line of this return is refused rather than ignored: it means
+    # the two sides disagree about what is coming back, and the batch it carries would
+    # otherwise be dropped without a word.
+    unknown = sorted(set(stated) - {line.line_no for line in row.items})
+    if unknown:
+        raise ValidationError(
+            f"{row.return_no} has no line "
+            f"{', '.join(str(n) for n in unknown)}, so there is nothing to send a "
+            "replacement for against it.")
+
+    for line in row.items:
+        answer = stated.get(line.line_no)
+        item = await _item_snapshot(db, line.item_id)
+        if item.is_batch_tracked and not ((answer.batch_no if answer else "") or "").strip():
+            raise ValidationError(
+                f"Line {line.line_no}: {item.code} is batch tracked — give the "
+                "batch number of the replacement goods you are sending.")
+        if item.has_expiry and (answer.expiry_date if answer else None) is None:
+            what = "warranty end date" if item.is_asset else "expiry date"
+            raise ValidationError(
+                f"Line {line.line_no}: {item.code} needs a {what} — give it for the "
+                "replacement goods you are sending.")
+    return stated
+
+
+async def _raise_vendor_return_inbound(db: AsyncSession, row: m.PurchaseReturn,
+                                       data: "s.VendorReturnResponseIn") -> m.Receipt:
+    """The DRAFT inbound receipt for goods the supplier is sending back to us.
+
+    Both answers that produce one produce the SAME shape of document — an expected
+    delivery at the warehouse that sent the return — and differ only in the sentence on
+    it, in whether the supplier told us how it travels, and in whose batch is on the
+    line. `ReceiptType.RETURN` already existed for exactly this.
+
+    HOW IT TRAVELS, on a REPLACEMENT (2026-09-11). The receipt used to be raised with no
+    expected date, no vehicle and no LR, so the store knew what to expect and never when
+    — the storekeeper found out when the lorry appeared at the gate. The supplier states
+    those facts in the same press that promises the replacement and they are written
+    HERE, onto `inb_receipts`' own columns, which the receiving screen already reads.
+    Nothing is stored on `pro_returns`: one fact, one place.
+
+    A RETURNED consignment gets none of them, and that is correct rather than an
+    omission — those are the goods WE despatched, travelling on the leg WE booked, and
+    `out_dispatches` already holds that lorry. Writing the supplier's answer over it
+    would replace what we know with what they guessed.
+
+    WHOSE BATCH IS ON THE LINE, and the reason it branches. On a RETURNED consignment the
+    same physical goods come back, so the return line's `batch_no` is the batch that will
+    arrive and is carried across. On a REPLACEMENT it is the batch of the FAULTY goods
+    going the other way — different physical stock, a different batch, frequently a
+    different expiry — so copying it would hand the store a prefilled batch number that
+    is wrong, on the one screen where a wrong batch becomes wrong stock.
+
+    THE SUPPLIER IS ASKED INSTEAD (2026-09-11), per line, and that is what
+    `data.replacement_lines` carries. Leaving it blank for the store to fill in was the
+    obvious answer and it did not work: an expiry-tracked line with no expiry date is
+    refused by `_apply_receipt_lines` when the GRN is submitted, so the receipt raised
+    here could be opened and never finished. The storekeeper cannot supply either fact —
+    the batch and the printed expiry belong to a carton standing in the supplier's
+    warehouse — and the supplier can, in the same press that promises the replacement. So
+    the two rules that will stop the GRN are applied HERE, against the same item master,
+    and the answer is refused while the person who knows it is still on the screen.
+
+    A line whose item needs neither is untouched and may be answered or not; and a
+    RETURNED consignment is never asked, because those goods are already ours and their
+    batch is on the return.
+
+    THREE THINGS THIS DELIBERATELY DOES NOT DO, all of them load-bearing:
+
+    * It does not post stock, and it does not go near `move_stock`. The row is a DRAFT
+      with `received_qty` zero on every line; the goods are still on a lorry somewhere.
+      The store inwards it through the ordinary GRN → QC → putaway path, which is the
+      only path allowed to touch a balance (rule 7). `ordered_qty` carries what to
+      EXPECT, which is what the receiving screen reconciles against.
+    * It does not call `create_receipt`. That service takes an employee and a
+      `ReceiptWrite` full of decisions a supplier is not entitled to make (warehouse,
+      project, bins). The row is built here instead, in the module that owns
+      `inb_receipts` — so raising it crosses no module boundary at all.
+    * It does not run a workflow. A draft nobody has submitted has nothing to approve;
+      approval happens when the store submits the receipt, exactly as for any other.
+
+    A line with no `item_id` is refused rather than dropped. `inb_receipt_items.item_id`
+    is NOT NULL, and a manually-typed return line may legitimately name an item the
+    masters do not hold — silently skipping it would raise a receipt short of a line
+    and the shortage would only surface when the lorry arrived.
+    """
+    _assert_inbound_raisable(row)
+
+    replacing = row.vendor_response == VendorReturnResponse.REPLACED.value
+    # Which of the two inbound legs, on a replacement. The schema has already refused a
+    # mode on any other answer and refused each leg the other's fields, so these can be
+    # copied across without re-deciding anything here.
+    collecting = replacing and data.replacement_mode in s.INBOUND_MODES_COLLECTED
+
+    receipt = m.Receipt(
+        grn_no=await next_number(db, WarehouseDocType.RECEIPT.value),
+        receipt_type=ReceiptType.RETURN.value,
+        grn_date=ist_today(),
+        # How the replacement travels, as the supplier stated it. All null on a RETURNED
+        # consignment — see the docstring: that lorry is ours and `out_dispatches` holds
+        # it.
+        inbound_transport_mode=data.replacement_mode if replacing else None,
+        # A DELIVERY's facts. `expected_delivery` is what the receiving screen sorts its
+        # queue by, and it stays null on a collection ON PURPOSE: until somebody here
+        # schedules a vehicle, nothing is due at the gate on any date, and a ready date
+        # written here would have the store waiting for a lorry that was never sent.
+        expected_delivery=data.replacement_expected_date if replacing else None,
+        transporter_name=data.replacement_transporter_name if replacing else None,
+        vehicle_no=data.replacement_vehicle_no if replacing else None,
+        lr_no=data.replacement_lr_no if replacing else None,
+        # A COLLECTION's facts: where the vehicle goes, and the earliest it may go.
+        pickup_address=data.replacement_pickup_address if collecting else None,
+        goods_ready_date=data.replacement_ready_date if collecting else None,
+        # The purchase behind the original return, carried across so the new receipt
+        # traces back to the same order the goods were bought on.
+        po_id=row.po_id,
+        po_no=row.po_no,
+        vendor_id=row.vendor_id,
+        vendor_name=row.vendor_name,
+        # Back to the warehouse that sent them. NOT NULL on the table, which is why the
+        # guard above exists.
+        warehouse_id=row.warehouse_id,
+        warehouse_name=row.warehouse_name,
+        status=ReceiptStatus.DRAFT.value,
+        remarks=(
+            f"Raised automatically from purchase return {row.return_no} — "
+            f"{VENDOR_RETURN_INBOUND_RESPONSES[row.vendor_response]}."
+            # Said in WORDS as well as in the column, because a storekeeper opening this
+            # reads the remark first and a collection that looks like a delivery is a
+            # vehicle nobody sends. The columns are what screens act on; this is what a
+            # person acts on.
+            + (" COLLECTION REQUIRED — the goods are ready at the supplier and somebody "
+               "here must send a vehicle." if collecting else "")
+            + (f" Supplier's note: {row.vendor_response_note}"
+               if row.vendor_response_note else "")
+        ),
+        total_items=len(row.items),
+        # Nothing has been received yet: this document says what to EXPECT.
+        total_received_qty=0,
+        total_accepted_qty=0,
+        total_rejected_qty=0,
+        total_value=sum((line.amount or Decimal(0)) for line in row.items) or Decimal(0),
+    )
+    # WHAT IS IN THE CARTON, as the supplier stated it, line by line, keyed on the
+    # `line_no` the portal showed them — and checked against the item master before any
+    # of it is written. See `_validate_replacement_cartons`.
+    stated = (await _validate_replacement_cartons(db, row, data.replacement_lines)
+              if replacing else {})
+
+    receipt.items = []
+    for line in row.items:
+        answer = stated.get(line.line_no)
+        batch_no = line.batch_no
+        mfg_date = expiry_date = None
+        if replacing:
+            # Theirs is the only batch that can be right here, and ours is the batch of
+            # the FAULTY goods travelling the other way — see the docstring. What the
+            # supplier states is taken; nothing is inherited.
+            batch_no = answer.batch_no if answer else None
+            mfg_date = answer.mfg_date if answer else None
+            expiry_date = answer.expiry_date if answer else None
+        receipt.items.append(m.ReceiptItem(
+            line_no=line.line_no,
+            po_item_id=line.po_item_id,
+            item_id=line.item_id,
+            item_code=line.item_code,
+            item_name=line.item_name,
+            uom_code=line.uom_code,
+            ordered_qty=line.quantity,
+            received_qty=0,
+            accepted_qty=0,
+            rejected_qty=0,
+            short_qty=0,
+            rate=line.rate,
+            amount=line.amount,
+            batch_no=batch_no,
+            mfg_date=mfg_date,
+            expiry_date=expiry_date,
+            qc_status=QcStatus.PENDING.value,
+            remarks=line.reason,
+        ))
+    db.add(receipt)
+    await db.flush()
+    await write_audit(
+        db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
+        action=AuditAction.CREATE, actor=None,
+        summary=f"Raised from purchase return {row.return_no}",
+        after={"receipt_type": receipt.receipt_type,
+               "source_return_no": row.return_no,
+               "vendor_response": row.vendor_response})
+    return receipt
+
+
+def _logistics_audit(data: "s.PurchaseReturnLogisticsIn", mode: str) -> dict:
+    """The logistics block as flat, JSON-safe facts for the audit trail.
+
+    This is the ONLY record a manual return keeps of how it travelled, so it holds
+    every field rather than a summary — see the manual branch of `send_to_vendor`.
+    """
+    def _txt(v):
+        return (v or "").strip() or None
+
+    return {
+        "mode": mode,
+        "hand_carried_by": _txt(data.hand_carried_by),
+        "vehicle_number": _txt(data.vehicle_number),
+        "driver_name": _txt(data.driver_name),
+        "driver_phone": _txt(data.driver_phone),
+        "carrier_name": _txt(data.carrier_name),
+        "lr_no": _txt(data.lr_no),
+        "freight_amount": (str(data.freight_amount)
+                           if data.freight_amount is not None else None),
+        "delivery_address": _txt(data.delivery_address),
+        "contact_person": _txt(data.contact_person),
+        "contact_phone": _txt(data.contact_phone),
+        "total_packages": data.total_packages,
+        "total_weight_kg": (str(data.total_weight_kg)
+                            if data.total_weight_kg is not None else None),
+        "eway_bill_no": _txt(data.eway_bill_no),
+        "gate_pass_no": _txt(data.gate_pass_no),
+        "expected_delivery": (data.expected_delivery.isoformat()
+                              if data.expected_delivery else None),
+        "dispatch_remarks": _txt(data.dispatch_remarks),
+        "acknowledged_by_name": _txt(data.acknowledged_by_name),
+        "acknowledged_at": (data.acknowledged_at.isoformat()
+                            if data.acknowledged_at else None),
+        "pod_url": _txt(data.pod_url),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The purchase-return dossier — the whole trail, read only
+# ---------------------------------------------------------------------------
+
+#: What each row on the trail is called, and which half of the story it belongs to.
+#: PURCHASE is how the material was bought, RETURN is how it came back, and DOCUMENT is
+#: the purchase return itself standing between the two.
+_TRAIL_KINDS: dict[str, tuple[str, str]] = {
+    "INDENT": ("Indent", "PURCHASE"),
+    "REQUISITION": ("Requisition", "PURCHASE"),
+    "RFQ": ("RFQ", "PURCHASE"),
+    "QUOTATION": ("Quotation", "PURCHASE"),
+    "PO": ("Purchase Order", "PURCHASE"),
+    "GRN": ("Goods Receipt", "PURCHASE"),
+    "VENDOR_INVOICE": ("Vendor Invoice", "PURCHASE"),
+    "QC": ("QC Inspection", "PURCHASE"),
+    "BRANCH_RETURN": ("Branch Return", "RETURN"),
+    "TRANSPORT_REQUEST": ("Transport / Consignment", "RETURN"),
+    "PURCHASE_RETURN": ("Purchase Return", "DOCUMENT"),
+    "DISPATCH": ("Dispatch to Vendor", "DOCUMENT"),
+    "CREDIT_NOTE": ("Credit Note", "DOCUMENT"),
+}
+
+#: Where each kind of document is read in the app. `{id}` is substituted. A kind absent
+#: from here renders as a row that cannot be opened, which is honest — better than a
+#: link into a module that has no detail screen for it. QUOTATION is deliberately
+#: absent: procurement serves a quotations REGISTER and no per-quotation route, so the
+#: row names the quotation and does not pretend to open it.
+_TRAIL_ROUTES: dict[str, str] = {
+    "INDENT": "/indents/{id}",
+    "REQUISITION": "/procurement/requisitions/{id}",
+    "RFQ": "/procurement/rfqs/{id}",
+    "PO": "/pos/{id}",
+    "GRN": "/warehouse/grn/{id}",
+    "QC": "/warehouse/quality-inspection/{id}",
+    "BRANCH_RETURN": "/returns/{id}",
+    "TRANSPORT_REQUEST": "/logistics/shipments/{id}",
+    "DISPATCH": "/warehouse/dispatch/{id}",
+}
+
+
+def _trail_row(doc_type: str, *, doc_id=None, doc_no=None, status=None, day=None,
+               party=None, facts=None, traced=False) -> dict:
+    """One trail row. Every kind carries the same keys so the screen never branches."""
+    label, leg = _TRAIL_KINDS.get(doc_type, (doc_type.replace("_", " ").title(),
+                                             "PURCHASE"))
+    route = _TRAIL_ROUTES.get(doc_type)
+    return {
+        "doc_type": doc_type,
+        "doc_label": label,
+        "doc_id": doc_id,
+        "doc_no": doc_no,
+        "status": status,
+        "doc_date": day.date() if isinstance(day, datetime) else day,
+        "party": party,
+        # Only the pairs that actually have a value: a trail row padded with dashes
+        # reads as a form somebody failed to fill in.
+        "facts": [[k, str(v)] for k, v in (facts or []) if v not in (None, "", [])],
+        "leg": leg,
+        "traced": traced,
+        "route": route.format(id=doc_id) if route and doc_id else None,
+    }
+
+
+async def _branch_return_of(db: AsyncSession, doc: m.PurchaseReturn):
+    """The branch consignment this purchase return was raised off, where there was one.
+
+    `inv_sto` is inventory's table and the returns module's document; it is READ here
+    and never written. The link is `pro_returns.source_return_id`, stamped by
+    `returns.service._warehouse_return_document` when the gate-out raised this draft.
+    """
+    if not doc.source_return_id:
+        return None
+    try:
+        from app.modules.inventory.models import StockTransferOrder as _STO
+        return await db.get(_STO, doc.source_return_id)
+    except Exception:
+        logger.debug("Branch return %s not reachable", doc.source_return_id,
+                     exc_info=True)
+        return None
+
+
+async def _transport_of_branch_return(db: AsyncSession, source_return_id: int | None):
+    """The consignment that carried the branch return in, off its public link.
+
+    Read from `lgs_transport_requests.source_type/source_id` rather than by unpacking
+    the JSON the returns module keeps in `inv_sto.remarks` — that payload is that
+    module's private encoding and this one has no business parsing it.
+    """
+    if not source_return_id:
+        return None
+    try:
+        from app.modules.logistics.models import TransportRequest as _TR
+        return await db.scalar(
+            select(_TR).where(_TR.source_type == "RETURN",
+                              _TR.source_id == source_return_id)
+            .order_by(_TR.id.desc()).limit(1))
+    except Exception:
+        logger.debug("Transport request for return %s not reachable", source_return_id,
+                     exc_info=True)
+        return None
+
+
+async def _procurement_trail(db: AsyncSession, po) -> list[dict]:
+    """Requisition, RFQ and quotation behind a purchase order.
+
+    Every one of them is a snapshot column ON the PO (`requisition_id`, `rfq_id`,
+    `quotation_id`), so this is three gets and no searching. Swallowed as a group where
+    procurement cannot be imported: a return is still readable without the buying trail.
+    """
+    rows: list[dict] = []
+    if po is None:
+        return rows
+    try:
+        from app.modules.procurement.models import RFQ as _RFQ
+        from app.modules.procurement.models import Quotation as _Quotation
+        from app.modules.procurement.models import Requisition as _Requisition
+    except Exception:
+        logger.debug("Procurement models not reachable", exc_info=True)
+        return rows
+
+    req = await db.get(_Requisition, po.requisition_id) if getattr(
+        po, "requisition_id", None) else None
+    if req is not None:
+        rows.append(_trail_row(
+            "REQUISITION", doc_id=req.id, doc_no=req.req_no, status=req.status,
+            day=req.req_date, party=req.created_by_name,
+            facts=[("Lines", req.total_items), ("Project", req.project_name),
+                   ("Approved by", req.approved_by_name)]))
+    elif getattr(po, "requisition_no", None):
+        rows.append(_trail_row("REQUISITION", doc_no=po.requisition_no))
+
+    rfq = await db.get(_RFQ, po.rfq_id) if getattr(po, "rfq_id", None) else None
+    if rfq is not None:
+        rows.append(_trail_row(
+            "RFQ", doc_id=rfq.id, doc_no=rfq.rfq_no, status=rfq.status,
+            day=rfq.rfq_date, party=rfq.awarded_vendor_name,
+            facts=[("Vendors invited", rfq.vendor_count),
+                   ("Responses", rfq.response_count),
+                   ("Awarded to", rfq.awarded_vendor_name)]))
+    elif getattr(po, "rfq_no", None):
+        rows.append(_trail_row("RFQ", doc_no=po.rfq_no))
+
+    quote = await db.get(_Quotation, po.quotation_id) if getattr(
+        po, "quotation_id", None) else None
+    if quote is not None:
+        rows.append(_trail_row(
+            "QUOTATION", doc_id=quote.id, doc_no=quote.quotation_no,
+            status=quote.status, day=quote.quotation_date, party=quote.vendor_name,
+            facts=[("Quoted", f"₹ {_d(quote.grand_total):,.2f}"),
+                   ("Vendor ref", quote.vendor_ref_no),
+                   ("Payment terms", quote.payment_terms)]))
+    elif getattr(po, "quotation_no", None):
+        rows.append(_trail_row("QUOTATION", doc_no=po.quotation_no))
+    return rows
+
+
+async def _dossier_documents(db: AsyncSession, doc: m.PurchaseReturn) -> list[dict]:
+    """Every document behind this return, oldest step of the flow first.
+
+    Two legs meeting at this document: how the material was BOUGHT (indent, requisition,
+    RFQ, quotation, PO, GRN, the vendor's invoice, QC) and how it came BACK (the branch
+    consignment, the transport request that carried it). The purchase return itself sits
+    between them, and the dispatch and credit note follow it.
+
+    `traced` is carried per row rather than as one flag on the response: on a return
+    raised off a branch consignment the whole purchase leg is READ off the stock and the
+    return leg is the document's own, and a reader has to be able to tell which half is
+    evidence and which half is binding.
+    """
+    rows: list[dict] = []
+    traced = bool(getattr(doc, "chain_traced", False))
+
+    # `getattr` throughout: every `traced_*` and chain field is a TRANSIENT attribute
+    # set by `_decorate_purchase_return`, not a column, so a document that took a
+    # different path through it — a manual return takes the early exit — has the
+    # attribute missing rather than None, and a plain `doc.x` raises AttributeError.
+    grn_id = doc.grn_id or getattr(doc, "traced_grn_id", None)
+    receipt = await db.get(m.Receipt, grn_id) if grn_id else None
+    po = await _po_of(db, doc.po_id or getattr(doc, "traced_po_id", None)
+                      or getattr(receipt, "po_id", None))
+
+    # --- how it was bought ---------------------------------------------------------
+    indent_id = getattr(doc, "indent_id", None) or getattr(po, "indent_id", None)
+    indent_no = getattr(doc, "indent_no", None) or await _indent_no(db, indent_id)
+    if indent_id or indent_no:
+        indent = None
+        try:
+            from app.modules.indents.models import Indent as _Indent
+            indent = await db.get(_Indent, indent_id) if indent_id else None
+        except Exception:
+            logger.debug("Indent %s not reachable", indent_id, exc_info=True)
+        rows.append(_trail_row(
+            "INDENT", doc_id=indent_id, doc_no=indent_no,
+            status=getattr(indent, "status", None),
+            day=getattr(indent, "indent_date", None),
+            party=getattr(indent, "requested_by_name", None),
+            facts=[("Project", getattr(indent, "project_name", None)),
+                   ("Office", getattr(indent, "office_name", None)),
+                   ("Lines", getattr(indent, "total_items", None))],
+            traced=traced))
+
+    rows.extend(row | {"traced": traced} for row in await _procurement_trail(db, po))
+
+    if po is not None:
+        rows.append(_trail_row(
+            "PO", doc_id=po.id, doc_no=po.po_no, status=po.status, day=po.po_date,
+            party=po.vendor_name,
+            facts=[("Order value", f"₹ {_d(po.total_amount):,.2f}"),
+                   ("Raised by", po.created_by_name),
+                   ("Approved", po.approved_at.date().isoformat()
+                    if getattr(po, "approved_at", None) else None)],
+            traced=traced))
+    elif doc.po_no or getattr(doc, "traced_po_no", None):
+        rows.append(_trail_row("PO",
+                               doc_no=doc.po_no or getattr(doc, "traced_po_no", None),
+                               traced=traced))
+
+    if receipt is not None:
+        rows.append(_trail_row(
+            "GRN", doc_id=receipt.id, doc_no=receipt.grn_no, status=receipt.status,
+            day=receipt.grn_date, party=receipt.vendor_name or getattr(po, "vendor_name", None),
+            facts=[("Received at", receipt.warehouse_name),
+                   ("Gate entry", getattr(receipt, "gate_entry_no", None))],
+            traced=traced))
+        # The vendor's own invoice behind the GRN — the reference the vendor argues the
+        # return against. Its own row because it is the vendor's paper, not ours.
+        if receipt.invoice_no:
+            rows.append(_trail_row(
+                "VENDOR_INVOICE", doc_no=receipt.invoice_no, day=receipt.invoice_date,
+                party=receipt.vendor_name or getattr(po, "vendor_name", None),
+                traced=traced))
+
+        qc = await db.scalar(
+            select(m.Inspection).where(m.Inspection.receipt_id == receipt.id)
+            .order_by(m.Inspection.id.desc()).limit(1))
+        if qc is not None:
+            rows.append(_trail_row(
+                "QC", doc_id=qc.id, doc_no=qc.inspection_no, status=qc.status,
+                day=qc.inspection_date, party=qc.inspector_name,
+                facts=[("Passed", qc.passed_items), ("Failed", qc.failed_items),
+                       ("Type", qc.inspection_type)],
+                traced=traced))
+
+    # --- how it came back ----------------------------------------------------------
+    branch = await _branch_return_of(db, doc)
+    if branch is not None:
+        rows.append(_trail_row(
+            "BRANCH_RETURN", doc_id=branch.id, doc_no=branch.sto_no,
+            status=branch.status, day=branch.created_at,
+            party=branch.requested_by_name,
+            facts=[("From", branch.from_warehouse_name),
+                   ("To", branch.to_warehouse_name),
+                   ("Approved by", branch.approved_by_name),
+                   ("Dispatched", branch.dispatched_at.strftime("%d %b %Y %H:%M")
+                    if branch.dispatched_at else None),
+                   ("Acknowledged", branch.received_at.strftime("%d %b %Y %H:%M")
+                    if branch.received_at else None)]))
+    elif doc.source_return_no:
+        rows.append(_trail_row("BRANCH_RETURN", doc_no=doc.source_return_no))
+
+    tr = await _transport_of_branch_return(db, doc.source_return_id)
+    if tr is not None:
+        rows.append(_trail_row(
+            "TRANSPORT_REQUEST", doc_id=tr.id, doc_no=tr.tr_no, status=tr.status,
+            day=tr.tr_date, party=tr.carrier_name or tr.driver_name,
+            facts=[("Gate pass", tr.gate_pass_no), ("Vehicle", tr.vehicle_number),
+                   ("Driver", tr.driver_name), ("LR / docket", tr.lr_no or tr.docket_no),
+                   ("Consignment", tr.consignment_no),
+                   ("Dispatched", tr.dispatched_at.strftime("%d %b %Y %H:%M")
+                    if tr.dispatched_at else None),
+                   ("Delivered", tr.delivered_at.strftime("%d %b %Y %H:%M")
+                    if tr.delivered_at else None)]))
+
+    # --- the document itself, and what has left it ----------------------------------
+    rows.append(_trail_row(
+        "PURCHASE_RETURN", doc_id=doc.id, doc_no=doc.return_no, status=doc.status,
+        day=doc.return_date, party=doc.vendor_name or getattr(doc, "traced_vendor_name", None),
+        facts=[("Raised by", doc.created_by_name),
+               ("Lines", doc.total_items),
+               ("Value", f"₹ {_d(doc.total_value):,.2f}"),
+               ("Source", doc.source_category_label),
+               ("Sent to vendor", doc.sent_at.strftime("%d %b %Y %H:%M")
+                if doc.sent_at else None)]))
+
+    if getattr(doc, "dispatch_id", None) or getattr(doc, "dispatch_no", None):
+        rows.append(_trail_row(
+            "DISPATCH", doc_id=doc.dispatch_id, doc_no=doc.dispatch_no,
+            party=doc.vendor_name or getattr(doc, "traced_vendor_name", None)))
+    if doc.credit_note_no:
+        rows.append(_trail_row("CREDIT_NOTE", doc_no=doc.credit_note_no,
+                               party=doc.vendor_name or getattr(doc, "traced_vendor_name", None)))
+    return rows
+
+
+#: How an audit row reads as a sentence. Keyed on the field the row recorded, because
+#: `sys_audit_log` stores WHAT changed and not why — the words belong here, next to the
+#: flow, rather than being invented on the screen.
+_EVENT_TITLES: dict[str, str] = {
+    "status": "Status changed",
+    "phase": "Moved to the next desk",
+    "disposition": "Decision taken",
+    "leg": "Return leg set",
+    "condition": "Condition recorded on arrival",
+    "signed_by": "Signed for at the far end",
+    "acknowledged_by": "Acknowledged",
+    "transport_request_no": "Consignment raised",
+    "warehouse_return_no": "Warehouse document raised",
+    "source_category": "Filed against the vendor",
+    "comments": "Comment added",
+    "note": "Note added",
+    "dispatch_no": "Dispatched",
+    "credit_note_no": "Credit note recorded",
+    "reason": "Reason recorded",
+}
+
+
+def _audit_event(row, entity_label: str) -> dict:
+    """One `sys_audit_log` row as a sentence a reader can follow.
+
+    The log keeps `{"field": {"from": x, "to": y}}` and nothing else, so the title comes
+    off the most significant field the row touched and the detail names the rest. A
+    field nobody has written words for still shows — as its own name — rather than
+    being dropped, because a silent gap in a trail is worse than a plain one.
+    """
+    changed = row.changed_fields
+    if isinstance(changed, str):
+        # Some rows in the live log were written before the column was typed JSON and
+        # come back as text. Decoded rather than dropped: an event with no detail on it
+        # is a hole in the trail, and the words are right there in the string.
+        try:
+            changed = json.loads(changed)
+        except (TypeError, ValueError):
+            changed = {}
+    if not isinstance(changed, dict):
+        changed = {}
+    status_to = (changed.get("status") or {}).get("to")
+    # Whichever recognised field the row carries first, in the order the flow cares
+    # about; the raw action where it carries none of them.
+    title = None
+    for field in _EVENT_TITLES:
+        if field in changed:
+            title = _EVENT_TITLES[field]
+            break
+    if row.action == "CREATE":
+        title = f"{entity_label} created"
+    elif title is None:
+        title = f"{entity_label} {str(row.action or '').lower()}"
+
+    parts: list[str] = []
+    for field, change in changed.items():
+        if not isinstance(change, dict):
+            continue
+        to = change.get("to")
+        if to in (None, "", False):
+            continue
+        was = change.get("from")
+        name = field.replace("_", " ")
+        parts.append(f"{name}: {was} → {to}" if was not in (None, "")
+                     else f"{name}: {to}")
+    return {
+        "at": row.created_at,
+        "entity": row.entity_type,
+        "doc_no": row.entity_no,
+        "action": row.action,
+        "title": title,
+        "detail": " · ".join(parts) or None,
+        "actor_name": row.actor_name,
+        "status_to": status_to,
+    }
+
+
+async def _dossier_timeline(db: AsyncSession, doc: m.PurchaseReturn) -> list[dict]:
+    """Everything that has happened, on this return AND on the return that caused it.
+
+    One trail, not two. To the warehouse person reading a DRAFT nobody remembers
+    raising, the branch's approvals, the decision desk, the gate-out and the
+    acknowledgement that produced it are the same story as this document's own — and
+    the whole of it was already in `sys_audit_log`, unread.
+
+    Approval actions come from the workflow engine on top, so a ladder configured for
+    purchase returns shows its signatures here beside the audit rows.
+    """
+    from app.platform.settings.models import AuditLog
+
+    wanted: list[tuple[str, int, str]] = [("pro_returns", doc.id, "Purchase return")]
+    if doc.source_return_id:
+        wanted.append(("inv_sto", doc.source_return_id, "Branch return"))
+    tr = await _transport_of_branch_return(db, doc.source_return_id)
+    if tr is not None:
+        wanted.append(("lgs_transport_requests", tr.id, "Consignment"))
+
+    events: list[dict] = []
+    for entity, entity_id, label in wanted:
+        rows = (await db.execute(
+            select(AuditLog)
+            .where(AuditLog.entity_type == entity, AuditLog.entity_id == entity_id)
+            .order_by(AuditLog.id)
+        )).scalars().all()
+        events.extend(_audit_event(row, label) for row in rows)
+
+    # The signatures, where a ladder is configured for purchase returns. Swallowed on
+    # failure: the audit trail above is the record, and a workflow that cannot be read
+    # must not take the history down with it.
+    try:
+        for action in await engine.history(
+                db, WarehouseDocType.PURCHASE_RETURN.value, doc.id):
+            events.append({
+                "at": action.acted_at,
+                "entity": "wf_actions",
+                "doc_no": doc.return_no,
+                "action": action.action,
+                "title": action.stage_name or "Approval",
+                "detail": action.comments,
+                "actor_name": action.actor_name,
+                "status_to": None,
+            })
+    except Exception:
+        logger.debug("Approval history for return %s not reachable", doc.id,
+                     exc_info=True)
+
+    # Oldest first: this is read as a story, and a story starts at the beginning. Rows
+    # with no timestamp sort last rather than crashing the comparison.
+    events.sort(key=lambda event: (event["at"] is None, event["at"] or utcnow()))
+    return events
+
+
+#: What `_replacement_intake` answers when there is nothing to answer about — no
+#: replacement receipt, or the read failed. A dict of the same shape rather than None, so
+#: `_journey_legs` never has to branch on whether it was given one and a screen never sees
+#: a different set of legs because a query went wrong.
+_NO_INTAKE: dict = {
+    "receipt_id": None, "grn_no": None, "grn_status": None, "grn_raised_at": None,
+    "grn_booked": False, "grn_booked_at": None,
+    "inspection_no": None, "inspection_status": None, "inspection_at": None,
+    "qc_required": False, "qc_passed": False, "qc_failed": False, "qc_partial": False,
+    "putaway_total": 0, "putaway_done": 0, "putaway_open": 0, "putaway_at": None,
+    "putaway_bins": None,
+    "stock_posted": False, "intake_complete": False, "completed_at": None,
+}
+
+
+async def _replacement_intake(db: AsyncSession, doc: m.PurchaseReturn) -> dict:
+    """How far the replacement has got through the store's ordinary inward path.
+
+    READ, NEVER STORED, and read off the three documents that already own these facts:
+    the goods receipt the dispatch note raised (`inb_receipts`), its QC
+    (`inb_inspections`) and its putaway tasks (`whs_warehouse_items`). Nothing here is
+    mirrored onto `pro_returns` — see `enums.RETURN_REPLACEMENT_INTAKE_STATUSES` for why
+    a copy of the receipt's ladder on the return was refused.
+
+    `vendor_followup_receipt_id` is the link, and it is the one the dispatch note already
+    stamped: one return, one intake receipt, which is also what stops a second GRN being
+    raised for one lorry (`vendor_dispatch_replacement`).
+
+    NEVER RAISES. The journey is a read on a screen a person opens to find out where their
+    document is; a tracker that 500s because a putaway query failed is worse than one that
+    says "not yet". A failed read comes back as `_NO_INTAKE`, which draws the three legs as
+    not-yet-started rather than inventing progress.
+    """
+    if not getattr(doc, "vendor_followup_receipt_id", None):
+        return dict(_NO_INTAKE)
+    try:
+        receipt = await db.scalar(
+            select(m.Receipt)
+            .options(selectinload(m.Receipt.items))
+            .where(m.Receipt.id == doc.vendor_followup_receipt_id))
+        if receipt is None:
+            return dict(_NO_INTAKE)
+
+        out = dict(_NO_INTAKE)
+        out["receipt_id"] = receipt.id
+        out["grn_no"] = receipt.grn_no
+        out["grn_status"] = receipt.status
+        out["grn_raised_at"] = receipt.created_at
+        # BOOKED IN means the store has said what physically arrived, which is the submit.
+        # A DRAFT is the expectation the dispatch note raised and nothing more; a CANCELLED
+        # receipt never became a GRN at all.
+        out["grn_booked"] = receipt.status not in {ReceiptStatus.DRAFT.value,
+                                                   ReceiptStatus.GATE_ENTRY.value,
+                                                   ReceiptStatus.CANCELLED.value}
+        out["grn_booked_at"] = receipt.updated_at if out["grn_booked"] else None
+        out["stock_posted"] = bool(receipt.is_stock_posted)
+        out["completed_at"] = receipt.posted_at
+        out["intake_complete"] = receipt.status == ReceiptStatus.COMPLETED.value
+
+        # WHETHER QC IS OWED AT ALL. A line the item master exempts arrives NOT_REQUIRED
+        # and goes straight to putaway, so a receipt made entirely of those has no
+        # inspection to wait for and the leg must say so rather than hanging on one that
+        # is never coming.
+        out["qc_required"] = any(
+            line.qc_status != QcStatus.NOT_REQUIRED.value for line in receipt.items)
+        out["qc_passed"] = receipt.status in {ReceiptStatus.QC_PASSED.value,
+                                              ReceiptStatus.PARTIALLY_RECEIVED.value,
+                                              ReceiptStatus.COMPLETED.value}
+        out["qc_failed"] = receipt.status == ReceiptStatus.QC_FAILED.value
+        out["qc_partial"] = receipt.status == ReceiptStatus.PARTIALLY_RECEIVED.value
+
+        inspection = await db.scalar(
+            select(m.Inspection)
+            .where(m.Inspection.receipt_id == receipt.id,
+                   m.Inspection.status != InspectionStatus.CANCELLED.value)
+            .order_by(m.Inspection.id.desc()).limit(1))
+        if inspection is not None:
+            out["inspection_no"] = inspection.inspection_no
+            out["inspection_status"] = inspection.status
+            out["inspection_at"] = inspection.created_at
+
+        # The putaway tasks this receipt raised. Counted rather than listed: the tracker
+        # says "3 of 4 placed", and the tasks themselves are worked on their own screen.
+        rows = (await db.execute(
+            select(m.PutawayTask.status, m.PutawayTask.completed_at,
+                   m.PutawayTask.lot_no)
+            .where(m.PutawayTask.grn_id == receipt.id)
+        )).all()
+        live = [row for row in rows if row.status != PutawayStatus.CANCELLED.value]
+        done = [row for row in live if row.status == PutawayStatus.COMPLETED.value]
+        out["putaway_total"] = len(live)
+        out["putaway_done"] = len(done)
+        out["putaway_open"] = len(live) - len(done)
+        out["putaway_at"] = max((row.completed_at for row in done
+                                 if row.completed_at), default=None)
+        return out
+    except Exception:
+        logger.exception("The replacement intake behind %s could not be read",
+                         doc.return_no)
+        return dict(_NO_INTAKE)
+
+
+def _journey_legs(doc: m.PurchaseReturn, intake: dict | None = None) -> list[dict]:
+    """The twelve legs of a purchase return, each with where it got to and what it said.
+
+    READ, NEVER STORED. Every value below comes off a column the document already carries
+    or off the trail that is already written — nothing is recorded for the tracker's
+    benefit, so the tracker cannot show a step the documents do not.
+
+    EVERY LEG IS DRAWN FOR EVERY RETURN, including ones this particular document will
+    never reach: a refund never gets to transport, a rejected return never gets past the
+    decision. A tracker that dropped steps per document would describe a different flow on
+    every screen, so a leg with nothing to do is CAPTIONED as having nothing to do. That is
+    the rule the stock-return tracker already follows.
+
+    A REFUSAL HALTS THE FLOW. Every leg after the one that stopped stays `pending`, so a
+    rejected return can never render as though the goods moved.
+
+    `intake` is what `_replacement_intake` read off the goods receipt, its QC and its
+    putaway tasks — the last three legs before the close. Passed IN rather than read here
+    because this function is deliberately synchronous and pure: it is the one place the
+    whole ladder is written down, and every caller must get the same answer for the same
+    document. Omitting it draws those three as not yet started, which is exactly right for
+    a return that has no replacement coming.
+    """
+    intake = intake or dict(_NO_INTAKE)
+    status = doc.status
+    rejected = status == ReturnStatus.REJECTED.value
+    cancelled = status == ReturnStatus.CANCELLED.value
+    refunded = status == ReturnStatus.REFUNDED.value
+    closed = status in RETURN_CLOSED_STATUSES
+
+    # Every one of these is a TRANSIENT attribute assigned by a decorator, not a column,
+    # and several decorators assign theirs only on the branch that has something to say.
+    # `getattr` rather than attribute access throughout, because this function runs on a
+    # document at EVERY rung — including a DRAFT, which has been down none of those
+    # branches. Reading one directly is an AttributeError, not a None.
+    dispatch_no = getattr(doc, "dispatch_no", None)
+    indent_no = getattr(doc, "indent_no", None)
+    reason_label = getattr(doc, "reason_label", None)
+    arrangement_label = getattr(doc, "vehicle_arrangement_label", None)
+
+    # How far along the ladder this document has actually travelled. Read off the stamps
+    # rather than off the status, because the status says where it is now and a tracker
+    # has to say where it has BEEN.
+    sent = bool(doc.sent_at)
+    decided = bool(doc.vendor_decision)
+    approved = doc.vendor_decision == ApprovalAction.APPROVED.value
+    settled = bool(doc.vendor_response) or refunded
+    transport_chosen = bool(doc.vehicle_arrangement)
+    picked_up = bool(doc.arranged_dispatched_at) or status in {
+        ReturnStatus.STOCK_PICKED_UP.value, ReturnStatus.VENDOR_RECEIVED.value,
+        ReturnStatus.REPLACEMENT_DISPATCHED.value,
+        ReturnStatus.RECEIVED_AT_WAREHOUSE.value, ReturnStatus.COMPLETED.value}
+    vendor_has_it = bool(doc.vendor_receipt_confirmed_at)
+    replacement_gone = bool(doc.replacement_dispatched_at)
+    back_here = bool(doc.received_at)
+
+    def leg(key: str, label: str, *, done: bool, current: bool = False,
+            at=None, actor: str | None = None, detail: str | None = None,
+            ref: str | None = None, state: str | None = None) -> dict:
+        return {
+            "key": key, "label": label,
+            "state": state or ("completed" if done
+                               else "current" if current else "pending"),
+            "at": at, "actor_name": actor, "detail": detail, "reference_no": ref,
+        }
+
+    legs = [
+        leg("created", "Created", done=True, at=doc.created_at,
+            actor=doc.created_by_name, ref=doc.return_no,
+            detail=reason_label or doc.reason),
+        leg("sent_to_vendor", "Sent to vendor", done=sent, current=not sent,
+            at=doc.sent_at, actor=doc.created_by_name,
+            ref=doc.grn_no or doc.po_no or indent_no,
+            detail=("Sent for the vendor to verify against the GRN, PO and QC"
+                    if sent else "Not sent yet")),
+    ]
+
+    legs.append(leg(
+        "vendor_decision", "Vendor decision",
+        done=decided, current=sent and not decided,
+        at=doc.vendor_decision_at, actor=doc.vendor_decision_by_name,
+        detail=(doc.vendor_decision_note or
+                ("Approved by the vendor" if approved else
+                 "Rejected by the vendor" if decided else
+                 "Waiting on the vendor to approve or reject")),
+        state="rejected" if rejected else None))
+
+    legs.append(leg(
+        "settlement", "Refund / Replacement",
+        done=settled, current=approved and not settled and not closed,
+        at=doc.vendor_response_at or doc.refunded_at,
+        actor=doc.vendor_name,
+        detail=(f"Refund of {_d(doc.vendor_refund_amount):,.2f} agreed" if refunded
+                else "Replacement agreed" if settled
+                else "Rejected — nothing to settle" if rejected
+                else "Waiting on the vendor to choose refund or replacement")))
+
+    # The three travelling legs. A refund never reaches them and says so rather than
+    # sitting at "pending" forever, which reads as work somebody still owes.
+    money = refunded or (rejected and not transport_chosen)
+    nothing_to_move = ("Settled in money — nothing travels" if refunded
+                       else "Rejected — nothing travels" if rejected else None)
+
+    legs.append(leg(
+        "transport", "Transport",
+        done=transport_chosen and picked_up,
+        current=settled and not money and not picked_up,
+        at=doc.vehicle_arrangement_at, actor=doc.vehicle_arrangement_by_name,
+        ref=doc.outbound_tr_no or dispatch_no,
+        detail=(nothing_to_move or arrangement_label
+                or "Waiting on the warehouse to arrange transport"),
+        state="cancelled" if money else None))
+
+    legs.append(leg(
+        "vendor_received", "Vendor received",
+        done=vendor_has_it, current=picked_up and not vendor_has_it and not money,
+        at=doc.vendor_receipt_confirmed_at, actor=doc.vendor_receipt_by_name,
+        detail=(nothing_to_move or doc.vendor_receipt_remarks
+                or ("Signed for at the vendor's dock" if vendor_has_it else
+                    "Waiting on the vendor to sign for the goods")),
+        state="cancelled" if money else None))
+
+    legs.append(leg(
+        "replacement_dispatched", "Replacement dispatched",
+        done=replacement_gone,
+        current=vendor_has_it and not replacement_gone and not money,
+        at=doc.replacement_dispatched_at, actor=doc.vendor_name,
+        ref=doc.replacement_dispatch_no or doc.vendor_followup_receipt_no,
+        detail=(nothing_to_move or doc.replacement_remarks
+                or ("Replacement on its way" if replacement_gone else
+                    "Waiting on the vendor to dispatch the replacement")),
+        state="cancelled" if money else None))
+
+    legs.append(leg(
+        "warehouse_received", "Warehouse received",
+        done=back_here, current=replacement_gone and not back_here and not money,
+        at=doc.received_at, actor=doc.received_by_name,
+        ref=doc.vendor_followup_receipt_no,
+        detail=(nothing_to_move or doc.received_remarks
+                or ("Replacement received" if back_here else
+                    "Waiting on the replacement to arrive")),
+        state="cancelled" if money else None))
+
+    # ---- the store's ordinary inward path, READ off the three documents that own it ----
+    #
+    # GRN, then QC, then putaway. Not a second flow built for returns: the goods receipt
+    # the dispatch note raised is booked in, inspected and placed exactly as any other
+    # delivery is, on the screens the store already works. These legs only SAY where that
+    # has got to, so the person chasing the return does not have to go and find three
+    # other documents to answer "is it on the shelf yet".
+    #
+    # A return that produces no replacement — a refund, a refusal, or one closed under the
+    # older flow that never had an intake receipt — says these will never happen rather
+    # than sitting at `pending`, which reads as work somebody still owes.
+    grn_no = intake["grn_no"]
+    grn_booked = intake["grn_booked"]
+    qc_required = intake["qc_required"]
+    qc_passed = intake["qc_passed"]
+    qc_failed = intake["qc_failed"]
+    put_total = intake["putaway_total"]
+    put_done = intake["putaway_done"]
+    placed = put_total > 0 and intake["putaway_open"] == 0
+    no_intake = nothing_to_move or (
+        "Closed with no replacement to book in"
+        if (closed or cancelled) and not grn_no else None)
+
+    legs.append(leg(
+        "grn", "GRN",
+        done=grn_booked, current=bool(grn_no) and back_here and not grn_booked,
+        at=intake["grn_booked_at"] if grn_booked else intake["grn_raised_at"],
+        ref=grn_no,
+        detail=(no_intake
+                or (f"Booked in on {grn_no}" if grn_booked
+                    else f"Draft {grn_no} raised — waiting on the store to book it in"
+                    if grn_no else "No goods receipt raised yet")),
+        state="cancelled" if no_intake else None))
+
+    legs.append(leg(
+        "qc", "QC inspection",
+        done=qc_passed or (grn_booked and not qc_required),
+        current=grn_booked and qc_required and not (qc_passed or qc_failed),
+        at=intake["inspection_at"], ref=intake["inspection_no"],
+        detail=(no_intake
+                or ("QC not required for these lines" if grn_booked and not qc_required
+                    else "QC failed — the replacement was rejected" if qc_failed
+                    else "Passed in part — some quantity was rejected"
+                    if intake["qc_partial"]
+                    else "QC passed" if qc_passed
+                    else "Waiting on the QC inspection" if grn_booked
+                    else "Inspected once the goods receipt is booked in")),
+        state="cancelled" if no_intake else "rejected" if qc_failed else None))
+
+    legs.append(leg(
+        "putaway", "Putaway",
+        done=placed,
+        current=(qc_passed or (grn_booked and not qc_required)) and not placed,
+        at=intake["putaway_at"],
+        detail=(no_intake
+                or ("QC failed — nothing to put away" if qc_failed
+                    else f"{put_done} of {put_total} placed" if put_total
+                    else "Waiting on QC before the stock may be placed")),
+        state="cancelled" if no_intake or qc_failed else None))
+
+    legs.append(leg(
+        "closed", "Closed", done=closed, current=placed and not closed,
+        # WHEN it closed. A refund is settled by the vendor's own answer; a replacement is
+        # closed by its putaway finishing, and the receipt's posting stamp is that moment
+        # — read off the intake rather than stored, like every other value here.
+        at=(doc.vendor_response_at if refunded
+            else intake["completed_at"] if closed else None),
+        ref=doc.credit_note_no or (grn_no if closed and not refunded else None),
+        detail=("Refund settled" if refunded else
+                "Rejected by the vendor" if rejected else
+                "Cancelled" if cancelled else
+                (f"Closed — the replacement was put away against {grn_no}"
+                 if grn_no else "Closed") if closed else
+                "Closes once the replacement is put away"),
+        state="rejected" if rejected else "cancelled" if cancelled else None))
+
+    # A refusal halts everything after the leg that stopped — see the docstring.
+    if rejected or cancelled:
+        halted = False
+        for row in legs:
+            if row["state"] in {"rejected", "cancelled"}:
+                halted = True
+                continue
+            if halted and row["state"] == "current":
+                row["state"] = "pending"
+
+    # THE TRACKER READS LEFT TO RIGHT, so it must be monotonic: a document that has
+    # demonstrably reached leg 8 has passed legs 1-7, whatever stamps those legs do or do
+    # not carry.
+    #
+    # This is not hypothetical tidying. Returns migrated from the older vendor -> warehouse
+    # flow were received at the warehouse without ever passing through the settlement and
+    # transport rungs, which did not exist when they travelled — so they rendered as
+    # "received" AND "waiting on the vendor to choose refund or replacement" at the same
+    # time, which is not a state any document can be in. An unstamped leg behind a
+    # completed one means the step happened and nobody recorded it, never that it is still
+    # owed.
+    #
+    # `cancelled` and `rejected` legs are left exactly as they are: those say a leg will
+    # never happen, which is a different statement from one that happened unrecorded.
+    last_done = max((i for i, row in enumerate(legs)
+                     if row["state"] == "completed"), default=-1)
+    for row in legs[:max(last_done, 0)]:
+        if row["state"] in {"pending", "current"}:
+            row["state"] = "completed"
+    # Exactly one leg may be current. If back-filling consumed it, the document is
+    # standing on the first leg that has still not happened.
+    #
+    # NOT on a document that STOPPED. A rejected or cancelled return is standing on
+    # nothing — nobody owes it a press — and restoring a `current` marker here would put
+    # "waiting on the vendor to choose refund or replacement" on a return the vendor has
+    # already refused. A halted flow has no current leg, which is the whole point of
+    # halting it.
+    halted = rejected or cancelled
+    if not halted and not any(row["state"] == "current" for row in legs):
+        for row in legs[last_done + 1:]:
+            if row["state"] == "pending":
+                row["state"] = "current"
+                break
+    return legs
+
+
+def _journey_summary(doc: m.PurchaseReturn, legs: list[dict]) -> tuple[int, str]:
+    """Which leg the document is standing on, and the sentence that says so.
+
+    Composed here rather than in a screen, for the reason every label in this module is:
+    the register, the detail screen and the vendor's copy must not word one document three
+    different ways.
+    """
+    current = next((i for i, row in enumerate(legs) if row["state"] == "current"), None)
+    if current is None:
+        # Nothing is outstanding: either it is finished, or it stopped.
+        last_done = max((i for i, row in enumerate(legs)
+                         if row["state"] in {"completed", "rejected", "cancelled"}),
+                        default=0)
+        return last_done + 1, (doc.status_label or PURCHASE_RETURN_PHASES[last_done][1])
+    return current + 1, f"Waiting: {legs[current]['detail'] or legs[current]['label']}"
+
+
+async def purchase_return_journey(db: AsyncSession, return_id: int, user=None) -> dict:
+    """The whole journey of one purchase return, as a tracker reads it.
+
+    Served on the DOSSIER rather than as an endpoint of its own: the detail screen already
+    fetches the dossier, and a second round trip for facts drawn from the same row would
+    be a second chance for the two to disagree about where the document is.
+    """
+    doc = await get_return(db, return_id, user)
+    legs = _journey_legs(doc, await _replacement_intake(db, doc))
+    sequence, message = _journey_summary(doc, legs)
+    return {
+        "return_id": doc.id,
+        "return_no": doc.return_no,
+        "status": doc.status,
+        "status_label": doc.status_label,
+        "phases": legs,
+        "current_sequence": sequence,
+        "current_stage_message": message,
+    }
+
+
+async def purchase_return_dossier(db: AsyncSession, return_id: int, user=None) -> dict:
+    """The whole paper trail behind one purchase return, and its history, in one call.
+
+    Read-only and side-effect free. `get_return` runs first and is what decides whether
+    this login may read the document at all — the trail behind a document must never be
+    visible to somebody the document itself is not.
+
+    Nothing here is stored: every row is resolved on read, from the tables that own it.
+    """
+    doc = await get_return(db, return_id, user)
+    documents = await _dossier_documents(db, doc)
+    timeline = await _dossier_timeline(db, doc)
+    note = None
+    if doc.is_manual:
+        note = (
+            "This return was entered by hand — its vendor and its lines were typed, "
+            "not read off a purchase in this system, so there is no buying trail "
+            "behind it."
+            + (f" The storekeeper's own reference is {doc.source_ref_no}."
+               if doc.source_ref_no else ""))
+    elif getattr(doc, "chain_traced", False):
+        note = (
+            "This return names no purchase of its own — it was raised off the stock "
+            "coming back. The buying trail below is READ from the goods receipt that "
+            "stock arrived on; sending the return to the vendor binds it.")
+    elif not any(row["leg"] == "PURCHASE" for row in documents):
+        note = ("No purchase trail could be read behind this return. Use Edit to pick "
+                "the Purchase Invoice / PO it was bought on.")
+    legs = _journey_legs(doc, await _replacement_intake(db, doc))
+    sequence, message = _journey_summary(doc, legs)
+    return {
+        "return_id": doc.id,
+        "return_no": doc.return_no,
+        "documents": documents,
+        "timeline": timeline,
+        "trail_note": note,
+        # The tracker, on the same call the trail and the history already come on. See
+        # `purchase_return_journey` for why it is not an endpoint of its own.
+        "journey": legs,
+        "current_sequence": sequence,
+        "current_stage_message": message,
+    }
+
+
+async def _first_line_by_parent(db: AsyncSession, model, parent_col,
+                                parent_ids: list[int]) -> dict[int, object]:
+    """The first line of each parent document, in ONE query, keyed by parent id.
+
+    Reads the LINE table rather than walking `parent.items`. Those relationships are
+    plain lazy ones (no `lazy="selectin"`), and touching one on an AsyncSession raises
+    `MissingGreenlet` — which is exactly what took `purchase_return_source_options`
+    down: the receipt loop accessed `grn.items` outside any try/except, so the whole
+    endpoint 500'd and the New Purchase Return picker opened empty with no explanation
+    anywhere on the screen (fixed 2026-09-10).
+
+    Ordered by `id`, never by `line_no`. Every line table here carries a JSON column,
+    MySQL sizes a filesort record by each column's MAXIMUM possible width, and a sort
+    over one of them raises 1038 "Out of sort memory" at ANY row count — three rows or
+    three million (see the CLAUDE.md note). `id` is the primary key, so reading it is an
+    index scan with no sort at all, and for lines the insert order IS the line order.
+    """
+    if not parent_ids:
+        return {}
+    rows = (await db.execute(
+        select(model).where(parent_col.in_(parent_ids)).order_by(model.id)
+    )).scalars().all()
+    first: dict[int, object] = {}
+    for row in rows:
+        first.setdefault(getattr(row, parent_col.key), row)
+    return first
+
+
+async def purchase_return_source_options(db: AsyncSession, params: PageParams, *,
+                                         search: str | None = None,
+                                         warehouse_id: int | None = None,
+                                         user=None) -> dict:
+    """Searchable eligible source transactions: GRN / PO / Indent / Item.
+
+    Uses existing SCM data only — no duplicate master.
+
+    Every family's first line comes from `_first_line_by_parent`, one query apiece.
+    Nothing in here may touch `parent.items`: see that helper for what happens when it
+    does. The PO and indent families are additionally wrapped, because their tables
+    belong to earlier modules that a deployment can legitimately not have reachable —
+    but the wrapper is for the IMPORT, not for a per-row mistake, and it logs at
+    warning now: swallowed at debug, a lazy-load error inside either block silently
+    dropped every purchase order and every indent from the picker and looked exactly
+    like a site that had none.
+    """
+    # Scope warehouses for this user
+    allowed = await warehouse_ids_for_user(db, user) if user else None
+    term = (search or "").strip()
+    like = f"%{term}%" if term else None
+
+    # --- GRNs (inb_receipts) — the primary purchase transaction with vendor ---
+    grn_stmt = select(m.Receipt).where(m.Receipt.status != ReceiptStatus.CANCELLED.value)
+    if allowed is not None:
+        grn_stmt = grn_stmt.where(m.Receipt.warehouse_id.in_(allowed or {0}))
+    if warehouse_id:
+        grn_stmt = grn_stmt.where(m.Receipt.warehouse_id == warehouse_id)
+    if like:
+        grn_stmt = grn_stmt.where(or_(
+            m.Receipt.grn_no.ilike(like),
+            m.Receipt.vendor_name.ilike(like),
+            m.Receipt.po_no.ilike(like),
+            m.Receipt.invoice_no.ilike(like),
+        ))
+    grn_stmt = grn_stmt.order_by(m.Receipt.id.desc()).limit(20)
+    grns = (await db.execute(grn_stmt)).scalars().all()
+
+    options: list[dict] = []
+    vendor_cache: dict[int, Vendor] = {}
+    grn_first = await _first_line_by_parent(
+        db, m.ReceiptItem, m.ReceiptItem.receipt_id, [g.id for g in grns])
+    for grn in grns:
+        vendor = vendor_cache.get(grn.vendor_id) if grn.vendor_id else None
+        if grn.vendor_id and grn.vendor_id not in vendor_cache:
+            vendor = await db.get(Vendor, grn.vendor_id)
+            vendor_cache[grn.vendor_id] = vendor
+        # First item snapshot, for the label only. Off the batched read above — never
+        # `grn.items`, which is the lazy relationship that used to 500 this endpoint.
+        first_item = grn_first.get(grn.id)
+        options.append({
+            "source_type": "GRN",
+            "source_id": grn.id,
+            "source_no": grn.grn_no,
+            "source_date": grn.grn_date,
+            "vendor_id": grn.vendor_id,
+            "vendor_name": grn.vendor_name or (vendor.name if vendor else None),
+            "vendor_code": vendor.code if vendor else None,
+            "item_id": first_item.item_id if first_item else None,
+            "item_code": first_item.item_code if first_item else None,
+            "item_name": first_item.item_name if first_item else None,
+            "warehouse_id": grn.warehouse_id,
+            "warehouse_name": grn.warehouse_name,
+            "po_id": grn.po_id,
+            "po_no": grn.po_no,
+            "grn_id": grn.id,
+            "grn_no": grn.grn_no,
+            "indent_id": first_item.indent_id if first_item and hasattr(first_item, 'indent_id') else None,
+            "indent_no": first_item.indent_no if first_item and hasattr(first_item, 'indent_no') else None,
+        })
+
+    # --- POs (pro_purchase_orders) — where GRN not yet created ---
+    try:
+        from app.modules.procurement.models import PurchaseOrder, POItem
+        po_stmt = select(PurchaseOrder).where(PurchaseOrder.status != POStatus.CANCELLED.value)
+        if like:
+            po_stmt = po_stmt.where(or_(
+                PurchaseOrder.po_no.ilike(like),
+                PurchaseOrder.vendor_name.ilike(like),
+            ))
+        po_stmt = po_stmt.order_by(PurchaseOrder.id.desc()).limit(20)
+        pos = (await db.execute(po_stmt)).scalars().all()
+        po_first = await _first_line_by_parent(
+            db, POItem, POItem.po_id, [p.id for p in pos])
+        for po in pos:
+            vendor = vendor_cache.get(po.vendor_id) if po.vendor_id else None
+            if po.vendor_id and po.vendor_id not in vendor_cache:
+                vendor = await db.get(Vendor, po.vendor_id)
+                vendor_cache[po.vendor_id] = vendor
+            first = po_first.get(po.id)
+            options.append({
+                "source_type": "PO",
+                "source_id": po.id,
+                "source_no": po.po_no,
+                "source_date": po.po_date if hasattr(po, 'po_date') else None,
+                "vendor_id": po.vendor_id,
+                "vendor_name": po.vendor_name or (vendor.name if vendor else None),
+                "vendor_code": vendor.code if vendor else None,
+                "item_id": first.item_id if first else None,
+                "item_code": first.item_code if first else None,
+                "item_name": first.item_name if first else None,
+                "warehouse_id": None,
+                "warehouse_name": po.facility_name if hasattr(po, 'facility_name') else None,
+                "po_id": po.id,
+                "po_no": po.po_no,
+                "indent_id": po.indent_id if hasattr(po, 'indent_id') else None,
+                "indent_no": po.indent_no if hasattr(po, 'indent_no') else None,
+            })
+    except Exception:
+        logger.warning("PO source options skipped — purchase orders will not appear in "
+                       "the purchase-return picker", exc_info=True)
+
+    # --- Indents (ind_indents) — for returns against original request ---
+    try:
+        from app.modules.indents.models import Indent, IndentItem as IItem
+        ind_stmt = select(Indent).where(Indent.status.in_([
+            IndentStatus.APPROVED.value, IndentStatus.ORDERED.value,
+            IndentStatus.CLOSED.value, IndentStatus.PARTIALLY_FULFILLED.value]))
+        if like:
+            ind_stmt = ind_stmt.where(or_(
+                Indent.indent_no.ilike(like),
+                Indent.remarks.ilike(like),
+            ))
+        ind_stmt = ind_stmt.order_by(Indent.id.desc()).limit(20)
+        inds = (await db.execute(ind_stmt)).scalars().all()
+        ind_first = await _first_line_by_parent(
+            db, IItem, IItem.indent_id, [i.id for i in inds])
+        for ind in inds:
+            # try to resolve vendor via linked PO
+            vendor_id = None
+            vendor_name = None
+            po_id = None
+            po_no = None
+            try:
+                from app.modules.procurement.models import PurchaseOrder as _PO
+                po = await db.scalar(select(_PO).where(_PO.indent_id == ind.id).limit(1))
+                if po:
+                    vendor_id = po.vendor_id
+                    vendor_name = po.vendor_name
+                    po_id = po.id
+                    po_no = po.po_no
+            except Exception:
+                pass
+            first = ind_first.get(ind.id)
+            options.append({
+                "source_type": "INDENT",
+                "source_id": ind.id,
+                "source_no": ind.indent_no,
+                "source_date": ind.indent_date if hasattr(ind, 'indent_date') else None,
+                "vendor_id": vendor_id,
+                "vendor_name": vendor_name,
+                "vendor_code": None,
+                "item_id": first.item_id if first and hasattr(first, 'item_id') else None,
+                "item_code": first.item_code if first and hasattr(first, 'item_code') else None,
+                "item_name": first.item_name if first and hasattr(first, 'item_name') else None,
+                "warehouse_id": None,
+                "warehouse_name": None,
+                "po_id": po_id,
+                "po_no": po_no,
+                "indent_id": ind.id,
+                "indent_no": ind.indent_no,
+            })
+    except Exception:
+        logger.warning("Indent source options skipped — indents will not appear in the "
+                       "purchase-return picker", exc_info=True)
+
+    # Filter by search if term but nothing matched — already filtered per query
+    # Sort: GRN first, then PO, then INDENT
+    order = {"GRN": 0, "PO": 1, "INDENT": 2}
+    options.sort(key=lambda r: (order.get(r["source_type"], 9), r["source_no"]))
+
+    # Paginate in-memory (small set)
+    total = len(options)
+    page = params.page or 1
+    size = params.size or 20
+    start = (page - 1) * size
+    sliced = options[start:start + size]
+    return {"items": sliced, "total": total, "page": page, "size": size}
+
+
+async def purchase_return_source_lookup(db: AsyncSession, *, doc_no: str,
+                                        source_type: str | None = None,
+                                        user=None) -> dict:
+    """One document, by the number a storekeeper typed in.
+
+    ADDED 2026-09-10. The picker offers the twenty most recent goods receipts, purchase
+    orders and indents, and that is the right list to BROWSE — but a storekeeper holding
+    a paper indent knows the number and should not have to scroll sixty rows to find it,
+    and the document they want is frequently older than any of the sixty. Typing the
+    number is the other half of the same question.
+
+    Exact match only, case-insensitive and trimmed. NOT a search: a fuzzy answer here
+    would auto-fetch a vendor off the wrong purchase and the storekeeper would have no
+    way to tell — the picker beside it is where browsing belongs. Tried in the order the
+    numbers are most likely to be held on paper: GRN, then the vendor's own invoice
+    number on that GRN, then PO, then indent.
+
+    Warehouse scope is applied to receipts exactly as the picker applies it, so typing a
+    number never reaches a document the login could not have picked from the list.
+    """
+    typed = (doc_no or "").strip()
+    if not typed:
+        return {"found": False, "can_return": False, "option": None, "message": None}
+    wanted = (source_type or "").upper().strip() or None
+    if wanted and wanted not in ("GRN", "PO", "INDENT"):
+        raise ValidationError(
+            f"{wanted} is not a document type you can return against. "
+            f"Type a GRN, purchase order or indent number.")
+    allowed = await warehouse_ids_for_user(db, user) if user else None
+
+    def answer(option, *, can_return=True, message=None) -> dict:
+        return {"found": option is not None, "option": option,
+                "can_return": bool(option is not None and can_return),
+                "message": message}
+
+    # --- the goods receipt, and the vendor's invoice number written on it -----------
+    if wanted in (None, "GRN"):
+        stmt = select(m.Receipt).where(
+            m.Receipt.status != ReceiptStatus.CANCELLED.value,
+            or_(func.lower(m.Receipt.grn_no) == typed.lower(),
+                func.lower(m.Receipt.invoice_no) == typed.lower()))
+        if allowed is not None:
+            stmt = stmt.where(m.Receipt.warehouse_id.in_(allowed or {0}))
+        receipt = await db.scalar(stmt.order_by(m.Receipt.id.desc()).limit(1))
+        if receipt is not None:
+            vendor_id, vendor_name = await _receipt_vendor(db, receipt)
+            vendor = await db.get(Vendor, vendor_id) if vendor_id else None
+            first = (await _first_line_by_parent(
+                db, m.ReceiptItem, m.ReceiptItem.receipt_id, [receipt.id])).get(receipt.id)
+            indent_id, indent_no = await _receipt_indent(db, receipt)
+            return answer({
+                "source_type": "GRN", "source_id": receipt.id,
+                "source_no": receipt.grn_no, "source_date": receipt.grn_date,
+                "vendor_id": vendor_id,
+                "vendor_name": (vendor.name if vendor else None) or vendor_name,
+                "vendor_code": vendor.code if vendor else None,
+                "item_id": getattr(first, "item_id", None),
+                "item_code": getattr(first, "item_code", None),
+                "item_name": getattr(first, "item_name", None),
+                "warehouse_id": receipt.warehouse_id,
+                "warehouse_name": receipt.warehouse_name,
+                "po_id": receipt.po_id, "po_no": receipt.po_no,
+                "grn_id": receipt.id, "grn_no": receipt.grn_no,
+                "indent_id": indent_id, "indent_no": indent_no,
+            }, message=(
+                None if vendor_id else
+                "This goods receipt names no vendor, and none could be read from the "
+                "purchase order behind it."), can_return=vendor_id is not None)
+
+    # --- the purchase order --------------------------------------------------------
+    if wanted in (None, "PO"):
+        try:
+            from app.modules.procurement.models import POItem, PurchaseOrder as _PO
+            po = await db.scalar(
+                select(_PO).where(func.lower(_PO.po_no) == typed.lower(),
+                                  _PO.status != POStatus.CANCELLED.value)
+                .order_by(_PO.id.desc()).limit(1))
+            if po is not None:
+                vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
+                first = (await _first_line_by_parent(
+                    db, POItem, POItem.po_id, [po.id])).get(po.id)
+                return answer({
+                    "source_type": "PO", "source_id": po.id, "source_no": po.po_no,
+                    "source_date": getattr(po, "po_date", None),
+                    "vendor_id": po.vendor_id,
+                    "vendor_name": po.vendor_name or (vendor.name if vendor else None),
+                    "vendor_code": vendor.code if vendor else None,
+                    "item_id": getattr(first, "item_id", None),
+                    "item_code": getattr(first, "item_code", None),
+                    "item_name": getattr(first, "item_name", None),
+                    "warehouse_id": None,
+                    "warehouse_name": getattr(po, "facility_name", None),
+                    "po_id": po.id, "po_no": po.po_no,
+                    "grn_id": None, "grn_no": None,
+                    "indent_id": getattr(po, "indent_id", None),
+                    "indent_no": getattr(po, "indent_no", None)
+                    or await _indent_no(db, getattr(po, "indent_id", None)),
+                }, message=(
+                    None if po.vendor_id else
+                    "This purchase order names no vendor."),
+                    can_return=po.vendor_id is not None)
+        except ValidationError:
+            raise
+        except Exception:
+            logger.warning("Purchase orders not reachable for a typed lookup",
+                           exc_info=True)
+
+    # --- the indent ----------------------------------------------------------------
+    if wanted in (None, "INDENT"):
+        try:
+            from app.modules.indents.models import Indent as _Indent
+            from app.modules.indents.models import IndentItem as _IndentItem
+            indent = await db.scalar(
+                select(_Indent).where(func.lower(_Indent.indent_no) == typed.lower())
+                .order_by(_Indent.id.desc()).limit(1))
+            if indent is not None:
+                # The vendor an indent can be returned to is the vendor of the purchase
+                # order raised off it — an indent is a REQUEST and names no supplier of
+                # its own. Said plainly where there is none, at the moment the number is
+                # typed, rather than letting the form fill up and the save refuse it.
+                po = None
+                try:
+                    from app.modules.procurement.models import PurchaseOrder as _PO2
+                    po = await db.scalar(
+                        select(_PO2).where(_PO2.indent_id == indent.id)
+                        .order_by(_PO2.id.desc()).limit(1))
+                except Exception:
+                    logger.warning("PO behind indent %s not reachable", indent.id,
+                                   exc_info=True)
+                vendor = await db.get(Vendor, po.vendor_id) if po is not None and po.vendor_id else None
+                first = (await _first_line_by_parent(
+                    db, _IndentItem, _IndentItem.indent_id, [indent.id])).get(indent.id)
+                return answer({
+                    "source_type": "INDENT", "source_id": indent.id,
+                    "source_no": indent.indent_no,
+                    "source_date": getattr(indent, "indent_date", None),
+                    "vendor_id": getattr(po, "vendor_id", None),
+                    "vendor_name": (vendor.name if vendor else None)
+                    or getattr(po, "vendor_name", None),
+                    "vendor_code": vendor.code if vendor else None,
+                    "item_id": getattr(first, "item_id", None),
+                    "item_code": getattr(first, "item_code", None),
+                    "item_name": getattr(first, "item_name", None),
+                    "warehouse_id": getattr(indent, "warehouse_id", None),
+                    "warehouse_name": getattr(indent, "warehouse_name", None),
+                    "po_id": getattr(po, "id", None),
+                    "po_no": getattr(po, "po_no", None),
+                    "grn_id": None, "grn_no": None,
+                    "indent_id": indent.id, "indent_no": indent.indent_no,
+                }, message=(
+                    None if po is not None and po.vendor_id else
+                    "No purchase order was raised against this indent, so there is no "
+                    "vendor to return the goods to. Type the GRN or PO number the goods "
+                    "actually came in on instead."),
+                    can_return=po is not None and po.vendor_id is not None)
+        except Exception:
+            logger.warning("Indents not reachable for a typed lookup", exc_info=True)
+
+    kind = {"GRN": "goods receipt", "PO": "purchase order",
+            "INDENT": "indent"}.get(wanted or "", "goods receipt, purchase order or indent")
+    return answer(None, message=(
+        f"No {kind} numbered “{typed}” was found on your warehouses. Check the number, "
+        f"or pick from the list instead."))
+
+
+async def purchase_return_source_detail(db: AsyncSession, *,
+                                        source_type: str,
+                                        source_id: int,
+                                        item_id: int | None = None) -> dict:
+    """Auto-fetch full vendor + item + purchase details for one source.
+
+    Single call, single truth — no manual typing.
+    """
+    source_type = (source_type or "GRN").upper().strip()
+    if source_type not in ("GRN", "PO", "INDENT", "ITEM", "MATERIAL_RECEIPT"):
+        if source_type == "MATERIAL_RECEIPT":
+            source_type = "GRN"
+        else:
+            raise ValidationError(f"Unknown source type {source_type}")
+
+    vendor_out = s.VendorDetailOut()
+    purchase = s.PurchaseDetailsOut()
+    item_details: list[s.ItemDetailOut] = []
+    warehouse_id = None
+    warehouse_name = None
+    source_no = ""
+    # ---- GRN ----
+    if source_type == "GRN":
+        receipt = await _load(db, m.Receipt, source_id, "Purchase Invoice/GRN", m.Receipt.items)
+        source_no = receipt.grn_no
+        purchase.grn_id = receipt.id
+        purchase.grn_no = receipt.grn_no
+        purchase.receipt_id = receipt.id
+        purchase.receipt_no = receipt.grn_no
+        purchase.receipt_date = receipt.grn_date
+        purchase.po_id = receipt.po_id
+        purchase.po_no = receipt.po_no
+        purchase.invoice_no = receipt.invoice_no
+        purchase.invoice_date = receipt.invoice_date
+        purchase.indent_id = None
+        warehouse_id = receipt.warehouse_id
+        warehouse_name = receipt.warehouse_name
+        # Indent linkage: the receipt's own lines where they carry it, the purchase
+        # order behind it where they do not (see `_receipt_indent`).
+        purchase.indent_id, purchase.indent_no = await _receipt_indent(db, receipt)
+
+        # Vendor — full master auto-fetch
+        vendor = await db.get(Vendor, receipt.vendor_id) if receipt.vendor_id else None
+        if vendor:
+            vendor_out.vendor_id = vendor.id
+            vendor_out.vendor_code = vendor.code
+            vendor_out.vendor_name = vendor.name
+            vendor_out.contact_person = vendor.contact_person
+            vendor_out.phone = vendor.phone
+            vendor_out.email = vendor.email
+            vendor_out.address = vendor.address
+            vendor_out.city = vendor.city
+            vendor_out.state = vendor.state
+            vendor_out.pincode = vendor.pincode
+            vendor_out.gstin = vendor.gstin
+        else:
+            vendor_out.vendor_id = receipt.vendor_id
+            vendor_out.vendor_name = receipt.vendor_name
+            vendor_out.vendor_code = None
+
+        # Per-item returnable computation (reuse caps logic)
+        # original = rejected_qty >0 ? rejected_qty : received_qty
+        already_by_grn_item: dict[int, Decimal] = {}
+        already_rows = (await db.execute(
+            select(m.PurchaseReturnItem.grn_item_id,
+                   func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+            .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+            .where(m.PurchaseReturn.grn_id == receipt.id,
+                   m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                   m.PurchaseReturnItem.grn_item_id.isnot(None))
+            .group_by(m.PurchaseReturnItem.grn_item_id)
+        )).all()
+        for gid, qty in already_rows:
+            already_by_grn_item[gid] = _d(qty)
+
+        for line in receipt.items:
+            if item_id and line.item_id != item_id:
+                continue
+            item = await db.get(Item, line.item_id)
+            original = _grn_line_returnable(line)
+            if original <= ZERO:
+                original = _d(line.ordered_qty) if hasattr(line, 'ordered_qty') else _d(line.received_qty)
+            previously = already_by_grn_item.get(line.id, ZERO)
+            returnable = max(original - previously, ZERO)
+            # batch/lot
+            batch = await db.get(m.Batch, line.batch_id) if getattr(line, 'batch_id', None) else None
+            unit_price = _d(line.rate) or None
+            item_details.append(s.ItemDetailOut(
+                item_id=line.item_id,
+                item_code=line.item_code or (item.code if item else None),
+                item_name=line.item_name or (item.name if item else None),
+                description=item.description if item else None,
+                uom_code=line.uom_code or (item.uom_code if item else None),
+                batch_no=line.batch_no or (batch.batch_no if batch else None),
+                batch_id=getattr(line, 'batch_id', None),
+                serial_no=None,
+                grn_item_id=line.id,
+                original_qty=original,
+                previously_returned=previously,
+                returnable_qty=returnable,
+                unit_price=unit_price,
+                amount=(returnable * unit_price) if unit_price else None,
+                warehouse_id=receipt.warehouse_id,
+                warehouse_name=receipt.warehouse_name,
+            ))
+        if not item_details:
+            raise ValidationError(f"GRN {receipt.grn_no} has no eligible lines for the selected item")
+
+    elif source_type == "PO":
+        from app.modules.procurement.models import PurchaseOrder, POItem
+        po = await _get(db, PurchaseOrder, source_id, "Purchase Order")
+        source_no = po.po_no
+        purchase.po_id = po.id
+        purchase.po_no = po.po_no
+        purchase.order_date = po.po_date if hasattr(po, 'po_date') else None
+        purchase.indent_id = po.indent_id if hasattr(po, 'indent_id') else None
+        purchase.indent_no = po.indent_no if hasattr(po, 'indent_no') else None
+        # vendor
+        vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
+        if vendor:
+            vendor_out.vendor_id = vendor.id
+            vendor_out.vendor_code = vendor.code
+            vendor_out.vendor_name = vendor.name
+            vendor_out.contact_person = vendor.contact_person
+            vendor_out.phone = vendor.phone
+            vendor_out.email = vendor.email
+            vendor_out.address = vendor.address
+            vendor_out.city = vendor.city
+            vendor_out.state = vendor.state
+            vendor_out.pincode = vendor.pincode
+            vendor_out.gstin = vendor.gstin
+        else:
+            vendor_out.vendor_id = po.vendor_id
+            vendor_out.vendor_name = po.vendor_name
+        # linked warehouse via receipt or indent
+        # try receipt
+        receipt = await db.scalar(select(m.Receipt).where(m.Receipt.po_id == po.id).limit(1))
+        if receipt:
+            warehouse_id = receipt.warehouse_id
+            warehouse_name = receipt.warehouse_name
+            purchase.grn_id = receipt.id
+            purchase.grn_no = receipt.grn_no
+        # items: po lines
+        po_items_stmt = select(POItem).where(POItem.po_id == po.id)
+        if item_id:
+            po_items_stmt = po_items_stmt.where(POItem.item_id == item_id)
+        po_items = (await db.execute(po_items_stmt)).scalars().all()
+        # already returned per po_item
+        already_by_po_item: dict[int, Decimal] = {}
+        already_po = (await db.execute(
+            select(m.PurchaseReturnItem.po_item_id,
+                   func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+            .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+            .where(m.PurchaseReturn.po_id == po.id,
+                   m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                   m.PurchaseReturnItem.po_item_id.isnot(None))
+            .group_by(m.PurchaseReturnItem.po_item_id)
+        )).all()
+        for pid, qty in already_po:
+            already_by_po_item[pid] = _d(qty)
+        for line in po_items:
+            item = await db.get(Item, line.item_id)
+            original = _d(line.quantity)
+            previously = already_by_po_item.get(line.id, ZERO)
+            returnable = max(original - previously, ZERO)
+            unit_price = _d(line.rate) or None
+            item_details.append(s.ItemDetailOut(
+                item_id=line.item_id,
+                item_code=line.item_code or (item.code if item else None),
+                item_name=line.item_name or (item.name if item else None),
+                description=item.description if item else None,
+                uom_code=line.uom_code or (item.uom_code if item else None),
+                batch_no=None,
+                batch_id=None,
+                po_item_id=line.id,
+                original_qty=original,
+                previously_returned=previously,
+                returnable_qty=returnable,
+                unit_price=unit_price,
+                amount=(returnable * unit_price) if unit_price else None,
+                warehouse_id=warehouse_id,
+                warehouse_name=warehouse_name,
+            ))
+
+    elif source_type == "INDENT":
+        from app.modules.indents.models import Indent, IndentItem
+        indent = await _get(db, Indent, source_id, "Indent")
+        source_no = indent.indent_no
+        purchase.indent_id = indent.id
+        purchase.indent_no = indent.indent_no
+        # vendor via linked PO if any
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO
+            po = await db.scalar(select(_PO).where(_PO.indent_id == indent.id).limit(1))
+            if po:
+                vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
+                if vendor:
+                    vendor_out.vendor_id = vendor.id
+                    vendor_out.vendor_code = vendor.code
+                    vendor_out.vendor_name = vendor.name
+                    vendor_out.contact_person = vendor.contact_person
+                    vendor_out.phone = vendor.phone
+                    vendor_out.email = vendor.email
+                    vendor_out.address = vendor.address
+                    vendor_out.city = vendor.city
+                    vendor_out.state = vendor.state
+                    # Both were missing here while the GRN and PO branches above set
+                    # them, so an indent-sourced return auto-fetched a vendor whose
+                    # address ended at the state and whose GSTIN read as "—" — the one
+                    # field the vendor argues a return against.
+                    vendor_out.pincode = vendor.pincode
+                    vendor_out.gstin = vendor.gstin
+                else:
+                    vendor_out.vendor_id = po.vendor_id
+                    vendor_out.vendor_name = po.vendor_name
+                purchase.po_id = po.id
+                purchase.po_no = po.po_no
+        except Exception:
+            # Never silent: this block is the whole vendor auto-fetch for an
+            # indent-sourced return, and swallowing it left the vendor card blank with
+            # nothing said anywhere about why.
+            logger.warning("Vendor could not be read from the PO behind indent %s",
+                           indent.id, exc_info=True)
+        # items
+        stmt = select(IndentItem).where(IndentItem.indent_id == indent.id)
+        if item_id:
+            stmt = stmt.where(IndentItem.item_id == item_id)
+        lines = (await db.execute(stmt)).scalars().all()
+        for line in lines:
+            item = await db.get(Item, line.item_id) if hasattr(line, 'item_id') else None
+            # indent quantity fields vary by version
+            original = _d(getattr(line, 'quantity', None) or getattr(line, 'approved_qty', None) or getattr(line, 'requested_qty', 0))
+            # previously returned via purchase returns linked to this indent (not direct; use po linkage)
+            previously = ZERO
+            returnable = max(original - previously, ZERO)
+            item_details.append(s.ItemDetailOut(
+                item_id=getattr(line, 'item_id', 0),
+                item_code=getattr(line, 'item_code', None) or (item.code if item else None),
+                item_name=getattr(line, 'item_name', None) or (item.name if item else None),
+                description=item.description if item else None,
+                uom_code=getattr(line, 'uom_code', None) or (item.uom_code if item else None),
+                batch_no=None,
+                batch_id=None,
+                original_qty=original,
+                previously_returned=previously,
+                returnable_qty=returnable,
+                warehouse_id=warehouse_id,
+                warehouse_name=warehouse_name,
+            ))
+
+    elif source_type == "ITEM":
+        if not item_id:
+            item_id = source_id
+        item = await _get(db, Item, int(item_id), "Item")
+        source_no = item.code
+        # vendor via preferred vendor_items
+        vendor_item = await db.scalar(
+            select(Vendor).join(s.Item, False)  # placeholder
+        ) if False else None
+        # find preferred vendor for item
+        from app.shared.models.master import VendorItem as _VI
+        vi = await db.scalar(select(_VI).where(_VI.item_id == item.id, _VI.is_preferred.is_(True)).limit(1))
+        if vi:
+            vendor = await db.get(Vendor, vi.vendor_id)
+            if vendor:
+                vendor_out.vendor_id = vendor.id
+                vendor_out.vendor_code = vendor.code
+                vendor_out.vendor_name = vendor.name
+                vendor_out.contact_person = vendor.contact_person
+                vendor_out.phone = vendor.phone
+                vendor_out.email = vendor.email
+                vendor_out.address = vendor.address
+                vendor_out.city = vendor.city
+                vendor_out.state = vendor.state
+        # warehouse: caller's primary location?
+        item_details.append(s.ItemDetailOut(
+            item_id=item.id,
+            item_code=item.code,
+            item_name=item.name,
+            description=item.description,
+            uom_code=item.uom_code,
+            batch_no=None,
+            batch_id=None,
+            original_qty=ZERO,
+            previously_returned=ZERO,
+            returnable_qty=ZERO,
+            warehouse_id=None,
+            warehouse_name=None,
+        ))
+
+    total_orig = sum((_d(it.original_qty) for it in item_details), ZERO)
+    total_prev = sum((_d(it.previously_returned) for it in item_details), ZERO)
+    total_ret = sum((_d(it.returnable_qty) for it in item_details), ZERO)
+
+    return {
+        "source_type": source_type,
+        "source_id": source_id,
+        "source_no": source_no,
+        "vendor": vendor_out.model_dump() if hasattr(vendor_out, 'model_dump') else vendor_out,
+        "items": [it.model_dump() if hasattr(it, 'model_dump') else it for it in item_details],
+        "purchase": purchase.model_dump() if hasattr(purchase, 'model_dump') else purchase,
+        "warehouse_id": warehouse_id,
+        "warehouse_name": warehouse_name,
+        "total_original_qty": total_orig,
+        "total_previously_returned": total_prev,
+        "total_returnable_qty": total_ret,
+    }
+
+
+async def send_to_vendor(db: AsyncSession, return_id: int, data: s.PurchaseReturnSendToVendorIn, user) -> m.PurchaseReturn:
+    """Warehouse → Vendor: the single 'Send to Vendor' commitment.
+
+    1. Validate the return is sendable - a DRAFT, or APPROVED by its ladder
+    2. Validate return quantity ≤ returnable, vendor locked to source, all required fields
+    3. Create/link Existing Logistics transaction (out_dispatches VENDOR_RETURN)
+    4. Flip -> SENT_TO_VENDOR, stamp sent_at, keep the dispatch link for the trail
+    5. A SENT_TO_VENDOR row can never be sent again.
+    """
+    doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    # Status guard — only a DRAFT can be sent; everything sent/settled is refused.
+    if doc.status == ReturnStatus.CANCELLED.value:
+        raise ValidationError("A cancelled return cannot be sent to vendor")
+    if doc.status == ReturnStatus.SENT_TO_VENDOR.value:
+        raise ValidationError("This Purchase Return has already been sent to the vendor")
+    if doc.status == ReturnStatus.COMPLETED.value:
+        raise ValidationError("This return is already completed")
+    if doc.status == ReturnStatus.DISPATCHED.value:
+        raise ValidationError("This return has already been dispatched to the vendor")
+    if doc.status == ReturnStatus.PENDING_APPROVAL.value:
+        raise ValidationError(
+            "This Purchase Return is waiting for approval. It can be sent to the "
+            "vendor once it has been approved.")
+    if doc.status not in SENDABLE_RETURN_STATUSES:
+        raise ValidationError(
+            f"A Purchase Return can be sent to the vendor while it is a draft, or "
+            f"once it has been approved. This return is {doc.status}.")
+
+    # Validate reason
+    valid_reasons = {v for v, _ in s.PURCHASE_RETURN_REASONS}
+    if data.return_reason not in valid_reasons:
+        raise ValidationError(f"Return reason must be one of: {', '.join(sorted(valid_reasons))}")
+    if data.return_reason == "OTHER" and not (data.remarks or "").strip():
+        raise ValidationError("Remarks are required when reason is Other")
+
+    # How it travels. Checked HERE, before either branch below commits anything, so a
+    # half-answered wizard is refused with the document still a DRAFT the storekeeper
+    # can go back and finish — rather than after the status has already flipped.
+    # Absent on purpose is not an error: the block is optional, and a caller that
+    # predates the wizard sends exactly what it always did. See the schema.
+    logistics_mode = (_validate_return_logistics(data.logistics)
+                      if data.logistics is not None else None)
+
+    # --- a MANUAL return goes out on its own terms ----------------------------------
+    #
+    # There is no source document to bind, no vendor to re-lock against one, and no
+    # returnable cap to re-check — the figures beside each line ARE the storekeeper's
+    # figures, checked against each other in `_apply_manual_return_lines`.
+    #
+    # NO `out_dispatches` RECORD IS RAISED, and that is deliberate rather than an
+    # omission. A dispatch line requires a master `item_id` (`out_dispatch_items` is
+    # NOT NULL on it and is the logistics module's table, shared with consignments), and
+    # a manual return exists precisely because its goods are not in the masters. Filing
+    # invented lines into the logistics register to satisfy a foreign key would put
+    # stock movements on the books for goods this system never held. The document still
+    # records that it went, and when it went, which is the fact being asserted.
+    if doc.is_manual:
+        if not (doc.vendor_name or "").strip() and not doc.vendor_id:
+            raise ValidationError(
+                "Enter the vendor's name before sending — the return has to say who "
+                "the goods are going back to.")
+        # LAST CHANCE TO BIND, for every manual return raised before the typed name was
+        # matched against the master at all. Those rows carry a name and a null
+        # `vendor_id`, so sending them put the goods on the road with no supplier able to
+        # see the document. Only ever fills a null — a return already bound is left
+        # exactly as it is.
+        if not doc.vendor_id:
+            matched = await _match_manual_vendor(
+                db, doc.vendor_name, doc.manual_vendor_code, doc.manual_vendor_gstin)
+            if matched:
+                doc.vendor_id = matched.id
+        if data.items:
+            await _apply_manual_return_lines(db, doc, data.items)
+        if not doc.items:
+            raise ValidationError("A return with no lines sends nothing back")
+        before_status = doc.status
+        doc.reason = data.return_reason
+        doc.remarks = (data.remarks or "").strip() or None
+        doc.status = ReturnStatus.SENT_TO_VENDOR.value
+        doc.sent_at = utcnow()
+        # The wizard's logistics answers, kept in the AUDIT TRAIL and nowhere else.
+        # A manual return raises no `out_dispatches` row — see the block above for
+        # why, and it has not changed — so there is no consignment to hang a
+        # transport mode on. The trail is a real, structured, permanent record, and
+        # losing what the storekeeper typed because the destination column does not
+        # exist would be worse than filing it here.
+        after = {"status": doc.status, "is_manual": True,
+                 "vendor_name": doc.vendor_name,
+                 "sent_at": doc.sent_at.isoformat() if doc.sent_at else None,
+                 "reason": doc.reason}
+        if logistics_mode:
+            after["logistics"] = _logistics_audit(data.logistics, logistics_mode)
+        await write_audit(
+            db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+            action=AuditAction.UPDATE, actor=user,
+            before={"status": before_status},
+            after=after)
+        await db.commit()
+        return await get_return(db, doc.id, user)
+
+    # Bind source if provided — but never to a different vendor than the locked one.
+    if data.grn_id:
+        receipt = await db.get(m.Receipt, data.grn_id)
+        if not receipt:
+            raise NotFoundError(f"Purchase Invoice/GRN {data.grn_id} not found")
+        if receipt.vendor_id and doc.vendor_id and int(receipt.vendor_id) != int(doc.vendor_id):
+            raise ValidationError(
+                "Vendor must come from the selected Purchase Invoice/PO and cannot be changed.")
+        doc.grn_id = receipt.id
+        doc.grn_no = receipt.grn_no
+        if not doc.po_id and receipt.po_id:
+            doc.po_id = receipt.po_id
+            doc.po_no = receipt.po_no
+        if not doc.vendor_id:
+            # Through the PO where the GRN names no vendor — see `_receipt_vendor`.
+            # Without this the send bound the GRN and then refused the document a
+            # line later for having no vendor to send it to.
+            doc.vendor_id, doc.vendor_name = await _receipt_vendor(db, receipt)
+        if not doc.warehouse_id and receipt.warehouse_id:
+            doc.warehouse_id = receipt.warehouse_id
+            doc.warehouse_name = receipt.warehouse_name
+    if data.po_id:
+        try:
+            from app.modules.procurement.models import PurchaseOrder as _PO2
+            po = await db.get(_PO2, data.po_id)
+            if not po:
+                raise NotFoundError(f"Purchase Order {data.po_id} not found")
+            if po.vendor_id and doc.vendor_id and int(po.vendor_id) != int(doc.vendor_id):
+                raise ValidationError(
+                    "Vendor must come from the selected Purchase Invoice/PO and cannot be changed.")
+            doc.po_id = po.id
+            doc.po_no = po.po_no
+            if not doc.vendor_id:
+                doc.vendor_id = po.vendor_id
+                doc.vendor_name = po.vendor_name
+        except (NotFoundError, ValidationError):
+            raise
+        except Exception:
+            doc.po_id = data.po_id
+    if data.vendor_id:
+        if doc.vendor_id and int(data.vendor_id) != int(doc.vendor_id):
+            raise ValidationError(
+                "Vendor must come from the selected Purchase Invoice/PO and cannot be changed.")
+        vendor = await db.get(Vendor, data.vendor_id)
+        if not vendor:
+            raise NotFoundError(f"Vendor {data.vendor_id} not found")
+        doc.vendor_id = vendor.id
+        doc.vendor_name = vendor.name
+    if data.warehouse_id:
+        wh = await db.get(Warehouse, data.warehouse_id)
+        if not wh:
+            raise NotFoundError(f"Warehouse {data.warehouse_id} not found")
+        doc.warehouse_id = wh.id
+        doc.warehouse_name = wh.name
+
+    # Final vendor/warehouse validation
+    if not doc.vendor_id:
+        raise ValidationError("Vendor is required — select a purchase transaction to auto-fetch vendor")
+    if not doc.warehouse_id:
+        raise ValidationError("Warehouse is required — select a purchase transaction to auto-fetch warehouse")
+
+    # Validate stock/return eligibility & apply lines with returnable check
+    # Build caps for validation message
+    caps: dict[int | None, Decimal] = {}
+    if doc.grn_id:
+        receipt = await _load(db, m.Receipt, doc.grn_id, "Receipt", m.Receipt.items)
+        caps_by_grn = {l.id: _grn_line_returnable(l) for l in receipt.items}
+        already = (await db.execute(
+            select(m.PurchaseReturnItem.grn_item_id, func.coalesce(func.sum(m.PurchaseReturnItem.quantity), 0))
+            .join(m.PurchaseReturn, m.PurchaseReturn.id == m.PurchaseReturnItem.return_id)
+            .where(m.PurchaseReturn.grn_id == doc.grn_id,
+                   m.PurchaseReturn.id != doc.id,
+                   m.PurchaseReturn.status != ReturnStatus.CANCELLED.value,
+                   m.PurchaseReturnItem.grn_item_id.isnot(None))
+            .group_by(m.PurchaseReturnItem.grn_item_id)
+        )).all()
+        for gid, qty in already:
+            caps_by_grn[gid] = max(caps_by_grn.get(gid, ZERO) - _d(qty), ZERO)
+        caps = caps_by_grn
+        # Validate each incoming line against cap
+        for line in data.items:
+            cap = caps.get(line.grn_item_id) if line.grn_item_id else None
+            if cap is not None and _d(line.quantity) > cap:
+                raise ValidationError(
+                    f"Return quantity cannot exceed the available returnable quantity of {cap}.")
+
+    # Also validate requested qty not negative and item exists
+    for idx, line in enumerate(data.items, start=1):
+        if _d(line.quantity) <= ZERO:
+            raise ValidationError(f"Line {idx}: return quantity must be greater than 0")
+        if not line.item_id:
+            # Optional on the schema because manual lines exist; a sourced send still
+            # needs it, and reaching `_item_snapshot` with None raised a 500 instead.
+            raise ValidationError(
+                f"Line {idx}: pick the item from the source document.")
+        await _item_snapshot(db, line.item_id)
+
+    # Apply lines (also re-checks cap)
+    await _apply_return_lines(db, doc, data.items)
+    doc.reason = data.return_reason
+    doc.remarks = (data.remarks or "").strip() or None
+
+    # THE QC THAT CONDEMNED THE GOODS, bound here for the same reason the GRN, the PO and
+    # the vendor are bound here: sending is what turns a read of the trail into a claim
+    # against a supplier, and the inspection is the evidence behind the claim. Only ever
+    # written where it is not already set — a return raised off a branch consignment
+    # carries its own QC from birth and that one is the better answer.
+    await _bind_return_inspection(db, doc)
+
+    # Update return status — DRAFT -> SENT_TO_VENDOR.
+    #
+    # NOTHING PHYSICAL HAPPENS HERE, and that is the change of 2026-09-12. This press used
+    # to raise the `out_dispatches` consignment AND a logistics leg, so the goods left the
+    # warehouse in the same breath as the paperwork and the vendor was asked to approve a
+    # consignment already standing on their dock. The business does it the other way
+    # round: the vendor reads the return against the GRN/PO/QC and says yes or no, then
+    # says refund or replacement, and only then does this warehouse decide whose vehicle
+    # carries the goods. The consignment and the leg are raised at that decision instead —
+    # see `arrange_return_transport`. A document that has gone out for an answer has moved
+    # no stock, so rule 7 has nothing to say about this function any more.
+    before = doc.status
+    doc.status = ReturnStatus.SENT_TO_VENDOR.value
+    doc.sent_at = utcnow()
+
+    sent_after = {"status": doc.status, "vendor_id": doc.vendor_id,
+                  "grn_no": doc.grn_no, "po_no": doc.po_no,
+                  "inspection_no": doc.inspection_no,
+                  "total_qty": str(doc.total_qty),
+                  "reason": doc.reason,
+                  "sent_at": doc.sent_at.isoformat() if doc.sent_at else None}
+    # A caller that still states how the goods travel is VALIDATED as before (a
+    # half-answered block is refused, and the document stays a DRAFT they can finish) but
+    # no longer acted on here — nothing travels until the vendor has answered and the
+    # transport decision has been taken. Kept on the TRAIL rather than dropped, because
+    # what somebody typed is a real record and losing it silently is worse than filing it
+    # somewhere the transport step can read it back.
+    if logistics_mode:
+        sent_after["logistics_stated_at_send"] = _logistics_audit(data.logistics,
+                                                                  logistics_mode)
+    await write_audit(db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      before={"status": before},
+                      after=sent_after,
+                      summary=(f"Purchase Return {doc.return_no} sent to "
+                               f"{doc.vendor_name or 'the vendor'} for their decision"))
+    await db.commit()
+
+    enriched = await _load(db, m.PurchaseReturn, doc.id, "Return", m.PurchaseReturn.items)
+    await _decorate_purchase_return(db, enriched)
+    return await _decorate_can_approve(db, enriched, WarehouseDocType.PURCHASE_RETURN.value, user)
+
+
+async def _bind_return_inspection(db: AsyncSession, doc: m.PurchaseReturn) -> None:
+    """Name the QC inspection behind this return's goods receipt, if it has none yet.
+
+    NEVER OVERWRITES. A return raised automatically off a branch consignment already
+    carries the inspection its own chain named, and that one was resolved with the
+    returned items in hand — this one is resolved from the GRN alone. Where both exist the
+    earlier answer is the better answer, so this only fills a blank.
+
+    The latest NON-CANCELLED inspection against the receipt, which is the same query
+    `_dossier_documents` has always used for the trail row, with the status filter it was
+    missing — a cancelled or rejected inspection winning on `MAX(id)` would name the one
+    piece of evidence that was withdrawn.
+
+    Silent where there is nothing to name: a return with no GRN, or a GRN nobody
+    inspected, keeps a null QC rather than borrowing somebody else's.
+    """
+    if doc.inspection_no or not doc.grn_id:
+        return
+    qc = await db.scalar(
+        select(m.Inspection)
+        .where(m.Inspection.receipt_id == doc.grn_id,
+               m.Inspection.status.notin_([InspectionStatus.CANCELLED.value,
+                                           InspectionStatus.REJECTED.value]))
+        .order_by(m.Inspection.id.desc()).limit(1))
+    if qc is not None:
+        doc.inspection_id = qc.id
+        doc.inspection_no = qc.inspection_no
+
+
+async def _build_return_consignment(db: AsyncSession, doc: m.PurchaseReturn, user,
+                                    logistics_mode: str | None,
+                                    logistics: "s.PurchaseReturnLogisticsIn | None",
+                                    ) -> m.Dispatch:
+    """The warehouse's own outward document for the goods going back to the vendor.
+
+    MOVED OUT OF `send_to_vendor` on 2026-09-12 (it was inline there) and into the
+    transport decision, because that is when the load actually travels. Byte-for-byte the
+    same document it always was — same `ref_type`, same `DispatchStatus.APPROVED`, same
+    lines — so `transport_released` -> `_apply_gate_out` settles it exactly as before and
+    the stock side never had two copies. What changed is only the moment it is raised.
+
+    Left at APPROVED rather than despatched: the goods are still on our floor, and the
+    gate-out is the logistics release (branch B) or the vendor's own pickup (branch A).
+    """
+    vendor = await db.get(Vendor, doc.vendor_id) if doc.vendor_id else None
+    wh = await db.get(Warehouse, doc.warehouse_id) if doc.warehouse_id else None
+    dispatch = m.Dispatch(
+        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value) if hasattr(WarehouseDocType, 'DISPATCH') else f"DISP-{doc.return_no}",
+        dispatch_type=DispatchType.VENDOR_RETURN.value if hasattr(DispatchType, 'VENDOR_RETURN') else "VENDOR_RETURN",
+        dispatch_date=ist_today() if 'ist_today' in globals() else date.today(),
+        warehouse_id=doc.warehouse_id,
+        warehouse_name=wh.name if wh else doc.warehouse_name,
+        vendor_id=doc.vendor_id,
+        vendor_name=vendor.name if vendor else doc.vendor_name,
+        delivery_address=_vendor_address(vendor) if vendor else None,
+        contact_person=vendor.contact_person if vendor and vendor.contact_person else None,
+        contact_phone=vendor.phone if vendor else None,
+        ref_type="PURCHASE_RETURN",
+        ref_id=doc.id,
+        ref_no=doc.return_no,
+        status=DispatchStatus.APPROVED.value,
+        total_items=len(doc.items),
+        total_qty=sum((_d(l.quantity) for l in doc.items), ZERO),
+        total_packages=len(doc.items),
+        total_value=sum((_d(l.amount) for l in doc.items), ZERO),
+        remarks=(f"Purchase Return {doc.return_no} → Vendor "
+                 f"{vendor.name if vendor else doc.vendor_name}"
+                 + (f" | Reason: {doc.reason}" if doc.reason else "")
+                 + (f" | {doc.remarks}" if doc.remarks else "")),
+        created_by_id=getattr(user, "id", None),
+        created_by_name=_name(user),
+    )
+    # How it travels, who signed, and what left the gate — applied AFTER the defaults
+    # above are set, because several of its fields (the delivery point, the package
+    # count) refine a value the vendor master or the line count already seeded.
+    if logistics_mode and logistics is not None:
+        _apply_return_logistics(dispatch, logistics, logistics_mode)
+    db.add(dispatch)
+    await db.flush()
+    # Dispatch items
+    for idx, line in enumerate(doc.items, start=1):
+        batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
+        # A manual line typed before the code was resolved at save carries no item id,
+        # and `out_dispatch_items.item_id` is NOT NULL — the raw database refusal came
+        # back to the desk as "item_id is required" on a form where the item was plainly
+        # filled in. Resolve the code here too, and say which line if it names nothing.
+        item_id = line.item_id
+        if not item_id:
+            found = await _item_by_code(db, line.item_code)
+            if found is not None:
+                item_id = line.item_id = found.id
+                line.item_code = found.code
+                line.uom_code = line.uom_code or found.uom_code
+        if not item_id:
+            named = f" - the code {line.item_code} matches none" if line.item_code else ""
+            raise ValidationError(
+                f"Line {idx} ({line.item_name or 'no name'}) is not linked to an item "
+                f"in the master{named}. Open the return, pick the item from the master "
+                "and save it, then arrange transport: the consignment and the stock "
+                "movement are both keyed on it.")
+        db.add(m.DispatchItem(
+            dispatch_id=dispatch.id,
+            line_no=idx,
+            item_id=item_id,
+            item_code=line.item_code,
+            item_name=line.item_name,
+            uom_code=line.uom_code,
+            batch_id=line.batch_id,
+            batch_no=line.batch_no or (batch.batch_no if batch else None),
+            quantity=_d(line.quantity),
+            rate=_d(line.rate) if line.rate else None,
+            amount=_d(line.amount) if line.amount else None,
+            remarks=line.reason,
+        ))
+    await db.flush()
+
+    # The link the serializer reads, and the one `_decorate_return_dispatch` will find on
+    # every later load off `out_dispatches` directly.
+    doc.dispatch_id = dispatch.id
+    doc.dispatch_no = dispatch.dispatch_no
+
+    dispatch_after = {"ref_type": "PURCHASE_RETURN", "ref_no": doc.return_no,
+                      "vendor": doc.vendor_name, "warehouse": doc.warehouse_name}
+    if logistics_mode and logistics is not None:
+        dispatch_after["logistics"] = _logistics_audit(logistics, logistics_mode)
+    await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
+                      entity_no=dispatch.dispatch_no,
+                      action=AuditAction.CREATE, actor=user,
+                      after=dispatch_after)
+    return dispatch
+
+
+# ---------------------------------------------------------------------------
+# After SENT_TO_VENDOR: the vendor's decision, and the journey the goods then make
+# ---------------------------------------------------------------------------
+#
+# THE FLOW, in the order a person works it, and WHO presses each button:
+#
+#   SENT_TO_VENDOR ──Reject (VENDOR, remarks required)──> REJECTED         (terminal)
+#                  ──Approve (VENDOR)──────────────────> VENDOR_APPROVED
+#                        ├─ Refund (VENDOR) ───────────> REFUNDED          (terminal)
+#                        └─ Replacement (VENDOR) ──────> REPLACEMENT_AGREED
+#                              │
+#                              └─ whose vehicle? (WAREHOUSE)
+#                                   ├─ Vendor arranges
+#                                   │    -> AWAITING_VENDOR_VEHICLE
+#                                   │    -> VENDOR accepts the job
+#                                   │         -> VENDOR_TRANSPORT_ACCEPTED
+#                                   │    -> VENDOR records the pickup
+#                                   │         -> STOCK_PICKED_UP
+#                                   └─ Warehouse requests a vehicle
+#                                        -> VEHICLE_REQUESTED   (leg raised in Logistics)
+#                                        -> STOCK_PICKED_UP     (logistics releases it)
+#                              -> VENDOR_RECEIVED          (VENDOR signs at their dock)
+#                              -> REPLACEMENT_DISPATCHED   (VENDOR's dispatch note, which
+#                                                           raises the DRAFT GRN)
+#                              -> RECEIVED_AT_WAREHOUSE    (the store SUBMITS that GRN)
+#                                   -> QC inspection on the same GRN
+#                                   -> putaway, once QC has passed it
+#                              -> COMPLETED                (the last putaway closes it)
+#
+# THE TAIL IS THE STORE'S ORDINARY INWARD PATH (2026-09-14). Everything after the vendor's
+# dispatch note happens on documents that already exist — the goods receipt, its
+# inspection, its putaway tasks — worked on the screens the store already works, with the
+# guards those documents already carry. Nothing about a replacement is booked in, inspected
+# or placed differently from any other delivery, which is why there is no second ladder
+# here: `RECEIVED_AT_WAREHOUSE` is where the return stands for the whole of it, and
+# `_close_return_on_intake_complete` is the single hook that ends it when the receipt
+# reaches COMPLETED. The journey READS those three rungs (`_replacement_intake`) so a
+# person chasing the return can see them without opening three other documents.
+#
+# WHO DECIDES CHANGED on 2026-09-12. Approve/Reject and Refund/Replacement used to be
+# OUR desk's presses, on a return whose goods had already gone out with the send. They
+# are the VENDOR's, made on their own portal against paperwork, before anything travels.
+# `decide_sent_return` and `arrange_return_vehicle` are gone with that change; the desk
+# keeps exactly one press in this whole sequence — `arrange_return_transport`, which is
+# the only question the business actually asks this warehouse.
+#
+# Every press below follows rule 9 — load, validate the CURRENT status, change it, write
+# the audit row, commit — and every audit row is written against `pro_returns`, which is
+# what puts the whole of this on the document's own History tab and its Journey
+# (`_dossier_timeline` unions `sys_audit_log` for this entity). Nothing here writes a
+# second history table.
+#
+# DUPLICATE PRESSES ARE REFUSED BY THE RUNGS THEMSELVES. Each press guards on its own
+# frozenset from `enums` (`RETURN_DECIDABLE_STATUSES` and friends) and the act moves the
+# document off that rung, so the second press is refused by the same test that refuses an
+# early one. Nothing needs a separate "already done" flag, and the served `can_*` flags
+# are computed from the same sets so the screen and the server cannot disagree.
+#
+# WHAT IS DELIBERATELY NOT HERE: no stock moves on any of these presses. Stock leaves the
+# books through `_apply_gate_out` on the consignment — the shared path the logistics
+# release and the vendor pickup both go through — and `complete_return` still owns the
+# close. These rungs record where the goods ARE, which is a different question from what
+# they are worth to us (rule 7 — stock changes only through `move_stock()`).
+
+
+def _decision_guard(doc: m.PurchaseReturn, what: str) -> None:
+    """Refuse a press the document is not standing at, in words that say why.
+
+    Its own function because every press below needs the same sentence shape, and a
+    reader hitting "cannot approve a DRAFT" needs to be told what CAN be done with a
+    draft rather than only that this cannot.
+
+    `status_label` is read with `getattr` because it is a TRANSIENT assigned by
+    `_decorate_purchase_return`, and every caller here loads the row raw — `_load` and
+    `_vendor_return` both return an undecorated instance. Reading it directly raised
+    AttributeError instead of this ValidationError, so a press made one rung too early
+    came back as a 500 with no explanation rather than the sentence written below. It is
+    a fallback anyway: the raw status is what every filter matches on.
+    """
+    raise ValidationError(
+        f"{doc.return_no} is {getattr(doc, 'status_label', None) or doc.status} — {what}")
+
+
+async def vendor_decide_return(db: AsyncSession, vendor_id: int, return_id: int,
+                               data: "s.VendorReturnDecisionIn"):
+    """The VENDOR's Approve or Reject on a return we have sent them.
+
+    THE DECISION MOVED HOUSE on 2026-09-12. This used to be `decide_sent_return`, a press
+    on our own returns desk gated on `return.approve`, answering for a vendor who was
+    already holding the goods. The business does not work that way: the return goes out as
+    PAPERWORK, the vendor reads it against the GRN, the PO and the QC that condemned the
+    stock, and the vendor says whether they accept it back. Nothing has travelled yet, so
+    a rejection costs a conversation rather than a wasted lorry.
+
+    NOT `engine.act`, and that judgement is unchanged from the desk version. The workflow
+    engine owns the chain that signs a document BEFORE it goes out (rule 8) — that is
+    `submit_return` starting a PURCHASE_RETURN instance while the return is still a draft,
+    and it still does. This is a counterparty's answer on a document that instance has
+    finished with, and starting a second instance against the same (doc_type, doc_id) is
+    exactly what the engine refuses. So it is the document's own status transition,
+    recorded in `sys_audit_log` where the History tab and the Journey both read it.
+
+    NO PERMISSION CODE, and none is wanted: the caller is a vendor, not an employee, and
+    `_vendor_return` scopes the row to the vendor id taken from their token at the router.
+    A return belonging to somebody else is a 404, not a 403.
+
+    A REJECTION MUST SAY WHY. An approval need not — the reason it was approved is the
+    reason it was raised, and a second mandatory box is one people type "ok" into. The
+    refusal is read by the storekeeper who raised the return and has to argue it, so an
+    unexplained one is useless to them.
+
+    ANSWERED ONCE. A decided return is past `RETURN_DECIDABLE_STATUSES`, so the second
+    press is refused by the same guard that refuses one too early.
+    """
+    doc = await _vendor_return(db, vendor_id, return_id)
+    if doc.status not in RETURN_DECIDABLE_STATUSES:
+        if doc.vendor_decision:
+            raise ValidationError(
+                f"{doc.return_no} was already "
+                f"{'approved' if doc.vendor_decision == ApprovalAction.APPROVED.value else 'rejected'}"
+                f"{f' on {doc.vendor_decision_at:%d %b %Y}' if doc.vendor_decision_at else ''}"
+                f" — it cannot be decided twice. Ask the buyer to raise a fresh document "
+                f"if something needs to change.")
+        _decision_guard(doc, "only a return that has been sent to you and not yet "
+                             "answered can be approved or rejected")
+
+    approved = data.action == ApprovalAction.APPROVED.value
+    note = (data.remarks or "").strip() or None
+    if not approved and not note:
+        raise ValidationError(
+            "Say why you are rejecting this return — the warehouse that raised it reads "
+            "this and has to act on it.")
+
+    before = doc.status
+    doc.vendor_decision = (ApprovalAction.APPROVED.value if approved
+                           else ApprovalAction.REJECTED.value)
+    doc.vendor_decision_at = utcnow()
+    # Deliberately NOT `vendor_decision_by_id`: that column is a soft fk to an EMPLOYEE
+    # and there is no employee behind this press. The name is the vendor's own, which is
+    # the honest record of who answered.
+    doc.vendor_decision_by_name = doc.vendor_name or "the vendor"
+    doc.vendor_decision_note = note
+    doc.status = (ReturnStatus.VENDOR_APPROVED.value if approved
+                  else ReturnStatus.REJECTED.value)
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        before={"status": before},
+        after={"status": doc.status, "vendor_decision": doc.vendor_decision,
+               "decided_by": doc.vendor_decision_by_name, "comments": note,
+               "acting_vendor_id": vendor_id},
+        summary=(f"Purchase Return {doc.return_no} "
+                 f"{'approved' if approved else 'rejected'} by "
+                 f"{doc.vendor_decision_by_name}"
+                 + (f" — {note}" if note else "")))
+    await db.commit()
+    logger.info("Purchase Return %s %s by the vendor", doc.return_no,
+                "approved" if approved else "rejected")
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def vendor_settle_return(db: AsyncSession, vendor_id: int, return_id: int,
+                               data: "s.VendorReturnSettlementIn"):
+    """Refund or Replacement — the VENDOR's second answer, once they have approved.
+
+    Two outcomes and no third. The old portal offered a RETURNED option beside these
+    ("we refuse these goods and are sending them back"), which was a refusal wearing the
+    costume of a settlement: it arrived on the same press as the two real settlements and
+    had to be untangled downstream. Refusal is now its own earlier press
+    (`vendor_decide_return`), so by the time anybody gets here the return has been
+    accepted and the only question left is what we get for it.
+
+    REFUND is terminal. Nothing travels, so there is no transport question, no vehicle and
+    no receipt — the figure and its stamp are the whole of what is left. The amount is
+    capped against `total_value` HERE rather than in the schema, because only this function
+    has the row and the cap is the one check an attacker would otherwise control both sides
+    of. A partial credit is ordinary (freight deducted, a restocking charge kept back); an
+    over-credit is a payment against nothing.
+
+    REPLACEMENT hands the document to OUR warehouse, which owes exactly one decision —
+    whose vehicle moves the goods. That is why it lands on its own rung rather than
+    staying on VENDOR_APPROVED: a person chasing the return needs to know which desk is
+    holding it, and "approved" does not say.
+
+    ANSWERED ONCE, by `RETURN_SETTLEABLE_STATUSES`. Answering moves the document off the
+    rung, so neither outcome can be pressed twice and one can never overwrite the other.
+    """
+    doc = await _vendor_return(db, vendor_id, return_id)
+    if doc.status not in RETURN_SETTLEABLE_STATUSES:
+        if doc.vendor_response:
+            answered = dict(s.VENDOR_RETURN_RESPONSES).get(doc.vendor_response,
+                                                           doc.vendor_response)
+            raise ValidationError(
+                f'{doc.return_no} was already settled as "{answered}"'
+                f"{f' on {doc.vendor_response_at:%d %b %Y}' if doc.vendor_response_at else ''}"
+                f". Ask the buyer to raise a fresh document if something needs to change.")
+        _decision_guard(doc, "a refund or a replacement can only be chosen once you have "
+                             "approved the return")
+
+    refunding = data.settlement == VendorReturnResponse.REFUNDED.value
+    note = (data.remarks or "").strip() or None
+    before = doc.status
+
+    if refunding:
+        amount = _d(data.refund_amount)
+        if amount <= ZERO:
+            raise ValidationError("The refund amount must be greater than 0.")
+        total = _d(doc.total_value)
+        if total > ZERO and amount > total:
+            raise ValidationError(
+                f"A refund of {amount:,.2f} is more than the {total:,.2f} of goods on "
+                f"{doc.return_no}. Credit that value or less.")
+        doc.vendor_refund_amount = amount
+        doc.status = ReturnStatus.REFUNDED.value
+    else:
+        doc.status = ReturnStatus.REPLACEMENT_AGREED.value
+
+    doc.vendor_response = (VendorReturnResponse.REFUNDED.value if refunding
+                           else VendorReturnResponse.REPLACED.value)
+    doc.vendor_response_at = utcnow()
+    doc.vendor_response_note = note
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        before={"status": before},
+        after={"status": doc.status, "vendor_response": doc.vendor_response,
+               # str(), not float(): this is the figure a credit note is reconciled
+               # against, and the audit row must not be where a decimal turns into a
+               # binary approximation of itself.
+               "vendor_refund_amount": (str(doc.vendor_refund_amount)
+                                        if doc.vendor_refund_amount is not None else None),
+               "remarks": note, "acting_vendor_id": vendor_id},
+        summary=(f"Purchase Return {doc.return_no}: "
+                 + (f"{doc.vendor_name or 'the vendor'} is refunding "
+                    f"{_d(doc.vendor_refund_amount):,.2f}" if refunding
+                    else f"{doc.vendor_name or 'the vendor'} is sending a replacement — "
+                         f"the warehouse now arranges transport")
+                 + (f" — {note}" if note else "")))
+    await db.commit()
+    logger.info("Purchase Return %s settled by the vendor as %s",
+                doc.return_no, doc.vendor_response)
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def _ensure_return_warehouse(db: AsyncSession, doc: m.PurchaseReturn,
+                                   user=None) -> None:
+    """Make sure the return says which of OUR points the load leaves from.
+
+    `out_dispatches.warehouse_id` is NOT NULL; `pro_returns.warehouse_id` is not, and the
+    gap between the two is what reaches the transport screen as a raw column name, on a
+    band whose only fields are the pickup address and the ready date. There is nothing on
+    that screen to fill in, because the value is missing from the RETURN, not the form.
+
+    How a return gets there: `send_to_vendor` refuses a sourced return with no warehouse,
+    but a MANUAL one returns before that check, and a return raised automatically off a
+    branch consignment copies whatever the stock transfer named at its end — so a leg
+    whose end had no warehouse row behind it leaves the id null with the NAME still
+    written on the document.
+
+    Resolved in the order the answer is actually known, and never invented:
+
+      1. the id the return already carries;
+      2. the goods receipt behind it — `inb_receipts.warehouse_id` is NOT NULL and is
+         literally where the material was booked in;
+      3. the warehouse master, matched on the name the document is already showing. Some
+         rows carry a picker's display label ("CENTRAL WAREHOUSE-1 - MAIN") rather than
+         the plain name, so the code and the part before a " - " suffix are tried too.
+         Every match is exact and case-insensitive: this narrows a name down to the row
+         that already bears it, and never picks between two that merely look alike;
+      4. THE PERSON PRESSING THE BUTTON — their own primary stocking point, across every
+         live post they hold. A manual draft carries no warehouse, no GRN and no item, so
+         1-3 have nothing to read and this is the only place the answer exists: the goods
+         are standing on the floor of the point that person works, which is what the
+         question was asking. This is why there is NO warehouse dropdown on the band —
+         asking a storekeeper to confirm their own only warehouse is a press with one
+         possible answer. Only where every live post agrees on ONE point: two posts at
+         two different stores is a genuine ambiguity, and guessing would send a vehicle
+         to the wrong building.
+
+    Whatever it resolves is STAMPED BACK onto the return, because every later read asks
+    the same column — the register's warehouse filter, `scope_condition`, and the receipt
+    the replacement is booked in against would all go on getting null.
+
+    Where nothing resolves the press is refused in words a storekeeper can act on, with
+    the document untouched — which is why this runs before the arrangement is written.
+    """
+    if doc.warehouse_id:
+        return
+
+    if doc.grn_id:
+        receipt = await db.get(m.Receipt, doc.grn_id)
+        if receipt is not None and receipt.warehouse_id:
+            doc.warehouse_id = receipt.warehouse_id
+            doc.warehouse_name = receipt.warehouse_name or doc.warehouse_name
+            return
+
+    named = (doc.warehouse_name or "").strip()
+    if named:
+        candidates = [named]
+        if " - " in named:
+            candidates.append(named.rsplit(" - ", 1)[0].strip())
+        for candidate in candidates:
+            if not candidate:
+                continue
+            wh = await db.scalar(
+                select(Warehouse)
+                .where(Warehouse.is_active.is_(True),
+                       or_(func.lower(Warehouse.name) == candidate.lower(),
+                           func.lower(Warehouse.code) == candidate.lower()))
+                .limit(1))
+            if wh is not None:
+                doc.warehouse_id = wh.id
+                doc.warehouse_name = wh.name
+                return
+
+    if user is not None:
+        own: set[int] = set()
+        for position_id in await stock_locations.active_positions_of(db, user):
+            point = await stock_locations.primary_location_for(db, position_id)
+            if point:
+                own.add(point)
+        if len(own) == 1:
+            wh = await db.get(Warehouse, own.pop())
+            if wh is not None and wh.is_active:
+                doc.warehouse_id = wh.id
+                doc.warehouse_name = wh.name
+                return
+
+    raise ValidationError(
+        f"{doc.return_no} does not say which warehouse the goods are leaving from, and "
+        f"the consignment that carries them cannot be raised without one"
+        + (f" — “{named}” is not a warehouse on the master."
+           if named else ".")
+        + " Set the warehouse on the return, or ask an administrator to tag your login "
+          "to the stocking point you work, then arrange the transport again.")
+
+
+async def arrange_return_transport(db: AsyncSession, return_id: int,
+                                   data: s.ReturnVehicleArrangementIn,
+                                   user) -> m.PurchaseReturn:
+    """Who moves the goods to the vendor — the ONE decision this warehouse still makes.
+
+    Opened by the vendor agreeing to replace, and it is the only press left on our side
+    until the replacement turns up. Two answers:
+
+    VENDOR_ARRANGES — the vendor sends their own vehicle to collect. Nothing is asked of
+    Logistics and no transport request is raised; the return waits on
+    AWAITING_VENDOR_VEHICLE for the vendor to accept the job on their portal.
+
+    WAREHOUSE_REQUESTS — the LOGISTICS RETURN LEG. An ordinary transport request on the
+    board logistics already works: `DispatchPage` reads a second queue of
+    `source_type=RETURN` rows and a DRAFT there gets the Dispatch press, which opens
+    `/logistics/dispatch/new?tr_id=`. No new table, no new logistics status, no screen to
+    build — the leg goes through `transport.create_tr`, the public intake, exactly as
+    every other return leg in this module does.
+
+    THE CONSIGNMENT IS RAISED HERE, not at the send. `out_dispatches` is the warehouse's
+    own outward document and it describes goods actually leaving; raising it when the
+    paperwork went out (which is what `send_to_vendor` used to do) had it claiming a load
+    had travelled while the vendor was still reading the return. Raised on BOTH branches,
+    because the goods leave the building either way and `_apply_gate_out` — the one place
+    stock comes off the books — hangs off it.
+
+    ASKED ONCE, by `RETURN_TRANSPORTABLE_STATUSES`. Answering moves the document off the
+    rung, which is what stops a second press raising a second consignment and a second
+    vehicle for one load.
+    """
+    doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    if doc.status not in RETURN_TRANSPORTABLE_STATUSES:
+        if doc.vehicle_arrangement:
+            raise ValidationError(
+                f"{doc.return_no} is already set to "
+                f"{RETURN_VEHICLE_ARRANGEMENT_LABELS.get(doc.vehicle_arrangement, doc.vehicle_arrangement)}"
+                f" — the transport for this return has already been arranged.")
+        _decision_guard(doc, "transport can only be arranged once the vendor has approved "
+                             "the return and asked for a replacement")
+
+    valid = set(RETURN_VEHICLE_ARRANGEMENT_LABELS)
+    if data.arrangement not in valid:
+        raise ValidationError(
+            f"Pick how the vehicle is arranged: {', '.join(sorted(valid))}")
+    if not doc.items:
+        raise ValidationError(
+            f"{doc.return_no} has no lines — there is nothing to put on a vehicle.")
+
+    # Which of OUR points the load leaves from, resolved and stamped on the document
+    # BEFORE anything is written: `out_dispatches.warehouse_id` is NOT NULL and the
+    # consignment is raised further down this same function, so a return that cannot
+    # answer has to be refused while it is still standing where the desk left it.
+    await _ensure_return_warehouse(db, doc, user)
+
+    raises_request = data.arrangement in RETURN_ARRANGEMENTS_RAISING_REQUEST
+    before = doc.status
+    doc.vehicle_arrangement = data.arrangement
+    doc.vehicle_arrangement_at = utcnow()
+    doc.vehicle_arrangement_by_name = _name(user)
+    doc.status = (ReturnStatus.VEHICLE_REQUESTED.value if raises_request
+                  else ReturnStatus.AWAITING_VENDOR_VEHICLE.value)
+    # Where the vehicle collects FROM is our own warehouse on this leg, so what the desk
+    # states here is the delivery end — the vendor's dock — and the ready date is the
+    # earliest the load can go. Stored on the same two columns either branch uses.
+    doc.inbound_pickup_address = (data.pickup_address or "").strip() or None
+    doc.inbound_ready_date = data.ready_date
+
+    remarks = (data.remarks or "").strip() or None
+
+    # The warehouse's outward document, on both branches — see the docstring.
+    dispatch = await _build_return_consignment(db, doc, user, None, None)
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": doc.status, "vehicle_arrangement": doc.vehicle_arrangement,
+               "dispatch_no": dispatch.dispatch_no, "dispatch_id": dispatch.id,
+               "pickup_address": doc.inbound_pickup_address,
+               "ready_date": (doc.inbound_ready_date.isoformat()
+                              if doc.inbound_ready_date else None),
+               "remarks": remarks},
+        summary=(f"Purchase Return {doc.return_no}: "
+                 f"{RETURN_VEHICLE_ARRANGEMENT_LABELS[data.arrangement]}"
+                 + (" — return leg going to Logistics" if raises_request
+                    else " — the vendor is collecting from the warehouse")
+                 + f" (consignment {dispatch.dispatch_no})"))
+
+    # Read while the instances are still live: the commit below expires every one of them
+    # and `create_tr` cannot run before it. Same ordering, for the same reason, as
+    # `_return_shipment_seed` and `_collection_shipment_seed`.
+    vendor = await db.get(Vendor, doc.vendor_id) if doc.vendor_id else None
+    seed = (_return_shipment_seed(doc, dispatch, vendor, LOGISTICS_MODE_UNSTATED)
+            if raises_request else None)
+
+    await db.commit()
+
+    # Raised AFTER the arrangement has committed, and never allowed to undo it: the desk
+    # has answered, and a leg that could not be raised must not un-answer them. Logged and
+    # swallowed, exactly as `_raise_collection_shipment` is — the desk can raise one by
+    # hand from the Shipments register, which is where every return was before any of this
+    # existed.
+    if seed is not None:
+        try:
+            await _raise_return_shipment(db, seed, user, stamp_outbound=True)
+        except Exception:
+            logger.exception(
+                "Purchase Return %s was set to a warehouse-arranged vehicle, but the "
+                "return leg could not be raised in Logistics", doc.return_no)
+            await db.rollback()
+
+    return await get_return(db, return_id, user)
+
+
+# ---------------------------------------------------------------------------
+# RETIRED 2026-09-12: the vendor -> warehouse vehicle request
+#
+# `_inbound_vehicle_seed` and `_raise_inbound_vehicle_request` below raised a leg that
+# COLLECTED the returned material FROM the vendor, because the old flow sent the goods
+# out with the paperwork and then had to fetch them back if anything went wrong. The
+# business's leg runs the other way — our warehouse to the vendor — and that is
+# `_raise_return_shipment`, called from `arrange_return_transport`.
+#
+# Nothing calls these two any more. They are kept rather than deleted because the columns
+# they wrote (`inbound_tr_id` / `inbound_tr_no`) are still carried by returns already in
+# flight, and `_inbound_vehicle_arrived` / `_inbound_vehicle_released` still settle those
+# legs when logistics signs them. Deleting the raiser while its readers stay would leave
+# the pair unreadable to whoever next has to work out where those rows came from.
+# ---------------------------------------------------------------------------
+
+
+async def _inbound_vehicle_seed(db: AsyncSession, doc: m.PurchaseReturn) -> dict:
+    """Everything the vehicle request needs, read while the arrangement's rows are live.
+
+    RETIRED — see the block above. `transport.create_tr` COMMITS, so it could not be
+    called before its caller had committed its own work, and after that commit every
+    instance here is expired.
+    """
+    vendor = await db.get(Vendor, doc.vendor_id) if doc.vendor_id else None
+    return {
+        "return_id": doc.id,
+        "return_no": doc.return_no,
+        "vendor_name": (vendor.name if vendor else doc.vendor_name) or "the vendor",
+        "warehouse_id": doc.warehouse_id,
+        "warehouse_name": doc.warehouse_name or "our warehouse",
+        "pickup_address": doc.inbound_pickup_address or (
+            _vendor_address(vendor) if vendor else None),
+        "ready_date": doc.inbound_ready_date,
+        # Who the driver calls when the vehicle reaches the vendor's gate.
+        "contact_person": (vendor.contact_person if vendor
+                           else doc.manual_vendor_contact_person),
+        "contact_phone": vendor.phone if vendor else doc.manual_vendor_phone,
+        "lines": [{
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "quantity": float(_d(line.quantity)),
+            # One carton per line, which is what every other return leg assumes. Nothing
+            # has been packed or weighed — the cartons are standing on the VENDOR's dock
+            # and nobody here has counted them — so `weight_kg` is left unsaid rather
+            # than invented: an unweighed line has no weight, and zero reads as "it
+            # weighs nothing".
+            "package_count": 1,
+            "remarks": line.reason,
+        } for line in (doc.items or []) if line.item_id],
+    }
+
+
+async def _raise_inbound_vehicle_request(db: AsyncSession, seed: dict, user) -> None:
+    """Put the warehouse's vehicle request on the Logistics Dispatch board as a DRAFT.
+
+    THE SAME DOOR EVERY OTHER RETURN LEG COMES THROUGH, and the reason this needed no
+    new screen: `DispatchPage` already reads a second board below the consignment queue
+    (`source_type=RETURN`, DRAFT through IN_TRANSIT), and a DRAFT row there gets the
+    Dispatch press that opens `/logistics/dispatch/new?tr_id=`. That screen is where the
+    vehicle and the driver are named. So this raises an ordinary transport request and
+    nothing else, and the rungs the leg then climbs are the ones every shipment climbs.
+
+    `source_id` IS DELIBERATELY LEFT NULL, for exactly the reason `_raise_return_shipment`
+    and `_raise_collection_shipment` both give: the returns module's hooks start at
+    `_return_behind`, which takes `source_type=RETURN` plus `source_id` and looks the id
+    up in `inv_sto` — field returns' own table, an unrelated sequence from `pro_returns`.
+    Passing a purchase return's id would eventually name somebody else's field return and
+    let a release debit a shelf this return never touched. Leaving it null is what makes
+    this leg provably not theirs. The return number still travels as `source_no`, which
+    is what the board and the confirm screen actually show.
+
+    WHICH WAY ROUND THE ENDS GO. This leg runs vendor -> our warehouse, so
+    `to_location_name` is our own warehouse — which is also the check that makes it safe,
+    since `create_tr` refuses an inbound leg that does not name where it is coming back
+    to. `from_warehouse_id` stays NULL: the load starts on a dock that is not a site of
+    ours, and writing an id there would have the board claim one of our own warehouses
+    shipped it. The pickup ADDRESS goes in the remarks rather than `delivery_address`,
+    because that column renders under "To" on the dispatch confirm screen and the
+    vendor's dock is where this vehicle comes FROM.
+
+    `expected_delivery` IS DELIBERATELY LEFT NULL. The only date anybody has stated is
+    the vendor's goods-ready date, which is the earliest the vehicle may collect — not
+    when the load is due back at our gate. Nobody can know that until the desk assigns
+    the vehicle, which is the press this draft exists to put in front of them.
+
+    THE LEG'S ID IS STAMPED BACK ONTO THE RETURN, and that link is load-bearing rather
+    than decorative: `_decorate_return_inbound_leg` reads the vehicle and the driver off
+    it, and `_inbound_vehicle_arrived` matches a signed leg back to the return waiting
+    on it. Without the stamp the vehicle arrives against nothing.
+    """
+    from app.modules.logistics import transport as lgs_transport
+    from app.modules.logistics.enums import TransportSource
+    from app.modules.logistics.schemas import TRCreate, TRLineIn
+
+    tr = await lgs_transport.create_tr(db, TRCreate(
+        # OUR OWN VEHICLE is the assumption, not a decision taken here: the warehouse
+        # asked for a vehicle, which is what "own vehicle" means on this board, and the
+        # desk changes the mode on the Dispatch screen before anything is booked. Same
+        # starting value `_raise_collection_shipment` uses for the same leg shape.
+        mode=LOGISTICS_MODE_RAISING_SHIPMENT,
+        source_type=TransportSource.RETURN.value,
+        source_id=None,                       # see the docstring — load-bearing
+        source_no=seed["return_no"],
+        from_warehouse_id=None,               # see the docstring — not a site of ours
+        from_warehouse_name=seed["vendor_name"],
+        to_location_name=seed["warehouse_name"],
+        contact_person=seed["contact_person"],
+        contact_phone=seed["contact_phone"],
+        remarks=(
+            f"Purchase Return {seed['return_no']} — collect the returned material from "
+            f"{seed['vendor_name']} and deliver it to {seed['warehouse_name']}."
+            + (f" Collect from: {seed['pickup_address']}."
+               if seed["pickup_address"] else "")
+            + (f" Ready from {seed['ready_date']:%d %b %Y}."
+               if seed["ready_date"] else "")
+            + " Assign the vehicle and the driver on this leg — the purchase return "
+              "reads them back off it."),
+        lines=[TRLineIn(**line) for line in seed["lines"]],
+    ), user)
+
+    # The link back, without which the vehicle arrives against nothing — see the
+    # docstring. A plain UPDATE rather than loading the row: `create_tr` has just
+    # committed and the return instance the caller held is expired.
+    await db.execute(
+        update(m.PurchaseReturn)
+        .where(m.PurchaseReturn.id == seed["return_id"])
+        .values(inbound_tr_id=tr.id, inbound_tr_no=tr.tr_no))
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=seed["return_id"],
+        entity_no=seed["return_no"], action=AuditAction.UPDATE, actor=user,
+        after={"inbound_tr_no": tr.tr_no, "inbound_tr_id": tr.id,
+               "transport_status": tr.status},
+        summary=f"Purchase Return {seed['return_no']}: vehicle request {tr.tr_no} "
+                f"raised in Logistics as a draft")
+    await db.commit()
+    logger.info("Purchase Return %s raised vehicle request %s (%s)",
+                seed["return_no"], tr.tr_no, tr.status)
+
+
+#: The stated-vehicle columns, and the request field each is filled from. One mapping,
+#: read by both vendor transport presses, so the accept and the pickup cannot disagree
+#: about where a vehicle number is stored.
+_VENDOR_VEHICLE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("arranged_vehicle_no", "vehicle_no"),
+    ("arranged_driver_name", "driver_name"),
+    ("arranged_driver_phone", "driver_phone"),
+    ("arranged_transporter_name", "transporter_name"),
+    ("arranged_lr_no", "lr_no"),
+    ("arranged_expected_date", "expected_date"),
+)
+
+
+def _apply_vendor_vehicle(doc: m.PurchaseReturn, data) -> dict:
+    """Copy the vehicle the vendor stated onto the return; report what changed.
+
+    ONLY WHAT WAS STATED. A blank field on a form filled in over several calls means
+    "nothing to say about this", never "erase what is there" — the same rule the masters
+    importer follows for an empty cell. A vendor names a truck on Monday, rings back on
+    Tuesday with the driver and swaps the vehicle on Wednesday when it breaks down, and
+    none of those three presses may wipe the other two.
+    """
+    changed: dict[str, str | None] = {}
+    for column, field in _VENDOR_VEHICLE_FIELDS:
+        value = getattr(data, field, None)
+        if isinstance(value, str):
+            value = value.strip() or None
+        if value is not None:
+            setattr(doc, column, value)
+            changed[column] = str(value)
+    return changed
+
+
+async def vendor_accept_transport(db: AsyncSession, vendor_id: int, return_id: int,
+                                  data: "s.VendorTransportAcceptIn"):
+    """The VENDOR accepts the collection job and names the vehicle they are sending.
+
+    ONLY on a VENDOR_ARRANGES leg. Where the warehouse asked Logistics for a vehicle it
+    belongs to the transport request logistics assigned it on and is read back off that
+    leg (`_decorate_return_inbound_leg`) — offering the vendor a second place to type one
+    is exactly how two documents end up naming different trucks for one load. The
+    arrangement is checked as well as the status, because a rung alone cannot say whose
+    vehicle it is.
+
+    ACCEPTING IS ANSWERED ONCE — the rung moves — but the VEHICLE DETAILS stay editable
+    afterwards through `vendor_record_pickup`, because a truck named three days before it
+    turns up is frequently not the truck that turns up.
+    """
+    doc = await _vendor_return(db, vendor_id, return_id)
+    if doc.vehicle_arrangement != ReturnVehicleArrangement.VENDOR_ARRANGES.value:
+        raise ValidationError(
+            f"{doc.return_no} is being collected by a vehicle the warehouse has arranged "
+            f"through Logistics — there is nothing for you to accept here.")
+    if doc.status not in RETURN_VENDOR_ACCEPTABLE_STATUSES:
+        if doc.vendor_transport_accepted_at:
+            raise ValidationError(
+                f"You already accepted the collection for {doc.return_no}"
+                f"{f' on {doc.vendor_transport_accepted_at:%d %b %Y}' if doc.vendor_transport_accepted_at else ''}"
+                f" — record the pickup when your vehicle has loaded.")
+        _decision_guard(doc, "the collection can only be accepted once the warehouse has "
+                             "asked you to send a vehicle")
+
+    before = doc.status
+    changed = _apply_vendor_vehicle(doc, data)
+    doc.vendor_transport_accepted_at = utcnow()
+    doc.vendor_transport_accepted_by_name = doc.vendor_name or "the vendor"
+    doc.status = ReturnStatus.VENDOR_TRANSPORT_ACCEPTED.value
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        before={"status": before},
+        after={"status": doc.status, **changed,
+               "accepted_by": doc.vendor_transport_accepted_by_name,
+               "remarks": (data.remarks or "").strip() or None,
+               "acting_vendor_id": vendor_id},
+        summary=(f"Purchase Return {doc.return_no}: "
+                 f"{doc.vendor_name or 'the vendor'} accepted the collection"
+                 + (f" — vehicle {doc.arranged_vehicle_no}"
+                    if doc.arranged_vehicle_no else "")))
+    await db.commit()
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def vendor_record_pickup(db: AsyncSession, vendor_id: int, return_id: int,
+                               data: "s.VendorPickupIn"):
+    """The vendor's vehicle has loaded at our warehouse and left with the goods.
+
+    THE GATE-OUT ON THE VENDOR BRANCH. On the warehouse branch it is Logistics releasing
+    the leg that takes the stock off our books; here there is no logistics document to say
+    so, so the vendor says it — and the SAME `_apply_gate_out` runs against the same
+    consignment, which is what keeps one path for stock leaving (rule 7) rather than two
+    that have to be kept in agreement.
+
+    A SEPARATE PRESS from accepting, rather than inferred from a vehicle number being
+    present, because knowing which truck is coming on Thursday is not the same fact as it
+    having loaded and gone.
+
+    IDEMPOTENT. A return already past this rung is refused rather than gating out twice —
+    a second gate-out would debit the shelf a second time for one load.
+    """
+    doc = await _vendor_return(db, vendor_id, return_id)
+    if doc.vehicle_arrangement != ReturnVehicleArrangement.VENDOR_ARRANGES.value:
+        raise ValidationError(
+            f"{doc.return_no} is travelling on a vehicle the warehouse arranged — "
+            f"Logistics records when it leaves.")
+    if doc.status not in RETURN_VENDOR_PICKUP_STATUSES:
+        if doc.arranged_dispatched_at:
+            raise ValidationError(
+                f"The pickup for {doc.return_no} was already recorded"
+                f"{f' on {doc.arranged_dispatched_at:%d %b %Y}' if doc.arranged_dispatched_at else ''}"
+                f" — sign for the goods when they reach you.")
+        _decision_guard(doc, "the pickup can only be recorded once you have accepted the "
+                             "collection")
+
+    before = doc.status
+    changed = _apply_vendor_vehicle(doc, data)
+    doc.arranged_dispatched_at = utcnow()
+    doc.status = ReturnStatus.STOCK_PICKED_UP.value
+
+    # The goods have physically left. Take them off the books through the one path that
+    # does that, against the consignment this return already raised.
+    gated = await _gate_out_return_consignment(db, doc, None)
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=None,
+        before={"status": before},
+        after={"status": doc.status, **changed,
+               "picked_up_at": doc.arranged_dispatched_at.isoformat(),
+               "gate_pass_no": gated,
+               "remarks": (data.remarks or "").strip() or None,
+               "acting_vendor_id": vendor_id},
+        summary=(f"Purchase Return {doc.return_no}: collected from "
+                 f"{doc.warehouse_name or 'the warehouse'} by "
+                 f"{doc.vendor_name or 'the vendor'}"
+                 + (f" on {doc.arranged_vehicle_no}" if doc.arranged_vehicle_no else "")))
+    await db.commit()
+    logger.info("Purchase Return %s picked up by the vendor's own vehicle", doc.return_no)
+    return await vendor_get_return(db, vendor_id, return_id)
+
+
+async def _gate_out_return_consignment(db: AsyncSession, doc: m.PurchaseReturn,
+                                       user) -> str | None:
+    """Take the goods off the books, through the consignment this return raised.
+
+    `_apply_gate_out` is the SHARED path — the logistics release hook has always called
+    it, and the vendor-pickup branch calls it here — so stock leaving a warehouse for a
+    vendor happens in exactly one place however the truck was booked (rule 7).
+
+    Runs inside the caller's transaction and never commits. Returns the gate pass number
+    where there was one, for the audit row.
+
+    NEVER RAISES. The goods are on a lorry and the document has to say so; refusing to
+    record that because the consignment is in an unexpected state would leave the two
+    further apart rather than closer. The same rule every hook in this module runs on.
+    """
+    try:
+        # `items` AND `packages` eagerly, because `_apply_gate_out` walks both and they
+        # are plain lazy relationships — touching one on an AsyncSession raises
+        # MissingGreenlet. Exactly what `_consignment_of` loads, for exactly this reason.
+        dispatch = await db.scalar(
+            select(m.Dispatch)
+            .options(selectinload(m.Dispatch.items),
+                     selectinload(m.Dispatch.packages))
+            .where(m.Dispatch.ref_type == "PURCHASE_RETURN",
+                   m.Dispatch.ref_id == doc.id)
+            .order_by(m.Dispatch.id.desc()).limit(1))
+        if dispatch is None:
+            logger.warning("Purchase Return %s has no consignment to gate out",
+                           doc.return_no)
+            return None
+        if dispatch.status in {DispatchStatus.DISPATCHED.value,
+                               DispatchStatus.IN_TRANSIT.value,
+                               DispatchStatus.DELIVERED.value,
+                               DispatchStatus.ACKNOWLEDGED.value}:
+            logger.info("Purchase Return %s: consignment %s has already left — not "
+                        "gating it out twice", doc.return_no, dispatch.dispatch_no)
+            return dispatch.gate_pass_no
+        await _apply_gate_out(db, dispatch, dispatch.gate_pass_no, user)
+        return dispatch.gate_pass_no
+    except Exception:
+        logger.exception("Purchase Return %s: the consignment could not be gated out",
+                         doc.return_no)
+        return None
+
+
+async def confirm_return_received(db: AsyncSession, return_id: int,
+                                  data: s.ReturnReceivedIn, user) -> m.PurchaseReturn:
+    """The REPLACEMENT is in the building, and somebody here has signed for it.
+
+    What happens to the goods AFTER they are in the building is the store's ordinary inward
+    path — the draft receipt the dispatch note raised, then GRN, QC and putaway — and
+    nothing here short-circuits it: no stock is posted by this press (rule 7), because a
+    signature at the gate is not a count on a shelf. The return then closes on the last
+    putaway (`_close_return_on_intake_complete`), never here.
+
+    THE ORDINARY WAY IN IS THE RECEIPT, not this press. Submitting the goods receipt is
+    what brings the return home (`_settle_return_on_receipt`), because that is where the
+    store says what physically arrived. This route survives for the load that turns up
+    while the paperwork lags — signing at the gate must never be impossible — and it is
+    refused once the receipt has already done it, which is what stops the two recording
+    one lorry twice.
+
+    WHAT ARRIVES HERE CHANGED on 2026-09-12. It used to be the FAULTY material coming back
+    from a vendor who had refused it. It is now the replacement the vendor dispatched,
+    which is the only thing still travelling towards us by this point — the faulty stock
+    went the other way and the vendor has already signed for it.
+
+    Reachable WITHOUT waiting for a logistics acknowledgement, on purpose. A load that
+    arrived while the paperwork lagged must not leave the warehouse unable to say so.
+    Whichever happens first wins, and the second finds the return already here and does
+    nothing rather than overwriting a signature.
+    """
+    doc = await _load(db, m.PurchaseReturn, return_id, "Return", m.PurchaseReturn.items)
+    if doc.status == ReturnStatus.RECEIVED_AT_WAREHOUSE.value:
+        raise ValidationError(
+            f"{doc.return_no} was already received"
+            + (f" by {doc.received_by_name}" if doc.received_by_name else "")
+            + (f" on {doc.received_at:%d %b %Y}" if doc.received_at else "") + ".")
+    # `RETURN_INBOUND_STATUSES` rather than only the replacement-dispatched rung, and
+    # deliberately wider than the other guards in this file: it also holds the rungs a
+    # return raised under the older vendor -> warehouse flow travels, and those rows must
+    # still be signable in. A return that has not moved at all is still refused.
+    if doc.status not in RETURN_INBOUND_STATUSES:
+        _decision_guard(doc, "only a return with material on its way to this warehouse "
+                             "can be received")
+
+    before = doc.status
+    doc.status = ReturnStatus.RECEIVED_AT_WAREHOUSE.value
+    doc.received_at = utcnow()
+    doc.received_by_name = (data.received_by_name or "").strip() or _name(user)
+    doc.received_remarks = (data.remarks or "").strip() or None
+
+    await write_audit(
+        db, entity="pro_returns", entity_id=doc.id, entity_no=doc.return_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": doc.status, "received_by": doc.received_by_name,
+               "received_at": doc.received_at.isoformat(),
+               "remarks": doc.received_remarks,
+               "vehicle_no": doc.arranged_vehicle_no,
+               "inbound_tr_no": doc.inbound_tr_no},
+        summary=(f"Purchase Return {doc.return_no}: material received at "
+                 f"{doc.warehouse_name or 'the warehouse'}, signed by "
+                 f"{doc.received_by_name}"))
+    await db.commit()
+    logger.info("Purchase Return %s received back at the warehouse", doc.return_no)
+    return await get_return(db, return_id, user)
+
+
+async def _inbound_vehicle_arrived(db: AsyncSession, tr, user) -> bool:
+    """A warehouse-requested vehicle has landed — bring the return in with it.
+
+    THE OTHER END of `_raise_inbound_vehicle_request`. Matched on `inbound_tr_id`, which
+    is its OWN column rather than the `collection_tr_id` the supplier-collection path
+    uses: the two trips look alike but settle differently, and sharing the column would
+    have `_collection_arrived` raise an inbound receipt against a supplier answer this
+    return never carried.
+
+    Returns whether this leg belonged to a purchase return's inbound vehicle, so the
+    caller knows to stop — the leg carries no consignment and none of the consignment
+    settlement applies to it.
+
+    IDEMPOTENT. A second acknowledgement finds the return already received and does
+    nothing rather than overwriting the signature that is on it.
+
+    Runs inside the transport service's transaction and never commits. It also never
+    raises: the vehicle is in the yard and the driver has been signed off, and refusing
+    to record that because the return behind it is in an unexpected state would leave
+    the two documents further apart rather than closer — the same rule every hook in
+    this module runs on.
+    """
+    if not getattr(tr, "id", None):
+        return False
+    row = (await db.execute(
+        select(m.PurchaseReturn)
+        .where(m.PurchaseReturn.inbound_tr_id == tr.id)
+    )).scalars().first()
+    if row is None:
+        return False
+    if row.status == ReturnStatus.RECEIVED_AT_WAREHOUSE.value:
+        logger.info("%s: %s is already received — not signing it in twice",
+                    tr.tr_no, row.return_no)
+        return True
+
+    before = row.status
+    row.status = ReturnStatus.RECEIVED_AT_WAREHOUSE.value
+    row.received_at = utcnow()
+    row.received_by_name = tr.acknowledged_by_name or _name(user)
+    row.received_remarks = tr.ack_remarks or None
+    await write_audit(
+        db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": row.status, "received_by": row.received_by_name,
+               "inbound_tr_no": tr.tr_no, "vehicle_no": tr.vehicle_number},
+        summary=(f"Purchase Return {row.return_no}: {tr.tr_no} delivered the returned "
+                 f"material to {row.warehouse_name or 'the warehouse'}"))
+    logger.info("%s brought %s back to the warehouse", tr.tr_no, row.return_no)
+    return True
+
+
+async def _inbound_vehicle_released(db: AsyncSession, tr, user) -> bool:
+    """The requested vehicle has left with the load — put the return on the road.
+
+    The rung between the request and the arrival, and the only one logistics can tell us
+    about: `ON_RELEASE` fires when the leg is actually dispatched, which for this leg is
+    the vehicle setting off with the material on it.
+
+    Deliberately does NOT try to record "a vehicle has been assigned". That is a press on
+    logistics' own Dispatch screen and they expose no hook for it, so it is WORDED off
+    the leg's columns on every read (`_decorate_return_inbound_leg`) rather than stored —
+    see `enums.ReturnStatus.VEHICLE_REQUESTED`.
+    """
+    if not getattr(tr, "id", None):
+        return False
+    row = (await db.execute(
+        select(m.PurchaseReturn)
+        .where(m.PurchaseReturn.inbound_tr_id == tr.id)
+    )).scalars().first()
+    if row is None:
+        return False
+    if row.status != ReturnStatus.VEHICLE_REQUESTED.value:
+        # Already on the road, already received, or cancelled. Nothing a release can add.
+        return True
+    before = row.status
+    row.status = ReturnStatus.IN_TRANSIT.value
+    await write_audit(
+        db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before},
+        after={"status": row.status, "inbound_tr_no": tr.tr_no,
+               "vehicle_no": tr.vehicle_number, "driver_name": tr.driver_name},
+        summary=(f"Purchase Return {row.return_no}: {tr.tr_no} left "
+                 f"{row.vendor_name or 'the vendor'} with the returned material"
+                 + (f" on {tr.vehicle_number}" if tr.vehicle_number else "")
+                 + (f", driver {tr.driver_name}" if tr.driver_name else "")))
+    logger.info("%s put %s on the road", tr.tr_no, row.return_no)
+    return True
+
+
+async def _outbound_return_released(db: AsyncSession, tr, user) -> None:
+    """The RETURN LEG has left our warehouse — the goods are on their way to the vendor.
+
+    The other end of `_raise_return_shipment(..., stamp_outbound=True)`, matched on
+    `outbound_tr_id`. Its OWN column rather than `inbound_tr_id` or `collection_tr_id`,
+    which two other settlements match on: the three trips look alike and settle
+    differently, and sharing a column would have each one fire on documents it was never
+    written for.
+
+    RETURNS NOTHING, and that is deliberate — it is the one probe in `transport_released`
+    that must NOT short-circuit. The other two answer "this leg is a purchase return's
+    vehicle and none of the consignment settlement applies to it". This leg DOES carry a
+    consignment (`dispatch_id` is set on it), and that consignment still has to be gated
+    out by the path below, which is the only place stock comes off the books. So this
+    records the rung and lets the caller carry on.
+
+    IDEMPOTENT. A return already past this rung is left alone rather than re-stamped.
+
+    Runs inside the transport service's transaction and never commits. It also never
+    raises: the load has gone and the driver is away, and refusing to record that because
+    the return behind it is in an unexpected state would leave the two documents further
+    apart rather than closer — the rule every hook in this module runs on.
+    """
+    if not getattr(tr, "id", None):
+        return
+    try:
+        row = (await db.execute(
+            select(m.PurchaseReturn)
+            .where(m.PurchaseReturn.outbound_tr_id == tr.id)
+        )).scalars().first()
+        if row is None:
+            return
+        if row.status != ReturnStatus.VEHICLE_REQUESTED.value:
+            logger.info("%s: %s is already past pickup — not stamping it twice",
+                        tr.tr_no, row.return_no)
+            return
+        before = row.status
+        row.status = ReturnStatus.STOCK_PICKED_UP.value
+        await write_audit(
+            db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+            action=AuditAction.UPDATE, actor=user,
+            before={"status": before},
+            after={"status": row.status, "outbound_tr_no": tr.tr_no,
+                   "vehicle_no": tr.vehicle_number, "driver_name": tr.driver_name},
+            summary=(f"Purchase Return {row.return_no}: {tr.tr_no} left "
+                     f"{row.warehouse_name or 'the warehouse'} for "
+                     f"{row.vendor_name or 'the vendor'}"
+                     + (f" on {tr.vehicle_number}" if tr.vehicle_number else "")
+                     + (f", driver {tr.driver_name}" if tr.driver_name else "")))
+        logger.info("%s carried %s out to the vendor", tr.tr_no, row.return_no)
+    except Exception:
+        logger.exception("Purchase Return behind %s could not be marked as picked up",
+                         getattr(tr, "tr_no", tr.id))
 
 
 # ---------------------------------------------------------------------------
@@ -12503,89 +18922,16 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     if bin_id:
         stmt = stmt.where(m.SerialNumber.bin_id == bin_id)
     if search:
-        needle = search.strip()
-        # A WHOLE code is found by INDEX SEEK; only a fragment is scanned for.
-        #
-        # These are two questions wearing one box, and they cost three orders of
-        # magnitude apart. The storekeeper at the shelf has the entire code — a gun
-        # read it off the label — and `serial_number` and `imei` are indexed, so that
-        # is a seek. `asset_code` and `consumable_code` are NOT indexed, so including
-        # them in the same OR drags the whole thing back down to a scan. Measured on
-        # one live bay of 464,776 units:
-        #
-        #     probe, serial_number = '<code>'          0.01 s
-        #     probe, four columns OR-ed together       1.65 s
-        #     COUNT over that same four-column OR      8.73 s
-        #     four columns ILIKE '%<fragment>%'        9.89 s
-        #
-        # So the indexed columns are probed FIRST and separately; the unindexed pair
-        # is only reached when neither matched, which is rare — `_place_unit_codes`
-        # writes a minted asset/consumable code into `serial_number` as well, so for
-        # those items the indexed probe already hits.
-        #
-        # And a hit narrows the query to that ONE ROW BY ID. Every identity column is
-        # unique per unit, so an exact code names exactly one, and pinning it by
-        # primary key means the count and the page below cost nothing at all instead
-        # of re-deriving the same row through the unindexed OR.
-        hit = None
-        probes = (
-            m.SerialNumber.serial_number == needle,       # indexed
-            m.SerialNumber.imei == needle,                # indexed
-            or_(m.SerialNumber.asset_code == needle,      # not indexed — last resort
-                m.SerialNumber.consumable_code == needle),
-        )
-        for probe in probes:
-            hit = await db.scalar(
-                stmt.with_only_columns(m.SerialNumber.id).order_by(None)
-                .where(probe).limit(1))
-            if hit:
-                break
-        if hit:
-            stmt = stmt.where(m.SerialNumber.id == hit)
-        else:
-            like = f"%{needle}%"
-            stmt = stmt.where(or_(
-                m.SerialNumber.serial_number.ilike(like),
-                m.SerialNumber.imei.ilike(like),
-                m.SerialNumber.asset_code.ilike(like),
-                m.SerialNumber.consumable_code.ilike(like)))
+        like = f"%{search}%"
+        stmt = stmt.where(or_(
+            m.SerialNumber.serial_number.ilike(like),
+            m.SerialNumber.imei.ilike(like),
+            m.SerialNumber.asset_code.ilike(like),
+            m.SerialNumber.consumable_code.ilike(like)))
 
-    # PAGED ON THE ID, THEN LOADED BY IT. Not a refinement of `paginate` — a different
-    # query, for the reason `stk_ledger` taught (CLAUDE.md, "never sort a list on a
-    # non-indexed column of a JSON-bearing table"): what costs is the SORT, and a sort
-    # record is as wide as the columns the statement carries.
-    #
-    # Measured on the live floor, one bay holding 464,776 available units:
-    #
-    #     ORDER BY id DESC LIMIT 500, selecting the whole row   8.93 s
-    #     ORDER BY id DESC LIMIT 500, selecting the id alone    0.09 s
-    #     loading those 500 rows by primary key                 0.02 s
-    #
-    # Eighty times, and it is the whole of why switching a page in the unit picker
-    # took a quarter of a minute. The narrow statement is served from
-    # `ix_whs_serial_stock_lookup` — a secondary index carries the primary key, so the
-    # ids come out of it already ordered and nothing is sorted at all. Widen this
-    # statement back to `select(m.SerialNumber)` and the filesort returns in silence:
-    # the answer stays correct, only the clock moves.
-    id_stmt = stmt.with_only_columns(m.SerialNumber.id).order_by(None)
-    total = await db.scalar(select(func.count()).select_from(id_stmt.subquery()))
-    ids = list((await db.execute(
-        id_stmt.order_by(m.SerialNumber.id.desc())
-        .limit(params.size).offset(params.offset)
-    )).scalars().all())
-
-    rows: list[m.SerialNumber] = []
-    if ids:
-        found = (await db.execute(
-            select(m.SerialNumber).where(m.SerialNumber.id.in_(ids))
-        )).scalars().all()
-        # `IN` gives no order back, and the page's order is the answer's — newest
-        # first — so it is restored from the ids rather than re-sorted in the database.
-        rank = {value: index for index, value in enumerate(ids)}
-        rows = sorted(found, key=lambda row: rank[row.id])
-
-    return {"items": await _decorate_serials(db, rows), "total": total or 0,
-            "page": params.page, "size": params.size}
+    page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
+    page["items"] = await _decorate_serials(db, page["items"])
+    return page
 
 
 async def serial_summary(db: AsyncSession, *, item_ids: list[int],
@@ -13159,12 +19505,20 @@ _ON_THE_ROAD = (
 
 
 def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
-                  received: Decimal, indent_status: str) -> str | None:
+                  received: Decimal, indent_status: str,
+                  on_order: Decimal = ZERO) -> str | None:
     """Plain-English answer to "where is the rest of my stuff".
 
     Read top-down: the nearest place the goods have got to is the honest answer. Derived
     at read time from the issue and dispatch state, never stored, so it cannot go stale
     behind the documents it describes.
+
+    `on_order` is THIS LINE's quantity sitting with procurement, and it is asked before
+    the indent status because the indent status answers for the whole document. An
+    indent whose first line was served off the shelf and whose second went out to be
+    bought is PARTIALLY_FULFILLED, so the status branch below never fired and the
+    bought line was described as sitting "in the warehouse, not yet issued" — the one
+    place it certainly was not.
     """
     if received >= approved:
         return None
@@ -13172,6 +19526,8 @@ def _pending_with(approved: Decimal, issued: Decimal, dispatched: Decimal,
         return "On the way to you"
     if issued > dispatched:
         return "Issued, waiting to be dispatched"
+    if on_order > ZERO:
+        return "With procurement"
     if indent_status in (IndentStatus.PENDING_PROCUREMENT.value,
                          IndentStatus.PARTIALLY_ORDERED.value,
                          IndentStatus.ORDERED.value):
@@ -13224,7 +19580,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     Shared by the requester's delivery list and by one indent's fulfilment trail, so the
     two can never disagree about how far an order has got.
     """
-    from app.modules.indents.service import owed_quantity
+    from app.modules.indents.models import IndentItem
+    from app.modules.indents.service import _on_order_by_lines, owed_quantity
 
     if not indents:
         return []
@@ -13262,6 +19619,227 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
 
+    # Preserve the physical packing split for the requester. This query is scoped to
+    # the same visible indents and posted outbound issues as the delivery totals above;
+    # it does not widen RBAC access, it only describes packages already in those rows.
+    package_rows = (await db.execute(
+        select(
+            m.MaterialIssueLine.indent_item_id,
+            m.Dispatch.id,
+            m.Dispatch.dispatch_no,
+            m.DispatchItem.package_id,
+            m.DispatchPackage.package_no,
+            func.sum(m.DispatchItem.quantity),
+            m.DispatchPackage.package_type,
+            m.DispatchPackage.barcode,
+            m.DispatchPackage.weight_kg,
+            m.DispatchPackage.length_cm,
+            m.DispatchPackage.width_cm,
+            m.DispatchPackage.height_cm,
+            m.DispatchPackage.is_fragile,
+            m.DispatchPackage.is_temp_controlled,
+            m.DispatchPackage.packed_by_name,
+            m.DispatchPackage.packed_at,
+        )
+        .select_from(m.DispatchItem)
+        .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
+        .join(m.MaterialIssue, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .join(m.MaterialIssueLine, and_(
+            m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+            m.MaterialIssueLine.item_id == m.DispatchItem.item_id,
+            m.MaterialIssueLine.indent_item_id.isnot(None)))
+        .join(IndentItem, and_(
+            IndentItem.id == m.MaterialIssueLine.indent_item_id,
+            IndentItem.indent_id == m.DispatchItem.indent_id,
+            IndentItem.item_id == m.DispatchItem.item_id))
+        .join(m.DispatchPackage, m.DispatchPackage.id == m.DispatchItem.package_id)
+        .where(IndentItem.indent_id.in_(indent_ids),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.Dispatch.status.in_(_ON_THE_ROAD),
+               m.DispatchItem.package_id.isnot(None),
+               ~relayed)
+        .group_by(m.MaterialIssueLine.indent_item_id,
+                  m.Dispatch.id,
+                  m.Dispatch.dispatch_no,
+                  m.DispatchItem.package_id,
+                  m.DispatchPackage.package_no,
+                  m.DispatchPackage.package_type,
+                  m.DispatchPackage.barcode,
+                  m.DispatchPackage.weight_kg,
+                  m.DispatchPackage.length_cm,
+                  m.DispatchPackage.width_cm,
+                  m.DispatchPackage.height_cm,
+                  m.DispatchPackage.is_fragile,
+                  m.DispatchPackage.is_temp_controlled,
+                  m.DispatchPackage.packed_by_name,
+                  m.DispatchPackage.packed_at)
+        .order_by(m.Dispatch.id, m.DispatchPackage.id)
+    )).all()
+    packages_by_line: dict[int, list[dict]] = defaultdict(list)
+    for row in package_rows:
+        packages_by_line[row[0]].append({
+            "dispatch_id": row[1],
+            "dispatch_no": row[2],
+            "package_id": row[3],
+            "package_no": row[4],
+            "quantity": float(_d(row[5])),
+            "package_type": row[6],
+            "barcode": row[7],
+            "weight_kg": float(_d(row[8])) if row[8] is not None else None,
+            "length_cm": float(_d(row[9])) if row[9] is not None else None,
+            "width_cm": float(_d(row[10])) if row[10] is not None else None,
+            "height_cm": float(_d(row[11])) if row[11] is not None else None,
+            "is_fragile": bool(row[12]),
+            "is_temp_controlled": bool(row[13]),
+            "packed_by_name": row[14],
+            "packed_at": row[15],
+        })
+
+    # ------------------------------------------------------------------
+    # Which physical units left for each (indent, item)
+    # ------------------------------------------------------------------
+    # `whs_serial_numbers` is the only per-UNIT record there is, and it carries no
+    # foreign key to the document moving it — the link is `remarks`, a stamp that is
+    # REWRITTEN at every doorway the unit passes through. So the read has to name
+    # every stamp a unit may be wearing right now, and attribute it through the issue
+    # LINE rather than the issue header. Both halves failed silently as "Not recorded"
+    # on a line that plainly had serials:
+    #
+    #   * a consignment credited at its destination re-stamps its units
+    #     `Received by <dispatch_no>` (`_land_units`), so every delivery to an LIP or
+    #     an MDP lost its serials at the moment the goods arrived — which is exactly
+    #     when the requester opens this screen to acknowledge them;
+    #   * a reservation is stamped per LINE (`_issue_line_serial_marker`), not per
+    #     document, so units captured on an approved-but-unposted issue matched none
+    #     of the document-level markers;
+    #   * the issue HEADER names one indent and a consolidated issue serves several
+    #     on its lines, so one indent collected every unit on the issue and the others
+    #     were told nothing had been recorded.
+    issue_line_rows = (await db.execute(
+        select(m.MaterialIssueLine.issue_id, m.MaterialIssueLine.id,
+               m.MaterialIssueLine.item_id, IndentItem.indent_id)
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .join(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+        .where(IndentItem.indent_id.in_(indent_ids),
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(True),
+               ~relayed)
+    )).all()
+
+    # marker -> {item_id: {indent_id, ...}}. A per-line stamp resolves to exactly one
+    # line; the document-level ones are shared by the issue's lines, so the item is
+    # what tells them apart.
+    marker_targets: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+    issue_ids: set[int] = set()
+    for issue_id, line_id, item_id, indent_id in issue_line_rows:
+        issue_ids.add(issue_id)
+        for marker in (*_issue_serial_markers(issue_id),
+                       _issue_line_serial_marker(issue_id, line_id)):
+            marker_targets[marker][item_id].add(indent_id)
+
+    # The consignments carrying those issues. A credited arrival re-stamps the units
+    # with the consignment's number, which is the only trace left of where they came
+    # from — so the dispatch number is a marker like any other.
+    dispatch_rows = (await db.execute(
+        select(m.Dispatch.id, m.Dispatch.dispatch_no, m.MaterialIssue.id)
+        .join(m.MaterialIssue, and_(
+            m.Dispatch.ref_id == m.MaterialIssue.id,
+            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .where(m.MaterialIssue.id.in_(issue_ids or {0}),
+               m.Dispatch.status != DispatchStatus.CANCELLED.value)
+    )).all() if issue_ids else []
+    dispatch_ids: list[int] = []
+    for dispatch_id, dispatch_no, issue_id in dispatch_rows:
+        dispatch_ids.append(dispatch_id)
+        source = marker_targets.get(_shipped_unit_marker("issue", issue_id), {})
+        for marker in (_shipped_unit_marker("dispatch", dispatch_id),
+                       f"Received by {dispatch_no}" if dispatch_no else None):
+            if not marker:
+                continue
+            for item_id, indents_for_item in source.items():
+                marker_targets[marker][item_id] |= indents_for_item
+
+    serials_by_indent_item: dict[tuple[int, int], list[str]] = defaultdict(list)
+
+    def _record(indent_id: int, item_id: int, code: str | None) -> None:
+        value = str(code or "").strip()
+        if not value:
+            return
+        bucket = serials_by_indent_item[(indent_id, item_id)]
+        if value not in bucket:
+            bucket.append(value)
+
+    if marker_targets:
+        # Named by whichever identifier the unit actually carries — `serial_number`
+        # alone left an IMEI-tracked handset and an asset-coded unit reading "Not
+        # recorded" while their labels sat one column over. `_unit_keys` is the same
+        # answer the picker gives, so the acknowledgement and the issue speak about a
+        # unit with one name.
+        unit_rows = (await db.execute(
+            select(m.SerialNumber)
+            .where(m.SerialNumber.remarks.in_(list(marker_targets)),
+                   m.SerialNumber.is_active.is_(True))
+            .order_by(m.SerialNumber.id)
+        )).scalars().all()
+        modes: dict[int, str] = {}
+        for row in unit_rows:
+            targets = marker_targets.get(row.remarks or "", {}).get(row.item_id)
+            if not targets:
+                continue
+            if row.item_id not in modes:
+                modes[row.item_id] = _unit_mode(await db.get(Item, row.item_id))
+            keys = _unit_keys(row, modes[row.item_id])
+            code = keys[0] if keys else (row.serial_number or row.asset_code
+                                         or row.consumable_code or row.imei)
+            for indent_id in sorted(targets):
+                _record(indent_id, row.item_id, code)
+
+    # The consignment's own per-unit lines, for a load gated out without an issue
+    # behind it — those units are stamped against the dispatch, never against an issue.
+    if dispatch_ids:
+        dispatch_serial_rows = (await db.execute(
+            select(m.Dispatch.id, m.DispatchItem.item_id, m.DispatchItem.serial_no)
+            .join(m.DispatchItem, m.DispatchItem.dispatch_id == m.Dispatch.id)
+            .where(m.Dispatch.id.in_(dispatch_ids),
+                   m.Dispatch.status.in_(_ON_THE_ROAD),
+                   m.DispatchItem.serial_no.isnot(None))
+            .order_by(m.Dispatch.id, m.DispatchItem.item_id, m.DispatchItem.line_no)
+        )).all()
+        # (dispatch_id, dispatch_no, issue_id) — the issue is what the markers key on.
+        by_dispatch = {row[0]: row[2] for row in dispatch_rows}
+        for dispatch_id, item_id, serial_no in dispatch_serial_rows:
+            issue_id = by_dispatch.get(dispatch_id)
+            targets = (marker_targets
+                       .get(_shipped_unit_marker("issue", issue_id), {})
+                       .get(item_id, set())) if issue_id else set()
+            for indent_id in sorted(targets):
+                _record(indent_id, item_id, serial_no)
+
+    shipments = await _shipments_by_indent(db, indent_ids)
+
+    # What of each line somebody is already BUYING. The indents module owns the
+    # definition of "on order" (`_SETTLED_MR_STATUSES`) and the fulfilment desk's
+    # remainder is netted by the same function — reading it here rather than writing a
+    # second query is what keeps the requester's screen and the desk from disagreeing
+    # about whether a line went out to procurement.
+    on_order_by_line = await _on_order_by_lines(
+        db, [item.id for indent in indents for item in indent.items])
+    item_ids = {item.item_id for indent in indents for item in indent.items}
+    # WHICH identifier the requester is being asked to match, not merely whether one
+    # exists. `is_serial_tracked` alone answered for every item that names its units,
+    # so an IMEI-tracked handset and an asset-coded unit showed no panel at all —
+    # `_tracking_type` is the same served answer the picker uses, and it is asked per
+    # LINE because an item may be asset-coded in the master with nothing coded here.
+    item_rows = {
+        row.id: row
+        for row in (await db.execute(
+            select(Item).where(Item.id.in_(item_ids))
+        )).scalars().all()
+    } if item_ids else {}
+
     shipments = await _shipments_by_indent(db, indent_ids)
 
     out = []
@@ -13272,6 +19850,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             received = _d(item.received_quantity)
             issued = issued_by_line.get(item.id, ZERO)
             dispatched = dispatched_by_line.get(item.id, ZERO)
+            on_order = on_order_by_line.get(item.id, ZERO)
+            line_serials = serials_by_indent_item.get((indent.id, item.item_id), [])
             lines.append({
                 "indent_item_id": item.id,
                 "item_code": item.item_code,
@@ -13281,8 +19861,24 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
                 "received_quantity": float(received),
+                "is_serial_tracked": bool(getattr(
+                    item_rows.get(item.item_id), "is_serial_tracked", False)),
+                # Served, never inferred in a screen (same rule as the issue picker):
+                # a serial, an IMEI, an asset tag and a lot code are fifteen
+                # characters of upper case apiece, and only the item says which one
+                # the labels below are.
+                "tracking_type": _tracking_type(
+                    item_rows.get(item.item_id),
+                    has_units=bool(line_serials),
+                ) if item_rows.get(item.item_id) is not None else TrackingType.NONE.value,
+                "serial_numbers": line_serials,
+                # Served, not inferred: the screen cannot tell a line being bought in
+                # from one waiting on a shelf, and guessing it from the indent status
+                # is exactly what got a procurement line labelled "on the way".
+                "on_order_quantity": float(on_order),
+                "package_quantities": packages_by_line.get(item.id, []),
                 "pending_with": _pending_with(approved, issued, dispatched, received,
-                                              indent.status),
+                                              indent.status, on_order),
             })
         out.append({
             "indent_id": indent.id,
@@ -13346,6 +19942,7 @@ async def _shipments_by_indent(db: AsyncSession,
         if indent_id not in indent_ids:
             continue
         by_indent.setdefault(indent_id, []).append({
+            "dispatch_id": leg.dispatch_id,
             "tr_id": leg.id,
             "tr_no": leg.tr_no,
             "mode": leg.mode,
@@ -14173,9 +20770,16 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
         stmt = stmt.where(Bin.id != exclude_bin_id)
     if storage_type_id:
         if storage_type_id.isdigit():
-            stmt = stmt.where(Bin.storage_type_id == int(storage_type_id))
+            type_id = int(storage_type_id)
+            storage_type = await db.get(m.StorageType, type_id)
+            clauses = [Bin.storage_type_id == type_id]
+            # Legacy locations can have the correct denormalised code while their
+            # newer master id is null. A selected master type must find both shapes.
+            if storage_type is not None and storage_type.code:
+                clauses.append(func.upper(Bin.bin_type) == storage_type.code.upper())
+            stmt = stmt.where(or_(*clauses))
         else:
-            stmt = stmt.where(Bin.bin_type == storage_type_id)
+            stmt = stmt.where(func.upper(Bin.bin_type) == storage_type_id.upper())
     if item_id or batch_id:
         from app.modules.inventory.models import Stock
         stmt = stmt.join(Stock, Stock.bin_id == Bin.id).where(
@@ -15500,6 +22104,19 @@ async def transport_released(db: AsyncSession, tr, user) -> None:
     Acknowledgements screen showed nothing to confirm while the goods were already on
     a truck, and the indent stayed open with no way to close it.
     """
+    # A PURCHASE RETURN'S INBOUND VEHICLE comes first and returns: it carries no
+    # consignment, so everything below would fall out at the next line anyway — but it
+    # has its own settlement, and reaching it by accident of a null `dispatch_id` would
+    # be luck rather than intent. Same arrangement `transport_acknowledged` already has.
+    if await _inbound_vehicle_released(db, tr, user):
+        return
+
+    # A PURCHASE RETURN'S OUTWARD LEG, on the other hand, DOES carry a consignment, so
+    # this one records its rung and deliberately falls through rather than returning.
+    # The gate-out below is the only place stock comes off the books, and short-circuiting
+    # here would leave the goods on a lorry and still on the shelf.
+    await _outbound_return_released(db, tr, user)
+
     dispatch = await _consignment_of(db, tr)
     if dispatch is None:
         return
@@ -15693,6 +22310,96 @@ async def _dispatch_signature_outstanding(db: AsyncSession, dispatch: m.Dispatch
     return instance is None or instance.status != InstanceStatus.APPROVED.value
 
 
+def _stored_collection_answer(row: m.PurchaseReturn) -> SimpleNamespace:
+    """The supplier's collection answer, rebuilt from what was kept on the return.
+
+    Shaped like `VendorReturnResponseIn` because `_raise_vendor_return_inbound` reads
+    these attribute names off it — one receipt builder serves the delivery and the
+    collection, and a second copy of that loop for the deferred case is exactly the
+    drift worth avoiding.
+
+    NOT the real schema, and that is deliberate rather than lazy. `VendorReturnResponseIn`
+    refuses a `replacement_ready_date` in the past, correctly: a supplier promising goods
+    ready last Tuesday is answering the wrong question. But this runs when the leg is
+    ACKNOWLEDGED, days or weeks after the promise was made and kept, by which time that
+    date is ALWAYS in the past. Replaying the answer through its own validator would
+    therefore fail every single time, on a document that was valid when it was written.
+    The validators belong to the press that took the answer; this only carries it.
+    """
+    return SimpleNamespace(
+        replacement_mode=s.INBOUND_MODES_COLLECTED[0],
+        # A collection's own two facts. The delivery fields stay None: nobody drove it
+        # here, and a transporter or LR number written now would be inventing one.
+        replacement_pickup_address=row.collection_pickup_address,
+        replacement_ready_date=row.collection_ready_date,
+        replacement_expected_date=None,
+        replacement_transporter_name=None,
+        replacement_vehicle_no=None,
+        replacement_lr_no=None,
+        # Plain namespaces rather than `VendorReplacementLineIn` for the same reason the
+        # outer object is one: the builder reads four attributes off each.
+        replacement_lines=[
+            SimpleNamespace(line_no=line.line_no,
+                            batch_no=line.replacement_batch_no,
+                            mfg_date=line.replacement_mfg_date,
+                            expiry_date=line.replacement_expiry_date)
+            for line in row.items
+        ],
+    )
+
+
+async def _collection_arrived(db: AsyncSession, tr, user) -> bool:
+    """A vendor collection leg has landed — raise the receipt it was fetching.
+
+    THE OTHER END of `_raise_collection_shipment`. When the supplier answers REPLACED
+    and asks us to collect, the answer raises the TRIP and nothing in the warehouse:
+    there is nothing for the store to do while the goods are still on the supplier's
+    dock. This is the moment that stops being true — our vehicle has been, and somebody
+    here has signed for what came back — so this is where the inbound receipt is raised,
+    against the facts the supplier stated when they answered.
+
+    Everything the receipt needs was validated in that press and kept on the return
+    (`collection_pickup_address`, `collection_ready_date`) and on its lines
+    (`replacement_batch_no` and the two dates). So the answer is rebuilt exactly as the
+    supplier gave it and handed to the same `_raise_vendor_return_inbound` a delivery
+    uses — one receipt builder, not a second drifting copy for the collection case.
+
+    Returns whether this leg was a collection, so the caller knows to stop: a collection
+    leg carries no consignment and none of the consignment settlement below applies.
+
+    IDEMPOTENT. A second acknowledgement finds `vendor_followup_receipt_id` already set
+    and does nothing rather than raising a second receipt — the store would otherwise be
+    expecting two lorries for one collection.
+    """
+    if not getattr(tr, "id", None):
+        return False
+    row = (await db.execute(
+        select(m.PurchaseReturn)
+        .options(selectinload(m.PurchaseReturn.items))
+        .where(m.PurchaseReturn.collection_tr_id == tr.id)
+    )).scalars().first()
+    if row is None:
+        return False
+    if row.vendor_followup_receipt_id:
+        logger.info("%s: %s already has receipt %s — not raising a second",
+                    tr.tr_no, row.return_no, row.vendor_followup_receipt_no)
+        return True
+
+    receipt = await _raise_vendor_return_inbound(db, row, _stored_collection_answer(row))
+    row.vendor_followup_receipt_id = receipt.id
+    row.vendor_followup_receipt_no = receipt.grn_no
+    await write_audit(
+        db, entity="pro_returns", entity_id=row.id, entity_no=row.return_no,
+        action=AuditAction.UPDATE, actor=user,
+        summary=f"{row.return_no}: {tr.tr_no} brought the replacement back — "
+                f"inbound receipt {receipt.grn_no} raised",
+        after={"vendor_followup_receipt_no": receipt.grn_no,
+               "collection_tr_no": tr.tr_no})
+    logger.info("%s landed the collection for %s as receipt %s",
+                tr.tr_no, row.return_no, receipt.grn_no)
+    return True
+
+
 async def transport_acknowledged(db: AsyncSession, tr, user) -> None:
     """The receiving site signed for the leg — settle what the leg was carrying.
 
@@ -15701,6 +22408,17 @@ async def transport_acknowledged(db: AsyncSession, tr, user) -> None:
     shelf and the indent closes once nothing is still owed on it. All of that already
     lives in `_apply_dispatch_acknowledgement`; this only decides that it applies.
     """
+    # A VENDOR COLLECTION comes first and returns: it carries no consignment, so
+    # everything below would fall out at the next line anyway — but it has its own
+    # settlement, and reaching it by accident of a null `dispatch_id` would be luck
+    # rather than intent.
+    if await _collection_arrived(db, tr, user):
+        return
+    # A PURCHASE RETURN'S INBOUND VEHICLE, for the same reason. Matched on its own
+    # column, so the two can never both claim one leg.
+    if await _inbound_vehicle_arrived(db, tr, user):
+        return
+
     dispatch = await _consignment_of(db, tr)
     if dispatch is None:
         return

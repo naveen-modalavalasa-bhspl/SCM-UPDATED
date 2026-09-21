@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import literal
 
 from app.core.exceptions import NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams
@@ -1062,7 +1063,7 @@ async def test_acknowledgment_search_uses_same_visibility_and_search_filters(mon
     db = CapturingDb()
     monkeypatch.setattr(
         service,
-        "indent_access_condition",
+        "_indent_visibility",
         AsyncMock(return_value=service.Indent.requested_by_id == 10),
     )
 
@@ -1456,6 +1457,11 @@ async def test_notification_filters_visible_content_before_stable_pagination(mon
         "indent_access_condition",
         AsyncMock(return_value=service.Indent.requested_by_id == 10),
     )
+    monkeypatch.setattr(
+        service,
+        "scope_condition",
+        AsyncMock(return_value=literal(True)),
+    )
 
     await service.list_notifications(
         db,
@@ -1469,14 +1475,20 @@ async def test_notification_filters_visible_content_before_stable_pagination(mon
 
     sql = sql_text(db.result_stmt)
     assert "ind_indents.requested_by_id = 10" in sql
-    assert "lower(ind_indents.indent_no)" in sql
+    assert "sys_notifications.employee_id = 10" in sql
+    assert "sys_notifications.entity_type = 'INDENT'" in sql
+    assert "sys_notifications.entity_type LIKE" in sql
+    assert "INDENT_STATUS:" in sql
+    assert "UNION ALL" in sql
+    assert "NOT (EXISTS" in sql
+    assert "lower(notification_rows.indent_no)" in sql
     assert "Request approved" in sql
     assert "approved and with inventory" in sql
-    assert "replace(ind_indents.status, '_', ' ')" in sql
-    assert "ind_indents.updated_at >= '2026-07-01 00:00:00+00:00'" in sql
-    assert "ind_indents.updated_at < '2026-08-01 00:00:00+00:00'" in sql
-    assert "ind_indents.status IN ('AWAITING_ALLOCATION')" in sql
-    assert "ORDER BY ind_indents.updated_at DESC, ind_indents.id DESC" in sql
+    assert "replace(notification_rows.status, '_', ' ')" in sql
+    assert "notification_rows.created_at >= '2026-07-01 00:00:00" in sql
+    assert "notification_rows.created_at < '2026-08-01 00:00:00" in sql
+    assert "notification_rows.status IN ('AWAITING_ALLOCATION')" in sql
+    assert "ORDER BY notification_rows.created_at DESC" in sql
     assert sql.rfind("WHERE") < sql.rfind("LIMIT 5 OFFSET 5")
     for hidden_field in (
         "requested_by_code",

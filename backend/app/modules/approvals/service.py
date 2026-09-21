@@ -13,7 +13,7 @@ from app.core.exceptions import (
     AppException, NotFoundError, PermissionError_, ValidationError,
 )
 from app.modules.indents import service as indent_service
-from app.modules.indents.models import Indent
+from app.modules.indents.models import Indent, IndentItem
 from app.modules.indents.enums import ApprovalAction, IndentStatus, IndentType
 from app.platform.settings.models import AuditLog
 from app.platform.settings.service import write_audit
@@ -265,7 +265,8 @@ DECISION_VALUES = {
 
 
 def _decision_output(action: Action, instance: Instance, user,
-                     numbers: dict[tuple[str, int], str] | None = None) -> dict:
+                     numbers: dict[tuple[str, int], str] | None = None,
+                     exclusions: dict[int, list[dict]] | None = None) -> dict:
     duration_hours = None
     if action.acted_at and instance.started_at:
         duration_hours = round(
@@ -291,6 +292,12 @@ def _decision_output(action: Action, instance: Instance, user,
         "requester": instance.started_by_name,
         "approver_name": action.actor_name or user.full_name,
         "workflow_status": instance.status,
+        # The lines THIS approver dropped when they signed. An exclusion is part of
+        # the decision, not a property of the document that follows it, so the ledger
+        # has to carry it: the indent screen shows the line at zero and says nothing
+        # about who took it out of the batch.
+        "excluded_items": (exclusions or {}).get(instance.doc_id, [])
+        if instance.doc_type == DocType.INDENT.value else [],
     }
 
 
@@ -341,6 +348,40 @@ async def decisions_for_user(db: AsyncSession, user) -> list[dict]:
             for action, instance in rows]
 
 
+async def _exclusions_by_indent(
+    db: AsyncSession, indent_ids: Iterable[int], actor_id: int,
+) -> dict[int, list[dict]]:
+    """Which lines this approver dropped, per indent.
+
+    Read off `ind_indent_items` — the exclusion is already stored there with who did
+    it and when (see `IndentItem.is_excluded`), so nothing is written for this
+    screen's benefit and it cannot show a drop the indent does not carry. Scoped to
+    the actor so a row in MY ledger never reports somebody else's exclusion.
+    """
+    ids = [i for i in set(indent_ids) if i]
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(IndentItem).where(
+            IndentItem.indent_id.in_(ids),
+            IndentItem.is_excluded.is_(True),
+            IndentItem.excluded_by_id == actor_id,
+        ).order_by(IndentItem.indent_id, IndentItem.line_no, IndentItem.id)
+    )).scalars().all()
+    out: dict[int, list[dict]] = defaultdict(list)
+    for line in rows:
+        out[line.indent_id].append({
+            "line_id": line.id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "requested_quantity": float(line.quantity or 0),
+            "excluded_by_name": line.excluded_by_name,
+            "excluded_at": line.excluded_at.isoformat() if line.excluded_at else None,
+        })
+    return dict(out)
+
+
 async def decisions_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     decision: str = "",
@@ -368,8 +409,14 @@ async def decisions_page(
     numbers = await _document_numbers(db, _missing_numbers(
         (instance.doc_type, instance.doc_id, instance.doc_no) for _, instance in rows
     ))
+    exclusions = await _exclusions_by_indent(
+        db,
+        (instance.doc_id for _, instance in rows
+         if instance.doc_type == DocType.INDENT.value),
+        user.id,
+    )
     return {
-        "items": [_decision_output(action, instance, user, numbers)
+        "items": [_decision_output(action, instance, user, numbers, exclusions)
                   for action, instance in rows],
         "total": total,
         "page": page,
@@ -766,6 +813,7 @@ def _approval_out(
         current_stage_name=instance.current_stage_name,
         current_approver_name=indent.current_approver_name,
         can_return_for_correction=can_return_for_correction,
+        required_date=indent.required_date,
         created_at=indent.created_at,
         items=items,
     )

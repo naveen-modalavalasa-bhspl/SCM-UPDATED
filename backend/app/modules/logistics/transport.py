@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import (
     BigInteger, Integer, String, and_, case, cast, func, literal, or_, select,
-    union_all,
+    text, union_all,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +41,10 @@ from app.modules.logistics.enums import (
     CARRIER_VENDOR_TYPES,
     DEFAULT_CARRIAGE,
     EXCEPTION_EVENT_TYPES,
+    INBOUND_SOURCES,
     LogisticsActivityType,
+    MANUAL_COURIER_REQUIRED_FIELDS,
+    MANUAL_COURIER_TRACKING_FIELDS,
     MODE_RULES,
     AckCondition,
     QuoteStatus,
@@ -50,6 +53,7 @@ from app.modules.logistics.enums import (
     TERMINAL_STATUSES,
     TransportMode,
     TransportStatus,
+    asks_provider_for_price,
     carriage_rule,
     flow_stages,
     is_inbound,
@@ -61,7 +65,7 @@ from app.modules.logistics.models import (
     MONEY, CarrierQuote, ShipmentEvent, TransportRequest, TransportRequestItem,
 )
 from app.modules.logistics.schemas import TRListRow, TROut
-from app.platform.settings.service import write_audit
+from app.platform.settings.service import get_setting, write_audit
 from app.platform.settings import attachments
 from app.platform.workflow import engine, ladder
 # Read-only, and only for the activity ledger: the trail of who decided what is
@@ -80,10 +84,47 @@ logger = logging.getLogger(__name__)
 AUDIT_ENTITY = "lgs_transport_requests"
 ZERO = Decimal("0")
 LOOKUP_LIMIT = 50
+MANUAL_COURIER_SETTING = "logistics.manual_courier_dispatch"
 
 
 def _d(value) -> Decimal:
     return Decimal(str(value or 0))
+
+
+async def manual_courier_dispatch_enabled(db: AsyncSession) -> bool:
+    """Whether Courier uses the desk-entered name flow for this company.
+
+    This small read is shared by the write path and the dispatch UI policy endpoint.
+    Keeping it here prevents a dispatcher from needing permission to read all Company
+    Settings just to learn which Courier form they should be shown.
+
+    Read defensively because this one boolean decides which form the desk is shown:
+    the row is written by whatever last touched `sys_settings` — the settings PUT
+    stores `str(True)`, a seed or a hand-edit may leave `1`, `yes` or an empty value —
+    and a raised exception here reads to the screen as "the setting is off", which is
+    the wrong form rather than a visible failure.
+    """
+    raw = await get_setting(db, MANUAL_COURIER_SETTING, "false")
+    return (raw or "").strip().lower() in {"true", "1", "yes", "on"}
+
+
+async def dispatch_policy(db: AsyncSession) -> dict:
+    """Everything the dispatch form needs in order to draw the Courier step.
+
+    Which form (the vendor dropdown or the typed name), and — when it is the typed
+    one — exactly which boxes the service will hold the press back for. Served rather
+    than decided in the screen for the same reason `/modes` is: a form that keeps its
+    own copy of "a manual courier needs a phone number" is a rule with two values, and
+    the day they disagree the desk is either blocked by an unmarked box or told the
+    press is ready when it is not.
+    """
+    return {
+        "manual_courier_dispatch": await manual_courier_dispatch_enabled(db),
+        "manual_courier_required_fields": list(MANUAL_COURIER_REQUIRED_FIELDS),
+        # Either one satisfies it. A list, not a field, because that is the shape of
+        # the rule — see MANUAL_COURIER_TRACKING_FIELDS.
+        "manual_courier_tracking_fields": list(MANUAL_COURIER_TRACKING_FIELDS),
+    }
 
 
 def _and_list(names: list[str]) -> str:
@@ -101,13 +142,92 @@ def _and_list(names: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 
 async def get_tr(db: AsyncSession, tr_id: int, user=None) -> TransportRequest:
-    """Load one shipment, applying the same scope as the transport register."""
+    """Load one shipment, applying the same scope as the transport register.
+
+    `_tr_readable` is that scope, and it is deliberately the same call the register and
+    the summary make: leaving an inbound leg scoped here was not a narrower read but a
+    broken screen. The Dispatch board's return queue lists the leg, and then EVERY
+    staff route carrying its id 404s, because `_require_transport_in_scope` is this
+    function. Confirm dispatch opened on a leg it could never load and sat on
+    "Loading..." forever, and the press behind it would have failed the same way.
+    """
     stmt = select(TransportRequest).where(TransportRequest.id == tr_id)
     if user is not None:
-        stmt = stmt.where(await _tr_scope(db, user))
+        stmt = stmt.where(await _tr_readable(db, user))
     doc = (await db.execute(stmt)).scalar_one_or_none()
     if doc is None:
         raise NotFoundError(f"Transport request {tr_id} not found")
+    await _attach_package_quantities(db, doc)
+    return doc
+
+
+def _package_quantity_key(row) -> tuple[str, object] | None:
+    item_id = getattr(row, "item_id", None)
+    if item_id is not None:
+        return ("id", int(item_id))
+    item_code = getattr(row, "item_code", None)
+    if item_code:
+        return ("code", str(item_code).lower())
+    item_name = getattr(row, "item_name", None)
+    if item_name:
+        return ("name", str(item_name).lower())
+    return None
+
+
+async def _attach_package_quantities(
+        db: AsyncSession, doc: TransportRequest) -> TransportRequest:
+    """Add per-package item quantities from the warehouse consignment.
+
+    `package_count` on transport lines is a freight count: each physical package is
+    counted once for pricing, so only one item in that package carries the count. The
+    manifest table needs a different read model: for this item, which package holds
+    how much. The source of truth for that is still the warehouse consignment, and the
+    soft dispatch id is enough to read it without adding columns to logistics.
+    """
+    if not doc.dispatch_id:
+        return doc
+
+    for line in doc.items:
+        setattr(line, "package_quantities", [])
+
+    rows = (await db.execute(text("""
+        SELECT
+            i.item_id,
+            i.item_code,
+            i.item_name,
+            i.package_id,
+            p.package_no,
+            p.package_type,
+            SUM(i.quantity) AS quantity
+        FROM out_dispatch_items i
+        LEFT JOIN out_dispatch_packages p ON p.id = i.package_id
+        WHERE i.dispatch_id = :dispatch_id
+        GROUP BY
+            i.item_id,
+            i.item_code,
+            i.item_name,
+            i.package_id,
+            p.package_no,
+            p.package_type
+        ORDER BY MIN(i.line_no)
+    """), {"dispatch_id": doc.dispatch_id})).mappings().all()
+
+    by_item: dict[tuple[str, object], list[dict]] = {}
+    for row in rows:
+        key = _package_quantity_key(SimpleNamespace(**row))
+        if key is None:
+            continue
+        by_item.setdefault(key, []).append({
+            "package_id": row["package_id"],
+            "package_no": row["package_no"],
+            "package_type": row["package_type"],
+            "quantity": row["quantity"] or 0,
+        })
+
+    for line in doc.items:
+        key = _package_quantity_key(line)
+        if key is not None:
+            setattr(line, "package_quantities", by_item.get(key, []))
     return doc
 
 
@@ -151,6 +271,27 @@ async def _tr_scope(db: AsyncSession, user):
         project_col=TransportRequest.project_id,
         warehouse_col=TransportRequest.from_warehouse_id,
     )
+
+
+async def _tr_readable(db: AsyncSession, user):
+    """What this login may READ on the register — the row scope, plus every INBOUND leg.
+
+    ONE definition, because the three reads that used to carve the return out on their
+    own had drifted into three different answers. `get_tr` exempted it, `_summary_scope`
+    exempted it, and `list_trs` exempted it only when the CALLER had already asked for
+    `source_type=RETURN` by name — so the Shipments register's default "Everything" view
+    applied the scope and dropped the very legs the tile above it had just counted and
+    the Dispatch board below it was listing. A count nobody can open is the defect the
+    `_summary_scope` docstring was written about; this is the other half of it.
+
+    The carve-out itself is `get_tr`'s reason unchanged: a return runs field ->
+    warehouse, so `from_warehouse_id` holds the field office it LEFT rather than the
+    warehouse it is coming to, and no central logistics profile is scoped to that. An
+    inbound leg from a field warehouse is every logistics viewer's business. The scope
+    still applies in full to outward legs.
+    """
+    return or_(await _tr_scope(db, user),
+               TransportRequest.source_type.in_(INBOUND_SOURCES))
 
 
 # The paperwork that travels WITH the load, as opposed to the receipt evidence above,
@@ -203,10 +344,15 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
                    awaiting_ack: bool = False,
                    user=None) -> dict:
     stmt = select(TransportRequest)
-    # FIXED — see `_tr_scope`. Optional so an internal caller that already knows what
+    # FIXED — see `_tr_readable`. Optional so an internal caller that already knows what
     # it is reading (a hook, a handoff) is unaffected; every ROUTE passes the user.
+    # The carve-out for inbound legs is UNCONDITIONAL now. It used to fire only when the
+    # caller had asked for `source_type=RETURN` by name, which meant the one view that
+    # does not name it — the register's "Everything" — was the one view a field return
+    # was missing from, while the tile above it counted the leg and the Dispatch board
+    # below it listed the same row.
     if user is not None:
-        stmt = stmt.where(await _tr_scope(db, user))
+        stmt = stmt.where(await _tr_readable(db, user))
     if source_type:
         # The one filter that separates the outward leg from the return one (doc E7).
         # Same register, same statuses, opposite direction.
@@ -238,6 +384,10 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
             TransportRequest.lr_no.ilike(like),
             TransportRequest.docket_no.ilike(like),
             TransportRequest.indent_no.ilike(like),
+            # FIX 2026-09-07: the source document, so typing a return's own number
+            # (RET-…) finds the leg carrying it. Every other list on this register can
+            # be searched by the paper the desk is holding; the return leg could not.
+            TransportRequest.source_no.ilike(like),
             TransportRequest.carrier_name.ilike(like),
             TransportRequest.to_location_name.ilike(like),
         ))
@@ -319,7 +469,7 @@ def mode_suggestion(distance_km: float | None = None,
     return suggest_mode(distance_km, weight_kg, packages)
 
 
-def flow_catalogue(mode: str | None = None) -> list[dict]:
+def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False) -> list[dict]:
     """The stepper, served rather than drawn from a constant in the screen.
 
     A tendered shipment has two stages the others do not. Letting the frontend decide
@@ -334,7 +484,7 @@ def flow_catalogue(mode: str | None = None) -> list[dict]:
         # to say, and the award half of "Provider accepts" is no different.
         "pending_help": stage.pending_help,
         "statuses": list(stage.statuses),
-    } for stage in flow_stages(mode)]
+    } for stage in flow_stages(mode, manual_courier=manual_courier)]
 
 
 #: The queues the logistics desk actually works, in the order the flow runs. Served
@@ -352,20 +502,47 @@ _SUMMARY_QUEUES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-async def summary(db: AsyncSession) -> dict:
-    """How many consignments are sitting at each stage, plus the open claims."""
+async def _summary_scope(db: AsyncSession, user):
+    """What this login may COUNT — exactly what `list_trs` lets it read.
+
+    The board and the queue behind it must be one answer. `summary` counted the whole
+    table while `list_trs` scoped every row, so a tile could show a number and then
+    open an empty list: the Overview read "1 delivered" over "No shipments match that"
+    for a desk whose rung does not reach that shipment. A count nobody can open is
+    worse than no count, because it sends somebody hunting for a row that was never
+    theirs.
+
+    One CALL rather than a repeated clause, for the same reason: this file already had
+    three hand-copied versions of the inbound carve-out and one of them had drifted.
+    """
+    return await _tr_readable(db, user)
+
+
+async def summary(db: AsyncSession, user=None) -> dict:
+    """How many consignments are sitting at each stage, plus the open claims.
+
+    `user` is optional for the same reason it is on `list_trs`: an internal caller
+    that already knows what it is reading is unaffected. Every ROUTE passes it.
+    """
+    scope = await _summary_scope(db, user) if user is not None else literal(True)
+
     rows = (await db.execute(
         select(TransportRequest.status, func.count(TransportRequest.id))
+        .where(scope)
         .group_by(TransportRequest.status)
     )).all()
     by_status = {status: count for status, count in rows}
 
     counts = {key: sum(by_status.get(s, 0) for s in statuses)
               for key, statuses in _SUMMARY_QUEUES}
+    # Scoped through the shipment the claim is against: a claim is a fact about a leg,
+    # so it is visible exactly when the leg is.
     counts["open_claims"] = (await db.execute(
         select(func.count(ShipmentEvent.id))
+        .join(TransportRequest, TransportRequest.id == ShipmentEvent.tr_id)
         .where(ShipmentEvent.is_exception.is_(True),
-               ShipmentEvent.resolved_at.is_(None))
+               ShipmentEvent.resolved_at.is_(None),
+               scope)
     )).scalar_one()
     # The two the desk is actually judged on: nothing should sit here.
     counts["awaiting_ack"] = sum(by_status.get(s, 0) for s in AWAITING_ACK_STATUSES)
@@ -373,7 +550,8 @@ async def summary(db: AsyncSession) -> dict:
         select(func.count(TransportRequest.id))
         .where(TransportRequest.status.in_([TransportStatus.IN_TRANSIT.value,
                                             TransportStatus.DELIVERED.value]),
-               TransportRequest.tracking_shared_at.is_(None))
+               TransportRequest.tracking_shared_at.is_(None),
+               scope)
     )).scalar_one()
     return counts
 
@@ -447,6 +625,7 @@ def _raiser_view(doc: TransportRequest) -> dict:
     the freight, the losing quotes and who awarded it are none of the field's business.
     """
     return {
+        "dispatch_id": doc.dispatch_id,
         "tr_id": doc.id, "tr_no": doc.tr_no,
         "status": doc.status, "mode": doc.mode,
         # How it travels, in the raiser's words as well as ours. The LABELS travel with
@@ -556,20 +735,23 @@ async def provider_board(db: AsyncSession, params: PageParams,
     rather than left to the screen to derive from the quote rows, because a board that
     makes you open each request to count the replies is a board that awards late.
 
-    Every mode, not just the tendered one. A courier booking has no quotes and reads
-    0 of 0, which is exactly right: it was settled at dispatch and there is nothing to
-    compare. Filtering it out would take rows off a board that has always shown them,
-    to make a column tidier.
+    Every mode, not just the tendered one. A manual courier booking has no quotes and
+    reads 0 of 0, which is exactly right: it was settled at dispatch and there is
+    nothing to compare. Filtering it out would take rows off a board that has always
+    shown them, to make a column tidier.
     """
     wanted = [s.strip().upper() for s in (status or "").split(",") if s.strip()]
     stmt = (select(TransportRequest)
             .where(TransportRequest.status.in_(
                 wanted or list(PROVIDER_BOARD_STATUSES))))
-    # FIXED — same rung as the register. The provider board carries the QUOTED PRICES,
-    # so leaving it unscoped published every carrier's rates for every lane to anyone
-    # holding transport.view.
+    # FIXED — same rung as the register, and literally the same call. The provider board
+    # carries the QUOTED PRICES, so leaving it unscoped published every carrier's rates
+    # for every lane to anyone holding transport.view. The inbound carve-out inside
+    # `_tr_readable` is not a hole in that: a return leg is already listed, counted and
+    # opened by every transport.view holder, and leaving it out HERE only meant a leg
+    # that reached QUOTING had no desk able to award it.
     if user is not None:
-        stmt = stmt.where(await _tr_scope(db, user))
+        stmt = stmt.where(await _tr_readable(db, user))
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(or_(
@@ -621,7 +803,10 @@ async def open_exceptions(db: AsyncSession, params: PageParams, user=None) -> di
     FIXED 2026-08-20 — was unscoped. A claim names a shipment, a lane and a carrier, so
     an open claims board with no rung told every logistics login what had gone wrong on
     every other region's freight. `ShipmentEvent` carries no location of its own, so it
-    is bounded through its shipment — the same rung `list_trs` applies.
+    is bounded through its shipment — the same rung `list_trs` applies, which is why it
+    is `_tr_readable` and not `_tr_scope`: a claim raised on a return leg has to be
+    visible to the desk that can see the leg, or the material that came back damaged is
+    on a board nobody who can act on it is allowed to read.
     """
     stmt = (select(ShipmentEvent)
             .where(ShipmentEvent.is_exception.is_(True),
@@ -629,7 +814,7 @@ async def open_exceptions(db: AsyncSession, params: PageParams, user=None) -> di
             .order_by(ShipmentEvent.event_at.desc()))
     if user is not None:
         stmt = stmt.where(ShipmentEvent.tr_id.in_(
-            select(TransportRequest.id).where(await _tr_scope(db, user))))
+            select(TransportRequest.id).where(await _tr_readable(db, user))))
     return await paginate(db, stmt, params)
 
 
@@ -752,8 +937,12 @@ async def activity_ledger(db: AsyncSession, params: PageParams, *,
     # bounds the whole ledger. WITHOUT this the retired Tracking and Exceptions boards
     # were replaced by a screen that showed strictly MORE than they did — who awarded
     # a job, at what freight, to which carrier — to anyone holding transport.view.
+    #
+    # `_tr_readable` rather than `_tr_scope`, for the reason the helper gives: the
+    # Dispatch board opens this ledger per row (`?dispatch_id=`), so a bound narrower
+    # than the board's own is a link that lands on an empty trail.
     if user is not None:
-        visible_stmt = visible_stmt.where(await _tr_scope(db, user))
+        visible_stmt = visible_stmt.where(await _tr_readable(db, user))
     visible = visible_stmt.cte("visible_shipments")
 
     key = func.concat(literal("tr:"), cast(visible.c.tr_id, String))
@@ -1035,6 +1224,120 @@ _FIELD_LABELS = {
     "handed_over_by_name": "who handed the material over",
 }
 
+#: The same fields said the way the MANUAL courier desk knows them. Nobody was sent
+#: for this load: somebody walked up to the counter, so "the driver's name" is the
+#: name of whoever took it and the number is the one that rings them today.
+_MANUAL_FIELD_LABELS = {
+    "driver_name": "who collected it",
+    "driver_phone": "their phone number",
+}
+
+
+def _is_manual_courier_row(doc: TransportRequest) -> bool:
+    """Is this shipment a courier recorded BY HAND, judged off the stored row?
+
+    Not off the company setting, which is what `dispatch_consignment` reads: the
+    setting says which form the desk is shown TODAY, and a shipment raised last week
+    is whatever it was raised as. A courier leg carrying a name but no vendor id is
+    the durable shape of a manual booking — the same test `_check_mode_fields`
+    already exempts from needing a carrier.
+    """
+    return (doc.mode == TransportMode.COURIER.value
+            and not doc.carrier_id
+            and bool((doc.carrier_name or "").strip()))
+
+
+def _awaiting_price(doc: TransportRequest) -> bool:
+    """Is a provider still holding the price question on THIS shipment?
+
+    Read off the invitation rather than off the mode, because the invitation is what a
+    shipment already raised carries: a courier leg sent for a price has an INVITED row
+    in `lgs_carrier_quotes` exactly as a tender does, and a manual courier — or any
+    mode the desk settles itself — has none. Same rule as `_manual_courier_here`: the
+    company setting decides how a NEW courier leg is raised and never re-answers one
+    already on the road.
+    """
+    return doc.awarded_quote_id is None and any(
+        quote.status in (QuoteStatus.INVITED.value, QuoteStatus.SUBMITTED.value)
+        for quote in doc.quotes)
+
+
+def _courier_arrangement_settled(doc: TransportRequest) -> bool:
+    """Has this courier leg already been arranged one way or the other?
+
+    A vendor id means it was booked with a registered courier; a name with no id means
+    it was written down at the counter. Either way the question has been ANSWERED, and
+    a company setting flipped afterwards must not re-answer it.
+
+    An outstanding INVITATION counts as arranged too, and for the same reason: a leg
+    sitting with a courier for their rate was booked from the vendor register — the
+    id simply is not on the document until the price is accepted. Without this an
+    admin ticking the manual-courier box mid-quote sent the next edit down the manual
+    branch, which drops the invitation and walks the shipment back to READY behind the
+    courier who was answering it.
+
+    None of the three means nobody has chosen yet — a fresh draft, or an edit that
+    just moved the mode onto COURIER and cleared the old provider with it. There the
+    setting is the right authority, because that choice is being made now.
+    """
+    return (doc.mode == TransportMode.COURIER.value
+            and bool(doc.carrier_id or (doc.carrier_name or "").strip()
+                     or _awaiting_price(doc)))
+
+
+async def _manual_courier_here(db: AsyncSession, doc: TransportRequest) -> bool:
+    """Which courier arrangement THIS shipment is on, for an edit.
+
+    The company setting decides how a courier leg is RAISED and nothing after that.
+    Read live on every edit it silently rewrote shipments already on the road:
+
+      * turn it OFF and a manual leg — a typed name, no vendor — became uneditable.
+        Its own name was refused ("select a registered courier instead") and, with no
+        vendor to offer, the next check demanded a provider the desk could not give
+        it. A shipment mid-approval could no longer be corrected at all.
+      * turn it ON and a leg genuinely booked with a registered courier went down the
+        manual branch on its next save: `carrier_id` cleared, the quotes dropped and
+        the status walked back to READY. A carrier who had accepted the job was
+        detached from it by an admin toggling a checkbox on another screen.
+
+    So: settled rows answer for themselves (`_courier_arrangement_settled`), and only
+    an unarranged one asks the setting.
+    """
+    if _courier_arrangement_settled(doc):
+        return _is_manual_courier_row(doc)
+    return (doc.mode == TransportMode.COURIER.value
+            and await manual_courier_dispatch_enabled(db))
+
+
+def _check_manual_courier_fields(row) -> None:
+    """What a manual courier leg must carry, because no portal will ever add it.
+
+    `row` is the incoming payload on the press that RAISES the leg (the document does
+    not exist yet, and a TR number should not be burned on one that would be raised
+    incomplete) and the stored document on an edit (which is partial by definition, so
+    what matters is the state it leaves behind). The field names are the same on both,
+    which is why one check serves them.
+
+    A vendor courier answers all of this in their own login when they acknowledge the
+    job (`carrier_acknowledge`), which is why these fields are not in the COURIER
+    mode rule and must not be: demanding them of a booking that has only just been
+    sent would be asking the desk for a van the courier has not assigned yet.
+
+    A manual courier has no login. This press is the only moment the answers exist,
+    so it is the moment they are asked for — see MANUAL_COURIER_REQUIRED_FIELDS.
+    """
+    missing = [_MANUAL_FIELD_LABELS.get(field, _FIELD_LABELS.get(field, field))
+               for field in MANUAL_COURIER_REQUIRED_FIELDS
+               if not str(getattr(row, field, None) or "").strip()]
+    if not any(str(getattr(row, field, None) or "").strip()
+               for field in MANUAL_COURIER_TRACKING_FIELDS):
+        missing.append("the LR or the docket number")
+    if missing:
+        raise ValidationError(
+            "A manual courier is recorded at the dispatch desk, so it needs "
+            f"{_and_list(missing)} entered here — there is no provider login to "
+            "fill them in later.")
+
 
 def _check_mode_fields(doc: TransportRequest, *, at_submit: bool = False) -> None:
     """Whatever the mode says it must carry, checked in one place.
@@ -1043,19 +1346,29 @@ def _check_mode_fields(doc: TransportRequest, *, at_submit: bool = False) -> Non
     is the whole point of a draft. What must never happen is an approved request that
     nobody can act on because it names no carrier and no vehicle.
 
-    One field is exempt at submit, and only for a tendered mode: the carrier. A
-    third-party shipment's carrier is AWARDED, not declared — it is the answer the
-    tender exists to produce — so demanding it up front made a third-party request
-    impossible to submit at all, while the form beside it correctly said to leave the
-    carrier blank. By dispatch it is set, because an award is what sets it.
+    One field is exempt at submit, and only while the price is still out with a
+    provider: the carrier. A third-party shipment's carrier is AWARDED, not declared —
+    it is the answer the tender exists to produce — so demanding it up front made a
+    third-party request impossible to submit at all, while the form beside it
+    correctly said to leave the carrier blank. A courier asked for its rate is on the
+    same footing until the desk accepts it (`_awaiting_price`). By dispatch it is set,
+    because accepting the price is what sets it.
     """
     rule = mode_rule(doc.mode)
     required = rule.required_fields
-    if at_submit and rule.needs_quotes:
+    if at_submit and (rule.needs_quotes or _awaiting_price(doc)):
         required = tuple(field for field in required if field != "carrier_id")
     missing = [_FIELD_LABELS.get(field, field)
                for field in required
-               if not getattr(doc, field, None)]
+               # A manual courier has no vendor id by design.  Its typed name is still
+               # a real, durable answer to who received custody, and keeping this
+               # check on the stored row means a later settings change cannot strand
+               # an already-approved manual shipment at final dispatch.
+               if not (field == "carrier_id"
+                       and doc.mode == TransportMode.COURIER.value
+                       and not doc.carrier_id
+                       and (doc.carrier_name or "").strip())
+               and not getattr(doc, field, None)]
     if missing:
         raise ValidationError(
             f"A {rule.label.lower()} request needs {', '.join(missing)}.")
@@ -1209,9 +1522,13 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
         back to the RFQ desk as a comparison. That round trip is the whole reason this
         mode exists, and it is only a tender if more than one carrier was asked: one
         price is a rate, not a competition.
-      * everything else — the provider is known the moment it is chosen (a courier, a
-        company vehicle, a person carrying it), so it goes straight to READY and the
-        next press is "it has left".
+      * COURIER — the same quoted path as third-party. Every provider chosen is
+        invited, the prices come back side by side, and one is awarded before the
+        courier acknowledges the job.
+      * everything else — a manual courier (a name off a counter receipt, with no
+        login to ask), a company vehicle, a person carrying it. The provider is known
+        the moment it is chosen, so it goes straight to READY and the next press is
+        "it has left".
 
     No second approval BY DEFAULT. The consignment it carries was already raised,
     approved and released by the warehouse; approving the same movement again is a
@@ -1230,13 +1547,34 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
             f"Choose one of: {', '.join(MODE_RULES)}.")
     rule = mode_rule(mode)
     chosen = _chosen_carriers(data)
-    if rule.needs_carrier and not chosen:
+    manual_courier = (
+        mode == TransportMode.COURIER.value
+        and await manual_courier_dispatch_enabled(db)
+    )
+    # Whether the provider gets to answer with a price. Courier and third-party both
+    # use the tender path now; only a manual courier has no provider login to ask.
+    tendered = asks_provider_for_price(mode, manual_courier=manual_courier)
+    manual_courier_name = (getattr(data, "manual_courier_name", None) or "").strip()
+    if manual_courier:
+        if chosen:
+            raise ValidationError(
+                "Manual courier dispatch is enabled. Enter the courier name instead of selecting a vendor.")
+        if not manual_courier_name:
+            raise ValidationError("Enter the courier name before sending for approval")
+        # The rest of what a manual leg has to be told, checked against what was
+        # SENT rather than against the row: `create_tr` below is what puts these on
+        # the document, and a request that would be raised incomplete must be
+        # refused before a TR number is burned on it.
+        _check_manual_courier_fields(data)
+    elif manual_courier_name:
+        raise ValidationError(
+            "Manual courier dispatch is disabled. Select a registered courier instead.")
+    if rule.needs_carrier and not chosen and not manual_courier:
         raise ValidationError(
             "Choose the logistics provider(s) this consignment goes with")
-    # A booking is made with ONE provider. Only a tender asks several, so naming more
-    # than one on a courier booking is a mistake worth stopping rather than silently
-    # resolving to whichever happened to be first in the list.
-    if not rule.needs_quotes and len(chosen) > 1:
+    # A booking is made with ONE provider. Courier and third-party are tenders, so they
+    # can name several; the desk-settled modes cannot.
+    if not tendered and len(chosen) > 1:
         raise ValidationError(
             f"A {rule.label.lower()} booking goes with one provider. "
             "Choose third-party to send the same job to several and compare.")
@@ -1250,8 +1588,14 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     data.carrier_id = chosen[0] if chosen else None
     doc = await create_tr(db, data, user)
     doc.mode = mode
+    if manual_courier:
+        # `carrier_name` already belongs to the transport record and is intentionally
+        # not a FK.  Reusing it records the counter courier without creating a fake
+        # vendor or a portal identity.
+        doc.carrier_id = None
+        doc.carrier_name = manual_courier_name
 
-    if rule.needs_quotes:
+    if tendered:
         doc.carrier_id = doc.carrier_name = None   # not theirs until it is awarded
         doc.evaluation_method = (method or "").upper() or None
         invited = []
@@ -1276,8 +1620,10 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
             # or the register holds two kinds of money.
             doc.freight_amount = round_money(data.freight_amount)
         _check_mode_fields(doc)
+        # The only courier that reaches here is the manual one — normal courier uses
+        # the same quoted and awarded path as third-party above.
         settled_summary = (
-            f"Sent {doc.tr_no} to {doc.carrier_name} for acknowledgement"
+            f"Recorded manual courier {doc.carrier_name} for {doc.tr_no}"
             if mode == TransportMode.COURIER.value
             else (f"{doc.tr_no} ready to leave with "
                   f"{doc.carrier_name or doc.vehicle_number or 'the warehouse'}")
@@ -1303,7 +1649,12 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     configured = await ladder.find_ladder(
         db, doc.project_id or None, DocType.TRANSPORT_REQUEST.value, raiser_role_id)
 
-    if configured is None:
+    # The manual courier option explicitly promises the desk a short internal flow:
+    # record the courier, approve the movement, then dispatch.  Unlike the existing
+    # vendor-integrated flow, it therefore starts the approval engine even where no
+    # project ladder was set up; the engine's normal fallback remains the authority on
+    # who approves.  All other modes retain their existing no-ladder behaviour.
+    if configured is None and not manual_courier:
         _advance_after_approval(doc)
         summary = settled_summary
         # "Confirm dispatch" on a settled mode is the load LEAVING, not a booking to
@@ -1331,6 +1682,98 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
+                      after={"mode": doc.mode, "status": doc.status},
+                      summary=summary)
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+async def dispatch_leg(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
+    """"This leg is going out, this way, with them." The same one press, on a shipment
+    that already exists.
+
+    ADDED 2026-09-10. `dispatch_consignment` is the press for a load this desk raises
+    itself: the consignment carries the whole header, so raising the shipment,
+    arranging it and sending it out is one action. A RETURN leg arrives the other way
+    round — the returns module raises the draft the moment the return reaches logistics
+    (`returns._raise_transport_leg`), so by the time this desk sees it the shipment
+    exists, its header is already right, and there is nothing left to create. What was
+    missing was the PRESS: the dispatch board could only open such a leg, and
+    everything after that had to be done a screen at a time, which is why a return
+    never felt like the normal flow.
+
+    So the same two questions are asked on the same screen and land here:
+
+      * the arrangement is applied by `update_tr`, not re-implemented — one place
+        decides what changing the mode does to the quotes already collected, what a
+        manual courier may and may not carry, and which provider rows an edit writes;
+      * a leg still sitting in DRAFT is then walked on exactly the way a consignment's
+        press walks one on. The ladder decides whether a signature is owed (rule 8 —
+        `find_ladder` returning None means nobody configured one, which is where this
+        behaves like the one-press dispatch), and `_advance_after_approval` decides
+        where it lands: QUOTING on a tender, READY on a mode the desk settles itself.
+
+    Anything past DRAFT is an EDIT and `update_tr` has already finished it — a leg out
+    for a price does not go back through the ladder because the desk added a fourth
+    provider to it.
+
+    Two things this deliberately does NOT do. It does not release the load: a return
+    leg may not leave before the return's own logistics rung is signed
+    (`returns._transport_may_release`), so `release_now` has no meaning here and the
+    leg stops at READY, where final dispatch on the shipment is the press that moves
+    it. And it does not touch that rung — the return is still signed on the return.
+    """
+    doc = await get_tr(db, tr_id)
+    if doc.status in TERMINAL_STATUSES:
+        raise ValidationError(
+            f"{doc.tr_no} is {doc.status.lower()} and can no longer be dispatched.")
+    was_draft = doc.status == TransportStatus.DRAFT.value
+
+    # The edit itself, through the one function that owns what an edit means.
+    doc = await update_tr(db, tr_id, data, user)
+    if not was_draft:
+        return doc
+
+    # Complete enough to be acted on by whoever gets it next. Same check and the same
+    # exemption `submit_tr` makes: a tendered leg has no carrier yet BECAUSE the tender
+    # is what produces one.
+    _check_mode_fields(doc, at_submit=True)
+
+    manual_courier = _is_manual_courier_row(doc)
+    doc.requested_position_id = (doc.requested_position_id
+                                 or getattr(user, "active_position_id", None))
+    raiser_role_id = await ladder.role_of_position(db, doc.requested_position_id)
+    configured = await ladder.find_ladder(
+        db, doc.project_id or None, DocType.TRANSPORT_REQUEST.value, raiser_role_id)
+
+    before = doc.status
+    if configured is None and not manual_courier:
+        # Nobody configured a TRANSPORT_REQUEST ladder, which is every project today.
+        # Calling the engine anyway would fall back to climbing the raiser's reporting
+        # line and land this leg in a stranger's queue — the same trap
+        # `dispatch_consignment` documents at length.
+        _advance_after_approval(doc)
+    else:
+        instance = await engine.start(
+            db, DocType.TRANSPORT_REQUEST.value, doc.id, _context(doc), user)
+        if instance.status == InstanceStatus.APPROVED.value:
+            _advance_after_approval(doc)
+        else:
+            doc.status = TransportStatus.PENDING_APPROVAL.value
+
+    invited = [quote.carrier_name for quote in doc.quotes
+               if quote.status == QuoteStatus.INVITED.value]
+    summary = (
+        f"Raised {doc.tr_no} for {mode_rule(doc.mode).label.lower()} "
+        "and sent it for approval"
+        if doc.status == TransportStatus.PENDING_APPROVAL.value
+        else f"Sent {doc.tr_no} to {_and_list(invited)} for a price" if invited
+        else (f"{doc.tr_no} ready to leave with "
+              f"{doc.carrier_name or doc.vehicle_number or 'the warehouse'}"))
+    await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      before={"status": before},
                       after={"mode": doc.mode, "status": doc.status},
                       summary=summary)
     await db.commit()
@@ -1471,6 +1914,23 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
     doc.carriage_mode = _resolve_carriage(
         doc.mode, getattr(data, "carriage_mode", None), current=doc.carriage_mode)
 
+    # Read off the SHIPMENT wherever it has already been arranged — the setting
+    # governs how a courier leg is raised, never what an existing one turns into on
+    # its next save. See `_manual_courier_here`.
+    manual_courier = await _manual_courier_here(db, doc)
+    manual_name_supplied = "manual_courier_name" in fields_set
+    manual_courier_name = (getattr(data, "manual_courier_name", None) or "").strip()
+    if manual_name_supplied:
+        if manual_courier:
+            if not manual_courier_name:
+                raise ValidationError(
+                    "Enter the courier name before sending for approval")
+            doc.carrier_id = None
+            doc.carrier_name = manual_courier_name
+        elif manual_courier_name:
+            raise ValidationError(
+                "Manual courier dispatch is disabled. Select a registered courier instead.")
+
     for field in ("tr_date", "source_type", "source_id", "source_no", "issue_id",
                   "dispatch_id", "consignment_no",
                   "indent_id", "indent_no", "from_warehouse_id",
@@ -1487,17 +1947,44 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
             setattr(doc, field, getattr(data, field, None))
 
     selection_supplied = bool({"carrier_id", "carrier_ids"} & fields_set)
-    if selection_supplied or mode_changed:
+    if selection_supplied or mode_changed or (manual_courier and manual_name_supplied):
         chosen = _chosen_carriers(data)
         rule = mode_rule(doc.mode)
-        if rule.needs_carrier and not chosen:
+        # Same question the dispatch press asks, and it has to be asked the same way
+        # here: a courier with a vendor account is sent for a price, so an edit that
+        # re-picks the provider must re-ask rather than quietly booking the leg and
+        # walking it on to AWAITING_CARRIER with no price on it.
+        tendered = asks_provider_for_price(doc.mode, manual_courier=manual_courier)
+        if manual_courier:
+            if chosen:
+                raise ValidationError(
+                    "Manual courier dispatch is enabled. Enter the courier name "
+                    "instead of selecting a vendor.")
+            if not (doc.carrier_name or "").strip():
+                raise ValidationError(
+                    "Enter the courier name before sending for approval")
+            # Read off the DOCUMENT here, not off `data`: an edit is partial by
+            # definition, and the fields were assigned above from whatever the
+            # payload carried. What matters is that the row is complete once this
+            # returns — an already-answered phone number must not be re-demanded
+            # just because this particular edit was silent about it.
+            _check_manual_courier_fields(doc)
+            doc.quotes.clear()
+            doc.awarded_quote_id = None
+            doc.carrier_id = None
+            doc.freight_amount = None
+            if workflow_status not in {
+                    TransportStatus.DRAFT.value,
+                    TransportStatus.PENDING_APPROVAL.value}:
+                doc.status = TransportStatus.READY.value
+        elif rule.needs_carrier and not chosen:
             raise ValidationError(
                 "Choose the logistics provider(s) this consignment goes with")
-        if not rule.needs_quotes and len(chosen) > 1:
+        elif not tendered and len(chosen) > 1:
             raise ValidationError(
                 f"A {rule.label.lower()} booking goes with one provider.")
 
-        if rule.needs_quotes:
+        if not manual_courier and tendered:
             current = [quote.carrier_id for quote in doc.quotes]
             if mode_changed or current != chosen:
                 doc.awarded_quote_id = None
@@ -1521,7 +2008,7 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                     raise ValidationError(
                         f"{method!r} is not an evaluation method")
                 doc.evaluation_method = method.upper()
-        elif rule.needs_carrier:
+        elif not manual_courier and rule.needs_carrier:
             if mode_changed or doc.carrier_id != chosen[0]:
                 vendor = await _carrier(db, chosen[0])
                 doc.quotes.clear()
@@ -1532,7 +2019,7 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                         TransportStatus.DRAFT.value,
                         TransportStatus.PENDING_APPROVAL.value}:
                     doc.status = TransportStatus.AWAITING_CARRIER.value
-        elif mode_changed:
+        elif not manual_courier and mode_changed:
             doc.quotes.clear()
             doc.awarded_quote_id = None
             doc.carrier_id = doc.carrier_name = None
@@ -1603,17 +2090,33 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
 
 
 def _advance_after_approval(doc: TransportRequest) -> None:
-    """Where an approved request goes next, which is entirely a question of mode.
+    """Where an approved request goes next.
 
-    A quoted mode goes out to carriers. A courier booking already knows the provider,
-    but still waits for that provider to acknowledge the job and supply the vehicle,
-    driver and tracking details from their own login. The two modes operated by the
-    warehouse are ready immediately because those details were entered by the desk.
+    A shipment somebody outside still owes an answer on goes out to every invited
+    carrier. Read off the invitations on the document (`_awaiting_price`) rather than
+    only off the mode, so a courier recorded by hand — no vendor, no login, nobody to
+    ask — is not sent to a portal that will never reply.
+
+    A booking already priced and accepted still waits for that provider to acknowledge
+    the job and supply the vehicle, driver and tracking details from their own login.
+    The two modes operated by the warehouse are ready immediately, because those
+    details were entered by the desk.
     """
-    if mode_rule(doc.mode).needs_quotes:
+    rule = mode_rule(doc.mode)
+    if (rule.needs_quotes and not _is_manual_courier_row(doc)
+            and doc.carrier_id is not None and not doc.quotes):
+        # The general Shipments form still has a single provider picker. Treat that
+        # pick as the first invitation, then let Provider Selection add more and award
+        # one, matching the one-press Dispatch tender path.
+        doc.quotes.append(CarrierQuote(
+            carrier_id=doc.carrier_id, carrier_name=doc.carrier_name,
+            status=QuoteStatus.INVITED.value, invited_at=utcnow(),
+        ))
+        doc.carrier_id = doc.carrier_name = None
         doc.status = TransportStatus.QUOTING.value
-    elif doc.mode == TransportMode.COURIER.value:
-        doc.status = TransportStatus.AWAITING_CARRIER.value
+    elif ((rule.needs_quotes and not _is_manual_courier_row(doc))
+            or _awaiting_price(doc)):
+        doc.status = TransportStatus.QUOTING.value
     else:
         doc.status = TransportStatus.READY.value
 
@@ -1680,11 +2183,16 @@ async def invite_carriers(db: AsyncSession, tr_id: int, data,
                           user) -> TransportRequest:
     """Ask a set of carriers to price the job.
 
-    Only for a quoting mode. Idempotent per carrier: inviting the same one twice keeps
-    the row (and any quote already on it) rather than resetting it to INVITED.
+    Only for a shipment whose price is a question — a tender, or a courier leg already
+    sent to a courier for its rate, which carries the same invitation row and is asked
+    again the same way when the first courier will not quote. A mode the desk settles
+    itself has nobody to ask.
+
+    Idempotent per carrier: inviting the same one twice keeps the row (and any quote
+    already on it) rather than resetting it to INVITED.
     """
     doc = await get_tr(db, tr_id)
-    if not mode_rule(doc.mode).needs_quotes:
+    if not mode_rule(doc.mode).needs_quotes and not doc.quotes:
         raise ValidationError(
             f"A {mode_rule(doc.mode).label.lower()} request is not tendered. "
             "Set the provider directly instead.")
@@ -2173,12 +2681,19 @@ async def decline_award(db: AsyncSession, tr_id: int, carrier_id: int | None,
 
 
 async def set_provider(db: AsyncSession, tr_id: int, data, user) -> TransportRequest:
-    """Fix the provider on a mode with no tender — courier, own vehicle, hand-over."""
+    """Fix the provider on a leg the desk settles itself — manual courier, own
+    vehicle, hand-over.
+
+    Never on one whose price is out with a provider. Setting the carrier here jumps
+    the shipment straight to READY, which on a priced leg would book a load against a
+    number nobody accepted and a courier who never said yes.
+    """
     doc = await get_tr(db, tr_id)
     rule = mode_rule(doc.mode)
-    if rule.needs_quotes:
+    if _awaiting_price(doc) or (rule.needs_quotes and not _is_manual_courier_row(doc)):
         raise ValidationError(
-            "A third-party shipment is awarded off its quotes, not set directly")
+            "This shipment is out with a provider for a price. Accept the price (or "
+            "award the tender) instead of setting the provider directly.")
     if doc.status not in (TransportStatus.READY.value,
                           TransportStatus.QUOTING.value):
         raise ValidationError(f"{doc.tr_no} must be approved first")
@@ -2216,6 +2731,56 @@ async def set_provider(db: AsyncSession, tr_id: int, data, user) -> TransportReq
 #  Tracking
 # --------------------------------------------------------------------------- #
 
+def _apply_custody(doc: TransportRequest, data) -> None:
+    """Write the hand-over's custody block from whatever the caller stated.
+
+    Only what was STATED: a payload that says nothing about a field leaves the booked
+    answer standing, which is what lets a desk correct one line without retyping the
+    other three. `model_fields_set` is the only way to tell "clear this" from "I have
+    no opinion" — both arrive as null over JSON.
+
+    The two id boxes are exclusive by design (an employee is pinned by their employee
+    id, anybody else by an Aadhaar) and the screen clears whichever is no longer asked
+    for, so stating EITHER replaces the PAIR. Applying them one at a time would leave
+    a person switched from Others to Employee carrying both numbers, and the gate pass
+    printing two identities for one pair of hands.
+    """
+    stated = getattr(data, "model_fields_set", None) or set()
+    for field in ("handed_over_by_name", "handed_over_phone"):
+        if field in stated:
+            setattr(doc, field, _text(getattr(data, field, None)))
+    if {"handed_over_employee_id", "handed_over_aadhaar"} & stated:
+        doc.handed_over_employee_id = _text(
+            getattr(data, "handed_over_employee_id", None))
+        doc.handed_over_aadhaar = _text(getattr(data, "handed_over_aadhaar", None))
+
+
+def _check_custody(doc: TransportRequest) -> None:
+    """A hand-over may not leave the yard with nobody pinned to it.
+
+    The same rule the booking form enforces, checked again here because this press can
+    now edit the answer: a name on its own identifies nobody when the load is chased,
+    and a phone number is how it gets chased. `_check_mode_fields` covers the name —
+    it is the mode's own required field — so this covers the two the mode rule cannot
+    express, because which of them is asked for depends on who the person is.
+    """
+    if not (doc.handed_over_employee_id or doc.handed_over_aadhaar):
+        raise ValidationError(
+            "Record who took custody — an employee id, or an Aadhaar number for "
+            "anybody else. A name on its own identifies nobody.")
+    if not (doc.handed_over_phone or "").strip():
+        raise ValidationError(
+            "Record a phone number for whoever took custody — it is how the "
+            "consignment is chased.")
+
+
+def _text(value) -> str | None:
+    """A trimmed answer, or nothing. An empty box means the field was cleared, never
+    that it holds two spaces."""
+    text = (str(value).strip() if value is not None else "")
+    return text or None
+
+
 async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
                    strict: bool = True) -> None:
     """It has left. Capture the tracking handle the field will be given.
@@ -2235,11 +2800,25 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
 
     Does not commit: the caller owns the transaction and its audit row.
     """
+    # A HAND-OVER is the one arrangement whose dispatch press can still correct who
+    # takes custody. It has no LR and no docket to record — nobody issues a lorry
+    # receipt for a storekeeper walking a carton out — so the custody block IS its
+    # tracking handle, and it was frozen at booking with no way to fix it at the gate.
+    # The person who actually collects is frequently not the one named the day before.
+    #
+    # Applied BEFORE the strict checks below, so what the desk just typed is what gets
+    # validated, and guarded on the mode so no other arrangement's release changes.
+    if doc.mode == TransportMode.DIRECT.value:
+        _apply_custody(doc, data)
+
     if strict:
         # The full check now, carrier included: whatever the mode was allowed to leave
         # blank at submit has been answered by this point, and a consignment must never
         # leave the yard with nobody named as taking it.
         _check_mode_fields(doc)
+
+        if doc.mode == TransportMode.DIRECT.value:
+            _check_custody(doc)
 
         rule = mode_rule(doc.mode)
         if rule.needs_carrier and not (getattr(data, "lr_no", None)
@@ -2468,9 +3047,15 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     indent's loop. A site reporting SHORT or DAMAGED opens a claim on the same shipment
     timeline rather than in a second place — the logistics desk chasing the carrier and
     the site's complaint are one fact, and recording them apart is how they diverge.
+
+    The signature also CLOSES the leg (see below) — every leg, claim or no claim.
     """
     doc = await get_tr(db, tr_id)
-    if doc.status == TransportStatus.ACKNOWLEDGED.value:
+    # Read off the STAMP, not off the status: a clean signature closes the leg on the
+    # way through, so a second press on an already-signed one arrives at CLOSED and
+    # would otherwise fall through to "only a consignment that has left can be
+    # acknowledged" — which is true of nothing and tells the site the wrong thing.
+    if doc.acknowledged_at is not None:
         raise ValidationError(f"{doc.tr_no} has already been acknowledged")
     if doc.status not in AWAITING_ACK_STATUSES:
         raise ValidationError(
@@ -2553,12 +3138,30 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     # — logistics sits in front of warehouse in the import chain (rule 5).
     await hooks.fire(hooks.ON_ACKNOWLEDGE, db, doc, user)
 
+    # THE SIGNATURE IS THE END OF THE LEG. The goods are at the destination and the
+    # person they were for has said so; there is no further transport fact to record,
+    # so the leg closes here and the Close press is gone from the screen entirely.
+    #
+    # A CLAIM DOES NOT HOLD IT OPEN (2026-09-16). It used to, and that was the wrong
+    # place to hold: a shortage is worked on the CLAIM — `resolve_exception`, off the
+    # shipment timeline, which never looks at the leg's status — not by leaving a
+    # delivered consignment parked in a transport queue. Holding the leg open made
+    # "has this arrived" and "has the carrier paid for what was missing" one question
+    # when they are two, and it is the first one the register exists to answer. The
+    # claim stays open, visible on the timeline and in the Activity Ledger, and is
+    # settled there.
+    #
+    # The OTHER door to a signature — the indent raiser's receipt, in
+    # `warehouse._close_signed_legs` — already closed on its own; only which claims
+    # it waits for differed, and now neither waits.
+    doc.status = TransportStatus.CLOSED.value
+
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},
                       after={"status": doc.status, "condition": condition},
                       summary=(f"{doc.acknowledged_by_name or 'The site'} acknowledged "
-                               f"{doc.tr_no} as {condition.lower()}"))
+                               f"{doc.tr_no} as {condition.lower()} — leg closed"))
     await db.commit()
     await db.refresh(doc)
     return doc
@@ -2583,11 +3186,12 @@ async def close_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
             "The indent requester must acknowledge this consignment before it can "
             "be closed" if doc.indent_id
             else "Only a delivered consignment can be closed")
-    open_claims = [e for e in doc.events if e.is_exception and e.resolved_at is None]
-    if open_claims:
-        raise ValidationError(
-            f"{len(open_claims)} open claim(s) on this consignment. Close them with "
-            "the provider before closing the shipment.")
+    # NO CLAIM CHECK (2026-09-16). It used to refuse while a shortage was unsettled,
+    # which is the same hold `acknowledge_tr` has stopped applying and for the same
+    # reason: a claim is worked on the claim (`resolve_exception`, which never reads the
+    # leg's status), not by keeping a delivered consignment in a transport queue. Two
+    # routes reaching one status had to agree, or whichever door a desk used decided
+    # whether the leg could end.
     doc.status = TransportStatus.CLOSED.value
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -2875,7 +3479,9 @@ def _carrier_view(doc: TransportRequest, carrier_id: int) -> TROut:
 
 async def carrier_view_request(db: AsyncSession, carrier_id: int,
                                tr_id: int) -> TROut:
-    return _carrier_view(await carrier_get_request(db, carrier_id, tr_id), carrier_id)
+    doc = await carrier_get_request(db, carrier_id, tr_id)
+    await _attach_package_quantities(db, doc)
+    return _carrier_view(doc, carrier_id)
 
 
 #: What a carrier must state before their price can be compared with anybody else's,

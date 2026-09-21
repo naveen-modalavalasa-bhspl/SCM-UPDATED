@@ -16,7 +16,7 @@ import {
   submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
 } from "../api";
 
-import { fmtMoney, fmtQty, num, today } from "../format";
+import { fmtMoney, fmtQty, num, rate2, today } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 import { useMyPoint, usePointLabel } from "../usePointLabel";
@@ -209,7 +209,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         received_qty: num(l.received_qty),
         accepted_qty: num(l.accepted_qty),
         rejected_qty: num(l.rejected_qty),
-        rate: l.rate,
+        rate: rate2(l.rate),
         batch_no: l.batch_no,
         mfg_date: l.mfg_date,
         expiry_date: l.expiry_date,
@@ -266,7 +266,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         // the storekeeper overwrites it with what actually turned up.
         received_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
-        rate: line.rate ?? null,
+        rate: rate2(line.rate),
       }));
       // Nothing outstanding is an ANSWER, and a toast that scrolls away is not where
       // it belongs: the storekeeper is standing at a delivery and needs to know the
@@ -384,7 +384,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           // exactly the shortage the GRN exists to record.
           received_qty: line.despatched_qty != null ? num(line.despatched_qty) as any : num(line.ordered_qty) as any,
           accepted_qty: line.despatched_qty != null ? num(line.despatched_qty) as any : num(line.ordered_qty) as any,
-          rate: line.rate ?? null,
+          rate: rate2(line.rate),
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,
           expiry_date: line.expiry_date,
@@ -445,7 +445,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           received_qty: num(line.received_qty),
           accepted_qty: num(line.received_qty),
           rejected_qty: 0,
-          rate: line.rate,
+          rate: rate2(line.rate),
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,
           expiry_date: line.expiry_date,
@@ -985,8 +985,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         <QtyInput
           ariaLabel={`Rate, line ${i + 1}`}
           value={l.rate ?? 0}
+          step="0.01"
           disabled={locked}
-          onChange={(v) => patchLine(i, { rate: v })}
+          onChange={(v) => patchLine(i, { rate: rate2(v) })}
         />
       ),
     },

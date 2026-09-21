@@ -244,6 +244,36 @@ PAGES: list[PageDef] = [
             sort_order=56),
 
     # ------------------------------------------------------------------ #
+    #  Masters, on the module that owns them
+    # ------------------------------------------------------------------ #
+    # `/masters` is NOT retired and is not listed here — it stays whole, and these are
+    # a second door on the same rows. What they add is RBAC reach: one page code per
+    # module, so a buyer can be given the vendor and HSN masters without also being
+    # handed the item catalogue, which one `page.masters.view` could never express.
+    #
+    # Every screen renders the masters module's own tab components with their own
+    # `<Can>` gating and calls the same `/api/masters/*` routes behind the same
+    # `master.*.manage` permissions, so nothing here widens what anybody may WRITE.
+    #
+    # All four sort LAST in their group. The left rail opens a module on its first
+    # child, and a master is never what somebody came to that module to do.
+    PageDef("inv_masters", "/inventory/masters", "Masters",
+            parent="grp_inventory", module="inventory", icon="database",
+            sort_order=65),
+    PageDef("pro_masters", "/procurement/masters", "Masters",
+            parent="grp_purchasing", module="procurement", icon="database",
+            sort_order=34),
+    PageDef("ind_masters", "/indents/masters", "Masters",
+            parent="grp_indents", module="indents", icon="database",
+            sort_order=17),
+    # Projects, facilities and departments — HCM mirrors, read-only (rule 10). Under
+    # Settings rather than a module, because filing them beside masters somebody can
+    # edit would imply these are editable too.
+    PageDef("admin_org_masters", "/admin/org-masters", "Organisation Masters",
+            parent="grp_settings", module="admin", icon="building-2",
+            sort_order=106),
+
+    # ------------------------------------------------------------------ #
     #  Logistics — the outward transport leg
     # ------------------------------------------------------------------ #
     # A module row of its own. sort_order 55 puts it after Warehouse (which the live
@@ -260,17 +290,17 @@ PAGES: list[PageDef] = [
     # same flow) the warehouse serves; these are separate rbac_pages rows pointing at
     # the same paths under /logistics. The warehouse rows keep their own codes, paths
     # and permissions and are not touched.
-    # NEW 2026-08-23. The module's front page, and its FIRST child, so /logistics opens
-    # on it. Every other module leads with an Overview; logistics redirected straight
-    # into Consignments, which asked the desk to start reading the queue before anything
-    # had told them the shape of the day.
+    # NEW 2026-08-23. The module's front page, and its FIRST child. It keeps its OWN
+    # url: `/logistics` is the module door and redirects to Shipments, where a
+    # logistics day is worked, so the Overview tab has to point at the Overview
+    # screen rather than follow that door.
     #
     # It reads `/api/transport/summary` and writes nothing, so it is guarded by the
     # transport code the Shipments register already needs — no new permission, and
     # `page.logistics_overview.view` inherits from `page.logistics_transport.view` (see
     # permissions.INHERITS_GRANTS_FROM) so the desk that works Shipments gets it without
     # anybody re-granting.
-    PageDef("logistics_overview", "/logistics", "Overview",
+    PageDef("logistics_overview", "/logistics/overview", "Overview",
             parent="grp_logistics", module="logistics", icon="layout-dashboard",
             sort_order=0),
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",

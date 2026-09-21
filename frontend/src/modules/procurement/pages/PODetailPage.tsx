@@ -621,9 +621,9 @@ export function PODetailPage() {
               showRate
               showTax
               showDate={false}
-              freezeRateAndTax={true}
+              freezeRateAndTax
               capQuantityAtOriginal={false}
-              hideAddLine={true}
+              hideAddLine
             />
           </div>
           <div className="border-t border-line pt-4">

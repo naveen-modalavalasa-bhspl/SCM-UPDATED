@@ -6,15 +6,64 @@ import {
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
-  KpiTiles, ResponsiveList, StatusPill, useAction, type Column, type KpiTileSpec,
+  KpiTiles, ResponsiveList, StatusPill, useAction,
+  type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
 import { consignmentApi, transportApi } from "../api";
-import { carriageLabel, carriageTint, load, modeLabel, modeTint, money } from "../components/modeCopy";
+import {
+  carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
+} from "../components/modeCopy";
 import { SearchField } from "../components/SearchField";
-import type { Consignment, ConsignmentLink, TransportRequest } from "../transportTypes";
+import type {
+  Consignment, ConsignmentLink, TransportRequest, TRListRow,
+} from "../transportTypes";
 
 const SIZE = 20;
+
+/**
+ * ADDED 2026-09-07: the return legs this desk has to move.
+ *
+ * A field return that travels is signed off in the returns module, which raises its
+ * shipment there and then and puts the return in front of the Return Logistics rung.
+ * That rung is unchanged — it is still approved on the return, and a leg still may not
+ * be released before it is signed (`_transport_may_release`). What was missing is that
+ * this board never showed the leg at all: the dispatch queue reads CONSIGNMENTS, and a
+ * return leg has no consignment behind it, so the one screen a logistics day is worked
+ * from had no row for the trip back. It does now, as a second board below the first.
+ *
+ * FIX 2026-09-16: the board no longer DROPS a leg the moment it is signed for.
+ *
+ * It used to list six statuses — everything up to IN_TRANSIT — on the reasoning that
+ * what has been signed for at the far end is not work. The reasoning was right about
+ * the work and wrong about the screen: DELIVERED and ACKNOWLEDGED were missing too, so
+ * the row a desk had arranged, watched and chased simply vanished from under it at the
+ * moment the return completed, with nothing on the board saying it had. "Where did my
+ * dispatch go" is the one question a queue must never provoke, and a desk that cannot
+ * see the finished leg cannot answer the branch ringing up to ask whether the material
+ * got there.
+ *
+ * So the board keeps the whole life of the leg and says which part of it a row is in.
+ * REJECTED and CANCELLED are in `RETURN_ALL` as well: a leg that was called off is a
+ * fact the desk is asked about, and hiding it reads as the return never existing.
+ */
+const RETURN_OPEN = "DRAFT,PENDING_APPROVAL,QUOTING,AWAITING_CARRIER,READY,IN_TRANSIT";
+const RETURN_DONE = "DELIVERED,ACKNOWLEDGED,CLOSED,REJECTED,CANCELLED";
+const RETURN_ALL = `${RETURN_OPEN},${RETURN_DONE}`;
+
+/**
+ * ADDED 2026-09-10: the statuses on which a return leg is still THIS desk's to
+ * arrange, and therefore the rows that get a Dispatch press.
+ *
+ * A draft has had no arrangement made on it at all; a leg out for a price, waiting on
+ * a carrier or ready at the gate can still have one changed, which is exactly what the
+ * consignment board above offers on the same three. PENDING_APPROVAL is left off
+ * because a signature is owed on it and editing it underneath the approver is not a
+ * press this board should make easy; past READY the load is moving and the shipment is
+ * the only honest screen.
+ */
+const ARRANGEABLE = new Set(["DRAFT", "QUOTING", "AWAITING_CARRIER", "READY"]);
+const arrangeable = (status: string) => ARRANGEABLE.has(status);
 
 /**
  * The queue is a board, not a report.
@@ -69,6 +118,9 @@ export function DispatchPage() {
 
   const [asking, setAsking] = useState<ConsignmentLink | null>(null);
   const [askNote, setAskNote] = useState("");
+  // The return board pages on its own. One page number for two lists would move the
+  // one the desk is not looking at.
+  const [returnPage, setReturnPage] = useState(1);
 
   const { data, isLoading, error, isFetching: queueFetching } = useQuery({
     queryKey: ["lgs-dispatch-queue", search, page],
@@ -114,6 +166,29 @@ export function DispatchPage() {
   // Only fetched while a quote is on the table, and only for that one shipment — but
   // polled while it is open, because the price the desk is looking at is one the
   // provider can revise from their portal mid-decision.
+
+  // The trip back. Its own request rather than a filter over the queue above: a return
+  // leg is a shipment with no consignment behind it, so the consignment endpoint can
+  // never return one. Polled on the same clock as the rest of the board, because a
+  // return's logistics rung is signed on the RETURN — off this screen — and the row
+  // here has to stop saying "waiting on approval" without anyone reloading.
+  const {
+    data: returns, isLoading: returnsLoading, error: returnsError,
+    isFetching: returnsFetching,
+  } = useQuery({
+    queryKey: ["lgs-dispatch-returns", search, returnPage],
+    queryFn: () => transportApi.list({
+      source_type: "RETURN",
+      status: RETURN_ALL,
+      search: search.trim() || undefined,
+      page: returnPage, size: SIZE,
+    }),
+    placeholderData: keepPreviousData,
+    refetchInterval: LIVE_MS,
+    refetchOnWindowFocus: true,
+  });
+  const returnRows = returns?.items ?? [];
+
   const linkOf = (row: Consignment) =>
     links?.find((link) => link.dispatch_id === row.id);
 
@@ -166,6 +241,12 @@ export function DispatchPage() {
   const dispatch = (row: Consignment) =>
     nav(`/logistics/dispatch/new?consignment_id=${row.id}`);
 
+  /** The same screen, with a return's existing leg already chosen. `tr_id` rather
+   *  than `consignment_id` because the shipment is what exists here — a return has no
+   *  consignment behind it — and the form arranges that leg instead of raising one. */
+  const dispatchLeg = (row: TRListRow) =>
+    nav(`/logistics/dispatch/new?tr_id=${row.id}`);
+
   const accept = useAction({
     run: (trId: number) => transportApi.acceptQuote(trId),
     // Accepting the price is our half. The provider still has to say they have a
@@ -183,10 +264,13 @@ export function DispatchPage() {
     onDone: (tr) => { patchLink(tr); setAsking(null); setAskNote(""); },
   });
 
-  const refreshing = queueFetching || linksFetching;
+  const refreshing = queueFetching || linksFetching || returnsFetching;
   const refreshNow = () => {
     qc.invalidateQueries({ queryKey: ["lgs-dispatch-queue"] });
     qc.invalidateQueries({ queryKey: ["lgs-consignment-links"] });
+    // FIX 2026-09-07: Refresh has to cover both boards, or the return legs sit on a
+    // ten-second-old answer while the press says the page has just been refreshed.
+    qc.invalidateQueries({ queryKey: ["lgs-dispatch-returns"] });
   };
 
   const open = (row: Consignment) => dispatch(row);
@@ -316,6 +400,105 @@ export function DispatchPage() {
     },
   ];
 
+  /**
+   * The return board's columns. Deliberately not the consignment ones: what a desk
+   * needs to know about a leg it can already see the shipment for is which return it
+   * belongs to, where it is going, and what the next move on it is — and the next move
+   * for a return whose logistics rung is unsigned is "approve it on the return", which
+   * is not a press that lives on this screen.
+   */
+  const returnColumns: Column<TRListRow>[] = [
+    {
+      key: "ret",
+      header: "Return",
+      render: (row) => (
+        <div className="min-w-0">
+          {/* The RET number first, because that is the paper the branch rang up about.
+              The TR is how logistics files it, so it is the subline. */}
+          <div className="font-mono text-xs font-semibold text-ink">
+            {row.source_no ?? row.tr_no}
+          </div>
+          <div className="text-[11px] text-muted">
+            {row.source_no ? `${row.tr_no} · ` : ""}{fmtDate(row.tr_date)}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "to",
+      header: "Going to",
+      render: (row) => (
+        <div className="min-w-0 text-sm">
+          <div className="truncate text-body">{row.to_location_name ?? "—"}</div>
+          <div className="truncate text-[11px] text-muted">
+            from {row.from_warehouse_name ?? "—"}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "load",
+      header: "Load",
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (row) => (
+        <span className="text-sm text-body">
+          {load(row.total_packages, row.total_weight_kg)}
+        </span>
+      ),
+    },
+    {
+      key: "transport",
+      header: "Transport",
+      render: (row) => (
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${carriageTint(row.carriage_mode)}`}>
+              {carriageLabel(row.carriage_mode)}
+            </span>
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${modeTint(row.mode)}`}>
+              {modeLabel(row.mode)}
+            </span>
+            <StatusPill status={row.status} />
+          </div>
+          <div className="truncate text-[11px] text-muted">
+            {/* What to DO about it, in four words — the same line the register shows,
+                and the reason a PENDING_APPROVAL row does not read as this desk's
+                problem when the signature owed is on the return. */}
+            {nextMove(row.status) || (row.carrier_name ?? row.tr_no)}
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "act",
+      header: "",
+      className: "text-right",
+      render: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          {/* FIX 2026-09-10: the press this board was missing.
+              A return leg is drafted for this desk by the returns module, so the row
+              arrived already knowing what has to travel and where — and the only
+              thing offered on it was "open the shipment", which is a reading screen.
+              Everything the desk then had to decide (road or rail, hired or our own,
+              which providers price it) lives on Confirm dispatch, the same screen a
+              consignment is dispatched from, so that is where the row goes. The leg
+              is passed by id because it already exists; nothing here raises a second
+              one. Past READY the arrangement is settled and the shipment is the
+              screen that matters. */}
+          {arrangeable(row.status) && (
+            <Can do="transport.create">
+              <Button onClick={() => dispatchLeg(row)}>Dispatch</Button>
+            </Can>
+          )}
+          <Button variant="ghost" onClick={() => nav(`/logistics/shipments/${row.id}`)}>
+            Open shipment
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
   // Rows the tiles have narrowed to. `linkOf` is the same lookup the table uses, so
   // a tile can never select a row the row itself would describe differently.
   const visible = queue === "" ? rows : rows.filter((row) => {
@@ -394,8 +577,13 @@ export function DispatchPage() {
 
       <SearchField
         value={search}
-        placeholder="Search consignment, issue or destination..."
-        onChange={(value) => { setSearch(value); setPage(1); }}
+        placeholder="Search consignment, return, issue or destination..."
+        onChange={(value) => {
+          setSearch(value);
+          setPage(1);
+          // Both boards are filtered by the one box, so both go back to page one.
+          setReturnPage(1);
+        }}
       />
 
       <ErrorBanner error={error ?? accept.error ?? askAgain.error} />
@@ -435,6 +623,62 @@ export function DispatchPage() {
         />
       </Card>
 
+      {/* ADDED 2026-09-07: the trip back.
+          A second board rather than extra rows in the first one, because the two are
+          not the same work: a consignment above is dispatched FROM here, in one press,
+          and a return leg already exists as a shipment by the time it reaches this
+          screen — it is opened, priced and released on the shipment itself. Mixing
+          them would put a Dispatch button on a row that must not raise a second leg. */}
+      <div className="mt-6">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-display text-base font-semibold text-ink">
+            Return legs
+            {returnRows.length > 0 && (
+              <span className="ml-1.5 text-sm font-normal text-muted">
+                ({returns?.total ?? returnRows.length})
+              </span>
+            )}
+          </h2>
+          <span className="text-[11px] text-muted">
+            Material coming back off site. The leg stays here after it is signed for.
+          </span>
+        </div>
+
+        {returnsError && <ErrorBanner error="Return legs could not be loaded." />}
+
+        <Card className="p-2">
+          <ResponsiveList
+            data={returnRows}
+            columns={returnColumns}
+            keyOf={(row) => row.id}
+            loading={returnsLoading}
+            onRowClick={(row) => (arrangeable(row.status)
+              ? dispatchLeg(row)
+              : nav(`/logistics/shipments/${row.id}`))}
+            page={returnPage}
+            totalPages={Math.max(1, Math.ceil((returns?.total ?? 0) / SIZE))}
+            onPageChange={setReturnPage}
+            empty="No return legs yet."
+            renderCard={(row) => (
+              <div className="space-y-1.5">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="font-mono text-xs font-semibold text-ink">
+                    {row.source_no ?? row.tr_no}
+                  </span>
+                  <StatusPill status={row.status} />
+                </div>
+                <div className="text-sm text-body">{row.to_location_name ?? "—"}</div>
+                <div className="text-xs text-muted">
+                  {load(row.total_packages, row.total_weight_kg)}
+                  {row.carrier_name ? ` · ${row.carrier_name}` : ""}
+                </div>
+                <div className="text-xs text-muted">{nextMove(row.status)}</div>
+              </div>
+            )}
+          />
+        </Card>
+      </div>
+
       {/* The price came back. Accept it, or send it back with a note. */}
       <ConfirmModal
         isOpen={Boolean(asking)}
@@ -471,7 +715,7 @@ export function DispatchPage() {
             </div>
           ))}
 
-          <Field label="Not happy with it? Say what to change">
+          <Field label="Not happy with it? Say what to change" required>
             <Input value={askNote} placeholder="Can you do it for 4,000?"
               onChange={(e) => setAskNote(e.target.value)} />
           </Field>

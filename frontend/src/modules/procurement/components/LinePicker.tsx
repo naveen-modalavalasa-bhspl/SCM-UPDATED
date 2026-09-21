@@ -34,6 +34,7 @@ interface MasterItem {
   code?: string | null;
   name: string;
   uom_code?: string | null;
+  tax_percent?: number | null;
 }
 
 /**
@@ -47,6 +48,7 @@ export function LinePicker({
   lines, onChange, showRate = false, showTax = false, showDate = true,
   disabled = false,
   freezeRateAndTax = false,
+  allowRepricing = false,
   capQuantityAtOriginal = true,
   hideAddLine = false,
 }: {
@@ -57,9 +59,21 @@ export function LinePicker({
   showDate?: boolean;
   disabled?: boolean;
   freezeRateAndTax?: boolean;
+  /** Rate and tax stay editable on a line that has already been saved.
+   *
+   *  Off everywhere else on purpose: a price on a document somebody has agreed to is
+   *  not a field to be nudged. An AMENDMENT is the one place it is, because amending
+   *  files the old version away, drops the order back to DRAFT and sends it up the
+   *  ladder again — so a changed price is a price a signatory has to approve before
+   *  it reaches the vendor, which is exactly what a rush order needs. */
+  allowRepricing?: boolean;
   /** Source-backed RFQs cannot exceed their authorised quantity. Amendments are
    * re-approved, so their revised quantity stays open for the approver to decide. */
   capQuantityAtOriginal?: boolean;
+<<<<<<< HEAD
+=======
+  /** Amendments may revise existing quantities but cannot introduce new items. */
+>>>>>>> 521e00de7951bd2a6c34d574b1bc3596f47d6b04
   hideAddLine?: boolean;
 }) {
   const [search, setSearch] = useState("");
@@ -145,6 +159,12 @@ export function LinePicker({
                     uom_code: chosen?.uom_code ?? null,
                     item_code: chosen?.code ?? null,
                     item_name: chosen?.name ?? null,
+                    // Only when the master actually states one. A null there means
+                    // nobody has classified the item, and filling 0 would put an
+                    // exempt rate on the line without anybody deciding it.
+                    ...(chosen?.tax_percent != null
+                      ? { tax_percent: String(chosen.tax_percent) }
+                      : {}),
                   });
                 }}
               />
@@ -174,7 +194,7 @@ export function LinePicker({
                   min="0"
                   step="0.01"
                   value={line.rate ?? ""}
-                  disabled={disabled || !!line.id || freezeRateAndTax}
+                  disabled={disabled || (!allowRepricing && (!!line.id || freezeRateAndTax))}
                   onChange={(e) => set(index, { rate: e.target.value })}
                 />
               </Field>
@@ -188,7 +208,7 @@ export function LinePicker({
                   min="0"
                   step="0.01"
                   value={line.tax_percent ?? ""}
-                  disabled={disabled || !!line.id || freezeRateAndTax}
+                  disabled={disabled || (!allowRepricing && (!!line.id || freezeRateAndTax))}
                   onChange={(e) => set(index, { tax_percent: e.target.value })}
                 />
               </Field>

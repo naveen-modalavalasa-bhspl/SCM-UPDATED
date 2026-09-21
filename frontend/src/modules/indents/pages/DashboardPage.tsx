@@ -3,10 +3,11 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   CalendarDays, CheckCircle2, ChevronRight, Clock, FileText, Package,
-  Percent, PencilLine, XCircle,
+  PackageCheck, PackageOpen, Percent, PencilLine, TrendingDown, XCircle,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Card } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -22,9 +23,12 @@ import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge
 import { StatusBreakdownChart } from "../components/StatusBreakdownChart";
 import { IndentFilterProvider, useIndentFilters } from "../context/IndentFilterContext";
 import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+// Indents reads inventory, which is the allowed direction — inventory is the base
+// module and nothing in it reads back.
+import { getReplenishments } from "@/modules/inventory/api";
 
 /* ---------------------------------------------------------------------------
- * The Overview answers two questions only: what needs MY action (the four
+ * The Overview answers two questions only: what needs MY action (the
  * queue tiles, each opening its own pre-filtered worklist), and how is the
  * pipeline shaped right now (context strip + status breakdown). Everything
  * else is decoration and was removed.
@@ -33,12 +37,15 @@ import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
  * same /indents list, whose rows and actions stay gated exactly as before.
  * ------------------------------------------------------------------------- */
 
+type DashboardStats = Awaited<ReturnType<typeof indentApi.stats>>;
+
 interface Queue {
-  key: keyof Awaited<ReturnType<typeof indentApi.stats>>;
+  key: string;
   label: string;
   icon: ReactNode;
   /** Chip tint = the urgency colour the rest of the app already uses. */
   chip: string;
+  value: (stats: DashboardStats | undefined) => number | undefined;
   /** Pre-filtered worklist the tile opens. Empty → opens the unfiltered list. */
   statuses?: string[];
 }
@@ -49,6 +56,7 @@ const QUEUES: Queue[] = [
     label: "Awaiting approval",
     icon: <Clock className="h-5 w-5" />,
     chip: "bg-warn-bg text-warn",
+    value: (stats) => stats?.awaiting_approval,
     statuses: ["PENDING_APPROVAL", "RETURNED_FOR_CORRECTION"],
   },
   {
@@ -56,13 +64,24 @@ const QUEUES: Queue[] = [
     label: "Approved active",
     icon: <CheckCircle2 className="h-5 w-5" />,
     chip: "bg-ok-bg text-ok",
-    statuses: ["AWAITING_ALLOCATION", "ALLOCATED", "PARTIALLY_FULFILLED"],
+    value: (stats) => (
+      stats ? stats.approved_active - (stats.by_status?.PARTIALLY_FULFILLED ?? 0) : undefined
+    ),
+    statuses: [
+      "APPROVED",
+      "AWAITING_ALLOCATION",
+      "ALLOCATED",
+      "PENDING_PROCUREMENT",
+      "PARTIALLY_ORDERED",
+      "ORDERED",
+    ],
   },
   {
     key: "draft",
     label: "In draft",
     icon: <PencilLine className="h-5 w-5" />,
     chip: "bg-neutral-bg text-neutral",
+    value: (stats) => stats?.draft,
     statuses: ["DRAFT"],
   },
   {
@@ -70,7 +89,24 @@ const QUEUES: Queue[] = [
     label: "Rejected",
     icon: <XCircle className="h-5 w-5" />,
     chip: "bg-bad-bg text-bad",
+    value: (stats) => stats?.rejected,
     statuses: ["REJECTED"],
+  },
+  {
+    key: "partially_fulfilled",
+    label: "Partially fulfilled",
+    icon: <PackageOpen className="h-5 w-5" />,
+    chip: "bg-brand-050 text-brand",
+    value: (stats) => stats?.by_status?.PARTIALLY_FULFILLED,
+    statuses: ["PARTIALLY_FULFILLED"],
+  },
+  {
+    key: "fulfilled",
+    label: "Fulfilled",
+    icon: <PackageCheck className="h-5 w-5" />,
+    chip: "bg-brand-050 text-brand",
+    value: (stats) => stats?.by_status?.CLOSED,
+    statuses: ["CLOSED"],
   },
 ];
 
@@ -195,6 +231,22 @@ function IndentDashboardContent() {
   });
   const recentIndents = recent?.items ?? [];
 
+  // The shortage tile reads /api/stock/replenishment, which is guarded by
+  // stock.view. Gate the QUERY on the same code, not just the button: a requester
+  // without it would otherwise spend a 403 on every visit to their own Overview.
+  const { can } = useAuth();
+  const canSeeStock = can("stock.view");
+  const { data: replenishments, isLoading: replenishmentsLoading } = useQuery({
+    queryKey: ["indent-dashboard", "replenishment-low-stock"],
+    queryFn: () => getReplenishments(),
+    enabled: canSeeStock,
+    staleTime: INDENT_QUERY_STALE_TIME,
+    gcTime: INDENT_QUERY_GC_TIME,
+  });
+  const replenishmentLowStock = Array.isArray(replenishments)
+    ? replenishments.length
+    : undefined;
+
   const openQueue = (statuses?: string[]) => {
     if (!statuses?.length) {
       nav("/indents");
@@ -229,10 +281,31 @@ function IndentDashboardContent() {
           <QueueTile
             key={queue.key}
             queue={queue}
-            value={stats?.[queue.key] as number | undefined}
+            value={queue.value(stats)}
             onOpen={openQueue}
           />
         ))}
+        {canSeeStock && (
+          <button
+            type="button"
+            onClick={() => nav("/inventory/replenishment")}
+            aria-label={`${replenishmentLowStock ?? 0} low-stock replenishment items. Open replenishment`}
+            className="group flex min-h-20 w-full items-center gap-3 rounded-xl border border-line/70 bg-content1 p-4 text-left shadow-sm transition duration-150 hover:-translate-y-px hover:border-brand/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 active:translate-y-0 active:scale-[0.99]"
+          >
+            <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-warn-bg text-warn">
+              <TrendingDown className="h-5 w-5" />
+            </span>
+            <span className="min-w-0">
+              <span className="block font-display text-[26px] font-bold leading-none tabular text-ink">
+                {replenishmentsLoading ? "–" : replenishmentLowStock ?? "–"}
+              </span>
+              <span className="mt-1 block truncate text-xs font-medium text-muted">
+                Replenishment low stock
+              </span>
+            </span>
+            <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-brand opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+          </button>
+        )}
       </section>
 
       {statsError && (
@@ -304,7 +377,10 @@ function IndentDashboardContent() {
                   <span className="mono block truncate text-sm font-semibold text-ink">{indent.indent_no}</span>
                   <span className="block truncate text-xs text-muted">{indent.requested_by_name || indent.department_name || "Unknown"}</span>
                 </span>
-                <IndentSummaryStatusBadge status={indent.status} />
+                <IndentSummaryStatusBadge
+                  status={indent.status}
+                  currentApproverName={indent.current_approver_name}
+                />
               </button>
             ))}
             {!recentLoading && recent?.items.length === 0 && (

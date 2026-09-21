@@ -38,11 +38,19 @@ NOT_CONFIGURABLE = {
 
 
 def test_every_doc_type_is_either_configurable_or_deliberately_excluded():
-    """A new DocType must be a conscious choice, not an omission."""
+    """A new DocType must be a conscious choice, not an omission.
+
+    Three buckets, not two: `NOT_CONFIGURABLE` above is numbering-only — the engine
+    never read those. `ladder.RETIRED_DOC_TYPES` is the other kind: the engine DID read
+    it and no longer opens one, so it keeps its label for the rows already raised and
+    loses its place on the config screen.
+    """
     configurable = set(ladder.configurable_doc_types())
     everything = {d.value for d in DocType}
-    assert configurable | NOT_CONFIGURABLE == everything
+    assert configurable | NOT_CONFIGURABLE | ladder.RETIRED_DOC_TYPES == everything
     assert not (configurable & NOT_CONFIGURABLE)
+    assert not (configurable & ladder.RETIRED_DOC_TYPES)
+    assert not (NOT_CONFIGURABLE & ladder.RETIRED_DOC_TYPES)
 
 
 def test_the_workflows_picker_offers_only_what_the_engine_reads():
@@ -51,6 +59,31 @@ def test_the_workflows_picker_offers_only_what_the_engine_reads():
     offered = set(ladder.configurable_doc_types())
     assert DocType.ISSUE.value not in offered
     assert DocType.QUOTATION.value not in offered
+
+
+async def test_a_retired_type_is_off_the_config_screen_but_keeps_its_name():
+    """The Return Logistics row. Nothing opens a `STOCK_RETURN_LOGISTICS` instance
+    since `_open_logistics_approval` was retired, so Approvals Config offered a ladder
+    that could never govern anything — while the label has to survive for the rows that
+    were already on the rung, and for the stage name the engine writes."""
+    retired = DocType.STOCK_RETURN_LOGISTICS.value
+    assert retired in ladder.RETIRED_DOC_TYPES
+    assert retired not in ladder.configurable_doc_types()
+    assert retired not in {row["code"] for row in await ladder.list_doc_types()}
+    assert ladder.DOC_TYPE_LABEL[retired] == "Return Logistics"
+    assert ladder.MODULE_BY_DOC_TYPE[retired] == "Returns"
+
+
+def test_a_retired_type_refuses_a_chain_rather_than_saving_a_dead_one():
+    """Written-and-never-read is the failure mode this whole file guards against, so
+    the writer refuses instead of the screen merely hiding the row."""
+    from app.core.exceptions import ValidationError
+    from app.platform.workflow.custom_ladder import ladder_config_validate
+
+    with pytest.raises(ValidationError):
+        ladder_config_validate(DocType.STOCK_RETURN_LOGISTICS.value)
+    # A live type still validates, so the guard cannot be the reason a real chain fails.
+    ladder_config_validate(DocType.TRANSPORT_REQUEST.value)
 
 
 def test_every_configurable_type_has_a_label_and_a_module():

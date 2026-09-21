@@ -68,6 +68,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.STOCK_MOVEMENT_ORDER.value: "Inventory",
     DocType.STOCK_RETURN.value: "Returns",
     DocType.STOCK_RETURN_RECEIPT.value: "Returns",
+    DocType.STOCK_RETURN_LOGISTICS.value: "Returns",
     DocType.WH_ISSUE.value: "Warehouse",
     DocType.GRN.value: "Warehouse",
     # Both really are submitted to the engine by modules/warehouse/service.py, and both
@@ -101,8 +102,9 @@ DOC_TYPE_LABEL: dict[str, str] = {
     # same-project transfer never starts a workflow, so this ladder stays quiet.
     DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
     DocType.STOCK_MOVEMENT_ORDER.value: "Stock Movement (bin to bin)",
-    DocType.STOCK_RETURN.value: "Stock Return (sending material back up)",
-    DocType.STOCK_RETURN_RECEIPT.value: "Stock Return (receiving and deciding)",
+    DocType.STOCK_RETURN.value: "Indent Return",
+    DocType.STOCK_RETURN_RECEIPT.value: "Decision Desk",
+    DocType.STOCK_RETURN_LOGISTICS.value: "Return Logistics",
     DocType.WH_ISSUE.value: "Material Issue",
     DocType.GRN.value: "Goods Receipt",
     # The outward leg: transport is arranged and the consignment leaves the warehouse.
@@ -122,6 +124,23 @@ DOC_TYPE_LABEL: dict[str, str] = {
 # The order the modules are listed in on the config screen.
 MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement",
                 "Logistics"]
+
+# Document types nothing OPENS an instance for any more. They keep their label and
+# their module — an instance raised before the retirement still has to render with a
+# name, and `engine` reads DOC_TYPE_LABEL for the stage name on a self-approved row —
+# but Approvals Config no longer OFFERS them, and `ladder_config_validate` refuses a
+# chain saved against one. Same reasoning as the ISSUE note above: a ladder the engine
+# never looks up is configuration that is written, never read, and silently ignored.
+#
+#   STOCK_RETURN_LOGISTICS — the return's second signature. `_open_logistics_approval`
+#       was retired on 2026-09-10 (`modules/returns/service.py`): the transport leg is
+#       raised at the hand-over, the load may leave without it, the shelf is debited at
+#       the gate and the far end signs on the Sign-off screen — so the rung asked
+#       somebody to approve a journey that had already been approved, arranged and
+#       sometimes finished. Its READ side is deliberately still standing for a return
+#       that was already sitting on the rung; nothing new opens one, so there is nothing
+#       left for a chain to govern.
+RETIRED_DOC_TYPES = frozenset({DocType.STOCK_RETURN_LOGISTICS.value})
 
 # Document types whose DEFAULT approver is the raiser's own post, not somebody above
 # it. These are the events where authority comes from holding the thing rather than
@@ -153,6 +172,20 @@ LADDER_CODE_PREFIX = "LADDER"
 CUSTOM_CODE_PREFIX = "CUSTOM"
 # Guards against a cycle in HCM's position tree, which would otherwise hang the walk.
 MAX_CLIMB = 20
+
+#: How many positions a rank may be spread across before it stops being resolvable as
+#: a CENTRAL function (see `_add_offline_rungs`).
+#:
+#: The live mirror splits cleanly in two. A central desk holds one seat, or a handful:
+#: SCM HEAD, CPO, DIRECTOR, LOGISTICS and INVENTORY MANAGER hold exactly one each, the
+#: QC desks, P O and INDENT TEAM three. A FIELD rank is a rank the org has one of per
+#: branch: Regional Manager 4, District Manager 27, OE 72, DEO and Driver 948 apiece,
+#: Store Keeper 2001. Resolving a field rank company-wide would put a document in front
+#: of two thousand storekeepers, so it is refused and said out loud instead.
+#:
+#: A rung the admin scoped to named positions is NOT held to this: naming the seats IS
+#: the answer to "which of them", however many were named.
+MAX_OFFLINE_RANK_POSITIONS = 3
 APPROVER_SCOPE_FIELD = "__approver_positions_configured"
 APPROVER_POSITION_FIELD = "__approver_position_id"
 
@@ -237,16 +270,20 @@ def configurable_doc_types() -> list[str]:
     module submits it to the engine. Exposing this as a function rather than letting
     callers iterate `DocType` is what stops a picker offering ISSUE or QUOTATION,
     against which a workflow can be saved and never read.
+
+    Minus `RETIRED_DOC_TYPES`, which are on the label map for display only: the engine
+    once read them and no longer opens one, so offering them is the same trap.
     """
-    return list(DOC_TYPE_LABEL)
+    return [code for code in DOC_TYPE_LABEL if code not in RETIRED_DOC_TYPES]
 
 
 async def list_doc_types() -> list[dict]:
+    """What Approvals Config lists: one row per configurable type, retired ones gone."""
     return [{
         "code": code,
         "label": DOC_TYPE_LABEL.get(code, code.title()),
         "module": MODULE_BY_DOC_TYPE.get(code, "Other"),
-    } for code in DOC_TYPE_LABEL]
+    } for code in configurable_doc_types()]
 
 
 def _held_position_ids(project_id: int):
@@ -1020,6 +1057,7 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
     exclude_id = None if policy == POLICY_CREATOR_ALLOWED else requester_id
 
     chain: list[dict] = []
+    matched: set[int] = set()
     seen: set[int] = {requester_position_id}
     position = await db.get(HcmPosition, requester_position_id)
     hops = 0
@@ -1041,6 +1079,7 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
             # A rung nobody fills is skipped rather than held: a vacant seat must not
             # strand the document. Delegation covers the named-stand-in case.
             if holders:
+                matched.add(parent.role_id)
                 chain.append({
                     "sequence": len(chain) + 1,
                     "position_id": parent.id,
@@ -1051,7 +1090,100 @@ async def resolve_chain(db: AsyncSession, stages: list[Stage],
                     "approver_names": [h.full_name for h in holders],
                 })
         position = parent
+
+    # A configured rank the raiser does not REPORT THROUGH was being dropped in
+    # silence, which is the one outcome rule 8 forbids: a ladder of OE -> SCM HEAD
+    # resolved to OE alone, so the document was fully approved the moment the OE
+    # signed, and nothing anywhere said a rung had gone missing. SCM HEAD is a root
+    # position — it sits outside every branch's reporting line by design, and no
+    # amount of climbing from a field post will ever reach it.
+    missing = [role_id for role_id in enabled if role_id not in matched]
+    if missing:
+        chain = await _add_offline_rungs(
+            db, chain, missing, enabled, stages, exclude_id)
     return dedupe_chain(chain)
+
+
+async def _add_offline_rungs(db: AsyncSession, chain: list[dict],
+                             missing: list[int],
+                             enabled: dict[int, set[int] | None],
+                             stages: list[Stage],
+                             exclude_id: int | None) -> list[dict]:
+    """Resolve the configured ranks the climb never met, off the whole org.
+
+    A central function is not anybody's ancestor. The climb answers "who above ME holds
+    this rank", which is the right question for a reporting rank and unanswerable for a
+    company-wide desk, so a rung naming one resolved to nobody and vanished.
+
+    Only where the answer is UNAMBIGUOUS. One seat, or the handful a desk is staffed
+    with, is a real answer; every Store Keeper in the company is not, and offering a
+    document to two thousand people is worse than the bug. An ambiguous rung is left
+    out exactly as before — but logged at ERROR, because the whole defect was that
+    nothing said anything.
+
+    Ordering comes from the LADDER once a rung is added this way: the climb orders by
+    the org tree, which cannot place a rank that is not in it. Chains that need no
+    offline rung are untouched, so no working ladder re-orders.
+    """
+    order = {stage.position_role_id: stage.sequence for stage in stages
+             if stage.position_role_id is not None}
+    added: list[dict] = []
+    for role_id in missing:
+        scope = enabled.get(role_id)
+        stmt = select(HcmPosition).where(HcmPosition.role_id == role_id,
+                                         HcmPosition.is_active.is_(True))
+        if scope:
+            stmt = stmt.where(HcmPosition.id.in_(scope))
+        posts = list((await db.execute(stmt)).scalars().all())
+        if not posts:
+            logger.error(
+                "Ladder rung for rank %s resolves to no active position; the rung is "
+                "not in the chain and nobody will be asked to sign it.", role_id)
+            continue
+        if scope is None and len(posts) > MAX_OFFLINE_RANK_POSITIONS:
+            logger.error(
+                "Ladder rung for rank %s is not in the raiser's reporting line and is "
+                "held by %d positions, too many to resolve company-wide. The rung is "
+                "NOT in the chain. Scope it to named positions on Approvals Config, "
+                "or configure a rank the raiser reports through.",
+                role_id, len(posts))
+            continue
+        approver_ids: list[int] = []
+        approver_names: list[str] = []
+        position_ids: list[int] = []
+        for post in posts:
+            position_ids.append(post.id)
+            for holder in await _position_holders(db, post.id, exclude_id):
+                if holder.id in approver_ids:
+                    continue
+                approver_ids.append(holder.id)
+                approver_names.append(holder.full_name)
+        if not approver_ids:
+            logger.error(
+                "Ladder rung for rank %s resolves to %d position(s) that nobody "
+                "fills; the rung is not in the chain.", role_id, len(posts))
+            continue
+        first = posts[0]
+        added.append({
+            "position_id": first.id,
+            "position_name": first.name,
+            "role_id": role_id,
+            "role_name": first.role_name or first.job_name or first.name,
+            "approver_ids": approver_ids,
+            "approver_names": approver_names,
+            "allowed_position_ids": position_ids,
+        })
+        logger.warning(
+            "Ladder rung for rank %s (%s) is not in the raiser's reporting line; "
+            "resolved company-wide to %d approver(s) across %d position(s).",
+            role_id, first.role_name or first.name, len(approver_ids), len(posts))
+    if not added:
+        return chain
+    merged = chain + added
+    merged.sort(key=lambda link: order.get(link["role_id"], len(order) + 1))
+    for sequence, link in enumerate(merged, start=1):
+        link["sequence"] = sequence
+    return merged
 
 
 async def own_post_chain(db: AsyncSession, requester_position_id: int | None,

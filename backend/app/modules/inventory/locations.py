@@ -223,13 +223,36 @@ async def floor_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     )).scalars().all())
     if not floor_posts:
         return None
-    automatic = set((await db.execute(
-        select(PositionLocation.location_id).where(
+    tags = (await db.execute(
+        select(PositionLocation.location_id, PositionLocation.warehouse_id).where(
             PositionLocation.position_id.in_(floor_posts),
             PositionLocation.is_active == 1,
-            PositionLocation.location_id.isnot(None),
         )
-    )).scalars().all())
+    )).all()
+    automatic = {int(location_id) for location_id, _warehouse_id in tags
+                 if location_id is not None}
+
+    # Older HCM stocking-point links name the warehouse and section but carry no
+    # physical `location_id`. In a building with exactly ONE active floor that floor
+    # is unambiguous; refusing the floor in-charge there as "not assigned" only makes
+    # a stale sync column more authoritative than the physical warehouse tree.
+    # Multi-floor buildings still fail closed until HCM/admin names the exact floor.
+    unresolved_warehouses = {int(warehouse_id) for location_id, warehouse_id in tags
+                              if location_id is None and warehouse_id is not None}
+    if unresolved_warehouses:
+        floor_rows = (await db.execute(
+            select(WarehouseLocation.id, WarehouseLocation.warehouse_id).where(
+                WarehouseLocation.warehouse_id.in_(unresolved_warehouses),
+                WarehouseLocation.bin_type == FLOOR_STORAGE_TYPE,
+                WarehouseLocation.is_active.is_(True),
+            )
+        )).all()
+        by_warehouse: dict[int, list[int]] = {}
+        for location_id, warehouse_id in floor_rows:
+            by_warehouse.setdefault(int(warehouse_id), []).append(int(location_id))
+        automatic |= {
+            floor_ids[0] for floor_ids in by_warehouse.values() if len(floor_ids) == 1
+        }
     extra = set((await db.execute(
         select(PositionLocationAccess.location_id).where(
             PositionLocationAccess.position_id.in_(floor_posts),
@@ -1014,6 +1037,10 @@ async def _rebuild_floors(db: AsyncSession, positions, warehouses: dict,
 
     # HCM is authoritative for warehouse sections. Create only the missing top-level
     # FLOOR nodes; racks/bins remain warehouse-master data and are never fabricated.
+    # Do NOT collapse an unmatched section onto "the warehouse's only floor": a
+    # building with one hand-built floor is exactly the case where HCM's other
+    # sections are floors nobody has created yet, and claiming them suppressed the
+    # creation entirely.
     for warehouse_id, key in sorted(wanted):
         if (warehouse_id, key) in by_key:
             continue

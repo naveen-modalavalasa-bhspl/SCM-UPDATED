@@ -185,6 +185,11 @@ class DocType(str, Enum):
     # material and where it then goes, which is a different ladder from the one that
     # let the material leave — hence a second doc type rather than a second stage.
     STOCK_RETURN_RECEIPT = "STOCK_RETURN_RECEIPT"
+    # The return's LOGISTICS rung. RETIRED as a live rung on 2026-09-10 (nothing opens
+    # an instance for it any more — see platform/workflow/ladder.RETIRED_DOC_TYPES), but
+    # the value stays: a return that was already sitting on it still has to render, and
+    # the engine reads DOC_TYPE_LABEL for the stage name on those rows.
+    STOCK_RETURN_LOGISTICS = "STOCK_RETURN_LOGISTICS"
     # Logistics. The warehouse has packed and asks for transport; this is the request
     # that says what is moving, how heavy it is and by which mode. Signed by Logistics
     # before any carrier is approached, because approaching one publishes the shipment.
@@ -690,6 +695,10 @@ class MailKind(str, Enum):
     carries a live reset link and the Sent tab is readable by anyone with `mail.view`."""
     MANUAL = "MANUAL"
     PASSWORD_RESET = "PASSWORD_RESET"
+    #: A carrier or supplier portal username plus the shared first password. The
+    #: body is not logged because those credentials should not be readable from
+    #: the Sent screen.
+    VENDOR_LOGIN_INVITE = "VENDOR_LOGIN_INVITE"
     #: The six digits a vendor needs before their quotation can be submitted. Logged
     #: without its body for the same reason as a reset link: it is a live credential
     #: for the few minutes it lives, and the Sent tab is readable by anyone with

@@ -1,5 +1,6 @@
 import { StatusPill } from "@/shared/components";
 import { INDENT_STATUS } from "../constants";
+import { pendingApprovalLabel } from "../displayFormat";
 import { statusChipStyle } from "../statusPalette";
 
 /**
@@ -17,12 +18,20 @@ const SUMMARY_LABEL: Record<string, string> = {
   FULFILLED: "FULFILLED",
 };
 
-export function IndentSummaryStatusBadge({ status }: { status: string }) {
+export function IndentSummaryStatusBadge({
+  status,
+  currentApproverName,
+}: {
+  status: string;
+  currentApproverName?: string | null;
+}) {
   // FULFILLED is not an indent status; it is what CLOSED is called on screen, and
   // the palette keys off the real status.
   const style = statusChipStyle(status === "FULFILLED" ? INDENT_STATUS.CLOSED : status);
   if (!style) return <StatusPill status={status} />;
-  const label = SUMMARY_LABEL[status] ?? status.replace(/_/g, " ");
+  const label = status === INDENT_STATUS.PENDING_APPROVAL
+    ? pendingApprovalLabel(currentApproverName)
+    : SUMMARY_LABEL[status] ?? status.replace(/_/g, " ");
   const casing = status === INDENT_STATUS.RETURNED_FOR_CORRECTION
     || status === INDENT_STATUS.RETURNED
     ? "normal-case"
@@ -32,9 +41,9 @@ export function IndentSummaryStatusBadge({ status }: { status: string }) {
     <span
       data-status={status}
       style={style}
-      className={`inline-flex h-6 shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${casing}`}
+      className={`inline-flex h-6 max-w-full shrink-0 items-center whitespace-nowrap rounded-full px-2 text-[11px] font-semibold uppercase tracking-wide ${casing}`}
     >
-      {label}
+      <span className="block max-w-full truncate" title={label}>{label}</span>
     </span>
   );
 }

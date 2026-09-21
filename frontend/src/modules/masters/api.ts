@@ -244,6 +244,7 @@ export const mastersApi = {
   },
 
   departments: () => all<RefRow>("/api/departments"),
+  ownershipDepartments: () => all<RefRow>("/api/departments/ownership-options"),
   facilities: () => all<RefRow>("/api/facilities"),
 
   /** Whether the dock mints an asset / consumable code for this item's units.

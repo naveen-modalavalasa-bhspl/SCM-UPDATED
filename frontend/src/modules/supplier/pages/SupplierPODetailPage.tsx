@@ -71,15 +71,12 @@ export function SupplierPODetailPage() {
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [editing, setEditing] = useState<DespatchNote | null>(null);
   const [responseNote, setResponseNote] = useState("");
-  const [amendedRates, setAmendedRates] = useState<Record<number, number>>({});
 
   /** Yes, or no with a reason. The vendor id comes from the token server-side, so this
    *  can only ever answer this vendor's own order. */
   const respond = useMutation({
-    mutationFn: (accept: boolean) => {
-      const linesData = Object.entries(amendedRates).map(([id, rate]) => ({ id: Number(id), rate }));
-      return supplierApi.respondToPo(poId, accept, responseNote, linesData.length > 0 ? linesData : undefined);
-    },
+    mutationFn: (accept: boolean) =>
+      supplierApi.respondToPo(poId, accept, responseNote),
     onSuccess: (_result, accept) => {
       toast.success(accept ? "Order accepted" : "Order declined");
       setResponseNote("");
@@ -488,17 +485,14 @@ export function SupplierPODetailPage() {
                     {line.ordered_qty} {line.uom_code ?? ""}
                   </td>
                   <td className="tabular p-2 text-right">
-                    {awaitingAnswer && isChanged ? (
-                      <Input
-                        type="number"
-                        placeholder="New rate"
-                        className="text-right w-24 ml-auto"
-                        value={amendedRates[line.po_item_id] ?? line.rate ?? ""}
-                        onChange={(e) => setAmendedRates(r => ({ ...r, [line.po_item_id]: Number(e.target.value) }))}
-                      />
-                    ) : (
-                      money(line.rate)
+                    {/* The rate is READ, on every rung. What changed on an
+                      * amendment is shown struck through beside it, because seeing the
+                      * old price is how a supplier decides - but the decision is
+                      * accept or decline, not a number typed back at us. */}
+                    {isChanged && prev?.rate != null && Number(prev.rate) !== Number(line.rate) && (
+                      <span className="line-through text-muted mr-1 text-xs">{money(prev.rate)}</span>
                     )}
+                    {money(line.rate)}
                   </td>
                   <td className="tabular p-3 text-right text-muted">{line.despatched_qty}</td>
                   <td className="tabular p-3 text-right font-semibold">{line.pending_qty}</td>

@@ -191,6 +191,7 @@ class ApprovalIndentOut(BaseModel):
     current_stage_name: str | None = None
     current_approver_name: str | None = None
     can_return_for_correction: bool = False
+    required_date: date | None = None
     created_at: datetime
     items: list[ApprovalIndentLineOut]
 

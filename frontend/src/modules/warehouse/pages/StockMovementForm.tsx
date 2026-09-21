@@ -20,7 +20,8 @@ import { TrackingBadge, useTrackingMeta } from "../components/TrackingBadge";
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import { fmtQty, num } from "../format";
 import type {
-  OccupancyMove, StockAvailability, StockMovementOrderItemWrite, TrackingType, UnitMode,
+  OccupancyMove, StockAvailability, StockMovementOrderItemWrite, StorageType,
+  TrackingType, UnitMode,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 
@@ -103,7 +104,7 @@ export default function StockMovementForm() {
       queryClient.invalidateQueries({ queryKey: ["wh-issue-codes"] });
       queryClient.invalidateQueries({ queryKey: ["wh-serials"] });
       queryClient.invalidateQueries({ queryKey: ["wh-item-locations"] });
-      
+
       const base = window.location.pathname.replace(/\/new$/, "");
       nav(`${base}/view?order_no=${encodeURIComponent(result.order_no)}`, { replace: true });
     },
@@ -462,7 +463,7 @@ function MovementLineEditor({
   line: DraftLine;
   warehouseId: number;
   isBinManaged: boolean;
-  storageTypes: any[];
+  storageTypes: StorageType[];
   problem: string | null;
   onPatch: (patch: Partial<DraftLine>) => void;
   onRemove: () => void;
@@ -471,13 +472,7 @@ function MovementLineEditor({
 }) {
   const [storageType, setStorageType] = useState<number | string | "">("");
   const trackingMeta = useTrackingMeta();
-
-  /* Only the storage types stock is actually counted in. The full BinType list was on
-   * offer — BLOCK, FLOOR, LANE, RACK, SHELF — and every one of them is structure you
-   * walk past on the way to a bin: picking one gave an empty destination list, and
-   * `all_locations` let a rack be chosen anyway, which the service then rejected with
-   * "Stock can move only between stock-holding bins". Mirrors BIN_TYPES on the server. */
-  const STORAGE_ENUMS = ["BIN", "COLD_STORAGE_BIN"];
+>>>>>>> 521e00de7951bd2a6c34d574b1bc3596f47d6b04
 
   const availability = useQuery({
     queryKey: ["wh-stock-movement-availability", warehouseId, line.source_bin_id, line.item_id, line.batch_id],
@@ -569,7 +564,8 @@ function MovementLineEditor({
           />
         </Field>
 
-        <Field label="Destination Storage Type">
+        <Field label="Destination storage type"
+               hint="Choose a type to narrow the destination locations.">
           <Select
             value={String(storageType)}
             onChange={(val) => {
@@ -577,10 +573,10 @@ function MovementLineEditor({
               // The bin below no longer belongs to the type now selected.
               onPatch({ destination_bin_id: 0, _destCode: null, _destName: null });
             }}
-            options={[
-              ...STORAGE_ENUMS.map(e => ({ value: e, label: e })),
-              ...storageTypes.map(st => ({ value: String(st.id), label: st.name }))
-            ]}
+            options={storageTypes
+              .filter((type) => type.is_active)
+              .map((type) => ({ value: String(type.id), label: type.name }))}
+            placeholder="Select storage type"
             ariaLabel="Storage type filter"
           />
         </Field>
@@ -594,7 +590,8 @@ function MovementLineEditor({
            * rather than in a bay (see `confirm_putaway`), and a destination the service
            * accepts has to be one the picker offers — otherwise stock that CAN be put
            * on a rack can never be moved onto one. */
-          <Field label="Destination location">
+          <Field label="Destination location"
+                 hint={!storageType ? "Select the destination storage type first." : undefined}>
             <Lookup
               name={`line-dest-${index}-${warehouseId}-${storageType || "any"}-${line.source_bin_id}`}
               load={(search) => binOptions(
@@ -602,13 +599,16 @@ function MovementLineEditor({
                 true, line.source_bin_id || undefined,
               )}
               value={line.destination_bin_id || ""}
+<<<<<<< HEAD
               isDisabled={!warehouseId}
+=======
+              isDisabled={!warehouseId || !storageType}
               onChange={(value, option) => onPatch({
                 destination_bin_id: value === "" ? 0 : value,
                 _destCode: option?.code ?? null,
                 _destName: option?.name ?? null,
               })}
-              placeholder="Destination location"
+              placeholder={storageType ? "Select destination location" : "Select storage type first"}
             />
           </Field>
         )}

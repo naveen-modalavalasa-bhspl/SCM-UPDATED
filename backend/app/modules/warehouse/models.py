@@ -97,6 +97,49 @@ class Receipt(Base):
     gate_entry_no = Column(String(50), nullable=True)
     gate_entry_at = Column(DateTime, nullable=True)
 
+    # WHEN THE GOODS ARE EXPECTED, on a receipt raised before they arrive (2026-09-11).
+    # Distinct from all three dates beside it: `grn_date` is this document's own date,
+    # `invoice_date` is the supplier's paperwork, and `gate_entry_at` is the moment a
+    # vehicle actually turned up. None of them can say "a lorry is coming on the 20th",
+    # which is exactly what a DRAFT receipt raised from a supplier's replacement promise
+    # exists to say — and what the receiving queue needs to sort by. Nullable, because a
+    # receipt written AT the gate is describing goods that are already there.
+    #
+    # SET ONLY WHEN SOMEBODY IS BRINGING IT TO US. On a collection it stays null on
+    # purpose — see `inbound_transport_mode`.
+    expected_delivery = Column(Date, nullable=True)
+
+    # WHO MOVES THE GOODS ON AN INBOUND LEG (2026-09-11). `SUPPLIER_DELIVERS` or
+    # `WE_COLLECT` (`schemas.INBOUND_TRANSPORT_MODES`); null on every receipt raised
+    # before this and on any written at the gate, where the goods are already standing
+    # in front of the storekeeper and the question is moot.
+    #
+    # WHY THIS IS NOT `TransportMode`. That enum answers "how does it travel and who is
+    # paid" — DIRECT, COURIER, OWN_VEHICLE, THIRD_PARTY — and every one of its values
+    # describes a leg arranged by the party SENDING the goods. On an inbound leg the
+    # first question is a different one: is anything coming at all, or must we go and
+    # fetch it. `OWN_VEHICLE` cannot answer it, because on goods coming towards us
+    # "own vehicle" is ambiguous between the supplier's truck and ours. The two axes are
+    # genuinely independent and collapsing them loses the answer the store acts on.
+    #
+    # THE STORE ACTS DIFFERENTLY ON EACH, which is the whole reason it is stored: a
+    # delivery is waited for at the gate, a collection is a vehicle somebody here has to
+    # send. A receipt that cannot tell them apart reads as a delivery, so a collection
+    # would sit in the queue until the supplier telephoned to ask why nobody came.
+    inbound_transport_mode = Column(String(30), nullable=True)
+    # WHERE we collect from, and WHEN it is ready — both only on a collection.
+    #
+    # `goods_ready_date` is NOT `expected_delivery` and must never be written to it: the
+    # supplier is promising the goods will be ready on their dock, not that they will be
+    # at our gate. Putting a ready date in the arrival column would have the receiving
+    # queue expecting a lorry on a day nothing is coming.
+    #
+    # No pickup CONTACT columns: `mst_vendors` already holds the supplier's contact
+    # person and phone, and `_enrich_return_with_vendor` already serves them onto the
+    # return. A second copy here would be one more thing to go stale.
+    pickup_address = Column(String(500), nullable=True)
+    goods_ready_date = Column(Date, nullable=True)
+
     status = Column(String(30), nullable=False, default=ReceiptStatus.DRAFT.value)
 
     # Rollups, recomputed from the lines on every write so a list screen reads one row.
@@ -661,13 +704,296 @@ class PurchaseReturn(Base):
     grn_id = Column(BigInteger, index=True, nullable=True)
     grn_no = Column(String(50), nullable=True)
 
+    # ADDED 2026-09-12. The QC that condemned the goods — the last reference the business
+    # asks a purchase return to carry, and the only one it could not.
+    #
+    # STORED rather than derived on every read, unlike `grn_date` and `invoice_no` beside
+    # it, because the business requires this one to survive the whole journey: a return
+    # argued with a vendor months later must still name the inspection it was raised on,
+    # and a derived value would change the day somebody re-pointed the GRN link — or
+    # vanish entirely if the inspection were later cancelled.
+    #
+    # WRITTEN IN EXACTLY TWO PLACES, and never anywhere else: at birth, by whoever raises
+    # the return, and at `send_to_vendor`, which BINDS it the same way it binds the traced
+    # GRN/PO/vendor chain. `_decorate_purchase_return` fills it in on read ONLY while it is
+    # null, which is a binding rather than an overwrite — the trap `manual_vendor_*`
+    # documents (a derived value silently replacing a stored one on the next GET) needs an
+    # UNCONDITIONAL assignment to spring, and there is none here.
+    #
+    # `indent_id`/`indent_no` are deliberately NOT columns beside these. They are already
+    # served, derived off the bound GRN on every read, and `_decorate_purchase_return`
+    # assigns them unconditionally — including to None on a manual return. Promoting them
+    # to columns would let an ordinary GET blank a stored indent.
+    #
+    # `inb_inspections` is this module's own table, but the link is soft: a return
+    # outlives an inspection somebody may cancel, and the number is the fact worth keeping
+    # even then.
+    inspection_id = Column(BigInteger, index=True, nullable=True)
+    inspection_no = Column(String(50), nullable=True)
+
     vendor_id = Column(BigInteger, index=True, nullable=True)
     vendor_name = Column(String(200), nullable=True)
     warehouse_id = Column(BigInteger, index=True, nullable=True)
     warehouse_name = Column(String(200), nullable=True)
 
     reason = Column(String(500), nullable=True)
+    # Free-text notes captured beside the reason. Nullable so every row raised
+    # before remarks existed keeps reading; new drafts write it on create/update.
+    remarks = Column(Text, nullable=True)
     status = Column(String(30), nullable=False, default=ReturnStatus.DRAFT.value)
+    # When a DRAFT was sent to the vendor (DRAFT -> SENT_TO_VENDOR). Null until
+    # sent; set once in the same transaction as the status flip so the two can
+    # never disagree. Read back on the detail for the review screen.
+    sent_at = Column(DateTime, nullable=True)
+
+    # ADDED 2026-09-08 (returns work). Where the material being sent back came FROM,
+    # as against which warehouse is sending it: off an upper-tier shelf, up the chain
+    # from a branch, or rejected on the inspection bench after the GRN. Nullable and
+    # unread by anything in this module — every existing route behaves as before — and
+    # written by whoever raises the return. `returns.enums.PurchaseReturnSource` names
+    # the values; the column is a plain String so the warehouse module does not have to
+    # import the returns module to store one (rule 5: the chain runs the other way).
+    source_category = Column(String(30), index=True, nullable=True)
+    # The stock return that produced this one, where it was produced automatically off a
+    # branch return landing at the warehouse. A soft link: `inv_sto` is inventory's
+    # table and a purchase return outlives the transfer that caused it.
+    source_return_id = Column(BigInteger, index=True, nullable=True)
+    source_return_no = Column(String(50), nullable=True)
+
+    # ADDED 2026-09-10. This document's vendor and lines were TYPED, not read off a
+    # purchase transaction — the warehouse is holding goods to send back whose
+    # paperwork never reached this system. Defaults false, so every row raised before
+    # today, and every sourced return raised after it, behaves exactly as it did.
+    is_manual = Column(Boolean, nullable=False, default=False, server_default="0")
+    # The document number the storekeeper typed for their own reference, where the
+    # system holds no such document. Never resolved and never linked — it is a note.
+    source_ref_no = Column(String(100), nullable=True)
+    # The vendor AS TYPED, in columns of their own.
+    #
+    # Deliberately not the `vendor_*` names the API serves: `_enrich_return_with_vendor`
+    # assigns those transient attributes off `mst_vendors` on every read and several
+    # callers commit straight afterwards, so a manual vendor stored under those names
+    # would be blanked by the next `get_return`. The serializer reads these where
+    # `is_manual` is set, which keeps the served shape identical either way.
+    manual_vendor_code = Column(String(50), nullable=True)
+    manual_vendor_contact_person = Column(String(200), nullable=True)
+    manual_vendor_phone = Column(String(50), nullable=True)
+    manual_vendor_email = Column(String(200), nullable=True)
+    manual_vendor_address = Column(String(500), nullable=True)
+    manual_vendor_city = Column(String(100), nullable=True)
+    manual_vendor_state = Column(String(100), nullable=True)
+    manual_vendor_pincode = Column(String(20), nullable=True)
+    manual_vendor_gstin = Column(String(20), nullable=True)
+
+    # ADDED 2026-09-11 (supplier portal: receipt + answer). Two independent facts, and
+    # deliberately two groups of columns — see `e1f2a3b4c5d6`.
+    #
+    # The PHYSICAL handover, signed once by the supplier when the consignment is put
+    # into their hands. This is what the acknowledgement receipt prints from. All null
+    # on every return raised before today, which is the same state a new one starts in.
+    vendor_receipt_confirmed_at = Column(DateTime, nullable=True)
+    vendor_receipt_by_name = Column(String(200), nullable=True)
+    # The vehicle AS THE SUPPLIER SAW IT. Not the same fact as the consignment's own
+    # `out_dispatches.vehicle_number`: that is what we booked, this is what turned up,
+    # and a transhipped load makes them genuinely different. Prefilled from the
+    # consignment on screen, stored separately so a correction is never lost.
+    vendor_receipt_vehicle_no = Column(String(50), nullable=True)
+    vendor_receipt_remarks = Column(Text, nullable=True)
+
+    # The DECISION: REFUNDED / REPLACED / RETURNED, or legacy ACCEPTED
+    # (`enums.VendorReturnResponse`). Answered once. A plain String, like `status` beside
+    # it, so the column outlives any renaming of the enum.
+    vendor_response = Column(String(30), index=True, nullable=True)
+    vendor_response_at = Column(DateTime, nullable=True)
+    vendor_response_note = Column(Text, nullable=True)
+    # What the supplier is refunding, where the answer was REFUNDED. Null on every other
+    # answer and on every return answered before 2026-09-11.
+    #
+    # STORED rather than assumed equal to `total_value`, because a partial credit is the
+    # normal case and not an exception: freight deducted, a restocking charge kept back,
+    # or a line the supplier disputes. Reading the refund off `total_value` would have
+    # been right until the first short credit arrived and then silently wrong, with
+    # nothing on the document to say the two numbers had ever differed. The service caps
+    # it at `total_value` — a supplier cannot credit more than was sent back to them.
+    vendor_refund_amount = Column(MONEY, nullable=True)
+    # The DRAFT inbound receipt that answer raised, where it raised one. RETURNED and
+    # REPLACED both put goods back on a vehicle towards us; REFUNDED settles in money
+    # and legacy ACCEPTED raised nothing, so both leave these null. A soft link —
+    # `inb_receipts` is this module's own table, but a return outlives the receipt
+    # somebody may later cancel.
+    vendor_followup_receipt_id = Column(BigInteger, index=True, nullable=True)
+    vendor_followup_receipt_no = Column(String(50), nullable=True)
+
+    # ADDED 2026-09-11 (`a4d8e2f6b0c9`). A collection — the supplier answered REPLACED
+    # and asked us to send a vehicle — raises NO receipt when it is answered, because a
+    # receipt is a warehouse document and on a collection the warehouse has nothing to
+    # do yet: no vehicle has gone and no date exists. It raises the TRIP instead, on the
+    # logistics desk's own Dispatch board, and the receipt follows when that leg is
+    # acknowledged and the goods are actually in the building.
+    #
+    # These four carry the answer across that gap. All null on a delivery, on a RETURNED
+    # consignment and on every return raised before today.
+    #
+    # A SOFT link, like every other cross-module id here: `lgs_transport_requests` is
+    # logistics', which sits BEFORE warehouse in the import chain (rule 5), and a return
+    # outlives a leg somebody may cancel. Indexed because `transport_acknowledged` asks
+    # "is a purchase return waiting on this leg?" on every shipment signature.
+    collection_tr_id = Column(BigInteger, index=True, nullable=True)
+    collection_tr_no = Column(String(50), nullable=True)
+    # Where our vehicle goes, and the earliest it may go. The same two facts
+    # `inb_receipts.pickup_address` / `goods_ready_date` hold on a delivery — held here
+    # instead because on a collection there is no receipt yet to hold them.
+    collection_pickup_address = Column(String(500), nullable=True)
+    collection_ready_date = Column(Date, nullable=True)
+
+    # ADDED 2026-09-11 (`b7e3c1a9d5f2`). THE DECISION ON A SENT RETURN, and the leg that
+    # brings the material back from the vendor afterwards.
+    #
+    # Until now a return stopped at SENT_TO_VENDOR: the consignment was in the vendor's
+    # hands, the screen went read-only, and whether anybody had agreed the return — and
+    # whose vehicle was bringing the material back — were facts the system simply did not
+    # hold. Every column below is null on every row raised before today, which is the
+    # same state a new one starts in, so nothing already in flight reads differently.
+    #
+    # The DECISION. APPROVED / REJECTED (`ApprovalAction`), answered once. Stored beside
+    # the status rather than derived from it because the status moves on afterwards —
+    # through the arrangement, the vehicle and the arrival — and "who agreed this, and
+    # when" has to stay readable at every one of those rungs.
+    vendor_decision = Column(String(20), nullable=True)
+    vendor_decision_at = Column(DateTime, nullable=True)
+    vendor_decision_by_id = soft_fk()
+    vendor_decision_by_name = Column(String(200), nullable=True)
+    vendor_decision_note = Column(Text, nullable=True)
+
+    # WHO PROVIDES THE VEHICLE (`enums.ReturnVehicleArrangement`). A plain String, like
+    # `status` and `vendor_response` beside it, so the column outlives any renaming of
+    # the enum. Null until the approval has been answered with one of the two options.
+    vehicle_arrangement = Column(String(30), nullable=True)
+    vehicle_arrangement_at = Column(DateTime, nullable=True)
+    vehicle_arrangement_by_name = Column(String(200), nullable=True)
+
+    # THE LOGISTICS LEG that fetches the material, on a WAREHOUSE_REQUESTS arrangement.
+    #
+    # ITS OWN PAIR OF COLUMNS, deliberately NOT the `collection_tr_*` pair above, which
+    # the supplier-collection path writes. The two trips look alike — both run vendor's
+    # dock -> our warehouse on our own vehicle — but they settle differently:
+    # `_collection_arrived` matches an acknowledged leg to `collection_tr_id` and raises
+    # an inbound RECEIPT against the supplier's stored REPLACED answer. A return that
+    # got here has no such answer, so sharing the column would have that settlement fire
+    # on a document it was never written for. Separate columns is what makes the two
+    # provably independent; `_inbound_vehicle_arrived` settles this one.
+    #
+    # A SOFT link, like every other cross-module id here: `lgs_transport_requests` is
+    # logistics', which sits BEFORE warehouse in the import chain (rule 5), and a return
+    # outlives a leg somebody may cancel. Indexed because the acknowledgement hook asks
+    # "is a purchase return waiting on this leg?" on every shipment signature.
+    inbound_tr_id = Column(BigInteger, index=True, nullable=True)
+    inbound_tr_no = Column(String(50), nullable=True)
+    # Where that vehicle collects from, and the earliest it may go. Stated by the desk
+    # when the request is raised, defaulted from the vendor master on screen.
+    inbound_pickup_address = Column(String(500), nullable=True)
+    inbound_ready_date = Column(Date, nullable=True)
+
+    # THE VEHICLE COMING BACK, on a VENDOR_ARRANGES leg only.
+    #
+    # Stored ONLY on that branch, and that asymmetry is deliberate rather than an
+    # omission. On a WAREHOUSE_REQUESTS leg the vehicle and the driver belong to the
+    # transport request Logistics assigns them on, and they are READ back off it on every
+    # load (`_decorate_return_inbound_leg`) exactly as `dispatch_no` already is — a second
+    # copy here would go stale the first time the desk re-assigned a truck. On a vendor
+    # leg there is no such document: the vendor states a vehicle over the phone and this
+    # row is the only place it can live.
+    #
+    # DELIBERATELY NOT the `inbound_*` names the API serves, and for the same reason
+    # `manual_vendor_*` is not `vendor_*`: `_decorate_return_inbound_leg` assigns the
+    # served names as transient attributes on every read, and several callers commit
+    # straight afterwards — so a vendor-stated vehicle stored under the served names
+    # would be silently overwritten with logistics' copy on the next load. The
+    # serializer reads these where the arrangement is VENDOR_ARRANGES, which keeps the
+    # served shape identical either way.
+    arranged_vehicle_no = Column(String(50), nullable=True)
+    arranged_driver_name = Column(String(200), nullable=True)
+    arranged_driver_phone = Column(String(30), nullable=True)
+    arranged_transporter_name = Column(String(200), nullable=True)
+    arranged_lr_no = Column(String(50), nullable=True)
+    arranged_expected_date = Column(Date, nullable=True)
+    arranged_dispatched_at = Column(DateTime, nullable=True)
+
+    # ADDED 2026-09-12. WHEN THE VENDOR ACCEPTED THE COLLECTION JOB, on a VENDOR_ARRANGES
+    # leg. Its own stamp rather than inferred from a vehicle number appearing, because
+    # agreeing to come and fetch the goods on Thursday and having named a truck are two
+    # different facts and the warehouse chases them differently. `arranged_dispatched_at`
+    # beside it is the later moment — the vehicle actually loaded and left our gate.
+    vendor_transport_accepted_at = Column(DateTime, nullable=True)
+    vendor_transport_accepted_by_name = Column(String(200), nullable=True)
+
+    # ADDED 2026-09-12. THE OUTWARD LEG — our warehouse to the vendor's dock.
+    #
+    # ITS OWN PAIR OF COLUMNS, deliberately not `inbound_tr_*` or `collection_tr_*` above.
+    # All three name a transport request against this return and all three are settled by a
+    # different hook: `collection_tr_id` raises an inbound receipt against a stored REPLACED
+    # answer, `inbound_tr_id` signs the material back in at our own gate, and this one moves
+    # the return to STOCK_PICKED_UP when the load actually leaves us. Sharing a column would
+    # have each settlement fire on documents it was never written for; separate columns is
+    # what makes the three provably independent.
+    #
+    # A SOFT link, like every other cross-module id here: `lgs_transport_requests` is
+    # logistics', which sits BEFORE warehouse in the import chain (rule 5), and a return
+    # outlives a leg somebody may cancel. Indexed because the release hook asks "is a
+    # purchase return waiting on this leg?" on every shipment that goes out.
+    outbound_tr_id = Column(BigInteger, index=True, nullable=True)
+    outbound_tr_no = Column(String(50), nullable=True)
+
+    # THE REPLACEMENT DISPATCH NOTE — what the vendor put on a vehicle towards us, and
+    # when. Stated once, by the vendor, on the rung where they actually ship it.
+    #
+    # The per-line half of this note (batch, mfg date, expiry) lives on
+    # `PurchaseReturnItem.replacement_*`, which already existed: replacement goods for two
+    # items have two batches and two expiries, and one pair of columns here would be right
+    # only for a single-line return.
+    #
+    # `replacement_dispatch_no` is the VENDOR's own note number, as they state it. Never
+    # generated here and never resolved — it is their reference, printed on the note so the
+    # two sides can quote one number at each other.
+    replacement_dispatched_at = Column(DateTime, nullable=True)
+    replacement_dispatch_no = Column(String(100), nullable=True)
+    replacement_dispatch_date = Column(Date, nullable=True)
+    replacement_expected_date = Column(Date, nullable=True)
+    replacement_transporter_name = Column(String(200), nullable=True)
+    replacement_vehicle_no = Column(String(50), nullable=True)
+    replacement_lr_no = Column(String(50), nullable=True)
+    replacement_remarks = Column(Text, nullable=True)
+
+    # THE ARRIVAL. Signed once, by whoever took the load in at the gate.
+    received_at = Column(DateTime, nullable=True)
+    received_by_name = Column(String(200), nullable=True)
+    received_remarks = Column(Text, nullable=True)
+
+    # THE REFUND, where the approval settled in money instead of goods.
+    #
+    # The AMOUNT reuses `vendor_refund_amount` above rather than taking its own
+    # column: a credit is a credit whichever desk recorded it, the cap (never more
+    # than the value sent back) is the same, and the supplier-answer card already
+    # reads that column. These three are the stamp of the INTERNAL settlement —
+    # kept apart from `vendor_response_*` so a desk-recorded refund can never read
+    # as an answer the supplier gave on their portal. All null except on REFUNDED.
+    refunded_at = Column(DateTime, nullable=True)
+    refunded_by_name = Column(String(200), nullable=True)
+    refund_remarks = Column(Text, nullable=True)
+
+    # ADDED 2026-09-08 (returns work). Where the material being sent back came FROM,
+    # as against which warehouse is sending it: off an upper-tier shelf, up the chain
+    # from a branch, or rejected on the inspection bench after the GRN. Nullable and
+    # unread by anything in this module — every existing route behaves as before — and
+    # written by whoever raises the return. `returns.enums.PurchaseReturnSource` names
+    # the values; the column is a plain String so the warehouse module does not have to
+    # import the returns module to store one (rule 5: the chain runs the other way).
+    source_category = Column(String(30), index=True, nullable=True)
+    # The stock return that produced this one, where it was produced automatically off a
+    # branch return landing at the warehouse. A soft link: `inv_sto` is inventory's
+    # table and a purchase return outlives the transfer that caused it.
+    source_return_id = Column(BigInteger, index=True, nullable=True)
+    source_return_no = Column(String(50), nullable=True)
 
     total_items = Column(Integer, nullable=False, default=0)
     total_qty = Column(QTY, nullable=False, default=0)
@@ -696,7 +1022,10 @@ class PurchaseReturnItem(Base):
     po_item_id = Column(BigInteger, nullable=True)
     grn_item_id = Column(BigInteger, nullable=True)
 
-    item_id = Column(BigInteger, index=True, nullable=False)
+    # NULLABLE since 2026-09-10: a manually typed line names an item that need not
+    # exist in `mst_items` at all. Every reader that groups or filters on this already
+    # guards for a missing value (see `_trace_purchase_source`).
+    item_id = Column(BigInteger, index=True, nullable=True)
     item_code = Column(String(50), nullable=True)
     item_name = Column(String(300), nullable=True)
     uom_code = Column(String(20), nullable=True)
@@ -707,6 +1036,32 @@ class PurchaseReturnItem(Base):
     rate = Column(RATE, nullable=True)
     amount = Column(MONEY, nullable=True)
     reason = Column(String(300), nullable=True)
+
+    # ADDED 2026-09-10. This line was typed rather than read off a source document.
+    is_manual = Column(Boolean, nullable=False, default=False, server_default="0")
+    # Purchased / already returned / available AS TYPED. On a SOURCED line these three
+    # are derived on every read from the GRN or PO behind the return and are left NULL
+    # here — deriving them is what stops a screen offering a quantity the save refuses.
+    # On a manual line there is no source to derive them from, so they are stored.
+    original_qty = Column(QTY, nullable=True)
+    previously_returned = Column(QTY, nullable=True)
+    returnable_qty = Column(QTY, nullable=True)
+
+    # ADDED 2026-09-11 (`a4d8e2f6b0c9`). WHAT THE SUPPLIER SAID IS IN THE CARTON, on a
+    # replacement they are sending back. Not this line's own `batch_no` — that is the
+    # batch of the FAULTY goods travelling the other way, different physical stock with
+    # a different expiry, and inheriting it would prefill the store's GRN with a wrong
+    # lot number.
+    #
+    # Written on a COLLECTION only, and only because the receipt those answers used to
+    # go straight onto is no longer raised at answer time (see `collection_tr_id` on the
+    # parent). The supplier is still asked, and still refused, at the moment they answer:
+    # a batch-tracked line with no batch and an expiry-tracked line with no expiry both
+    # stop the GRN later, and only the supplier can read them off a carton standing in
+    # their own warehouse. These columns are where the answers wait for the receipt.
+    replacement_batch_no = Column(String(50), nullable=True)
+    replacement_mfg_date = Column(Date, nullable=True)
+    replacement_expiry_date = Column(Date, nullable=True)
 
     parent = relationship("PurchaseReturn", back_populates="items")
 

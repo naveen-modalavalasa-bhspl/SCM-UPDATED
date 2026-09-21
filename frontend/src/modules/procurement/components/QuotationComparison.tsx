@@ -206,14 +206,6 @@ export function QuotationComparison({
       : [...current, quotationId]);
   };
 
-  if (!totals.length) {
-    return (
-      <Card className="p-6 text-center text-sm text-muted">
-        No quotations submitted yet.
-      </Card>
-    );
-  }
-
   const hidden = totals.length - columns.length;
 
   const chips = useMemo(() => {
@@ -234,6 +226,17 @@ export function QuotationComparison({
         .some((field) => String(field ?? "").toLowerCase().includes(q));
     });
   }, [comparison.items, itemQuery, quotedOnly, columns]);
+
+  // Keep every hook above this branch. The comparison can first render empty and then
+  // receive quotations; returning before the memo hooks changed the hook count and
+  // crashed the whole RFQ screen on that transition.
+  if (!totals.length) {
+    return (
+      <Card className="p-6 text-center text-sm text-muted">
+        No quotations submitted yet.
+      </Card>
+    );
+  }
 
   const formatQuantity = (value: number) => Number(value).toLocaleString(undefined, {
     maximumFractionDigits: 3,

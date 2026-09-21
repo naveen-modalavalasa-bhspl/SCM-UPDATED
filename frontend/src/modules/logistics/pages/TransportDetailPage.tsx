@@ -15,9 +15,13 @@ import { FlowStepper } from "../components/FlowStepper";
 import {
   carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
 } from "../components/modeCopy";
+import {
+  custodyOf, custodyProblems, HandoverCustody, personKindOf,
+} from "../components/HandoverCustody";
+import type { CustodyValue, PersonKind } from "../components/HandoverCustody";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
-import { manifestLines } from "../components/consignmentToLines";
-import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { ManifestTable } from "../components/ManifestTable";
+import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT, TONE_YELLOW } from "@/shared/components/tones";
 
 /**
  * One consignment's transport leg, from planning to the signature at the far end.
@@ -48,6 +52,11 @@ export function TransportDetailPage() {
   const [tracking, setTracking] = useState({
     lr_no: "", docket_no: "", tracking_url: "", eway_bill_no: "", gate_pass_no: "",
   });
+  // A hand-over records a person, not a paper. Held beside `tracking` rather than
+  // inside it because the two are alternatives — a leg fills one or the other — and
+  // folding them together makes a nine-field object no press ever answers whole.
+  const [custody, setCustody] = useState<CustodyValue>(custodyOf(null));
+  const [handoverPerson, setHandoverPerson] = useState<PersonKind>("EMPLOYEE");
   const [declining, setDeclining] = useState(false);
   const [declineNote, setDeclineNote] = useState("");
   const [downloadingEvidence, setDownloadingEvidence] = useState<number | null>(null);
@@ -80,6 +89,10 @@ export function TransportDetailPage() {
       eway_bill_no: doc.eway_bill_no || "",
       gate_pass_no: doc.gate_pass_no || `GP/${reference}`,
     });
+    // What the booking recorded, brought forward so the desk edits an answer rather
+    // than retyping one. Which id was filled is itself which kind of person it was.
+    setCustody(custodyOf(doc));
+    setHandoverPerson(personKindOf(doc));
     setDispatching(true);
   };
 
@@ -107,8 +120,24 @@ export function TransportDetailPage() {
     success: "Award overruled — back out to the carriers", invalidates,
     onDone: () => { setAwardReject(false); setAwardRejectNote(""); },
   });
+  // Which arrangement this is decides what the release press records, and it is the
+  // ONE branch: a hand-over carries a person, everything else carries paper.
+  const isHandover = doc?.mode === "DIRECT";
   const dispatch = useAction({
-    run: () => transportApi.dispatch(trId, {
+    run: () => transportApi.dispatch(trId, isHandover ? {
+      // The gate pass is still security's, whoever carries the load out.
+      gate_pass_no: tracking.gate_pass_no || null,
+      handed_over_by_name: custody.handed_over_by_name || null,
+      // Only the id the chosen kind of person actually has. Sending both — one of
+      // them empty — is what tells the service to replace the pair, so the number
+      // left behind by a switch from Others to Employee is cleared rather than
+      // printed on the gate pass beside the new one.
+      handed_over_employee_id: handoverPerson === "EMPLOYEE"
+        ? custody.handed_over_employee_id || null : null,
+      handed_over_aadhaar: handoverPerson === "OTHERS"
+        ? custody.handed_over_aadhaar || null : null,
+      handed_over_phone: custody.handed_over_phone || null,
+    } : {
       lr_no: tracking.lr_no || null,
       docket_no: tracking.docket_no || null,
       tracking_url: tracking.tracking_url || null,
@@ -118,6 +147,9 @@ export function TransportDetailPage() {
     success: "Dispatched — it has left the yard", invalidates,
     onDone: () => setDispatching(false),
   });
+  // Read forward off the same rule the service enforces, so the press says which box
+  // is wrong before the round trip rather than after it.
+  const custodyGaps = isHandover ? custodyProblems(handoverPerson, custody) : [];
   const carrierDeclined = useAction({
     run: () => transportApi.carrierDeclined(trId, declineNote),
     success: "Back out to the other carriers", invalidates,
@@ -127,11 +159,6 @@ export function TransportDetailPage() {
     run: () => transportApi.shareTracking(trId),
     success: "Tracking shared with the field", invalidates,
   });
-  const close = useAction({
-    run: () => transportApi.close(trId),
-    success: "Shipment closed", invalidates,
-  });
-
   const downloadEvidence = async (attachmentId: number, fileName: string) => {
     setDownloadingEvidence(attachmentId);
     setEvidenceDownloadError(null);
@@ -161,6 +188,10 @@ export function TransportDetailPage() {
   // the tender. This is the state the Confirm award press exists for, and nothing
   // reaches the carrier's portal while the shipment is in it.
   const awardPending = doc.status === "QUOTING" && Boolean(doc.awarded_at);
+  const trackingHandleMissing = !isHandover
+    && ["COURIER", "THIRD_PARTY"].includes(doc.mode)
+    && !(tracking.lr_no.trim() || tracking.docket_no.trim()
+      || doc.lr_no || doc.docket_no);
 
   return (
     <div>
@@ -173,6 +204,25 @@ export function TransportDetailPage() {
         actions={
           <>
             <Button variant="ghost" onClick={() => nav("/logistics/shipments")}>Back</Button>
+
+            {/* The pass, on every mode and for the whole life of the leg. It was
+                printable only off the confirm screen, and only on the press that asked
+                to stay there — press the primary button instead and the desk was
+                navigated to Provider Selection or here, with the paper the gate reads
+                behind it and no door back to it. A hired vehicle, an own vehicle, a
+                courier, a hand-over and a tender all leave through the same gate, so
+                the door is unconditional past DRAFT; a draft leg has nothing arranged
+                on it yet, which is the one state the pass would print empty in.
+
+                Same `TONE_YELLOW` pill, glyph and one-word label as the confirm
+                screen's and the indent's — one PDF button, everywhere. */}
+            {doc.status !== "DRAFT" && (
+              <Button variant="secondary" className={TONE_YELLOW}
+                onClick={() => window.open(
+                  `/logistics/shipments/${doc.id}/gate-pass`, "_blank", "noopener")}>
+                <FileText className="h-4 w-4" /> PDF
+              </Button>
+            )}
 
             {doc.status === "DRAFT" && (
               <Can do="transport.create">
@@ -242,23 +292,29 @@ export function TransportDetailPage() {
               </Can>
             )}
 
-            {doc.status === "ACKNOWLEDGED" && (
-              <Can do="transport.track">
-                <Button onClick={() => close.mutate()} disabled={close.isPending}>
-                  Close shipment
-                </Button>
-              </Can>
-            )}
+            {/* NO CLOSE PRESS (2026-09-16). The receiver signing for the load IS the
+                end of the leg — `acknowledge_tr` lands it on CLOSED — so this button
+                sat in front of somebody who had already finished, could be pressed
+                exactly one way, and left every leg nobody remembered to press parked
+                in a queue that reads as unfinished work. An open claim does not hold
+                it either: a claim is settled on the claim, in the timeline below.
+                `transportApi.close` and `POST /{id}/close` both stay, for the legs
+                acknowledged before this landed. */}
           </>
         }
       />
 
       <ErrorBanner error={submit.error ?? approve.error ?? dispatch.error
-        ?? close.error ?? share.error
+        ?? share.error
         ?? carrierDeclined.error ?? approveAward.error
         ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
 
-      <FlowStepper mode={doc.mode} status={doc.status} awardPending={awardPending} />
+      <FlowStepper
+        mode={doc.mode}
+        status={doc.status}
+        awardPending={awardPending}
+        manualCourier={doc.mode === "COURIER" && !doc.carrier_id && Boolean(doc.carrier_name)}
+      />
 
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
@@ -289,13 +345,27 @@ export function TransportDetailPage() {
       {/* What to do next, said in one line. The status names the state; a desk
           working a queue needs the move. */}
       {!["CLOSED", "CANCELLED", "REJECTED"].includes(doc.status) && (
-        <Card className="mb-4 flex items-center gap-3 border-brand/30 bg-brand/5 p-4">
-          <Clock className="h-4 w-4 shrink-0 text-brand" />
-          <p className="text-sm font-medium text-ink">
-            {awardPending
-              ? "Confirm the award — then the provider is asked to acknowledge it"
-              : nextMove(doc.status)}
-          </p>
+        <Card className="mb-4 flex items-center justify-between gap-3 border-brand/30 bg-brand/5 p-4">
+          <div className="flex items-center gap-3">
+            <Clock className="h-4 w-4 shrink-0 text-brand" />
+            <p className="text-sm font-medium text-ink">
+              {awardPending
+                ? "Confirm the award — then the provider is asked to acknowledge it"
+                : nextMove(doc.status)}
+            </p>
+          </div>
+          {/* FIX 2026-09-10: it carries `invite=1`. The press says "Invite carriers",
+              and it used to land on the tender sheet with the invite control collapsed
+              behind a quiet "Invite more" in the corner — on a shipment nobody has
+              quoted yet that is a screen with a heading and an empty table, which reads
+              as "this took me nowhere". The parameter opens the partner picker for this
+              shipment on arrival, so the button lands on the thing it named. */}
+          {doc.status === "QUOTING" && (
+            <Button variant="subtle"
+                    onClick={() => nav(`/logistics/providers?tr=${doc.id}&invite=1`)}>
+              Invite carriers & award
+            </Button>
+          )}
         </Card>
       )}
 
@@ -424,7 +494,9 @@ export function TransportDetailPage() {
         <Card className="mb-4 border-amber-300 bg-amber-50 p-4 dark:bg-amber-900/20">
           <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
             {openClaims} open claim{openClaims === 1 ? "" : "s"} on this consignment.
-            It cannot be closed until they are settled with the provider.
+            Settle {openClaims === 1 ? "it" : "them"} with the provider on the claim
+            itself, in Tracking below. The leg is closed either way — where the goods
+            got to and what the carrier still owes for them are two questions.
           </p>
         </Card>
       )}
@@ -509,6 +581,13 @@ export function TransportDetailPage() {
               ["Docket", doc.docket_no],
               ["E-way bill", doc.eway_bill_no],
               ["Handed over by", doc.handed_over_by_name],
+              // The number that pins that person down, and the one to ring about the
+              // load. On a hand-over these ARE the tracking handle — there is no LR
+              // above them to chase it on — and `Section` drops whichever is empty,
+              // so a hired leg is unchanged by their being listed here.
+              ["Employee ID", doc.handed_over_employee_id],
+              ["Aadhaar", doc.handed_over_aadhaar],
+              ["Custody phone", doc.handed_over_phone],
               ["Released by", doc.dispatched_by_name],
               ["Dispatched", fmtDateTime(doc.dispatched_at, "")],
               ["Delivered", fmtDateTime(doc.delivered_at, "")],
@@ -523,54 +602,14 @@ export function TransportDetailPage() {
             ]} />
           </div>
 
-          <div className="mt-4 border-t border-line/70 pt-4">
-            <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
-              Lines
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[520px] text-sm">
-                <thead>
-                  <tr className="border-b border-line text-left text-[11px] uppercase tracking-wide text-muted">
-                    <th className="py-2 font-semibold">Item</th>
-                    <th className="py-2 text-right font-semibold">Qty</th>
-                    <th className="py-2 text-right font-semibold">Pkgs</th>
-                    <th className="py-2 text-right font-semibold">Weight</th>
-                    <th className="py-2 text-right font-semibold">Delivered</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {manifestLines(doc.items).map((line) => (
-                    <tr key={line.id} className="border-b border-line/50 last:border-0">
-                      <td className="py-2.5 pr-3 text-body">
-                        {line.item_name ?? "—"}
-                        {line.is_fragile && (
-                          <span className="ml-2 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-                            Fragile
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2.5 text-right font-mono text-body">
-                        {Number(line.quantity)}
-                      </td>
-                      <td className="py-2.5 text-right font-mono text-body">
-                        {line.package_count}
-                      </td>
-                      <td className="py-2.5 text-right font-mono text-muted">
-                        {line.weight_kg != null ? `${Number(line.weight_kg)} kg` : "—"}
-                      </td>
-                      {/* Short delivery is the one number worth spotting from a
-                        * metre away, so it is the only one that changes colour. */}
-                      <td className={`py-2.5 text-right font-mono font-semibold ${
-                        Number(line.delivered_qty) < Number(line.quantity)
-                          ? "text-amber-600" : "text-emerald-600"}`}>
-                        {Number(line.delivered_qty)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          {/* What travels. One panel, shared with the provider desk and with the
+            * carrier's own job sheet — a short delivery is argued over the same
+            * document from both sides, so it cannot be a different table on each. */}
+          <ManifestTable
+            className="mt-4"
+            items={doc.items}
+            status={doc.status}
+          />
         </Card>
 
         <div className="space-y-4">
@@ -589,7 +628,7 @@ export function TransportDetailPage() {
         onConfirm={() => doReject.mutate()}
         onClose={() => setReject(false)}
       >
-        <Field label="Reason">
+        <Field label="Reason" required>
           <Input value={rejectNote} onChange={(e) => setRejectNote(e.target.value)} />
         </Field>
       </ConfirmModal>
@@ -605,7 +644,7 @@ export function TransportDetailPage() {
         onConfirm={() => rejectAward.mutate()}
         onClose={() => setAwardReject(false)}
       >
-        <Field label="Reason">
+        <Field label="Reason" required>
           <Input value={awardRejectNote}
             onChange={(e) => setAwardRejectNote(e.target.value)} />
         </Field>
@@ -622,17 +661,27 @@ export function TransportDetailPage() {
         onConfirm={() => carrierDeclined.mutate()}
         onClose={() => setDeclining(false)}
       >
-        <Field label="What did they say">
+        <Field label="What did they say" required>
           <Input value={declineNote} onChange={(e) => setDeclineNote(e.target.value)} />
         </Field>
       </ConfirmModal>
 
+      {/* What this press RECORDS depends on how the load travels, and a hand-over is
+          the one arrangement with no paper to record. It has no LR, no docket and no
+          tracking link — nobody issues a lorry receipt for a storekeeper walking a
+          carton out — so the desk was being shown four boxes it could only leave
+          blank while the one fact the leg does carry, who took the goods, was frozen
+          at booking with no way to fix it at the gate. The person who actually
+          collects is frequently not the one named the day before. */}
       <ConfirmModal
         isOpen={dispatching}
-        title="Dispatch this consignment"
-        message="Record the gate pass and what the field will be given to track it."
+        title={isHandover ? "Hand this consignment over" : "Dispatch this consignment"}
+        message={isHandover
+          ? "Record the gate pass and who is taking custody of it."
+          : "Record the gate pass and what the field will be given to track it."}
         confirmLabel="It has left"
         busy={dispatch.isPending}
+        confirmDisabled={custodyGaps.length > 0}
         onConfirm={() => dispatch.mutate()}
         onClose={() => setDispatching(false)}
       >
@@ -641,22 +690,51 @@ export function TransportDetailPage() {
             <Input value={tracking.gate_pass_no}
               onChange={(e) => setTracking({ ...tracking, gate_pass_no: e.target.value })} />
           </Field>
-          <Field label="LR number" hint="For a truck">
-            <Input value={tracking.lr_no}
-              onChange={(e) => setTracking({ ...tracking, lr_no: e.target.value })} />
-          </Field>
-          <Field label="Docket number" hint="For a courier">
-            <Input value={tracking.docket_no}
-              onChange={(e) => setTracking({ ...tracking, docket_no: e.target.value })} />
-          </Field>
-          <Field label="Tracking link">
-            <Input value={tracking.tracking_url}
-              onChange={(e) => setTracking({ ...tracking, tracking_url: e.target.value })} />
-          </Field>
-          <Field label="E-way bill">
-            <Input value={tracking.eway_bill_no}
-              onChange={(e) => setTracking({ ...tracking, eway_bill_no: e.target.value })} />
-          </Field>
+
+          {isHandover ? (
+            <HandoverCustody
+              person={handoverPerson}
+              onPerson={setHandoverPerson}
+              value={custody}
+              onChange={setCustody}
+            />
+          ) : (
+            <>
+              <Field
+                label="LR number"
+                required={trackingHandleMissing}
+                hint={trackingHandleMissing ? "This or the docket number is required." : "For a truck"}
+              >
+                <Input value={tracking.lr_no}
+                  onChange={(e) => setTracking({ ...tracking, lr_no: e.target.value })} />
+              </Field>
+              <Field
+                label="Docket number"
+                required={trackingHandleMissing}
+                hint={trackingHandleMissing ? "This or the LR number is required." : "For a courier"}
+              >
+                <Input value={tracking.docket_no}
+                  onChange={(e) => setTracking({ ...tracking, docket_no: e.target.value })} />
+              </Field>
+              <Field label="Tracking link">
+                <Input value={tracking.tracking_url}
+                  onChange={(e) => setTracking({ ...tracking, tracking_url: e.target.value })} />
+              </Field>
+              <Field label="E-way bill">
+                <Input value={tracking.eway_bill_no}
+                  onChange={(e) => setTracking({ ...tracking, eway_bill_no: e.target.value })} />
+              </Field>
+            </>
+          )}
+
+          {/* Why the button is off, rather than an off button and no reason. */}
+          {custodyGaps.length > 0 && (
+            <ul className="space-y-1 text-xs text-muted">
+              {custodyGaps.map((gap) => (
+                <li key={gap}>• {gap}</li>
+              ))}
+            </ul>
+          )}
         </div>
       </ConfirmModal>
 

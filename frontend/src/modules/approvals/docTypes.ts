@@ -16,6 +16,12 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
   RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
   TRANSPORT_REQUEST: "Shipment",
+<<<<<<< HEAD
+=======
+  // FIX 2026-09-07: absent, so the queue printed the raw enum "STOCK RETURN" through
+  // the underscore fallback while every row beside it read as words.
+  STOCK_RETURN: "Stock return", STOCK_RETURN_RECEIPT: "Stock return receipt", STOCK_RETURN_LOGISTICS: "Stock return logistics",
+>>>>>>> 521e00de7951bd2a6c34d574b1bc3596f47d6b04
   STOCK_MOVEMENT_ORDER: "Stock movement order",
 };
 

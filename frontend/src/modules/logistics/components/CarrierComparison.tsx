@@ -4,6 +4,7 @@ import { Award, Clock, IndianRupee, Trophy } from "lucide-react";
 import {
   Button, Can, Card, ErrorBanner, Field, Select, StatusPill, useAction,
 } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { transportApi } from "../api";
 import { money } from "./modeCopy";
@@ -33,7 +34,8 @@ import type {
  * pallet last month.
  */
 export function CarrierComparison({
-  trId, status, quotes, awardPending = false, compact = false, onAwarded,
+  trId, status, quotes, awardPending = false, autoInvite = false, compact = false,
+  onAwarded,
 }: {
   trId: number;
   status: string;
@@ -42,6 +44,9 @@ export function CarrierComparison({
    *  QUOTING, but the tender is closed: inviting or awarding again would raise a
    *  second award against a decision nobody has made yet. */
   awardPending?: boolean;
+  /** The caller arrived on a press that said "invite" — open the partner picker at
+   *  once instead of making the reader find it. FIX 2026-09-10. */
+  autoInvite?: boolean;
   /** Drop the card chrome — the host screen supplies its own heading. */
   compact?: boolean;
   /** Where the award goes next. Provider Selection sends it on to the shipment: once
@@ -50,8 +55,13 @@ export function CarrierComparison({
    *  no next hop, so it passes nothing and stays put. */
   onAwarded?: (trId: number) => void;
 }) {
+  const { can } = useAuth();
   const [method, setMethod] = useState("");
-  const [inviting, setInviting] = useState(false);
+  // FIX 2026-09-10: opens with the picker already up when the press that got here said
+  // "invite". Only for a login that may actually award — the backend refuses the rest,
+  // and a form nobody can submit is worse than no form.
+  const mayAward = can("transport.award");
+  const [inviting, setInviting] = useState(autoInvite && mayAward);
   const [chosen, setChosen] = useState<number[]>([]);
 
   const { data: methods } = useQuery({
@@ -141,12 +151,31 @@ export function CarrierComparison({
         </p>
       )}
 
+      {/* FIX 2026-09-10: the empty state carries the press. "Invite the partners who
+          should price this shipment" named the next step and then left the reader to
+          hunt for a ghost button in the header — which is how "Invite carriers & award"
+          on the shipment landed on what looked like a blank page. A login that cannot
+          award is told who does it instead of being shown a dead button. */}
       {rows.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted">
-          {quotes.length === 0
-            ? "Invite the partners who should price this shipment."
-            : "Nobody has sent a price yet."}
-        </p>
+        <div className="py-6 text-center">
+          <p className="text-sm text-muted">
+            {quotes.length === 0
+              ? "No partner has been asked to price this shipment yet."
+              : "Nobody has sent a price yet."}
+          </p>
+          {quotes.length === 0 && canTender && !inviting && (
+            mayAward ? (
+              <Button className="mt-3" onClick={() => setInviting(true)}>
+                Invite carriers to quote
+              </Button>
+            ) : (
+              <p className="mt-2 text-xs text-muted">
+                Inviting partners is the provider desk's press — ask whoever holds
+                logistics award rights to send the price request.
+              </p>
+            )
+          )}
+        </div>
       ) : (
         <>
           <QuoteMatrix
@@ -168,7 +197,7 @@ export function CarrierComparison({
 
       {inviting && (
         <div className="rounded-lg border border-line p-4">
-          <Field label="Partners to invite">
+          <Field label="Partners to invite" required>
             <Select
               value=""
               placeholder="Add a partner"

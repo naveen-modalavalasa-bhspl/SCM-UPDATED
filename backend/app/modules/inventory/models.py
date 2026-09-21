@@ -342,12 +342,13 @@ class StockAdjustmentItem(Base):
 
 #: The two documents `inv_sto` carries. EXTENDED 2026-08-21.
 #:
-#: They share a header, lines, and a DRAFT -> PENDING_APPROVAL -> APPROVED ladder, which
+#: They share a header and lines, but their lifecycles diverge after approval, which
 #: is why an SMO lives here rather than in a table of its own. They do NOT share what
 #: approval MEANS, and that is the part to be careful with:
 #:
 #:   STO  moves stock warehouse -> warehouse, and only on RECEIPT.
-#:   SMO  moves stock bin -> bin inside ONE warehouse, at the moment it is approved.
+#:   SMO  moves stock bin -> bin inside ONE warehouse only after APPROVED -> INSPECTED
+#:        -> COMPLETED; approval itself never changes inventory.
 #:
 #: Two lifecycles on one table is exactly the mistake the warehouse Dispatch door was
 #: retired for, so the rule here is explicit: `doc_kind` is load-bearing, every reader

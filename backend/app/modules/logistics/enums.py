@@ -278,8 +278,8 @@ MODE_RULES: dict[str, ModeRule] = {
     ),
     TransportMode.COURIER.value: ModeRule(
         label="Courier",
-        help="Booked with a courier at their standard rate. Track it on the docket.",
-        needs_carrier=True, needs_quotes=False,
+        help="Invite courier providers, compare their quotes and award the shipment.",
+        needs_carrier=True, needs_quotes=True,
         required_fields=("carrier_id",),
     ),
     TransportMode.OWN_VEHICLE.value: ModeRule(
@@ -302,6 +302,78 @@ def mode_rule(mode: str) -> ModeRule:
     if rule is None:
         raise KeyError(mode)
     return rule
+
+
+def asks_provider_for_price(mode: str | None,
+                            *, manual_courier: bool = False) -> bool:
+    """Does the PROVIDER answer this arrangement with a price, or does the desk settle it?
+
+    A third-party job always does — asking several and comparing them IS the mode. A
+    courier does too, whenever there is a provider account to ask: a courier is a
+    vendor with a portal login, and a booking pushed at them without ever asking what
+    it costs is a leg that reaches the gate with nothing agreed. The desk had no
+    number to check the invoice against, the courier was told a parcel was theirs
+    without being asked whether they wanted it, and the shipment carried a blank
+    freight for the rest of its life.
+
+    The MANUAL courier is the one courier leg that cannot be asked: a name written on
+    a counter receipt has no vendor row, no portal and no login, so there is nobody to
+    send the question to. That flow is untouched — recorded at the desk, approved,
+    dispatched.
+
+    Held here beside MODE_RULES rather than in the two services that read it, because
+    it is the same question `needs_quotes` answers and a second copy of it is a rule
+    with two values.
+    """
+    rule = mode_rule(mode) if mode else None
+    if rule is None:
+        return False
+    if manual_courier and (mode or "").upper() == TransportMode.COURIER.value:
+        return False
+    if rule.needs_quotes:
+        return True
+    return ((mode or "").upper() == TransportMode.COURIER.value
+            and not manual_courier)
+
+
+# --------------------------------------------------------------------------- #
+#  What a MANUAL courier has to be told at the desk
+# --------------------------------------------------------------------------- #
+# An integrated courier is a vendor with a login: the desk names them, the booking
+# lands in their portal, and the vehicle, the person who came for the parcel and the
+# docket it travels on are typed by the party that actually knows them when they
+# acknowledge the job. A MANUAL courier is a name on a counter receipt — there is no
+# vendor row, no portal and no login, so nobody downstream ever fills those boxes in.
+# Left optional they stay empty for the life of the shipment: the leg reaches READY
+# with no person named and no number to chase it on, and the receiving site is asked
+# to sign for a load whose only record is "guru".
+#
+# So the same answers are asked once, on the press that books the leg, and ONLY on
+# this flow — a vendor booking must keep them optional or it would be demanding
+# details of a van that has not been sent yet.
+#
+# Held here, beside MODE_RULES and for the same reason: the list is served
+# (`/api/transport/dispatch-policy`) so the form asks for exactly what the service
+# enforces, instead of the screen keeping a second copy that drifts.
+
+#: Typed at the desk, each one on its own, before a manual courier leg is raised.
+#: The courier's NAME is not in here — it is checked separately, because it is the
+#: field that decides this is a manual leg at all.
+MANUAL_COURIER_REQUIRED_FIELDS: tuple[str, ...] = (
+    "driver_name",
+    "driver_phone",
+)
+
+#: And one of these two, never both: a parcel handed over the counter comes back with
+#: a docket, a load given to a local carrier with an LR. Which paper it is depends on
+#: what turned up, so the requirement is the PAIR — the same rule `_release` already
+#: applies to every hired leg, moved forward to the press that books this one.
+MANUAL_COURIER_TRACKING_FIELDS: tuple[str, ...] = ("lr_no", "docket_no")
+
+#: The vehicle and the licence stay OPTIONAL on purpose. A courier sends whoever is on
+#: the round in whatever van the depot gave them; those two belong to the courier, not
+#: to this consignment, and a required box nobody at the gate can answer is a box that
+#: gets filled with "-".
 
 
 # --------------------------------------------------------------------------- #
@@ -448,12 +520,15 @@ _ACK = Stage(
 )
 
 
-def flow_stages(mode: str | None = None) -> list[Stage]:
+def flow_stages(mode: str | None = None, *, manual_courier: bool = False) -> list[Stage]:
     """The stages this mode actually passes through, in order.
 
     Two things past the approval depend on the mode, and they are separate questions:
 
-      * was there a TENDER — only a third-party job asks several providers for a price.
+      * was there a PRICE to ask for — a third party asks several providers and
+        compares them, a courier is asked its rate; only the manual courier, who has
+        no login to be asked through, is settled at the desk
+        (`asks_provider_for_price`).
       * does an outside provider have to ACCEPT it — a third party and a courier both
         do, and the shipment waits at AWAITING_CARRIER until they answer. A courier was
         being drawn without that stage, so a booked parcel sitting on exactly that rung
@@ -463,9 +538,10 @@ def flow_stages(mode: str | None = None) -> list[Stage]:
     """
     rule = mode_rule(mode) if mode else None
     stages = [_PLAN, _APPROVE]
-    if rule and rule.needs_quotes:
+    if mode and asks_provider_for_price(mode, manual_courier=manual_courier):
         stages.append(_TENDER)
-    if rule and rule.needs_carrier:
+    if rule and rule.needs_carrier and not (
+            manual_courier and (mode or "").upper() == TransportMode.COURIER.value):
         stages.append(_CONFIRM)
     return stages + [_DISPATCH, _TRANSIT, _ACK]
 

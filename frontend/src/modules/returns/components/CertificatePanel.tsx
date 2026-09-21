@@ -1,7 +1,8 @@
 import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileCheck2, ShieldAlert } from "lucide-react";
-import { Button, Card, ErrorBanner } from "@/shared/components";
+import { Button, ErrorBanner } from "@/shared/components";
+import { SectionCard } from "./DetailChrome";
 import { returnsApi } from "../api";
 import { CERTIFICATE_CATEGORY } from "../types";
 import type { StockReturn } from "../types";
@@ -38,7 +39,7 @@ export function CertificatePanel({ doc }: { doc: StockReturn }) {
 
   if (doc.has_certificate) {
     return (
-      <div className="flex items-start gap-2 rounded-xl bg-ok-bg px-3 py-2 text-sm text-ok">
+      <div className="flex items-start gap-2 rounded-xl border border-ok/30 bg-ok-bg px-3.5 py-3 text-sm text-ok">
         <FileCheck2 className="mt-0.5 h-4 w-4 shrink-0" />
         <span>
           Disposal certificate on file
@@ -50,14 +51,14 @@ export function CertificatePanel({ doc }: { doc: StockReturn }) {
   }
 
   return (
-    <Card className="p-4">
+    <SectionCard
+      tone="warn"
+      icon={<ShieldAlert className="h-4 w-4" />}
+      title="Disposal certificate outstanding"
+    >
       <div className="flex items-start gap-2">
-        <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-warn" />
         <div className="min-w-0 flex-1">
-          <h2 className="font-display text-lg font-bold text-ink">
-            Disposal certificate outstanding
-          </h2>
-          <p className="mt-1 text-sm text-body">
+          <p className="text-sm text-body">
             This was a controlled disposal
             {doc.decision?.disposal_agency
               ? ` by ${doc.decision.disposal_agency}`
@@ -97,6 +98,6 @@ export function CertificatePanel({ doc }: { doc: StockReturn }) {
           )}
         </div>
       </div>
-    </Card>
+    </SectionCard>
   );
 }

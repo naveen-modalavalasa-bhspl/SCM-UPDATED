@@ -121,6 +121,11 @@ PAGE_TREE = [
      P.page_view_code("ind_reports"), 15, "grp_indents"),
     ("ind_notifications", "/indents/notifications", "Notifications", "bell",
      P.page_view_code("ind_notifications"), 16, "grp_indents"),
+    # What a BOM puts on the form, and which items a role or region may ask for at
+    # all. LAST in the group — the rail opens a module on its first child and a master
+    # is never what somebody came to Indents to do.
+    ("ind_masters", "/indents/masters", "Masters", "database",
+     P.page_view_code("ind_masters"), 17, "grp_indents"),
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
     ("approval_overview", "/approvals/overview", "Overview", "layout-dashboard",
@@ -141,6 +146,9 @@ PAGE_TREE = [
 
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
     ("po_list", "/pos", "Purchase Orders", "receipt", P.PO_VIEW, 31, "grp_purchasing"),
+    # Vendors, vendor rates and HSN codes — who we buy from and at what tax.
+    ("pro_masters", "/procurement/masters", "Masters", "database",
+     P.page_view_code("pro_masters"), 34, "grp_purchasing"),
 
     # Every working screen is its own menu entry. A single "Transactions" entry that
     # hid six screens behind in-page tabs meant nobody could reach a screen from the
@@ -247,6 +255,11 @@ PAGE_TREE = [
     #  P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",
      P.STOCK_VIEW, 64, "grp_inventory"),
+    # The item catalogue, on the module that owns stock. `/masters` still carries the
+    # whole set; this is the inventory slice of it, with its own page code so the
+    # catalogue can be granted without the vendor or BOM masters coming with it.
+    ("inv_masters", "/inventory/masters", "Masters", "database",
+     P.page_view_code("inv_masters"), 65, "grp_inventory"),
 
     ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 60, None),
 
@@ -308,6 +321,10 @@ PAGE_TREE = [
     # database picks it up on startup without a reseed.
     ("admin_code_formats", "/admin/code-formats", "Code Formats", "braces",
      P.ADMIN_CODE_FORMATS_MANAGE, 102, "grp_settings"),
+    # Projects, facilities and departments: HCM mirrors, read-only here because HCM
+    # owns them (rule 10) and the write routes are not registered.
+    ("admin_org_masters", "/admin/org-masters", "Organisation Masters", "building-2",
+     P.page_view_code("admin_org_masters"), 106, "grp_settings"),
 ]
 
 

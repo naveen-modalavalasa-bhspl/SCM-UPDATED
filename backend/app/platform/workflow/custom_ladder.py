@@ -611,5 +611,15 @@ async def save_custom(db: AsyncSession, data, user) -> dict:
 
 def ladder_config_validate(doc_type: str) -> None:
     from app.shared.enums import DocType
-    if doc_type not in {d.value for d in DocType}:
+    # Refused rather than quietly accepted: nothing opens an instance for a retired
+    # type, so a chain saved against one would be written and never read — and the
+    # admin would have no way to tell it apart from one that works. Guarding the READ
+    # too is deliberate: a bookmark to the old editor answers why the row went away
+    # instead of offering an editor whose Save cannot take effect.
+    if doc_type in ladder.RETIRED_DOC_TYPES:
+        raise ValidationError(
+            f"{ladder.DOC_TYPE_LABEL.get(doc_type, doc_type)} no longer takes an "
+            f"approval chain — nothing opens one for it to govern.")
+    allowed = set(ladder.configurable_doc_types()) | {d.value for d in DocType}
+    if doc_type not in allowed:
         raise ValidationError(f"Unknown document type {doc_type!r}")

@@ -155,17 +155,22 @@ vi.mock("../api", async () => {
 });
 
 import { indentApi, masterApi } from "../api";
+import { ToastProvider } from "@/shared/components";
 
 function renderForm(route = "/indents/new", ui: ReactElement = <IndentFormPage />) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The form calls useToast, so it cannot render outside the provider. The harness
+  // predates that and every test in this file was failing on it.
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[route]}>
-        <Routes>
-          <Route path="/indents/new" element={ui} />
-          <Route path="/indents/:id" element={<output aria-label="detail route" />} />
-        </Routes>
-      </MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[route]}>
+          <Routes>
+            <Route path="/indents/new" element={ui} />
+            <Route path="/indents/:id" element={<output aria-label="detail route" />} />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   );
 }
@@ -335,6 +340,33 @@ describe("IndentFormPage", () => {
     expect(screen.getByText("Indents")).toBeInTheDocument();
     expect(screen.queryByText("Attachments")).not.toBeInTheDocument();
     expect(screen.queryByText("Stock availability not checked")).not.toBeInTheDocument();
+  });
+
+  // Replenishment hands the shortage over as query parameters. The guards matter more
+  // than the happy path: a bad id must prefill NOTHING rather than a blank row nobody
+  // can explain, and an unusable quantity must leave the box empty rather than write a
+  // zero, which reads as a decision somebody took.
+  it("prefills the first line from a replenishment shortage", async () => {
+    renderForm("/indents/new?item_id=1&quantity=12");
+
+    await waitFor(() => expect(indentApi.eligibleItems).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByRole("spinbutton", { name: "Quantity (ml)" })).toHaveValue(12));
+  });
+
+  it("leaves the quantity empty when replenishment sends an unusable one", async () => {
+    renderForm("/indents/new?item_id=1&quantity=0");
+
+    await waitFor(() => expect(indentApi.eligibleItems).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByRole("spinbutton", { name: "Quantity (ml)" })).toHaveValue(null));
+  });
+
+  it("prefills nothing when the item in the query string is not an id", async () => {
+    renderForm("/indents/new?item_id=not-an-item&quantity=12");
+
+    await waitFor(() => expect(indentApi.eligibleItems).toHaveBeenCalled());
+    expect(screen.queryByRole("spinbutton", { name: "Quantity (ml)" })).not.toBeInTheDocument();
   });
 
   it("prefills a Draft and updates the same indent in edit mode", async () => {

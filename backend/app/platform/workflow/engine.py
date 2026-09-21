@@ -42,6 +42,25 @@ FINAL_REPORTING_STAGE_NAME = "Final authority"
 # walks resolved_chain.
 CORRECTION_KEY = "_correction"
 
+#: Context key letting a module route a document up ANOTHER document type's ladder.
+#:
+#: ADDED 2026-09-07 for stock returns. Approving the return of material is approving the
+#: undoing of the indent that asked for it, and those are the same people — so a return
+#: naming an indent is resolved against the INDENT ladder configured for the raiser's
+#: rank, rather than against a second ladder an admin would have to keep in step by hand.
+#:
+#: It is deliberately a LOOKUP override and NOTHING more. Everything that identifies the
+#: document keeps the document's real `doc_type` — `wf_instances.doc_type`, its audit
+#: rows, and every later `act`, `history`, `current_approvers` and `pending_for_user`
+#: call — or the module would lose track of its own approval. Absent from the context
+#: (every caller but returns) the ladder is the document's own, exactly as before.
+LADDER_DOC_TYPE_KEY = "ladder_doc_type"
+
+
+def _ladder_doc_type(doc_type: str, context: dict | None) -> str:
+    """Which ladder to look up: the one the caller named, else the document's own."""
+    return (context or {}).get(LADDER_DOC_TYPE_KEY) or doc_type
+
 
 #: What a second press on an approval that has already been decided says.
 #:
@@ -556,9 +575,21 @@ async def _finish_ladder(db: AsyncSession, instance: Instance) -> None:
     await _clear_pending(db, instance.id)
 
 
-async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dict,
-                        user, project_id: int | None,
-                        requester_position_id: int | None) -> Instance:
+async def _resolve_ladder_chain(db, wf, stages, context: dict, user,
+                                requester_position_id: int | None,
+                                ) -> tuple[list[dict], str]:
+    """Work out WHO signs a document travelling this ladder. Reads only; writes nothing.
+
+    Split out of `_start_ladder` on 2026-09-07 so `preview_chain` can show a raiser the
+    route ahead by running the very resolution the submit runs. A preview that
+    re-implemented this would be a second opinion about who approves, free to drift from
+    the real one the moment either side changed.
+
+    Returns `(chain, independent_fallback_reason)`. An empty chain means nobody above the
+    raiser has to sign. The reason is empty unless the independent-approver safety net
+    below is what produced the chain, and only `_start_ladder` has an instance to record
+    it against.
+    """
     # Who may approve a document this person raised is a property of the ladder, not of
     # a role or a person, so it is read here and applied to whichever resolution runs.
     policy, fallback_position_id = await ladder.read_policy(db, stages)
@@ -597,6 +628,14 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
                     "approver_names": [a.full_name for a in approvers],
                 }]
                 independent_fallback = f"{fallback.REASON_INDEPENDENT_FALLBACK}/{reason}"
+    return chain, independent_fallback
+
+
+async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dict,
+                        user, project_id: int | None,
+                        requester_position_id: int | None) -> Instance:
+    chain, independent_fallback = await _resolve_ladder_chain(
+        db, wf, stages, context, user, requester_position_id)
 
     instance = await _open_instance(
         db, doc_type, doc_id, workflow_id=wf.id,
@@ -655,8 +694,9 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
     return instance
 
 
-async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
-                          context: dict, user, project_id: int | None) -> Instance:
+async def start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict],
+                               context: dict, user,
+                               project_id: int | None = None) -> Instance:
     """Open an instance on a chain the caller has already worked out.
 
     Used where the approvers do not come from a configured workflow at all — the
@@ -664,10 +704,14 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
     hang off, so it borrows the doc type's fallback one; the chain on the instance is
     what actually decides who approves, exactly as with a ladder.
     """
+    context = context or {}
+    resolved = [{**link, "sequence": index + 1}
+                for index, link in enumerate(chain or [])
+                if isinstance(link, dict)]
     wf = await fallback.ensure_workflow(db, doc_type)
     instance = await _open_instance(
         db, doc_type, doc_id, workflow_id=wf.id,
-        project_id=project_id, resolved_chain=chain,
+        project_id=project_id, resolved_chain=resolved,
         doc_no=context.get("doc_no"),
         started_by_id=user.id, started_by_name=user.full_name,
         status=InstanceStatus.IN_PROGRESS.value,
@@ -680,9 +724,27 @@ async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
         action=ApprovalAction.SUBMITTED.value,
     ))
     await db.flush()
-    await _open_ladder_link(db, instance, chain[0], context)
+    if not resolved:
+        db.add(Action(
+            instance_id=instance.id, stage_sequence=0,
+            stage_name=ladder.DOC_TYPE_LABEL.get(doc_type, doc_type),
+            actor_id=user.id, actor_name=user.full_name,
+            actor_position=context.get("requester_position_name"),
+            action=ApprovalAction.APPROVED.value, comments=SELF_APPROVED_COMMENT,
+        ))
+        instance.status = InstanceStatus.APPROVED.value
+        instance.completed_at = utcnow()
+        await db.flush()
+        return instance
+    await _open_ladder_link(db, instance, resolved[0], context)
     await db.flush()
     return instance
+
+
+async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
+                          context: dict, user, project_id: int | None) -> Instance:
+    return await start_resolved_chain(db, doc_type, doc_id, chain, context, user,
+                                      project_id)
 
 
 async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
@@ -941,7 +1003,11 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     # that height. A raiser with no post has no rank, which simply means the chain
     # everybody shares — the same answer as before this existed.
     raiser_role_id = await ladder.role_of_position(db, requester_position_id)
-    found = await ladder.find_ladder(db, project_id, doc_type, raiser_role_id)
+    # Normally the document's own type; a module may name another (LADDER_DOC_TYPE_KEY).
+    # Only the LOOKUP moves — `_start_ladder` is still handed the real `doc_type`, so the
+    # instance and its trail stay keyed on the document that is actually being approved.
+    found = await ladder.find_ladder(db, project_id,
+                                     _ladder_doc_type(doc_type, context), raiser_role_id)
     if (found is not None and requester_position_id is None
             and not ladder.is_custom_ladder(found[0])):
         found = None
@@ -989,6 +1055,53 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
     if applicable:
         await _materialize_pending(db, instance, applicable[0], context)
     return instance
+
+
+async def preview_chain(db, doc_type: str, context: dict, user) -> list[dict] | None:
+    """Who WILL sign, resolved exactly as `start` resolves it. Nothing is written.
+
+    ADDED 2026-09-07 so a screen can show a raiser the route ahead — on a form, before
+    the document exists at all. It repeats the same four steps `start` takes (the
+    raiser's post, the document's project, his rank, the ladder found for that
+    combination) and then calls the same `_resolve_ladder_chain`, so what a form promises
+    and what the submit does cannot disagree.
+
+    THREE answers, and a caller must keep them apart:
+
+      * `None`  — no ladder is configured for this project, doc type and rank. `start`
+                  would fall through to the reporting line and then the admin safety net,
+                  neither of which can be resolved without a document to hang them on.
+      * `[]`    — configured, and nobody has to sign: NO_APPROVAL, or the raiser is
+                  himself the top of the ladder.
+      * a list  — the rungs in order, each carrying the people who may sign it.
+
+    "Nobody is configured" and "configured to need no signature" are different answers
+    and the second is a real choice an admin makes, which is why they are not both `[]`.
+
+    One limit worth knowing: a rung gated by a CONDITION is evaluated against the context
+    it is given, so a preview built from a thinner context than the submit will send can
+    differ on exactly those rungs. Pass the same keys and the answers match.
+    """
+    context = context or {}
+    requester_position_id = (context.get("requester_position_id")
+                             or getattr(user, "active_position_id", None))
+    project_id = context.get("project_id")
+    if project_id is None:
+        project_id, _project_name = await ladder.project_for(
+            db, requester_position_id, user)
+    raiser_role_id = await ladder.role_of_position(db, requester_position_id)
+    found = await ladder.find_ladder(db, project_id,
+                                     _ladder_doc_type(doc_type, context), raiser_role_id)
+    # The same guard `start` applies: with no post there is no reporting line to climb,
+    # so a rank-based ladder cannot resolve and is not the route the document takes.
+    if (found is not None and requester_position_id is None
+            and not ladder.is_custom_ladder(found[0])):
+        found = None
+    if found is None:
+        return None
+    chain, _independent_fallback = await _resolve_ladder_chain(
+        db, found[0], found[1], context, user, requester_position_id)
+    return chain
 
 
 async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str = "",

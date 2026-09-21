@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, FileText, X } from "lucide-react";
+import { ArrowLeft, Check, CheckCircle2, ClipboardCheck, FileText, PackageCheck, ShieldCheck, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button, Can, Card, ErrorBanner, PageHeader, StatusPill, ResponsiveList, useToast,
 } from "@/shared/components";
-import { actOnStockMovementOrder, getStockMovementOrder, submitStockMovementOrder } from "../api";
+import {
+  actOnStockMovementOrder,
+  completeStockMovementInspection,
+  completeStockMovementOrder,
+  getStockMovementOrder,
+  submitStockMovementOrder,
+} from "../api";
 import { Modal, ModalBody, ModalContent, ModalHeader, ModalFooter } from "@heroui/react";
 import { useState } from "react";
 import { Section } from "../components/DocumentMeta";
@@ -12,14 +18,8 @@ import { fmtDateTime, fmtQty } from "../format";
 import type { StockMovementOrderItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
-function ViewSerials({ serials }: { serials: string[] | null | undefined }) {
-  const [open, setOpen] = useState(false);
-  if (!serials || serials.length === 0) return null;
-
-  return (
-    <>
-      <button 
-        type="button" 
+      <button
+        type="button"
         onClick={() => setOpen(true)}
         className="mt-1 inline-flex items-center text-[11px] font-medium text-brand hover:underline"
       >
@@ -55,6 +55,14 @@ export default function StockMovementDetail() {
   const toast = useToast();
   const queryClient = useQueryClient();
 
+  const refreshMovement = () => {
+    queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-order"] });
+    queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
+    queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
+    queryClient.invalidateQueries({ queryKey: ["wh-bin-options"] });
+    queryClient.invalidateQueries({ queryKey: ["wh-serial-options"] });
+  };
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["wh-stock-movement-order", orderNo],
     queryFn: () => getStockMovementOrder(orderNo as string),
@@ -65,12 +73,37 @@ export default function StockMovementDetail() {
     mutationFn: (action: "APPROVED" | "REJECTED") =>
       actOnStockMovementOrder((data as { id: number }).id, action),
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-order"] });
-      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
-      queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
+      refreshMovement();
       toast.success(result.status === "REJECTED"
         ? `${result.order_no} rejected — nothing moved`
-        : `${result.order_no} approved — the stock has moved`);
+        : `${result.order_no} approved — ready for inspection`);
+    },
+  });
+
+  const submit = useMutation({
+    mutationFn: () => submitStockMovementOrder((data as { id: number }).id),
+    onSuccess: (result) => {
+      refreshMovement();
+      toast.success(result.status === "APPROVED"
+        ? `${result.order_no} approved — ready for inspection`
+        : `${result.order_no} submitted for approval${
+            result.current_approver_name ? ` — waiting on ${result.current_approver_name}` : ""}`);
+    },
+  });
+
+  const inspect = useMutation({
+    mutationFn: () => completeStockMovementInspection((data as { id: number }).id),
+    onSuccess: (result) => {
+      refreshMovement();
+      toast.success(`${result.order_no} inspection completed — ready to move`);
+    },
+  });
+
+  const complete = useMutation({
+    mutationFn: () => completeStockMovementOrder((data as { id: number }).id),
+    onSuccess: (result) => {
+      refreshMovement();
+      toast.success(`${result.order_no} completed — stock moved successfully`);
     },
   });
 
@@ -144,13 +177,36 @@ export default function StockMovementDetail() {
                   onClick={() => act.mutate("APPROVED")}
                 >
                   <Check className="h-4 w-4" />
-                  {act.isPending ? "Working…" : "Approve & move"}
+                  {act.isPending ? "Working…" : "Approve"}
+                </Button>
+              </Can>
+            )}
+            {data.status === "APPROVED" && data.id > 0 && (
+              <Can do="movement.inspect">
+                <Button className={TONE_APPROVE} disabled={inspect.isPending} onClick={() => inspect.mutate()}>
+                  <ClipboardCheck className="h-4 w-4" />
+                  {inspect.isPending ? "Checking…" : "Complete inspection"}
+                </Button>
+              </Can>
+            )}
+            {data.status === "INSPECTED" && data.id > 0 && (
+              <Can do="movement.complete">
+                <Button className={TONE_APPROVE} disabled={complete.isPending} onClick={() => complete.mutate()}>
+                  <PackageCheck className="h-4 w-4" />
+                  {complete.isPending ? "Moving…" : "Complete movement"}
                 </Button>
               </Can>
             )}
           </>
         }
       />
+
+      <MovementProgress status={data.status} />
+      {(act.error || submit.error || inspect.error || complete.error) && (
+        <div className="mb-6">
+          <ErrorBanner error={act.error || submit.error || inspect.error || complete.error} />
+        </div>
+      )}
 
       <Section title="Movement Summary">
         <Card className="p-6">

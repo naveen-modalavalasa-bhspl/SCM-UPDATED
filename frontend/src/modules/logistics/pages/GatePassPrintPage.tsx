@@ -1,12 +1,13 @@
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { PrintTemplate, type PrintColumn, type PrintField } from "@/shared/components";
+import { fmtDate } from "@/shared/datetime";
+import { displayUom } from "@/modules/indents/displayFormat";
 import { transportApi } from "../api";
 import { carriageLabel, modeLabel } from "../components/modeCopy";
 import {
   CARRYING_LABEL, carryingFields, carryingValue,
 } from "../components/gatePassFields";
-import { fmtDate } from "@/shared/datetime";
 
 /**
  * The gate pass — the paper the load leaves the gate with.
@@ -66,10 +67,12 @@ export function GatePassPrintPage() {
   }));
 
   const columns: PrintColumn[] = [
-    { header: "Item", width: "44%" },
-    { header: "Qty", align: "right", width: "14%" },
-    { header: "Packages", align: "right", width: "13%" },
-    { header: "Weight (kg)", align: "right", width: "14%" },
+    { header: "Item", width: "39%" },
+    { header: "UOM", width: "9%" },
+    { header: "Qty", align: "right", width: "12%" },
+    { header: "Packages", align: "right", width: "12%" },
+    { header: "Weight (kg)", align: "right", width: "13%" },
+    { header: "Remarks", width: "15%" },
   ];
 
   return (
@@ -90,6 +93,7 @@ export function GatePassPrintPage() {
         { label: "Carriage", value: carriageLabel(doc.carriage_mode) },
         { label: "Arrangement", value: modeLabel(doc.mode) },
         { label: "Distance", value: doc.distance_km ? `${doc.distance_km} km` : "—" },
+        { label: "Expected delivery", value: doc.expected_delivery ? fmtDate(doc.expected_delivery) : "—" },
       ]}
       blocks={[
         {
@@ -125,14 +129,17 @@ export function GatePassPrintPage() {
             <span className="ml-1 text-[8.5px] font-bold uppercase" style={{ color: "#CC004C" }}>· fragile</span>
           )}
         </>,
-        <>{line.quantity} <span style={{ color: "#697187" }}>{line.uom_code ?? ""}</span></>,
+        displayUom(line.uom_code),
+        line.quantity,
         line.package_count,
         line.weight_kg ?? "—",
+        dash(line.remarks),
       ])}
       itemsTotal={[
         `${doc.total_items} item${doc.total_items === 1 ? "" : "s"}`,
-        doc.total_qty, doc.total_packages, doc.total_weight_kg,
+        "", doc.total_qty, doc.total_packages, doc.total_weight_kg, "",
       ]}
+      remarks={doc.remarks}
       /* Three hands touch the load on the way out, and the pass is the only place all
          three sign. Printed as empty boxes on purpose — they are signed on paper. */
       signatures={["Dispatched by", "Security / gate", "Received by"]}

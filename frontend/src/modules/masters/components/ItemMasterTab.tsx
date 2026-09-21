@@ -35,7 +35,7 @@ type DraftComponent = {
 const empty = {
   name: "", short_name: "", category_id: "", general_name_id: "", brand_id: "",
   manufacturer_id: "", item_class_id: "", item_sub_class_id: "", uom_id: "",
-  hsn_id: "", is_asset: false,
+  owner_department_id: "", hsn_id: "", is_asset: false,
   description: "", has_components: false, barcode_type: "AUTO",
   barcode_value: "", is_batch_tracked: false, is_serial_tracked: false,
   is_imei_tracked: false, generate_unit_code: true, has_expiry: false,
@@ -193,6 +193,10 @@ export function ItemMasterTab() {
     queryKey: ["masters", "dosage-forms"],
     queryFn: () => mastersApi.dosageForms.list({ size: 300 }).then((r) => r.items),
   });
+  const departments = useQuery({
+    queryKey: ["masters", "departments", "ownership-options"],
+    queryFn: mastersApi.ownershipDepartments,
+  });
   // Tags on a parent category apply to every child. The Level 3 category may
   // override a repeated tag by defining it closer to the item.
   const categoryTags = useQuery({
@@ -289,7 +293,7 @@ export function ItemMasterTab() {
   const payload = useMemo(() => {
     const ids = ["category_id", "general_name_id", "brand_id", "manufacturer_id",
       "item_class_id", "uom_id", "item_sub_class_id", "dosage_form_id",
-      "hsn_id"] as const;
+      "owner_department_id", "hsn_id"] as const;
     const value: Record<string, unknown> = { ...form };
     for (const key of ids) value[key] = form[key] === "" ? null : Number(form[key]);
     return value;
@@ -360,6 +364,7 @@ export function ItemMasterTab() {
       general_name_id: row.general_name_id ?? "", brand_id: row.brand_id ?? "",
       manufacturer_id: row.manufacturer_id ?? "", item_class_id: row.item_class_id ?? "",
       item_sub_class_id: row.item_sub_class_id ?? "", uom_id: row.uom_id ?? "",
+      owner_department_id: row.owner_department_id ?? "",
       hsn_id: row.hsn_id ?? "",
       dosage_form_id: row.dosage_form_id ?? "" } as Form);
     setHsnCode(row.hsn_code ?? "");
@@ -382,6 +387,7 @@ export function ItemMasterTab() {
     : !preview ? "Complete the category, general name, brand and manufacturer"
     : !form.name.trim() ? "Give the item a name"
     : !form.uom_id ? "Pick a primary unit on the Units tab"
+    : !form.owner_department_id ? "Pick an ownership department"
     : !hsnCode ? "Enter an HSN code on the Identification tab"
     : hsnFormatError ? hsnFormatError
     : unanswered.length ? `Answer ${unanswered.map((t) => t.tag_name).join(", ")}`
@@ -396,6 +402,7 @@ export function ItemMasterTab() {
     { key: "hsn", header: "HSN", render: (row) => row.hsn_code ?? "—" },
     { key: "kind", header: "Kind", render: (row) => (row.is_asset ? "Asset" : "Consumable") },
     { key: "uom", header: "Primary UOM", render: (row) => row.uom_code ?? "—" },
+    { key: "owner", header: "Ownership", render: (row) => row.owner_department_name ?? "—" },
     { key: "status", header: "Status", render: (row) => row.is_active ? "Active" : "Inactive" },
   ];
 
@@ -497,6 +504,13 @@ export function ItemMasterTab() {
                 onChange={(e) => set("name", e.target.value)} /></Field>
               <Field label="Short Name"><Input value={form.short_name}
                 onChange={(e) => set("short_name", e.target.value)} /></Field>
+              <Field label="Ownership Department *"
+                     hint="HCM department responsible for tickets and other item-related work">
+                <Select value={form.owner_department_id}
+                  options={opt(departments.data ?? [])}
+                  onChange={(v) => set("owner_department_id", v)}
+                  placeholder="Select responsible department" />
+              </Field>
               <div className="md:col-span-3"><Field label="Description"><Input value={form.description}
                 onChange={(e) => set("description", e.target.value)} /></Field></div>
             </div>}

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Card, ErrorBanner } from "@/shared/components";
+import { Camera, FileText, Images } from "lucide-react";
+import { Button, ErrorBanner } from "@/shared/components";
+import { SectionCard } from "./DetailChrome";
+import { api } from "@/shared/api/client";
 import { returnsApi } from "../api";
 import { DOCUMENT_CATEGORY, PHOTO_CATEGORY, type StagedAttachment } from "../types";
 
@@ -16,6 +19,12 @@ import { DOCUMENT_CATEGORY, PHOTO_CATEGORY, type StagedAttachment } from "../typ
  * Uploads are only offered while the return is still a draft: once it is submitted the
  * evidence is what the approvers saw, and the backend refuses a late change anyway.
  * Hiding the control is UX; the guard in `service.add_file` is the real one.
+ *
+ * `embedded` (2026-09-07) drops the card and the heading so the raise form can put this
+ * inside its own numbered step without nesting a card in a card. Same component, same
+ * rules — the detail page keeps the standalone card it has always drawn. The pattern is
+ * the Fulfilment Desk's: render the original component with `embedded`, never keep a
+ * second copy of its rules.
  */
 export function AttachmentsPanel({
   returnId,
@@ -23,12 +32,15 @@ export function AttachmentsPanel({
   staged = [],
   onStagedChange,
   photoRequired = false,
+  embedded = false,
 }: {
   returnId: number | null;
   editable: boolean;
   staged?: StagedAttachment[];
   onStagedChange?: (files: StagedAttachment[]) => void;
   photoRequired?: boolean;
+  /** Drawn inside somebody else's card: no `Card`, no heading of its own. */
+  embedded?: boolean;
 }) {
   const queryClient = useQueryClient();
   const photoInput = useRef<HTMLInputElement>(null);
@@ -106,16 +118,48 @@ export function AttachmentsPanel({
   const missingPhoto = photoRequired && photos.length + stagedPhotos.length === 0;
   const nothingAtAll = files.length === 0 && staged.length === 0;
 
-  return (
-    <Card className="p-4">
-      <h2 className="mb-3 font-display text-lg font-bold text-ink">
-        Photos &amp; documents
-      </h2>
+  // SCM HEAD needs to see what the storekeeper photographed. Existing photos
+  // were only listed by name, so the decision was made blind. Fetch each photo
+  // as a blob and show it inline - the download route is gated by RETURN_VIEW
+  // and the return's own visibility, so only someone who can read the return
+  // can pull its bytes.
+  const [photoUrls, setPhotoUrls] = useState<Record<number, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const next: Record<number, string> = {};
+      for (const file of photos) {
+        if (!file.file_name.match(/\.(png|jpg|jpeg|gif|webp|bmp|heic|heif)$/i)) continue;
+        if (returnId == null) continue;
+        try {
+          const res = await api.get(`/api/returns/${returnId}/attachments/${file.id}/download`, {
+            responseType: "blob",
+          });
+          if (cancelled) return;
+          next[file.id] = URL.createObjectURL(res.data);
+        } catch {
+          // Preview is best-effort - the file row still shows and can be downloaded.
+        }
+      }
+      if (!cancelled) setPhotoUrls(next);
+    };
+    if (photos.length) void load();
+    return () => {
+      cancelled = true;
+      Object.values(photoUrls).forEach((url) => URL.revokeObjectURL(url));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photos.map((f) => f.id).join(","), returnId]);
 
+  // Revoke when the component unmounts or photos change
+  useEffect(() => () => Object.values(photoUrls).forEach((url) => URL.revokeObjectURL(url)), [photoUrls]);
+
+  const inner = (
+    <>
       {error && <ErrorBanner error={error} />}
 
       {editable && (
-        <div className="mb-4 flex flex-wrap gap-2">
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row">
           {/* `capture` is what opens the camera straight away on a phone, which is how
            * a storekeeper photographs damaged stock standing at the rack. */}
           <input
@@ -135,12 +179,32 @@ export function AttachmentsPanel({
             className="hidden"
             onChange={(event) => pick(event, DOCUMENT_CATEGORY)}
           />
-          <Button variant="subtle" onClick={() => photoInput.current?.click()}>
+          {/* The indent acknowledgement screen's own picker: a full-width dashed target
+            * with the camera on it, not a bordered button. Same words, and the same
+            * shape as the "Add photo" control a storekeeper already uses to prove a
+            * delivery arrived — this is the same act from the other end. A 44px
+            * bordered button read as secondary chrome on a card whose whole purpose is
+            * that one press. */}
+          <button
+            type="button"
+            onClick={() => photoInput.current?.click()}
+            className={`flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-dashed px-4 py-2 text-sm font-semibold transition hover:border-brand hover:bg-brand-050 hover:text-brand ${
+              missingPhoto
+                ? "border-bad/50 bg-bad-bg/40 text-bad"
+                : "border-line bg-content1 text-body"
+            }`}
+          >
+            <Camera className="h-4 w-4" />
             Add photo of the stock{photoRequired ? " *" : ""}
-          </Button>
-          <Button variant="subtle" onClick={() => docInput.current?.click()}>
+          </button>
+          <button
+            type="button"
+            onClick={() => docInput.current?.click()}
+            className="flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-content1 px-4 py-2 text-sm font-semibold text-body transition hover:border-brand hover:bg-brand-050 hover:text-brand"
+          >
+            <FileText className="h-4 w-4" />
             Add GRN / inward bill
-          </Button>
+          </button>
         </div>
       )}
 
@@ -162,7 +226,7 @@ export function AttachmentsPanel({
 
       {staged.length > 0 && (
         <div className="mb-4">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+          <div className="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">
             To be attached
           </div>
           <ul className="space-y-2">
@@ -210,7 +274,7 @@ export function AttachmentsPanel({
         .filter((group) => group.rows.length > 0)
         .map((group) => (
           <div key={group.label} className="mb-4 last:mb-0">
-            <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+            <div className="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">
               {group.label}
             </div>
             <ul className="space-y-2">
@@ -219,28 +283,58 @@ export function AttachmentsPanel({
                   key={file.id}
                   className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line/70 p-2"
                 >
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-ink">
-                      {file.file_name}
-                    </div>
-                    <div className="text-xs text-muted">
-                      {file.uploaded_by_name ?? "—"}
-                      {file.file_size ? ` · ${Math.round(file.file_size / 1024)} KB` : ""}
+                  <div className="flex min-w-0 items-center gap-2">
+                    {group.label === "Photos" && photoUrls[file.id] && (
+                      <img
+                        src={photoUrls[file.id]}
+                        alt={file.file_name}
+                        className="h-12 w-12 rounded object-cover border border-line"
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-ink">
+                        {file.file_name}
+                      </div>
+                      <div className="text-xs text-muted">
+                        {file.uploaded_by_name ?? "—"}
+                        {file.file_size ? ` · ${Math.round(file.file_size / 1024)} KB` : ""}
+                      </div>
                     </div>
                   </div>
-                  {editable && (
-                    <Button
-                      variant="dangerSoft"
-                      onClick={() => remove.mutate(file.id)}
-                    >
-                      Remove
-                    </Button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {group.label === "Photos" && photoUrls[file.id] && (
+                      <Button
+                        variant="subtle"
+                        onClick={() => window.open(photoUrls[file.id], "_blank")}
+                      >
+                        View
+                      </Button>
+                    )}
+                    {editable && (
+                      <Button
+                        variant="dangerSoft"
+                        onClick={() => remove.mutate(file.id)}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>
           </div>
         ))}
-    </Card>
+    </>
+  );
+
+  // The raise form supplies its own numbered heading and card, so `embedded` hands back
+  // the contents bare. The detail page keeps the standalone card and its `font-display`
+  // heading, which is the scale every other panel beside it uses.
+  if (embedded) return inner;
+
+  return (
+    <SectionCard icon={<Images className="h-4 w-4" />} title="Photos & documents">
+      {inner}
+    </SectionCard>
   );
 }

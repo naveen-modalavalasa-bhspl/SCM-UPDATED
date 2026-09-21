@@ -297,11 +297,22 @@ export const indentApi = {
     body.append("file", file);
     return api
       .post<ReceiptAttachment>(
-        `/api/indents/${id}/receipt-attachments?doc_category=${docCategory}`,
+        // Encoded: a package-scoped category carries a "::" separator, and a raw
+        // colon in a query string is not ours to gamble on.
+        `/api/indents/${id}/receipt-attachments?doc_category=${encodeURIComponent(docCategory)}`,
         body,
       )
       .then((r) => r.data);
   },
+
+  // The bytes themselves, for the preview. Nested under the indent because that is
+  // the route indents gates — the viewer never builds a URL of its own.
+  downloadReceiptAttachment: (id: number, attachmentId: number) =>
+    api
+      .get(`/api/indents/${id}/receipt-attachments/${attachmentId}/download`, {
+        responseType: "blob",
+      })
+      .then((r) => r.data as Blob),
 
   deleteReceiptAttachment: (attachmentId: number) =>
     api.delete<void>(`/api/indents/receipt-attachments/${attachmentId}`).then((r) => r.data),

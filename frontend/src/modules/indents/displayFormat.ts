@@ -8,6 +8,33 @@ export function displayUom(value?: string | null) {
   return text.replace(/^uom[-_\s]+/i, "").trim();
 }
 
+const PENDING_APPROVAL_ROLE_LABELS: Record<string, string> = {
+  "district manager": "DM",
+  "regional manager": "RM",
+};
+
+export function compactPendingApprovalText(value?: string | null) {
+  let text = value?.trim().replace(/\s+/g, " ") ?? "";
+  for (const [role, label] of Object.entries(PENDING_APPROVAL_ROLE_LABELS)) {
+    text = text.replace(new RegExp(`\\b${role}\\b`, "gi"), label);
+  }
+  return text;
+}
+
+export function pendingApprovalLabel(currentApproverName?: string | null) {
+  const value = currentApproverName?.trim().replace(/\s+/g, " ");
+  if (!value) return "Pending Approval";
+  const role = value.match(/\(([^)]+)\)\s*[.:;]?\s*$/)?.[1]?.trim();
+  return `Pending at ${compactPendingApprovalText(role || value)}`;
+}
+
+export function pendingApprovalTargetFromMessage(message?: string | null) {
+  const value = message?.trim().replace(/\s+/g, " ");
+  if (!value) return null;
+  const role = value.match(/\(([^)]+)\)\s*[.:;]?\s*$/)?.[1]?.trim();
+  return role ? compactPendingApprovalText(role) : null;
+}
+
 export interface DeliveryOfficeParts {
   officeName: string;
   vehicleNumber: string | null;

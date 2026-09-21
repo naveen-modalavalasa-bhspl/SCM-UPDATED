@@ -1,8 +1,9 @@
 import { api } from "@/shared/api/client";
 import type {
-  ApprovalTrailRow, DecisionOptions, DecisionWrite, MyStockRow, Page, PositionOption,
-  PurchaseReturn, Raiser, Reason, ReceivingConfig, ReturnAttachment, ReturnJourney,
-  ReturnSummary, ReturnWrite, StockReturn,
+  ApprovalFlow, ApprovalTrailRow, DecisionOptions, DecisionWrite, IndentOption,
+  MyStockRow, Page, PositionOption, PurchaseReturn, Raiser, Reason, ReceivingConfig,
+  RelatedDocuments, ReturnAttachment, ReturnJourney, ReturnReceiptWrite, ReturnSummary,
+  ReturnWrite, StockReturn,
 } from "./types";
 
 /**
@@ -32,18 +33,45 @@ export interface ReturnListQuery {
    * stocking point of their own and a visibility filter written for storekeepers would
    * hand them an empty list.
    */
-  queue?: "decision" | "endorsement";
+  queue?: "decision" | "endorsement" | "logistics" | "receipt";
+  /**
+   * The day the return was RAISED, both ends inclusive, as `YYYY-MM-DD`. That is the
+   * date these screens print, so the filter and the column can never disagree; the
+   * server bounds `created_at` and does the inclusive end itself.
+   */
+  date_from?: string;
+  date_to?: string;
 }
+
+/**
+ * Which stage a send-back or a reject is being pressed from. The route differs per stage
+ * because the PERMISSION does: the decision desk, the floor and the reporting line are
+ * three different people holding three different `return.*` codes, and one shared
+ * endpoint would have had to be gated on somebody else's.
+ */
+export type ReturnStage = "approval" | "decision" | "sign-off";
 
 export const returnsApi = {
   list: async (query: ReturnListQuery = {}): Promise<Page<StockReturn>> =>
     (await api.get("/api/returns", { params: clean({ ...query }) })).data,
 
-  /** The other family of return — `pro_returns`, read only. */
+  /**
+   * The other family of return — `pro_returns`, read only.
+   *
+   * `source` narrows to where the material came from (FROM_WAREHOUSE / FROM_LIP_MDB /
+   * QC_REJECTED_GRN), which is a different question from `status`: one is how far the
+   * paperwork has got, the other is what the buying desk is actually chasing.
+   */
   purchaseReturns: async (
-    query: { page?: number; size?: number; status?: string; search?: string } = {},
+    query: {
+      page?: number; size?: number; status?: string; search?: string; source?: string;
+    } = {},
   ): Promise<Page<PurchaseReturn>> =>
     (await api.get("/api/returns/purchase", { params: clean({ ...query }) })).data,
+
+  /** The three source categories, served so the filter and the desk agree on wording. */
+  purchaseReturnSources: async (): Promise<Reason[]> =>
+    (await api.get("/api/returns/options/purchase-sources")).data,
 
   summary: async (): Promise<ReturnSummary> =>
     (await api.get("/api/returns/summary")).data,
@@ -55,10 +83,36 @@ export const returnsApi = {
   raiser: async (): Promise<Raiser> =>
     (await api.get("/api/returns/options/raiser")).data,
 
-  /** Only what this person is holding, and only what is free to send back. */
-  myStock: async (query: { page?: number; size?: number; search?: string } = {}):
-    Promise<Page<MyStockRow>> =>
+  /**
+   * Only what this person is holding, and only what is free to send back.
+   *
+   * `indent_id` narrows it to the items that indent asked for — the return form offers
+   * nothing until an indent has been picked, so a line can never be filed under the
+   * approval chain of a request that never asked for it.
+   */
+  myStock: async (
+    query: { page?: number; size?: number; search?: string; indent_id?: number } = {},
+  ): Promise<Page<MyStockRow>> =>
     (await api.get("/api/returns/my-stock", { params: clean({ ...query }) })).data,
+
+  /** The indents this person may return against — their own, past approval. */
+  indents: async (query: { page?: number; size?: number; search?: string } = {}):
+    Promise<Page<IndentOption>> =>
+    (await api.get("/api/returns/options/indents", { params: clean({ ...query }) })).data,
+
+  /**
+   * Who will sign a return raised against this indent, BEFORE it is raised. Resolved by
+   * the workflow engine's own preview, so what the form shows is what the submit does.
+   * Called with no indent to see the stock return's own chain instead.
+   */
+  approvalFlowFor: async (indentId: number | null): Promise<ApprovalFlow> =>
+    (await api.get("/api/returns/options/approval-flow", {
+      params: clean({ indent_id: indentId }),
+    })).data,
+
+  /** An existing return's own approval chain — the route ahead, not the trail behind. */
+  approvalFlow: async (id: number): Promise<ApprovalFlow> =>
+    (await api.get(`/api/returns/${id}/approval-flow`)).data,
 
   /** Who checks a return after its reporting line signs. */
   receivingConfig: async (): Promise<ReceivingConfig> =>
@@ -108,18 +162,45 @@ export const returnsApi = {
   objectToDecision: async (id: number, comments: string): Promise<StockReturn> =>
     (await api.post(`/api/returns/${id}/object`, { comments })).data,
 
+  /**
+   * Any of the three stages handing the whole document back to the raiser to correct.
+   *
+   * Not a rejection and not an objection: the return drops to DRAFT, the hold on the
+   * stock is released, both approval chains are abandoned and the decision is cleared,
+   * so a corrected return is decided and approved again from the top. The note is the
+   * only thing the raiser is given to work out what to change, so it is mandatory.
+   */
+  sendBack: async (id: number, stage: ReturnStage, comments: string):
+    Promise<StockReturn> =>
+    (await api.post(`/api/returns/${id}/${stage}/send-back`, { comments })).data,
+
+  /** Either desk refusing the return outright. Ends the document and frees the hold. */
+  rejectAtStage: async (id: number, stage: Exclude<ReturnStage, "approval">,
+                        comments: string): Promise<StockReturn> =>
+    (await api.post(`/api/returns/${id}/${stage}/reject`, { comments })).data,
+
   cancel: async (id: number): Promise<StockReturn> =>
     (await api.post(`/api/returns/${id}/cancel`)).data,
 
-  /** The raiser closing their own return once the stock has moved. */
-  acknowledge: async (id: number): Promise<StockReturn> =>
-    (await api.post(`/api/returns/${id}/acknowledge`)).data,
+  /**
+   * One route, two presses — which one it is depends on where the material has got to.
+   *
+   * A RECEIPT while the return is still on its leg (`can_receive`): the body says how much
+   * of each line arrived and in what state, the server credits only that much to the
+   * receiving point and refuses the whole thing without a delivery photograph on file.
+   * A CLOSE once it has landed: nothing physical happens, so it takes no body at all.
+   */
+  acknowledge: async (id: number, body?: ReturnReceiptWrite): Promise<StockReturn> =>
+    (await api.post(`/api/returns/${id}/acknowledge`, body ?? null)).data,
 
   journey: async (id: number): Promise<ReturnJourney> =>
     (await api.get(`/api/returns/${id}/journey`)).data,
 
   history: async (id: number): Promise<ApprovalTrailRow[]> =>
     (await api.get(`/api/returns/${id}/history`)).data,
+
+  relatedDocuments: async (id: number): Promise<RelatedDocuments> =>
+    (await api.get(`/api/returns/${id}/related-documents`)).data,
 
   attachments: async (id: number): Promise<ReturnAttachment[]> =>
     (await api.get(`/api/returns/${id}/attachments`)).data,

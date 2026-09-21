@@ -565,6 +565,10 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
     "Update an existing stock movement order.",
   "movement.approve":
     "Approve a pending stock movement order.",
+  "movement.inspect":
+    "Verify approved quantities and tracked identifiers before stock is moved.",
+  "movement.complete":
+    "Post an inspected movement and transfer stock to its destination locations.",
   "movement.delete":
     "Delete an unfinished stock movement that is still a draft.",
   "master.item.manage":
@@ -702,7 +706,7 @@ export const featureHint = (feature: MatrixFeature) =>
     + "request, so it is the real permission, not just a visible button.";
 
 export function featureGroup(code: string): string {
-  if (code === "movement.view" || code === "movement.approve") return "Actions and settings";
+  if (["movement.view", "movement.approve", "movement.inspect", "movement.complete"].includes(code)) return "Actions and settings";
   if (/(^|\.)view([._]|$)/.test(code)) return "Visibility and data access";
   if (/(^|\.)(approve|reject)([._]|$)/.test(code)) return "Approval decisions";
   return "Actions and settings";
@@ -722,8 +726,10 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "transport.create": { button: "Dispatch", where: "Logistics > Dispatch > a consignment row" },
   "stock.points.manage": { button: "Tag / Access / Grant access", where: "Inventory > Stocking Points > Position row > Access" },
   "movement.view": { button: "View Stock Movements", where: "Warehouse > Stock Movements" },
-  "movement.create": { button: "Complete movement", where: "Warehouse > Stock Movements > New Order" },
-  "movement.approve": { button: "Approve & move", where: "Warehouse > Stock Movements > Open a pending order" },
+  "movement.create": { button: "New order / Save draft", where: "Warehouse > Stock Movements" },
+  "movement.approve": { button: "Approve", where: "Warehouse > Stock Movements > Open a pending order" },
+  "movement.inspect": { button: "Complete inspection", where: "Warehouse > Stock Movements > Open an approved order" },
+  "movement.complete": { button: "Complete movement", where: "Warehouse > Stock Movements > Open an inspected order" },
 };
 
 /* A picture of the control, for the profile builder who has never opened the screen.

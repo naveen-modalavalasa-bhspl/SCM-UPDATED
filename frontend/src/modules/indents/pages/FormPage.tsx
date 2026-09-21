@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
-import { PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
+import { PageHeader, Button, Card, Field, Input, Select, useToast } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import {
   indentApi, indentKeys, isIndentModuleQuery,
@@ -26,6 +26,14 @@ interface Line {
 
 const PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today";
 const REQUIRED_DATE_MANDATORY_ERROR = "Required date is mandatory.";
+const REQUIRED_DATE_MISSING_NOTICE = {
+  title: "Required date is missing",
+  message: REQUIRED_DATE_MANDATORY_ERROR,
+};
+const REQUIRED_DATE_PAST_NOTICE = {
+  title: "Required date needs attention",
+  message: PAST_REQUIRED_DATE_ERROR,
+};
 const DUPLICATE_ITEM_ERROR = "This item is already added to the indent.";
 const MISSING_QTY_ERROR = "Quantity is required for this item.";
 const UOM_UNAVAILABLE = "UOM unavailable";
@@ -96,7 +104,9 @@ export function IndentFormPage() {
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
   const qc = useQueryClient();
+  const toast = useToast();
   const initializedDraftId = useRef<number | null>(null);
+  const initializedPrefill = useRef<string | null>(null);
   const [priority, setPriority] = useState("NORMAL");
   const [indentType, setIndentType] = useState<IndentType>(INDENT_TYPE.REGULAR);
   const [vehicleId, setVehicleId] = useState<number | "">("");
@@ -117,6 +127,28 @@ export function IndentFormPage() {
       ? PAST_REQUIRED_DATE_ERROR
       : null;
   const visibleRequiredDateError = hasAttemptedSubmit ? requiredDateError : null;
+
+  const showRequiredDateNotice = () => {
+    toast.warning(requiredDate ? REQUIRED_DATE_PAST_NOTICE : REQUIRED_DATE_MISSING_NOTICE);
+    requestAnimationFrame(() => {
+      const field = document.getElementById("indent-required-date");
+      field?.scrollIntoView({ behavior: "smooth", block: "center" });
+      field?.focus({ preventScroll: true });
+    });
+  };
+
+  useEffect(() => {
+    if (requiredDateError === REQUIRED_DATE_MANDATORY_ERROR) {
+      toast.dismiss("warning", REQUIRED_DATE_PAST_NOTICE);
+      return;
+    }
+    if (requiredDateError === PAST_REQUIRED_DATE_ERROR) {
+      toast.dismiss("warning", REQUIRED_DATE_MISSING_NOTICE);
+      return;
+    }
+    toast.dismiss("warning", REQUIRED_DATE_MISSING_NOTICE);
+    toast.dismiss("warning", REQUIRED_DATE_PAST_NOTICE);
+  }, [requiredDateError, toast]);
 
   // The narrowed picker, not the whole item master: an item tagged to another role or
   // region is not offered here. Until an administrator tags something this returns
@@ -177,6 +209,29 @@ export function IndentFormPage() {
       quantity: Number(item.quantity),
     })));
   }, [canEditLoadedIndent, draft]);
+
+  // Replenishment sends a shortage here as ?item_id=&quantity=. Guarded rather than
+  // trusted: a non-numeric or non-positive id prefills nothing, and an unusable
+  // quantity leaves the box EMPTY rather than writing a zero — a zero reads as a
+  // decision somebody made. The key is the parameters themselves, so it runs once and
+  // never fights the user's own edits on a re-render; editing is left alone entirely.
+  useEffect(() => {
+    if (isEditing) return;
+    const itemParam = searchParams.get("item_id");
+    const quantityParam = searchParams.get("quantity");
+    const prefillKey = `${itemParam ?? ""}:${quantityParam ?? ""}`;
+    if (initializedPrefill.current === prefillKey) return;
+
+    const itemId = Number(itemParam);
+    if (!Number.isFinite(itemId) || itemId <= 0) return;
+
+    const quantity = Number(quantityParam);
+    initializedPrefill.current = prefillKey;
+    setLines([{
+      item_id: itemId,
+      quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : "",
+    }]);
+  }, [isEditing, searchParams]);
 
   const payload = (): IndentCreate => ({
     priority,
@@ -497,6 +552,7 @@ export function IndentFormPage() {
             </Field>
             <Field label="Required date" required>
               <Input
+                id="indent-required-date"
                 type="date"
                 min={today}
                 value={requiredDate}
@@ -564,7 +620,10 @@ export function IndentFormPage() {
           onClick={() => {
             setError(null);
             setHasAttemptedSubmit(true);
-            if (requiredDateError) return;
+            if (requiredDateError) {
+              showRequiredDateNotice();
+              return;
+            }
             if (hasMissingQtyError) return;
             const duplicates = duplicateItemRows(lines);
             if (duplicates.size) {

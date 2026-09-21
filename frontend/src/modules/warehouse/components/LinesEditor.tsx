@@ -187,6 +187,7 @@ export function QtyInput({
   disabled,
   invalid,
   ariaLabel,
+  step = "0.01",
 }: {
   value: number | string;
   onChange: (value: any) => void;
@@ -194,6 +195,8 @@ export function QtyInput({
   disabled?: boolean;
   invalid?: boolean;
   ariaLabel: string;
+  /** Warehouse quantities and money are entered at two decimal places. */
+  step?: string;
 }) {
   return (
     <input
@@ -201,7 +204,7 @@ export function QtyInput({
       inputMode="decimal"
       min={0}
       max={max}
-      step="0.01"
+      step={step}
       value={value === 0 ? "0.00" : value === "" || value == null ? "" : Number(value).toFixed(2)}
       disabled={disabled}
       aria-label={ariaLabel}

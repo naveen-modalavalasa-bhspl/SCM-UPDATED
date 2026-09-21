@@ -33,6 +33,49 @@ async def list_departments(db: AsyncSession = Depends(get_db),
     return {"items": [{"id": d.id, "code": d.code, "name": d.name} for d in rows]}
 
 
+def _ownership_department_options(rows) -> list[dict]:
+    """One routing option per department name, despite HCM's office-scoped rows.
+
+    The current HCM feed contains hundreds of separate department IDs named `104`,
+    one for each office. Item ownership is a company-level routing choice, so showing
+    every office copy makes the selector unusable. Keep one deterministic HCM row per
+    normalised name: prefer a row carrying a code, then the lowest HCM ID.
+
+    This intentionally powers only the Item Master ownership selector. The ordinary
+    `/api/departments` endpoint remains lossless for screens that need office-specific
+    HCM department records.
+    """
+    chosen: dict[str, HcmDepartment] = {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        name = (row.name or "").strip()
+        if not name:
+            continue
+        key = name.casefold()
+        counts[key] = counts.get(key, 0) + 1
+        current = chosen.get(key)
+        candidate_rank = (0 if row.code else 1, row.id)
+        current_rank = ((0 if current.code else 1), current.id) if current else None
+        if current is None or candidate_rank < current_rank:
+            chosen[key] = row
+    return [{
+        "id": chosen[key].id,
+        "code": chosen[key].code,
+        "name": chosen[key].name.strip(),
+        "duplicate_count": counts[key],
+    } for key in sorted(chosen, key=lambda value: chosen[value].name.casefold())]
+
+
+@_hcm.get("/api/departments/ownership-options")
+async def list_ownership_departments(db: AsyncSession = Depends(get_db),
+                                     user=Depends(get_current_user)):
+    rows = (await db.execute(
+        select(HcmDepartment).where(HcmDepartment.is_active.is_(True))
+        .order_by(HcmDepartment.id)
+    )).scalars().all()
+    return {"items": _ownership_department_options(rows)}
+
+
 @_hcm.get("/api/facilities")
 async def list_facilities(db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):

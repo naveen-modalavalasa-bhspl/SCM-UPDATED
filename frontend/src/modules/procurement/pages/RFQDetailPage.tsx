@@ -15,6 +15,7 @@ import {
 import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { writeToClipboard } from "@/shared/clipboard";
 
 /**
  * One RFQ: its lines, who was asked, and — once quotes are in — the comparison.
@@ -296,7 +297,11 @@ export function RFQDetailPage() {
     || close.isPending || award.isPending || awardSplit.isPending || raisePo.isPending;
 
   const copyInvite = async (vendorId: number, path: string) => {
-    await navigator.clipboard.writeText(`${location.origin}${path}`);
+    const copied = await writeToClipboard(`${location.origin}${path}`);
+    if (!copied) {
+      toast.error("Could not copy the link. Open it and copy the address instead.");
+      return;
+    }
     setCopied(vendorId);
     toast.success("Link copied — send it to the vendor");
     setTimeout(() => setCopied(null), 2000);

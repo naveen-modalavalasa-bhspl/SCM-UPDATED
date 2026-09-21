@@ -1,5 +1,6 @@
 import { Skeleton } from "@heroui/react";
 import { Ban, Check, Clock, X } from "lucide-react";
+import { roleOnly } from "../constants";
 import type { JourneyPhase, JourneyState, ReturnJourney } from "../types";
 
 /**
@@ -10,34 +11,59 @@ import type { JourneyPhase, JourneyState, ReturnJourney } from "../types";
  * The phases and their states come from `GET /api/returns/{id}/journey`, never from a
  * status-to-steps table kept here: a second copy of the flow in the browser is how a
  * rejected document ends up rendering as though the stock moved.
+ *
+ * A caption naming an approver is reduced to the RANK (`roleOnly`). The server sends
+ * "MAHENDRA Y scm (SCM HEAD)" and a dot has about ninety pixels for it, so the label
+ * wrapped over three lines and shoved its neighbours out of alignment. A rung is a rank
+ * (CLAUDE.md rule 8) and the rank is the half that answers "who signs this"; the holder is
+ * named in full on the current-stage line directly below, in the approval trail and on the
+ * journey screen, so the name is unstacked rather than lost.
  */
-/** Must match `enums.PHASES`. The tracker went from six legs to seven when the decision
- *  desk and the sign-off were split apart; the grid stayed at six, so the seventh leg
- *  wrapped onto its own row and every connector after it pointed at nothing. */
-const PHASE_COUNT = 7;
+/** Must match the leg COUNT in `enums.PHASES_APPROVAL_FIRST` — 8 legs: draft, submitted,
+ *  approval, decision, sign-off, logistics, movement, acknowledged. Only the count is
+ *  pinned here, never the sequence: the backend sends the legs in the order this document
+ *  actually travels, and a row raised under the older order sends the same 8 in a
+ *  different sequence (`enums.PHASES`). The tracker went from six legs to seven when the
+ *  decision desk and the sign-off were split apart; the grid stayed at six, so the
+ *  seventh leg wrapped onto its own row. Now 8. */
+const PHASE_COUNT = 8;
+
+const HALTED_STATES: JourneyState[] = ["rejected", "cancelled"];
 
 function iconFor(state: JourneyState, index: number) {
-  if (state === "completed") return <Check className="h-3.5 w-3.5" />;
-  if (state === "current") return <Clock className="h-3.5 w-3.5" />;
-  if (state === "rejected") return <X className="h-3.5 w-3.5" />;
-  if (state === "cancelled") return <Ban className="h-3.5 w-3.5" />;
+  if (state === "completed") return <Check className="h-4 w-4" />;
+  if (state === "current") return <Clock className="h-4 w-4" />;
+  if (state === "rejected") return <X className="h-4 w-4" />;
+  if (state === "cancelled") return <Ban className="h-4 w-4" />;
   return index + 1;
 }
 
+/* The indent stepper's `--color-step-*` fills exactly - filled means done, same halo
+ * on the live step - because the two documents are meant to read as one system. See
+ * the token block in `index.css`. */
 function stateClasses(state: JourneyState) {
   const classes: Record<JourneyState, string> = {
-    completed: "border-ok bg-ok text-white",
-    current: "border-brand bg-brand text-white shadow-sm shadow-brand/20",
-    pending: "border-line bg-white text-muted",
-    rejected: "border-bad bg-bad text-white",
-    cancelled: "border-neutral bg-neutral text-white",
+    completed: "border-transparent bg-step-done text-white",
+    current: "border-transparent bg-step-live text-white ring-4 ring-step-live/20",
+    pending: "border-line bg-content1 text-muted",
+    rejected: "border-transparent bg-step-bad text-white",
+    cancelled: "border-transparent bg-step-off text-white",
   };
   return classes[state] ?? classes.pending;
 }
 
 function connectorClass(left: JourneyState, right: JourneyState) {
-  const halted = right === "rejected" || right === "cancelled";
-  return left === "completed" && !halted ? "bg-ok" : "bg-line";
+  const halted = HALTED_STATES.includes(right);
+  return left === "completed" && !halted ? "bg-step-done-rail" : "bg-line";
+}
+
+/* The label under a dot. The live leg is the one the reader is looking for, so it is the
+ * one carrying weight and colour; a leg nobody has reached yet stays quiet. */
+function labelClass(state: JourneyState) {
+  if (state === "current") return "text-step-live";
+  if (state === "pending") return "text-muted";
+  if (state === "rejected") return "text-bad";
+  return "text-body";
 }
 
 function captionFor(phase: JourneyPhase) {
@@ -60,16 +86,16 @@ function StepperSkeleton() {
       aria-label="Loading return progress"
     >
       {/* Mirrors the real phase grid so nothing shifts when the data lands. */}
-      <div className="grid grid-cols-1 items-start gap-2 lg:grid-cols-7 lg:gap-0">
+      <div className="grid grid-cols-1 items-start gap-1 lg:grid-cols-8 lg:gap-0">
         {Array.from({ length: PHASE_COUNT }, (_unused, index) => (
           <div
             key={index}
-            className="flex min-w-0 items-center gap-3 px-1 lg:flex-col lg:gap-0"
+            className="flex min-w-0 items-center gap-2 px-1 lg:flex-col lg:gap-0"
           >
             <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
-            <div className="w-full min-w-0 max-w-28">
-              <Skeleton className="h-3 w-full max-w-20 rounded lg:mt-2" />
-              <Skeleton className="mt-1 h-2.5 w-full max-w-14 rounded" />
+            <div className="w-full min-w-0 max-w-24">
+              <Skeleton className="h-2.5 w-full max-w-16 rounded lg:mt-2" />
+              <Skeleton className="mt-1 h-2 w-full max-w-12 rounded" />
             </div>
           </div>
         ))}
@@ -105,7 +131,7 @@ export function ReturnStepper({
   return (
     <div role="group" className="-mx-1 overflow-hidden px-1 pb-1" aria-label="Return progress">
       <ol
-        className="grid min-w-0 grid-cols-1 items-start gap-2 lg:grid-cols-7 lg:gap-0"
+        className="grid min-w-0 grid-cols-1 items-start gap-1 lg:grid-cols-8 lg:gap-0"
         data-testid="return-progress"
       >
         {phases.map((phase, index) => (
@@ -128,27 +154,30 @@ export function ReturnStepper({
                 {/* The vertical rail is what keeps the steps connected once the grid
                  * collapses to a single column on a phone. */}
                 <span
-                  className={`absolute left-5 top-8 h-[calc(100%+0.5rem)] w-0.5 -translate-x-1/2 lg:hidden ${connectorClass(phase.state, phases[index + 1].state)}`}
+                  className={`absolute left-5 top-9 h-[calc(100%+0.25rem)] w-0.5 -translate-x-1/2 lg:hidden ${connectorClass(phase.state, phases[index + 1].state)}`}
                   aria-hidden="true"
                 />
               </>
             )}
             <span
               aria-label={`${phase.label}, ${phase.state}${phase.caption ? `: ${phase.caption}` : ""}`}
-              className={`relative z-10 grid h-8 w-8 shrink-0 place-items-center rounded-full border text-xs font-bold transition-colors ${stateClasses(phase.state)}`}
+              className={`relative z-10 grid h-8 w-8 shrink-0 place-items-center rounded-full border text-[11px] font-bold transition-colors ${stateClasses(phase.state)}`}
             >
               {iconFor(phase.state, index)}
             </span>
             <div className="w-full min-w-0 max-w-28 text-left lg:mx-auto lg:text-center">
               <span
-                className={`block text-balance break-words text-[11px] font-semibold leading-4 lg:mt-2 lg:min-h-8 ${
-                  phase.state === "pending" ? "text-muted" : "text-body"
-                }`}
+                className={`block text-balance break-words text-[11px] font-semibold leading-[14px] lg:mt-2 lg:min-h-7 ${labelClass(phase.state)}`}
               >
                 {phase.label}
               </span>
-              <span className="mt-0.5 block max-w-full break-words text-[10px] font-medium leading-3 text-muted">
-                {captionFor(phase)}
+              {/* The rank, not the holder — see the note at the top of this file. The full
+                * label stays on the element's `title`, so the name is one hover away. */}
+              <span
+                title={captionFor(phase)}
+                className="mt-0.5 block max-w-full break-words text-[10px] font-medium leading-3 text-muted"
+              >
+                {roleOnly(captionFor(phase))}
               </span>
             </div>
           </li>
@@ -156,14 +185,14 @@ export function ReturnStepper({
       </ol>
 
       {journey?.current_stage_message && (
-        <div className="mt-3 border-t border-line pt-3">
+        <div className="mt-4 rounded-xl border border-line bg-content2/50 px-3.5 py-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">
             Current stage
           </p>
-          <p className="mt-0.5 break-words text-xs font-semibold text-body">
+          <p className="mt-1 break-words text-sm font-bold text-ink">
             Stage {summaryIndex + 1} of {phases.length} · {phases[summaryIndex].label}
           </p>
-          <p className="mt-0.5 break-words text-xs font-semibold text-body">
+          <p className="mt-0.5 break-words text-xs font-medium text-body">
             {journey.current_stage_message}
           </p>
         </div>

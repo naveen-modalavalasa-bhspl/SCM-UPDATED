@@ -42,6 +42,17 @@ describe("approval document routes", () => {
       .toBe("/logistics/shipments/5?decision=1");
   });
 
+  // Both phases of a stock return carry the return's own id, and /returns/:id is the
+  // screen that offers the decision. Left out of the switch, the whole STOCK RETURN
+  // block of the inbox navigated back to /approvals and read as a dead button.
+  it("routes both phases of a stock return to the return detail", () => {
+    expect(approvalDocumentPath({ doc_type: "STOCK_RETURN", doc_id: 20 })).toBe("/returns/20");
+    expect(approvalDocumentPath({ doc_type: "STOCK_RETURN_RECEIPT", doc_id: 20 }))
+      .toBe("/returns/20");
+    expect(approvalDecisionDocumentPath({ doc_type: "STOCK_RETURN", doc_id: 20 }))
+      .toBe("/returns/20");
+  });
+
   it("opens the exact purchase order instead of the generic PO page", () => {
     expect(approvalDecisionDocumentPath({ doc_type: "PO", doc_id: 9 })).toBe("/pos/9?decision=1");
     expect(approvalDocumentPath({ doc_type: "PO", doc_id: 9 })).toBe("/pos/9?approval=1");

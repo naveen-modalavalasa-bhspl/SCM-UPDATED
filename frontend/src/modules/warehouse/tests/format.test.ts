@@ -28,7 +28,7 @@ describe("warehouse formatting", () => {
     expect(num("not a number")).toBe(0);
   });
 
-  it("formats a quantity to 2 decimal places", () => {
+  it("shows every quantity at two decimals, so a column lines up", () => {
     expect(fmtQty("12.500")).toBe("12.50");
     expect(fmtQty(0)).toBe("0.00");
   });

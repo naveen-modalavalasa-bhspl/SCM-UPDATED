@@ -61,6 +61,11 @@ const FAMILY: Record<string, { icon: LucideIcon; tint: string }> = {
   OWN_STOCK_ISSUE: { icon: Package, tint: "bg-ok-bg text-ok" },
   GRN: { icon: Package, tint: "bg-ok-bg text-ok" },
   PURCHASE_RETURN: { icon: Package, tint: "bg-ok-bg text-ok" },
+  // FIX 2026-09-07: a stock return moves stock, so it reads with the rest of that
+  // family instead of falling through to the generic document glyph.
+  STOCK_RETURN: { icon: Package, tint: "bg-ok-bg text-ok" },
+  STOCK_RETURN_RECEIPT: { icon: Package, tint: "bg-ok-bg text-ok" },
+  STOCK_RETURN_LOGISTICS: { icon: Package, tint: "bg-ok-bg text-ok" },
   QC_OUTWARD: { icon: Package, tint: "bg-ok-bg text-ok" },
   DISPATCH: { icon: Truck, tint: "bg-warn-bg text-warn" },
   CARRIER_AWARD: { icon: Truck, tint: "bg-warn-bg text-warn" },

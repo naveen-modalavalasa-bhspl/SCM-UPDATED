@@ -245,9 +245,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
 
-  // Approval lines retain the original request while stock serving tracks what is
-  // still owed. Downstream approvers must decide only that remainder: if OE served 5
-  // of 10, DM (and every rung after DM) sees and approves 5, never the original 10.
+  // Keep the raiser's original request visible. Earlier approvals and stock serving
+  // only reduce the current rung's cap, so the audit meaning is never rewritten.
   const reviewItems = useMemo(() => {
     const remainderByLine = new Map(
       (availability.data?.items ?? []).map((line) => [line.line_id, line.remainder]),
@@ -258,7 +257,6 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       const outstanding = Math.max(0, Number(remainder));
       return {
         ...line,
-        requested_quantity: outstanding,
         approved_quantity: Math.min(line.approved_quantity, outstanding),
         max_quantity: Math.min(line.max_quantity, outstanding),
       };
@@ -382,6 +380,26 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       </Card>
     );
   }
+  // A cached review can outlive the workflow task when another tab or approver moves
+  // the indent on. Never leave live decision buttons over a completed document.
+  if (indent.data && indent.data.status !== "PENDING_APPROVAL") {
+    return (
+      <Card className="p-5">
+        <div className="flex items-start gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-ok-bg text-ok">
+            <CheckCircle2 className="h-5 w-5" />
+          </span>
+          <div>
+            <p className="font-display text-base font-bold text-ink">This indent has already moved on</p>
+            <p className="mt-1 text-sm text-muted">It is now {indent.data.status.replace(/_/g, " ").toLowerCase()} and is no longer awaiting approval.</p>
+            <Button className="mt-3" variant="subtle" onClick={() => nav("/approvals")}>
+              <ArrowLeft className="h-4 w-4" /> Back to approvals
+            </Button>
+          </div>
+        </div>
+      </Card>
+    );
+  }
   if (!indent.data) return <p className="p-6 text-muted">Approval not found.</p>;
 
   const historyRows = history.data ?? [];
@@ -408,10 +426,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
       {/* Who is asking, and for what — the context the numbers below are judged
           against, on one strip instead of a paragraph of definition lists. */}
       <Card className="p-4 sm:p-5">
-        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <Fact icon={User} label="Requested by">{indent.data.requested_by_name ?? "—"}</Fact>
           <Fact icon={Building2} label="Department">{indent.data.department_name ?? "—"}</Fact>
           <Fact icon={CalendarDays} label="Raised on">{fmtDate(indent.data.created_at)}</Fact>
+          {/* When the goods are needed decides whether this is urgent, so it is read
+              beside the raise date. Nothing behind it is drawn as nothing — the raise
+              date under this label would say the goods were wanted the day it was asked. */}
+          <Fact icon={CalendarDays} label="Required date">
+            {indent.data.required_date ? fmtDate(indent.data.required_date) : "—"}
+          </Fact>
           <Fact icon={Flag} label="Priority">
             <StatusPill status={indent.data.priority} />
           </Fact>
@@ -484,7 +508,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                 <tr className="text-[11px] uppercase tracking-wider text-muted">
                   <th className="px-4 py-3 text-left font-semibold">Item</th>
                   <th className="px-4 py-3 text-right font-semibold">Requested</th>
-                  <th className="px-4 py-3 text-right font-semibold">Most you can approve</th>
+                  <th className="px-4 py-3 text-right font-semibold">Current request</th>
                   <th className="px-4 py-3 text-right font-semibold">Approved at this level</th>
                   <th className="px-4 py-3 text-right font-semibold">Difference</th>
                 </tr>
@@ -588,7 +612,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       </span>
                     </div>
                     <div className="rounded-xl bg-content2 px-3 py-2">
-                      <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted">Most you can approve</span>
+                      <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted">Current request</span>
                       <span className={`block text-sm font-semibold tabular-nums ${reduced ? "text-warn" : "text-ink"}`}>
                         {formatQuantity(ceiling)} {unit}
                       </span>

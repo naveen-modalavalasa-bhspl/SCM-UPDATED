@@ -6,6 +6,24 @@ import { NavLink } from "react-router-dom";
 import { useAuth } from "@/shared/auth/AuthContext";
 
 /**
+ * RETIRED 2026-09-05 — unimported, and it should stay that way.
+ *
+ * This drew a SECOND tab strip underneath the layout's own, so every Returns screen
+ * showed the same eight destinations twice, in two different orders and two different
+ * wordings ("All Returns" above "All returns", "Approvals" above "To approve").
+ *
+ * It was written when the note below was true. It is not any longer: `page_registry.py`
+ * carries `grp_returns` and a row per screen, so `/api/auth/me` `menu[]` serves them and
+ * the shared layout renders them as tabs like every other module's. That strip is also
+ * the one to keep — it is filtered against the signed-in login's granted pages, where
+ * this one showed every tab to everybody bar one.
+ *
+ * Kept on disk rather than deleted, the same way `Dispatch.tsx` was: the file is a
+ * record of a decision, and an empty import is easier to explain than a missing one.
+ * Adding navigation belongs in `PAGE_TREE`, never in a component (CLAUDE.md — the left
+ * rail and the tabs are both derived from `rbac_pages`).
+ *
+ * ---- the original note, now obsolete ----
  * Sub-navigation for Returns — the same tab strip Indents uses, so a person moving
  * between the two modules is not learning a second navigation.
  *
@@ -32,6 +50,7 @@ const destinations: Tab[] = [
   // them to what this login actually holds — so hiding the tab adds nothing.
   { key: "/returns/decisions", label: "Decision desk", icon: Scale },
   { key: "/returns/sign-off", label: "Sign-off", icon: ClipboardCheck },
+  { key: "/returns/logistics", label: "Return logistics", icon: Truck },
   { key: "/returns/mine", label: "My returns", icon: Undo2 },
   { key: "/returns/purchase", label: "Purchase returns", icon: Truck },
   // Who signs after the reporting line does. Only shown to whoever configures
