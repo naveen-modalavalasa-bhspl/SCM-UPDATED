@@ -579,6 +579,19 @@ def _validate_doc_type(doc_type: str) -> None:
 # branch below rather than being given a permission that implies they are actionable.
 RETURN_PERMISSION_BY_DOC_TYPE: dict[str, str] = {
     DocType.INDENT.value: perms.INDENT_APPROVE,
+    # Same document, same signatures, therefore the same code: a monthly indent is an
+    # indent raised on the cycle, and whoever may send one back may send back the
+    # other. A configurable type missing from this map is not "no rule" — it is a 403
+    # on a button the approvals screen has already drawn (`_require_action_permission`
+    # fails closed), which is what `test_every_configurable_type_can_be_returned`
+    # exists to catch.
+    DocType.MONTHLY_INDENT.value: perms.INDENT_APPROVE,
+    # Both of these were configurable on Approvals Config and absent here since the day
+    # they were added, so a bin-to-bin movement and an outward QC could be approved and
+    # never returned for correction. Each takes its OWN approve code rather than
+    # borrowing a neighbour's — returning a document is a decision on that document.
+    DocType.STOCK_MOVEMENT_ORDER.value: perms.MOVEMENT_APPROVE,
+    DocType.QC_OUTWARD.value: perms.QC_OUTWARD_APPROVE,
     DocType.ALLOCATION.value: perms.ALLOCATION_APPROVE,
     DocType.OWN_STOCK_ALLOCATION.value: perms.ALLOCATION_APPROVE,
     # The issue family shares `issue.issue`: the same people move stock out of a

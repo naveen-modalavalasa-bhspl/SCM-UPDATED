@@ -127,6 +127,20 @@ class UserRole(str, Enum):
 
 class DocType(str, Enum):
     INDENT = "INDENT"
+    # The SAME document as an INDENT, raised on the monthly cycle, and a separate
+    # ladder only because Settings > Monthly Indent lets a site route the monthly
+    # round to different signatures from an ad-hoc request. Where that switch is off
+    # nothing is ever submitted under this type — the indent climbs INDENT's chain as
+    # it always did (`indents.service`, `monthly_indent.custom_approval_flow_enabled`).
+    #
+    # It lived as the bare string "MONTHLY_INDENT" in `ladder.DOC_TYPE_LABEL` and
+    # `MODULE_BY_DOC_TYPE`, where every sibling is a `DocType.X.value` (rule 3). Three
+    # validators then disagreed about whether it existed: `custom_ladder` reads the
+    # label map and accepted it, while `ladder_config` and `workflow.service` read the
+    # enum and refused — so Approvals Config LISTED Monthly Indent and the screen that
+    # opens its chain answered 422 "Unknown document type". Naming it here is what
+    # makes those three agree.
+    MONTHLY_INDENT = "MONTHLY_INDENT"
     ALLOCATION = "ALLOCATION"   # inventory's decision on how much stock to give
     # The same decision, made by the person who HOLDS the stock rather than by the
     # inventory desk: an OE serving an indent out of his own MDP or a LIP under him.

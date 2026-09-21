@@ -185,6 +185,22 @@ export function MonthlyIndentPage() {
     && stepSignature(steps) !== stepSignature(chain.data.steps ?? []);
   const dirty = cycleDirty || flowDirty;
 
+  /* What the save bar names. Every one of these lives on the same cycle row, so
+     "the month settings changed" was what came out when somebody had only switched
+     the APPROVAL choice — true, and no help at all in telling them what they are
+     about to save. */
+  const changedParts = [
+    cycle && serverCycle && CYCLE_FIELDS.some(
+      (field) => field !== "approval_flow_enabled" && cycle[field] !== serverCycle[field])
+      ? "the month settings" : null,
+    cycle && serverCycle && cycle.approval_flow_enabled !== serverCycle.approval_flow_enabled
+      ? "how monthly indents are approved" : null,
+    flowDirty ? "the approver list" : null,
+  ].filter(Boolean) as string[];
+  const changedSentence = changedParts.length <= 1
+    ? changedParts[0] ?? ""
+    : `${changedParts.slice(0, -1).join(", ")} and ${changedParts[changedParts.length - 1]}`;
+
   const rules = useMemo(() => settings.data?.rules ?? [], [settings.data]);
   const activeRules = rules.filter((rule) => rule.is_active);
 
@@ -623,10 +639,8 @@ export function MonthlyIndentPage() {
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border
                           border-brand/30 bg-content1 px-4 py-3 shadow-lg">
             <p className="text-sm text-body">
-              <strong className="text-ink">Not saved yet.</strong>{" "}
-              {[cycleDirty ? "the month settings" : null,
-                flowDirty ? "the approver list" : null]
-                .filter(Boolean).join(" and ")} changed.
+              <strong className="text-ink">Not saved yet</strong> — you changed{" "}
+              {changedSentence}.
             </p>
             <div className="flex gap-2">
               <Button

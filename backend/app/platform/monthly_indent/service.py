@@ -31,7 +31,11 @@ VARIABLES = {
     "employee_name", "role", "month", "cycle_start", "cycle_end",
     "pending_since", "approval_level",
 }
-MONTHLY_INDENT_LADDER_DOC_TYPE = "MONTHLY_INDENT"
+#: The ladder a monthly indent climbs when the site has switched on a chain of its
+#: own. Read off the enum rather than spelled again here: this constant and
+#: `ladder.DOC_TYPE_LABEL` naming the same document by two independent strings is
+#: precisely how the 422 on Settings > Monthly Indent came about.
+MONTHLY_INDENT_LADDER_DOC_TYPE = DocType.MONTHLY_INDENT.value
 
 
 @dataclass(frozen=True)
