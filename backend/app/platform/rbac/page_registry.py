@@ -70,11 +70,14 @@ PAGES: list[PageDef] = [
     # The asset / consumable code formula. Last in Settings for the reason above.
     PageDef("admin_code_formats", "/admin/code-formats", "Code Formats",
             parent="grp_settings", module="admin", icon="braces", sort_order=102),
+    PageDef("admin_monthly_indent", "/admin/monthly-indent", "Monthly Indent",
+            parent="grp_settings", module="admin", icon="bell",
+            sort_order=103),
     # The API console. Under Settings, last, for the same reason as Code Formats —
     # a new screen must never become a module's front door.
     PageDef("admin_integrations", "/admin/integrations", "Integrations",
             parent="grp_settings", module="integrations", icon="plug",
-            sort_order=103),
+            sort_order=104),
     # The other half of the same question, right beside it: the console lists who
     # calls US, this lists what WE call — HCM, mail, the database — with each
     # credential masked and each link's own log readable for the first time. A failed
@@ -84,7 +87,7 @@ PAGES: list[PageDef] = [
     # whoever can read the API console reads this and nothing new is granted.
     PageDef("admin_app_links", "/admin/app-links", "App Integrations",
             parent="grp_settings", module="integrations", icon="plug",
-            sort_order=104),
+            sort_order=105),
     # The approvals landing page. sort_order 20 puts it FIRST in its group, which
     # makes it the module's front door — deliberate here, and safe, because it calls
     # no endpoint that did not already exist (/pending/summary, /reports/summary,

@@ -108,7 +108,9 @@ const MaterialIssuePrintPage = lazy(() => import("@/modules/warehouse/pages/Mate
 const MaterialRequestDetailPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestDetailPage").then((m) => ({ default: m.MaterialRequestDetailPage })));
 const MaterialRequestFormPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestFormPage").then((m) => ({ default: m.MaterialRequestFormPage })));
 const MaterialRequestsPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestsPage").then((m) => ({ default: m.MaterialRequestsPage })));
+const MonthlyIndentPage = lazy(() => import("@/modules/settings/pages/MonthlyIndentPage").then((m) => ({ default: m.MonthlyIndentPage })));
 const MyDecisionsPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.MyDecisionsPage })));
+const DecisionLedgerPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.DecisionLedgerPage })));
 const NotFoundPage = lazy(() => import("@/pages/NotFoundPage").then((m) => ({ default: m.NotFoundPage })));
 const NotificationsPage = lazy(() => import("@/modules/admin/pages/NotificationsPage").then((m) => ({ default: m.NotificationsPage })));
 const NumberingPage = lazy(() => import("@/modules/admin/pages/NumberingPage").then((m) => ({ default: m.NumberingPage })));
@@ -388,6 +390,7 @@ function AppRoutes() {
         <Route path="approvals/overview" element={<ApprovalOverviewPage />} />
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="approvals/decisions" element={<MyDecisionsPage />} />
+        <Route path="approvals/decisions/:docType/:docId" element={<DecisionLedgerPage />} />
         {/* Team Queue is retired. The route stays so an old link, a bookmark or a
             stale menu row lands on the inbox instead of on a blank page. */}
         <Route path="approvals/team-queue" element={<Navigate to="/approvals" replace />} />
@@ -590,6 +593,7 @@ function AppRoutes() {
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/settings" element={<SettingsPage />} />
         <Route path="admin/code-formats" element={<CodeFormatsPage />} />
+        <Route path="admin/monthly-indent" element={<MonthlyIndentPage />} />
         {/* The company mailbox: Inbox, Sent, Compose. Gated by
             `page.settings_mail.view`, and the Compose tab additionally by
             `mail.send` — the server checks both independently. */}

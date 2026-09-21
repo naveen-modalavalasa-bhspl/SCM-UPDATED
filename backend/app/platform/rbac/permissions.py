@@ -24,6 +24,17 @@ INDENT_DELETE = "indent.delete"
 INDENT_SUBMIT = "indent.submit"
 INDENT_APPROVE = "indent.approve"
 INDENT_REJECT = "indent.reject"
+# Read EVERY stage of an approval trail, including the stages above your own.
+#
+# Fail-closed on purpose: no INHERITS_GRANTS_FROM entry, so a deploy grants it to
+# Admin and to nobody else, and an auditor gets it by a deliberate tick.
+#
+# It is deliberately NOT `report.view`, which was the first thing reached for here
+# and is wrong: that code is held today by twenty-odd job profiles including Driver,
+# QC Team and OE, so using it would have switched the scoping OFF for very nearly
+# every login — which is precisely the defect it was added to fix. A permission that
+# almost everybody holds cannot be the one that lifts a restriction.
+APPROVAL_TRAIL_VIEW_ALL = "approval.trail.view_all"
 # Confirming the goods physically arrived. Held by requesters, not approvers — the
 # service also checks the actor raised the indent, because this is the one step nobody
 # else can perform on their behalf.
@@ -283,6 +294,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(INDENT_SUBMIT, "indents", "indent", "submit", "Submit indents for approval"),
     Perm(INDENT_APPROVE, "indents", "indent", "approve", "Approve indents"),
     Perm(INDENT_REJECT, "indents", "indent", "reject", "Reject indents"),
+    Perm(APPROVAL_TRAIL_VIEW_ALL, "approvals", "approval_trail", "view_all",
+         "Read every stage of an approval trail, including stages above your own"),
     Perm(INDENT_ACKNOWLEDGE, "indents", "indent", "acknowledge",
          "Acknowledge receipt of indent goods"),
     Perm(INDENT_VIEW_FULFILMENT, "indents", "indent", "view_fulfilment",
@@ -690,6 +703,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # profile therefore took the ability to configure approvals away with it, and vice
     # versa. Its own code separates "may open this screen" from "may change a chain".
     ("admin_approval_flow", "admin", "Settings · Approval Flow"),
+    ("admin_monthly_indent", "admin", "Settings · Monthly Indent"),
     ("admin_rules", "admin", "Settings · Rules Engine"),
     ("admin_numbering", "admin", "Settings · Document Numbering"),
     ("admin_notifications", "admin", "Settings · Notifications"),
@@ -761,6 +775,7 @@ INHERITS_GRANTS_FROM.update({
     # used to gate it — everybody who can open the screen today still can, and from
     # now on the screen and the action can be granted apart.
     page_view_code("admin_approval_flow"): ADMIN_WORKFLOW_MANAGE,
+    page_view_code("admin_monthly_indent"): ADMIN_SETTINGS_MANAGE,
     page_view_code("approval_consolidation"): INDENT_APPROVE,
     # The Overview reads nothing the inbox does not already show this person — it is
     # the same approval-scoped queries, summarised — so anybody who can open the inbox

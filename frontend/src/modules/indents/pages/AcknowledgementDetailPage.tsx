@@ -1099,8 +1099,12 @@ function GateStop({
       {/* The whole reason this step exists, so it is the first thing after the slip
           -- not a panel below a tracking card the person did not ask for. */}
       <ProofPanel
-        title="Photograph it as it arrived"
-        note="Filed against the consignment above. Each package gets its own photos at the steps after this one."
+        // Named for what the pictures ARE, in the word the paperwork and the rest of
+        // this step use: they are the consignment's photos, filed against the
+        // consignment number on the slip above. "Photograph it" left the pile
+        // unnamed, and a photo nobody can name is a photo nobody produces later.
+        title="Consignment photos, as received"
+        note="Of the consignment on the slip above, before anything is opened. Each package gets its own photos at the steps after this one."
         shots={GATE_SHOTS}
         indentId={indentId}
         files={files}

@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 # never read, and the document fell through to the reporting-line fallback.
 MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.INDENT.value: "Indents",
+    "MONTHLY_INDENT": "Indents",
     DocType.ALLOCATION.value: "Inventory",
     DocType.OWN_STOCK_ALLOCATION.value: "Inventory",
     DocType.OWN_STOCK_ISSUE.value: "Warehouse",
@@ -93,6 +94,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
 
 DOC_TYPE_LABEL: dict[str, str] = {
     DocType.INDENT.value: "Indent",
+    "MONTHLY_INDENT": "Monthly Indent",
     DocType.ALLOCATION.value: "Stock Allocation",
     DocType.OWN_STOCK_ALLOCATION.value: "Stock Allocation (from your own point)",
     DocType.OWN_STOCK_ISSUE.value: "Material Issue (from your own point)",

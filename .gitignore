@@ -133,3 +133,7 @@ frontend/vite.config.d.ts
 # A SQLite file in a MySQL-only project (CLAUDE.md: no SQLite fallback). Whatever
 # wrote it, it is not source and it can carry live rows.
 backend/scm.db
+
+# ---- Local dev server logs (uvicorn / vite run in the background) ----
+backend/uvicorn*.log.*
+frontend/vite*.log.*

@@ -61,7 +61,7 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
  */
 export function approvalDecisionDocumentPath(document: ApprovalDocument): string {
   switch (document.doc_type) {
-    case "INDENT": return `/indents/${document.doc_id}?decision=1`;
+    case "INDENT": return `/approvals/decisions/INDENT/${document.doc_id}`;
     case "ALLOCATION":
     case "OWN_STOCK_ALLOCATION":
       return `/inventory/allocation-approvals/${document.doc_id}?decision=1`;
@@ -90,4 +90,13 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?decision=1`;
     default: return "/approvals/decisions";
   }
+}
+
+export function approvalDecisionLedgerPath(document: ApprovalDocument & { id?: number | null }): string {
+  const base = `/approvals/decisions/${encodeURIComponent(document.doc_type)}/${document.doc_id}`;
+  return document.id ? `${base}?action=${document.id}` : base;
+}
+
+export function waitingDecisionLedgerPath(document: ApprovalDocument): string {
+  return `/approvals/decisions/${encodeURIComponent(document.doc_type)}/${document.doc_id}`;
 }

@@ -59,16 +59,85 @@
 
   --color-signal: #f0872b; /* warm accent, used sparingly */
 
-  --color-ok: #0f9d6b;
-  --color-ok-bg: #e5f6ee;
-  --color-warn: #b7791f;
-  --color-warn-bg: #fbf1dc;
-  --color-bad: #d64550;
-  --color-bad-bg: #fce8ea;
-  --color-info: #3a5bd0;
-  --color-info-bg: #e8edfb;
-  --color-neutral: #5a6377;
-  --color-neutral-bg: #eceef3;
+  /* ---- The five outcomes. Re-picked 2026-09-21, measured not eyeballed. ----
+     Two things were wrong and only one of them was visible.
+
+     VISIBLE: --color-warn was #b7791f, a desaturated brown-gold, on a cream
+     #fbf1dc. Every "Partially approved" pill in the product was brown text on
+     custard, which is the dated, dirty pairing nobody could name but everybody
+     could see.
+
+     NOT VISIBLE, and worse: four of the six failed WCAG AA as text on their own
+     chip -- ok 3.10, warn 3.24, bad 3.70, returned 4.44 against the 4.5 a 12px
+     bold label needs. The chips have been unreadable-by-the-standard since they
+     were drawn, and no amount of taste finds that.
+
+     So the whole family is set from three numbers each, in CIE LCh:
+       lightness  fixed at L*45, the exact point where a fill clears 4.5:1 on
+                  white AND 4.5:1 on its own L*94 tint. Higher and the chip
+                  fails; lower and the set turns to mud.
+       hue        what the word means. Green approved, amber partially, red
+                  denied, indigo waiting, violet returned.
+       chroma     a FRACTION of the sRGB gamut edge, never the edge itself --
+                  edge colours look garish and clip on a wide-gamut display.
+
+     Every fill now clears 4.5:1 on white and on its tint (worst: 4.60), and the
+     closest two hues under deuteranopia or protanopia went from dE 5.5 to 7.9.
+
+     WHAT IS STILL NOT FIXED, because it cannot be: warn and bad are dE 1.0 apart
+     under deuteranopia. Amber and red differ along the L-M axis, which is the
+     axis a deuteranope does not have, and the only remaining separator is
+     lightness -- which is pinned at L*45 by the contrast requirement above. Pick
+     any two of: reads as amber, passes AA, separates from red for a deuteranope.
+     This palette picks the first two, and the third is carried where it should
+     have been all along: every chip states its outcome in a WORD and a distinct
+     ICON (MinusCircle vs XCircle), so hue is the third channel, not the only one.
+     Do not "fix" this by desaturating one of them -- the optimiser's answer was a
+     taupe "denied", which separates beautifully and is not a colour anyone ships. */
+  --color-ok: #167a4b;
+  /* The tint was #bafdd3 and it was the one value in the family nobody had
+     measured on the SAME axis as its siblings. Lightness was right -- L*94.1,
+     the pinned value -- but chroma was C32 against warn C10.2, bad C6.9, info
+     C7.8 and returned C12.1. Three to four times its siblings, which is why the
+     "Approved" chip read as candy mint on a page where "Partially approved" was
+     a quiet cream: the two are supposed to be the same WEIGHT of colour with a
+     different hue, and one of them was shouting. Same L*, same hue (155), chroma
+     brought to 10 -- in family with warn, and the only tint that changes.
+     Contrast of --color-ok on it is 4.62:1, against the family's 4.60 worst, so
+     the AA property the comment above guarantees is unchanged. */
+  --color-ok-bg: #dff3e6;
+  --color-warn: #a85400;
+  --color-warn-bg: #fdebdc;
+  --color-bad: #d21633;
+  --color-bad-bg: #fdeae8;
+  --color-info: #3169bf;
+  --color-info-bg: #eaedfc;
+  --color-neutral: #5b6270;
+  --color-neutral-bg: #edeff4;
+
+  /* ---- Outcome RAILS: the strip down a card, and the bar across a summary ----
+     The full-strength outcome colour, deliberately. There was a lighter set here
+     and it was wrong twice over: the first attempt derived it with `bg-warn/70`,
+     which drains a warm hue to khaki and a cool one to grey, and the second
+     replaced that with picked pastels which read as sugary rather than calm. A
+     rail is a thin strip on a white card; at rail width there is no such thing as
+     too much colour, only too little, and the argument that eleven of them read as
+     eleven alarms turned out to be an argument about WIDTH, not saturation.
+
+     So they are declared as a reference rather than a value. One definition, no
+     dark override: `--color-ok` is already re-pointed under `.dark`, so the rail
+     follows its own theme for free and the two can never drift into disagreeing
+     about what green means. It stays a named token rather than every call site
+     reaching for `bg-ok`, because "the outcome as a rail" is a real role -- if a
+     future rail ever needs to differ from the chip's fill, this is the one line
+     that does it. */
+  --color-ok-rail: var(--color-ok);
+  --color-warn-rail: var(--color-warn);
+  --color-bad-rail: var(--color-bad);
+  --color-info-rail: var(--color-info);
+  --color-neutral-rail: var(--color-neutral);
+  --color-chart-returned-rail: var(--color-chart-returned);
+
   /* ---- The progress rail (every flow stepper in the product) ----
      FILLED means done, outlined means not yet. One calm hue per meaning and no
      gradient: `.bg-brand` carries the four-stop brand sweep as a background IMAGE and
@@ -98,7 +167,11 @@
      5.0 under deutan — below the floor at which two fills are tellable apart at all.
      This violet clears both (20.3 / 23.0). Verified with the dataviz validator, not
      by eye. */
-  --color-chart-returned: #7b5ea7;
+  --color-chart-returned: #aa2ec5;
+  /* It had no tint of its own, so the chip was mixing one live at 12% opacity --
+     which is not the same colour as the other four chips' tints and could not be
+     checked against anything. Set, and measured, like its siblings. */
+  --color-chart-returned-bg: #fae8fc;
 
   /* Categorical slots for a donut whose slices are IDENTITIES (document types), not
      states. Deliberately NOT the status tokens: reusing ok/bad/warn for "series 4"
@@ -141,16 +214,27 @@
   --color-brand-600: #FF9BBF;
   --color-brand-050: #2e0f1b;
 
-  --color-ok: #2fc487;
-  --color-ok-bg: #10281f;
-  --color-warn: #e0aa4b;
-  --color-warn-bg: #2b2110;
-  --color-bad: #f07580;
-  --color-bad-bg: #33151c;
-  --color-info: #859dff;
-  --color-info-bg: #171f3d;
-  --color-neutral: #97a1b8;
-  --color-neutral-bg: #232a3d;
+  /* The same five, re-derived for a near-black card rather than translated from
+     the light theme. Dark passed AA already (5.98 worst) so the move here is
+     separation: the closest pair under deuteranopia was dE 1.9, which is two
+     chips a deuteranope reads as one. Now 2.6 -- better, and still the weakest
+     part of the system, for the reason spelled out beside the light values. The
+     tints are deep and chromatic rather than grey, so a chip is identifiable by
+     its ground before its text is read. */
+  --color-ok: #5cd191;
+  --color-ok-bg: #0b3d24;
+  --color-warn: #fbb267;
+  --color-warn-bg: #4e2d04;
+  --color-bad: #f2908e;
+  --color-bad-bg: #621c21;
+  --color-info: #a4b4ec;
+  --color-info-bg: #243458;
+  --color-neutral: #a2a9b8;
+  --color-neutral-bg: #252b39;
+
+  /* No rail overrides here on purpose: they are declared once as
+     `var(--color-ok)` and friends, so re-pointing the five above is all a theme
+     has to do. A literal here would silently pin the light value's sibling. */
   /* The same six, re-STEPPED for the dark ground rather than auto-lightened: the light
      emerald and indigo both sit too close to #121828 to read as a filled disc on it,
      and the check inside them has to stay white in both themes or "done" changes shape
@@ -164,7 +248,8 @@
 
 
   /* Re-stepped for the dark surface, not lightened automatically. */
-  --color-chart-returned: #a78bfa;
+  --color-chart-returned: #dea1e8;
+  --color-chart-returned-bg: #531d5f;
 
   /* Re-STEPPED for the dark surface, not auto-lightened: the light steps sit above
      the dark lightness band. Validated against #121828, same five checks. */

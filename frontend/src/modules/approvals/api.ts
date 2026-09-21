@@ -6,7 +6,7 @@ import type {
   IndentAvailability, IssueFromStockLine, IssueFromStockResult,
   ConsolidationFilterOptions, ConsolidationQuery, ConsolidationWorkspace,
   CorrectionIndent, PendingApproval,
-  PendingSummary, AllocationCycleRow,
+  PendingSummary, AllocationCycleRow, DecisionLedger, CycleLedger,
 } from "./types";
 import type { Paginated } from "@/shared/types";
 
@@ -142,9 +142,21 @@ export const approvalsApi = {
   pending: (page = 1, size = 20, filters: PendingApprovalQuery = {}) =>
     api.get<Paginated<PendingApproval>>("/api/approvals/pending", { params: { page, size, ...filters } }).then((r) => r.data),
   pendingAll: () => allPages<PendingApproval>("/api/approvals/pending"),
-  decisions: (page = 1, size = 20, filters: { search?: string; decision?: string } = {}) =>
+  decisions: (page = 1, size = 20, filters: { search?: string; decision?: string; doc_type?: string } = {}) =>
     api.get<Paginated<ApprovalDecisionRow>>("/api/approvals/my-decisions", { params: { page, size, ...filters } }).then((r) => r.data),
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
+  decisionLedger: (docType: string, docId: number, actionId?: number | null) =>
+    api.get<DecisionLedger>(
+      `/api/approvals/decision-ledger/${encodeURIComponent(docType)}/${docId}`,
+      { params: actionId ? { action_id: actionId } : {} },
+    ).then((r) => r.data),
+  // The same trail read as a MONTH. Only ever called for a monthly indent — the
+  // server refuses a regular one, because a regular indent IS one decision on one
+  // document and the ledger above already states it.
+  cycleLedger: (docType: string, docId: number) =>
+    api.get<CycleLedger>(
+      `/api/approvals/cycle-ledger/${encodeURIComponent(docType)}/${docId}`,
+    ).then((r) => r.data),
   // Normalised on arrival: an older API build answers with `{items}` alone, and the
   // screen must degrade to "no filters offered" rather than blank out reading
   // `filter_options` off undefined. The live outstanding quantities are then applied

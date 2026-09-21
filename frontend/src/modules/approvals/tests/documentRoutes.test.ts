@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { approvalDecisionDocumentPath, approvalDocumentPath } from "../documentRoutes";
+import {
+  approvalDecisionDocumentPath, approvalDecisionLedgerPath, approvalDocumentPath,
+  waitingDecisionLedgerPath,
+} from "../documentRoutes";
 
 describe("approval document routes", () => {
   it("keeps pending indents on the actionable approval review", () => {
@@ -7,9 +10,13 @@ describe("approval document routes", () => {
       .toBe("/approvals?reviewIndent=42");
   });
 
-  it("opens completed indents through their permanent document detail", () => {
+  it("opens completed indents through the approver decision ledger", () => {
     expect(approvalDecisionDocumentPath({ doc_type: "INDENT", doc_id: 42 }))
-      .toBe("/indents/42?decision=1");
+      .toBe("/approvals/decisions/INDENT/42");
+    expect(approvalDecisionLedgerPath({ doc_type: "INDENT", doc_id: 42, id: 9 }))
+      .toBe("/approvals/decisions/INDENT/42?action=9");
+    expect(waitingDecisionLedgerPath({ doc_type: "INDENT", doc_id: 42 }))
+      .toBe("/approvals/decisions/INDENT/42");
   });
 
   it("marks completed allocations as read-only decision views", () => {

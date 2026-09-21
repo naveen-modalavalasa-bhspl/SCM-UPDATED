@@ -1456,6 +1456,13 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
     # `CON/2026-27/00001`. One document, named once, from submit onwards.
     await _join_consolidation(db, indent, user)
     workflow_context = _workflow_context_for_indent(indent)
+    if indent.indent_type == IndentType.MONTHLY.value:
+        from app.platform.monthly_indent import service as monthly_indent_service
+
+        if await monthly_indent_service.custom_approval_flow_enabled(db):
+            workflow_context[engine.LADDER_DOC_TYPE_KEY] = (
+                monthly_indent_service.MONTHLY_INDENT_LADDER_DOC_TYPE
+            )
     await engine.start(
         db, doc_type=DocType.INDENT.value, doc_id=indent.id,
         context=workflow_context,

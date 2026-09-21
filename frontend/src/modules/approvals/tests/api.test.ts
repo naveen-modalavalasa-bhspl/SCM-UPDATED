@@ -44,12 +44,19 @@ describe("approvals api", () => {
 
   it("sends pagination and queue filters to the backend", async () => {
     await approvalsApi.pending(3, 20, { doc_type: "INDENT", search: "IND/12" });
-    await approvalsApi.decisions(2, 20, { decision: "REJECTED" });
+    await approvalsApi.decisions(2, 20, { decision: "REJECTED", doc_type: "INDENT" });
     expect(apiMock.get).toHaveBeenNthCalledWith(1, "/api/approvals/pending", {
       params: { page: 3, size: 20, doc_type: "INDENT", search: "IND/12" },
     });
     expect(apiMock.get).toHaveBeenNthCalledWith(2, "/api/approvals/my-decisions", {
-      params: { page: 2, size: 20, decision: "REJECTED" },
+      params: { page: 2, size: 20, decision: "REJECTED", doc_type: "INDENT" },
+    });
+  });
+
+  it("opens a read-only decision ledger with the optional action id", async () => {
+    await approvalsApi.decisionLedger("INDENT", 42, 99);
+    expect(apiMock.get).toHaveBeenCalledWith("/api/approvals/decision-ledger/INDENT/42", {
+      params: { action_id: 99 },
     });
   });
 

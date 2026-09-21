@@ -71,3 +71,64 @@ export interface CodeFormatToken {
   token: string;
   description: string;
 }
+
+export interface MonthlyIndentCycle {
+  is_enabled: boolean;
+  approval_flow_enabled: boolean;
+  cycle_month_offset: number;
+  start_day: number;
+  end_day: number;
+  timezone: string;
+  scheduler_enabled: boolean;
+  scheduler_interval_minutes: number;
+  cycle_start?: string;
+  cycle_end?: string;
+  cycle_key?: string;
+}
+
+export type MonthlyIndentCondition = "NOT_SUBMITTED" | "PENDING_APPROVAL" | "NOT_RESPONDED";
+export type MonthlyIndentTargetType = "HCM_ROLE" | "POSITION" | "EMPLOYEE";
+export type MonthlyIndentEscalationTargetType = "REPORTING_MANAGER" | "HCM_ROLE" | "EMPLOYEE";
+
+export interface MonthlyIndentRule {
+  id: number;
+  name: string;
+  is_active: boolean;
+  trigger_day: number;
+  trigger_time: string;
+  target_type: MonthlyIndentTargetType;
+  target_ref_id: number;
+  target_name?: string | null;
+  condition: MonthlyIndentCondition;
+  message_template: string;
+  escalation_enabled: boolean;
+  escalation_day?: number | null;
+  escalation_time?: string | null;
+  escalation_target_type?: MonthlyIndentEscalationTargetType | null;
+  escalation_target_ref_id?: number | null;
+  escalation_target_name?: string | null;
+  escalation_message_template?: string | null;
+}
+
+export interface MonthlyIndentLog {
+  id: number;
+  rule_id: number;
+  cycle_key: string;
+  kind: "PRIMARY" | "ESCALATION";
+  target_employee_id: number;
+  target_employee_name?: string | null;
+  recipient_employee_id: number;
+  recipient_employee_name?: string | null;
+  status: "SENT" | "SKIPPED";
+  reason?: string | null;
+  title?: string | null;
+  message?: string | null;
+  sent_at: string;
+}
+
+export interface MonthlyIndentSettings {
+  cycle: MonthlyIndentCycle;
+  rules: MonthlyIndentRule[];
+  logs: MonthlyIndentLog[];
+  next_run?: string | null;
+}

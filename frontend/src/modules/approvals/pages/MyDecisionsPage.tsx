@@ -2,317 +2,374 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
-  BarChart3, CheckCircle2, ChevronRight, ClipboardList, Download, FileText,
-  History, MinusCircle, Package, Truck, Undo2, XCircle,
+  CheckCircle2, ChevronRight, Download, FileSearch, History,
+  RotateCcw, Search, XCircle,
 } from "lucide-react";
-import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
 import type { LucideIcon } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
   Button, Card, ErrorBanner, Input, PageHeader, ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
-import { fmtDate, fmtRelative, fmtTime } from "@/shared/datetime";
+import { fmtDate, fmtTime } from "@/shared/datetime";
 import { approvalsApi } from "../api";
-import { approvalDecisionDocumentPath } from "../documentRoutes";
-import type { ApprovalDecisionExclusion, ApprovalDecisionRow } from "../types";
+import { approvalDecisionLedgerPath } from "../documentRoutes";
+import type { ApprovalDecisionRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
 import { TONE_BLUE } from "@/shared/components/tones";
 
-/* ---------------------------------------------------------------------------
- * My Decisions — the approver's own ledger.
- *
- * Read by people who never file a ticket in their life: a store keeper, a
- * district manager, a plant head. So a row reads as one short statement — what
- * you did, where you did it, what became of it — and no two cells on it say the
- * same thing twice. The raw status still sits there on a StatusPill, so the row
- * agrees with every other screen in the app.
- *
- * Nothing here writes. The redesign changed no data, no filter, no endpoint: it
- * is the same three pieces of state (search, decision, page) over the same
- * `/api/approvals/my-decisions` call, drawn differently.
- * ------------------------------------------------------------------------- */
-
-/** What the document IS, in the words the floor uses for it. */
-const DOC_LABELS: Record<string, string> = {
-  INDENT: "Indent", MR: "Material request", ALLOCATION: "Stock allocation",
-  OWN_STOCK_ALLOCATION: "Allocation from my point",
-  OWN_STOCK_ISSUE: "Issue from my point", ISSUE: "Material issue",
-  WH_ISSUE: "Warehouse issue", PO: "Purchase order", GRN: "Goods receipt",
-  REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
-  RFQ: "Request for quotation", DISPATCH: "Dispatch",
-  QC_OUTWARD: "Outward QC",
-  PURCHASE_RETURN: "Purchase return", TRANSPORT_REQUEST: "Shipment",
-  CARRIER_AWARD: "Carrier award",
-};
-
-const docLabel = (docType: string) => DOC_LABELS[docType] ?? docType.replace(/_/g, " ");
-
 /**
- * One glyph and one tint per document FAMILY — a request, a buying document,
- * something moving stock, something on the road. The approvals queue reads the
- * same four families, so a document looks like itself on both screens.
+ * The record of what THIS approver has signed.
+ *
+ * One colour per outcome, and it is the same colour in all three places it appears:
+ * the filter chip that narrows to it, the tile at the head of the row, and the badge
+ * in the decision column. A reader who has never used the screen learns the language
+ * once — green was approved, amber went back, red was denied — and can then scan a
+ * page of history without reading a word of it.
+ *
+ * The header is ONE card rather than a stack: whose list this is, how many rows it
+ * holds, and the two axes it narrows on (what kind of indent, what the outcome was).
+ * The filters used to sit loose on the page under a card carrying nothing but a
+ * search box, which read as three unrelated controls stacked above a table.
  */
-const FAMILY: Record<string, { icon: LucideIcon; tint: string }> = {
-  INDENT: { icon: ClipboardList, tint: "bg-brand-050 text-brand" },
-  MR: { icon: ClipboardList, tint: "bg-brand-050 text-brand" },
-  CONSOLIDATION: { icon: ClipboardList, tint: "bg-brand-050 text-brand" },
-  REQUISITION: { icon: FileText, tint: "bg-info-bg text-info" },
-  RFQ: { icon: FileText, tint: "bg-info-bg text-info" },
-  PO: { icon: FileText, tint: "bg-info-bg text-info" },
-  ALLOCATION: { icon: Package, tint: "bg-ok-bg text-ok" },
-  OWN_STOCK_ALLOCATION: { icon: Package, tint: "bg-ok-bg text-ok" },
-  ISSUE: { icon: Package, tint: "bg-ok-bg text-ok" },
-  WH_ISSUE: { icon: Package, tint: "bg-ok-bg text-ok" },
-  OWN_STOCK_ISSUE: { icon: Package, tint: "bg-ok-bg text-ok" },
-  GRN: { icon: Package, tint: "bg-ok-bg text-ok" },
-  PURCHASE_RETURN: { icon: Package, tint: "bg-ok-bg text-ok" },
-  QC_OUTWARD: { icon: Package, tint: "bg-ok-bg text-ok" },
-  DISPATCH: { icon: Truck, tint: "bg-warn-bg text-warn" },
-  TRANSPORT_REQUEST: { icon: Truck, tint: "bg-warn-bg text-warn" },
-  CARRIER_AWARD: { icon: Truck, tint: "bg-warn-bg text-warn" },
-};
 
-const family = (docType: string) =>
-  FAMILY[docType] ?? { icon: FileText, tint: "bg-neutral-bg text-neutral" };
+type IndentKind = "ALL" | "REGULAR" | "MONTHLY";
 
-/** The three decisions this ledger can hold, said out loud. */
-const DECISION: Record<string, {
-  label: string; icon: LucideIcon; chip: string; rail: string;
-}> = {
+interface DecisionMeta {
+  label: string;
+  icon: LucideIcon;
+  /** The badge in the decision column. */
+  chip: string;
+  /** The square tile at the head of the row. */
+  tile: string;
+  /** The rail down the left of a phone card. */
+  bar: string;
+  /** The filter chip while it is the one that is on. */
+  on: string;
+}
+
+const DECISION_META: Record<string, DecisionMeta> = {
   APPROVED: {
-    label: "Approved", icon: CheckCircle2, chip: "bg-ok-bg text-ok", rail: "bg-ok",
+    label: "Approved", icon: CheckCircle2,
+    chip: "bg-ok-bg text-ok", tile: "bg-ok-bg text-ok", bar: "bg-ok",
+    on: "bg-ok-bg text-ok ring-ok/40",
   },
   RETURNED: {
-    label: "Sent back", icon: Undo2, chip: "bg-warn-bg text-warn", rail: "bg-warn",
+    label: "Returned", icon: RotateCcw,
+    chip: "bg-warn-bg text-warn", tile: "bg-warn-bg text-warn", bar: "bg-warn",
+    on: "bg-warn-bg text-warn ring-warn/40",
   },
   REJECTED: {
-    label: "Rejected", icon: XCircle, chip: "bg-bad-bg text-bad", rail: "bg-bad",
+    label: "Denied", icon: XCircle,
+    chip: "bg-bad-bg text-bad", tile: "bg-bad-bg text-bad", bar: "bg-bad",
+    on: "bg-bad-bg text-bad ring-bad/40",
   },
 };
 
-const decisionMeta = (value: string) => DECISION[value] ?? {
-  label: value.replace(/_/g, " "), icon: History,
-  chip: "bg-neutral-bg text-neutral", rail: "bg-neutral",
-};
-
-/**
- * What became of the document AFTER this decision.
- *
- * NOT a second reading of the status chip beside it — that would print the word
- * "approved" twice on the same row, which is what the first cut of this screen
- * did. The chip says where the document IS; this says what that means for the
- * decision you made. The line worth reading is the one where the two differ: you
- * approved and it was turned down higher up, or you sent it back and it came
- * through in the end. An approver's own ledger is the only place that shows.
- */
-function aftermath(decision: string, status: string): string {
-  const mine = status === decision;
-  if (status === "CANCELLED") return "Withdrawn by the raiser";
-  if (status === "IN_PROGRESS") return "Still in approval";
-  if (status === "APPROVED") return mine ? "Cleared to the end" : "Approved after your step";
-  if (status === "REJECTED") return mine ? "Stopped here" : "Turned down after your step";
-  return "—";
+function decisionMeta(value: string): DecisionMeta {
+  return DECISION_META[value] ?? {
+    label: value.replace(/_/g, " "), icon: History,
+    chip: "bg-neutral-bg text-neutral", tile: "bg-neutral-bg text-neutral",
+    bar: "bg-neutral", on: "bg-neutral-bg text-neutral ring-neutral/40",
+  };
 }
 
-/** How long the document waited on this approver — never a bare decimal, and
- *  never a whole clause: it sits at the tail of a line that already runs long. */
-function turnaround(hours?: number | null): string | null {
-  if (hours === null || hours === undefined) return null;
-  const minutes = Math.round(hours * 60);
-  if (minutes < 1) return "decided at once";
-  if (minutes < 60) return `took ${minutes} min`;
-  if (hours < 48) return `took ${Math.round(hours)} h`;
-  return `took ${Math.round(hours / 24)} days`;
-}
-
-/** The lines this approver left out when they signed, if any.
- *
- *  An exclusion is part of the DECISION, not of the document that follows it: the
- *  indent screen shows the dropped line at zero and never says who took it out. So
- *  the ledger carries it, and a row that has one does not send the reader off to an
- *  indent to work it out for themselves.
- */
-const exclusionsOf = (row: ApprovalDecisionRow): ApprovalDecisionExclusion[] =>
-  row.excluded_items ?? [];
-
-const exclusionLabel = (line: ApprovalDecisionExclusion) =>
-  line.item_name ?? line.item_code ?? `Line #${line.line_id}`;
-
-/** Quantities come off the wire as numbers; drop a trailing `.000` so a countable
- *  item reads as 10 rather than 10.000. Same shape the consolidation screen uses. */
-const formatQty = (value: number) =>
-  Number.isFinite(value) ? String(Number(value.toFixed(3))) : "—";
-
-/** The chip that says something was left out. Same words and same warn tint as the
- *  Excluded column on the consolidation screen — one exclusion, one look. */
-function ExcludedChip({ count }: { count: number }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-warn-bg px-2.5 py-1 text-xs font-bold text-warn">
-      <MinusCircle className="h-3.5 w-3.5" />
-      {count} item{count === 1 ? "" : "s"} excluded
-    </span>
-  );
-}
-
-/** The buttons that stand in for the decision dropdown. Same values, all visible. */
-const DECISION_FILTERS: Array<{ value: string; label: string; icon: LucideIcon }> = [
-  { value: "", label: "All", icon: History },
-  { value: "APPROVED", label: "Approved", icon: CheckCircle2 },
-  { value: "RETURNED", label: "Sent back", icon: Undo2 },
-  { value: "REJECTED", label: "Rejected", icon: XCircle },
+/** The outcome filter. "All" wears the brand; the other three wear the outcome they
+ *  select, taken from the table above so a chip's label cannot drift from a badge. */
+const decisionOptions: Array<{ value: string; label: string; icon: LucideIcon; on: string }> = [
+  { value: "", label: "All", icon: History, on: "bg-brand-050 text-brand ring-brand/40" },
+  ...(["APPROVED", "RETURNED", "REJECTED"] as const).map((key) => ({
+    value: key as string,
+    label: DECISION_META[key].label,
+    icon: DECISION_META[key].icon,
+    on: DECISION_META[key].on,
+  })),
 ];
 
-/** `21 Aug 2026` split into its parts, so the date can be drawn as a calendar chip.
- *  Read off the shared IST formatter — the clock is never re-implemented here. */
-function dayParts(value?: string | null) {
-  const [day, month] = fmtDate(value, "").split(" ");
-  return day && month ? { day, month } : null;
-}
+const kindOptions: Array<{ value: IndentKind; label: string }> = [
+  { value: "ALL", label: "All indents" },
+  { value: "REGULAR", label: "Regular" },
+  { value: "MONTHLY", label: "Monthly/Consolidation" },
+];
+
+const typeLabel = (row: ApprovalDecisionRow) =>
+  row.indent_type === "MONTHLY" ? "Monthly/Consolidation" : "Regular";
+
+/** Where the row goes, said on the button.
+ *
+ *  One press on the Consolidation screen signs a whole month, and every indent in
+ *  it writes its own row here — six on the live database, nine hundred at the scale
+ *  this was sized for — so a monthly page of this list is the same decision over
+ *  and over. Each of those rows opens the CYCLE ledger, which is the roll-up of all
+ *  of them; saying "View decision" on it promised one document and delivered the
+ *  month, which reads as the wrong page having loaded. */
+const openLabel = (row: ApprovalDecisionRow) =>
+  row.indent_type === "MONTHLY" ? "View cycle" : "View decision";
 
 function exportExcel(rows: ApprovalDecisionRow[]) {
   const sheet = XLSX.utils.json_to_sheet(rows.map((row) => ({
     "Decision date": row.decision_at ? new Date(row.decision_at).toLocaleString() : "",
-    "Document type": row.doc_type,
-    "Document number": row.doc_no ?? `#${row.doc_id}`,
+    "Indent number": row.doc_no ?? `#${row.doc_id}`,
+    Type: row.indent_type === "MONTHLY" ? "Monthly/Consolidation" : "Regular",
     "Approval stage": row.stage_name ?? `Stage ${row.stage_sequence}`,
     Decision: row.decision,
     Comments: row.comments ?? "",
     Requester: row.requester ?? "",
     "Workflow status": row.workflow_status,
-    Excluded: (row.excluded_items ?? [])
-      .map((line) => `${exclusionLabel(line)} (${formatQty(line.requested_quantity)}${
-        line.uom_code ? ` ${line.uom_code}` : ""})`)
-      .join("; "),
   })));
   const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, sheet, "My Decisions");
-  XLSX.writeFile(workbook, "my-approval-decisions.xlsx");
+  XLSX.utils.book_append_sheet(workbook, sheet, "Indent Decisions");
+  XLSX.writeFile(workbook, "my-indent-decisions.xlsx");
 }
 
-/** The date, drawn the way a desk calendar draws it, on a rail coloured by the
- *  decision — so the shape of a month's work is readable down the left edge. */
-function WhenCell({ row }: { row: ApprovalDecisionRow }) {
-  const parts = dayParts(row.decision_at);
+/** The view switch — one of three, so it reads as a switch and not as a filter. */
+function Segment<T extends string>({
+  value, options, onChange, ariaLabel,
+}: {
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+  ariaLabel: string;
+}) {
   return (
-    <div className="flex items-center gap-3">
-      <span
-        aria-hidden="true"
-        className={`h-11 w-1 shrink-0 rounded-full ${decisionMeta(row.decision).rail}`}
-      />
-      <span className="flex h-11 w-11 shrink-0 flex-col items-center justify-center rounded-xl border border-line bg-content2">
-        {parts ? (
-          <>
-            <span className="tabular font-display text-[15px] font-bold leading-none text-ink">
-              {parts.day}
-            </span>
-            <span className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-              {parts.month}
-            </span>
-          </>
-        ) : (
-          <span className="text-muted">—</span>
-        )}
-      </span>
-      <div className="min-w-0">
-        <p className="text-sm font-semibold text-ink">{fmtTime(row.decision_at)}</p>
-        <p className="text-xs text-muted">{fmtRelative(row.decision_at)}</p>
-      </div>
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="inline-flex w-full flex-wrap gap-1 rounded-full border border-line bg-content2 p-1 sm:w-auto"
+    >
+      {options.map((option) => {
+        const active = value === option.value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(option.value)}
+            className={`min-h-10 flex-1 whitespace-nowrap rounded-full px-3.5 text-sm font-semibold transition-colors sm:flex-none ${
+              active
+                ? "bg-content1 text-ink shadow-sm ring-1 ring-line"
+                : "text-muted hover:text-ink"
+            }`}
+          >
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-/** Which document it was — the number, and what that number means. */
-function DocumentCell({ row }: { row: ApprovalDecisionRow }) {
-  const { icon: Icon, tint } = family(row.doc_type);
+/** The outcome filter, each chip wearing the colour of the outcome it selects. */
+function OutcomeChips({
+  value, onChange, ariaLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+}) {
   return (
-    <div className="flex items-start gap-3">
-      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tint}`}>
+    <div role="group" aria-label={ariaLabel} className="flex flex-wrap gap-1.5">
+      {decisionOptions.map((option) => {
+        const Icon = option.icon;
+        const active = value === option.value;
+        return (
+          <button
+            key={option.value || "ALL"}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(option.value)}
+            className={`inline-flex min-h-10 items-center gap-1.5 rounded-full px-3.5 text-sm font-semibold ring-1 transition ${
+              active
+                ? `${option.on} shadow-sm`
+                : "bg-content1 text-muted ring-line hover:bg-content2 hover:text-ink"
+            }`}
+          >
+            <Icon className="h-4 w-4" />
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function HeaderDeck({
+  search, setSearch, decidedCount, kind, setKind, decision, setDecision,
+}: {
+  search: string;
+  setSearch: (value: string) => void;
+  decidedCount: number;
+  kind: IndentKind;
+  setKind: (value: IndentKind) => void;
+  decision: string;
+  setDecision: (value: string) => void;
+}) {
+  return (
+    <Card className="mb-4 overflow-hidden">
+      <div className="flex flex-wrap items-center gap-3 p-4">
+        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-brand-050 text-brand">
+          <FileSearch className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="font-display text-[15px] font-bold text-ink">Approver decision workspace</p>
+          <p className="text-xs text-muted">
+            Indents you approved, reduced, denied, or returned for correction.
+          </p>
+        </div>
+        <div className="flex items-baseline gap-2 rounded-xl bg-content2 px-3.5 py-2">
+          <span className="tabular font-display text-2xl font-bold leading-none text-ink">
+            {decidedCount}
+          </span>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+            Decided
+          </span>
+        </div>
+      </div>
+
+      <div className="h-px bg-line" />
+
+      <div className="space-y-3 p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-[240px] flex-1">
+            <Input
+              aria-label="Search indent decisions"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search indent number, requester, stage, note"
+            />
+          </div>
+          <Segment<IndentKind>
+            ariaLabel="Indent type"
+            value={kind}
+            onChange={setKind}
+            options={kindOptions}
+          />
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <OutcomeChips ariaLabel="Decision result" value={decision} onChange={setDecision} />
+          <p className="flex items-center gap-1.5 text-xs text-muted">
+            <Search className="h-3.5 w-3.5" />
+            Use search with the type and decision filters for large indent histories.
+          </p>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function DecisionBadge({ value }: { value: string }) {
+  const meta = decisionMeta(value);
+  const Icon = meta.icon;
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-bold ${meta.chip}`}>
+      <Icon className="h-3.5 w-3.5" />
+      {meta.label}
+    </span>
+  );
+}
+
+/** The indent, with its outcome as a tile so a page of history scans on colour. */
+function IndentCell({ row }: { row: ApprovalDecisionRow }) {
+  const meta = decisionMeta(row.decision);
+  const Icon = meta.icon;
+  return (
+    <div className="flex items-center gap-3">
+      <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${meta.tile}`}>
         <Icon className="h-4 w-4" />
       </span>
       <div className="min-w-0">
-        <p className="mono text-[13px] font-semibold text-ink">
-          {row.doc_no ?? `#${row.doc_id}`}
-        </p>
-        <p className="truncate text-xs text-muted">
-          {docLabel(row.doc_type)}
-          {row.requester ? ` · raised by ${row.requester}` : ""}
+        <p className="mono truncate text-sm font-bold text-ink">{row.doc_no ?? `#${row.doc_id}`}</p>
+        <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
+          <span className="rounded border border-line bg-content2 px-1.5 py-px font-semibold text-body">
+            {typeLabel(row)}
+          </span>
+          {row.requester ? `raised by ${row.requester}` : null}
         </p>
       </div>
     </div>
   );
 }
 
-/** The stamp: what this approver did, at which step, and how quickly.
- *
- *  One word, not a sentence. "You approved this" wrapped onto two lines in every
- *  row of the table and only repeated the column heading, which already says
- *  what you did — so the heading carries the voice and the chip carries the verb.
- */
-function DecisionCell({ row }: { row: ApprovalDecisionRow }) {
-  const meta = decisionMeta(row.decision);
-  const Icon = meta.icon;
-  const took = turnaround(row.duration_hours);
-  const stage = row.stage_name ?? `Stage ${row.stage_sequence}`;
-  const excluded = exclusionsOf(row);
+function WhenCell({ value }: { value?: string | null }) {
   return (
-    <div className="space-y-1.5">
-      <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-bold ${meta.chip}`}>
-        <Icon className="h-3.5 w-3.5" />
-        {meta.label}
-      </span>
-      <p className="line-clamp-2 text-xs text-muted" title={stage}>
-        as {stage}{took ? ` · ${took}` : ""}
-      </p>
-      {excluded.length > 0 && <ExcludedChip count={excluded.length} />}
+    <div className="leading-tight">
+      <p className="text-sm font-medium text-ink">{fmtDate(value)}</p>
+      <p className="text-xs text-muted">{fmtTime(value)}</p>
     </div>
   );
 }
 
-/** What was left out, item by item — the panel behind a row that excluded something.
- *  Deliberately a list and nothing else: the ledger is a record, and every action on
- *  these items belongs to the document, not to the decision that is already signed. */
-function ExclusionList({ lines }: { lines: ApprovalDecisionExclusion[] }) {
+function DecidedRows({
+  rows, loading, onOpen,
+}: {
+  rows: ApprovalDecisionRow[];
+  loading: boolean;
+  onOpen: (row: ApprovalDecisionRow) => void;
+}) {
+  const columns: Column<ApprovalDecisionRow>[] = [
+    { key: "indent", header: "Indent", render: (row) => <IndentCell row={row} /> },
+    {
+      key: "decision", header: "Your decision", render: (row) => <DecisionBadge value={row.decision} />,
+    },
+    {
+      key: "stage", header: "Stage", hideOnNarrow: true, render: (row) => (
+        <span className="inline-flex items-center rounded-md border border-line bg-content2 px-2 py-1 text-xs font-semibold text-body">
+          {row.stage_name ?? `Stage ${row.stage_sequence}`}
+        </span>
+      ),
+    },
+    {
+      key: "status", header: "Current status", render: (row) => <StatusPill status={row.workflow_status} />,
+    },
+    {
+      key: "when", header: "When", hideOnNarrow: true, render: (row) => <WhenCell value={row.decision_at} />,
+    },
+    {
+      key: "action", header: "", className: "w-[150px] text-right", render: (row) => (
+        <Button variant="ghost" onClick={() => onOpen(row)}>
+          {openLabel(row)} <ChevronRight className="h-4 w-4" />
+        </Button>
+      ),
+    },
+  ];
   return (
-    <ul className="divide-y divide-line rounded-xl border border-line">
-      {lines.map((line) => (
-        <li key={line.line_id} className="flex items-start justify-between gap-3 p-3">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-ink">{exclusionLabel(line)}</p>
-            {line.item_code && <p className="mono text-xs text-muted">{line.item_code}</p>}
-          </div>
-          <div className="shrink-0 text-right">
-            <p className="tabular text-sm font-semibold text-warn">
-              {formatQty(line.requested_quantity)}{line.uom_code ? ` ${line.uom_code}` : ""}
-            </p>
-            <p className="text-xs text-muted">left out</p>
-          </div>
-        </li>
-      ))}
-    </ul>
+    <ResponsiveList
+      data={rows}
+      loading={loading}
+      keyOf={(row) => row.id}
+      columns={columns}
+      onRowClick={onOpen}
+      empty="You have not decided any indent approvals yet."
+      renderCard={(row) => <DecisionCard row={row} onOpen={() => onOpen(row)} />}
+    />
   );
 }
 
-/** The note, quoted the way a margin note is quoted — a rule down the side, not
- *  a glyph. An empty one is a dash: "No note left" on two rows in three is a
- *  sentence the eye has to read before it can skip it. */
-function NoteCell({ row }: { row: ApprovalDecisionRow }) {
-  if (!row.comments) return <span className="text-muted">—</span>;
+/** The phone card. Same colour language and the same order of facts as the row. */
+function DecisionCard({ row, onOpen }: { row: ApprovalDecisionRow; onOpen: () => void }) {
+  const meta = decisionMeta(row.decision);
   return (
-    <p
-      className="line-clamp-2 border-l-2 border-line pl-2.5 text-sm italic text-body"
-      title={row.comments}
-    >
-      {row.comments}
-    </p>
-  );
-}
-
-/** Where the document stands — the status, then what it means for YOUR decision. */
-function OutcomeCell({ row }: { row: ApprovalDecisionRow }) {
-  return (
-    <div className="space-y-1.5">
-      <StatusPill status={row.workflow_status} />
-      <p className="text-xs text-muted">{aftermath(row.decision, row.workflow_status)}</p>
+    <div className="relative space-y-3 pl-3">
+      <span aria-hidden="true" className={`absolute left-0 top-0 h-full w-1 rounded-full ${meta.bar}`} />
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="mono text-sm font-bold text-ink">{row.doc_no ?? `#${row.doc_id}`}</p>
+          <p className="text-xs text-muted">
+            {typeLabel(row)}
+            {row.requester ? ` - raised by ${row.requester}` : ""}
+          </p>
+        </div>
+        <DecisionBadge value={row.decision} />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPill status={row.workflow_status} />
+        <span className="rounded-md border border-line bg-content2 px-2 py-1 text-xs font-semibold text-body">
+          {row.stage_name ?? `Stage ${row.stage_sequence}`}
+        </span>
+      </div>
+      <WhenCell value={row.decision_at} />
+      <Button variant="soft" onClick={onOpen}>
+        {openLabel(row)} <ChevronRight className="h-4 w-4" />
+      </Button>
     </div>
   );
 }
@@ -321,232 +378,65 @@ export function MyDecisionsPage() {
   const nav = useNavigate();
   const [search, setSearch] = useState("");
   const [decision, setDecision] = useState("");
+  const [kind, setKind] = useState<IndentKind>("ALL");
   const [page, setPage] = useState(1);
   const size = 20;
-  const query = useQuery({ queryKey: ["approvals", "decisions", page, size, search, decision], queryFn: () => approvalsApi.decisions(page, size, { search: search.trim(), decision }) });
-  useEffect(() => setPage(1), [decision, search]);
-  const rows = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return (query.data?.items ?? []).filter((row) => (!decision || row.decision === decision)
-      && (!term || [row.doc_no, row.requester, row.comments, row.doc_type]
-        .some((value) => String(value ?? "").toLowerCase().includes(term))));
-  }, [decision, query.data?.items, search]);
-  // A row that left something out opens its own panel rather than the document: the
-  // question being asked of this screen is "what did I exclude", and the indent shows
-  // the dropped line as a zero with nothing to say who zeroed it. Every other row is
-  // unchanged — straight to the document, as before.
-  const [detail, setDetail] = useState<ApprovalDecisionRow | null>(null);
-  const openDocument = (row: ApprovalDecisionRow) => nav(approvalDecisionDocumentPath(row));
-  const openDecision = (row: ApprovalDecisionRow) => {
-    if (exclusionsOf(row).length > 0) setDetail(row);
-    else openDocument(row);
-  };
-  const filtered = Boolean(decision || search.trim());
-  const total = query.data?.total ?? 0;
 
-  const columns: Column<ApprovalDecisionRow>[] = [
-    {
-      key: "date", header: "When", className: "w-[210px] align-middle",
-      render: (row) => <WhenCell row={row} />,
-    },
-    {
-      key: "document", header: "Document", className: "w-[250px] align-middle",
-      render: (row) => <DocumentCell row={row} />,
-    },
-    {
-      key: "decision", header: "What you did", className: "w-[230px] align-middle",
-      render: (row) => <DecisionCell row={row} />,
-    },
-    {
-      key: "comments", header: "Your note", hideOnNarrow: true,
-      className: "align-middle",
-      render: (row) => <NoteCell row={row} />,
-    },
-    {
-      key: "status", header: "Where it stands", className: "w-[190px] align-middle",
-      render: (row) => <OutcomeCell row={row} />,
-    },
-    {
-      key: "action", header: "", className: "w-[150px] text-right align-middle",
-      render: (row) => (
-        <Button variant="ghost" onClick={() => openDecision(row)}>
-          {exclusionsOf(row).length > 0 ? "View excluded" : "View details"}
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      ),
-    },
-  ];
+  const decided = useQuery({
+    queryKey: ["approvals", "my-decisions", "decided", page, size, search, decision],
+    queryFn: () => approvalsApi.decisions(page, size, {
+      search: search.trim(), decision, doc_type: "INDENT",
+    }),
+  });
 
-  return <>
-    <PageHeader
-      eyebrow="Approvals"
-      title="My Decisions"
-      actions={<div className="flex gap-2">
-        <Button variant="ghost" onClick={() => nav("/approvals?view=reports")}><BarChart3 className="h-4 w-4" /> Reports</Button>
-        <Button className={TONE_BLUE} variant="ghost" disabled={!rows.length} onClick={() => exportExcel(rows)}><Download className="h-4 w-4" /> Export Excel</Button>
-      </div>}
-    />
+  useEffect(() => setPage(1), [decision, search, kind]);
 
-    {/* The deck: what this page is, how many rows are in it, and the two ways to
-      * narrow it. One card rather than a sentence, a card and a dropdown — the
-      * count and the filters are answers to the same question. */}
-    <Card className="mb-4 p-4 sm:p-5">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand-050 text-brand">
-            <History className="h-5 w-5" />
-          </span>
-          <div>
-            <p className="font-display text-[15px] font-bold text-ink">Your decision ledger</p>
-            <p className="text-xs text-muted">
-              Every approval you have signed, kept permanently. Nothing here can be changed.
-            </p>
-          </div>
-        </div>
-        <div className="text-right">
-          <p className="tabular font-display text-[26px] font-bold leading-none text-ink">{total}</p>
-          <p className="mt-1 text-[11px] font-semibold uppercase tracking-wider text-muted">
-            {filtered ? "matching" : "on record"}
-          </p>
-        </div>
-      </div>
+  const decidedRows = useMemo(() => {
+    const rows = decided.data?.items ?? [];
+    return rows.filter((row) => (
+      kind === "ALL" || row.indent_type === kind
+    ));
+  }, [decided.data?.items, kind]);
 
-      <div className="my-4 h-px bg-line" />
+  const openDecided = (row: ApprovalDecisionRow) => nav(approvalDecisionLedgerPath(row));
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-        <Input
-          aria-label="Search decisions"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search by document number, who raised it, or your note"
-        />
-        {/* A dropdown hid three of the four choices behind a click. Four buttons
-          * show every answer at once, which is the whole filter for somebody who
-          * does not know that RETURNED is the word to go looking for. */}
-        <div role="group" aria-label="Filter by decision" className="flex flex-wrap gap-1 rounded-xl border border-line bg-content2 p-1">
-          {DECISION_FILTERS.map((option) => {
-            const Icon = option.icon;
-            const active = decision === option.value;
-            return (
-              <button
-                key={option.value || "ALL"}
-                type="button"
-                aria-pressed={active}
-                onClick={() => setDecision(option.value)}
-                className={`inline-flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-semibold transition-colors lg:flex-none ${
-                  active ? "bg-content1 text-brand shadow-sm" : "text-muted hover:text-ink"
-                }`}
-              >
-                <Icon className="h-4 w-4" />
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </Card>
-
-    <ErrorBanner error={query.error} />
-
-    {!query.error && <ResponsiveList
-      data={rows}
-      loading={query.isLoading}
-      keyOf={(row) => row.id}
-      columns={columns}
-      onRowClick={openDecision}
-      empty={filtered
-        ? "No decision matches what you are looking for. Clear the search, or choose All."
-        : "You have not made an approval decision yet. Once you approve something, it is recorded here for good."}
-      renderCard={(row) => {
-        const meta = decisionMeta(row.decision);
-        const Icon = meta.icon;
-        const { icon: DocIcon, tint } = family(row.doc_type);
-        const took = turnaround(row.duration_hours);
-        const excluded = exclusionsOf(row);
-        return (
-          <div className="space-y-3">
-            <div className="flex items-start gap-3">
-              <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tint}`}>
-                <DocIcon className="h-4 w-4" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="mono text-[13px] font-semibold text-ink">{row.doc_no ?? `#${row.doc_id}`}</p>
-                <p className="truncate text-xs text-muted">
-                  {docLabel(row.doc_type)}
-                  {row.requester ? ` · raised by ${row.requester}` : ""}
-                </p>
-              </div>
-            </div>
-            <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-bold ${meta.chip}`}>
-              <Icon className="h-3.5 w-3.5" />
-              {meta.label}
-            </span>
-            <p className="text-xs text-muted">
-              as {row.stage_name ?? `Stage ${row.stage_sequence}`}
-              {took ? ` · ${took}` : ""}
-            </p>
-            {excluded.length > 0 && <ExcludedChip count={excluded.length} />}
-            {row.comments && (
-              <p className="border-l-2 border-line pl-2.5 text-sm italic text-body">
-                {row.comments}
-              </p>
-            )}
-            <div className="flex items-center justify-between gap-2 border-t border-line pt-3">
-              <div>
-                <p className="text-sm font-medium text-body">
-                  {aftermath(row.decision, row.workflow_status)}
-                </p>
-                <p className="text-xs text-muted">{fmtDate(row.decision_at)} · {fmtTime(row.decision_at)}</p>
-              </div>
-              <StatusPill status={row.workflow_status} />
-            </div>
-            <Button variant="soft" onClick={() => openDecision(row)}>
-              {excluded.length > 0 ? "View excluded" : "View details"}
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-        );
-      }}
-    />}
-
-    {!query.error && <ApprovalPager page={page} size={size} total={total} onPage={setPage} />}
-
-    {/* What was excluded on this decision. The document is still one press away —
-      * the panel answers the question first rather than instead. */}
-    <Modal
-      isOpen={Boolean(detail)}
-      onClose={() => setDetail(null)}
-      size="lg"
-      scrollBehavior="inside"
-      classNames={{ base: "rounded-2xl border border-line/70" }}
-    >
-      <ModalContent>
-        <ModalHeader className="flex flex-col items-start gap-1 pb-2">
-          <span className="mono text-[13px] font-semibold text-ink">
-            {detail?.doc_no ?? (detail ? `#${detail.doc_id}` : "")}
-          </span>
-          <span className="text-xs font-normal text-muted">
-            {detail ? docLabel(detail.doc_type) : ""}
-            {detail?.requester ? ` · raised by ${detail.requester}` : ""}
-          </span>
-        </ModalHeader>
-        <ModalBody className="pt-0">
-          <p className="text-[13px] leading-5 text-muted">
-            You approved this on {fmtDate(detail?.decision_at)} and left the following
-            out of it. The rest of the document went on at the quantities you signed.
-          </p>
-          {detail && <ExclusionList lines={exclusionsOf(detail)} />}
-        </ModalBody>
-        <ModalFooter className="pt-2">
-          <Button variant="subtle" onClick={() => setDetail(null)}>Close</Button>
+  return (
+    <>
+      <PageHeader
+        eyebrow="Approvals"
+        title="My Decisions"
+        actions={
           <Button
-            variant="soft"
-            onClick={() => { const row = detail; setDetail(null); if (row) openDocument(row); }}
+            className={TONE_BLUE}
+            variant="ghost"
+            disabled={!decidedRows.length}
+            onClick={() => exportExcel(decidedRows)}
           >
-            Open document<ChevronRight className="h-4 w-4" />
+            <Download className="h-4 w-4" /> Export Excel
           </Button>
-        </ModalFooter>
-      </ModalContent>
-    </Modal>
-  </>;
+        }
+      />
+      <HeaderDeck
+        search={search}
+        setSearch={setSearch}
+        decidedCount={decided.data?.total ?? 0}
+        kind={kind}
+        setKind={setKind}
+        decision={decision}
+        setDecision={setDecision}
+      />
+      <ErrorBanner error={decided.error} />
+      {!decided.error && (
+        <DecidedRows rows={decidedRows} loading={decided.isLoading} onOpen={openDecided} />
+      )}
+      {!decided.error && (
+        <ApprovalPager
+          page={page}
+          size={size}
+          total={decided.data?.total ?? 0}
+          onPage={setPage}
+        />
+      )}
+    </>
+  );
 }
