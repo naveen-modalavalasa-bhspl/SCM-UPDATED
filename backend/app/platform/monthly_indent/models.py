@@ -14,9 +14,19 @@ class MonthlyIndentSetting(Base):
     id = pk()
     is_enabled = Column(Boolean, nullable=False, default=True, server_default="1")
     approval_flow_enabled = Column(Boolean, nullable=False, default=False, server_default="0")
+    #: Which month the window OPENS in, counted from the current month.
     cycle_month_offset = Column(Integer, nullable=False, default=0, server_default="0")
     start_day = Column(Integer, nullable=False, default=1, server_default="1")
+    #: How many months after the opening month the window CLOSES in. 0 is the same
+    #: month; 1 makes "1st of this month to the 31st of next" sayable, which is the
+    #: whole reason the column exists — `end_day < start_day` could only ever express
+    #: a window one month long.
+    end_month_offset = Column(Integer, nullable=False, default=0, server_default="0")
     end_day = Column(Integer, nullable=False, default=31, server_default="31")
+    #: Which month the collected indents are FOR, counted from the opening month.
+    #: Purely what the cycle is CALLED — it moves no date, so a two-month collection
+    #: for October is one setting, not a window shoved into the future.
+    serves_month_offset = Column(Integer, nullable=False, default=0, server_default="0")
     timezone = Column(String(80), nullable=False, default="Asia/Kolkata")
     scheduler_enabled = Column(Boolean, nullable=False, default=True, server_default="1")
     scheduler_interval_minutes = Column(Integer, nullable=False, default=30, server_default="30")

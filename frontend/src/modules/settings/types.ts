@@ -75,15 +75,23 @@ export interface CodeFormatToken {
 export interface MonthlyIndentCycle {
   is_enabled: boolean;
   approval_flow_enabled: boolean;
+  /** Which month the window OPENS in, counted from the current month. */
   cycle_month_offset: number;
   start_day: number;
+  /** How many months after the opening month it CLOSES in — 0 is the same month. */
+  end_month_offset: number;
   end_day: number;
+  /** Which month the indents are FOR, counted from the opening month. Names the
+   *  cycle; moves no date. */
+  serves_month_offset: number;
   timezone: string;
   scheduler_enabled: boolean;
   scheduler_interval_minutes: number;
   cycle_start?: string;
   cycle_end?: string;
   cycle_key?: string;
+  serves_start?: string;
+  serves_month?: string;
 }
 
 export type MonthlyIndentCondition = "NOT_SUBMITTED" | "PENDING_APPROVAL" | "NOT_RESPONDED";

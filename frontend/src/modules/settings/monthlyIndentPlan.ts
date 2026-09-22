@@ -8,8 +8,8 @@
  *  had to remember.
  *
  *  So the dates are computed HERE, once, mirroring `platform/monthly_indent/service.py`
- *  exactly — `calculate_cycle` for the window, `_due_at` for where a reminder actually
- *  lands. The ribbon on screen is therefore not a picture of the settings: it is the
+ *  exactly — `calculate_cycle` for the window, `occurrence` for where a reminder
+ *  actually lands. The ribbon on screen is therefore not a picture of the settings: it is the
  *  schedule the server will run, drawn. If the two ever drift the ribbon lies, which is
  *  why every rule below names the server function it mirrors and why this file holds no
  *  React.
@@ -24,7 +24,7 @@ import type {
 } from "./types";
 
 /* ---------------------------------------------------------------------------
- * Dates. Mirrors service.calculate_cycle / service._due_at.
+ * Dates. Mirrors service.calculate_cycle / service.occurrence.
  * ------------------------------------------------------------------------- */
 
 export function daysInMonth(year: number, month: number): number {
@@ -46,51 +46,88 @@ export function clampedDay(year: number, month: number, day: number): Date {
 export interface CycleWindow {
   start: Date;
   end: Date;
-  /** The window runs past the end of its own month into the next one. */
+  /** The window runs past the end of the month it opens in. */
   wraps: boolean;
-  /** The months the ribbon has to draw: one, or two when it wraps. */
+  /** The months the ribbon has to draw — the opening month through the closing one. */
   months: { year: number; month: number }[];
+  /** The first of the month these indents are FOR. Not a date the window is measured
+   *  against: only what the cycle is called. */
+  serves: Date;
+}
+
+/** Which settings of the cycle describe the window. The rest of the row — the
+ *  timezone, the scheduler, the approval switch — moves no date. */
+export type CycleShape = Pick<MonthlyIndentCycle,
+  "cycle_month_offset" | "start_day" | "end_day"> &
+  Partial<Pick<MonthlyIndentCycle, "end_month_offset" | "serves_month_offset">>;
+
+/** How many months after the opening month the window closes in. Mirrors
+ *  `service.cycle_span_months`.
+ *
+ *  `end_month_offset` states it. Zero keeps the one shorthand that existed before
+ *  that field did — a closing day EARLIER than the opening day means the next month
+ *  — so a cycle saved as 26 -> 5 still draws the window it always drew.
+ */
+export function cycleSpanMonths(cycle: CycleShape): number {
+  if (cycle.end_month_offset) return cycle.end_month_offset;
+  return cycle.end_day < cycle.start_day ? 1 : 0;
 }
 
 /** The window the server would resolve from these settings, today.
  *
- *  `end_day < start_day` means the window rolls into the following month — a cycle
- *  that opens on the 21st and closes on the 20th is eleven months of the year a
- *  two-month span, and drawing it inside one month would put the close before the
- *  open. That is the whole reason `months` is a list.
+ *  Each end is two decisions — a day, and which month that day is in — so a cycle may
+ *  run from one day to just over a year, and `months` is however many the band
+ *  crosses. Drawing a multi-month window inside one month would put the close before
+ *  the open, which is the whole reason `months` is a list.
  */
-export function cycleWindow(
-  cycle: Pick<MonthlyIndentCycle, "cycle_month_offset" | "start_day" | "end_day">,
-  today: Date = new Date(),
-): CycleWindow {
+export function cycleWindow(cycle: CycleShape, today: Date = new Date()): CycleWindow {
   const anchor = addMonths(today.getFullYear(), today.getMonth(), cycle.cycle_month_offset || 0);
   const start = clampedDay(anchor.year, anchor.month, cycle.start_day);
-  const wraps = cycle.end_day < cycle.start_day;
-  const endAnchor = wraps ? addMonths(anchor.year, anchor.month, 1) : anchor;
+  const span = cycleSpanMonths(cycle);
+  const endAnchor = addMonths(anchor.year, anchor.month, span);
   const end = clampedDay(endAnchor.year, endAnchor.month, cycle.end_day);
-  const months = wraps ? [anchor, endAnchor] : [anchor];
-  return { start, end, wraps, months };
+  const months = Array.from({ length: span + 1 },
+                            (_, index) => addMonths(anchor.year, anchor.month, index));
+  const serves = addMonths(anchor.year, anchor.month, cycle.serves_month_offset || 0);
+  return {
+    start, end, wraps: span > 0, months,
+    serves: new Date(serves.year, serves.month, 1),
+  };
 }
 
-/** Where a day-of-month setting actually fires — mirrors `_due_at`.
+/** Where a day-of-month setting actually fires — mirrors `service.occurrence`.
  *
- *  The server always reads the day against the window's FIRST month and then clamps
- *  the result into the window, so a reminder set for a day the window does not cover
- *  does not simply not run: it runs on the nearest edge. The ribbon draws it there,
- *  because a pin sitting outside the band would say "this never fires", which is not
- *  what happens.
+ *  A window that spans months carries the same day number more than once, so the
+ *  FIRST occurrence inside the window wins. A day the window never reaches is still
+ *  pulled to the nearest edge rather than dropped, and the ribbon draws it there:
+ *  a pin sitting outside the band would say "this never fires", which is not what
+ *  happens.
  */
 export function dueDate(window: CycleWindow, day: number): Date {
-  const target = clampedDay(window.start.getFullYear(), window.start.getMonth(), day);
-  if (target < window.start) return window.start;
-  if (target > window.end) return window.end;
-  return target;
+  for (const { year, month } of window.months) {
+    const candidate = clampedDay(year, month, day);
+    if (candidate >= window.start && candidate <= window.end) return candidate;
+  }
+  const first = clampedDay(window.start.getFullYear(), window.start.getMonth(), day);
+  return first < window.start ? window.start : window.end;
 }
 
-/** True when the day was moved to fire somewhere other than where it was typed. */
+/** True when the day was moved to fire somewhere other than where it was typed —
+ *  i.e. no month of the window carries it. */
 export function isDayOutsideWindow(window: CycleWindow, day: number): boolean {
-  const target = clampedDay(window.start.getFullYear(), window.start.getMonth(), day);
-  return target < window.start || target > window.end;
+  return !window.months.some(({ year, month }) => {
+    const candidate = clampedDay(year, month, day);
+    return candidate >= window.start && candidate <= window.end;
+  });
+}
+
+/** How many whole months `date` sits after the given month. Negative before it.
+ *
+ *  Tapping a day on the ribbon has to set a day AND a month offset — without the
+ *  second, "close the collection here" on a day in the band's second month silently
+ *  moved the close into the first one. */
+export function monthsAfter(year: number, month: number, date: Date): number {
+  return (date.getFullYear() - year) * 12 + (date.getMonth() - month);
 }
 
 export const dateKey = (date: Date) =>
@@ -110,9 +147,12 @@ export function shortDate(date: Date): string {
   return `${date.getDate()} ${MONTH_NAMES[date.getMonth()].slice(0, 3)}`;
 }
 
-/** "21 September" — for the one place a sentence carries a single date. */
-export function longDate(date: Date): string {
-  return `${date.getDate()} ${MONTH_NAMES[date.getMonth()]}`;
+/** "21 September" — for the one place a sentence carries a single date. The year is
+ *  spelled only when it has to be: a window may now run from December into January,
+ *  and "1 December to 31 January" leaves which January open to guessing. */
+export function longDate(date: Date, withYear = false): string {
+  const year = withYear ? ` ${date.getFullYear()}` : "";
+  return `${date.getDate()} ${MONTH_NAMES[date.getMonth()]}${year}`;
 }
 
 /** "10:00" (or "10:00:00" off the wire) read as "10:00 am". Twelve-hour, because a
@@ -242,7 +282,7 @@ export interface AgendaItem {
  *  which answers "what is configured".
  */
 export function buildAgenda(
-  cycle: Pick<MonthlyIndentCycle, "cycle_month_offset" | "start_day" | "end_day">,
+  cycle: CycleShape,
   rules: MonthlyIndentRule[],
   today: Date = new Date(),
 ): { window: CycleWindow; items: AgendaItem[] } {

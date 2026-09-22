@@ -233,6 +233,26 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
   // stop it was taken at. Read through `attachmentBase`, so a package photo counts.
   const anyPhoto = allAttachments.some(
     (file) => attachmentBase(file.doc_category) === PHOTO);
+  /**
+   * Every filed photo, indexed by the indent LINE it is a picture of.
+   *
+   * Keyed on the line and not on (line, package) on purpose, and it is the same rule
+   * `indents.service.acknowledge_receipt` counts by: one item split across two
+   * cartons is one item, and demanding a second shot of it when the second carton is
+   * opened teaches a storekeeper that the second shot is a formality. A photo filed
+   * against the load or against a carton is not in here at all — that is the whole
+   * point of the change, and `scopeItemId` is what tells them apart.
+   */
+  const photosByLine = useMemo(() => {
+    const index = new Map<number, ReceiptAttachment[]>();
+    allAttachments.forEach((file) => {
+      if (attachmentBase(file.doc_category) !== PHOTO) return;
+      const lineId = scopeItemId(attachmentScope(file.doc_category));
+      if (lineId === null) return;
+      index.set(lineId, [...(index.get(lineId) ?? []), file]);
+    });
+    return index;
+  }, [allAttachments]);
   const anythingToConfirm = row.lines.some((line) => receivable(line) > 0);
   const waiting = row.lines.reduce((sum, line) => sum + receivable(line), 0);
   const nothingSentYet = row.lines.every((line) => line.dispatched_quantity <= 0);
@@ -245,7 +265,13 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
     };
   }, [row.lines, received]);
   const entered = receivingSummary.quantity > 0;
-  const ready = entered && anyPhoto;
+  /** The lines being confirmed that still have no picture of themselves. This is the
+   *  client half of the server's rule, so the button and the save agree about why. */
+  const unphotographed = useMemo(
+    () => [...receivingSummary.byLine.keys()].filter((id) => !photosByLine.has(id)),
+    [receivingSummary, photosByLine],
+  );
+  const ready = entered && anyPhoto && unphotographed.length === 0;
 
   const consignments = useMemo(
     () => receiptConsignments(row, tracking.data),
@@ -268,7 +294,12 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
       (line) => Number(line.package_quantity ?? receivable(line)) > 0);
     const done = lines.filter(
       (line) => receivedNumber(received[line.receipt_key]) > 0).length;
-    return { total: lines.length, done };
+    // How many of those same lines have a picture of themselves. Counted over the
+    // ITEMS in the carton rather than over the photos filed against it: two shots of
+    // one cable and none of the other is not "2 of 2 photographed".
+    const photographed = lines.filter(
+      (line) => photosByLine.has(line.indent_item_id)).length;
+    return { total: lines.length, done, photographed };
   };
 
   /**
@@ -287,7 +318,11 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
     if (target.kind === "gate") {
       return [{
         done: hasPhoto,
-        label: "Photograph the consignment as it was received",
+        // "Recommended" is said out loud because this one no longer BLOCKS: the
+        // rule that does moved onto the items, where a dispute actually lives. A
+        // step that reads exactly like a required one and is not is the reason
+        // somebody stops believing any of them.
+        label: "Photograph the consignment as it was received (recommended)",
       }];
     }
     if (target.kind === "package") {
@@ -304,12 +339,26 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
             ? "Enter how many arrived"
             : `Enter how many arrived, for all ${counted.total} items`,
         },
-        { done: hasPhoto, label: "Photograph this package" },
+        {
+          // ITEM-WISE, and the count is in the label: a grey circle beside
+          // "Photograph every item" on a carton of eleven says a photo is missing
+          // and never which one, which is the whole reason the strip on each row
+          // carries its own state as well.
+          done: counted.photographed === counted.total,
+          label: counted.total === 1
+            ? "Photograph the item"
+            : `Photograph every item (${counted.photographed} of ${counted.total})`,
+        },
       ];
     }
     return [
       { done: entered, label: "Count at least one item" },
-      { done: anyPhoto, label: "Attach at least one photo" },
+      {
+        done: entered && unphotographed.length === 0,
+        label: unphotographed.length > 0
+          ? `Photograph every item you are confirming (${unphotographed.length} still without one)`
+          : "Photograph every item you are confirming",
+      },
     ];
   };
 
@@ -332,7 +381,16 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
     ? null
     : !entered
       ? "Enter how many arrived before you can acknowledge"
-      : "Attach at least one photo before you can acknowledge";
+      : unphotographed.length > 0
+        // Named, not counted. "1 item still needs a photo" on a delivery of eleven
+        // sends somebody back through every carton to find out which.
+        ? `Photograph ${sentenceList(unphotographed
+          .slice(0, 3)
+          .map((id) => row.lines.find((line) => line.indent_item_id === id))
+          .map((line, index) => line?.item_name ?? line?.item_code ?? `item ${index + 1}`))}`
+          + (unphotographed.length > 3 ? ` and ${unphotographed.length - 3} more` : "")
+          + " before you can acknowledge"
+        : "Attach at least one photo before you can acknowledge";
 
   return (
     <div className="space-y-4">
@@ -359,7 +417,7 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
         </div>
         <p className="mt-1.5 text-sm leading-relaxed text-body">
           {anythingToConfirm
-            ? `${qty(waiting)} still to be received. Nothing is recorded until you sign at the last step.`
+            ? `${qty(waiting)} still to be received. Count each item and take one photo of it — the quantity does not change that. Nothing is recorded until you sign at the last step.`
             : nothingSentYet
               ? "Nothing has been sent to you yet, so there is nothing to count."
               : "Everything sent to you has already been acknowledged."}
@@ -399,13 +457,14 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
             const target = stops.find(
               (item) => item.kind === "package" && item.pack?.key === pack.key);
             const counted = countedFor(pack);
-            const files = target ? proofFor(target) : [];
             return {
               done: target ? stopDone(target) : false,
               countedDone: counted.done,
               countedTotal: counted.total,
-              photos: files.filter(
-                (file) => attachmentBase(file.doc_category) === PHOTO).length,
+              // ITEMS photographed, not photos filed. The card sits beside "3 of 3
+              // counted" and has to be the same kind of number, or "4 photos" over
+              // three items reads as finished when one of them has none.
+              photographed: counted.photographed,
             };
           }}
         />
@@ -424,9 +483,17 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
           received={received}
           counted={countedFor(stop.pack)}
           pickedSerials={pickedSerials}
+          photosByLine={photosByLine}
           uploadPending={upload.isPending}
           removePending={remove.isPending}
           onUpload={uploadFile(stop.scope)}
+          // The item's own shot, filed against the LINE and the carton it was taken
+          // in. `uploadFile` files against the stop; this one files against the row.
+          onUploadItem={(line, file) => upload.mutate({
+            file,
+            category: scopedCategory(
+              PHOTO, itemProofScope(line.indent_item_id, stop.pack?.key ?? "")),
+          })}
           onView={(files, index) => setViewing({ files, index })}
           onDelete={(id) => remove.mutate(id)}
           onChange={(key, value) =>
@@ -448,6 +515,9 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
           summary={receivingSummary}
           anythingToConfirm={anythingToConfirm}
           nothingSentYet={nothingSentYet}
+          photosByLine={photosByLine}
+          indentId={row.indent_id}
+          onView={(files, index) => setViewing({ files, index })}
         />
       )}
 
@@ -852,6 +922,50 @@ function attachmentScope(value?: string | null) {
 function proofScope(prefix: "C" | "P", key: string) {
   const slug = key.toUpperCase().replace(/[^A-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   return `${prefix}-${slug}`.slice(0, 30);
+}
+
+/* ---------------------------------------------------------------------------
+ * A photo of one ITEM.
+ *
+ * ADDED 2026-09-21. A picture of the sealed pallet proves a delivery happened. It
+ * proves nothing about what was in it, and every dispute three weeks later is about
+ * a particular line — the wrong model of handset, one crushed box of four. So each
+ * item being confirmed carries its own shot, and the scope names the indent LINE.
+ *
+ * ONE photo per item, never one per unit. Sixty cables are photographed once;
+ * a rule that asked for sixty is a rule satisfied with sixty pictures of one bundle.
+ *
+ * The item id comes FIRST and the package second (`I-<line>-<package>`), because the
+ * server counts by line and the screen files by carton. `indents.service`'s
+ * `ack_category_item` reads the same shape, and matches on the id alone — so an item
+ * split across two packages, photographed while the first was open, is not demanded
+ * again when the second is opened.
+ * ------------------------------------------------------------------------ */
+
+/** The scope for one line's own photo, taken while `packKey`'s carton was open. */
+function itemProofScope(indentItemId: number, packKey: string) {
+  // Hashed, not sliced. The package key is `dispatch-4-package-9` today and a
+  // vendor's own package_no string when the warehouse never numbered one; a slice
+  // lets two long ones collide, which files one carton's proof against another.
+  // The scope must also stay inside `ACK_SCOPE_MAX` (30) on the server.
+  return `I-${indentItemId}-${shortHash(packKey)}`;
+}
+
+/** Which line a filed photo is OF, or null for a shot of the load or a carton. */
+function scopeItemId(scope: string): number | null {
+  const match = /^I-(\d+)(?:-|$)/.exec(scope);
+  return match ? Number(match[1]) : null;
+}
+
+/** Six hex characters, deterministic, from any key. FNV-1a — no dependency, and the
+ *  only property needed is that two different cartons do not land on one string. */
+function shortHash(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).toUpperCase().padStart(8, "0").slice(0, 6);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1669,8 +1783,8 @@ function dueNote(leg?: ReceiptLeg) {
 
 function PackageStop({
   pack, stepNo, stepTotal, indentId, tasks, position, total, files, received, counted,
-  pickedSerials, uploadPending, removePending, onUpload, onView, onDelete, onChange,
-  onPickSerials,
+  pickedSerials, photosByLine, uploadPending, removePending, onUpload, onUploadItem,
+  onView, onDelete, onChange, onPickSerials,
 }: {
   pack: ReceiptPackage;
   stepNo: number;
@@ -1681,11 +1795,13 @@ function PackageStop({
   total: number;
   files: ReceiptAttachment[];
   received: Record<string, string>;
-  counted: { total: number; done: number };
+  counted: { total: number; done: number; photographed: number };
   pickedSerials: Record<string, string[]>;
+  photosByLine: Map<number, ReceiptAttachment[]>;
   uploadPending: boolean;
   removePending: boolean;
   onUpload: (file: File, base: string) => void;
+  onUploadItem: (line: ReceiptPackageLine, file: File) => void;
   onView: (files: ReceiptAttachment[], index: number) => void;
   onDelete: (attachmentId: number) => void;
   onChange: (receiptKey: string, value: string) => void;
@@ -1696,10 +1812,10 @@ function PackageStop({
       stepNo={stepNo}
       stepTotal={stepTotal}
       kicker={`Package ${position} of ${total}`}
-      headline="Open it and count what is inside"
-      note="Count the units yourself. Enter what is actually in the package, even if it is fewer than the paperwork says."
+      headline="Open it, count it, photograph each item"
+      note="Count the units yourself and enter what is actually there, even if it is fewer than the paperwork says. One photo of each item is enough — the quantity does not change that."
       code={pack.no}
-      meta={`${counted.done} of ${counted.total} counted`}
+      meta={`${counted.done} of ${counted.total} counted · ${counted.photographed} of ${counted.total} photographed`}
       tasks={tasks}
     >
       {/* The carton, before its contents: what to pick up and open. */}
@@ -1718,14 +1834,22 @@ function PackageStop({
               onChange={(value) => onChange(line.receipt_key, value)}
               selectedSerials={pickedSerials[line.receipt_key] ?? []}
               onPickSerials={() => onPickSerials(line)}
+              indentId={indentId}
+              photos={photosByLine.get(line.indent_item_id) ?? []}
+              uploadPending={uploadPending}
+              removePending={removePending}
+              onUploadPhoto={(file) => onUploadItem(line, file)}
+              onViewPhoto={onView}
+              onDeletePhoto={onDelete}
             />
           ))}
         </ul>
       </section>
 
       <ProofPanel
-        title={`Photos of ${pack.no}`}
-        note="Kept against this package alone, so a question about this one is answered with this one's picture."
+        title={`Photos of the carton — ${pack.no}`}
+        note="Optional. The item photos above are what is required; this is the outside of the box, the seal, the label — what a claim against a carrier is argued from."
+        optional
         indentId={indentId}
         files={files}
         uploadPending={uploadPending}
@@ -1744,7 +1868,10 @@ interface PackageProgress {
   done: boolean;
   countedDone: number;
   countedTotal: number;
-  photos: number;
+  /** How many ITEMS in this carton have a picture of themselves — not how many
+   *  photos are filed. Four photos over three items, one of them untouched, is not
+   *  the carton being finished. */
+  photographed: number;
 }
 
 /**
@@ -1773,8 +1900,8 @@ function PackageCard({ pack, label, progress, onOpen }: {
   progress: PackageProgress;
   onOpen: () => void;
 }) {
-  const { done, countedDone, countedTotal, photos } = progress;
-  const started = countedDone > 0 || photos > 0;
+  const { done, countedDone, countedTotal, photographed } = progress;
+  const started = countedDone > 0 || photographed > 0;
   const weight = packageWeight(pack);
   const size = packageSize(pack);
   const barcode = (pack.detail?.barcode ?? "").trim();
@@ -1870,8 +1997,7 @@ function PackageCard({ pack, label, progress, onOpen }: {
                 ? "Counted and photographed"
                 : countedTotal === 0
                   ? "Nothing here is waiting on you"
-                  : `${countedDone} of ${countedTotal} counted · ${
-                    photos > 0 ? `${photos} photo${photos === 1 ? "" : "s"}` : "no photo yet"}`}
+                  : `${countedDone} of ${countedTotal} counted · ${photographed} of ${countedTotal} photographed`}
             </span>
             <span className="inline-flex shrink-0 items-center gap-1 font-semibold text-brand">
               {started || done ? "Open" : "Open and count"}
@@ -2008,12 +2134,23 @@ function Handling({ icon: Icon, tone, label }: {
  * The stepper stays: often a phone, often one hand, and 44px of button beats a
  * keyboard at a pallet. The box is still there for 37 of something.
  */
-function PackageLineRow({ line, value, onChange, selectedSerials, onPickSerials }: {
+function PackageLineRow({
+  line, value, onChange, selectedSerials, onPickSerials, indentId, photos,
+  uploadPending, removePending, onUploadPhoto, onViewPhoto, onDeletePhoto,
+}: {
   line: ReceiptPackageLine;
   value: string;
   onChange: (value: string) => void;
   selectedSerials: string[];
   onPickSerials: () => void;
+  indentId: number;
+  /** This line's own pictures, wherever in the delivery they were taken. */
+  photos: ReceiptAttachment[];
+  uploadPending: boolean;
+  removePending: boolean;
+  onUploadPhoto: (file: File) => void;
+  onViewPhoto: (files: ReceiptAttachment[], index: number) => void;
+  onDeletePhoto: (attachmentId: number) => void;
 }) {
   const max = Number(line.package_quantity ?? receivable(line));
   const serials = line.serial_numbers?.filter(Boolean) ?? [];
@@ -2069,6 +2206,19 @@ function PackageLineRow({ line, value, onChange, selectedSerials, onPickSerials 
         </p>
       )}
 
+      {max > 0 && (
+        <ItemProofStrip
+          label={label}
+          indentId={indentId}
+          photos={photos}
+          uploadPending={uploadPending}
+          removePending={removePending}
+          onUpload={onUploadPhoto}
+          onView={onViewPhoto}
+          onDelete={onDeletePhoto}
+        />
+      )}
+
       {serials.length > 0 && (
         <SerialPanel
           heading={(tracking ?? TRACKING.SERIAL).heading}
@@ -2083,6 +2233,116 @@ function PackageLineRow({ line, value, onChange, selectedSerials, onPickSerials 
         />
       )}
     </li>
+  );
+}
+
+/**
+ * The picture of THIS item, as it came out of the carton.
+ *
+ * ADDED 2026-09-21, and it is the one thing on the row that is required rather than
+ * merely useful. The delivery already carried proof — a photo of the sealed load,
+ * and one of each carton — and neither answers the question every dispute is
+ * actually about: was the thing inside the right thing, and what state was it in.
+ * Three items in one box used to share a single photograph, so an argument about the
+ * second of them was settled with a picture of the first.
+ *
+ * **One photo is enough, and the quantity is irrelevant to that.** Sixty cables are
+ * photographed once. A rule that scaled with the quantity would be satisfied by
+ * sixty pictures of the same bundle, which is sixty times the effort for no more
+ * evidence — and the storekeeper who learns that lesson stops looking at what they
+ * are photographing. More than one is allowed and never asked for: the second shot
+ * is the damaged corner.
+ *
+ * **It is a strip, not a panel.** The row already carries a stepper, a status
+ * sentence, three reference figures and often a serial panel; a fourth framed box
+ * would bury the one control that now blocks the sign-off. So: a single line of
+ * state, the shots themselves at thumbnail size, and one dashed tile to add
+ * another. The strip is amber until it has a picture and green once it does —
+ * the same two colours the count above it uses, for the same reason.
+ *
+ * The thumbnails are `PhotoThumb`, which fetches its own bytes down the indent's
+ * gated route. Nothing here is a public URL and there is no thumbnail service.
+ */
+function ItemProofStrip({
+  label, indentId, photos, uploadPending, removePending, onUpload, onView, onDelete,
+}: {
+  label: string;
+  indentId: number;
+  photos: ReceiptAttachment[];
+  uploadPending: boolean;
+  removePending: boolean;
+  onUpload: (file: File) => void;
+  onView: (files: ReceiptAttachment[], index: number) => void;
+  onDelete: (attachmentId: number) => void;
+}) {
+  const has = photos.length > 0;
+  return (
+    <div className={`mt-3.5 rounded-2xl border px-3.5 py-3 transition-colors ${
+      has ? "border-ok/35 bg-ok-bg/40" : "border-warn/45 bg-warn-bg/35"
+    }`}>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${
+            has ? "bg-ok text-white" : "bg-content1 text-warn"
+          }`}>
+            {has
+              ? <Check className="h-4 w-4" strokeWidth={3} aria-hidden />
+              : <Camera className="h-4 w-4" aria-hidden />}
+          </span>
+          <div className="min-w-0">
+            <div className={`text-sm font-semibold ${has ? "text-ok" : "text-warn"}`}>
+              {has
+                ? `Photographed${photos.length > 1 ? ` · ${photos.length} shots` : ""}`
+                : "Photo of this item required"}
+            </div>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+              {has
+                ? "Filed against this item alone. Add another if something is damaged."
+                : "One picture is enough, whatever the quantity. It is filed against this item, not the carton."}
+            </p>
+          </div>
+        </div>
+
+        {/* The press, on the right of its own sentence and at tap size. `capture`
+            opens the rear camera on a phone, which is where a delivery is actually
+            confirmed; a laptop ignores the attribute and opens the file picker. */}
+        <label className={`inline-flex h-11 shrink-0 cursor-pointer items-center gap-2 rounded-xl px-3.5 text-xs font-semibold transition ${
+          has
+            ? "border border-line bg-content1 text-body hover:border-brand hover:text-brand"
+            : "bg-warn text-white hover:brightness-95"
+        } ${uploadPending ? "pointer-events-none opacity-60" : ""}`}>
+          <Camera className="h-4 w-4" aria-hidden />
+          {uploadPending ? "Uploading…" : has ? "Add another" : "Take a photo"}
+          <input
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            aria-label={`Photograph ${label}`}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) onUpload(file);
+            }}
+          />
+        </label>
+      </div>
+
+      {has && (
+        <ul className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-6">
+          {photos.map((file) => (
+            <PhotoThumb
+              key={file.id}
+              indentId={indentId}
+              file={file}
+              busy={removePending}
+              onView={() => onView(photos, photos.indexOf(file))}
+              onDelete={() => onDelete(file.id)}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -2266,7 +2526,7 @@ function QuantityStepper({ value, max, onChange, label }: {
 
 function ReviewStop({
   row, stepNo, stepTotal, tasks, stops, proofFor, isDone, onJump, summary,
-  anythingToConfirm, nothingSentYet,
+  anythingToConfirm, nothingSentYet, photosByLine, indentId, onView,
 }: {
   row: Acknowledgement;
   stepNo: number;
@@ -2279,6 +2539,11 @@ function ReviewStop({
   summary: { quantity: number; lines: number; byLine: Map<number, number> };
   anythingToConfirm: boolean;
   nothingSentYet: boolean;
+  /** Each line's own photographs, so the slip can say which lines are provable
+   *  before the press rather than leaving the server to refuse it afterwards. */
+  photosByLine: Map<number, ReceiptAttachment[]>;
+  indentId: number;
+  onView: (files: ReceiptAttachment[], index: number) => void;
 }) {
   const slip = row.lines.filter((line) => (summary.byLine.get(line.indent_item_id) ?? 0) > 0);
   const inProcess = row.lines.filter((line) =>
@@ -2311,24 +2576,48 @@ function ReviewStop({
         ) : (
           <>
             <ul className="mt-2 divide-y divide-line">
-              {slip.map((line) => (
-                <li key={line.indent_item_id} className="flex items-baseline gap-3 py-2.5">
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-ink">
-                      {line.item_name ?? line.item_code}
+              {slip.map((line) => {
+                const shots = photosByLine.get(line.indent_item_id) ?? [];
+                return (
+                  <li key={line.indent_item_id} className="flex items-center gap-3 py-2.5">
+                    {/* The picture itself, not a tick beside a name: the last look
+                        before signing is at what was actually photographed, and a
+                        tick never let anybody see that the wrong box was shot. */}
+                    {shots.length > 0 ? (
+                      <SlipPhoto
+                        indentId={indentId}
+                        file={shots[0]}
+                        label={line.item_name ?? line.item_code ?? "this item"}
+                        onView={() => onView(shots, 0)}
+                      />
+                    ) : (
+                      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-dashed border-warn/50 bg-warn-bg/40 text-warn"
+                            title="No photo of this item yet">
+                        <Camera className="h-4 w-4" aria-hidden />
+                      </span>
+                    )}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm text-ink">
+                        {line.item_name ?? line.item_code}
+                      </span>
+                      <span className="block truncate font-mono text-[11px] text-muted">
+                        {line.item_code}
+                      </span>
+                      {shots.length === 0 && (
+                        <span className="mt-0.5 block text-[11px] font-medium text-warn">
+                          Needs a photo before you can sign
+                        </span>
+                      )}
                     </span>
-                    <span className="block truncate font-mono text-[11px] text-muted">
-                      {line.item_code}
+                    <span className="shrink-0 font-mono text-sm font-semibold tabular-nums text-ink">
+                      {qty(summary.byLine.get(line.indent_item_id) ?? 0)}
+                      <span className="ml-1 text-[11px] font-normal text-muted">
+                        {line.uom_code ?? ""}
+                      </span>
                     </span>
-                  </span>
-                  <span className="shrink-0 font-mono text-sm font-semibold tabular-nums text-ink">
-                    {qty(summary.byLine.get(line.indent_item_id) ?? 0)}
-                    <span className="ml-1 text-[11px] font-normal text-muted">
-                      {line.uom_code ?? ""}
-                    </span>
-                  </span>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
             <div className="mt-3 flex items-baseline justify-between border-t border-line pt-3">
               <span className="text-sm font-semibold text-body">Total</span>
@@ -2341,9 +2630,10 @@ function ReviewStop({
       </section>
 
       <section>
-        <SectionLabel>Consignment and package photos</SectionLabel>
+        <SectionLabel>Consignment and carton photos</SectionLabel>
         <p className="mt-1 text-xs text-muted">
-          At least one is needed to sign. Press a step to go back and add it.
+          Extra evidence, on top of the item photos above. Press a step to go back
+          and add one.
         </p>
         <ul className="mt-2 divide-y divide-line">
           {evidence.map((stop) => {
@@ -2415,10 +2705,14 @@ function ReviewStop({
  */
 function ProofPanel({
   title, note, indentId, files, uploadPending, removePending, onUpload, onView,
-  onDelete, shots,
+  onDelete, shots, optional = false,
 }: {
   title: string;
   note: string;
+  /** Nothing here blocks the sign-off. Says so on the tile rather than leaving
+   *  "Needed before you can sign" on a panel that is not, which is the sentence
+   *  that sends somebody hunting for a rule that no longer exists. */
+  optional?: boolean;
   /** Whose files these are — the thumbnails fetch their bytes off this indent's own
    *  gated route, never a URL of their own (the same rule the shared viewer keeps). */
   indentId: number;
@@ -2480,18 +2774,21 @@ function ProofPanel({
               />
             ))}
           </ul>
-          {/* Two different facts, and only the first of them is a rule: one photo
-              lets you sign, and the rest are what an argument with a carrier is
-              settled with three weeks later. */}
+          {/* What is filed here, and honestly what it is FOR. None of it blocks the
+              sign-off any more — that rule moved onto the items, where a dispute
+              actually lives — so the sentence no longer claims a gate that is not
+              here. "Needed before you can sign" on a panel that is not needed is
+              what sends somebody hunting for a rule nobody can find. */}
           <p className="mt-2.5 text-[11px] leading-relaxed">
-            <span className={`font-semibold ${photos.length > 0 ? "text-ok" : "text-warn"}`}>
+            <span className={`font-semibold ${photos.length > 0 ? "text-ok" : "text-body"}`}>
               {photos.length > 0
                 ? `${photos.length} photo${photos.length === 1 ? "" : "s"} filed`
-                : "No photo yet — one is needed before you can sign"}
+                : "No photo of the load yet"}
             </span>
             <span className="text-muted">
-              {` · ${shotsDone} of ${shots.length} suggested shots taken. Any one photo`}
-              {" lets you sign; the others are what a claim is settled with."}
+              {` · ${shotsDone} of ${shots.length} suggested shots taken. The items`}
+              {" themselves are photographed at the steps after this one; these are"}
+              {" what a claim against the carrier is argued from."}
             </span>
           </p>
           <div className="mt-3 sm:max-w-[340px]">{billTile}</div>
@@ -2503,7 +2800,7 @@ function ProofPanel({
             label={photos.length > 0 ? "Add another photo" : "Take a photo"}
             caption={photos.length > 0
               ? `${photos.length} attached`
-              : "Needed before you can sign"}
+              : optional ? "Optional" : "Needed before you can sign"}
             done={photos.length > 0}
             accept="image/*"
             category={PHOTO}
@@ -2563,20 +2860,17 @@ const isImage = (file: ReceiptAttachment) =>
  * step, and a step carries a handful; the alternative is a filename, which is what
  * this replaces.
  */
-function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
-  indentId: number;
-  file: ReceiptAttachment;
-  onView: () => void;
-  onDelete: () => void;
-  busy: boolean;
-}) {
+/** One filed attachment's bytes as an object URL, fetched down the indent's own
+ *  gated route. Shared by the tile and by the small slip thumbnail, so there is one
+ *  place that knows a receipt photo is not a public URL. */
+function useReceiptImage(indentId: number, fileId: number) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let dropped = false;
     let made = "";
-    indentApi.downloadReceiptAttachment(indentId, file.id)
+    indentApi.downloadReceiptAttachment(indentId, fileId)
       .then((blob) => {
         if (dropped) return;
         made = URL.createObjectURL(blob);
@@ -2587,7 +2881,43 @@ function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
       dropped = true;
       if (made) URL.revokeObjectURL(made);
     };
-  }, [indentId, file.id]);
+  }, [indentId, fileId]);
+
+  return { url, failed };
+}
+
+/** The picture just taken, at row size: no caption, no delete, one press to open.
+ *  Sits beside the item master's photo on the sign-off slip — what was ordered and
+ *  what turned up, drawn the same size so they can actually be compared. */
+function SlipPhoto({ indentId, file, label, onView }: {
+  indentId: number;
+  file: ReceiptAttachment;
+  label: string;
+  onView: () => void;
+}) {
+  const { url, failed } = useReceiptImage(indentId, file.id);
+  return (
+    <button
+      type="button"
+      onClick={onView}
+      aria-label={`Open the photo taken of ${label}`}
+      className="h-10 w-10 shrink-0 overflow-hidden rounded-lg border border-ok/40 bg-content2"
+    >
+      {url && !failed
+        ? <img src={url} alt={`Photo of ${label}`} className="h-full w-full object-cover" />
+        : <span className="block h-full w-full animate-pulse bg-content3" />}
+    </button>
+  );
+}
+
+function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
+  indentId: number;
+  file: ReceiptAttachment;
+  onView: () => void;
+  onDelete: () => void;
+  busy: boolean;
+}) {
+  const { url, failed } = useReceiptImage(indentId, file.id);
 
   const isBill = attachmentBase(file.doc_category) === BILL;
   // What it is a picture OF, where the shot was named on the way up. A file name is

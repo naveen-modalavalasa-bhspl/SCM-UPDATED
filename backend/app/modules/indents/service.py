@@ -1554,6 +1554,27 @@ def ack_category_scope(value: str | None) -> str:
     return parts[1] if len(parts) == 2 else ""
 
 
+#: A scope naming one LINE of the indent: `I-<indent_item_id>-<package>`.
+#:
+#: The item id comes FIRST and is the only part this side reads. What follows it is
+#: the package the picture was taken in, which matters to the screen — a photo of
+#: the cable in carton two is filed against carton two — and not at all to the rule
+#: below, which asks one question per line: is there a picture of this item.
+#:
+#: Deliberately not a second separator or a second column. `sys_attachments` has
+#: neither, adding one is a platform change for a fact only this screen has (rule 4),
+#: and a scope is already the established way this module says which pile a photo
+#: belongs to. The item id is parsed rather than string-matched so a photo taken in
+#: package one still counts as a photo of that item when package two is opened.
+_ACK_ITEM_SCOPE = re.compile(r"^I-(\d+)(?:-|$)")
+
+
+def ack_category_item(value: str | None) -> int | None:
+    """Which indent line a photo is OF, or None for a shot of the load or a carton."""
+    match = _ACK_ITEM_SCOPE.match(ack_category_scope(value))
+    return int(match.group(1)) if match else None
+
+
 def owed_quantity(item) -> Decimal:
     """What the requester is entitled to on this line.
 
@@ -1598,6 +1619,13 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
         # than trimmed: a silently shortened scope files the proof against a package
         # nobody can find again.
         raise ValidationError("That is not a package this delivery was sent in")
+    line_id = ack_category_item(doc_category)
+    if line_id is not None and line_id not in {item.id for item in indent.items}:
+        # Same rule one rung down. An item scope is what `acknowledge_receipt` counts
+        # the photos by, so a picture filed against a line of somebody else's indent
+        # is proof that can never be found again AND a line here that will read as
+        # unphotographed with no way to see why.
+        raise ValidationError("That is not an item on this indent")
     return await attachments.add_attachment(
         db, entity_type=ACK_ENTITY_TYPE, entity_id=indent.id,
         upload=upload, doc_category=doc_category, user=user)
@@ -1707,6 +1735,33 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
             "Attach a photo of the goods you received before acknowledging")
 
     by_id = {item.id: item for item in indent.items}
+
+    # ITEM-WISE PROOF (2026-09-21). One photo of the pallet is proof a delivery
+    # happened; it is not proof of what was in it. A dispute three weeks later is
+    # always about a particular line — the wrong model of handset, a crushed box of
+    # four — and the picture of the sealed load answers none of it.
+    #
+    # So every line being acknowledged needs a picture of ITSELF, and exactly one:
+    # the requirement is per LINE, never per unit. Somebody confirming sixty cables
+    # photographs the cables once, and a rule that asked for sixty photographs is a
+    # rule that gets satisfied by sixty pictures of the same bundle.
+    #
+    # Counted off the scope (`ack_category_item`), so a photo taken while carton one
+    # was open still counts when carton two is being opened — the same item split
+    # across two packages is one item, and being made to photograph it twice would
+    # teach the storekeeper that the second shot is a formality.
+    photographed = {ack_category_item(row.doc_category) for row in photos}
+    unproven = [
+        by_id[line_id] for line_id in lines
+        if line_id in by_id and line_id not in photographed
+    ]
+    if unproven:
+        named = ", ".join(item.item_name or item.item_code or f"line {item.id}"
+                          for item in unproven[:4])
+        more = len(unproven) - 4
+        raise ValidationError(
+            f"Take a photo of each item you are confirming. Still without one: "
+            f"{named}{f' and {more} more' if more > 0 else ''}.")
     before = {str(i.id): float(_d(i.received_quantity)) for i in indent.items}
     for line_id, quantity in lines.items():
         item = by_id.get(line_id)

@@ -452,6 +452,51 @@ own answers where the goods are and not how much of the line is there, and an in
 served in rounds — two of ten off the shelf, eight being bought in — is the common
 case, not the exception.
 
+### A receipt is proved ITEM by item, once each (2026-09-21)
+
+A photo of the sealed pallet proves a delivery happened and nothing about what was in
+it — and every dispute three weeks later is about one line: the wrong model of
+handset, one crushed box of four. One package holding three items collected a single
+photograph, so an argument about the second of them was answered with a picture of
+the first.
+
+So each line being acknowledged now needs a picture of ITSELF, and the rule is per
+LINE and never per unit: sixty cables are photographed once. A rule that scaled with
+the quantity would be satisfied by sixty pictures of one bundle — sixty times the
+effort for no more evidence, and the storekeeper who learns that lesson stops looking
+at what they are photographing. More than one is allowed and never asked for; the
+second shot is the damaged corner.
+
+The scope is `RECEIPT_PHOTO::I-<indent_item_id>-<packageHash>`, on `doc_category`
+beside the consignment (`C-`) and package (`P-`) scopes already there, for the same
+reason they are: `sys_attachments` is one flat table for every module with no column
+for it, and adding one is a platform change for a fact only this screen has (rule 4).
+The item id comes FIRST and is the only half the server reads
+(`service.ack_category_item`, anchored so `IMAGE-9` is never mistaken for line 9);
+the package half is the screen's, so the picture is filed against the carton it was
+taken in. **Matching on the id alone is load-bearing** — an item split across two
+packages is one item, and demanding a second shot when the second carton opens
+teaches a storekeeper that the second shot is a formality.
+
+`acknowledge_receipt` refuses a receipt whose lines are not all photographed and
+**names the ones that are not**; "1 item still needs a photo" on a delivery of eleven
+sends somebody back through every carton to find out which. `add_receipt_attachment`
+refuses an item scope naming a line that is not on this indent, for the same reason
+it refuses a malformed package scope: proof filed where nobody can find it again.
+
+What this replaced: **the package photo is no longer required** (`ProofPanel
+optional`) and the consignment photo says "(recommended)" out loud. Both are still
+there and still worth taking — they are what a claim against a carrier is argued from
+— but the gate moved onto the items, and a step that reads exactly like a required
+one and is not is the reason somebody stops believing any of them.
+
+On the screen it is `ItemProofStrip`, one per line in `PackageLineRow`: amber until
+there is a picture, green after, with the shots themselves at thumbnail size and one
+`capture="environment"` press that opens the rear camera on a phone. The sign-off
+slip draws each line's own photograph beside its quantity — the last look before
+signing is at what was actually photographed, and a tick beside a name never let
+anybody see that the wrong box had been shot.
+
 
 ### The outward leg (doc Phase D+E), under Logistics
 

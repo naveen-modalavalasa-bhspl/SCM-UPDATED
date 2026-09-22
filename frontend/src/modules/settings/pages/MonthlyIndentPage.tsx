@@ -44,7 +44,8 @@ import type { CustomLadderStep, FlowRung, StepKind } from "@/modules/admin/types
 import { monthlyIndentApi } from "../api";
 import type { MonthlyIndentCycle, MonthlyIndentLog, MonthlyIndentRule } from "../types";
 import {
-  CONDITION_CHIP, buildAgenda, dateKey, everyPhrase, longDate, prettyTime, shortDate,
+  CONDITION_CHIP, buildAgenda, dateKey, everyPhrase, longDate, monthName, monthsAfter,
+  prettyTime, shortDate,
 } from "../monthlyIndentPlan";
 import type { AgendaItem } from "../monthlyIndentPlan";
 import { MonthRibbon, type DayMark } from "../components/MonthRibbon";
@@ -54,11 +55,30 @@ import {
 
 const DOC_TYPE = "MONTHLY_INDENT";
 
-const WHICH_MONTH = [
-  { value: 0, label: "This month" },
-  { value: 1, label: "Next month" },
-  { value: 2, label: "The month after next" },
-];
+/** Thirteen months out, worded rather than numbered — and generated, so the three
+ *  dropdowns can never offer a month the server's `ge=0, le=12` would refuse. */
+function monthOffsets(zero: string, one: string, rest: (n: number) => string) {
+  return Array.from({ length: 13 }, (_, n) => ({
+    value: n, label: n === 0 ? zero : n === 1 ? one : rest(n),
+  }));
+}
+
+/** Which month the collection OPENS in. */
+const OPENS_IN = monthOffsets(
+  "This month", "Next month", (n) => `${n} months from now`);
+
+/** Which month it CLOSES in, counted from the opening month. This is the control
+ *  that makes "the 1st of this month to the 31st of next" sayable at all: before it
+ *  the only way past the opening month was to close on an earlier DAY than the one
+ *  it opened on, which caps a cycle at a single month. */
+const CLOSES_IN = monthOffsets(
+  "The same month", "The month after", (n) => `${n} months later`);
+
+/** Which month the collected indents are FOR. Names the cycle and moves no date —
+ *  collecting through September and October for November is one setting, not a
+ *  window pushed two months into the future. */
+const SERVES = monthOffsets(
+  "The month it opens in", "The month after that", (n) => `${n} months after it opens`);
 
 const TIMEZONES = ["Asia/Kolkata", "UTC", "Asia/Dubai", "Europe/London"]
   .map((value) => ({ value, label: value }));
@@ -94,16 +114,21 @@ function normalizeCycle(cycle: MonthlyIndentCycle): MonthlyIndentCycle {
     approval_flow_enabled: Boolean(cycle.approval_flow_enabled),
     cycle_month_offset: Number(cycle.cycle_month_offset ?? 0),
     start_day: Number(cycle.start_day ?? 1),
+    end_month_offset: Number(cycle.end_month_offset ?? 0),
     end_day: Number(cycle.end_day ?? 31),
+    serves_month_offset: Number(cycle.serves_month_offset ?? 0),
     scheduler_interval_minutes: Number(cycle.scheduler_interval_minutes ?? 30),
   };
 }
 
-/** The eight settings the cycle row actually stores. Compared field by field rather
- *  than by identity, because the draft is a fresh object on every keystroke and the
- *  save bar must appear only when something genuinely differs. */
+/** The settings the cycle row actually stores. Compared field by field rather than
+ *  by identity, because the draft is a fresh object on every keystroke and the save
+ *  bar must appear only when something genuinely differs. A field missing from this
+ *  list is a field that can be edited and never saved, with nothing on screen saying
+ *  so — so every new one belongs here the day it is added. */
 const CYCLE_FIELDS: (keyof MonthlyIndentCycle)[] = [
-  "is_enabled", "approval_flow_enabled", "cycle_month_offset", "start_day", "end_day",
+  "is_enabled", "approval_flow_enabled", "cycle_month_offset", "start_day",
+  "end_month_offset", "end_day", "serves_month_offset",
   "timezone", "scheduler_enabled", "scheduler_interval_minutes",
 ];
 
@@ -111,6 +136,13 @@ function cycleChanged(a: MonthlyIndentCycle | null, b: MonthlyIndentCycle | null
   if (!a || !b) return false;
   return CYCLE_FIELDS.some((field) => a[field] !== b[field]);
 }
+
+/** A month offset the server will accept. Tapping a day on a ribbon that draws
+ *  thirteen months can produce any number; `ge=0, le=12` is what `MonthlyIndentCycle`
+ *  permits, and a 422 on save is a worse answer than a clamp. */
+const clampOffset = (value: number) => Math.max(0, Math.min(12, value));
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const stepSignature = (steps: CustomLadderStep[]) => steps.map(stepKey).join("|");
 
@@ -205,10 +237,20 @@ export function MonthlyIndentPage() {
   const activeRules = rules.filter((rule) => rule.is_active);
 
   const { window: win, items: agenda } = useMemo(
-    () => buildAgenda(cycle ?? { cycle_month_offset: 0, start_day: 1, end_day: 31 },
+    () => buildAgenda(cycle ?? { cycle_month_offset: 0, start_day: 1,
+                                 end_month_offset: 0, end_day: 31 },
                       rules, today),
     [cycle, rules, today],
   );
+
+  /* Both ends of the band read plainly only while they share a year: a cycle that
+     opens in December and closes in January otherwise says "1 December to 31 January"
+     and leaves which January to the reader. */
+  const crossesYear = win.start.getFullYear() !== win.end.getFullYear();
+  const spanDays = Math.round(
+    (new Date(win.end.getFullYear(), win.end.getMonth(), win.end.getDate()).getTime()
+      - new Date(win.start.getFullYear(), win.start.getMonth(), win.start.getDate()).getTime())
+    / DAY_MS) + 1;
 
   const marks = useMemo(() => {
     const map = new Map<string, DayMark>();
@@ -371,8 +413,13 @@ export function MonthlyIndentPage() {
                 {cycle.is_enabled ? (
                   <>
                     Stores send their indent between{" "}
-                    <strong className="text-brand">{longDate(win.start)}</strong> and{" "}
-                    <strong className="text-brand">{longDate(win.end)}</strong>.
+                    <strong className="text-brand">{longDate(win.start, crossesYear)}</strong>
+                    {" "}and{" "}
+                    <strong className="text-brand">{longDate(win.end, crossesYear)}</strong>,
+                    {" "}for{" "}
+                    <strong className="text-brand">
+                      {monthName(win.serves.getFullYear(), win.serves.getMonth())}
+                    </strong>.
                   </>
                 ) : (
                   <>Monthly indent collection is switched off. Nothing is being sent.</>
@@ -428,8 +475,22 @@ export function MonthlyIndentPage() {
               items={selectedItems}
               isStart={dateKey(selectedDay) === dateKey(win.start)}
               isEnd={dateKey(selectedDay) === dateKey(win.end)}
-              onOpenHere={() => setCycle({ ...cycle, start_day: selectedDay.getDate() })}
-              onCloseHere={() => setCycle({ ...cycle, end_day: selectedDay.getDate() })}
+              /* A day carries a month, and so must the setting it writes. Setting
+                 the day alone moved a close tapped in the band's second month back
+                 into its first, silently, which is the one thing a ribbon you can
+                 tap must not do. */
+              onOpenHere={() => setCycle({
+                ...cycle,
+                start_day: selectedDay.getDate(),
+                cycle_month_offset: clampOffset(
+                  monthsAfter(today.getFullYear(), today.getMonth(), selectedDay)),
+              })}
+              onCloseHere={() => setCycle({
+                ...cycle,
+                end_day: selectedDay.getDate(),
+                end_month_offset: clampOffset(monthsAfter(
+                  win.start.getFullYear(), win.start.getMonth(), selectedDay)),
+              })}
               onAddReminder={() =>
                 openEditor(emptyReminder(selectedDay.getDate()), null)}
               onEdit={(rule) => openEditor(rule, rule.id)}
@@ -437,28 +498,68 @@ export function MonthlyIndentPage() {
             />
           )}
 
-          <div className="mt-5 grid gap-3 border-t border-line pt-4 sm:grid-cols-3">
+          {/* Each end of the window is a DAY and a MONTH, side by side. One day box
+              per end could only ever describe a window inside a single month — the
+              wrap onto the next was a side effect of closing on an earlier day than
+              it opened, which is not a thing anybody sets out to type. */}
+          <div className="mt-5 grid gap-3 border-t border-line pt-4 sm:grid-cols-2
+                          lg:grid-cols-4">
             <Field label="Collection opens on day">
               <Input type="number" min={1} max={31} value={cycle.start_day}
                      onChange={(event) => setCycle({
                        ...cycle, start_day: Number(event.target.value) })} />
             </Field>
-            <Field label="Collection closes on day"
-                   hint={win.wraps ? "Earlier than the opening day, so it runs into the next month."
-                     : undefined}>
-              <Input type="number" min={1} max={31} value={cycle.end_day}
-                     onChange={(event) => setCycle({
-                       ...cycle, end_day: Number(event.target.value) })} />
-            </Field>
-            <Field label="These indents are for"
-                   hint="Which month the stock is being asked for.">
+            <Field label="Opening month"
+                   hint={monthName(win.start.getFullYear(), win.start.getMonth())}>
               <Select
                 value={cycle.cycle_month_offset}
-                options={WHICH_MONTH}
+                options={OPENS_IN}
                 onChange={(value) => setCycle({
                   ...cycle, cycle_month_offset: Number(value) })}
               />
             </Field>
+            <Field label="Collection closes on day">
+              <Input type="number" min={1} max={31} value={cycle.end_day}
+                     onChange={(event) => setCycle({
+                       ...cycle, end_day: Number(event.target.value) })} />
+            </Field>
+            <Field label="Closing month"
+                   hint={monthName(win.end.getFullYear(), win.end.getMonth())
+                     + (cycle.end_month_offset === 0 && win.wraps
+                       ? " — the closing day is earlier than the opening one, so it "
+                         + "runs into the next month" : "")}>
+              <Select
+                value={cycle.end_month_offset}
+                options={CLOSES_IN}
+                onChange={(value) => setCycle({
+                  ...cycle, end_month_offset: Number(value) })}
+              />
+            </Field>
+          </div>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="These indents are for"
+                   hint={monthName(win.serves.getFullYear(), win.serves.getMonth())}>
+              <Select
+                value={cycle.serves_month_offset}
+                options={SERVES}
+                onChange={(value) => setCycle({
+                  ...cycle, serves_month_offset: Number(value) })}
+              />
+            </Field>
+            {/* The window is now long enough to be worth stating in one sentence —
+                a band crossing three months is not countable off the ribbon. */}
+            <p className="self-end text-sm leading-relaxed text-muted lg:col-span-3">
+              Collection runs <strong className="text-body">{spanDays}</strong>
+              {spanDays === 1 ? " day" : " days"}, from{" "}
+              <strong className="text-body">{longDate(win.start, crossesYear)}</strong> to{" "}
+              <strong className="text-body">{longDate(win.end, crossesYear)}</strong>, and
+              what it collects is the indent for{" "}
+              <strong className="text-body">
+                {monthName(win.serves.getFullYear(), win.serves.getMonth())}
+              </strong>. That is the month <code className="text-xs">{"{{month}}"}</code>{" "}
+              writes into every reminder.
+            </p>
           </div>
         </Card>
 

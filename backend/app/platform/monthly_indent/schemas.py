@@ -9,7 +9,9 @@ class MonthlyIndentCycle(BaseModel):
     approval_flow_enabled: bool = False
     cycle_month_offset: int = Field(default=0, ge=0, le=12)
     start_day: int = Field(default=1, ge=1, le=31)
+    end_month_offset: int = Field(default=0, ge=0, le=12)
     end_day: int = Field(default=31, ge=1, le=31)
+    serves_month_offset: int = Field(default=0, ge=0, le=12)
     timezone: str = "Asia/Kolkata"
     scheduler_enabled: bool = True
     scheduler_interval_minutes: int = Field(default=30, ge=5, le=1440)
@@ -19,6 +21,11 @@ class MonthlyIndentCycleOut(MonthlyIndentCycle):
     cycle_start: date
     cycle_end: date
     cycle_key: str
+    #: The first of the month the cycle is FOR, and that month written out. Served
+    #: rather than composed on screen, because it is what `{{month}}` renders into
+    #: every reminder and the two must not be able to disagree.
+    serves_start: date
+    serves_month: str
 
 
 class MonthlyIndentRuleIn(BaseModel):

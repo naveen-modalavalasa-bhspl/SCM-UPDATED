@@ -44,6 +44,9 @@ class CycleWindow:
     end: date
     key: str
     timezone: str
+    #: The first of the month these indents are FOR. Defaults to the opening month,
+    #: and is never a date the window is measured against — only what it is called.
+    serves: date
 
 
 @dataclass(frozen=True)
@@ -67,8 +70,25 @@ def _clamped_day(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, calendar.monthrange(year, month)[1]))
 
 
+def cycle_span_months(cycle: MonthlyIndentCycle) -> int:
+    """How many months after the opening month the window closes in.
+
+    `end_month_offset` states it outright. Zero keeps the one shorthand that existed
+    before the column did — a closing day EARLIER than the opening day means the next
+    month — so a cycle configured as 26 -> 5 still resolves to the window it always
+    resolved to, without anybody editing it.
+    """
+    if cycle.end_month_offset:
+        return cycle.end_month_offset
+    return 1 if cycle.end_day < cycle.start_day else 0
+
+
 def calculate_cycle(cycle: MonthlyIndentCycle, reference: datetime | None = None) -> CycleWindow:
     """Resolve the configured cycle using the company's timezone.
+
+    The window is two independent decisions — a day, and which month that day is in —
+    on each end, so it may be any length from one day to just over a year. "The 1st of
+    this month to the 31st of next" is `start_day=1, end_month_offset=1, end_day=31`.
 
     Days above the month's length are clamped, so an end day of 31 means "last day"
     for February, leap years included.
@@ -80,12 +100,13 @@ def calculate_cycle(cycle: MonthlyIndentCycle, reference: datetime | None = None
     local_now = local_now.astimezone(tz)
     anchor = _add_months(local_now.date().replace(day=1), cycle.cycle_month_offset)
     start = _clamped_day(anchor.year, anchor.month, cycle.start_day)
-    end_anchor = anchor if cycle.end_day >= cycle.start_day else _add_months(anchor, 1)
+    end_anchor = _add_months(anchor, cycle_span_months(cycle))
     end = _clamped_day(end_anchor.year, end_anchor.month, cycle.end_day)
     if end < start:
         raise ValidationError("Cycle end must be on or after cycle start")
+    serves = _add_months(anchor, cycle.serves_month_offset)
     return CycleWindow(start=start, end=end, key=f"{start.isoformat()}_{end.isoformat()}",
-                       timezone=cycle.timezone)
+                       timezone=cycle.timezone, serves=serves)
 
 
 def render_template(template: str, values: dict[str, object]) -> str:
@@ -110,7 +131,9 @@ async def get_cycle_settings(db: AsyncSession) -> MonthlyIndentCycle:
         approval_flow_enabled=row.approval_flow_enabled,
         cycle_month_offset=row.cycle_month_offset,
         start_day=row.start_day,
+        end_month_offset=row.end_month_offset,
         end_day=row.end_day,
+        serves_month_offset=row.serves_month_offset,
         timezone=row.timezone,
         scheduler_enabled=row.scheduler_enabled,
         scheduler_interval_minutes=row.scheduler_interval_minutes,
@@ -141,7 +164,9 @@ async def update_cycle_settings(db: AsyncSession, data: MonthlyIndentCycle, acto
 def _cycle_out(cycle: MonthlyIndentCycle) -> dict:
     window = calculate_cycle(cycle)
     return {**cycle.model_dump(), "cycle_start": window.start,
-            "cycle_end": window.end, "cycle_key": window.key}
+            "cycle_end": window.end, "cycle_key": window.key,
+            "serves_start": window.serves,
+            "serves_month": window.serves.strftime("%B %Y")}
 
 
 async def custom_approval_flow_enabled(db: AsyncSession) -> bool:
@@ -210,6 +235,15 @@ async def overview(db: AsyncSession) -> dict:
 
 
 async def _target_name(db: AsyncSession, target_type: str, ref_id: int | None) -> str | None:
+    # REPORTING_MANAGER is checked BEFORE the "no id, no name" guard, and is the one
+    # target that means something without one: the manager is found at send time by
+    # climbing the raiser's own reporting line, so there is no row to name here. The
+    # guard used to run first, which made its `ref_id is None` arm unreachable — and
+    # since REPORTING_MANAGER is the escalation the screen offers by default and sends
+    # with no id, every reminder that escalated to a manager was refused with
+    # "Escalation recipient could not be resolved".
+    if target_type == "REPORTING_MANAGER" and ref_id is None:
+        return "Reporting manager"
     if ref_id is None:
         return None
     if target_type == "HCM_ROLE":
@@ -228,7 +262,9 @@ async def _target_name(db: AsyncSession, target_type: str, ref_id: int | None) -
         row = await db.get(HcmEmployee, ref_id)
         return row.full_name if row else None
     if target_type == "REPORTING_MANAGER":
-        return "Reporting manager" if ref_id is None else await _target_name(db, "HCM_ROLE", ref_id)
+        # With an id it is "climb until you reach somebody of THIS rank", so the name
+        # to record is the rank's.
+        return await _target_name(db, "HCM_ROLE", ref_id)
     return None
 
 
@@ -465,13 +501,33 @@ async def escalation_recipients(db: AsyncSession, rule: MonthlyIndentNotificatio
     return []
 
 
+def occurrence(window: CycleWindow, day: int) -> date:
+    """The date inside the window that carries this day of the month.
+
+    A reminder is a day number, and a window that spans months carries that day
+    number more than once — so the FIRST occurrence inside the window wins. Reading
+    the day against the opening month alone (which is all this did while a window was
+    at most one month long) sent every reminder for a day before the opening one to
+    the opening day, so a two-month cycle could not be nudged in its second month at
+    all.
+
+    A day the window genuinely never reaches is still pulled to the nearest edge
+    rather than dropped: a reminder that does not run is indistinguishable on screen
+    from one nobody configured.
+    """
+    cursor = date(window.start.year, window.start.month, 1)
+    last = date(window.end.year, window.end.month, 1)
+    while cursor <= last:
+        candidate = _clamped_day(cursor.year, cursor.month, day)
+        if window.start <= candidate <= window.end:
+            return candidate
+        cursor = _add_months(cursor, 1)
+    first = _clamped_day(window.start.year, window.start.month, day)
+    return window.start if first < window.start else window.end
+
+
 def _due_at(window: CycleWindow, day: int, value: time) -> datetime:
-    target_date = _clamped_day(window.start.year, window.start.month, day)
-    if target_date < window.start:
-        target_date = window.start
-    if target_date > window.end:
-        target_date = window.end
-    return datetime.combine(target_date, value, ZoneInfo(window.timezone))
+    return datetime.combine(occurrence(window, day), value, ZoneInfo(window.timezone))
 
 
 def _is_due(window: CycleWindow, day: int | None, value: time | None,
@@ -489,7 +545,7 @@ def _values(candidate: Candidate, window: CycleWindow) -> dict[str, str]:
     return {
         "employee_name": candidate.employee_name,
         "role": candidate.role or "",
-        "month": window.start.strftime("%B %Y"),
+        "month": window.serves.strftime("%B %Y"),
         "cycle_start": window.start.isoformat(),
         "cycle_end": window.end.isoformat(),
         "pending_since": pending,
