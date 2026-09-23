@@ -25,6 +25,7 @@ import type {
   LocationOption,
   VolumeBudget,
   ItemLocationsOut,
+  StockReportScopes,
   ListParams,
   LocationOccupancy,
   Notification,
@@ -736,6 +737,58 @@ export const listBatches = (params: ListParams & { item_id?: number; expiring_da
 
 export const getItemLocations = ({ warehouse_id, item_id, location_id }: { warehouse_id: number; item_id?: number | null; location_id?: number | null }) =>
   get<ItemLocationsOut[]>(`${BASE}/stock-segregation/item-locations`, { warehouse_id, item_id, location_id });
+
+/* --------------------------------------- stock by location, as a download -- */
+
+/**
+ * What each of the two downloads would contain, BEFORE either is pulled.
+ *
+ * "The Floor 1 report" means two different files — the floor row itself, or the floor
+ * and every bay under it — and on a real building the first is usually empty. The
+ * counts are what make that visible, so they are fetched as soon as a location is
+ * picked rather than after somebody has opened a blank spreadsheet.
+ */
+export const stockReportScopes = (params: {
+  warehouse_id: number;
+  location_id?: number | null;
+  item_id?: number | null;
+}) => get<StockReportScopes>(`${BASE}/stock-segregation/report/scopes`, params);
+
+/** The file itself. Goes through the shared axios client so it carries the bearer
+ *  token — a plain <a href> would hit the endpoint unauthenticated and 401. */
+export const downloadStockReport = async (params: {
+  warehouse_id: number;
+  scope: "LOCATION" | "HIERARCHY";
+  location_id?: number | null;
+  item_id?: number | null;
+  format?: "xlsx" | "csv";
+}) => {
+  const response = await api.get<Blob>(`${BASE}/stock-segregation/report/export`, {
+    params: { format: "xlsx", ...params },
+    responseType: "blob",
+  });
+  // The server names the file — it knows the location, the scope and the timestamp,
+  // and a name invented here would drift from the header block inside the file.
+  const disposition = String(response.headers?.["content-disposition"] ?? "");
+  const named = /filename="?([^";]+)"?/.exec(disposition)?.[1];
+  return {
+    blob: response.data,
+    filename: named ?? `stock-report.${params.format ?? "xlsx"}`,
+  };
+};
+
+/** Hands a blob to the browser as a download. Kept here so no page has to know about
+ *  object URLs. */
+export const saveStockReport = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
 
 export interface ScanLine {
   item_code?: string | null;

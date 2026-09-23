@@ -3846,6 +3846,56 @@ class ItemLocationsOut(BaseModel):
     total_on_hand: float
     locations: list[ItemLocation]
 
+
+# --------------------------------------------------------------------------- #
+# Stock by storage location, as a download (`warehouse/stock_report.py`)
+# --------------------------------------------------------------------------- #
+
+class StockReportScopeOption(BaseModel):
+    """One of the two downloads, already counted.
+
+    Every string on it is composed by the service, so the button and the file it
+    produces cannot describe the same scope differently.
+    """
+    key: str                       #: LOCATION | HIERARCHY
+    title: str                     #: "Only F1 — Ground floor"
+    sentence: str                  #: the same line the file's header block prints
+    hint: str                      #: why you would pick this one, or must not
+    locations_in_scope: int        #: locations the scope covers, stock or no stock
+    locations: int                 #: of those, how many actually hold something
+    items: int
+    rows: int
+    total_qty: Decimal
+    is_empty: bool
+    #: True when this location has nothing inside it, so both scopes are one file.
+    same_as_other: bool
+    recommended: bool
+
+
+class StockReportScopes(BaseModel):
+    """`GET /stock-segregation/report/scopes` — what each download would contain.
+
+    Asked BEFORE anything is downloaded, because "the Floor 1 report" means two
+    different files and the counts are what make the difference visible.
+    """
+    warehouse_id: int
+    warehouse_name: str | None = None
+    location_id: int | None = None
+    location_code: str | None = None
+    location_name: str | None = None
+    location_label: str
+    location_kind: str | None = None
+    location_path: list[str] = Field(default_factory=list)
+    depth: int = 0
+    child_count: int = 0
+    descendant_count: int = 0
+    item_filter: int | None = None
+    #: The person only sees the floors they are assigned; another may pull more.
+    floor_restricted: bool = False
+    row_cap: int
+    options: list[StockReportScopeOption] = Field(default_factory=list)
+
+
 # Forward references: LocationOccupancy names CapacityGate/OccupancyLine and
 # PutawayRead names HandlingUnit, all declared after them.
 LocationOccupancy.model_rebuild()

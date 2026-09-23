@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -27,6 +27,7 @@ from app.modules.indents.schemas import FulfilmentStep as IndentFulfilmentStep
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
+from app.modules.warehouse import stock_report
 from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
@@ -1164,6 +1165,49 @@ async def item_locations(warehouse_id: int, item_id: int | None = None, location
     """Every location holding stock in this warehouse, optionally filtered by item or location."""
     return await inv_service.get_item_locations(
         db, warehouse_id=warehouse_id, item_id=item_id, location_id=location_id, user=user)
+
+
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/stock-segregation/report/scopes", response_model=s.StockReportScopes)
+async def stock_report_scopes(warehouse_id: int, location_id: int | None = None,
+                              item_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """What each of the two downloads would contain, counted before either is pulled."""
+    return await stock_report.report_scopes(
+        db, warehouse_id=warehouse_id, location_id=location_id, item_id=item_id,
+        user=user)
+
+
+@router.get("/stock-segregation/report/export")
+async def stock_report_export(warehouse_id: int, scope: str = stock_report.SCOPE_HIERARCHY,
+                              location_id: int | None = None,
+                              item_id: int | None = None, format: str = "xlsx",
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """The file. Excel by default — it is the only format that carries the scope
+    header, the styling and the per-location roll-up; `?format=csv` for a plain one."""
+    actor = getattr(user, "full_name", None)
+    args = dict(warehouse_id=warehouse_id, location_id=location_id, scope=scope,
+                item_id=item_id, actor=actor, user=user)
+    # `content_disposition` builds the header, never an f-string here: HTTP headers are
+    # latin-1 and this file's name carries an em dash, so the hand-built version raised
+    # UnicodeEncodeError inside `Response.__init__` and answered 500 with the workbook
+    # already built.
+    if format == "csv":
+        filename, text = await stock_report.export_csv(db, **args)
+        # The BOM is what makes Excel read a CSV as UTF-8 — without it the "›" in the
+        # location path opens as mojibake.
+        return Response(
+            content="﻿" + text, media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition":
+                     stock_report.content_disposition(filename)})
+    filename, body = await stock_report.export_xlsx(db, **args)
+    return Response(
+        content=body, media_type=XLSX_MEDIA,
+        headers={"Content-Disposition": stock_report.content_disposition(filename)})
 
 
 @router.get("/batches", response_model=Page[s.BatchRead])

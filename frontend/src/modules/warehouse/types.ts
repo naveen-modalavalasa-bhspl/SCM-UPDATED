@@ -2348,6 +2348,53 @@ export interface ItemLocationsOut {
   locations: ItemLocation[];
 }
 
+/* ------------------------------------------- stock by location, as a file -- */
+
+/**
+ * One of the two downloads offered for a storage location, already counted.
+ *
+ * Every string here is composed by `warehouse/stock_report.py` — the title, the
+ * sentence and the hint — so the button and the file it produces can never describe
+ * the same scope differently. The screen renders them; it words nothing itself.
+ */
+export interface StockReportScopeOption {
+  key: "LOCATION" | "HIERARCHY";
+  title: string;
+  sentence: string;
+  hint: string;
+  /** Locations the scope covers, whether or not they hold anything. */
+  locations_in_scope: number;
+  /** Of those, how many actually hold stock. */
+  locations: number;
+  items: number;
+  rows: number;
+  total_qty: number;
+  is_empty: boolean;
+  /** This location has nothing inside it, so both scopes are the same file. */
+  same_as_other: boolean;
+  recommended: boolean;
+}
+
+/** `GET /stock-segregation/report/scopes` — what each download would contain, asked
+ *  before either is pulled. */
+export interface StockReportScopes {
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  location_id?: number | null;
+  location_code?: string | null;
+  location_name?: string | null;
+  location_label: string;
+  location_kind?: string | null;
+  location_path: string[];
+  depth: number;
+  child_count: number;
+  descendant_count: number;
+  item_filter?: number | null;
+  floor_restricted: boolean;
+  row_cap: number;
+  options: StockReportScopeOption[];
+}
+
 
 /* ------------------------------------------------------------- supporting -- */
 
