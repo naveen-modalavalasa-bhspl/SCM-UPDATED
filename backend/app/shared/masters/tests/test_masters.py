@@ -1369,3 +1369,141 @@ async def test_import_preview_marks_duplicate_codes_before_commit(client, admin)
     assert body["summary"] == {"total": 2, "ready": 1, "blocked": 1}
     assert body["rows"][1]["problems"][0]["field"] == "code"
     assert "Duplicate of row 2" in body["rows"][1]["problems"][0]["message"]
+
+
+# ---------------------- HSN codes through the importer ---------------------- #
+# Excel stores a column of digits as NUMBERS, so an HSN sheet reads back 10005040
+# (or 10005040.0), and chapters 01-09 lose their leading zero. The form sends text,
+# which is why only the import used to fail, with "Input should be a valid string".
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _hsn_workbook(rows):
+    import io
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["code", "description", "cgst_rate", "sgst_rate", "igst_rate",
+                  "cess_rate", "effective_from", "is_active"])
+    for row in rows:
+        sheet.append(row)
+    payload = io.BytesIO()
+    book.save(payload)
+    return payload.getvalue()
+
+
+def _hsn_def():
+    from app.shared.masters.defs import MASTERS
+    return next(m for m in MASTERS if m.path == "hsn-codes")
+
+
+def _hsn_parse(rows):
+    from app.shared.masters.bulk import parse_upload, validate_rows
+    parsed, read_errors = parse_upload(_hsn_def(), _hsn_workbook(rows))
+    assert read_errors == []
+    ready, problems = validate_rows(_hsn_def(), parsed)
+    return {line: data for line, _, data in ready}, problems
+
+
+def test_a_numeric_hsn_cell_imports_as_its_text():
+    ready, problems = _hsn_parse([[10005040, None, 5, 5, 10],
+                                  [28289011.0, "From a CSV", 9, 9, 18]])
+    assert problems == []
+    assert ready[2].code == "10005040"
+    assert ready[3].code == "28289011"
+
+
+def test_a_numeric_hsn_cell_gets_its_lost_leading_zero_back():
+    ready, problems = _hsn_parse([[1012100, "Live horses", 0, 0, 0]])
+    assert problems == []
+    assert ready[2].code == "01012100"
+
+
+def test_a_short_hsn_typed_as_text_is_refused_not_guessed():
+    _, problems = _hsn_parse([["1012100", "Typo"], [1234, "Far too short"]])
+    assert len(problems) == 2
+    assert "exactly 8 digits" in problems[0] and "1012100" in problems[0]
+    assert "“1234” has 4" in problems[1]
+
+
+def test_a_grouped_hsn_code_is_read_as_its_digits():
+    ready, problems = _hsn_parse([["8471 30 10", "Computers"],
+                                  ["8471.30.20", "Laptops"]])
+    assert problems == []
+    assert [ready[2].code, ready[3].code] == ["84713010", "84713020"]
+
+
+def test_an_igst_only_row_is_split_into_cgst_and_sgst():
+    ready, problems = _hsn_parse([[10005040, None, None, None, 10],
+                                  [10005041, None, 9, None, None]])
+    assert problems == []
+    assert (ready[2].cgst_rate, ready[2].sgst_rate, ready[2].igst_rate) == (5, 5, 10)
+    assert (ready[3].cgst_rate, ready[3].sgst_rate, ready[3].igst_rate) == (9, 9, 18)
+
+
+def test_a_stated_gst_contradiction_is_reported_against_its_row():
+    _, problems = _hsn_parse([[30049099, None, 6, 6, 18], [30049098, None, 0, 0, 150]])
+    assert problems[0].startswith("Row 2, igst_rate: CGST 6% + SGST 6% = 12%")
+    assert any(p.startswith("Row 3, igst_rate") for p in problems)
+
+
+def test_the_hsn_template_formats_the_code_column_as_text():
+    import io
+    from openpyxl import load_workbook
+    from app.shared.masters.bulk import build_template
+
+    book = load_workbook(io.BytesIO(build_template(_hsn_def())))
+    assert book["Data"]["A2"].number_format == "@"
+
+
+def test_an_item_sheet_finds_an_hsn_that_lost_its_leading_zero():
+    from app.shared.masters.defs import hsn_lookup_key
+    assert hsn_lookup_key("1012100") == "01012100"
+    assert hsn_lookup_key("10005040.0") == "10005040"
+    assert hsn_lookup_key("Medicaments") == "Medicaments"
+
+
+async def test_the_api_accepts_an_hsn_code_posted_as_a_number(client, admin):
+    r = await client.post("/api/hsn-codes", json={
+        "code": 10005040, "cgst_rate": 5, "sgst_rate": 5, "igst_rate": 10},
+        headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["code"] == "10005040"
+
+
+async def test_hsn_import_preview_then_commit_saves_numeric_codes(client, admin):
+    content = _hsn_workbook([[10005040, None, None, None, 10],
+                             [1012100, "Live horses", 0, 0, 0]])
+    preview = await client.post(
+        "/api/hsn-codes/import/preview", headers=admin,
+        files={"file": ("hsn.xlsx", content, XLSX)})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["summary"] == {"total": 2, "ready": 2, "blocked": 0}
+    # The review shows each row as it will be saved.
+    assert body["rows"][0]["values"]["code"] == "10005040"
+    assert body["rows"][0]["values"]["cgst_rate"] == 5
+    assert body["rows"][1]["values"]["code"] == "01012100"
+
+    # The review screen posts the values back as it holds them — here the code as a
+    # number again and a cleared cell as "", which must both still save.
+    rows = [dict(r["values"], __row__=r["row"]) for r in body["rows"]]
+    rows[0]["code"] = 10005040
+    rows[1]["description"] = ""
+    committed = await client.post("/api/hsn-codes/import/commit",
+                                  json={"rows": rows}, headers=admin)
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["created"] == 2
+
+    listed = (await client.get("/api/hsn-codes", headers=admin)).json()["items"]
+    assert sorted(h["code"] for h in listed) == ["01012100", "10005040"]
+
+
+async def test_hsn_straight_import_accepts_numeric_codes(client, admin):
+    content = _hsn_workbook([[28289011, "Hypochlorites", 9, 9, 18]])
+    r = await client.post("/api/hsn-codes/import", headers=admin,
+                          files={"file": ("hsn.xlsx", content, XLSX)})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 1

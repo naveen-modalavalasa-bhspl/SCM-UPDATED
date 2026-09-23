@@ -2,7 +2,7 @@
 written by hand here are the two HCM mirrors (read-only, rule 10) and item specs,
 whose primary key is item_id rather than a surrogate id."""
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
-    MASTERS, UOM_SUGGESTIONS, hsn_out, packaging_breakdown,
+    MASTERS, UOM_SUGGESTIONS, check_hsn_code, hsn_out, packaging_breakdown,
 )
 from app.shared.models.master import HsnCode, Item, ItemSpec, Uom
 
@@ -187,7 +187,14 @@ _hsn = APIRouter(tags=["masters"])
 
 
 class HsnResolveIn(BaseModel):
-    code: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
+    code: str = Field(min_length=8, max_length=8)
+
+    # The same reading of a code as the HSN master's own schema, so a number, a
+    # grouped "8471 30 10" and the canonical text all resolve to one row.
+    @field_validator("code", mode="before")
+    @classmethod
+    def _code(cls, value):
+        return check_hsn_code(value)
 
 
 @_hsn.post("/api/hsn-codes/resolve")

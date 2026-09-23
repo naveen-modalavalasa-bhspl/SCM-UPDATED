@@ -263,24 +263,19 @@ async def submit_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_receipt(db, receipt_id, user)
 
 
-# A GRN only reaches SUBMITTED when this project configured a Goods Receipt chain on
-# Settings > Approval Flow; with none configured nothing ever lands here. Gated on
-# RECEIPT_CREATE only as a floor — `engine.act` is what decides whether THIS caller is
-# on the current rung, exactly as everywhere else (rule 8).
-@router.post("/receipts/{receipt_id}/approve", response_model=s.ReceiptDetail)
-async def approve_receipt(receipt_id: int, body: s.ReasonIn = s.ReasonIn(),
-                          db: AsyncSession = Depends(get_db),
-                          user=Depends(require_permission(RECEIPT_CREATE))):
-    return await service.approve_receipt(db, receipt_id, user, approve=True,
-                                         comments=body.reason or "")
+# Where each line goes — QC or straight to putaway. A forecast before submit, the
+# record after it.
+@router.get("/receipts/{receipt_id}/routing", response_model=s.ReceiptRouting)
+async def receipt_routing(receipt_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.receipt_routing(db, receipt_id, user=user)
 
 
-@router.post("/receipts/{receipt_id}/reject", response_model=s.ReceiptDetail)
-async def reject_receipt(receipt_id: int, body: s.ReasonIn,
-                         db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(RECEIPT_CREATE))):
-    return await service.approve_receipt(db, receipt_id, user, approve=False,
-                                         comments=body.reason or "")
+# Splits a GRN the retired GRN approval parked at SUBMITTED with nothing raised.
+@router.post("/receipts/{receipt_id}/route", response_model=s.ReceiptDetail)
+async def route_parked_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.route_parked_receipt(db, receipt_id, user)
 
 
 @router.post("/receipts/{receipt_id}/complete", response_model=s.ReceiptDetail)

@@ -47,6 +47,7 @@ import type {
   PutawayUnitCode,
   PutawayCreate,
   Receipt,
+  ReceiptRouting,
   ReceiptWrite,
   SerialNumber,
   StockAvailability,
@@ -214,6 +215,15 @@ export const convertReceiptToGrn = (id: number) =>
 
 /** Freezes the receipt and raises the inspection tasks behind it. */
 export const submitReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/${id}/submit`);
+
+/** Where each GRN line goes — a QC draft or straight to putaway. A forecast before
+ *  submit, the record after it. */
+export const getReceiptRouting = (id: number) =>
+  get<ReceiptRouting>(`${BASE}/receipts/${id}/routing`);
+
+/** Splits a GRN the retired GRN approval left at SUBMITTED with nothing raised. */
+export const routeParkedReceipt = (id: number) =>
+  post<Receipt>(`${BASE}/receipts/${id}/route`);
 
 /** Pass an arrived consignment on to the points below — the MDP leg of WH -> MDP -> LIP.
  *  Builds one DRAFT issue per indent; the storekeeper still reviews and submits. */
@@ -386,15 +396,12 @@ export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
 export const submitStockMovementOrder = (id: number) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/submit`);
 
-<<<<<<< HEAD
-=======
 export const completeStockMovementInspection = (id: number) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/complete-inspection`);
 
 export const completeStockMovementOrder = (id: number) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/complete`);
 
->>>>>>> 521e00de7951bd2a6c34d574b1bc3596f47d6b04
 /** Approve or reject a movement waiting on a signature. Only reachable when the
  *  project has an approval ladder configured for STOCK_MOVEMENT_ORDER — with none
  *  (every project today) a movement completes on the press and never lands here. */

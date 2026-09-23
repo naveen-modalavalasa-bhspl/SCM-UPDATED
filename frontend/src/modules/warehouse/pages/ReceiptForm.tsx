@@ -8,12 +8,13 @@ import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "..
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
+import { ReceiptRoutingPanel } from "../components/ReceiptRouting";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   binOptions, completeReceipt, convertReceiptToGrn, createReceipt, forwardArrival,
   despatchNoteOptions, dispatchReceiptSource, gateEntryOptions, getDespatchPrefill,
-  getPoLines, getReceipt, incomingDispatchOptions, itemOptions, poOptions,
-  submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
+  getPoLines, getReceipt, getReceiptRouting, incomingDispatchOptions, itemOptions, poOptions,
+  routeParkedReceipt, submitReceipt, myWarehouseOptions, updateReceipt, uploadAttachment, vendorOptions,
 } from "../api";
 
 import { fmtMoney, fmtQty, num, rate2, today } from "../format";
@@ -683,6 +684,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       qc.invalidateQueries({ queryKey: ["wh-gate-entries"] });
       qc.invalidateQueries({ queryKey: ["wh-receipt", String(saved.id)] });
+      qc.invalidateQueries({ queryKey: ["wh-receipt-routing", String(saved.id)] });
       qc.invalidateQueries({ queryKey: ["wh-attachments", "RECEIPT", saved.id] });
       if (!editing) {
         if (!isGrn) {
@@ -721,6 +723,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         : "receipt.posted_direct";
       void alerts.success(key, { number });
       qc.invalidateQueries({ queryKey: ["wh-receipt", id] });
+      qc.invalidateQueries({ queryKey: ["wh-receipt-routing", id] });
+      qc.invalidateQueries({ queryKey: ["wh-receipt-inspections", Number(id)] });
       qc.invalidateQueries({ queryKey: ["wh-receipts"] });
       setConfirming(null);
     },
@@ -747,6 +751,26 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       // The list lives under /transactions; /warehouse/issues is not a route, so the
       // click landed nowhere and reinforced the "did anything happen?" feeling.
       nav("/warehouse/transactions/material-issues");
+    },
+  });
+
+  /* Where each line goes: QC draft or straight to putaway. A forecast off the saved
+   * lines before submit, the record after it. Save and submit both refresh it. */
+  const routing = useQuery({
+    queryKey: ["wh-receipt-routing", id],
+    queryFn: () => getReceiptRouting(Number(id)),
+    enabled: editing && isGrn && !!doc && doc.status !== "CANCELLED",
+  });
+
+  /* A GRN the retired approval left at SUBMITTED: nothing was raised behind it. */
+  const route = useMutation({
+    mutationFn: () => routeParkedReceipt(Number(id)),
+    onSuccess: () => {
+      void alerts.success("receipt.submitted", { number: doc?.grn_no ?? "The receipt" });
+      qc.invalidateQueries({ queryKey: ["wh-receipt", id] });
+      qc.invalidateQueries({ queryKey: ["wh-receipt-routing", id] });
+      qc.invalidateQueries({ queryKey: ["wh-receipt-inspections", Number(id)] });
+      qc.invalidateQueries({ queryKey: ["wh-receipts"] });
     },
   });
 
@@ -1074,7 +1098,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             )}
             {editing && isGrn && doc?.status === "DRAFT" && (
               <Can do="receipt.create">
-                <Button onClick={() => setConfirming("submit")}>Submit for QC</Button>
+                <Button onClick={() => setConfirming("submit")}>Submit GRN</Button>
               </Can>
             )}
             {editing && !isGrn && doc?.status === "GATE_ENTRY" && (
@@ -1094,7 +1118,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 prefills off `?receipt_id=`; the ladder and every write stay on
                 `/api/warehouse/inspections`, which is gated on inspection.execute. */}
             {editing && isGrn
-              && ["SUBMITTED", "PENDING_QC", "QC_FAILED"].includes(doc?.status ?? "") && (
+              && ["PENDING_QC", "QC_FAILED"].includes(doc?.status ?? "")
+              && !routing.data?.inspection_id && (
               <Can do="inspection.execute">
                 <Button
                   variant="ghost"
@@ -1121,7 +1146,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         }
       />
 
-      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error} />
+      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -1415,6 +1440,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           />
         </Section>
 
+      {routing.data && (
+        <ReceiptRoutingPanel
+          routing={routing.data}
+          onRoute={() => route.mutate()}
+          routing_busy={route.isPending}
+        />
+      )}
+
       <Section title="Remarks">
         <Input value={form.remarks ?? ""} disabled={locked} onChange={(e) => set("remarks", e.target.value)} />
       </Section>
@@ -1484,9 +1517,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
 
       <ConfirmModal
         isOpen={confirming === "submit"}
-        title="Submit for inspection?"
-        message="The lines are frozen and an inspection is raised against this receipt."
-        confirmLabel="Submit"
+        title="Submit this GRN?"
+        message={
+          `The lines are frozen. ${routing.data?.stage === "FORECAST" ? routing.data.headline : ""}`.trim()
+          + " Items that require QI get a QC draft; every other item gets a putaway draft."
+        }
+        confirmLabel="Submit & split"
         busy={act.isPending}
         error={act.error}
         onConfirm={() => { setTouched(true); act.mutate("submit"); }}

@@ -9,6 +9,7 @@ from decimal import Decimal
 import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1536,15 +1537,167 @@ async def apply_item_component(db: AsyncSession, row: ItemComponent,
 # --------------------------------------------------------------------------- #
 #  HSN codes — the tax classification
 # --------------------------------------------------------------------------- #
+HSN_CODE_LENGTH = 8
+# Published tariff schedules write a code as "8471 30 10", "8471.30.10" or
+# "8471-30-10". The grouping is presentation; the code is the eight digits.
+_HSN_SEPARATORS = re.compile(r"[\s.\-]")
+
+
+def _is_blank(value) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def normalize_hsn_code(value) -> str:
+    """The canonical 8-digit text of an HSN code, from whatever carried it.
+
+    An HSN code is a CODE made of digits, not a quantity, so it is stored as text —
+    leading zeros are part of it. But it very often arrives as a NUMBER: Excel types a
+    column of digits as numeric and hands back 10005040 (or 10005040.0), and an API
+    client may post the bare integer. Both are the same code and both are accepted.
+
+    A number cannot carry a leading zero, so chapters 01-09 come back one digit short
+    ("01012100" -> 1012100). When the value arrived AS A NUMBER and is exactly one
+    digit short, the zero is put back — that is the only way an 8-digit code can
+    shrink to 7. TEXT typed as "1012100" is left alone and refused: that is somebody
+    who mistyped, and guessing a chapter for them would be worse.
+    """
+    from_number = False
+    if isinstance(value, bool):                   # bool is an int; it is not a code
+        return str(value)
+    if isinstance(value, float):
+        if not value.is_integer():
+            return str(value)                     # "8471.3" — refused as not 8 digits
+        value, from_number = int(value), True
+    elif isinstance(value, Decimal):
+        if value != value.to_integral_value():
+            return str(value)
+        value, from_number = int(value), True
+    elif isinstance(value, int):
+        from_number = True
+    text = _HSN_SEPARATORS.sub("", str(value))
+    if from_number and text.isdigit() and len(text) == HSN_CODE_LENGTH - 1:
+        text = "0" + text
+    return text
+
+
+def hsn_lookup_key(text: str) -> str:
+    """How an HSN code typed into ANOTHER master's sheet (an item's HSN column) is
+    matched against the HSN master. Only ever used to FIND an existing row, so
+    restoring a lost leading zero here cannot invent a code — it either names a
+    real row or matches nothing."""
+    code = str(text).strip()
+    if code.endswith(".0"):                  # a float that went through a CSV —
+        code = code[:-2]                     # before "." is read as a separator
+    code = _HSN_SEPARATORS.sub("", code)
+    if code.isdigit() and len(code) == HSN_CODE_LENGTH - 1:
+        code = "0" + code
+    return code
+
+
+def _pct(value: float) -> str:
+    return f"{value:g}"
+
+
+def check_hsn_code(value) -> str:
+    """Normalise, then refuse anything that is not a real 8-digit HSN code, in words
+    the person fixing the sheet can act on."""
+    if _is_blank(value):
+        raise PydanticCustomError("hsn_code", "HSN code is required")
+    code = normalize_hsn_code(value)
+    if not code.isdigit():
+        raise PydanticCustomError(
+            "hsn_code", "HSN code must contain digits only (got “{code}”)",
+            {"code": code})
+    if len(code) != HSN_CODE_LENGTH:
+        raise PydanticCustomError(
+            "hsn_code",
+            "HSN code must be exactly 8 digits — “{code}” has {n}",
+            {"code": code, "n": len(code)})
+    # Chapters run 01-98; "00" is a short number that was zero-padded by hand.
+    if code.startswith("00"):
+        raise PydanticCustomError(
+            "hsn_code", "HSN code “{code}” is in chapter 00, which does not exist",
+            {"code": code})
+    return code
+
+
 class HsnIn(BaseModel):
-    code: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
-    description: str | None = None
-    cgst_rate: float = 0
-    sgst_rate: float = 0
-    igst_rate: float = 0
-    cess_rate: float = 0
+    # Declared `str` because the code is text (leading zeros matter), but a number is
+    # accepted — see normalize_hsn_code. The width stays declared on the field, where
+    # the importer reads it to tell a fixed-width code column from free text.
+    code: str = Field(min_length=HSN_CODE_LENGTH, max_length=HSN_CODE_LENGTH)
+    description: str | None = Field(None, max_length=300)
+    cgst_rate: float = Field(0, ge=0, le=100)
+    sgst_rate: float = Field(0, ge=0, le=100)
+    igst_rate: float = Field(0, ge=0, le=100)
+    cess_rate: float = Field(0, ge=0, le=100)
     effective_from: date | None = None
     is_active: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _complete_the_gst_split(cls, data):
+        """Fill in the GST figures a sheet commonly leaves out, from the ones it gave.
+
+        Only a rate that was NOT SUPPLIED is derived; a stated figure is never
+        overwritten, so a contradiction is still reported rather than repaired.
+        Tariff lists are routinely published with only the IGST column, and CGST and
+        SGST are by law each half of it — refusing such a row, or saving it as 0 + 0
+        and undertaxing every intra-state sale, are both worse than the arithmetic.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+
+        def number(key):
+            try:
+                return None if _is_blank(data.get(key)) else float(data[key])
+            except (TypeError, ValueError):
+                return None                       # left for the field to refuse
+
+        blank = {k: _is_blank(data.get(k)) for k in ("cgst_rate", "sgst_rate", "igst_rate")}
+        cgst, sgst, igst = number("cgst_rate"), number("sgst_rate"), number("igst_rate")
+        # CGST and SGST are always equal, so either one states the other.
+        if blank["cgst_rate"] and sgst is not None:
+            data["cgst_rate"], cgst, blank["cgst_rate"] = sgst, sgst, False
+        elif blank["sgst_rate"] and cgst is not None:
+            data["sgst_rate"], sgst, blank["sgst_rate"] = cgst, cgst, False
+        if blank["cgst_rate"] and blank["sgst_rate"] and igst is not None:
+            data["cgst_rate"] = data["sgst_rate"] = round(igst / 2, 3)
+        elif blank["igst_rate"] and cgst is not None and sgst is not None:
+            data["igst_rate"] = round(cgst + sgst, 3)
+        return data
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _code(cls, value):
+        return check_hsn_code(value)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _description(cls, value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("igst_rate")
+    @classmethod
+    def _igst_matches_the_split(cls, value, info):
+        # GST is split as CGST + SGST within a state and charged as IGST across
+        # states, so the two routes must come to the same number. They disagreeing
+        # means one of them is wrong, and the document would tax the same sale
+        # differently by destination. Checked on the schema, not in apply_hsn, so an
+        # import preview reports it against the row instead of the Save failing.
+        cgst, sgst = info.data.get("cgst_rate"), info.data.get("sgst_rate")
+        if value and cgst is not None and sgst is not None \
+                and round(cgst + sgst, 3) != round(value, 3):
+            raise PydanticCustomError(
+                "gst_split",
+                "CGST {cgst}% + SGST {sgst}% = {split}%, which must equal IGST {igst}%",
+                {"cgst": _pct(cgst), "sgst": _pct(sgst),
+                 "split": _pct(round(cgst + sgst, 3)), "igst": _pct(value)})
+        return value
 
 
 def hsn_out(h: HsnCode) -> dict:
@@ -1556,14 +1709,8 @@ def hsn_out(h: HsnCode) -> dict:
 
 
 async def apply_hsn(db: AsyncSession, row: HsnCode, data: HsnIn) -> None:
-    for name in ("cgst_rate", "sgst_rate", "igst_rate", "cess_rate"):
-        if not 0 <= getattr(data, name) <= 100:
-            raise ValidationError(f"{name.replace('_', ' ')} must be between 0 and 100")
-    # GST is split as CGST + SGST within a state and charged as IGST across states, so
-    # the two routes must come to the same number. They disagreeing means one of them
-    # is wrong, and the document would tax the same sale differently by destination.
-    if data.igst_rate and round(data.cgst_rate + data.sgst_rate, 3) != round(data.igst_rate, 3):
-        raise ValidationError("CGST + SGST must equal IGST")
+    # The 0-100 range and CGST + SGST = IGST are enforced by HsnIn itself, so the
+    # form, the API and every import door refuse the same rows in the same words.
     await require_unique(db, HsnCode, "code", data.code, row, "HSN code")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1926,7 +2073,8 @@ ITEM_LOOKUPS = (
     # what is written on an invoice, so that is what the sheet asks for and matches
     # on first.
     Lookup("hsn_id", HsnCode, "HSN code",
-           match=("code", "description"), display=("code",)),
+           match=("code", "description"), display=("code",),
+           normalize=hsn_lookup_key),
     Lookup("dosage_form_id", DosageForm, "Dosage form"),
 )
 

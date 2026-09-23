@@ -472,7 +472,6 @@ function MovementLineEditor({
 }) {
   const [storageType, setStorageType] = useState<number | string | "">("");
   const trackingMeta = useTrackingMeta();
->>>>>>> 521e00de7951bd2a6c34d574b1bc3596f47d6b04
 
   const availability = useQuery({
     queryKey: ["wh-stock-movement-availability", warehouseId, line.source_bin_id, line.item_id, line.batch_id],
@@ -599,9 +598,6 @@ function MovementLineEditor({
                 true, line.source_bin_id || undefined,
               )}
               value={line.destination_bin_id || ""}
-<<<<<<< HEAD
-              isDisabled={!warehouseId}
-=======
               isDisabled={!warehouseId || !storageType}
               onChange={(value, option) => onPatch({
                 destination_bin_id: value === "" ? 0 : value,

@@ -70,6 +70,10 @@ class Lookup:
     # column is free text and the review screen resolves it: Excel chokes on a
     # validation list of nine hundred warehouses, and so does the person reading it.
     max_options: int = 500
+    # Turns a cell into the form the target stores, when the two can differ — an HSN
+    # code typed into Excel loses its leading zero. Tried only after the cell as
+    # typed has failed to match, and only ever to FIND a row, never to create one.
+    normalize: Callable[[str], str] | None = None
 
 
 @dataclass

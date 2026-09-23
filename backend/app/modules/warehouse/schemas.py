@@ -605,6 +605,9 @@ class ReceiptItemRead(_Read):
     uom_code: str | None = None
     is_asset: bool = False
     is_serial_tracked: bool = False
+    #: The item master's "Requires QI". Decides whether this line goes to QC or
+    #: straight to putaway on submit.
+    requires_qi: bool = False
     ordered_qty: Decimal
     received_qty: Decimal
     accepted_qty: Decimal
@@ -685,6 +688,44 @@ class ReceiptRead(_Read):
 
 class ReceiptDetail(ReceiptRead):
     items: list[ReceiptItemRead] = Field(default_factory=list)
+
+
+class ReceiptRouteLine(BaseModel):
+    """One GRN line and where it goes. `route` is QC, PUTAWAY or STOCK (a point with
+    no bins banks the goods directly)."""
+    receipt_item_id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    received_qty: Decimal
+    accepted_qty: Decimal
+    rejected_qty: Decimal
+    requires_qi: bool = False
+    route: str
+    qc_status: str | None = None
+    putaway_id: int | None = None
+    putaway_no: str | None = None
+    putaway_status: str | None = None
+
+
+class ReceiptRouting(BaseModel):
+    """`service.receipt_routing`. `stage` is FORECAST (not submitted yet), PARKED (the
+    retired GRN approval held it with nothing raised) or ROUTED."""
+    receipt_id: int
+    grn_no: str
+    status: str
+    stage: str
+    is_bin_managed: bool
+    headline: str
+    inspection_id: int | None = None
+    inspection_no: str | None = None
+    inspection_status: str | None = None
+    putaway_total: int = 0
+    putaway_done: int = 0
+    qc_lines: list[ReceiptRouteLine] = Field(default_factory=list)
+    direct_lines: list[ReceiptRouteLine] = Field(default_factory=list)
 
 
 class PoLineOption(BaseModel):
@@ -1260,9 +1301,9 @@ class StockMovementOrderRead(BaseModel):
     line, so `items` is empty there and populated on create.
     """
     order_no: str
-    #: 0 when no ladder is configured and the movement completed on the press — that
-    #: path writes no document row, exactly as it always did. Non-zero means there is
-    #: an `inv_sto` row to approve (2026-08-21).
+    #: 0 only for movements completed before orders were stored — those have ledger
+    #: rows and no document row. Every order raised since carries a non-zero
+    #: `inv_sto` row moving DRAFT → PENDING_APPROVAL → APPROVED → COMPLETED.
     id: int = 0
     warehouse_id: int
     warehouse_name: str | None = None

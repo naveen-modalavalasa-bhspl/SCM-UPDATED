@@ -11,13 +11,58 @@ import {
   getStockMovementOrder,
   submitStockMovementOrder,
 } from "../api";
-import { Modal, ModalBody, ModalContent, ModalHeader, ModalFooter } from "@heroui/react";
+import { Modal, ModalBody, ModalContent, ModalHeader, ModalFooter , Tooltip} from "@heroui/react";
 import { useState } from "react";
 import { Section } from "../components/DocumentMeta";
 import { fmtDateTime, fmtQty } from "../format";
 import type { StockMovementOrderItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
 
+const MOVEMENT_STEPS = [
+  { label: "Draft", icon: FileText },
+  { label: "Approval", icon: ShieldCheck },
+  { label: "Inspection", icon: ClipboardCheck },
+  { label: "Movement", icon: PackageCheck },
+] as const;
+
+function MovementProgress({ status }: { status: string }) {
+  const active = ({ DRAFT: 0, PENDING_APPROVAL: 1, APPROVED: 2, INSPECTED: 3, COMPLETED: 4 } as Record<string, number>)[status] ?? 0;
+  const rejected = status === "REJECTED";
+
+  return (
+    <Card className="mb-6 overflow-hidden border-line/70 bg-gradient-to-r from-white via-white to-brand/[0.035] p-5">
+      <div className="grid grid-cols-4 gap-2">
+        {MOVEMENT_STEPS.map(({ label, icon: Icon }, index) => {
+          const done = !rejected && active > index;
+          const current = !rejected && active === index;
+          return (
+            <div key={label} className="relative flex flex-col items-center text-center">
+              {index > 0 && <span className={`absolute right-1/2 top-4 h-0.5 w-full ${done ? "bg-emerald-400" : "bg-line"}`} />}
+              <span className={`relative z-10 grid h-8 w-8 place-items-center rounded-full border transition-colors ${
+                done ? "border-emerald-500 bg-emerald-500 text-white"
+                  : current ? "border-brand bg-brand text-white shadow-sm"
+                    : rejected && index === 1 ? "border-danger bg-danger text-white"
+                      : "border-line bg-white text-muted"
+              }`}>
+                {done ? <CheckCircle2 className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
+              </span>
+              <span className={`mt-2 text-[11px] font-semibold sm:text-xs ${current || done ? "text-ink" : "text-muted"}`}>
+                {rejected && index === 1 ? "Rejected" : label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function ViewSerials({ serials }: { serials: string[] | null | undefined }) {
+  const [open, setOpen] = useState(false);
+  if (!serials || serials.length === 0) return null;
+
+  return (
+    <>
       <button
         type="button"
         onClick={() => setOpen(true)}
@@ -104,19 +149,6 @@ export default function StockMovementDetail() {
     onSuccess: (result) => {
       refreshMovement();
       toast.success(`${result.order_no} completed — stock moved successfully`);
-    },
-  });
-
-  const submit = useMutation({
-    mutationFn: () => submitStockMovementOrder((data as { id: number }).id),
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-order"] });
-      queryClient.invalidateQueries({ queryKey: ["wh-stock-movement-orders"] });
-      queryClient.invalidateQueries({ queryKey: ["inventory-stock"] });
-      toast.success(result.status === "APPROVED"
-        ? `${result.order_no} approved — the stock has moved`
-        : `${result.order_no} submitted for approval${
-            result.current_approver_name ? ` — waiting on ${result.current_approver_name}` : ""}`);
     },
   });
 
@@ -249,7 +281,9 @@ export default function StockMovementDetail() {
               header: "Item",
               render: (row) => (
                 <div>
-                  <div className="font-semibold text-ink">{row.item_name}</div>
+                  <Tooltip content={row.item_name} placement="top" closeDelay={0}>
+                    <div className="font-semibold text-ink truncate cursor-help">{row.item_name}</div>
+                  </Tooltip>
                   <div className="font-mono text-[11px] text-muted">{row.item_code}</div>
                   <ViewSerials serials={row.serial_numbers} />
                 </div>
@@ -291,7 +325,9 @@ export default function StockMovementDetail() {
           renderCard={(row) => (
             <div className="space-y-2">
               <div className="flex justify-between font-semibold">
-                <span>{row.item_name}</span>
+                <Tooltip content={row.item_name} placement="top" closeDelay={0}>
+                  <span className="truncate cursor-help max-w-[200px] block">{row.item_name}</span>
+                </Tooltip>
                 <span>{fmtQty(row.quantity)} <span className="text-xs text-muted">{row.uom_code}</span></span>
               </div>
               <div className="text-sm">

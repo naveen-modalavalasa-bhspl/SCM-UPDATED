@@ -581,6 +581,43 @@ export interface Receipt {
   items?: ReceiptItem[];
 }
 
+/** One GRN line and where it goes (`GET /receipts/{id}/routing`). */
+export interface ReceiptRouteLine {
+  receipt_item_id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  received_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  requires_qi: boolean;
+  route: "QC" | "PUTAWAY" | "STOCK";
+  qc_status?: string | null;
+  putaway_id?: number | null;
+  putaway_no?: string | null;
+  putaway_status?: string | null;
+}
+
+/** Where a GRN's lines go: QC draft or straight to putaway. FORECAST before submit,
+ *  ROUTED after, PARKED for a GRN the retired approval held with nothing raised. */
+export interface ReceiptRouting {
+  receipt_id: number;
+  grn_no: string;
+  status: string;
+  stage: "FORECAST" | "PARKED" | "ROUTED";
+  is_bin_managed: boolean;
+  headline: string;
+  inspection_id?: number | null;
+  inspection_no?: string | null;
+  inspection_status?: string | null;
+  putaway_total: number;
+  putaway_done: number;
+  qc_lines: ReceiptRouteLine[];
+  direct_lines: ReceiptRouteLine[];
+}
+
 /** `inb_receipt_items`. */
 export interface ReceiptItem {
   id: number;
@@ -596,6 +633,8 @@ export interface ReceiptItem {
   is_asset?: boolean;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
+  /** The item master's "Requires QI": QC line on submit, else straight to putaway. */
+  requires_qi?: boolean;
   ordered_qty: number;
   received_qty: number;
   accepted_qty: number;
@@ -2567,9 +2606,9 @@ export interface StockAvailability {
 }
 
 export interface StockMovementOrder {
-  /** 0 when no approval ladder is configured and the movement completed on the press —
-   *  that path writes no document row, exactly as it always did. Non-zero means there
-   *  is a record to approve (2026-08-21). */
+  /** 0 only for movements completed before orders were stored — those have ledger
+   *  rows and no document row. Every order raised since carries a non-zero id and
+   *  moves DRAFT → PENDING_APPROVAL → APPROVED → COMPLETED. */
   id: number;
   order_no: string;
   warehouse_id: number;

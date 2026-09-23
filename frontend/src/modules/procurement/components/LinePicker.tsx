@@ -70,10 +70,7 @@ export function LinePicker({
   /** Source-backed RFQs cannot exceed their authorised quantity. Amendments are
    * re-approved, so their revised quantity stays open for the approver to decide. */
   capQuantityAtOriginal?: boolean;
-<<<<<<< HEAD
-=======
   /** Amendments may revise existing quantities but cannot introduce new items. */
->>>>>>> 521e00de7951bd2a6c34d574b1bc3596f47d6b04
   hideAddLine?: boolean;
 }) {
   const [search, setSearch] = useState("");
