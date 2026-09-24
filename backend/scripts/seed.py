@@ -98,10 +98,10 @@ PAGE_TREE = [
     ("home", "/", "Home", "home", None, 0, None),
 
     # One code per page (P.page_view_code), not one shared indent.view: ticking
-    # Overview must not hand out the Activity Ledger.
+    # Dashboard must not hand out the Activity Ledger.
     ("grp_indents", "/indents/dashboard", "Indents", "file-text",
      P.page_view_code("grp_indents"), 10, None),
-    ("ind_dashboard", "/indents/dashboard", "Overview", "layout-dashboard",
+    ("ind_dashboard", "/indents/dashboard", "Dashboard", "layout-dashboard",
      P.page_view_code("ind_dashboard"), 11, "grp_indents"),
     ("ind_list", "/indents", "All Requests", "list",
      P.page_view_code("ind_list"), 12, "grp_indents"),
@@ -128,7 +128,7 @@ PAGE_TREE = [
      P.page_view_code("ind_masters"), 17, "grp_indents"),
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
-    ("approval_overview", "/approvals/overview", "Overview", "layout-dashboard",
+    ("approval_overview", "/approvals/overview", "Dashboard", "layout-dashboard",
      P.page_view_code("approval_overview"), 20, "approvals"),
     ("approval_waiting", "/approvals", "Waiting for Me", "inbox", P.INDENT_VIEW, 21, "approvals"),
     # Built, routed and working since the monthly-cycle work, but no row ever pointed
@@ -158,11 +158,12 @@ PAGE_TREE = [
     # Ordered the way the floor works: goods in (inward -> receipt -> QC -> put-away),
     # then goods out (picklist -> issue -> dispatch), then returns.
     ("grp_warehouse", "/warehouse", "Warehouse", "warehouse", P.STOCK_VIEW, 40, None),
-    # "Overview", not "Dashboard": the page heading has always said Overview, and
-    # every other module's first child is called Overview too (ind_dashboard,
-    # approval_overview, inv_overview). The row was the only thing still saying
-    # Dashboard, so the rail and the screen disagreed on the name of the same page.
-    ("wh_dashboard", "/warehouse", "Overview", "layout-dashboard",
+    # "Dashboard" everywhere (2026-09-21, business request): every module's first
+    # child is now called Dashboard — ind_dashboard, approval_overview, inv_overview,
+    # pro_overview, logistics_overview, returns_overview — and each screen's own
+    # heading says the same word. The CODES are untouched, so every grant already
+    # issued still resolves; only the name a person reads moved.
+    ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 41, "grp_warehouse"),
     ("wh_inward", "/warehouse/material-inward", "Material Inward", "truck",
      P.RECEIPT_VIEW, 42, "grp_warehouse"),
@@ -214,7 +215,7 @@ PAGE_TREE = [
 
     ("grp_inventory", "/inventory", "Inventory", "package",
      P.STOCK_VIEW, 50, None),
-    ("inv_overview", "/inventory", "Overview", "layout-dashboard",
+    ("inv_overview", "/inventory", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 51, "grp_inventory"),
     ("inv_balance", "/inventory/stock-balance", "Stock Balance", "boxes",
      P.STOCK_VIEW, 52, "grp_inventory"),

@@ -23,7 +23,7 @@ export const ORIGIN_STATE_KEY = "navFrom";
  *  cannot match `/returns` for `/returns/decisions`. Labels are the menu's own
  *  (`page_registry.py`), so the back link names the tab the reader can see. */
 const ORIGINS: { path: string; label: string }[] = [
-  { path: "/returns/dashboard", label: "Overview" },
+  { path: "/returns/dashboard", label: "Dashboard" },
   { path: "/returns/approvals", label: "Approvals" },
   { path: "/returns/decisions", label: "Decision Desk" },
   { path: "/returns/sign-off", label: "Sign-off" },

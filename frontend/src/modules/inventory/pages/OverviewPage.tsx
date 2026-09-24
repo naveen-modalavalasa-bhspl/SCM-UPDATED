@@ -137,7 +137,7 @@ export function InventoryOverviewPage() {
     <div>
       <PageHeader
         eyebrow="Inventory"
-        title="Overview & Analytics"
+        title="Dashboard & Analytics"
         actions={
           <Button variant="subtle" disabled={isFetching} onClick={() => refetch()}>
             <RefreshCw size={14} className={isFetching ? "animate-spin" : ""} />

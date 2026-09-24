@@ -28,7 +28,7 @@ import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 import { getReplenishments } from "@/modules/inventory/api";
 
 /* ---------------------------------------------------------------------------
- * The Overview answers two questions only: what needs MY action (the
+ * The Dashboard answers two questions only: what needs MY action (the
  * queue tiles, each opening its own pre-filtered worklist), and how is the
  * pipeline shaped right now (context strip + status breakdown). Everything
  * else is decoration and was removed.
@@ -233,7 +233,7 @@ function IndentDashboardContent() {
 
   // The shortage tile reads /api/stock/replenishment, which is guarded by
   // stock.view. Gate the QUERY on the same code, not just the button: a requester
-  // without it would otherwise spend a 403 on every visit to their own Overview.
+  // without it would otherwise spend a 403 on every visit to their own Dashboard.
   const { can } = useAuth();
   const canSeeStock = can("stock.view");
   const { data: replenishments, isLoading: replenishmentsLoading } = useQuery({
@@ -268,7 +268,7 @@ function IndentDashboardContent() {
   return (
     <>
       <IndentModuleHeader
-        title="Overview"
+        title="Dashboard"
         statusFilterOptions={INDENT_REQUEST_STATUS_FILTER_OPTIONS}
         separateDateFilters
         regionFilterLabel="Department"

@@ -257,25 +257,49 @@ export default function OutboundQualityInspectionForm({
 
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
+  /** A line whose issue line sent out named units — serials, IMEIs, asset tags or
+   *  consumable codes. Those are picked here whatever the kind; the server checks each
+   *  against what the issue line actually carried. Whole-unit rules for counted UOMs
+   *  (Nos, Box…) are the server's, which knows the unit master. */
   const validateAcceptedSerials = () => {
     for (const [index, line] of form.items.entries()) {
       const available = availableSerials(index);
-      if (!available) continue;
+      if (!available && !isSerialTracked(index)) continue;
+      const label = `Line ${index + 1} (${line.item_code ?? line.item_name ?? "item"})`;
       const required = Math.floor(num(line.accepted_qty));
       if (num(line.accepted_qty) !== required) {
-        throw new Error(`Line ${index + 1}: accepted quantity must be a whole number for serialized items.`);
+        const rest = num(line.inspected_qty) - required;
+        throw new Error(
+          `${label}: units named one by one are accepted whole. ` +
+          `Accept ${required} and reject the remaining ${rest} with a reason.`,
+        );
       }
+      if (!available) continue;
       const actual = line.serial_numbers?.length ?? available.length;
       if (actual !== required) {
-        throw new Error(`Line ${index + 1}: select exactly ${required} accepted serial numbers.`);
+        throw new Error(`${label}: select exactly ${required} accepted units.`);
       }
     }
   };
 
+  /** An untouched picker means "every unit passed" (see the column below). Say so on
+   *  the wire: the server counts what it is sent, and null reads as zero selected. */
+  const payload = (): InspectionWrite => ({
+    ...form,
+    items: form.items.map((line, index) => {
+      const available = availableSerials(index);
+      return line.serial_numbers == null && available
+        ? { ...line, serial_numbers: available }
+        : line;
+    }),
+  });
+
   const save = useMutation({
     mutationFn: () => {
       validateAcceptedSerials();
-      return editing ? updateOutboundInspection(Number(id), form) : createOutboundInspection(form);
+      return editing
+        ? updateOutboundInspection(Number(id), payload())
+        : createOutboundInspection(payload());
     },
     onSuccess: (saved: Inspection) => {
       qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
@@ -291,7 +315,7 @@ export default function OutboundQualityInspectionForm({
      * while the confirm modal in front of them counted their own unsaved passes. */
     mutationFn: async () => {
       validateAcceptedSerials();
-      await updateOutboundInspection(Number(id), form);
+      await updateOutboundInspection(Number(id), payload());
       return completeOutboundInspection(Number(id));
     },
     onSuccess: () => {
@@ -424,13 +448,14 @@ export default function OutboundQualityInspectionForm({
     },
     {
       key: "serials",
-      header: "Accepted serials",
+      // Serials, IMEIs, asset tags and consumable codes alike: whatever named the
+      // units this issue line sent out. Only serial-tracked lines used to get it.
+      header: "Accepted units",
       width: "w-32",
       hideOnNarrow: true,
       render: (line, index) => {
-        if (!isSerialTracked(index)) return <span className="text-muted">—</span>;
-
         const available = availableSerials(index);
+        if (!available && !isSerialTracked(index)) return <span className="text-muted">—</span>;
         // An untouched line has decided nothing, which means nothing rejected — show it
         // as all accepted rather than as zero.
         const accepted = line.serial_numbers?.length ?? available?.length ?? 0;

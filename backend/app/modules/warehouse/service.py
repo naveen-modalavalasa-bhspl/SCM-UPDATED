@@ -36,6 +36,7 @@ from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory import locations as stock_locations
+from app.shared import uom as uom_rules
 from app.modules.inventory.service import move_stock, move_stock_out, take_units
 from app.modules.warehouse import capacity
 from app.modules.warehouse import models as m
@@ -6369,7 +6370,9 @@ async def _indent_cap(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
 
 
 async def _already_issued(db: AsyncSession, indent_id: int,
-                          warehouse_id: int | None = None) -> dict[int, Decimal]:
+                          warehouse_id: int | None = None, *,
+                          warehouse_ids: list[int] | None = None,
+                          exclude_issue_id: int | None = None) -> dict[int, Decimal]:
     """Per item, what live issues from THIS POINT already cover.
 
     Per point, not per indent, because one indent is served down a chain: the main
@@ -6380,22 +6383,52 @@ async def _already_issued(db: AsyncSession, indent_id: int,
 
     Within a point the cap still bites: that point cannot issue more than was approved.
     Cancelled and rejected issues hold nothing, so they free their quantity back up.
+
+    `warehouse_ids` widens "this point" to every point of the same tier — the guard
+    passes it, so two main warehouses cannot each issue the whole indent. A line is
+    attributed by its OWN `indent_item_id` first and the header second, the rule
+    `_indent_id_for_line` applies to incoming lines: a consolidated issue's lines
+    were invisible to a header-only match. `exclude_issue_id` leaves out the document
+    being edited, whose old lines are about to be replaced.
     """
+    from app.modules.indents.models import IndentItem
+
+    owner = func.coalesce(IndentItem.indent_id, m.MaterialIssue.indent_id)
     conditions = [
-        m.MaterialIssue.indent_id == indent_id,
+        owner == indent_id,
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
     ]
-    if warehouse_id is not None:
+    if warehouse_ids is not None:
+        conditions.append(m.MaterialIssue.warehouse_id.in_(warehouse_ids))
+    elif warehouse_id is not None:
         conditions.append(m.MaterialIssue.warehouse_id == warehouse_id)
+    if exclude_issue_id is not None:
+        conditions.append(m.MaterialIssue.id != exclude_issue_id)
     rows = (await db.execute(
         select(m.MaterialIssueLine.item_id,
                func.coalesce(func.sum(m.MaterialIssueLine.issued_qty), 0))
         .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .outerjoin(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
         .where(*conditions)
         .group_by(m.MaterialIssueLine.item_id)
     )).all()
     return {item_id: _d(qty) for item_id, qty in rows}
+
+
+async def _same_tier_warehouse_ids(db: AsyncSession, warehouse_id: int) -> list[int]:
+    """Every point on the same rung of the chain as this one, itself included.
+
+    The indent cap is per TIER, not per point: WH -> MDP -> LIP are the same units
+    travelling and each rung gets its own allowance, but two points on one rung are
+    two sources for the same demand and must share it.
+    """
+    wh = await db.get(Warehouse, warehouse_id)
+    if wh is None:
+        return [warehouse_id]
+    tier = stock_locations.tier_of(wh.warehouse_type)
+    rows = (await db.execute(select(Warehouse.id, Warehouse.warehouse_type))).all()
+    return [wid for wid, kind in rows if stock_locations.tier_of(kind) is tier]
 
 
 async def _already_picking(db: AsyncSession, indent_id: int,
@@ -6419,25 +6452,80 @@ async def _already_picking(db: AsyncSession, indent_id: int,
 
 
 async def _live_issue_labels(db: AsyncSession, indent_id: int,
-                             warehouse_id: int | None) -> str:
+                             warehouse_ids: list[int] | None,
+                             exclude_issue_id: int | None = None) -> str:
     """The issues already holding this indent's quantity here, named and with status.
 
     "Nothing is outstanding" is a true answer to the wrong question when the thing
     holding the quantity is a draft the same person raised a minute ago. Name it:
     the store can open it and finish it instead of guessing what drew the stock.
+    Same scope and same line attribution as `_already_issued`, so the documents named
+    are exactly the ones that were counted.
     """
+    from app.modules.indents.models import IndentItem
+
     conditions = [
-        m.MaterialIssue.indent_id == indent_id,
+        func.coalesce(IndentItem.indent_id, m.MaterialIssue.indent_id) == indent_id,
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
     ]
-    if warehouse_id is not None:
-        conditions.append(m.MaterialIssue.warehouse_id == warehouse_id)
+    if warehouse_ids is not None:
+        conditions.append(m.MaterialIssue.warehouse_id.in_(warehouse_ids))
+    if exclude_issue_id is not None:
+        conditions.append(m.MaterialIssue.id != exclude_issue_id)
     rows = (await db.execute(
-        select(m.MaterialIssue.issue_no, m.MaterialIssue.status)
-        .where(*conditions).order_by(m.MaterialIssue.id)
+        # id is selected because MySQL refuses DISTINCT ordered by a column outside
+        # the select list (3065).
+        select(m.MaterialIssue.id, m.MaterialIssue.issue_no, m.MaterialIssue.status)
+        .join(m.MaterialIssueLine, m.MaterialIssueLine.issue_id == m.MaterialIssue.id)
+        .outerjoin(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+        .where(*conditions)
+        .distinct().order_by(m.MaterialIssue.id)
     )).all()
-    return ", ".join(f"{issue_no} ({status})" for issue_no, status in rows)
+    return ", ".join(f"{issue_no} ({status})" for _, issue_no, status in rows)
+
+
+async def _guard_issue_indent_caps(db: AsyncSession, items: list, header_indent_id: int | None,
+                                   warehouse_id: int,
+                                   exclude_issue_id: int | None = None) -> set[int]:
+    """Refuses an outward issue that would take any indent it serves past approval.
+
+    The ONE check, run on create AND on edit. It used to run on create only, so a
+    draft raised small and then edited up — or raised with no lines and filled in
+    afterwards — was never measured, and an indent already issued in full could be
+    issued again. Returns the indent ids the lines serve (empty = none).
+
+    A line with no `issued_qty` is counted at its requested quantity, which is what
+    `_apply_issue_lines` will store for it; reading None as zero let it skip the cap.
+    """
+    from app.modules.indents.models import Indent
+
+    wanted: dict[int, dict[int, Decimal]] = defaultdict(dict)
+    for line in items:
+        owner = await _indent_id_for_line(db, line, header_indent_id)
+        if not owner:
+            continue
+        qty = _d(line.requested_qty if line.issued_qty is None else line.issued_qty)
+        by_item = wanted[owner]
+        by_item[line.item_id] = by_item.get(line.item_id, ZERO) + qty
+    if not wanted:
+        return set()
+    # Scoped to THIS TIER: the same indent is served down a chain, and the
+    # warehouse's leg must not consume the MDP's allowance to forward on — but two
+    # points on one rung are sharing one demand.
+    peers = await _same_tier_warehouse_ids(db, warehouse_id)
+    for indent_id, by_item in wanted.items():
+        served = await db.get(Indent, indent_id)
+        if served is None:
+            continue
+        await _guard_indent_quantity(
+            db, served.id, served.indent_no, by_item,
+            await _already_issued(db, served.id, warehouse_ids=peers,
+                                  exclude_issue_id=exclude_issue_id),
+            "issue",
+            await _live_issue_labels(db, served.id, peers, exclude_issue_id),
+        )
+    return set(wanted)
 
 
 async def _guard_indent_quantity(db: AsyncSession, indent_id: int, indent_no: str,
@@ -8249,6 +8337,16 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
     # change — after approval they are frozen. See `_assert_issue_sources`.
     await _assert_issue_sources(db, issue, lines)
 
+    # How finely each line's unit divides — the rule indents and approvals already
+    # apply (`shared/uom`). Nobody hands over 9.5 Nos; the issue form accepted it and
+    # the half unit then stranded the line at Outward QC, whose serial check can never
+    # account for it.
+    item_ids = {line.item_id for line in lines if line.item_id}
+    uom_codes = dict((await db.execute(
+        select(Item.id, Item.uom_code).where(Item.id.in_(item_ids))
+    )).all()) if item_ids else {}
+    decimals = await uom_rules.decimals_by_code(db, uom_codes.values())
+
     for index, line in enumerate(lines, start=1):
         item = await _item_snapshot(db, line.item_id)
         requested = _d(line.requested_qty)
@@ -8258,6 +8356,12 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
         if issued > requested:
             raise ValidationError(
                 f"Line {index}: cannot issue {issued} against a request for {requested}")
+        if decimals.get(item.uom_code, uom_rules.MAX_DECIMALS) == 0 and (
+                issued != issued.to_integral_value()
+                or requested != requested.to_integral_value()):
+            raise ValidationError(
+                f"Line {index}: {item.code} is counted in {item.uom_code} — "
+                f"{issued} is not a whole number. Issue whole units only.")
 
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
@@ -8738,25 +8842,7 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         # Grouped per indent, because one issue can now serve a whole consolidated
         # cycle. Capping the batch against the header's indent alone would let one
         # LT's line be checked and the other 899 sail through unchecked.
-        wanted: dict[int, dict[int, Decimal]] = defaultdict(dict)
-        for line in data.items:
-            owner = await _indent_id_for_line(db, line, data.indent_id)
-            if not owner:
-                continue
-            by_item = wanted[owner]
-            by_item[line.item_id] = by_item.get(line.item_id, ZERO) + _d(line.issued_qty)
-        for indent_id, by_item in wanted.items():
-            served = indent if indent and indent.id == indent_id else await db.get(
-                Indent, indent_id)
-            if served is None:
-                continue
-            await _guard_indent_quantity(
-                db, served.id, served.indent_no, by_item,
-                # Scoped to THIS point: the same indent is served down a chain, and the
-                # warehouse's leg must not consume the MDP's allowance to forward on.
-                await _already_issued(db, served.id, wh.id), "issue",
-                await _live_issue_labels(db, served.id, wh.id),
-            )
+        wanted = await _guard_issue_indent_caps(db, data.items, data.indent_id, wh.id)
 
         # A LIP is the bottom of the chain: everything it holds arrived against a
         # request and everything it gives out answers one. Issuing with no indent
@@ -9237,6 +9323,11 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     issue.issued_to_name = snapshots["issued_to_name"]
     issue.remarks = data.remarks
 
+    if issue.direction != IssueDirection.IN.value and data.items:
+        # The same cap `_build_issue` applies, with this draft's own old lines left
+        # out — they are the ones being replaced.
+        await _guard_issue_indent_caps(db, data.items, data.indent_id, wh.id,
+                                       exclude_issue_id=issue.id)
     await _clear_issue_serial_reservations(db, issue.id)
     await _apply_issue_lines(db, issue, data.items)
     # The edit that matters most on this screen: a storekeeper who moves a line onto
@@ -9558,12 +9649,27 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         outstanding = _d(line.requested_qty)
         if outstanding <= ZERO:
             continue
+        # The children are written straight to the table and never pass through
+        # `_reserve_issue_serials`, the check that refuses a fractional serialized
+        # line on create and edit. So it is repeated here: a 9.5 child of a serialized
+        # item can never be completed at Outward QC.
+        item = await _item_snapshot(db, line.item_id)
+        whole = item.is_serial_tracked or (
+            await uom_rules.decimals_by_code(db, [line.uom_code])
+        ).get(line.uom_code, uom_rules.MAX_DECIMALS) == 0
+        if whole and outstanding != outstanding.to_integral_value():
+            raise ValidationError(
+                f"{item.code}: {outstanding} {line.uom_code} is not a whole number — "
+                f"cancel {parent.issue_no} and raise it again in whole units.")
         for row in rows:
             if outstanding <= ZERO:
                 break
             if row.item_id != line.item_id:
                 continue
             available = _d(row.qty)
+            if whole:
+                # Whole units only, or a fractional balance row splits 9 into 4.5 + 4.5.
+                available = Decimal(int(available))
             if available <= ZERO:
                 continue
             floor_id, floor_name = _floor_of(index, row.bin_id)
@@ -10050,6 +10156,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     # holding a trolley is not sent back for one item at a time.
     incomplete = []
     needs_qc = False
+    decimals = await uom_rules.decimals_by_code(db, {line.uom_code for line in issue.items})
     for line in issue.items:
         qty = _d(line.issued_qty)
         if qty <= ZERO:
@@ -10057,7 +10164,24 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
         item = await _item_snapshot(db, line.item_id)
         if item.requires_qi:
             needs_qc = True
+        # A counted unit (Nos, Box, Pack…) goes out whole, serialized or not. Drafts
+        # saved before `_apply_issue_lines` checked this still carry 9.5 Nos.
+        if (decimals.get(line.uom_code, uom_rules.MAX_DECIMALS) == 0
+                and qty != qty.to_integral_value()):
+            incomplete.append(
+                f"{item.code}: {qty} {line.uom_code} is not a whole number — cancel "
+                "this issue and raise it again in whole units")
+            continue
         if not item.is_serial_tracked:
+            continue
+        # int(9.5) is 9, so nine serials used to pass for a line issuing 9.5 and the
+        # half unit went out on the ledger. Outward QC then refuses the line forever
+        # ("accepted quantity must be a whole number"), because no whole number of
+        # serials can account for it. Refused here, the last door before stock moves.
+        if qty != qty.to_integral_value():
+            incomplete.append(
+                f"{item.code}: {qty} is not a whole number of units — a serialized "
+                "item is issued in whole units")
             continue
         captured = len(getattr(line, "serial_numbers", None) or [])
         if captured != int(qty):
@@ -22503,6 +22627,21 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
             issued_by_item[item_id] = issued_by_item.get(item_id, ZERO) + _d(qty)
             line_id_by_item.setdefault(item_id, row_id)
 
+    # The units each issue line actually sent out, named every way the unit can be
+    # read — serial, IMEI, asset tag, consumable code. Serials were the only kind QC
+    # knew about, so an asset- or lot-coded item went through outward QC with no way
+    # to say WHICH units passed.
+    units_by_line: dict[int, set[str]] = {}
+    if inspection.issue_id:
+        issue = await get_issue(db, inspection.issue_id)
+        for line_id, rows in (await _issue_units_by_line(db, issue)).items():
+            units_by_line[line_id] = {
+                value for row in rows
+                for value in (row.serial_number, row.imei, row.asset_code,
+                              row.consumable_code) if value}
+    decimals = await uom_rules.decimals_by_code(
+        db, [(await _item_snapshot(db, line.item_id)).uom_code for line in lines])
+
     for line in lines:
         item = await _item_snapshot(db, line.item_id)
         inspected = _d(line.inspected_qty)
@@ -22545,11 +22684,42 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: accepted serial numbers must be unique")
             
-        if item.is_serial_tracked and accepted != accepted.to_integral_value():
-            raise ValidationError(f"{item.code}: accepted quantity must be a whole number for serialized items")
-        if item.is_serial_tracked and len(serials) != int(accepted):
-            raise ValidationError(f"{item.code}: select exactly {int(accepted)} accepted serial numbers")
-            
+        # Counted units (Nos, Box…) and serialized items are inspected and accepted
+        # whole — QC0038 passed 3.63 Nos of A4 paper. Name the line and the way out:
+        # one item can sit on several lines (one per bin), so a bare item code read
+        # as "still the same error" after the inspector had fixed a different line.
+        label = f"{item.code} (batch {line.batch_no or '-'})"
+        whole_units = item.is_serial_tracked or decimals.get(
+            item.uom_code, uom_rules.MAX_DECIMALS) == 0
+        if whole_units:
+            issued_here = issued_by_line.get(line.issue_item_id) if line.issue_item_id else None
+            # An issue saved before whole units were enforced may still be 9.5 Nos;
+            # inspecting all of it must stay possible or that issue is stranded.
+            if inspected != inspected.to_integral_value() and inspected != issued_here:
+                raise ValidationError(
+                    f"{label}: inspected {inspected} {item.uom_code} — counted units "
+                    "are inspected whole.")
+            if accepted != accepted.to_integral_value():
+                whole = Decimal(int(accepted))
+                raise ValidationError(
+                    f"{label}: accepted {accepted} {item.uom_code} — counted units are "
+                    f"accepted whole. Accept {whole} and reject the remaining "
+                    f"{inspected - whole} with a reason.")
+
+        sent = units_by_line.get(line.issue_item_id or 0, set())
+        if sent:
+            stray = [value for value in serials if value not in sent]
+            if stray:
+                raise ValidationError(
+                    f"{label}: {', '.join(stray[:5])} did not go out on this issue line")
+            if len(serials) != int(accepted):
+                raise ValidationError(
+                    f"{label}: select exactly {int(accepted)} accepted units "
+                    f"({len(serials)} selected)")
+        elif item.is_serial_tracked and len(serials) != int(accepted):
+            raise ValidationError(
+                f"{label}: select exactly {int(accepted)} accepted serial numbers")
+
         reason = line.rejection_reason or line.defect_type
         if rejected > ZERO and not (reason or "").strip():
             raise ValidationError(f"{item.code}: a failed line needs a defect type")

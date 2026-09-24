@@ -125,7 +125,7 @@ export function LogisticsOverviewPage() {
 
   return (
     <Can do="transport.view">
-      <PageHeader eyebrow="Logistics" title="Overview" />
+      <PageHeader eyebrow="Logistics" title="Dashboard" />
       <p className="mb-4 text-sm text-muted">
         The outward leg at a glance. Press a number to open the queue behind it.
       </p>

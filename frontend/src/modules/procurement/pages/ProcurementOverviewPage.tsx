@@ -304,7 +304,7 @@ export function ProcurementOverviewPage() {
   if (!anySection) {
     return (
       <>
-        <PageHeader eyebrow="Procurement" title="Overview" />
+        <PageHeader eyebrow="Procurement" title="Dashboard" />
         <Card className="p-10 text-center">
           <p className="text-sm text-muted">
             Nothing here is available to your role yet. Ask an administrator for access
@@ -317,7 +317,7 @@ export function ProcurementOverviewPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Procurement" title="Overview" />
+      <PageHeader eyebrow="Procurement" title="Dashboard" />
 
       {/* 1 — the only thing on the page that is somebody's to DO. */}
       {myQueues.length > 0 && (

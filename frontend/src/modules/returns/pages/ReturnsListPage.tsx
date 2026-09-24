@@ -206,7 +206,7 @@ export default function ReturnsListPage() {
                   // not any more, so the hint says where the button actually is rather
                   // than pointing at a corner of the screen with nothing in it.
                   ? "When stock has to go back up the chain — expired, damaged or not "
-                    + "needed — raise it from All returns or Overview. It will appear here."
+                    + "needed — raise it from All returns or Dashboard. It will appear here."
                   : "When stock has to go back up the chain — expired, damaged or not needed — raise it here."
             }
           />
