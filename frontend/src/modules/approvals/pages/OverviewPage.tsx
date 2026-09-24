@@ -93,7 +93,7 @@ export function ApprovalOverviewPage() {
 
   return (
     <>
-      <PageHeader title="Overview" />
+      <PageHeader title="Dashboard" />
 
       {/* The summary IS the page. A failure here is not a partial render — say so,
           rather than draw four zeroes, which reads as "nothing to approve". */}

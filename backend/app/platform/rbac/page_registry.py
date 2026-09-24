@@ -89,14 +89,14 @@ PAGES: list[PageDef] = [
     # makes it the module's front door — deliberate here, and safe, because it calls
     # no endpoint that did not already exist (/pending/summary, /reports/summary,
     # /allocation-cycles). The warning at the top of this list is about NEW endpoints.
-    PageDef("approval_overview", "/approvals/overview", "Overview",
+    PageDef("approval_overview", "/approvals/overview", "Dashboard",
             parent="approvals", module="approvals", icon="layout-dashboard",
             sort_order=20),
     # Returns — a module of its own, so the group row comes first and the screens
     # hang off it. sort_order 60 puts it after Warehouse and before Reports.
     PageDef("grp_returns", "/returns", "Returns", module="returns",
             icon="corner-up-left", sort_order=60),
-    PageDef("returns_overview", "/returns/dashboard", "Overview",
+    PageDef("returns_overview", "/returns/dashboard", "Dashboard",
             parent="grp_returns", module="returns", icon="layout-dashboard",
             sort_order=1),
     PageDef("returns_register", "/returns", "All Returns",
@@ -147,7 +147,7 @@ PAGES: list[PageDef] = [
     # counts (`requisition.view`, `consolidation.view`, `rfq.view`, `rfq.compare`,
     # `po.view`), so the page's own permission means only "may open the board" — a
     # login that holds one of the five sees one strip, not an error.
-    PageDef("pro_overview", "/procurement/overview", "Overview",
+    PageDef("pro_overview", "/procurement/overview", "Dashboard",
             parent="grp_purchasing", module="procurement", icon="layout-dashboard",
             sort_order=24),
     PageDef("pro_requisitions", "/procurement/requisitions", "Requisitions",
@@ -292,7 +292,7 @@ PAGES: list[PageDef] = [
     # and permissions and are not touched.
     # NEW 2026-08-23. The module's front page, and its FIRST child. It keeps its OWN
     # url: `/logistics` is the module door and redirects to Shipments, where a
-    # logistics day is worked, so the Overview tab has to point at the Overview
+    # logistics day is worked, so the Dashboard tab has to point at the Dashboard
     # screen rather than follow that door.
     #
     # It reads `/api/transport/summary` and writes nothing, so it is guarded by the
@@ -300,7 +300,7 @@ PAGES: list[PageDef] = [
     # `page.logistics_overview.view` inherits from `page.logistics_transport.view` (see
     # permissions.INHERITS_GRANTS_FROM) so the desk that works Shipments gets it without
     # anybody re-granting.
-    PageDef("logistics_overview", "/logistics/overview", "Overview",
+    PageDef("logistics_overview", "/logistics/overview", "Dashboard",
             parent="grp_logistics", module="logistics", icon="layout-dashboard",
             sort_order=0),
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",

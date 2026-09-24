@@ -714,7 +714,7 @@ export function featureGroup(code: string): string {
 
 // Only name controls verified in their screens; a scope has no matching button.
 export const ACTION_LOCATIONS: Record<string, { button: string; where: string }> = {
-  "indent.create": { button: "New indent", where: "Indents > Overview or All Requests" },
+  "indent.create": { button: "New indent", where: "Indents > Dashboard or All Requests" },
   "indent.edit": { button: "Edit Indent", where: "Indents > All Requests > Open an editable indent" },
   "po.create": { button: "New purchase order", where: "Procurement > Purchase Orders" },
   "po.approve": { button: "Approve", where: "Procurement > Purchase Orders > Open an order > Approve this order" },

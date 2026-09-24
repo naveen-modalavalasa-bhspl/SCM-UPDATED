@@ -559,7 +559,7 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
 PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # (page code, module, page name)
     ("grp_indents", "indents", "Indents"),
-    ("ind_dashboard", "indents", "Indents · Overview"),
+    ("ind_dashboard", "indents", "Indents · Dashboard"),
     ("ind_list", "indents", "Indents · All Requests"),
     # Code kept as `ind_deliveries` on purpose: it is the identity every existing
     # rbac_page_permissions grant hangs off. Only the screen's name and path moved
@@ -575,7 +575,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Rode on `indent.approve` because it was never catalogued: unticking the screen
     # revoked the approve BUTTON on every indent screen, and ticking it handed the
     # button back. Same split as the rest.
-    ("approval_overview", "approvals", "Approvals · Overview"),
+    ("approval_overview", "approvals", "Approvals · Dashboard"),
     ("approval_consolidation", "approvals", "Approvals · Consolidation"),
     ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
     ("approval_decisions", "approvals", "Approvals · My Decisions"),
@@ -600,7 +600,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # what each rung is holding, and the demand pool underneath it. Every tile on it is
     # gated separately on the document family it counts, so the screen's own code is
     # only "may open the board".
-    ("pro_overview", "procurement", "Procurement · Overview"),
+    ("pro_overview", "procurement", "Procurement · Dashboard"),
     # Settings > Mail. Fail-closed to Admin on purpose: it reads a shared mailbox and
     # can send under the company's address, and neither is something to hand out by
     # inheritance. No INHERITS_GRANTS_FROM entry for exactly that reason.
@@ -644,7 +644,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("wh_reports", "warehouse", "Warehouse · Reports"),
     ("wh_masters", "warehouse", "Warehouse · Masters"),
     ("grp_inventory", "inventory", "Inventory"),
-    ("inv_overview", "inventory", "Inventory · Overview"),
+    ("inv_overview", "inventory", "Inventory · Dashboard"),
     ("inv_balance", "inventory", "Inventory · Stock Balance"),
     ("inv_ledger", "inventory", "Inventory · Stock Ledger"),
     ("inv_replenishment", "inventory", "Inventory · Replenishment"),
@@ -670,7 +670,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Every code here already existed as an auto-created row except the last two;
     # listing them changes no module, resource or action, only who may refresh them.
     ("grp_logistics", "logistics", "Logistics"),
-    ("logistics_overview", "logistics", "Logistics · Overview"),
+    ("logistics_overview", "logistics", "Logistics · Dashboard"),
     ("logistics_consignments", "logistics", "Logistics · Consignments"),
     ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
     ("logistics_transport", "logistics", "Logistics · Shipments"),
