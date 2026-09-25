@@ -1198,10 +1198,12 @@ async def scan(code: str, db: AsyncSession = Depends(get_db),
 @router.get("/acknowledgements/mine", response_model=list[IndentAcknowledgementRow])
 async def my_acknowledgements(search: str | None = None, status: str | None = None,
                               only_actionable: bool = False,
+                              indent_type: list[str] | None = Query(None),
                               db: AsyncSession = Depends(get_db),
                               user=Depends(require_permission(INDENT_VIEW))):
     return await service.acknowledgements_for_requester(
-        db, user, search=search, status=status, only_actionable=only_actionable)
+        db, user, search=search, status=status, only_actionable=only_actionable,
+        indent_types=indent_type)
 
 
 # The delivery half of an indent's journey, for the stepper on its detail page. Any
@@ -1553,11 +1555,13 @@ async def delete_stock_movement(order_id: int, db: AsyncSession = Depends(get_db
 @router.get("/outbound-inspections", response_model=Page[s.OutboundInspectionRead])
 async def list_outbound_inspections(params: PageParams = Depends(),
                                     status: str | None = None, warehouse_id: int | None = None,
-                                    search: str | None = None, db: AsyncSession = Depends(get_db),
+                                    search: str | None = None,
+                                    stock_transfer: bool | None = None,
+                                    db: AsyncSession = Depends(get_db),
                                     user=Depends(require_permission(QC_OUTWARD_VIEW))):
     return await service.list_outbound_inspections(db, params, status=status,
                                                    warehouse_id=warehouse_id, search=search,
-                                                   user=user)
+                                                   user=user, stock_transfer=stock_transfer)
 
 @router.get("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
 async def get_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),

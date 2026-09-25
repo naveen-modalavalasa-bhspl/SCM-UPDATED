@@ -12,10 +12,10 @@ from app.modules.inventory.schemas import (
     ActionIn, MovementRow, MRClaimsOut, MRCreateIn, MRListRow, MROut, MRReviseIn,
     StockRow,
     TransferIn,
-    AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, ReplenishmentRow,
+    AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, CountSheetRow, ReplenishmentRow,
     ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
     AgeingSummaryOut, ValuationSummaryOut, NearExpiryAlertRow,
-    STOIn, STOOut, STOListRow, CycleCountIn, CycleCountUpdateIn,
+    STOIn, STOOut, STOListRow, STOReject, CycleCountIn, CycleCountUpdateIn,
     CycleCountOut, CycleCountListRow, StockOverviewKPIs,
     StockDetailOut, ReplenishmentRuleIn, ReplenishmentRuleRow,
     PositionLocationIn, PositionLocationOut, FloorAccessIn, MovementClassificationOut,
@@ -107,9 +107,20 @@ async def create_adjustment(body: AdjustmentIn, db: AsyncSession = Depends(get_d
 
 @stock_router.get("/adjustments", response_model=Page[AdjustmentListRow])
 async def list_adjustments(params: PageParams = Depends(), warehouse_id: int | None = None,
-                            status: str | None = None, db: AsyncSession = Depends(get_db),
+                            status: str | None = None, search: str | None = None,
+                            reason: str | None = None, date_from: date | None = None,
+                            date_to: date | None = None, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_adjustments(db, params, warehouse_id, status, user=user)
+    return await service.list_adjustments(
+        db, params, warehouse_id, status, user=user, search=search, reason=reason,
+        date_from=date_from, date_to=date_to)
+
+
+# Declared before /adjustments/{id}, which would otherwise claim the path and 422.
+@stock_router.get("/adjustments/count-sheet", response_model=list[CountSheetRow])
+async def adjustment_count_sheet(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(perms.STOCK_ADJUST))):
+    return await service.adjustment_count_sheet(db, warehouse_id, user)
 
 
 @stock_router.get("/adjustments/{id}", response_model=AdjustmentOut)
@@ -119,15 +130,17 @@ async def get_adjustment(id: int, db: AsyncSession = Depends(get_db),
 
 
 @stock_router.post("/adjustments/{id}/approve", response_model=AdjustmentOut)
-async def approve_adjustment(id: int, db: AsyncSession = Depends(get_db),
-                             user=Depends(require_permission(perms.STOCK_ADJUST))):
-    return await service.act_on_adjustment(db, id, "APPROVE", user)
+async def approve_adjustment(id: int, body: AdjustmentRejectIn | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_ADJUST_APPROVE))):
+    return await service.act_on_adjustment(db, id, "APPROVE", user,
+                                           remarks=body.remarks if body else None)
 
 
 @stock_router.post("/adjustments/{id}/reject", response_model=AdjustmentOut)
 async def reject_adjustment(id: int, body: AdjustmentRejectIn | None = None,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.STOCK_ADJUST))):
+                            user=Depends(require_permission(perms.STOCK_ADJUST_APPROVE))):
     return await service.act_on_adjustment(db, id, "REJECT", user,
                                            remarks=body.remarks if body else None)
 
@@ -213,9 +226,18 @@ async def create_sto(body: STOIn, db: AsyncSession = Depends(get_db),
 
 @stock_router.get("/sto", response_model=Page[STOListRow])
 async def list_stos(params: PageParams = Depends(), status: str | None = None,
+                    kind: str | None = None, search: str | None = None,
+                    str_id: int | None = None, origin: str | None = None,
+                    from_warehouse_id: int | None = None,
+                    to_warehouse_id: int | None = None,
+                    date_from: date | None = None, date_to: date | None = None,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission(perms.STOCK_VIEW))):
-    return await service.list_stos(db, params, status, user=user)
+    return await service.list_stos(db, params, status, user=user, kind=kind,
+                                   search=search, str_id=str_id, origin=origin,
+                                   from_warehouse_id=from_warehouse_id,
+                                   to_warehouse_id=to_warehouse_id,
+                                   date_from=date_from, date_to=date_to)
 
 
 @stock_router.get("/sto/{id}", response_model=STOOut)
@@ -226,8 +248,14 @@ async def get_sto(id: int, db: AsyncSession = Depends(get_db),
 
 @stock_router.post("/sto/{id}/approve", response_model=STOOut)
 async def approve_sto(id: int, db: AsyncSession = Depends(get_db),
-                      user=Depends(require_permission(perms.STOCK_TRANSFER))):
+                      user=Depends(require_permission(perms.STOCK_TRANSFER_APPROVE))):
     return await service.approve_sto(db, id, user)
+
+
+@stock_router.post("/sto/{id}/reject", response_model=STOOut)
+async def reject_sto(id: int, body: STOReject, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.STOCK_TRANSFER_APPROVE))):
+    return await service.reject_sto(db, id, user, body.comments)
 
 
 @stock_router.post("/sto/{id}/dispatch", response_model=STOOut)

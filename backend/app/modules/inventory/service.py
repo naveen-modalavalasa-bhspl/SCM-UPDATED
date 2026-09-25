@@ -124,6 +124,21 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     office_id = getattr(user, "office_id", None)
     project_id = getattr(user, "project_id", None)
 
+    # BUG_SCM_012 — scoped to the post being worked as, not the person. One human
+    # holding a Store Keeper and a DEO post in the same office read the LIP's stock
+    # from both, because this floor matched the EMPLOYEE's office. With a post in hand,
+    # the floor is the shelves that post holds (`locations.held_location_ids`), and
+    # the subtree rungs descend from that post alone.
+    active_position = getattr(user, "active_position_id", None)
+    if active_position is not None:
+        own = await locations.held_location_ids(db, active_position, subtree=False)
+        if rung is ScopeRung.PROJECT and project_id is not None:
+            return own | await _project_warehouse_ids(db, project_id)
+        if rung in (ScopeRung.SUBTREE, ScopeRung.OFFICE):
+            return own | await locations.held_location_ids(
+                db, active_position, subtree=True)
+        return own
+
     # Points this person holds directly: they are its incharge, or it hangs off their
     # own office. This is the SELF floor — no rung is ever narrower than "mine".
     own_conditions = [Warehouse.incharge_id == user.id]
@@ -140,16 +155,7 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
 
     if rung is ScopeRung.PROJECT and project_id is not None:
         # Everything in the project, however it is tagged.
-        in_project = set((await db.execute(
-            select(Warehouse.id)
-            .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
-            .outerjoin(HcmOffice, HcmOffice.id == func.coalesce(
-                Warehouse.office_id, HcmFacility.office_id))
-            .join(HcmEmployee, HcmEmployee.office_id == HcmOffice.id)
-            .where(Warehouse.is_active.is_(True),
-                   HcmEmployee.project_id == project_id)
-        )).scalars().all())
-        return own | in_project
+        return own | await _project_warehouse_ids(db, project_id)
 
     if rung in (ScopeRung.SUBTREE, ScopeRung.OFFICE):
         # The REPORTING TREE, walked through hcm_positions.parent_position_id — every
@@ -161,6 +167,19 @@ async def _warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
 
     # SELF, or a rung whose data is missing: only what this login holds itself.
     return own
+
+
+async def _project_warehouse_ids(db: AsyncSession, project_id: int) -> set[int]:
+    """Every active point in the project, however it is tagged."""
+    return set((await db.execute(
+        select(Warehouse.id)
+        .outerjoin(HcmFacility, HcmFacility.id == Warehouse.facility_id)
+        .outerjoin(HcmOffice, HcmOffice.id == func.coalesce(
+            Warehouse.office_id, HcmFacility.office_id))
+        .join(HcmEmployee, HcmEmployee.office_id == HcmOffice.id)
+        .where(Warehouse.is_active.is_(True),
+               HcmEmployee.project_id == project_id)
+    )).scalars().all())
 
 
 async def warehouse_ids_for_user(db: AsyncSession, user) -> set[int] | None:
@@ -795,7 +814,97 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
             row.reorder_level = float(item.reorder_level or 0) if item else 0.0
             row.barcode_value = item.barcode_value if item else None
         await _fill_uom_names(db, page["items"])
+        pipeline = await stock_pipeline(
+            db, warehouse_ids={row.warehouse_id for row in page["items"]}, item_ids=ids)
+        for row in page["items"]:
+            figures = pipeline.get((row.warehouse_id, row.item_id), {})
+            for key in ("issued_pending_qty", "outgoing_qty", "incoming_qty"):
+                setattr(row, key, float(figures.get(key, 0)))
     return page
+
+
+#: Consignment statuses that mean "on the road": gated out, and not yet signed for or
+#: inwarded at the far end. DELIVERED stays in — the carrier says it arrived, the
+#: receiving point has not taken it onto a shelf. `out_dispatches.status` values
+#: (warehouse's enum; inventory may not import it — rule 5).
+_ON_THE_ROAD = ("DISPATCHED", "IN_TRANSIT", "DELIVERED")
+
+
+async def stock_pipeline(db: AsyncSession, *, warehouse_ids=None, item_ids=None
+                         ) -> dict[tuple[int, int], dict[str, Decimal]]:
+    """REQ_032: what is between shelves, per (warehouse, item). READ, never stored.
+
+    `stk_balance.transit_qty` was never written by anything, so the grid's "In transit"
+    was always 0. Rather than start keeping a second copy of facts the warehouse
+    documents already hold — and have to keep it right through every cancel, split,
+    partial receipt and forward — the figures are derived from those documents:
+
+      issued_pending  a posted OUT issue still at ISSUED, raised for an indent/STR or
+                      an STO: off the shelf, not yet on a consignment that has gone.
+      outgoing        consignment lines out of this point, on the road.
+      incoming        consignment lines addressed to this point, on the road.
+
+    `warehouse_ids` / `item_ids` of None mean "no narrowing". Three grouped queries,
+    whatever the page size.
+    """
+    from sqlalchemy import column, table
+
+    issues = table("out_issues", column("id"), column("warehouse_id"), column("status"),
+                   column("direction"), column("is_stock_posted"), column("indent_id"))
+    issue_lines = table("out_issue_items", column("issue_id"), column("item_id"),
+                        column("issued_qty"), column("indent_item_id"))
+    dispatches = table("out_dispatches", column("id"), column("warehouse_id"),
+                       column("to_warehouse_id"), column("status"))
+    dispatch_lines = table("out_dispatch_items", column("dispatch_id"), column("item_id"),
+                           column("quantity"))
+
+    def narrow(stmt, wh_col, item_col):
+        if warehouse_ids is not None:
+            stmt = stmt.where(wh_col.in_(warehouse_ids or {0}))
+        if item_ids is not None:
+            stmt = stmt.where(item_col.in_(item_ids or {0}))
+        return stmt
+
+    out: dict[tuple[int, int], dict[str, Decimal]] = {}
+
+    def add(rows, key: str) -> None:
+        for wh, item, qty in rows:
+            if wh is None or item is None:
+                continue
+            slot = out.setdefault((int(wh), int(item)), {
+                "issued_pending_qty": Decimal("0"), "outgoing_qty": Decimal("0"),
+                "incoming_qty": Decimal("0")})
+            slot[key] += Decimal(str(qty or 0))
+
+    pending = narrow(
+        select(issues.c.warehouse_id, issue_lines.c.item_id,
+               func.sum(issue_lines.c.issued_qty))
+        .select_from(issue_lines.join(issues, issues.c.id == issue_lines.c.issue_id))
+        .where(issues.c.status == "ISSUED", issues.c.direction == "OUT",
+               issues.c.is_stock_posted.is_(True),
+               # Only an issue that is going somewhere: against an indent/STR (header
+               # or line — a consolidated issue names its indents per line) or
+               # executing an STO. A direct issue to a department is consumed where it
+               # stands, never gets a consignment, and would sit here for ever.
+               or_(issues.c.indent_id.is_not(None),
+                   issue_lines.c.indent_item_id.is_not(None),
+                   issues.c.id.in_(select(StockTransferOrder.issue_id)
+                                   .where(StockTransferOrder.issue_id.is_not(None))))),
+        issues.c.warehouse_id, issue_lines.c.item_id,
+    ).group_by(issues.c.warehouse_id, issue_lines.c.item_id)
+    add((await db.execute(pending)).all(), "issued_pending_qty")
+
+    road = dispatch_lines.join(dispatches, dispatches.c.id == dispatch_lines.c.dispatch_id)
+    for wh_col, key in ((dispatches.c.warehouse_id, "outgoing_qty"),
+                        (dispatches.c.to_warehouse_id, "incoming_qty")):
+        stmt = narrow(
+            select(wh_col, dispatch_lines.c.item_id, func.sum(dispatch_lines.c.quantity))
+            .select_from(road)
+            .where(dispatches.c.status.in_(_ON_THE_ROAD)),
+            wh_col, dispatch_lines.c.item_id,
+        ).group_by(wh_col, dispatch_lines.c.item_id)
+        add((await db.execute(stmt)).all(), key)
+    return out
 
 
 async def _fill_uom_names(db: AsyncSession, rows) -> None:
@@ -903,7 +1012,19 @@ async def stock_summary(db: AsyncSession, item_id: int | None = None,
         select(func.count()).select_from(Item).where(Item.reorder_level > 0).limit(1)
     ))
 
+    # The pipeline over the same points. Narrowed to the one warehouse/item filtered
+    # on, else to what this login may see (None = everywhere).
+    visible = await _warehouse_ids_for_user(db, user)
+    pipeline_wh = ({warehouse_id} if warehouse_id else visible)
+    pipeline = await stock_pipeline(
+        db, warehouse_ids=pipeline_wh, item_ids={item_id} if item_id else None)
+    pipeline_totals = {
+        key: float(sum((v[key] for v in pipeline.values()), Decimal("0")))
+        for key in ("issued_pending_qty", "outgoing_qty", "incoming_qty")
+    }
+
     return {
+        **pipeline_totals,
         "stock_lines": int(totals[0] or 0),
         "distinct_items": int(totals[1] or 0),
         "total_qty": float(totals[2] or 0),
@@ -1764,8 +1885,13 @@ async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) 
     and reports "Insufficient stock" against a warehouse that plainly has the item.
     move_stock_out() treats an unspecified bin as "pick from available", which is what
     a storekeeper writing off damage actually means.
+
+    A counted line that matched (quantity 0) is the audit's evidence, not a movement,
+    and is skipped.
     """
     for adj_item in adj_items:
+        if _d(adj_item.quantity) <= 0:
+            continue
         common = dict(
             ref_type=RefType.ADJUSTMENT.value, ref_id=adjustment.id,
             ref_no=adjustment.adjustment_no, user=user,
@@ -1786,16 +1912,85 @@ async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) 
             )
 
 
-async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustment:
-    """Create a stock adjustment. Outward lines always need approval; small inward
-    ones post immediately (see AUTO_APPROVE_MAX_QTY / _VALUE above)."""
-    warehouse = await db.get(Warehouse, data.warehouse_id)
+async def _assert_warehouse_visible(db: AsyncSession, warehouse_id: int, user) -> Warehouse:
+    warehouse = await db.get(Warehouse, warehouse_id)
     if not warehouse:
-        raise NotFoundError(f"Warehouse {data.warehouse_id} not found")
+        raise NotFoundError(f"Warehouse {warehouse_id} not found")
+    visible = await _warehouse_ids_for_user(db, user)
+    if visible is not None and warehouse_id not in visible:
+        raise PermissionError_(f"{warehouse.name} is outside the stock you can see")
+    return warehouse
+
+
+async def _system_qty(db: AsyncSession, warehouse_id: int, item_id: int,
+                      bin_id: int = 0, batch_id: int = 0) -> Decimal:
+    """What the system holds, read at save time - never taken from the client."""
+    stmt = select(func.coalesce(func.sum(Stock.total_qty), 0)).where(
+        Stock.warehouse_id == warehouse_id, Stock.item_id == item_id)
+    if bin_id:
+        stmt = stmt.where(Stock.bin_id == bin_id)
+    if batch_id:
+        stmt = stmt.where(Stock.batch_id == batch_id)
+    return _d((await db.execute(stmt)).scalar_one())
+
+
+async def adjustment_count_sheet(db: AsyncSession, warehouse_id: int, user) -> list[dict]:
+    """Every item the system holds at a warehouse, summed over bins, batches and
+    projects - the left-hand column of a stock audit."""
+    await _assert_warehouse_visible(db, warehouse_id, user)
+    rows = (await db.execute(
+        select(
+            Stock.item_id,
+            func.max(Stock.item_code), func.max(Stock.item_name), func.max(Stock.uom_code),
+            func.sum(Stock.total_qty), func.sum(Stock.reserved_qty),
+        )
+        .where(Stock.warehouse_id == warehouse_id)
+        .group_by(Stock.item_id)
+        .having(func.sum(Stock.total_qty) != 0)
+        .order_by(func.max(Stock.item_code))
+    )).all()
+    return [
+        {"item_id": r[0], "item_code": r[1], "item_name": r[2], "uom_code": r[3],
+         "system_qty": float(_d(r[4])), "reserved_qty": float(_d(r[5]))}
+        for r in rows
+    ]
+
+
+async def _adjustment_ladder(db: AsyncSession, user):
+    """The configured Stock Audit chain for this raiser's project, or None."""
+    from app.platform.workflow import ladder as wf_ladder
+
+    position_id = getattr(user, "active_position_id", None)
+    project_id, _name = await wf_ladder.project_for(db, position_id, user)
+    raiser_role_id = await wf_ladder.role_of_position(db, position_id)
+    return await wf_ladder.find_ladder(
+        db, project_id, DocType.STOCK_ADJUSTMENT.value, raiser_role_id)
+
+
+def _mark_adjustment_approved(adjustment: StockAdjustment, user) -> None:
+    adjustment.status = AdjustmentStatus.APPROVED.value
+    adjustment.approved_by_id = getattr(user, "id", None)
+    adjustment.approved_by_name = getattr(user, "full_name", None)
+    adjustment.approved_at = utcnow()
+    adjustment.current_approver_name = None
+
+
+async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustment:
+    """Raise a stock audit / adjustment.
+
+    Approval, in order:
+      * nothing differs (every counted line matched) - recorded as APPROVED at once,
+        there is nothing to post and nothing to sign;
+      * the raiser's project configured a STOCK_ADJUSTMENT chain on Approval Flow -
+        the engine decides (rule 8), and NO_APPROVAL there posts immediately;
+      * otherwise the old rule: small inward corrections post, anything outward or
+        larger waits for one holder of `stock.adjust.approve` who is not the raiser.
+    """
+    warehouse = await _assert_warehouse_visible(db, data.warehouse_id, user)
     if not data.items:
-        raise ValidationError("A stock adjustment needs at least one line")
-    # Rule 3: the reason is an enum, not free text. It was unchecked, so a typo — or
-    # anything at all — was stored and reported on as if it were a real category.
+        raise ValidationError("A stock audit needs at least one line")
+    # Rule 3: the reason is an enum, not free text. It was unchecked, so a typo - or
+    # anything at all - was stored and reported on as if it were a real category.
     valid_reasons = [r.value for r in AdjustmentReason]
     if data.reason not in valid_reasons:
         raise ValidationError(
@@ -1804,14 +1999,23 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
 
     # Validated before anything is written. An adjustment naming an item that is not
     # in the master used to be accepted, snapshot its code as NULL, and then fail on
-    # the FK the moment it posted — after the document already had a number.
+    # the FK the moment it posted - after the document already had a number.
     items_by_id: dict[int, Item] = {}
+    seen: set[tuple[int, int, int]] = set()
     for line in data.items:
-        if line.direction not in (StockDirection.IN.value, StockDirection.OUT.value):
-            raise ValidationError(
-                f"Line direction must be IN or OUT, got {line.direction!r}")
-        if _d(line.quantity) <= 0:
-            raise ValidationError("Adjustment quantity must be positive")
+        if line.physical_qty is None:
+            if line.direction not in (StockDirection.IN.value, StockDirection.OUT.value):
+                raise ValidationError(
+                    "Each line needs a physical count, or a direction (IN/OUT) and a "
+                    "quantity")
+            if line.quantity is None or _d(line.quantity) <= 0:
+                raise ValidationError("Adjustment quantity must be positive")
+        else:
+            key = (line.item_id, line.bin_id or 0, line.batch_id or 0)
+            if key in seen:
+                raise ValidationError(
+                    "The same item is counted twice on this audit. Count it once.")
+            seen.add(key)
         if line.item_id not in items_by_id:
             item = await db.get(Item, line.item_id)
             if item is None:
@@ -1839,11 +2043,24 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
     adj_items: list[StockAdjustmentItem] = []
     for item_data in data.items:
         item = items_by_id[item_data.item_id]
-        qty = _d(item_data.quantity)
         cost = _d(item_data.unit_cost or 0)
-        total_qty += qty
-        total_val += await _adjustment_line_value(db, item, qty, cost)
-        has_outward = has_outward or item_data.direction == StockDirection.OUT.value
+        system_qty = physical_qty = None
+        if item_data.physical_qty is not None:
+            system_qty = await _system_qty(
+                db, data.warehouse_id, item_data.item_id,
+                item_data.bin_id or 0, item_data.batch_id or 0)
+            physical_qty = _d(item_data.physical_qty)
+            variance = physical_qty - system_qty
+            direction = (StockDirection.OUT.value if variance < 0
+                         else StockDirection.IN.value)
+            qty = abs(variance)
+        else:
+            direction = item_data.direction
+            qty = _d(item_data.quantity)
+        if qty > 0:
+            total_qty += qty
+            total_val += await _adjustment_line_value(db, item, qty, cost)
+            has_outward = has_outward or direction == StockDirection.OUT.value
 
         adj_items.append(StockAdjustmentItem(
             adjustment_id=adjustment.id,
@@ -1854,26 +2071,50 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
             bin_id=item_data.bin_id or NO_BIN,
             batch_id=item_data.batch_id or NO_BATCH,
             project_id=item_data.project_id or NO_PROJECT,
-            direction=item_data.direction,
+            direction=direction,
             quantity=qty,
+            system_qty=system_qty,
+            physical_qty=physical_qty,
             unit_cost=cost,
             remarks=item_data.remarks,
         ))
     db.add_all(adj_items)
+    await db.flush()
 
+    outcome = "for approval"
+    if total_qty == 0:
+        _mark_adjustment_approved(adjustment, user)
+        outcome = "with no difference to post"
+    elif await _adjustment_ladder(db, user) is not None:
+        instance = await engine.start(
+            db, DocType.STOCK_ADJUSTMENT.value, adjustment.id,
+            {
+                "doc_no": adjustment.adjustment_no,
+                "doc_summary": f"Stock audit {adjustment.adjustment_no} at {warehouse.name}",
+                "requester_position_id": getattr(user, "active_position_id", None),
+                "warehouse_id": adjustment.warehouse_id,
+                "total_quantity": float(total_qty),
+            },
+            user,
+        )
+        if instance.status == InstanceStatus.APPROVED.value:
+            _mark_adjustment_approved(adjustment, user)
+            await db.flush()
+            await _post_adjustment_lines(db, adjustment, adj_items, user)
+            outcome = "and approved by its chain"
+        else:
+            adjustment.current_approver_name = await engine.current_approver_label(
+                db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
     # Outward stock is never written off unattended, however small: that was the hole
     # a zero unit_cost walked through. Inward stock under both thresholds still posts
     # immediately, so the everyday "found one more box" case is unchanged.
-    auto = (not has_outward
-            and total_qty <= AUTO_APPROVE_MAX_QTY
-            and total_val <= AUTO_APPROVE_MAX_VALUE)
-    if auto:
-        adjustment.status = AdjustmentStatus.APPROVED.value
-        adjustment.approved_by_id = getattr(user, "id", None)
-        adjustment.approved_by_name = getattr(user, "full_name", None)
-        adjustment.approved_at = utcnow()
+    elif (not has_outward
+          and total_qty <= AUTO_APPROVE_MAX_QTY
+          and total_val <= AUTO_APPROVE_MAX_VALUE):
+        _mark_adjustment_approved(adjustment, user)
         await db.flush()
         await _post_adjustment_lines(db, adjustment, adj_items, user)
+        outcome = "and auto-approved"
 
     await write_audit(
         db, entity="inv_adjustments", entity_id=adjustment.id,
@@ -1881,14 +2122,27 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
         after={"status": adjustment.status, "reason": adjustment.reason,
                "warehouse_id": adjustment.warehouse_id,
                "total_qty": str(total_qty), "lines": len(adj_items)},
-        summary=(f"Stock adjustment {adjustment.adjustment_no} raised"
-                 + (" and auto-approved" if auto else " for approval")),
+        summary=f"Stock audit {adjustment.adjustment_no} raised {outcome}",
     )
     await db.commit()
     # Name the relationship: a bare refresh expires it, so the first caller to read
     # .items (the response model, for one) would lazy-load outside the greenlet.
     await db.refresh(adjustment, ["items"])
     return adjustment
+
+
+async def _adjustment_can_act(db: AsyncSession, adjustment: StockAdjustment, user) -> bool:
+    """May this login approve or reject the audit right now."""
+    if user is None or adjustment.status != AdjustmentStatus.PENDING_APPROVAL.value:
+        return False
+    instance = await engine_instance_for(db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
+    if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
+        return await engine.can_act_now(
+            db, DocType.STOCK_ADJUSTMENT.value, adjustment.id, user)
+    if getattr(user, "id", None) == adjustment.created_by_id:
+        return False
+    granted = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
+    return perms.STOCK_ADJUST_APPROVE in granted
 
 
 async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, user,
@@ -1910,42 +2164,54 @@ async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, u
     if adjustment.status != AdjustmentStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Adjustment is in status {adjustment.status}, cannot change")
 
-    # Raising and approving are the same permission today (stock.adjust guards both
-    # endpoints), so without this the approval step is decoration — the raiser simply
-    # approves their own write-off. Splitting the permission needs a new code in
-    # platform/rbac, which this module may not edit; refusing self-approval is the part
-    # that can be enforced here, and it is the part that actually stops the abuse.
-    actor_id = getattr(user, "id", None)
-    if actor_id is not None and actor_id == adjustment.created_by_id:
-        raise PermissionError_(
-            "You raised this adjustment, so you cannot approve or reject it. "
-            "Ask another storekeeper or the warehouse in-charge to action it."
-        )
-
     before = {"status": adjustment.status}
-    if action == "APPROVE":
-        if not adjustment.items:
-            raise ValidationError("This adjustment has no lines to post")
-        adjustment.status = AdjustmentStatus.APPROVED.value
-        adjustment.approved_by_id = actor_id
-        adjustment.approved_by_name = getattr(user, "full_name", None)
-        adjustment.approved_at = utcnow()
-        await _post_adjustment_lines(db, adjustment, adjustment.items, user)
+    actor_id = getattr(user, "id", None)
+    instance = await engine_instance_for(db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
+    if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
+        # A configured chain: the engine decides whether this caller is on the current
+        # rung, whether rungs remain, and what the self-approval policy allows.
+        instance = await engine.act(
+            db, DocType.STOCK_ADJUSTMENT.value, adjustment.id,
+            ApprovalAction.APPROVED.value if action == "APPROVE"
+            else ApprovalAction.REJECTED.value,
+            user, remarks or "",
+            {"doc_no": adjustment.adjustment_no},
+        )
+        if instance.status == InstanceStatus.APPROVED.value:
+            _mark_adjustment_approved(adjustment, user)
+            await _post_adjustment_lines(db, adjustment, adjustment.items, user)
+        elif instance.status == InstanceStatus.REJECTED.value:
+            adjustment.status = AdjustmentStatus.REJECTED.value
+            adjustment.current_approver_name = None
+        else:
+            adjustment.current_approver_name = await engine.current_approver_label(
+                db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
     else:
-        adjustment.status = AdjustmentStatus.REJECTED.value
-        # No column exists for a rejection reason and the schema is frozen, so it is
-        # appended to the remarks the document already carries. Without it a rejection
-        # is unexplainable after the fact.
-        if remarks:
-            who = getattr(user, "full_name", None) or "approver"
-            note = f"[Rejected by {who}] {remarks}"
-            adjustment.remarks = f"{adjustment.remarks}\n{note}" if adjustment.remarks else note
+        # No chain: one signature, never the raiser's own - otherwise the approval
+        # step is decoration and the raiser simply approves their own write-off.
+        if actor_id is not None and actor_id == adjustment.created_by_id:
+            raise PermissionError_(
+                "You raised this stock audit, so you cannot approve or reject it. "
+                "Ask another storekeeper or the warehouse in-charge to action it."
+            )
+        if action == "APPROVE":
+            _mark_adjustment_approved(adjustment, user)
+            await _post_adjustment_lines(db, adjustment, adjustment.items, user)
+        else:
+            adjustment.status = AdjustmentStatus.REJECTED.value
+
+    # No column exists for a rejection reason, so it is appended to the remarks the
+    # document already carries. Without it a rejection is unexplainable after the fact.
+    if adjustment.status == AdjustmentStatus.REJECTED.value and remarks:
+        who = getattr(user, "full_name", None) or "approver"
+        note = f"[Rejected by {who}] {remarks}"
+        adjustment.remarks = f"{adjustment.remarks}\n{note}" if adjustment.remarks else note
 
     await write_audit(
         db, entity="inv_adjustments", entity_id=adjustment.id,
         entity_no=adjustment.adjustment_no, action=AuditAction.UPDATE, actor=user,
         before=before, after={"status": adjustment.status},
-        summary=f"Stock adjustment {adjustment.adjustment_no} {adjustment.status.lower()}",
+        summary=f"Stock audit {adjustment.adjustment_no} {adjustment.status.lower()}",
     )
     await db.commit()
     await db.refresh(adjustment, ["items"])
@@ -1953,8 +2219,31 @@ async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, u
 
 
 async def list_adjustments(db: AsyncSession, params: PageParams, warehouse_id: int | None = None,
-                           status: str | None = None, user=None) -> dict:
+                           status: str | None = None, user=None, *,
+                           search: str | None = None, reason: str | None = None,
+                           date_from: date | None = None,
+                           date_to: date | None = None) -> dict:
     stmt = select(StockAdjustment)
+    if search and search.strip():
+        # Audit number, who raised it, or any item counted on it — "which audits
+        # touched this item" is the question an auditor actually asks.
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            StockAdjustment.adjustment_no.like(like),
+            StockAdjustment.created_by_name.like(like),
+            StockAdjustment.id.in_(
+                select(StockAdjustmentItem.adjustment_id).where(or_(
+                    StockAdjustmentItem.item_code.like(like),
+                    StockAdjustmentItem.item_name.like(like),
+                ))
+            ),
+        ))
+    if reason:
+        stmt = stmt.where(StockAdjustment.reason == reason)
+    if date_from:
+        stmt = stmt.where(StockAdjustment.created_at >= datetime.combine(date_from, datetime.min.time()))
+    if date_to:
+        stmt = stmt.where(StockAdjustment.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
     if user is not None:
         stmt = stmt.where(await scope_condition(
             db, user,
@@ -1966,7 +2255,7 @@ async def list_adjustments(db: AsyncSession, params: PageParams, warehouse_id: i
         stmt = stmt.where(StockAdjustment.warehouse_id == warehouse_id)
     if status:
         stmt = stmt.where(StockAdjustment.status == status)
-    return await paginate(db, stmt.order_by(StockAdjustment.created_at.desc()), params)
+    return await paginate(db, stmt.order_by(StockAdjustment.id.desc()), params)
 
 
 async def get_adjustment(db: AsyncSession, adjustment_id: int, user=None) -> StockAdjustment:
@@ -1983,8 +2272,16 @@ async def get_adjustment(db: AsyncSession, adjustment_id: int, user=None) -> Sto
             ) if user is not None else true(),
         )
     )).scalar_one_or_none()
+    if not adj and user is not None:
+        # An approver on a configured chain may sit outside the warehouse's scope;
+        # the document they were asked to sign must still open for them.
+        candidate = await db.get(StockAdjustment, adjustment_id)
+        if candidate is not None and await engine.can_act_now(
+                db, DocType.STOCK_ADJUSTMENT.value, adjustment_id, user):
+            adj = candidate
     if not adj:
         raise NotFoundError(f"Stock adjustment {adjustment_id} not found")
+    adj.can_act = await _adjustment_can_act(db, adj, user)
     return adj
 
 
@@ -2484,7 +2781,10 @@ async def get_item_availability(db: AsyncSession, item_id: int, project_id: int 
 
     total_avail = sum((s.available_qty or Decimal("0") for s in stocks), Decimal("0"))
     total_res = sum((s.reserved_qty or Decimal("0") for s in stocks), Decimal("0"))
-    total_transit = sum((s.transit_qty or Decimal("0") for s in stocks), Decimal("0"))
+    # REQ_032: `transit_qty` is never written; what is on its way is read off the
+    # consignments addressed to the points in scope.
+    pipeline = await stock_pipeline(db, warehouse_ids=warehouse_ids, item_ids={item_id})
+    total_transit = sum((v["incoming_qty"] for v in pipeline.values()), Decimal("0"))
 
     batches = [
         {
@@ -2681,6 +2981,15 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     to_wh = await db.get(Warehouse, data.to_warehouse_id)
     if not from_wh or not to_wh:
         raise NotFoundError("Source or destination warehouse not found")
+    if from_wh.id == to_wh.id:
+        raise ValidationError("A transfer needs two different stocking points")
+    # Stock can only be sent from a point this login holds — tagged to it or under it.
+    # The route's permission says "may transfer"; this says "from here".
+    visible = await _warehouse_ids_for_user(db, user)
+    if visible is not None and from_wh.id not in visible:
+        raise PermissionError_(
+            f"{from_wh.name} is not a stocking point you hold — a transfer can only be "
+            "sent from your own point or one under you")
 
     # What this move IS comes from the two points, never from the request body, so a
     # cross-project transfer cannot be relabelled into something that skips approval.
@@ -2745,6 +3054,9 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
     await _start_sto_approval(db, sto, user)
     await db.commit()
     await db.refresh(sto)
+    if sto.status == STOStatus.APPROVED.value:
+        await hooks.fire_sto_approved(db, sto, user)
+        sto = await get_sto(db, sto.id)
     return sto
 
 
@@ -2795,27 +3107,101 @@ async def get_sto(db: AsyncSession, sto_id: int, user=None) -> StockTransferOrde
             StockTransferOrder.id == sto_id,
             # Same scope the list applies. A document hidden from the list must
             # not be readable by putting its id in the URL.
-            await scope_condition(
-                db, user,
-                owner_col=StockTransferOrder.requested_by_id,
-            ) if user is not None else true(),
+            await _sto_visibility(db, user) if user is not None else true(),
         )
     )).scalar_one_or_none()
     if not sto:
         raise NotFoundError(f"STO {sto_id} not found")
+    await _decorate_sto_stages(db, [sto])
     return sto
 
 
-async def list_stos(db: AsyncSession, params: PageParams, status: str | None = None, user=None) -> dict:
-    stmt = select(StockTransferOrder)
+#: Where an issue-executed STO has got to, read off its material issue — never stored
+#: on the STO, so a posting, a gate-out or an acknowledgement moves it by existing.
+#: Keys are `out_issues.status` values (warehouse's enum; inventory may not import it).
+_STO_STAGE_BY_ISSUE = {
+    "DRAFT": "TO_ISSUE", "PENDING_APPROVAL": "TO_ISSUE", "APPROVED": "TO_ISSUE",
+    "ISSUED": "ISSUED", "DISPATCHED": "IN_TRANSIT", "ACKNOWLEDGED": "RECEIVED",
+    "PARTIALLY_RETURNED": "RECEIVED", "RETURNED": "RECEIVED",
+    "REJECTED": "CANCELLED", "CANCELLED": "CANCELLED",
+}
+
+
+async def _decorate_sto_stages(db: AsyncSession, rows) -> None:
+    """Stamp `issue_status` and `stage` on each STO, in one query for the page."""
+    from sqlalchemy import column, table
+
+    issues = table("out_issues", column("id"), column("status"))
+    ids = {r.issue_id for r in rows if getattr(r, "issue_id", None)}
+    status_by_id = dict((await db.execute(
+        select(issues.c.id, issues.c.status).where(issues.c.id.in_(ids))
+    )).all()) if ids else {}
+    for r in rows:
+        issue_status = status_by_id.get(r.issue_id) if r.issue_id else None
+        r.issue_status = issue_status
+        if r.status != STOStatus.APPROVED.value or not r.issue_id:
+            r.stage = r.status
+        else:
+            r.stage = _STO_STAGE_BY_ISSUE.get(issue_status or "", "TO_ISSUE")
+
+
+async def _sto_visibility(db: AsyncSession, user):
+    """The raiser, or anybody holding either end of the move."""
+    visible = await _warehouse_ids_for_user(db, user)
+    owner = await scope_condition(db, user, owner_col=StockTransferOrder.requested_by_id)
+    if visible is None:
+        return true()
+    ids = visible or {0}
+    return or_(owner,
+               StockTransferOrder.from_warehouse_id.in_(ids),
+               StockTransferOrder.to_warehouse_id.in_(ids))
+
+
+async def list_stos(db: AsyncSession, params: PageParams, status: str | None = None,
+                    user=None, *, kind: str | None = None, search: str | None = None,
+                    str_id: int | None = None, from_warehouse_id: int | None = None,
+                    to_warehouse_id: int | None = None, date_from: date | None = None,
+                    date_to: date | None = None, origin: str | None = None) -> dict:
+    # A field return rides on `inv_sto` too, under `returns.enums.MARKER` (read as a
+    # literal: returns sits after inventory in the chain). It has its own screens and
+    # ledger, and listing it here read as a transfer nobody raised.
+    stmt = select(StockTransferOrder).where(
+        func.coalesce(StockTransferOrder.remarks, "").notlike("[STOCK_RETURN]%"))
     if user is not None:
-        stmt = stmt.where(await scope_condition(
-            db, user,
-            owner_col=StockTransferOrder.requested_by_id,
-        ))
+        stmt = stmt.where(await _sto_visibility(db, user))
+    if kind:
+        stmt = stmt.where(StockTransferOrder.doc_kind == kind)
     if status:
         stmt = stmt.where(StockTransferOrder.status == status)
-    return await paginate(db, stmt.order_by(StockTransferOrder.created_at.desc()), params)
+    if str_id:
+        stmt = stmt.where(StockTransferOrder.str_id == str_id)
+    # DIRECT = raised on its own; STR = produced by serving a request.
+    if origin == "DIRECT":
+        stmt = stmt.where(StockTransferOrder.str_id.is_(None))
+    elif origin == "STR":
+        stmt = stmt.where(StockTransferOrder.str_id.is_not(None))
+    if from_warehouse_id:
+        stmt = stmt.where(StockTransferOrder.from_warehouse_id == from_warehouse_id)
+    if to_warehouse_id:
+        stmt = stmt.where(StockTransferOrder.to_warehouse_id == to_warehouse_id)
+    if date_from:
+        stmt = stmt.where(StockTransferOrder.created_at >= datetime.combine(date_from, datetime.min.time()))
+    if date_to:
+        stmt = stmt.where(StockTransferOrder.created_at
+                          < datetime.combine(date_to + timedelta(days=1), datetime.min.time()))
+    if search:
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            StockTransferOrder.sto_no.ilike(like),
+            StockTransferOrder.str_no.ilike(like),
+            StockTransferOrder.issue_no.ilike(like),
+            StockTransferOrder.from_warehouse_name.ilike(like),
+            StockTransferOrder.to_warehouse_name.ilike(like),
+        ))
+    # By id, not created_at: unique and the insert order (see CLAUDE.md on sorting).
+    page = await paginate(db, stmt.order_by(StockTransferOrder.id.desc()), params)
+    await _decorate_sto_stages(db, page["items"])
+    return page
 
 
 async def approve_sto(db: AsyncSession, sto_id: int, user,
@@ -2850,7 +3236,38 @@ async def approve_sto(db: AsyncSession, sto_id: int, user,
     sto.approved_at = utcnow()
     await db.commit()
     await db.refresh(sto)
-    return sto
+    # The approval is committed; drafting the material issue at the source point is
+    # its consequence (warehouse, registered on the hook — rule 5).
+    await hooks.fire_sto_approved(db, sto, user)
+    return await get_sto(db, sto.id)
+
+
+async def reject_sto(db: AsyncSession, sto_id: int, user,
+                     comments: str = "") -> StockTransferOrder:
+    """Refuse a transfer. Through the engine when a chain governs it."""
+    sto = await get_sto(db, sto_id)
+    if sto.status != STOStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"STO is in status {sto.status}, cannot reject")
+    comments = (comments or "").strip()
+    if not comments:
+        raise ValidationError("Say why the transfer is being rejected")
+    instance = await engine_instance_for(db, DocType.STOCK_TRANSFER.value, sto.id)
+    if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
+        await engine.act(
+            db, DocType.STOCK_TRANSFER.value, sto.id,
+            ApprovalAction.REJECTED.value, user, comments,
+            {"requester_position_id": getattr(user, "active_position_id", None)},
+        )
+    sto.status = STOStatus.REJECTED.value
+    sto.remarks = " · ".join(filter(None, (sto.remarks, f"Rejected: {comments}")))
+    await write_audit(
+        db, entity="inv_sto", entity_id=sto.id, entity_no=sto.sto_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": STOStatus.PENDING_APPROVAL.value},
+        after={"status": sto.status}, summary="Rejected stock transfer",
+    )
+    await db.commit()
+    return await get_sto(db, sto.id)
 
 
 async def engine_instance_for(db: AsyncSession, doc_type: str, doc_id: int):
@@ -2867,6 +3284,10 @@ async def engine_instance_for(db: AsyncSession, doc_type: str, doc_id: int):
 async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
     """Take transfer stock out of the source when it physically leaves."""
     sto = await get_sto(db, sto_id)
+    if sto.issue_id or sto.str_id:
+        raise ValidationError(
+            f"{sto.sto_no} is executed by its material issue {sto.issue_no or ''} — "
+            "post the issue and dispatch its consignment instead")
     if sto.status != STOStatus.APPROVED.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot dispatch")
 
@@ -2888,6 +3309,9 @@ async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrde
 async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder:
     """Credit the destination when the dispatched transfer is received."""
     sto = await get_sto(db, sto_id)
+    if sto.issue_id or sto.str_id:
+        raise ValidationError(
+            f"{sto.sto_no} is received by acknowledging its consignment")
     if sto.status != STOStatus.DISPATCHED.value:
         raise ValidationError(f"STO is in status {sto.status}, cannot receive")
 

@@ -77,7 +77,11 @@ const ageInDays = (s?: string | null) =>
  *  wraps it as a tab and a screen must not print two headings. Everything else — the
  *  filters, the cycle rows, where a click leads — is identical either way, so the desk
  *  never has to keep a second copy of the queue's rules. */
-export function FulfillmentQueuePage({ embedded = false }: { embedded?: boolean } = {}) {
+/** `indentType` narrows the queue to one kind of request — Inventory > Stock
+ *  Transfer opens it on STRs alone, with no monthly cycles beside them. */
+export function FulfillmentQueuePage({ embedded = false, indentType }: {
+  embedded?: boolean; indentType?: string;
+} = {}) {
   const [search, setSearch] = useState("");
   const [priorityFilter, setPriorityFilter] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
@@ -98,8 +102,8 @@ export function FulfillmentQueuePage({ embedded = false }: { embedded?: boolean 
   const [view, setView] = useState("OWED");
 
   const queue = useQuery({
-    queryKey: ["fulfillment-queue", view],
-    queryFn: () => getFulfillmentQueue(undefined, view === "OWED"),
+    queryKey: ["fulfillment-queue", view, indentType ?? "ALL"],
+    queryFn: () => getFulfillmentQueue(undefined, view === "OWED", indentType),
   });
   // An indent whose allocation is already waiting on an approver has been dealt with;
   // showing it again invites a second allocation the backend will refuse anyway.
@@ -127,6 +131,7 @@ export function FulfillmentQueuePage({ embedded = false }: { embedded?: boolean 
     // A cycle that has been fully allocated leaves the queue, which is right — but it
     // also became unfindable, so there was no way to look back at what was just done.
     queryFn: () => getFulfilmentBatches(showDoneCycles),
+    enabled: !indentType || indentType === "MONTHLY",
   });
 
   const all = useMemo(() => {

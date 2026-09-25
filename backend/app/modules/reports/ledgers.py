@@ -20,7 +20,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import aliased
 
 from app.modules.indents.models import Indent
-from app.modules.inventory.models import Stock, StockMovement, StockTransferOrder
+from app.modules.inventory.models import (
+    Stock, StockMovement, StockTransferOrder, StockTransferOrderItem,
+)
 from app.modules.logistics.models import TransportRequest
 from app.modules.procurement.models import PurchaseOrder
 from app.modules.reports.enums import AgeBucket, Breach, ExpiryBucket, LedgerKey
@@ -1037,6 +1039,101 @@ RETURNS = LedgerSpec(
 
 
 # --------------------------------------------------------------------------- #
+# Stock transfers — every STR and every STO, one row each (REQ_020). An STR is an
+# `ind_indents` row of type STR; an STO is an `inv_sto` row of kind STO that is not a
+# field return (those carry the returns marker and have their own ledger). The STO's
+# progress is its material issue's status, joined rather than stored.
+# --------------------------------------------------------------------------- #
+
+def _stock_transfers_source() -> Select:
+    requests = select(
+        Indent.id.label("id"),
+        literal("STR").label("doc_type"),
+        Indent.indent_no.label("doc_no"),
+        null().label("str_no"),
+        cast(Indent.indent_date, String(10)).label("doc_date"),
+        Indent.status.label("status"),
+        null().label("from_location"),
+        Indent.office_name.label("to_location"),
+        null().label("issue_no"),
+        null().label("issue_status"),
+        Indent.total_qty.label("total_qty"),
+        Indent.requested_by_id.label("raised_by_id"),
+        Indent.requested_by_name.label("raised_by"),
+        Indent.approved_by_name.label("approved_by"),
+        Indent.approved_at.label("approved_at"),
+        Indent.created_at.label("created_at"),
+    ).where(Indent.indent_type == "STR")
+
+    qty = (
+        select(func.coalesce(func.sum(StockTransferOrderItem.requested_qty), 0))
+        .where(StockTransferOrderItem.sto_id == StockTransferOrder.id)
+        .correlate(StockTransferOrder).scalar_subquery()
+    )
+    orders = select(
+        StockTransferOrder.id.label("id"),
+        literal("STO").label("doc_type"),
+        StockTransferOrder.sto_no.label("doc_no"),
+        StockTransferOrder.str_no.label("str_no"),
+        cast(StockTransferOrder.created_at, String(10)).label("doc_date"),
+        StockTransferOrder.status.label("status"),
+        StockTransferOrder.from_warehouse_name.label("from_location"),
+        StockTransferOrder.to_warehouse_name.label("to_location"),
+        StockTransferOrder.issue_no.label("issue_no"),
+        MaterialIssue.status.label("issue_status"),
+        qty.label("total_qty"),
+        StockTransferOrder.requested_by_id.label("raised_by_id"),
+        StockTransferOrder.requested_by_name.label("raised_by"),
+        StockTransferOrder.approved_by_name.label("approved_by"),
+        StockTransferOrder.approved_at.label("approved_at"),
+        StockTransferOrder.created_at.label("created_at"),
+    ).outerjoin(
+        MaterialIssue, MaterialIssue.id == StockTransferOrder.issue_id,
+    ).where(
+        StockTransferOrder.doc_kind == "STO",
+        func.coalesce(StockTransferOrder.remarks, "").notlike(f"{RETURNS_MARKER}%"),
+    )
+    return union_all(requests, orders)
+
+
+STOCK_TRANSFERS = LedgerSpec(
+    key=LedgerKey.STOCK_TRANSFERS.value,
+    label="Stock Transfers",
+    subtitle="Every stock transfer request (STR) and order (STO), and where each got to",
+    permission=perms.STOCK_VIEW,
+    source=_stock_transfers_source,
+    columns=[
+        Col("doc_no", "Document"),
+        Col("doc_type", "Type", "status", narrow=True),
+        Col("str_no", "Against STR", narrow=True),
+        Col("doc_date", "Raised on", "date"),
+        Col("status", "Status", "status"),
+        Col("from_location", "From"),
+        Col("to_location", "To"),
+        Col("issue_no", "Material issue", narrow=True),
+        Col("issue_status", "Issue status", "status", narrow=True),
+        Col("total_qty", "Qty", "qty", narrow=True),
+        Col("raised_by", "Raised by"),
+        Col("approved_by", "Approved by", narrow=True),
+        Col("approved_at", "Approved on", "datetime", narrow=True),
+    ],
+    filters=[
+        Filt("doc_type", "Type"),
+        Filt("status", "Status"),
+        Filt("from_location", "From"),
+        Filt("to_location", "To"),
+        Filt("raised_by", "Raised by"),
+    ],
+    search=["doc_no", "str_no", "issue_no", "from_location", "to_location", "raised_by"],
+    date_col="doc_date",
+    order_col="created_at",
+    key_cols=["id", "doc_type"],
+    # Whose document it is, the same owner column `inventory.list_stos` scopes on.
+    scope_owner_col="raised_by_id",
+)
+
+
+# --------------------------------------------------------------------------- #
 # Transport — the outward leg
 # --------------------------------------------------------------------------- #
 
@@ -1195,6 +1292,6 @@ LEDGERS: dict[str, LedgerSpec] = {
     spec.key: spec for spec in (
         INDENTS, APPROVALS, INVENTORY, WAREHOUSE,
         STOCK, ASSETS, ACKNOWLEDGEMENTS, INDENT_TRACKER, APPROVAL_SLA, CONSUMPTION,
-        RETURNS, TRANSPORT, PROCUREMENT,
+        RETURNS, TRANSPORT, PROCUREMENT, STOCK_TRANSFERS,
     )
 }

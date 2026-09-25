@@ -313,7 +313,7 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
     hint: "See items that may need more stock and plan replenishment.",
   },
   inv_transfers: {
-    hint: "Create and track stock transfers between warehouses.",
+    hint: "Request stock (STR), serve it, and follow each transfer order (STO) to receipt.",
   },
   inv_fulfilment_desk: {
     hint: "Decide how much stock each indent gets, and sign it off — one screen.",

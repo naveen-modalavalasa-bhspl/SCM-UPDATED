@@ -1,12 +1,18 @@
 from datetime import date, datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, computed_field, field_serializer, field_validator,
+)
 
 from app.modules.indents.enums import IndentType
-from app.shared.time import iso as ist_iso, not_in_past
+from app.shared.enums import IndentStatus
+from app.shared.time import iso as ist_iso, not_in_past, to_ist, today
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_DOCUMENT_LINES,
 )
+
+
+_AGE_FROZEN = {IndentStatus.CLOSED.value, IndentStatus.REJECTED.value}
 
 
 def _utc_iso(value: datetime | None) -> str | None:
@@ -146,10 +152,21 @@ class IndentListRow(BaseModel):
     current_approver_name: str | None = None
     is_bookmarked: str = "NO"
     created_at: datetime
+    updated_at: datetime | None = Field(default=None, exclude=True)
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):
         return _utc_iso(value)
+
+    @computed_field
+    @property
+    def age_days(self) -> int:
+        """Days since the indent was raised. A closed or rejected indent stops ageing
+        at its last change — nothing is owed on it any more."""
+        end = today()
+        if self.status in _AGE_FROZEN and self.updated_at is not None:
+            end = to_ist(self.updated_at).date()
+        return max((end - to_ist(self.created_at).date()).days, 0)
 
 
 class RegionCount(BaseModel):

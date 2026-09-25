@@ -160,6 +160,8 @@ const StockBalanceView = lazy(() => import("@/modules/inventory/components/Stock
 const StockLedgerView = lazy(() => import("@/modules/inventory/components/StockLedgerView").then((m) => ({ default: m.StockLedgerView })));
 const StockMovementPrintPage = lazy(() => import("@/modules/warehouse/pages/StockMovementPrintPage").then((m) => ({ default: m.StockMovementPrintPage })));
 const StockReplenishmentView = lazy(() => import("@/modules/inventory/components/StockReplenishmentView").then((m) => ({ default: m.StockReplenishmentView })));
+const OutboundQualityInspectionForm = lazy(() => import("@/modules/warehouse/pages/OutboundQualityInspectionForm"));
+const MaterialIssueForm = lazy(() => import("@/modules/warehouse/pages/MaterialIssueForm"));
 const StockTransferView = lazy(() => import("@/modules/inventory/components/StockTransferView").then((m) => ({ default: m.StockTransferView })));
 const StockValuationView = lazy(() => import("@/modules/inventory/components/StockValuationView").then((m) => ({ default: m.StockValuationView })));
 const StockingPointsPage = lazy(() => import("@/modules/inventory/pages/StockingPointsPage").then((m) => ({ default: m.StockingPointsPage })));
@@ -546,6 +548,12 @@ function AppRoutes() {
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
+        {/* An STO's material issue, worked inside Stock Transfer rather than the
+            warehouse rail (REQ_020). The same form; only its home path moves. */}
+        <Route path="inventory/transfers/qc/:id"
+               element={<OutboundQualityInspectionForm basePath="/inventory/transfers/qc" />} />
+        <Route path="inventory/transfers/issues/:id"
+               element={<MaterialIssueForm basePath="/inventory/transfers/issues" />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         {/* The Fulfilment Desk: the Fulfilment Queue and Allocation Approvals as one

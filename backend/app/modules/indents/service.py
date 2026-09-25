@@ -309,12 +309,23 @@ async def _requester_context(db: AsyncSession, user) -> dict:
     }
 
 
+async def _assert_can_raise_str(db: AsyncSession, user) -> None:
+    """An STR is raised through the indent routes, so its own permission is checked
+    here — the route's `indent.create` alone must not let anybody request a transfer."""
+    user_perms = await rbac_service.get_user_permissions(
+        db, user, getattr(user, "active_position_id", None))
+    if perms.STOCK_TRANSFER_REQUEST not in user_perms:
+        raise PermissionError_("You are not allowed to raise a stock transfer request")
+
+
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
     indent_type = _validate_indent_type(
         getattr(data, "indent_type", None)) or IndentType.REGULAR.value
 
+    if indent_type == IndentType.STR.value:
+        await _assert_can_raise_str(db, user)
     if not data.items:
         raise ValidationError("Indent must have at least one item")
     _validate_item_quantities(data.items)
@@ -339,7 +350,11 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
-        indent_no=await next_number(db, "indent", project=context["project_name"]),
+        # An STR carries its own series (STR prefix) so a transfer is never read as an
+        # indent on paper.
+        indent_no=await next_number(
+            db, "str" if indent_type == IndentType.STR.value else "indent",
+            project=context["project_name"]),
         indent_type=indent_type,
         indent_date=utcnow().date(),
         required_date=data.required_date,
@@ -405,9 +420,15 @@ def unknown_indent_statuses(statuses) -> set[str]:
 
 
 def _workflow_context_for_indent(indent: Indent) -> dict:
+    is_str = indent.indent_type == IndentType.STR.value
     return {
+        # An STR is an indent on its own ladder: the instance stays INDENT (inbox, deep
+        # links, approve permission), only the ladder lookup reads the STR's chain.
+        **({engine.LADDER_DOC_TYPE_KEY: DocType.STOCK_TRANSFER_REQUEST.value}
+           if is_str else {}),
         "doc_no": indent.indent_no,
-        "doc_summary": f"Indent {indent.indent_no}",
+        "doc_summary": (f"Stock transfer request {indent.indent_no}" if is_str
+                        else f"Indent {indent.indent_no}"),
         "department_id": indent.department_id,
         "project_id": getattr(indent, "project_id", None),
         "requester_position_id": indent.position_id,
@@ -1359,7 +1380,14 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     if data.priority is not None:
         indent.priority = _validate_priority(data.priority)
     if data.indent_type is not None:
-        indent.indent_type = _validate_indent_type(data.indent_type)
+        new_type = _validate_indent_type(data.indent_type)
+        # The number was minted from the type's own series (IND vs STR); flipping an
+        # STR into an indent, or back, would leave a document numbered as the other.
+        if (new_type == IndentType.STR.value) != (indent.indent_type == IndentType.STR.value):
+            raise ValidationError(
+                "A stock transfer request cannot be turned into an indent, or back — "
+                "raise a new document instead")
+        indent.indent_type = new_type
     # Explicitly sent, so a null clears the vehicle. Omitting the key leaves whatever
     # is already attached — the same contract office_id follows below.
     if "vehicle_id" in data.model_fields_set:

@@ -8,7 +8,7 @@ import {
 } from "@/shared/components";
 import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
-import { INDENT_STATUS } from "../constants";
+import { INDENT_LIST_TYPES, INDENT_STATUS } from "../constants";
 import { indentApi } from "../api";
 import type { Acknowledgement } from "../types";
 import {
@@ -38,7 +38,11 @@ const STATUS_OPTIONS = [
   { value: INDENT_STATUS.CLOSED, label: "Fulfilled" },
 ];
 
-export default function AcknowledgementsPage() {
+/** `indentTypes` narrows the list to one kind of request, and `embedded` drops the
+ *  module header — Inventory > Stock Transfer mounts this on STRs alone. */
+export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, embedded = false }: {
+  indentTypes?: string[]; embedded?: boolean;
+} = {}) {
   const nav = useNavigate();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
@@ -47,8 +51,8 @@ export default function AcknowledgementsPage() {
   // Filtering happens server-side so the list stays honest when it grows past a page.
   const filters = useMemo(
     () => ({ search: search.trim() || undefined, status: status || undefined,
-             only_actionable: onlyActionable || undefined }),
-    [search, status, onlyActionable],
+             only_actionable: onlyActionable || undefined, indent_type: indentTypes }),
+    [search, status, onlyActionable, indentTypes],
   );
 
   const acknowledgements = useQuery({
@@ -80,7 +84,7 @@ export default function AcknowledgementsPage() {
     },
     {
       key: "project",
-      header: "Project",
+      header: "Raised By",
       hideOnNarrow: true,
       render: (row) => <span className="text-sm text-muted">{row.project_name ?? "—"}</span>,
     },
@@ -134,7 +138,9 @@ export default function AcknowledgementsPage() {
     <div className="space-y-4">
       {/* Same header as the other indent screens, minus the shared filter bar: this list
           has its own, and the shared one filters a different query shape. */}
-      <IndentModuleHeader title="Acknowledgements" showCreate={false} showFilters={false} />
+      {!embedded && (
+        <IndentModuleHeader title="Acknowledgements" showCreate={false} showFilters={false} />
+      )}
 
       <Card className="flex flex-col gap-3 p-3 md:flex-row md:items-center">
         <div className="min-w-0 flex-1">

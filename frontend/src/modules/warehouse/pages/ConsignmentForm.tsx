@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
-import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, Warehouse } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Download, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, Warehouse } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, Select, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow } from "../components/DocumentMeta";
 import { PrintPortal } from "../components/LabelPrint";
@@ -160,18 +161,37 @@ const ScanQr = memo(function ScanQr({ code }: { code: string }) {
 });
 const ScanBarcode = memo(function ScanBarcode({ code }: { code: string }) {
   return (
-    <div className="overflow-hidden">
+    // Scaled to fit, never clipped: a long package code used to lose its tail
+    // ("…WHI0026|PKG-0") behind overflow-hidden, on screen and on paper alike.
+    <div className="[&_svg]:h-auto [&_svg]:max-w-full">
       <Barcode value={code} height={54} width={1.35} fontSize={12} margin={0} displayValue />
     </div>
   );
 });
 
-function ScanCard({ spec }: { spec: ScanCardSpec }) {
+/** One card's identity — which label a per-card download prints. */
+const scanKey = (card: ScanCardSpec) => `${card.accent}-${card.code}`;
+
+/** A4 sheet rules for the printed labels: one label per row at full printable width,
+ *  so neither code is squeezed, and a label never splits across two pages. */
+const SCAN_PRINT_CSS = `
+  @media print {
+    @page { size: A4 portrait; margin: 10mm; }
+    #wh-consignment-scan-labels { padding: 0 !important; gap: 8mm !important; }
+    #wh-consignment-scan-labels .scan-card { box-shadow: none !important; }
+    #wh-consignment-scan-labels .scan-card-body {
+      grid-template-columns: 40mm minmax(0, 1fr) !important;
+    }
+    #wh-consignment-scan-labels svg { max-width: 100%; height: auto; }
+  }
+`;
+
+function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () => void }) {
   const accent = spec.accent === "consignment"
     ? "border-brand/40 bg-brand-050/30"
     : "border-line bg-content1";
   return (
-    <div className={`rounded-lg border ${accent} p-4 shadow-sm`}>
+    <div className={`scan-card rounded-lg border ${accent} p-4 shadow-sm`}>
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -184,12 +204,25 @@ function ScanCard({ spec }: { spec: ScanCardSpec }) {
           </div>
           {spec.subtitle && <div className="mt-1 truncate text-xs text-muted">{spec.subtitle}</div>}
         </div>
-        <div className="rounded-md bg-content1 px-2 py-1 font-mono text-[11px] font-semibold text-ink">
-          {spec.code}
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="rounded-md bg-content1 px-2 py-1 font-mono text-[11px] font-semibold text-ink">
+            {spec.code}
+          </div>
+          {onDownload && (
+            <button
+              type="button"
+              onClick={onDownload}
+              title="Download this label (choose Save as PDF)"
+              aria-label={`Download label ${spec.code}`}
+              className="flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-white text-brand hover:bg-brand-050 print:hidden"
+            >
+              <Download className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-[128px_1fr]">
+      <div className="scan-card-body grid grid-cols-1 gap-4 sm:grid-cols-[128px_1fr]">
         {/* Both codes carry the bare document number, as they always did. A QR holding
             a URL sent every phone through the login screen before it could show
             anything; the number is what the yard actually reads out loud. What the
@@ -763,6 +796,24 @@ export default function ConsignmentForm() {
     return (target.line.serial_numbers ?? []).filter(
       (serial) => current.has(serial) || !used.has(serial.toLowerCase()),
     );
+  };
+
+  // Which label the next print run carries: null = every card on the sheet.
+  const [printOnly, setPrintOnly] = useState<string | null>(null);
+  /** Print one label, or all of them. The browser's dialog is the download — "Save as
+   *  PDF" names the file after the label, because the page title is the code for the
+   *  duration of the print run. */
+  const printLabels = (card: ScanCardSpec | null) => {
+    const title = document.title;
+    flushSync(() => setPrintOnly(card ? scanKey(card) : null));
+    document.title = card ? `Label ${card.code}` : `Labels ${doc?.dispatch_no ?? ""}`.trim();
+    document.title = document.title.replace(/[\/|:*?"<>]/g, "-");
+    try {
+      window.print();
+    } finally {
+      document.title = title;
+      setPrintOnly(null);
+    }
   };
 
   const scanCards: ScanCardSpec[] = useMemo(() => (doc ? [
@@ -1376,22 +1427,26 @@ export default function ConsignmentForm() {
             icon={ScanLine}
             hint="Consignment and package identities. Each card carries both QR and barcode for scanning."
             actions={
-              <Button onClick={() => window.print()} disabled={scanCards.length === 0}>
-                <Printer className="h-4 w-4" /> Print labels
+              <Button onClick={() => printLabels(null)} disabled={scanCards.length === 0}>
+                <Printer className="h-4 w-4" /> Print all labels
               </Button>
             }
           >
             {/* The printed sheet is its own copy of the cards, portalled to <body>.
                 Printing the on-screen node put it inside a clipping card and the paper
                 came out blank; see PrintPortal. */}
-            <PrintPortal id="wh-consignment-scan-labels">
-              {scanCards.map((card) => (
-                <ScanCard key={`print-${card.accent}-${card.code}`} spec={card} />
-              ))}
+            <PrintPortal id="wh-consignment-scan-labels" columns={1}>
+              <style>{SCAN_PRINT_CSS}</style>
+              {scanCards
+                .filter((card) => printOnly === null || scanKey(card) === printOnly)
+                .map((card) => (
+                  <ScanCard key={`print-${scanKey(card)}`} spec={card} />
+                ))}
             </PrintPortal>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {scanCards.map((card) => (
-                <ScanCard key={`${card.accent}-${card.code}`} spec={card} />
+                <ScanCard key={scanKey(card)} spec={card}
+                          onDownload={() => printLabels(card)} />
               ))}
             </div>
           </ConsignmentSection>

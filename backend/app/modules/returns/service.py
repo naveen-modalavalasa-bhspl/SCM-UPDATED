@@ -41,7 +41,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
@@ -1640,11 +1640,17 @@ async def summary(db: AsyncSession, user) -> dict:
     over whichever page happened to be fetched."""
     visible = await locations.location_ids_for_user(db, user)
     owner = _raised_by_me(user)
-    scope = or_(
-        owner,
-        StockTransferOrder.from_warehouse_id.in_(visible),
-        StockTransferOrder.to_warehouse_id.in_(visible),
-    ) if visible else owner
+    # The same reach `list_returns` applies: a login holding `return.view_all` reads the
+    # whole register, so its tiles must count the whole register too — or the tiles say
+    # 0 over a Recent returns list that is full.
+    if await _sees_every_return(db, user):
+        scope = true()
+    else:
+        scope = or_(
+            owner,
+            StockTransferOrder.from_warehouse_id.in_(visible),
+            StockTransferOrder.to_warehouse_id.in_(visible),
+        ) if visible else owner
 
     rows = (await db.execute(
         select(StockTransferOrder.status, func.count(StockTransferOrder.id))

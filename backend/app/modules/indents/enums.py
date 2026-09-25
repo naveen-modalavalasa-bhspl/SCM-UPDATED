@@ -39,6 +39,11 @@ class IndentType(str, Enum):
 
     REGULAR = "REGULAR"
     MONTHLY = "MONTHLY"
+    # A Stock Transfer Request: a point asking for stock to be moved to it. Same
+    # document and legs as an indent; approved on its own ladder
+    # (DocType.STOCK_TRANSFER_REQUEST) and listed on Inventory > Stock Transfer
+    # rather than among the indents.
+    STR = "STR"
 
 
 class ConsolidationStatus(str, Enum):

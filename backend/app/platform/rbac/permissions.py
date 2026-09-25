@@ -55,6 +55,10 @@ STOCK_VIEW = "stock.view"
 # network — they choose which warehouse fills an indent — so they see every one.
 STOCK_VIEW_ALL = "stock.view.all"
 STOCK_ADJUST = "stock.adjust"
+# Signing a stock audit. Carved out of STOCK_ADJUST (2026-09-24), which guarded both
+# raising and approving, so the second pair of eyes was only ever "somebody else with
+# the same tick". Inherits its grants below, so nobody who approves today loses it.
+STOCK_ADJUST_APPROVE = "stock.adjust.approve"
 STOCK_RESERVE = "stock.reserve"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
 STOCK_VALUATION_VIEW = "stock.valuation.view"
@@ -68,6 +72,9 @@ STOCK_POINTS_MANAGE = "stock.points.manage"
 # Under `stock`, not a resource of its own: a one-permission resource would open a
 # lone group in Job Profiles beside the real ones, which reads as a mistake.
 STOCK_TRANSFER_APPROVE = "stock.transfer.approve"
+# Raising a Stock Transfer Request (STR) — asking another point to send stock here.
+# Its own code so a storekeeper can be let raise transfers without raising indents.
+STOCK_TRANSFER_REQUEST = "stock.transfer.request"
 ALLOCATION_VIEW = "allocation.view"
 ALLOCATION_CREATE = "allocation.create"
 ALLOCATION_APPROVE = "allocation.approve"
@@ -320,6 +327,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_VIEW_ALL, "inventory", "stock", "view_all",
          "View stock in every warehouse, not just your own office"),
     Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
+    Perm(STOCK_ADJUST_APPROVE, "inventory", "stock", "adjust_approve",
+         "Approve or reject a stock audit / adjustment"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
          "View stock valuation and cost"),
@@ -330,7 +339,9 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_POINTS_MANAGE, "inventory", "stock", "points_manage",
          "Tag positions to stocking points (MDP / LIP)"),
     Perm(STOCK_TRANSFER_APPROVE, "inventory", "stock", "transfer_approve",
-         "Approve a stock transfer that crosses a project boundary"),
+         "Approve a stock transfer order (STO)"),
+    Perm(STOCK_TRANSFER_REQUEST, "inventory", "stock", "transfer_request",
+         "Raise a stock transfer request (STR)"),
     Perm(ALLOCATION_VIEW, "inventory", "allocation", "view", "View stock allocations"),
     Perm(ALLOCATION_CREATE, "inventory", "allocation", "create",
          "Decide how much stock an indent gets"),
@@ -532,12 +543,15 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
+    # Everyone who could raise a transfer yesterday can request one today.
+    STOCK_TRANSFER_REQUEST: STOCK_TRANSFER,
     MOVEMENT_INSPECT: MOVEMENT_CREATE,
     MOVEMENT_COMPLETE: MOVEMENT_CREATE,
     # Splitting is a way of DOING the issue, not a new authority over it: whoever
     # could post the whole issue yesterday can hand its pieces to the floors today.
     # Fail-closed would leave the button on nobody's profile and the feature unused.
     ISSUE_SPLIT: ISSUE_ISSUE,
+    STOCK_ADJUST_APPROVE: STOCK_ADJUST,
 }
 
 
@@ -648,7 +662,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("inv_balance", "inventory", "Inventory · Stock Balance"),
     ("inv_ledger", "inventory", "Inventory · Stock Ledger"),
     ("inv_replenishment", "inventory", "Inventory · Replenishment"),
-    ("inv_transfers", "inventory", "Inventory · Transfers"),
+    ("inv_transfers", "inventory", "Inventory · Stock Transfer"),
     # Retired 2026-08-21, replaced by the Fulfilment Desk below. Catalogued still,
     # because `seed_permissions` never prunes: the rows and every grant on them are in
     # the database, and the new screen's own code inherits from the first of them.
@@ -660,6 +674,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # can inherit below instead of landing Admin-only.
     ("pro_ledger", "procurement", "Procurement · Ledger"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
+    ("inv_adjustments", "inventory", "Inventory · Stock Audit"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
     # Rode on `stock.points.manage`, which is the action that RE-TAGS a stocking point.
     ("inv_stocking_points", "inventory", "Inventory · Stocking Points"),
@@ -797,6 +812,9 @@ INHERITS_GRANTS_FROM.update({
     # can open it. Fail-closed would retire a landing page nobody granted yet.
     page_view_code("approval_overview"): page_view_code("approval_waiting"),
     page_view_code("inv_stocking_points"): STOCK_POINTS_MANAGE,
+    # Stock Audit comes back on the rail (2026-09-24). The screen was always gated on
+    # `stock.adjust`, so it lands with exactly the people who could open it by URL.
+    page_view_code("inv_adjustments"): STOCK_ADJUST,
     # The supplier register (2026-08-24). Not fail-closed: every route behind it is
     # already gated on `vendor.portal.manage`, the code that has governed minting a
     # vendor login since the portal landed, so whoever holds it today opens the screen

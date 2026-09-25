@@ -78,14 +78,25 @@ export const poHeaderPayload = (v: POHeaderValue): POHeader => ({
 
 /** Long text on the order: a term is what was agreed with THIS vendor, so it is typed
  *  rather than picked. Local to the module — `@/shared/components` has no textarea. */
+/** BUG_SCM_016: both addresses are mandatory (`_assert_po_addresses` on the server
+ *  refuses create and submit without them). The sentence to show, or null. */
+export function poMissingAddresses(v: POHeaderValue): string | null {
+  const missing = [
+    ["Billing address", v.billing_address],
+    ["Shipping address", v.shipping_address],
+  ].filter(([, value]) => !(value ?? "").trim()).map(([label]) => label);
+  if (!missing.length) return null;
+  return `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} required.`;
+}
+
 export function LongText({
-  label, hint, value, onChange, rows = 3, disabled = false,
+  label, hint, value, onChange, rows = 3, disabled = false, required = false,
 }: {
   label: string; hint?: string; value: string;
-  onChange: (v: string) => void; rows?: number; disabled?: boolean;
+  onChange: (v: string) => void; rows?: number; disabled?: boolean; required?: boolean;
 }) {
   return (
-    <Field label={label} hint={hint}>
+    <Field label={label} hint={hint} required={required}>
       <textarea
         rows={rows}
         value={value}
@@ -142,9 +153,9 @@ export function POHeaderFields({
       {/* Where the goods are invoiced and where they land. Two different places more
         * often than not, which is why they are two fields and not one. */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <LongText label="Billing address" disabled={disabled}
+        <LongText label="Billing address" disabled={disabled} required
           value={value.billing_address} onChange={set("billing_address")} />
-        <LongText label="Shipping address" disabled={disabled}
+        <LongText label="Shipping address" disabled={disabled} required
           value={value.shipping_address} onChange={set("shipping_address")} />
       </div>
 

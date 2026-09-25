@@ -4,6 +4,51 @@ export interface InventoryOverview {
   database_ready: boolean;
 }
 
+/** One item the system holds at a warehouse, summed over bins and batches. */
+export interface CountSheetRow {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  system_qty: number;
+  reserved_qty: number;
+}
+
+export interface StockAdjustmentLine {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  direction: "IN" | "OUT" | string;
+  /** The correction posted: |physical - system| on a counted line. */
+  quantity: number;
+  /** Null on a direct adjustment, which states a correction and no count. */
+  system_qty?: number | null;
+  physical_qty?: number | null;
+  unit_cost?: number | null;
+  remarks?: string | null;
+}
+
+export interface StockAdjustment {
+  id: number;
+  adjustment_no: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  reason: string;
+  status: string;
+  created_by_id?: number | null;
+  created_by_name?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
+  current_approver_name?: string | null;
+  created_at: string;
+  remarks?: string | null;
+  items?: StockAdjustmentLine[];
+  /** Detail read only: may this login approve or reject it now. */
+  can_act?: boolean;
+}
+
 export interface WarehouseOption {
   id: number;
   code: string;
@@ -64,6 +109,12 @@ export interface StockBalanceItem {
   serial_number?: string;
   barcode_value?: string;
   transit_qty?: number;
+  /** REQ_032 — the ITEM at this POINT (not this lot), read off the warehouse
+   *  documents: posted out but not yet sent, left here on a consignment, and on a
+   *  consignment addressed here. */
+  issued_pending_qty?: number;
+  outgoing_qty?: number;
+  incoming_qty?: number;
   project_name?: string;
   bin_code?: string;
   bin_id?: number;
@@ -105,6 +156,10 @@ export interface StockSummary {
    *  artefact rather than an answer — the tile and the filter hide themselves instead
    *  of reporting a reassuring 0. Absent on an older backend, hence the optional. */
   reorder_configured?: boolean;
+  /** REQ_032 pipeline totals over the points on screen. */
+  issued_pending_qty?: number;
+  outgoing_qty?: number;
+  incoming_qty?: number;
 }
 
 /** GET /api/warehouse/serials/summary — per item + stocking point + bin + batch. */
@@ -331,6 +386,9 @@ export interface StockRow {
   available_qty: number;
   reserved_qty: number;
   transit_qty?: number;
+  issued_pending_qty?: number;
+  outgoing_qty?: number;
+  incoming_qty?: number;
   total_qty: number;
   valuation_rate?: number;
   stock_value?: number;

@@ -12,6 +12,8 @@ import {
 import { ItemCombobox } from "../components/ItemCombobox";
 import { ChooseBomModal } from "../components/ChooseBomModal";
 import { INDENT_STATUS, INDENT_TYPE, INDENT_TYPE_OPTIONS } from "../constants";
+
+const STR_HOME = "/inventory/transfers?tab=requests";
 import {
   comparableVehicleNumber, displayUom, splitDeliveryOffice,
 } from "../displayFormat";
@@ -108,7 +110,11 @@ export function IndentFormPage() {
   const initializedDraftId = useRef<number | null>(null);
   const initializedPrefill = useRef<string | null>(null);
   const [priority, setPriority] = useState("NORMAL");
-  const [indentType, setIndentType] = useState<IndentType>(INDENT_TYPE.REGULAR);
+  // `?type=STR` opens this form as a Stock Transfer Request: same lines, same
+  // document, its own ladder and number series on the server.
+  const [indentType, setIndentType] = useState<IndentType>(
+    searchParams.get("type") === INDENT_TYPE.STR ? INDENT_TYPE.STR : INDENT_TYPE.REGULAR);
+  const isStr = indentType === INDENT_TYPE.STR;
   const [vehicleId, setVehicleId] = useState<number | "">("");
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
@@ -408,11 +414,13 @@ export function IndentFormPage() {
   return (
     <>
       <PageHeader
-        back={{ to: "/indents", label: "Back to All indents" }}
-        eyebrow="Indents"
+        back={isStr ? { to: STR_HOME, label: "Back to Stock Transfer" }
+                    : { to: "/indents", label: "Back to All indents" }}
+        eyebrow={isStr ? "Stock Transfer" : "Indents"}
         title={isCorrectionEdit
           ? `Edit correction ${draft?.indent_no ?? "indent"}`
-          : isEditing ? `Edit ${draft?.indent_no ?? "indent"}` : "New request"}
+          : isEditing ? `Edit ${draft?.indent_no ?? "indent"}`
+          : isStr ? "New stock transfer request" : "New request"}
         actions={!isEditing ? (
           <Button variant="primary" onClick={() => setBomPickerOpen(true)} className={TONE_AMBER}>
             <LibraryBig className="h-4 w-4" /> Choose BOM
@@ -535,14 +543,16 @@ export function IndentFormPage() {
         <Card className="h-fit">
           <CardBody className="gap-4 p-5">
             <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">Details</h2>
-            <Field label="Indent type">
-              <Select
-                ariaLabel="Indent type"
-                value={indentType}
-                onChange={(v) => setIndentType((v || INDENT_TYPE.REGULAR) as IndentType)}
-                options={INDENT_TYPE_OPTIONS}
-              />
-            </Field>
+            {!isStr && (
+              <Field label="Indent type">
+                <Select
+                  ariaLabel="Indent type"
+                  value={indentType}
+                  onChange={(v) => setIndentType((v || INDENT_TYPE.REGULAR) as IndentType)}
+                  options={INDENT_TYPE_OPTIONS}
+                />
+              </Field>
+            )}
             <Field label="Priority">
               <Select
                 value={priority}
@@ -605,7 +615,7 @@ export function IndentFormPage() {
         <Button
           variant="soft"
           className={`flex-1 md:flex-none ${TONE_PINK}`}
-          onClick={() => nav(isEditing ? `/indents/${editId}` : "/indents")}
+          onClick={() => nav(isEditing ? `/indents/${editId}` : isStr ? STR_HOME : "/indents")}
         >
           Cancel
         </Button>

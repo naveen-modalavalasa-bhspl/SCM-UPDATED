@@ -8,7 +8,7 @@ import { todayIst } from "@/shared/datetime";
 import { poApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import {
-  blankPOHeader, POHeaderFields, poHeaderPayload, type POHeaderValue,
+  blankPOHeader, POHeaderFields, poHeaderPayload, poMissingAddresses, type POHeaderValue,
 } from "../components/POHeaderFields";
 import { money } from "./RequisitionListPage";
 
@@ -111,6 +111,12 @@ export function POFormPage() {
     }
     if (totals.discount > totals.sub) {
       setProblem("The discount is more than the order sub-total.");
+      return;
+    }
+    // BUG_SCM_016 — the server refuses these too; said here first, by name.
+    const missingAddress = poMissingAddresses(header);
+    if (missingAddress) {
+      setProblem(missingAddress);
       return;
     }
     setProblem(null);
