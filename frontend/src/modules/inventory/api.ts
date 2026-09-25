@@ -529,13 +529,16 @@ export const getFulfilmentBatches = (includeDone = false) =>
  *  /indents and in its journey — it is simply no longer work waiting on him. */
 export const getFulfillmentQueue = (status?: string, owedOnly = true, indentType?: string) =>
   api
-    .get<Page<Record<string, unknown>>>("/api/indents", {
+    // STRs come from Stock Transfer's own list, so serving one needs
+    // `stock.transfer.serve` rather than all of Indents.
+    .get<Page<Record<string, unknown>>>(
+      indentType === "STR" ? "/api/indents/stock-transfer-requests" : "/api/indents", {
       params: {
         size: 100,
         to_serve: true,
         ...(owedOnly ? { has_remainder: true } : {}),
         ...(status ? { status } : {}),
-        ...(indentType ? { indent_type: indentType } : {}),
+        ...(indentType && indentType !== "STR" ? { indent_type: indentType } : {}),
       },
     })
     .then((r) => r.data);
@@ -685,8 +688,10 @@ export const listSTRs = (params?: {
   page?: number; size?: number; search?: string; status?: string;
   created_date_from?: string; created_date_to?: string;
 }) =>
-  api.get<Page<Record<string, any>>>("/api/indents", {
-    params: { indent_type: "STR", size: 50, ...params },
+  // The transfer screen's own list, under `stock.transfer.view` — not /api/indents,
+  // which would demand all of Indents to see a transfer request.
+  api.get<Page<Record<string, any>>>("/api/indents/stock-transfer-requests", {
+    params: { size: 50, ...params },
   }).then((r) => r.data);
 
 export const getSTO = (id: number) =>

@@ -120,6 +120,23 @@ export default function OutboundQualityInspectionForm({
     });
   }, [doc]);
 
+  // A stock transfer's QC is worked on Inventory > Stock Transfer. Whatever link
+  // opened it here — the approvals inbox, a notification, the issue list's QC button —
+  // hand it over there, same id, same issue.
+  const { data: startIssue } = useQuery({
+    queryKey: ["wh-issue", String(initialIssueId ?? "")],
+    queryFn: () => getIssue(Number(initialIssueId)),
+    enabled: !basePath && !editing && !!initialIssueId,
+  });
+  useEffect(() => {
+    if (basePath) return;
+    if (editing && (doc as { is_stock_transfer?: boolean } | undefined)?.is_stock_transfer) {
+      nav(`/inventory/transfers/qc/${id}`, { replace: true });
+    } else if (!editing && (startIssue as { is_stock_transfer?: boolean } | undefined)?.is_stock_transfer) {
+      nav(`/inventory/transfers/qc/new?issue_id=${initialIssueId}`, { replace: true });
+    }
+  }, [basePath, editing, doc, startIssue, id, initialIssueId, nav]);
+
   useEffect(() => {
     if (!editing && initialIssueId && !pulled) {
       pullIssue.mutate(Number(initialIssueId));

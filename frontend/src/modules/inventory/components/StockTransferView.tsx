@@ -100,26 +100,30 @@ export function StockTransferView() {
   const strCount = useQuery({
     queryKey: ["stock-transfer", "count", "str"],
     queryFn: () => listSTRs({ size: 1 }),
-    enabled: can("indent.view"),
+    enabled: can("stock.transfer.view"),
   });
   const stoCount = useQuery({
     queryKey: ["stock-transfer", "count", "sto"],
     queryFn: () => listSTOs({ size: 1 }),
+    enabled: can("stock.transfer.view"),
   });
 
   const tabs: { key: string; label: string; badge?: number }[] = useMemo(() => [
-    ...(can("indent.view") ? [{ key: "requests", label: "Requests (STR)",
+    // Each tab is gated on the permission its own data and buttons need — the same
+    // list Settings > Job Profiles prints beside this screen.
+    ...(can("stock.transfer.view") ? [{ key: "requests", label: "Requests (STR)",
                                 badge: strCount.data?.total }] : []),
     ...(can("allocation.create") ? [{ key: "serve", label: "To serve" }] : []),
-    { key: "orders", label: "Orders (STO / SMO)", badge: stoCount.data?.total as number | undefined },
+    ...(can("stock.transfer.view") ? [{ key: "orders", label: "Orders (STO / SMO)",
+                                        badge: stoCount.data?.total as number | undefined }] : []),
     // The outward QC of a transfer's issue is done here, not on the warehouse rail.
     ...(can("qc_outward.view") ? [{ key: "qc", label: "Outward QC" }] : []),
-    ...(can("indent.view") ? [{ key: "acknowledge", label: "Acknowledgements" }] : []),
-    { key: "history", label: "History" },
+    ...(can("indent.acknowledge") ? [{ key: "acknowledge", label: "Acknowledgements" }] : []),
+    ...(can("stock.transfer.view") ? [{ key: "history", label: "History" }] : []),
   ], [can, strCount.data, stoCount.data]);
 
   const requested = params.get("tab");
-  const active = tabs.some((t) => t.key === requested) ? requested! : tabs[0].key;
+  const active = tabs.some((t) => t.key === requested) ? requested! : tabs[0]?.key;
   const select = (key: string) => {
     const next = new URLSearchParams();
     next.set("tab", key);

@@ -919,6 +919,8 @@ class OutboundInspectionRead(_Read):
 
 class OutboundInspectionDetail(OutboundInspectionRead):
     items: list[OutboundInspectionItemRead] = []
+    # Its issue executes a stock transfer, so it is worked on Inventory > Stock Transfer.
+    is_stock_transfer: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1593,6 +1595,8 @@ class IssueRead(_Read):
 
 class IssueDetail(IssueRead):
     items: list[IssueItemRead] = []
+    # Executes a stock transfer (STO / STR) — its QC is worked on Inventory > Stock Transfer.
+    is_stock_transfer: bool = False
     # True only for the person the document is waiting on RIGHT NOW. Holding the
     # permission is not enough: every warehouse post shares one HCM rank, so all
     # eleven of them hold `issue.issue` and a permission-gated button appeared for

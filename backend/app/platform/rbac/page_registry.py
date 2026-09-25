@@ -495,6 +495,11 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
         spec = catalogue.get(row.code)
         if spec is None:
             continue  # not ours: left alone, same rule as an unknown page
+        if row.description != spec.description:
+            # Wording only — never a grant. The Job Profiles screen prints this, so a
+            # corrected sentence in the catalogue must reach every database.
+            row.description = spec.description
+            changed.append(f"{row.code}: relabelled")
         if (row.module, row.resource, row.action) == (
                 spec.module, spec.resource, spec.action):
             continue

@@ -313,7 +313,10 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
     hint: "See items that may need more stock and plan replenishment.",
   },
   inv_transfers: {
-    hint: "Request stock (STR), serve it, and follow each transfer order (STO) to receipt.",
+    label: "Stock Transfer",
+    hint: "Request stock (STR), serve it, and follow each transfer order (STO) to receipt. "
+      + "Every tab has its own Stock Transfer action below, and each works ONLY on stock "
+      + "transfer documents — never on an ordinary indent or warehouse issue.",
   },
   inv_fulfilment_desk: {
     hint: "Decide how much stock each indent gets, and sign it off — one screen.",
@@ -472,13 +475,33 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
   "stock.valuation.view":
     "See the quantity, cost, and total value of stock.",
   "stock.transfer":
-    "Move stock from one warehouse to another.",
+    "Raise a stock transfer order (STO) directly — send stock from a point you hold, without a request.",
   "stock.view.subtree":
     "See stock at locations that report under the user's position.",
   "stock.points.manage":
     "Tag positions to stocking points and grant or revoke additional floor access.",
+  "stock.transfer.view":
+    "See Inventory > Stock Transfer's requests (STR), orders (STO) and their history.",
+  "stock.transfer.request":
+    "Raise a stock transfer request (STR) — ask another point to send stock here. It is approved on the STR ladder (Settings > Approvals Config).",
+  "stock.transfer.str_approve":
+    "Approve, reject or return a stock transfer request (STR). Only STRs — not ordinary indents.",
+  "stock.transfer.serve":
+    "Serve a stock transfer request: pick which of your points gives what (the To serve tab). Only STRs.",
+  "stock.transfer.serve_approve":
+    "Approve or reject how an STR is being served. Only STRs — not ordinary indent allocations.",
+  "stock.transfer.issue":
+    "Work a stock transfer's material issue — batch, bay, serials, submit. Only transfer issues.",
+  "stock.transfer.issue_post":
+    "Approve and post a stock transfer's material issue — the stock leaves the point. Only transfer issues.",
+  "stock.transfer.qc":
+    "Run the outward QC of a stock transfer (the Outward QC tab). Only transfer QCs.",
+  "stock.transfer.qc_approve":
+    "Complete, approve or reject a stock transfer's outward QC. Only transfer QCs.",
+  "stock.transfer.receive":
+    "Acknowledge a stock transfer when it arrives — this credits your point's stock. Only STRs.",
   "stock.transfer.approve":
-    "Approve stock transfers that move goods between different projects.",
+    "Approve or reject a stock transfer order (STO), on the STO ladder (Settings > Approvals Config).",
   "allocation.view":
     "Open and review how stock has been allocated to indents.",
   "allocation.create":
@@ -725,6 +748,14 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "rfq.create": { button: "New RFQ", where: "Procurement > RFQs (also [Create RFQ] on an approved requisition or consolidation)" },
   "transport.create": { button: "Dispatch", where: "Logistics > Dispatch > a consignment row" },
   "stock.points.manage": { button: "Tag / Access / Grant access", where: "Inventory > Stocking Points > Position row > Access" },
+  "stock.transfer.view": { button: "Requests / Orders / History tabs", where: "Inventory > Stock Transfer" },
+  "stock.transfer.request": { button: "New STR", where: "Inventory > Stock Transfer > Requests (STR)" },
+  "stock.transfer": { button: "New STO", where: "Inventory > Stock Transfer > Orders (STO / SMO)" },
+  "stock.transfer.approve": { button: "Approve / Reject", where: "Inventory > Stock Transfer > Orders > Open a pending order" },
+  "stock.transfer.serve": { button: "Allocate", where: "Inventory > Stock Transfer > To serve" },
+  "stock.transfer.qc": { button: "New inspection / Outward QC", where: "Inventory > Stock Transfer > Outward QC (or an order's Outward QC button)" },
+  "stock.transfer.issue": { button: "Open material issue", where: "Inventory > Stock Transfer > Orders > Open an order" },
+  "stock.transfer.receive": { button: "Confirm receipt", where: "Inventory > Stock Transfer > Acknowledgements" },
   "movement.view": { button: "View Stock Movements", where: "Warehouse > Stock Movements" },
   "movement.create": { button: "New order / Save draft", where: "Warehouse > Stock Movements" },
   "movement.approve": { button: "Approve", where: "Warehouse > Stock Movements > Open a pending order" },

@@ -1100,7 +1100,7 @@ STOCK_TRANSFERS = LedgerSpec(
     key=LedgerKey.STOCK_TRANSFERS.value,
     label="Stock Transfers",
     subtitle="Every stock transfer request (STR) and order (STO), and where each got to",
-    permission=perms.STOCK_VIEW,
+    permission=perms.STOCK_TRANSFER_VIEW,
     source=_stock_transfers_source,
     columns=[
         Col("doc_no", "Document"),

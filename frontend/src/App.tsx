@@ -550,6 +550,11 @@ function AppRoutes() {
         <Route path="inventory/transfers" element={<StockTransferView />} />
         {/* An STO's material issue, worked inside Stock Transfer rather than the
             warehouse rail (REQ_020). The same form; only its home path moves. */}
+        {/* The two forms' Back lands on their list path; the list IS a tab here. */}
+        <Route path="inventory/transfers/qc"
+               element={<Navigate to="/inventory/transfers?tab=qc" replace />} />
+        <Route path="inventory/transfers/issues"
+               element={<Navigate to="/inventory/transfers?tab=orders" replace />} />
         <Route path="inventory/transfers/qc/:id"
                element={<OutboundQualityInspectionForm basePath="/inventory/transfers/qc" />} />
         <Route path="inventory/transfers/issues/:id"

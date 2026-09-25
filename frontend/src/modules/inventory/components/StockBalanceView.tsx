@@ -773,7 +773,7 @@ export function StockBalanceView() {
                   </div>
                 ))}
               </ResponsiveGrid>
-              <div className="mt-2 grid grid-cols-3 gap-2">
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
                 {PIPELINE.map(([key, label, tone]) => (
                   <div key={key} className="rounded-lg border border-line/70 p-2">
                     <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</div>
