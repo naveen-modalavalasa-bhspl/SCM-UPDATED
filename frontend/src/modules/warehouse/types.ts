@@ -2683,3 +2683,66 @@ export interface StockMovementOrderWrite {
   reason?: string | null;
   items: StockMovementOrderItemWrite[];
 }
+
+// ---------------------------------------------------------------------------
+// Warehouse Demand Pool
+// ---------------------------------------------------------------------------
+
+export interface WDemandPoolStage {
+  stage: string;
+  label: string;
+  tone: string;
+  hint: string;
+  deep_link: string;
+}
+
+export interface WDemandPoolDoc {
+  kind: string;
+  id: number;
+  no: string | null;
+  status: string;
+  qty: number;
+  stage?: string;
+}
+
+export interface WDemandPoolSource {
+  indent_id: number;
+  indent_no: string;
+  indent_item_id: number;
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  requested_qty: number;
+  owed_qty: number;
+  stage: string;
+  stages: Record<string, number>;
+  required_date: string | null;
+  priority: string | null;
+  requested_by_name: string | null;
+  department_name: string | null;
+  project_name: string | null;
+  docs: WDemandPoolDoc[];
+}
+
+export interface WDemandPoolGroup {
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  total_qty: number;
+  indent_count: number;
+  stage_summary: Record<string, number>;
+  earliest_required: string | null;
+  sources: WDemandPoolSource[];
+}
+
+export interface WDemandPoolResponse {
+  groups: WDemandPoolGroup[];
+  group_count: number;
+  indent_count: number;
+  stage_totals: Record<string, number>;
+  page: number;
+  size: number;
+  total: number;
+}

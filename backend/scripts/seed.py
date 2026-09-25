@@ -145,6 +145,8 @@ PAGE_TREE = [
     # redirects to the inbox. Existing wf_delegations rows are left as history.
 
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
+    ("pro_demand_pool", "/procurement/demand-pool", "Demand Pool", "pie-chart",
+     P.page_view_code("pro_demand_pool"), 30, "grp_purchasing"),
     ("po_list", "/pos", "Purchase Orders", "receipt", P.PO_VIEW, 31, "grp_purchasing"),
     # Vendors, vendor rates and HSN codes — who we buy from and at what tax.
     ("pro_masters", "/procurement/masters", "Masters", "database",
@@ -165,6 +167,8 @@ PAGE_TREE = [
     # issued still resolves; only the name a person reads moved.
     ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 41, "grp_warehouse"),
+    ("wh_demand_pool", "/warehouse/demand-pool", "Demand Pool", "pie-chart",
+     P.page_view_code("wh_demand_pool"), 41, "grp_warehouse"),
     ("wh_inward", "/warehouse/material-inward", "Material Inward", "truck",
      P.RECEIPT_VIEW, 42, "grp_warehouse"),
     ("wh_grn", "/warehouse/grn", "Goods Receipt", "file-text",

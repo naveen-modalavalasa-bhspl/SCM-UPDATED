@@ -1867,3 +1867,57 @@ async def vendor_dispatch_replacement(return_id: int,
     """
     return await service.vendor_dispatch_replacement(
         db, account.vendor_id, return_id, body)
+
+
+# --------------------------------------------------------------------------- #
+#  Warehouse Demand Pool — item-wise view of outstanding indent demand in the
+#  outward chain.  Two endpoints: the pool (paginated groups) and stage metadata.
+#  Both gated on `issue.view`: the same permission that governs the issue register.
+# --------------------------------------------------------------------------- #
+from app.modules.warehouse import demand_pool as dp_warehouse  # noqa: E402
+
+
+@router.get("/demand-pool/stages", response_model=list[dict])
+async def warehouse_demand_pool_stages(
+        user=Depends(require_permission(ISSUE_VIEW))):
+    """Ordered stage metadata for the warehouse demand pool UI strip.
+
+    Served so screens can render stage chips, tooltips and deep links without
+    any hardcoded enum values — the same served-meta pattern as
+    `ACTIVITY_META` / `TRACKING_META` in the logistics module.
+    """
+    return list(dp_warehouse.WAREHOUSE_STAGES)
+
+
+@router.get("/demand-pool", response_model=dict)
+async def warehouse_demand_pool(
+        params: PageParams = Depends(),
+        search: str | None = None,
+        item_id: int | None = None,
+        warehouse_id: int | None = None,
+        project_id: int | None = None,
+        stage: str | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(ISSUE_VIEW))):
+    """Item-wise warehouse demand pool.
+
+    Every outstanding indent quantity that has a signed allocation and has not
+    yet been acknowledged by the requester appears here, grouped by item, with
+    each contributing indent line showing which outward stage its quantity is at
+    (TO_ISSUE → IN_ISSUE → ISSUED → OUTWARD_QC → CONSIGNMENT → IN_TRANSIT →
+    DELIVERED).
+
+    When the requester confirms receipt (`indents.acknowledge_receipt`) the
+    quantity drops out of the pool by itself — nothing is stored, everything is
+    read.
+
+    `?stage=` narrows to one bucket so KPI tile counts and the list they open
+    can never disagree.
+    """
+    return await dp_warehouse.demand_pool(
+        db, params,
+        search=search, item_id=item_id,
+        warehouse_id=warehouse_id, project_id=project_id,
+        stage=stage, user=user,
+    )
+

@@ -1091,3 +1091,35 @@ export const deleteIssue = (id: number) => del(`${BASE}/issues/${id}`);
 export const deleteDispatch = (id: number) => del(`${BASE}/dispatches/${id}`);
 export const deletePurchaseReturn = (id: number) => del(`${BASE}/returns/${id}`);
 export const deleteStockMovement = (id: number) => del(`${BASE}/stock-movements/${id}`);
+
+
+// --------------------------------------------------------------------------- //
+//  Warehouse Demand Pool  (2026-09-25)
+// --------------------------------------------------------------------------- //
+
+import type { WDemandPoolResponse, WDemandPoolStage } from './types';
+
+/** Stage metadata served by the backend — never hardcoded in the screen. */
+export const warehouseDemandPoolApi = {
+  stages: (signal?: AbortSignal) =>
+    api.get<WDemandPoolStage[]>('/api/warehouse/demand-pool/stages', { signal })
+      .then((r) => r.data),
+
+  pool: (params: {
+    search?: string;
+    item_id?: number;
+    warehouse_id?: number;
+    project_id?: number;
+    stage?: string;
+    page?: number;
+    size?: number;
+  } = {}, signal?: AbortSignal) =>
+    api.get<WDemandPoolResponse>('/api/warehouse/demand-pool', { params, signal })
+      .then((r) => r.data),
+};
+
+export const warehouseDemandPoolKeys = {
+  stages: () => ['warehouse', 'demand-pool', 'stages'] as const,
+  pool: (params: Record<string, unknown> = {}) =>
+    ['warehouse', 'demand-pool', params] as const,
+};

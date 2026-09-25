@@ -126,6 +126,7 @@ const POPrintPage = lazy(() => import("@/modules/procurement/pages/POPrintPage")
 const PicklistPrintPage = lazy(() => import("@/modules/warehouse/pages/PicklistPrintPage").then((m) => ({ default: m.PicklistPrintPage })));
 const PlatformLinksPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.PlatformLinksPage })));
 const PoliciesPage = lazy(() => import("@/modules/admin/pages/PoliciesPage").then((m) => ({ default: m.PoliciesPage })));
+const ProcurementDemandPoolPage = lazy(() => import("@/modules/procurement/pages/ProcurementDemandPoolPage"));
 const ProcurementLedgerPage = lazy(() => import("@/modules/procurement/pages/ProcurementLedgerPage").then((m) => ({ default: m.ProcurementLedgerPage })));
 const ProcurementOverviewPage = lazy(() => import("@/modules/procurement/pages/ProcurementOverviewPage").then((m) => ({ default: m.ProcurementOverviewPage })));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage").then((m) => ({ default: m.ProfilePage })));
@@ -419,6 +420,7 @@ function AppRoutes() {
             documents it reads, so it is safe as a landing page for a
             module whose five registers are granted separately. */}
         <Route path="procurement/overview" element={<ProcurementOverviewPage />} />
+        <Route path="procurement/demand-pool" element={<ProcurementDemandPoolPage />} />
         <Route path="procurement/ledger" element={<ProcurementLedgerPage />} />
         {/* The supplier register — who we buy from, and the login each one answers
             an RFQ with. Inside the employee shell like every other procurement
