@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, InputHTMLAttributes, MouseEvent, ReactNode } from "react";
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
@@ -162,12 +162,26 @@ export function StatCard({
   );
 }
 
+/** A <label> forwards a click on its text or hint to the first control inside it.
+ *  For a Select that control is the Autocomplete's input, which HeroUI opens on
+ *  click — so clicking beside an open dropdown to dismiss it closed it and then
+ *  opened it again. Cancelling the label's default action for clicks that land
+ *  outside the Select stops the forward; clicks on the Select itself are untouched. */
+function stopLabelReopeningSelect(event: MouseEvent<HTMLLabelElement>) {
+  // The popover is portalled: its clicks bubble here through React but were never
+  // inside the label, so the browser has nothing to forward for them.
+  const target = event.target as Node;
+  if (!event.currentTarget.contains(target)) return;
+  const select = event.currentTarget.querySelector("[data-select-root]");
+  if (select && !select.contains(target)) event.preventDefault();
+}
+
 export function Field(
   { label, children, hint, required }:
   { label: string; children: ReactNode; hint?: string; required?: boolean },
 ) {
   return (
-    <label className="block">
+    <label className="block" onClick={stopLabelReopeningSelect}>
       <span className="mb-1.5 block text-sm font-medium text-body">
         {label}
         {/* The asterisk is the only thing on the form that says "you cannot save
@@ -345,6 +359,7 @@ export function Select({
 
   if (!(searchable ?? options.length >= SEARCHABLE_FROM)) {
     return (
+      <div data-select-root className="contents">
       <HSelect
         {...common}
         placeholder={placeholder ?? "Select an option"}
@@ -365,10 +380,12 @@ export function Select({
       >
         {renderSelectItem}
       </HSelect>
+      </div>
     );
   }
 
   return (
+    <div data-select-root className="contents">
     <Autocomplete
       {...common}
       placeholder={placeholder ?? "Type to search…"}
@@ -381,5 +398,6 @@ export function Select({
     >
       {renderAutocompleteItem}
     </Autocomplete>
+    </div>
   );
 }
