@@ -163,6 +163,53 @@ async def location_ids_for_subtree(db: AsyncSession, position_id: int | None) ->
     return points
 
 
+async def held_location_ids(db: AsyncSession, position_id: int | None, *,
+                            subtree: bool) -> set[int]:
+    """The stocking points whose SHELF this post holds (and, with `subtree`, the posts
+    under it hold). BUG_SCM_012.
+
+    `rebuild_stocking_points` links EVERY post in an office to that office's point —
+    the Store Keeper, and the DEO and the Driver sitting beside him — because the link
+    also answers "which point serves this post" (a DEO's indent is served there). So
+    the link alone cannot say whose stock it is. HCM's SECTION can: at an LIP or an
+    MDP only the post in the stocking section (`L I P`, `M.D.P.`) keeps the shelf. A
+    main warehouse is staffed by sections of its own (WAREHOUSE-01, LOGISTICS-01…),
+    so every post linked to one still holds it, exactly as before.
+
+    Per POST, not per person: the same human working as Driver and as Store Keeper
+    sees the LIP's stock only while working as the Store Keeper.
+    """
+    if position_id is None:
+        return set()
+    cache = db.info.setdefault("held_points_memo", {})
+    key = (position_id, subtree)
+    if key in cache:
+        return set(cache[key])
+
+    seen: set[int] = {position_id}
+    frontier = [position_id] if subtree else []
+    while frontier:
+        children = set((await db.execute(
+            select(HcmPosition.id).where(HcmPosition.parent_position_id.in_(frontier))
+        )).scalars().all())
+        frontier = list(children - seen)
+        seen |= children
+
+    stocking_types = {WarehouseType.LIP.value, WarehouseType.MDP.value}
+    points: set[int] = set()
+    for warehouse_id, warehouse_type, section in (await db.execute(
+        select(PositionLocation.warehouse_id, Warehouse.warehouse_type,
+               PositionLocation.section_name)
+        .join(Warehouse, Warehouse.id == PositionLocation.warehouse_id)
+        .where(PositionLocation.position_id.in_(seen), PositionLocation.is_active == 1)
+    )).all():
+        if (warehouse_type not in stocking_types
+                or SECTION_TIER.get(_letters(section)) is not None):
+            points.add(warehouse_id)
+    cache[key] = set(points)
+    return points
+
+
 async def active_positions_of(db: AsyncSession, user) -> set[int]:
     """Every LIVE post this login holds — not just the hat they happen to be wearing.
 

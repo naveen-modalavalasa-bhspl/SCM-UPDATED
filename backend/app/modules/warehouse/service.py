@@ -34,6 +34,7 @@ from app.core.database import SessionLocal
 
 from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.modules.indents.enums import IndentType
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory import locations as stock_locations
 from app.shared import uom as uom_rules
@@ -6885,8 +6886,97 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
             vehicle_number=vehicle_number,
             items=items,
         )
-        drafts.append(await _build_issue(db, data, user))
+        draft = await _build_issue(db, data, user)
+        drafts.append(draft)
+        if indent is not None and indent.indent_type == _STR_INDENT_TYPE:
+            await _record_sto_for_str_issue(db, draft, indent, user)
     return drafts
+
+
+#: An indent of this type is a Stock Transfer Request — its served issues are STOs.
+_STR_INDENT_TYPE = IndentType.STR.value
+
+
+async def _record_sto_for_str_issue(db: AsyncSession, issue: m.MaterialIssue,
+                                    indent, user) -> None:
+    """The Stock Transfer Order one served STR produces, per source point.
+
+    The allocation decided which point gives what; that decision, signed, IS the
+    order. It is recorded as an `inv_sto` row pointing back at the STR and forward at
+    the material issue that executes it, so Inventory > Stock Transfer can list the
+    orders an STR produced. The row never moves stock — the issue posts it out and
+    the requester's acknowledgement credits it in — so it is written APPROVED and its
+    progress is read off the issue (`inventory.service._decorate_sto_stages`).
+    """
+    from app.modules.inventory.enums import STOStatus
+    from app.modules.inventory.models import (
+        STO_KIND_TRANSFER, StockTransferOrder, StockTransferOrderItem,
+    )
+
+    source = await db.get(Warehouse, issue.warehouse_id)
+    destination = await _requesting_point(db, issue)
+    order = StockTransferOrder(
+        sto_no=await next_number(db, "sto", project=indent.project_name),
+        doc_kind=STO_KIND_TRANSFER,
+        from_warehouse_id=issue.warehouse_id,
+        from_warehouse_name=getattr(source, "name", None) or issue.warehouse_name,
+        # The requesting point may be unresolvable (an office with no stocking point);
+        # the column is NOT NULL, so the source stands in and the name says why.
+        to_warehouse_id=destination.id if destination else issue.warehouse_id,
+        to_warehouse_name=(destination.name if destination
+                           else f"{indent.office_name or 'Requester'} (no stocking point)"),
+        from_project_id=indent.project_id or 0,
+        to_project_id=indent.project_id or 0,
+        status=STOStatus.APPROVED.value,
+        requested_by_id=indent.requested_by_id,
+        requested_by_name=indent.requested_by_name,
+        approved_by_name=_name(user),
+        approved_at=utcnow(),
+        str_id=indent.id,
+        str_no=indent.indent_no,
+        issue_id=issue.id,
+        issue_no=issue.issue_no,
+        remarks=f"Serves {indent.indent_no}",
+    )
+    # One order line per ITEM: the issue splits an item over the batches and bays it
+    # was reserved from, which is the storekeeper's detail, not the order's.
+    by_item: dict[int, StockTransferOrderItem] = {}
+    for line in issue.items:
+        row = by_item.get(line.item_id)
+        if row is None:
+            by_item[line.item_id] = StockTransferOrderItem(
+                item_id=line.item_id, item_code=line.item_code,
+                item_name=line.item_name, uom_code=line.uom_code,
+                requested_qty=_d(line.requested_qty))
+        else:
+            row.requested_qty = _d(row.requested_qty) + _d(line.requested_qty)
+    order.items = list(by_item.values())
+    db.add(order)
+    await db.flush()
+    issue.remarks = " · ".join(filter(None, (issue.remarks, f"STO {order.sto_no}")))
+
+
+async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
+    """ON_STO_APPROVED: a directly raised STO becomes a material issue draft at the
+    source point, where the storekeeper picks batch, bay and serials exactly as for any
+    other issue. An STO serving an STR already has its issue (the allocation drafted
+    it), and a movement order (SMO) never leaves the building."""
+    from app.modules.inventory.models import STO_KIND_TRANSFER
+
+    if sto.doc_kind != STO_KIND_TRANSFER or sto.issue_id or sto.str_id:
+        return
+    data = s.IssueWrite(
+        issue_date=ist_today(),
+        warehouse_id=sto.from_warehouse_id,
+        project_id=sto.from_project_id or None,
+        remarks=f"STO {sto.sto_no} to {sto.to_warehouse_name}",
+        items=[s.IssueItemWrite(item_id=line.item_id, requested_qty=_d(line.requested_qty))
+               for line in sto.items],
+    )
+    issue = await _build_issue(db, data, user, for_sto=True)
+    sto.issue_id = issue.id
+    sto.issue_no = issue.issue_no
+    await db.commit()
 
 
 async def _allocation_lines_by_batch(
@@ -8834,6 +8924,18 @@ async def _issue_destination(
         indent = await db.get(Indent, issue.indent_id)
         if indent is not None and getattr(indent, "office_id", None):
             return indent.office_id, indent.office_name
+    # An issue executing a directly raised STO: the order names the point it is for.
+    if issue.id:
+        from app.modules.inventory.models import StockTransferOrder
+        from app.platform.hcm.models import HcmOffice
+
+        to_warehouse_id = await db.scalar(
+            select(StockTransferOrder.to_warehouse_id)
+            .where(StockTransferOrder.issue_id == issue.id).limit(1))
+        point = await db.get(Warehouse, to_warehouse_id) if to_warehouse_id else None
+        if point is not None and point.office_id:
+            return point.office_id, await db.scalar(
+                select(HcmOffice.name).where(HcmOffice.id == point.office_id))
     return None, None
 
 
@@ -8931,7 +9033,8 @@ async def _decorate_dispatch_page_destinations(db: AsyncSession, page: dict) -> 
     return page
 
 
-async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.MaterialIssue:
+async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
+                       for_sto: bool = False) -> m.MaterialIssue:
     """Build one material issue draft without committing it.
 
     Same reason as _build_picking: allocation approval creates its warehouse drafts
@@ -8961,7 +9064,9 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
         # above has nothing to measure against either. Upstream points are
         # deliberately not held to this: a main store issues to departments, writes
         # off scrap and moves stock for reasons no indent covers.
-        if not wanted and stock_locations.tier_of(
+        # An approved Stock Transfer Order is the request: its issue has no indent,
+        # and a LIP sending stock sideways is exactly what the STO sanctioned.
+        if not wanted and not for_sto and stock_locations.tier_of(
             wh.warehouse_type
         ) is stock_locations.LocationTier.LIP:
             raise ValidationError(
@@ -20200,7 +20305,8 @@ async def _shipments_by_indent(db: AsyncSession,
 
 async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str | None = None,
                                          status: str | None = None,
-                                         only_actionable: bool = False) -> list[dict]:
+                                         only_actionable: bool = False,
+                                         indent_types: list[str] | None = None) -> list[dict]:
     """Every indent this person raised that has reached the delivery stage.
 
     Served from the warehouse module because the evidence — what was issued, what was
@@ -20241,6 +20347,9 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
                               Indent.position_id.is_(None)))
     if status:
         stmt = stmt.where(Indent.status == status)
+    # Indents > Acknowledgements asks for REGULAR/MONTHLY, Stock Transfer for STR.
+    if indent_types:
+        stmt = stmt.where(Indent.indent_type.in_(indent_types))
     if search:
         like = f"%{search.strip()}%"
         # Item text as well as the indent number: people look for "the masks", not for
@@ -22697,6 +22806,17 @@ def _register_transport_hooks() -> None:
 
 _register_transport_hooks()
 
+
+def _register_stock_transfer_hooks() -> None:
+    """An approved STO drafts its material issue here (inventory may not import us)."""
+    from app.modules.inventory import hooks as inv_hooks
+
+    if draft_issue_for_sto not in inv_hooks.ON_STO_APPROVED:
+        inv_hooks.ON_STO_APPROVED.append(draft_issue_for_sto)
+
+
+_register_stock_transfer_hooks()
+
 # ---------------- Outbound Quality Inspection ----------------
 
 async def get_outbound_inspection(db: AsyncSession, inspection_id: int) -> m.OutboundInspection:
@@ -23082,11 +23202,35 @@ async def act_on_outbound_inspection(db: AsyncSession, inspection_id: int, actio
     return await get_outbound_inspection(db, inspection_id)
 
 
+def _stock_transfer_issue_ids():
+    """Material issues that execute a stock transfer: the issue an STO names, or one
+    serving an STR (on the header, or per line for a consolidated issue)."""
+    from app.modules.indents.models import Indent, IndentItem
+    from app.modules.inventory.models import StockTransferOrder
+
+    str_indents = select(Indent.id).where(Indent.indent_type == _STR_INDENT_TYPE)
+    return select(m.MaterialIssue.id).where(or_(
+        m.MaterialIssue.id.in_(select(StockTransferOrder.issue_id)
+                               .where(StockTransferOrder.issue_id.is_not(None))),
+        m.MaterialIssue.indent_id.in_(str_indents),
+        m.MaterialIssue.id.in_(
+            select(m.MaterialIssueLine.issue_id)
+            .join(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+            .where(IndentItem.indent_id.in_(str_indents))),
+    ))
+
+
 async def list_outbound_inspections(db: AsyncSession, params: PageParams,
                                     status: str | None = None,
                                     warehouse_id: int | None = None,
-                                    search: str | None = None, user=None) -> dict:
+                                    search: str | None = None, user=None,
+                                    stock_transfer: bool | None = None) -> dict:
     stmt = select(m.OutboundInspection).where(m.OutboundInspection.status != InspectionStatus.CANCELLED.value)
+    # Outward QC of a stock transfer is worked on Inventory > Stock Transfer (True);
+    # the warehouse's own Outward QC list leaves it out (False). None = everything.
+    if stock_transfer is not None:
+        in_transfer = m.OutboundInspection.issue_id.in_(_stock_transfer_issue_ids())
+        stmt = stmt.where(in_transfer if stock_transfer else ~in_transfer)
     if user is not None:
         # The same rung every other warehouse list obeys - this one read the whole
         # network, so an Outward QC screen showed checks run at points the login has

@@ -213,7 +213,11 @@ function BreakdownGroup({
   );
 }
 
-export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "OUT" | "IN" }) {
+/** `basePath` re-homes the screen: Inventory > Stock Transfer mounts this same form at
+ *  `/inventory/transfers/issues` so an STO's issue is worked without leaving it. */
+export default function MaterialIssueForm({ direction = "OUT", basePath }: {
+  direction?: "OUT" | "IN"; basePath?: string;
+}) {
   const pointLabel = usePointLabel();
   const { id } = useParams();
   const [searchParams] = useSearchParams();
@@ -225,7 +229,8 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
    * /warehouse/... and under /warehouse/transactions/...), and a relative Back
    * resolves against the matched route, so it landed on the dashboard from one
    * of them and on the list from the other. */
-  const listPath = direction === "OUT" ? "/warehouse/material-issues" : "/warehouse/material-returns";
+  const listPath = basePath
+    ?? (direction === "OUT" ? "/warehouse/material-issues" : "/warehouse/material-returns");
 
   const [form, setForm] = useState<IssueWrite>({
     issue_type: "DIRECT",
@@ -1036,7 +1041,7 @@ export default function MaterialIssueForm({ direction = "OUT" }: { direction?: "
             {splitResult.children.map((child) => (
               <li key={child.id} className="flex flex-wrap items-baseline gap-2">
                 <button type="button" className="font-mono underline"
-                        onClick={() => nav(`/warehouse/material-issues/${child.id}`)}>
+                        onClick={() => nav(`${listPath}/${child.id}`)}>
                   {child.issue_no}
                 </button>
                 <span className="text-muted">{child.floor_location_name ?? "—"}</span>

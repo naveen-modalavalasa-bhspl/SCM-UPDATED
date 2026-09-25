@@ -227,7 +227,7 @@ PAGES: list[PageDef] = [
     # refresh leaves `required_permission` exactly as the row already carries it —
     # this is a rename and nothing else. sort_order matches the live row (55), because
     # sync_pages refreshes that field and a different number would move the screen.
-    PageDef("inv_transfers", "/inventory/transfers", "Transfer Records",
+    PageDef("inv_transfers", "/inventory/transfers", "Stock Transfer",
             parent="grp_inventory", module="inventory", icon="arrow-left-right",
             sort_order=55, always_on=True),
     # The Fulfilment Desk — the Fulfilment Queue and Allocation Approvals as ONE
@@ -245,6 +245,12 @@ PAGES: list[PageDef] = [
     PageDef("inv_fulfilment_desk", "/inventory/fulfilment", "Fulfilment Desk",
             parent="grp_inventory", module="inventory", icon="check-circle",
             sort_order=56),
+    # Stock Audit (2026-09-24): the physical count against system stock, and the
+    # correction that follows. The live row is parked (is_active = 0) and sync never
+    # flips that, so migration `a4c6e8f0b2d3` switches it back on.
+    PageDef("inv_adjustments", "/inventory/adjustments", "Stock Audit",
+            parent="grp_inventory", module="inventory", icon="sliders",
+            sort_order=60),
 
     # ------------------------------------------------------------------ #
     #  Masters, on the module that owns them

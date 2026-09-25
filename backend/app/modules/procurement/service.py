@@ -404,6 +404,18 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     return po
 
 
+def _assert_po_addresses(billing, shipping) -> None:
+    """BUG_SCM_016: an order must say where it is invoiced and where the goods land.
+    Checked on the hand-raised create and again on submit, which is the gate every
+    order passes — one drafted from an indent or a quotation arrives with neither."""
+    missing = [label for label, value in (("Billing address", billing),
+                                          ("Shipping address", shipping))
+               if not (value or "").strip()]
+    if missing:
+        raise ValidationError(f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} "
+                              "required on a purchase order")
+
+
 async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     """Raise a purchase order directly — no indent, no quotation behind it.
 
@@ -420,6 +432,8 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     """
     if not data.lines:
         raise ValidationError("A purchase order must have at least one line")
+    _assert_po_addresses(getattr(data, "billing_address", None),
+                         getattr(data, "shipping_address", None))
 
     vendor = await db.get(Vendor, data.vendor_id)
     if vendor is None:
@@ -1050,6 +1064,7 @@ async def submit_po(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     po = await get_po(db, po_id)
     if po.status != POStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a PO in {po.status} status")
+    _assert_po_addresses(po.billing_address, po.shipping_address)
     instance = await engine.start(db, DocType.PO.value, po.id,
                                   context={"total_amount": float(po.total_amount),
                                            # The ORDER's project, not the buyer's. The

@@ -268,8 +268,11 @@ export const indentApi = {
    * there; the screen is an indents screen all the same.
    */
   myAcknowledgements: (params: { search?: string; status?: string;
-                                 only_actionable?: boolean } = {}) =>
-    api.get<Acknowledgement[]>("/api/warehouse/acknowledgements/mine", { params })
+                                 only_actionable?: boolean; indent_type?: string[] } = {}) =>
+    // URLSearchParams so `indent_type` repeats (`?indent_type=A&indent_type=B`) the
+    // way FastAPI reads a list, not axios's `indent_type[]=`.
+    api.get<Acknowledgement[]>("/api/warehouse/acknowledgements/mine",
+                               { params: toSearchParams(params) })
       .then((r) => r.data),
 
   /** The issued / dispatched / delivered stages for one indent's stepper. */

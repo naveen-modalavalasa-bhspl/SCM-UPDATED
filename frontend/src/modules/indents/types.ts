@@ -16,7 +16,8 @@ export interface IndentItem {
  * stays part of the union — list and detail screens must render it, not fall through
  * to a blank. It's also the ad-hoc request type; MONTHLY is the recurring one.
  */
-export type IndentType = "REGULAR" | "MONTHLY";
+/** STR = a Stock Transfer Request, raised from Inventory > Stock Transfer. */
+export type IndentType = "REGULAR" | "MONTHLY" | "STR";
 
 export interface Indent {
   id: number;
@@ -92,6 +93,8 @@ export interface IndentListRow {
   current_approver_name?: string | null;
   is_bookmarked: "YES" | "NO" | string;
   created_at: string;
+  /** Days since raised; frozen at the last change once CLOSED or REJECTED. */
+  age_days?: number | null;
 }
 
 /** One Region/Location bucket of the stats breakdown. Null id = no location. */

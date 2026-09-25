@@ -50,10 +50,14 @@ const deriveResult = (inspected: number, accepted: number): InspectionItemWrite[
   return "PARTIAL";
 };
 
+/** `basePath` re-homes the form — Inventory > Stock Transfer mounts it at
+ *  `/inventory/transfers/qc` for the QC of a transfer's material issue. */
 export default function OutboundQualityInspectionForm({
   type = "OUTGOING",
+  basePath,
 }: {
   type?: "INCOMING" | "OUTGOING";
+  basePath?: string;
 }) {
   const pointLabel = usePointLabel();
   const { id } = useParams();
@@ -62,7 +66,7 @@ export default function OutboundQualityInspectionForm({
   const editing = !!id && id !== "new";
   /* Absolute: this screen is mounted at two depths, so `".."` resolved against the
    * matched route and Back landed somewhere different depending on the entry URL. */
-  const listPath = "/warehouse/qc-outward";
+  const listPath = basePath ?? "/warehouse/qc-outward";
   const [searchParams] = window.location.search ? [new URLSearchParams(window.location.search)] : [new URLSearchParams()];
   const initialIssueId = searchParams.get("issue_id");
 

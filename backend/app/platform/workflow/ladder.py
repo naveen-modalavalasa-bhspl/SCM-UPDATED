@@ -65,7 +65,9 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.FORWARD_ISSUE.value: "Warehouse",
     DocType.MR.value: "Inventory",
     DocType.STOCK_TRANSFER.value: "Inventory",
+    DocType.STOCK_TRANSFER_REQUEST.value: "Inventory",
     DocType.STOCK_MOVEMENT_ORDER.value: "Inventory",
+    DocType.STOCK_ADJUSTMENT.value: "Inventory",
     DocType.STOCK_RETURN.value: "Returns",
     DocType.STOCK_RETURN_RECEIPT.value: "Returns",
     DocType.STOCK_RETURN_LOGISTICS.value: "Returns",
@@ -100,8 +102,10 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.MR.value: "Material Request",
     # Only ever raised for a transfer that crosses a project boundary — a
     # same-project transfer never starts a workflow, so this ladder stays quiet.
-    DocType.STOCK_TRANSFER.value: "Stock Transfer (cross-project)",
+    DocType.STOCK_TRANSFER.value: "Stock Transfer Order (STO)",
+    DocType.STOCK_TRANSFER_REQUEST.value: "Stock Transfer Request (STR)",
     DocType.STOCK_MOVEMENT_ORDER.value: "Stock Movement (bin to bin)",
+    DocType.STOCK_ADJUSTMENT.value: "Stock Audit (physical count correction)",
     DocType.STOCK_RETURN.value: "Indent Return",
     DocType.STOCK_RETURN_RECEIPT.value: "Decision Desk",
     DocType.STOCK_RETURN_LOGISTICS.value: "Return Logistics",

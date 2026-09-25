@@ -24,6 +24,8 @@ class LedgerKey(str, Enum):
     TRANSPORT = "transport"
     # Purchase orders — raised, approved, sent, and the vendor's answer.
     PROCUREMENT = "procurement"
+    # Stock Transfer Requests and Orders, on one register (Inventory > Stock Transfer).
+    STOCK_TRANSFERS = "stock_transfers"
 
 
 class AgeBucket(str, Enum):

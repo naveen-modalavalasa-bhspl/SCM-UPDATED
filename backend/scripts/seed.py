@@ -230,7 +230,7 @@ PAGE_TREE = [
     # Read-only since 2026-08-20 — the screen shows STO/SMO records and can no longer
     # raise or advance one, so it is gated on STOCK_VIEW rather than STOCK_ADJUST: a
     # register nobody can write to should not need the write permission to open.
-    ("inv_transfers", "/inventory/transfers", "Transfer Records", "arrow-left-right",
+    ("inv_transfers", "/inventory/transfers", "Stock Transfer", "arrow-left-right",
      P.STOCK_VIEW, 55, "grp_inventory"),
     # The Fulfilment Queue and Allocation Approvals as one screen (2026-08-21): decide
     # what to give and sign it in the same place. Both old rows are in
@@ -245,7 +245,7 @@ PAGE_TREE = [
      P.page_view_code("inv_fulfilment_desk"), 56, "grp_inventory"),
     ("inv_stocking_points", "/inventory/stocking-points", "Stocking Points", "map-pin",
      P.STOCK_POINTS_MANAGE, 58, "grp_inventory"),
-    # Parked, not deleted: Demand by Item, Adjustments and Valuation & Ageing are
+    # Parked, not deleted: Demand by Item and Valuation & Ageing are
     # off the menu (rbac_pages.is_active = 0) until they are implemented properly.
     # seed_pages sets is_active = True for everything in PAGE_TREE, so leaving the
     # rows here would put the screens back on the rail at the next seed. The routes
@@ -254,8 +254,8 @@ PAGE_TREE = [
     #  P.ALLOCATION_VIEW, 58, "grp_inventory"),
     ("inv_mr", "/inventory/material-requests", "Material Requests", "file-text",
      P.MR_VIEW, 59, "grp_inventory"),
-    # ("inv_adjustments", "/inventory/adjustments", "Adjustments", "sliders",
-    #  P.STOCK_ADJUST, 60, "grp_inventory"),
+    ("inv_adjustments", "/inventory/adjustments", "Stock Audit", "sliders",
+     P.page_view_code("inv_adjustments"), 60, "grp_inventory"),
     # ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
     #  P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",

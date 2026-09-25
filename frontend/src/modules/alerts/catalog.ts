@@ -166,6 +166,11 @@ const DEFINITIONS: AlertDef[] = [
     "Post Adjustment",
   ),
   confirm(
+    "stock.audit.submit", "warning", "Submit this stock audit?",
+    "{count} counted at {warehouse}; {diff} differ from system stock. Differences are posted to the ledger once the audit is approved.",
+    "Submit Audit",
+  ),
+  confirm(
     "adjustment.approve", "warning", "Approve this adjustment?",
     "Approving writes the counted quantity for {item} into the ledger. The ledger is append-only, so a mistake has to be corrected with a second adjustment.",
     "Approve",
@@ -394,6 +399,7 @@ const DEFINITIONS: AlertDef[] = [
     "material_request.revised", "success", "Quantities saved",
     "{number} now asks for the amounts you entered. Approve it to send them to procurement.",
   ),
+  alert("stock.audit.saved", "success", "Stock audit saved", "{number} is {status}."),
   alert("adjustment.approved", "success", "Adjustment approved", "{item} now reads {qty}."),
   alert(
     "adjustment.rejected", "success", "Adjustment rejected",

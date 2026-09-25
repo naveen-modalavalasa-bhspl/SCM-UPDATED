@@ -594,6 +594,10 @@ RETURN_PERMISSION_BY_DOC_TYPE: dict[str, str] = {
     DocType.GRN.value: perms.GRN_QC,
     DocType.DISPATCH.value: perms.DISPATCH_APPROVE,
     DocType.STOCK_TRANSFER.value: perms.STOCK_TRANSFER_APPROVE,
+    # Only a LADDER key — the instance of an STR is an INDENT (see DocType), so this
+    # entry only answers the config screen's "who signs this" question.
+    DocType.STOCK_TRANSFER_REQUEST.value: perms.INDENT_APPROVE,
+    DocType.STOCK_ADJUSTMENT.value: perms.STOCK_ADJUST_APPROVE,
     # All three returns share `return.approve` — the code is one resource used by
     # both the purchase and the stock-return chains.
     DocType.PURCHASE_RETURN.value: perms.RETURN_APPROVE,

@@ -25,6 +25,8 @@ import type { LedgerQuery, ReportRow } from "../types";
 // filter sweep below does not mistake it for a filter and send it to the backend.
 const CONTROLS = new Set([
   "page", "size", "search", "date_from", "date_to", "sort", "dir", "cols", "sub",
+  // The host screen's own tab, when this ledger is embedded in one.
+  "tab",
 ]);
 const SIZES = [20, 50, 100, 200];
 
@@ -60,8 +62,13 @@ const SUBLEDGERS: Record<string, { key: string; label: string }[]> = {
   ],
 };
 
-export function ReportLedgerPage() {
-  const { ledger = "indents" } = useParams();
+/** `ledgerKey` pins the ledger instead of reading the route, and `embedded` drops
+ *  the page chrome — Inventory > Stock Transfer mounts its History tab this way. */
+export function ReportLedgerPage({ ledgerKey, embedded = false }: {
+  ledgerKey?: string; embedded?: boolean;
+} = {}) {
+  const { ledger: routeLedger = "indents" } = useParams();
+  const ledger = ledgerKey ?? routeLedger;
   const [params, setParams] = useSearchParams();
   const toast = useToast();
   const [exporting, setExporting] = useState(false);
@@ -200,10 +207,10 @@ export function ReportLedgerPage() {
   const to = Math.min(page * size, total);
 
   return (
-    <div className="p-4 sm:p-6">
+    <div className={embedded ? "" : "p-4 sm:p-6"}>
       {/* Title is just "Ledger": the eyebrow says Reports and the rail tab says
           which ledger, so naming the module here says it a third time. */}
-      <PageHeader
+      {!embedded && <PageHeader
         eyebrow="Reports"
         title="Ledger"
         actions={
@@ -219,7 +226,7 @@ export function ReportLedgerPage() {
             </div>
           </div>
         }
-      />
+      />}
       {info?.subtitle && <p className="mb-5 text-sm text-muted">{info.subtitle}</p>}
 
       {subOptions && (

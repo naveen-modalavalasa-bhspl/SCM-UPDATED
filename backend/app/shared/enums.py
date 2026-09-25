@@ -171,12 +171,23 @@ class DocType(str, Enum):
     # engine when the two points sit in different projects — a same-project transfer
     # is the holder's own call and never starts a workflow at all.
     STOCK_TRANSFER = "STOCK_TRANSFER"
+    # A Stock Transfer REQUEST (STR): one point asking another to send it stock. It is
+    # carried as an indent (`indents.IndentType.STR`) so the serve, issue, consignment
+    # and acknowledgement legs are the indent's own, and this value is only the LADDER
+    # it is approved on (engine context `ladder_doc_type`) — the instance itself stays
+    # doc type INDENT, so every inbox, deep link and approve permission still resolves.
+    STOCK_TRANSFER_REQUEST = "STOCK_TRANSFER_REQUEST"
     # Stock moving between BINS inside one warehouse. Its own doc type, not
     # STOCK_TRANSFER: a transfer crosses stocking points and is the receiving side's
     # business, while a movement never leaves the building and is the point owner's
     # own. Added 2026-08-21 — before it, a movement went through no ladder at all and
     # `stock.movement.approve` existed with nothing able to call it.
     STOCK_MOVEMENT_ORDER = "STOCK_MOVEMENT_ORDER"
+    # A stock audit: the physical count against what the system holds, and the
+    # correction that follows. Only put through the engine when a project configured a
+    # chain for it on Approval Flow; otherwise one holder of `stock.adjust.approve`
+    # signs (inventory.service.act_on_adjustment).
+    STOCK_ADJUSTMENT = "STOCK_ADJUSTMENT"
     # Material going back UP the chain: a LIP returning expired or damaged stock to
     # the MDP above it. Its own doc type, not STOCK_TRANSFER — a transfer is the
     # holder's own call and a return has to be sanctioned by the tier receiving it.

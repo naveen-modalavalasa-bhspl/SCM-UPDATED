@@ -73,7 +73,7 @@ export function WarehouseModule() {
         <Route path="quality-inspection/new" element={<QualityInspectionForm />} />
         <Route path="quality-inspection/:id" element={<QualityInspectionForm />} />
 
-        <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" />} />
+        <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" stockTransfer={false} />} />
         <Route path="qc-outward/new" element={<OutboundQualityInspectionForm />} />
         <Route path="qc-outward/:id" element={<OutboundQualityInspectionForm />} />
 
@@ -138,7 +138,7 @@ export function WarehouseModule() {
       <Route path="quality-inspection/new" element={<QualityInspectionForm />} />
       <Route path="quality-inspection/:id" element={<QualityInspectionForm />} />
 
-      <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" />} />
+      <Route path="qc-outward" element={<QualityInspection type="OUTGOING" title="Outward QC" stockTransfer={false} />} />
       <Route path="qc-outward/new" element={<OutboundQualityInspectionForm />} />
       <Route path="qc-outward/:id" element={<OutboundQualityInspectionForm />} />
 

@@ -101,7 +101,7 @@ export function IndentPrintPage() {
         { label: "Position", value: dash(indent.position_name) },
         { label: "Department", value: dash(indent.department_name) },
         { label: "Region / Location", value: dash(indent.region_name) },
-        { label: "Project", value: dash(indent.project_name) },
+        { label: "Raised By", value: dash(indent.project_name) },
         { label: "Indent type", value: indentTypeLabel(indent.indent_type) },
         { label: "Raised on", value: fmtDateTime(indent.created_at) },
         { label: "Approved on", value: indent.approved_at ? fmtDateTime(indent.approved_at) : "—" },
