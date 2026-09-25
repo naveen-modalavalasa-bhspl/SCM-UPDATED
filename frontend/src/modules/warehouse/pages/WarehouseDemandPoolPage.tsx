@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Download, ChevronDown, FileSpreadsheet, FileText, Layers, Building2 } from "lucide-react";
+import { PageHeader, Card, ErrorBanner, FilterBar, FilterMenu, FilterDateRange, useToast } from "@/shared/components";
+import { exportToCSV } from "@/shared/exportUtils";
 import { warehouseDemandPoolApi, warehouseDemandPoolKeys } from "../api";
 import type {
   WDemandPoolGroup,
@@ -8,15 +11,15 @@ import type {
   WDemandPoolStage,
 } from "../types";
 
-const STAGE_TONE: Record<string, string> = {
-  neutral: "#94a3b8",
-  warning: "#f59e0b",
-  info: "#3b82f6",
-  success: "#10b981",
+const STAGE_TONE: Record<string, { bg: string; text: string; border: string }> = {
+  neutral: { bg: "#f1f5f9", text: "#475569", border: "#cbd5e1" },
+  warning: { bg: "#fef3c7", text: "#92400e", border: "#fde68a" },
+  info: { bg: "#dbeafe", text: "#1e40af", border: "#bfdbfe" },
+  success: { bg: "#d1fae5", text: "#065f46", border: "#a7f3d0" },
 };
 
-function toneColor(tone: string) {
-  return STAGE_TONE[tone] ?? "#94a3b8";
+function stageStyle(tone: string) {
+  return STAGE_TONE[tone] ?? STAGE_TONE.neutral;
 }
 
 function StagePill({
@@ -31,7 +34,7 @@ function StagePill({
   onClick?: () => void;
 }) {
   const meta = stages.find((s) => s.stage === stage);
-  const color = meta ? toneColor(meta.tone) : "#94a3b8";
+  const style = stageStyle(meta?.tone ?? "neutral");
   return (
     <span
       onClick={onClick}
@@ -44,14 +47,15 @@ function StagePill({
         borderRadius: 20,
         fontSize: 12,
         fontWeight: 600,
-        color: "#fff",
-        background: color,
+        color: style.text,
+        backgroundColor: style.bg,
+        border: `1px solid ${style.border}`,
         cursor: onClick ? "pointer" : "default",
         whiteSpace: "nowrap",
       }}
     >
       {meta?.label ?? stage}
-      <span style={{ opacity: 0.85, fontWeight: 400 }}>{qty}</span>
+      <span style={{ opacity: 0.85, fontWeight: 500 }}>{qty}</span>
     </span>
   );
 }
@@ -67,59 +71,40 @@ function SourceRow({
   const meta = stages.find((s) => s.stage === source.stage);
 
   return (
-    <tr
-      style={{
-        borderBottom: "1px solid rgba(255,255,255,0.05)",
-        fontSize: 13,
-      }}
-    >
-      <td style={{ padding: "8px 12px", color: "#34d399", whiteSpace: "nowrap" }}>
+    <tr className="border-b border-slate-200/80 text-xs hover:bg-slate-100/60 transition-colors">
+      <td className="py-2.5 px-3 font-medium whitespace-nowrap">
         <button
+          type="button"
           onClick={() => nav(`/indents/${source.indent_id}`)}
-          style={{
-            background: "none",
-            border: "none",
-            color: "#34d399",
-            cursor: "pointer",
-            fontWeight: 600,
-            textDecoration: "underline",
-            fontSize: 13,
-          }}
+          className="text-emerald-700 font-semibold hover:underline bg-none border-none p-0 cursor-pointer"
         >
           {source.indent_no}
         </button>
       </td>
-      <td style={{ padding: "8px 12px", color: "#cbd5e1" }}>
+      <td className="py-2.5 px-3 text-slate-700 font-medium">
         {source.owed_qty} {source.uom_code}
       </td>
-      <td style={{ padding: "8px 12px" }}>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <td className="py-2.5 px-3">
+        <div className="flex gap-1.5 flex-wrap">
           {Object.entries(source.stages).map(([st, qty]) => (
             <StagePill key={st} stage={st} qty={qty} stages={stages} />
           ))}
         </div>
       </td>
-      <td style={{ padding: "8px 12px", color: "#94a3b8", fontSize: 12 }}>
+      <td className="py-2.5 px-3 text-slate-500">
         {source.department_name ?? "—"}
       </td>
-      <td style={{ padding: "8px 12px", color: "#94a3b8", fontSize: 12 }}>
+      <td className="py-2.5 px-3 text-slate-500">
         {source.required_date ?? "—"}
       </td>
-      <td style={{ padding: "8px 12px" }}>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <td className="py-2.5 px-3">
+        <div className="flex gap-1.5 flex-wrap">
           {source.docs.slice(0, 3).map((doc, i) => (
             <button
               key={i}
+              type="button"
               onClick={() => nav(meta?.deep_link ?? "#")}
-              style={{
-                background: "rgba(52,211,153,0.12)",
-                border: "1px solid rgba(52,211,153,0.35)",
-                borderRadius: 6,
-                color: "#34d399",
-                fontSize: 11,
-                padding: "2px 8px",
-                cursor: "pointer",
-              }}
+              className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 rounded px-2 py-0.5 text-[11px] font-medium transition-colors"
             >
               {doc.kind} #{doc.id}
             </button>
@@ -143,69 +128,51 @@ function GroupRow({
     <>
       <tr
         onClick={() => setExpanded((e) => !e)}
-        style={{
-          cursor: "pointer",
-          background: expanded
-            ? "rgba(52,211,153,0.06)"
-            : "rgba(255,255,255,0.02)",
-          borderBottom: "1px solid rgba(255,255,255,0.06)",
-          transition: "background 0.15s",
-        }}
+        className={`cursor-pointer border-b border-slate-200 transition-colors ${
+          expanded ? "bg-emerald-50/50" : "hover:bg-slate-50/80 bg-white"
+        }`}
       >
-        <td style={{ padding: "12px 16px", width: 32 }}>
+        <td className="py-3 px-4 w-8 text-center">
           <span
-            style={{
-              display: "inline-block",
-              transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-              transition: "transform 0.2s",
-              color: "#34d399",
-              fontSize: 14,
-            }}
+            className={`inline-block transition-transform duration-200 text-emerald-600 text-xs ${
+              expanded ? "rotate-90" : "rotate-0"
+            }`}
           >
             ▶
           </span>
         </td>
-        <td style={{ padding: "12px 16px" }}>
-          <div style={{ fontWeight: 600, color: "#e2e8f0", fontSize: 14 }}>
+        <td className="py-3 px-4">
+          <div className="font-semibold text-slate-900 text-sm">
             {group.item_name}
           </div>
-          <div style={{ color: "#64748b", fontSize: 12, marginTop: 2 }}>
+          <div className="text-slate-500 text-xs font-mono mt-0.5">
             {group.item_code}
           </div>
         </td>
-        <td style={{ padding: "12px 16px", color: "#94a3b8", fontSize: 13 }}>
+        <td className="py-3 px-4 text-slate-700 text-sm font-medium">
           {group.total_qty} {group.uom_code}
         </td>
-        <td style={{ padding: "12px 16px" }}>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <td className="py-3 px-4">
+          <div className="flex gap-1.5 flex-wrap">
             {Object.entries(group.stage_summary).map(([st, qty]) => (
               <StagePill key={st} stage={st} qty={qty} stages={stages} />
             ))}
           </div>
         </td>
-        <td
-          style={{ padding: "12px 16px", color: "#64748b", fontSize: 12 }}
-        >
+        <td className="py-3 px-4 text-slate-500 text-xs">
           {group.indent_count} indent{group.indent_count !== 1 ? "s" : ""}
         </td>
-        <td
-          style={{ padding: "12px 16px", color: "#64748b", fontSize: 12 }}
-        >
+        <td className="py-3 px-4 text-slate-500 text-xs">
           {group.earliest_required ?? "—"}
         </td>
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} style={{ padding: 0 }}>
-            <div
-              style={{
-                background: "rgba(0,0,0,0.25)",
-                borderBottom: "2px solid rgba(52,211,153,0.2)",
-              }}
-            >
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <td colSpan={6} className="p-0 border-b border-slate-200">
+            <div className="bg-slate-50/90 border-b-2 border-emerald-200 px-4 py-2">
+              <table className="w-full border-collapse">
                 <thead>
-                  <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                  <tr className="border-b border-slate-200/80 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
                     {[
                       "Indent",
                       "Owed Qty",
@@ -214,18 +181,8 @@ function GroupRow({
                       "Required",
                       "Documents",
                     ].map((h) => (
-                      <th
-                        key={h}
-                        style={{
-                          padding: "6px 12px",
-                          color: "#64748b",
-                          fontSize: 11,
-                          fontWeight: 600,
-                          textAlign: "left",
-                          letterSpacing: 0.5,
-                        }}
-                      >
-                        {h.toUpperCase()}
+                      <th key={h} className="py-1.5 px-3 text-left">
+                        {h}
                       </th>
                     ))}
                   </tr>
@@ -249,11 +206,30 @@ function GroupRow({
 }
 
 export default function WarehouseDemandPoolPage() {
+  const toast = useToast();
   const [params, setParams] = useSearchParams();
   const activeStage = params.get("stage") ?? undefined;
   const search = params.get("search") ?? "";
+  const department = params.get("department") ?? "";
+  const dateFrom = params.get("date_from") ?? "";
+  const dateTo = params.get("date_to") ?? "";
   const page = parseInt(params.get("page") ?? "1");
   const PAGE_SIZE = 50;
+
+  const [exportOpen, setExportOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const exportRef = useRef<HTMLDivElement>(null);
+
+  // Close export dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+        setExportOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const stagesQ = useQuery({
     queryKey: warehouseDemandPoolKeys.stages(),
@@ -262,32 +238,148 @@ export default function WarehouseDemandPoolPage() {
   });
 
   const poolQ = useQuery({
-    queryKey: warehouseDemandPoolKeys.pool({ activeStage, search, page }),
+    queryKey: warehouseDemandPoolKeys.pool({ activeStage, search, page: 1, size: 500 }),
     queryFn: ({ signal }) =>
       warehouseDemandPoolApi.pool(
-        { stage: activeStage, search: search || undefined, page, size: PAGE_SIZE },
+        { stage: activeStage, search: search || undefined, page: 1, size: 500 },
         signal
       ),
     placeholderData: (prev) => prev,
   });
 
   const stages: WDemandPoolStage[] = stagesQ.data ?? [];
-  const data = poolQ.data;
+  const rawData = poolQ.data;
 
-  function setStage(s: string | undefined) {
+  // Department options derived from data
+  const departmentOptions = useMemo(() => {
+    if (!rawData?.groups) return [];
+    const depts = new Set<string>();
+    for (const g of rawData.groups) {
+      for (const s of g.sources) {
+        if (s.department_name) depts.add(s.department_name);
+      }
+    }
+    return Array.from(depts).sort().map((d) => ({ value: d, label: d }));
+  }, [rawData]);
+
+  // Stage dropdown options for FilterMenu
+  const stageMenuOptions = useMemo(() => {
+    return [
+      { value: "", label: "All Stages", reset: true },
+      ...stages.map((s) => ({
+        value: s.stage,
+        label: s.label,
+        hint: s.hint,
+      })),
+    ];
+  }, [stages]);
+
+  // Client-side filtering for department & date range
+  const filteredGroups = useMemo(() => {
+    if (!rawData?.groups) return [];
+    return rawData.groups
+      .map((group) => {
+        let sources = group.sources;
+
+        if (department) {
+          sources = sources.filter(
+            (s) => (s.department_name ?? "").toLowerCase() === department.toLowerCase()
+          );
+        }
+
+        if (dateFrom) {
+          sources = sources.filter(
+            (s) => s.required_date && s.required_date >= dateFrom
+          );
+        }
+
+        if (dateTo) {
+          sources = sources.filter(
+            (s) => s.required_date && s.required_date <= dateTo
+          );
+        }
+
+        if (sources.length === 0) return null;
+
+        const totalQty = sources.reduce((sum, s) => sum + s.owed_qty, 0);
+        const stageSummary: Record<string, number> = {};
+        for (const s of sources) {
+          for (const [st, q] of Object.entries(s.stages)) {
+            stageSummary[st] = (stageSummary[st] ?? 0) + q;
+          }
+        }
+
+        return {
+          ...group,
+          total_qty: Math.round(totalQty * 100) / 100,
+          indent_count: new Set(sources.map((s) => s.indent_id)).size,
+          stage_summary: stageSummary,
+          sources,
+        };
+      })
+      .filter((g): g is WDemandPoolGroup => g !== null);
+  }, [rawData, department, dateFrom, dateTo]);
+
+  // Paginated groups view
+  const totalItems = filteredGroups.length;
+  const totalPages = Math.ceil(totalItems / PAGE_SIZE) || 1;
+  const paginatedGroups = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filteredGroups.slice(start, start + PAGE_SIZE);
+  }, [filteredGroups, page, PAGE_SIZE]);
+
+  // Dynamic KPI counts based on current filters
+  const stageTotals = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const g of filteredGroups) {
+      for (const [st, qty] of Object.entries(g.stage_summary)) {
+        totals[st] = (totals[st] ?? 0) + qty;
+      }
+    }
+    return totals;
+  }, [filteredGroups]);
+
+  const totalIndentCount = useMemo(() => {
+    const ids = new Set<number>();
+    for (const g of filteredGroups) {
+      for (const s of g.sources) {
+        ids.add(s.indent_id);
+      }
+    }
+    return ids.size;
+  }, [filteredGroups]);
+
+  // URL state modifiers
+  function updateParam(key: string, val: string | undefined) {
     const next = new URLSearchParams(params);
-    if (s) next.set("stage", s);
-    else next.delete("stage");
+    if (val) next.set(key, val);
+    else next.delete(key);
     next.set("page", "1");
     setParams(next);
   }
 
+  function setStage(s: string | undefined) {
+    updateParam("stage", s);
+  }
+
   function setSearch(v: string) {
-    const next = new URLSearchParams(params);
-    if (v) next.set("search", v);
-    else next.delete("search");
-    next.set("page", "1");
-    setParams(next);
+    updateParam("search", v || undefined);
+  }
+
+  function setDepartment(v: string) {
+    updateParam("department", v || undefined);
+  }
+
+  function setDateFrom(v: string) {
+    updateParam("date_from", v || undefined);
+  }
+
+  function setDateTo(v: string) {
+    updateParam("date_to", v || undefined);
+  }
+
+  function clearAllFilters() {
+    setParams(new URLSearchParams());
   }
 
   function setPage(p: number) {
@@ -296,115 +388,270 @@ export default function WarehouseDemandPoolPage() {
     setParams(next);
   }
 
-  const totalPages = data ? Math.ceil(data.total / PAGE_SIZE) : 1;
+  // Active filters counter
+  const activeFilterCount =
+    (activeStage ? 1 : 0) +
+    (search ? 1 : 0) +
+    (department ? 1 : 0) +
+    (dateFrom || dateTo ? 1 : 0);
+
+  // Helper to fetch complete dataset without violating size <= 500
+  async function fetchAllFilteredExportData(): Promise<WDemandPoolGroup[]> {
+    let allGroups: WDemandPoolGroup[] = [];
+    let p = 1;
+    let totalP = 1;
+    do {
+      const res = await warehouseDemandPoolApi.pool({
+        stage: activeStage,
+        search: search || undefined,
+        page: p,
+        size: 500,
+      });
+      if (res?.groups) {
+        allGroups = allGroups.concat(res.groups);
+        totalP = Math.ceil((res.total || 0) / 500) || 1;
+      }
+      p++;
+    } while (p <= totalP);
+
+    // Apply client filters if present
+    if (department || dateFrom || dateTo) {
+      return allGroups
+        .map((group) => {
+          let sources = group.sources;
+          if (department) {
+            sources = sources.filter(
+              (s) => (s.department_name ?? "").toLowerCase() === department.toLowerCase()
+            );
+          }
+          if (dateFrom) {
+            sources = sources.filter((s) => s.required_date && s.required_date >= dateFrom);
+          }
+          if (dateTo) {
+            sources = sources.filter((s) => s.required_date && s.required_date <= dateTo);
+          }
+          if (sources.length === 0) return null;
+          const totalQty = sources.reduce((sum, s) => sum + s.owed_qty, 0);
+          const stageSummary: Record<string, number> = {};
+          for (const s of sources) {
+            for (const [st, q] of Object.entries(s.stages)) {
+              stageSummary[st] = (stageSummary[st] ?? 0) + q;
+            }
+          }
+          return {
+            ...group,
+            total_qty: Math.round(totalQty * 100) / 100,
+            indent_count: new Set(sources.map((s) => s.indent_id)).size,
+            stage_summary: stageSummary,
+            sources,
+          };
+        })
+        .filter((g): g is WDemandPoolGroup => g !== null);
+    }
+
+    return allGroups;
+  }
+
+  // ── CSV EXPORT HANDLERS ──
+  async function handleExportGroupedCSV() {
+    try {
+      setIsExporting(true);
+      const groupsToExport = await fetchAllFilteredExportData();
+      if (groupsToExport.length === 0) {
+        toast.error("No demand pool items available to export.");
+        return;
+      }
+
+      const headers = [
+        "Item Code",
+        "Item Name",
+        "UOM",
+        "Total Outstanding Qty",
+        "Indent Count",
+        "Stage Breakdown",
+        "Earliest Required Date",
+      ];
+
+      const rows: (string | number | boolean | null | undefined)[][] = groupsToExport.map((g) => {
+        const breakdown = Object.entries(g.stage_summary)
+          .map(([st, q]) => `${st}: ${q}`)
+          .join("; ");
+        return [
+          g.item_code,
+          g.item_name,
+          g.uom_code,
+          g.total_qty,
+          g.indent_count,
+          breakdown,
+          g.earliest_required ?? "",
+        ];
+      });
+
+      const filename = `Warehouse_Demand_Pool_Summary_${new Date().toISOString().slice(0, 10)}.csv`;
+      exportToCSV({ filename, headers, rows });
+      toast.success(`Exported ${groupsToExport.length} item group(s) to CSV`);
+    } catch (err: any) {
+      toast.error(err?.message ?? "Export failed.");
+    } finally {
+      setIsExporting(false);
+      setExportOpen(false);
+    }
+  }
+
+  async function handleExportDetailedCSV() {
+    try {
+      setIsExporting(true);
+      const groupsToExport = await fetchAllFilteredExportData();
+      if (groupsToExport.length === 0) {
+        toast.error("No indent line records available to export.");
+        return;
+      }
+
+      const headers = [
+        "Indent No",
+        "Item Code",
+        "Item Name",
+        "Department",
+        "Required Date",
+        "Owed Qty",
+        "UOM",
+        "Current Stage",
+        "Documents",
+      ];
+
+      const rows: (string | number | boolean | null | undefined)[][] = [];
+      for (const g of groupsToExport) {
+        for (const s of g.sources) {
+          const docsStr = s.docs.map((d) => `${d.kind} #${d.id}`).join("; ");
+          rows.push([
+            s.indent_no,
+            g.item_code,
+            g.item_name,
+            s.department_name ?? "",
+            s.required_date ?? "",
+            s.owed_qty,
+            s.uom_code,
+            s.stage,
+            docsStr,
+          ]);
+        }
+      }
+
+      const filename = `Warehouse_Demand_Pool_Detailed_${new Date().toISOString().slice(0, 10)}.csv`;
+      exportToCSV({ filename, headers, rows });
+      toast.success(`Exported ${rows.length} detailed line(s) to CSV`);
+    } catch (err: any) {
+      toast.error(err?.message ?? "Export failed.");
+    } finally {
+      setIsExporting(false);
+      setExportOpen(false);
+    }
+  }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "linear-gradient(135deg,#0f2718 0%,#0f172a 60%,#1e293b 100%)",
-        fontFamily: "'Inter','Segoe UI',sans-serif",
-        color: "#e2e8f0",
-        padding: "24px 32px",
-      }}
-    >
-      {/* ── Header ── */}
-      <div style={{ marginBottom: 28 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
-          <span
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: 10,
-              background: "linear-gradient(135deg,#10b981,#059669)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 18,
-            }}
-          >
-            🏭
-          </span>
-          <div>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: 22,
-                fontWeight: 700,
-                color: "#f1f5f9",
-                letterSpacing: -0.3,
-              }}
-            >
-              Warehouse Demand Pool
-            </h1>
-            <p style={{ margin: 0, color: "#64748b", fontSize: 13 }}>
-              Every outstanding allocated indent quantity, where it sits in the outward chain
-            </p>
-          </div>
-        </div>
+    <div className="space-y-6 pb-12">
+      <div>
+        <PageHeader
+          eyebrow="Warehouse"
+          title="Demand Pool"
+          actions={
+            <div className="relative" ref={exportRef}>
+              <button
+                type="button"
+                disabled={isExporting}
+                onClick={() => setExportOpen((o) => !o)}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+              >
+                <Download className="h-4 w-4 text-emerald-600" />
+                {isExporting ? "Exporting…" : "Export Demand"}
+                <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+              </button>
+
+              {exportOpen && (
+                <div className="absolute right-0 mt-1.5 w-60 bg-white border border-slate-200 rounded-xl shadow-lg z-50 py-1 text-xs divide-y divide-slate-100">
+                  <button
+                    type="button"
+                    onClick={handleExportGroupedCSV}
+                    className="w-full text-left px-4 py-2.5 hover:bg-emerald-50/70 text-slate-700 flex items-center gap-2.5 font-medium transition-colors cursor-pointer"
+                  >
+                    <FileSpreadsheet className="h-4 w-4 text-emerald-600 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-slate-800">Export Grouped Summary</div>
+                      <div className="text-[11px] text-slate-400">Item-wise total demand (CSV)</div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExportDetailedCSV}
+                    className="w-full text-left px-4 py-2.5 hover:bg-emerald-50/70 text-slate-700 flex items-center gap-2.5 font-medium transition-colors cursor-pointer"
+                  >
+                    <FileText className="h-4 w-4 text-teal-600 shrink-0" />
+                    <div>
+                      <div className="font-semibold text-slate-800">Export Detailed Lines</div>
+                      <div className="text-[11px] text-slate-400">Granular indent lines (CSV)</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+          }
+        />
+        <p className="text-xs text-slate-500 font-medium -mt-3">
+          Every outstanding indent demand served from stock across the outward chain
+        </p>
       </div>
 
-      {/* ── KPI Strip ── */}
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          flexWrap: "wrap",
-          marginBottom: 24,
-        }}
-      >
-        {/* All tile */}
+      {/* ── Top KPI Interactive Cards ── */}
+      <div className="flex gap-3 flex-wrap">
+        {/* All Indents Tile */}
         <button
+          type="button"
           onClick={() => setStage(undefined)}
-          style={{
-            padding: "12px 20px",
-            borderRadius: 12,
-            border: `2px solid ${!activeStage ? "#10b981" : "rgba(255,255,255,0.1)"}`,
-            background: !activeStage
-              ? "rgba(16,185,129,0.12)"
-              : "rgba(255,255,255,0.04)",
-            cursor: "pointer",
-            color: !activeStage ? "#34d399" : "#94a3b8",
-            textAlign: "left",
-            minWidth: 110,
-            transition: "all 0.15s",
-          }}
+          className={`px-4 py-3 rounded-xl border text-left min-w-[130px] transition-all cursor-pointer ${
+            !activeStage
+              ? "bg-emerald-50/90 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-400/50"
+              : "bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+          }`}
         >
-          <div style={{ fontSize: 22, fontWeight: 700 }}>
-            {data?.indent_count ?? "—"}
+          <div className="text-2xl font-bold font-display leading-tight flex items-center justify-between">
+            {totalIndentCount}
+            {!activeStage && (
+              <span className="h-2 w-2 rounded-full bg-emerald-600 animate-pulse" />
+            )}
           </div>
-          <div style={{ fontSize: 11, opacity: 0.8, marginTop: 2 }}>
+          <div className="text-xs text-slate-500 mt-1 font-medium flex items-center gap-1">
+            <Layers className="h-3 w-3 text-slate-400" />
             All Indents
           </div>
         </button>
 
+        {/* Stage KPI Cards */}
         {stages.map((s) => {
-          const qty = data?.stage_totals?.[s.stage] ?? 0;
+          const qty = stageTotals[s.stage] ?? 0;
           const active = activeStage === s.stage;
-          const color = toneColor(s.tone);
+          const style = stageStyle(s.tone);
           return (
             <button
               key={s.stage}
+              type="button"
               onClick={() => setStage(active ? undefined : s.stage)}
               title={s.hint}
-              style={{
-                padding: "12px 20px",
-                borderRadius: 12,
-                border: `2px solid ${active ? color : "rgba(255,255,255,0.1)"}`,
-                background: active
-                  ? `${color}22`
-                  : "rgba(255,255,255,0.04)",
-                cursor: "pointer",
-                color: active ? color : "#94a3b8",
-                textAlign: "left",
-                minWidth: 110,
-                transition: "all 0.15s",
-              }}
+              className={`px-4 py-3 rounded-xl border text-left min-w-[130px] transition-all cursor-pointer ${
+                active
+                  ? "bg-emerald-50/90 border-emerald-500 text-emerald-900 shadow-sm ring-1 ring-emerald-400/50"
+                  : "bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+              }`}
             >
-              <div style={{ fontSize: 22, fontWeight: 700 }}>
+              <div
+                className="text-2xl font-bold font-display leading-tight flex items-center justify-between"
+                style={{ color: active ? "#047857" : style.text }}
+              >
                 {qty}
+                {active && (
+                  <span className="h-2 w-2 rounded-full bg-emerald-600 animate-pulse" />
+                )}
               </div>
-              <div style={{ fontSize: 11, opacity: 0.8, marginTop: 2 }}>
+              <div className="text-xs text-slate-500 mt-1 font-medium">
                 {s.label}
               </div>
             </button>
@@ -412,142 +659,104 @@ export default function WarehouseDemandPoolPage() {
         })}
       </div>
 
-      {/* ── Search ── */}
-      <div style={{ marginBottom: 20, display: "flex", gap: 12, alignItems: "center" }}>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search item or indent…"
-          style={{
-            flex: 1,
-            maxWidth: 380,
-            padding: "10px 16px",
-            borderRadius: 10,
-            border: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(255,255,255,0.06)",
-            color: "#e2e8f0",
-            fontSize: 14,
-            outline: "none",
-          }}
-        />
-        {poolQ.isFetching && (
-          <span style={{ color: "#64748b", fontSize: 13 }}>Loading…</span>
-        )}
-        {data && (
-          <span style={{ color: "#64748b", fontSize: 13 }}>
-            {data.group_count} item group{data.group_count !== 1 ? "s" : ""}
+      {/* ── Top-Notch Filter Bar ── */}
+      <FilterBar
+        search={search}
+        onSearch={setSearch}
+        searchPlaceholder="Search item name, code, or indent no… (Press /)"
+        active={activeFilterCount}
+        onClear={clearAllFilters}
+        right={
+          <span className="text-xs text-slate-500 font-medium hidden sm:inline">
+            {totalItems} group{totalItems !== 1 ? "s" : ""} ({totalIndentCount} indents)
           </span>
-        )}
-      </div>
-
-      {/* ── Table ── */}
-      <div
-        style={{
-          borderRadius: 16,
-          overflow: "hidden",
-          border: "1px solid rgba(255,255,255,0.08)",
-          background: "rgba(255,255,255,0.02)",
-          boxShadow: "0 4px 32px rgba(0,0,0,0.4)",
-        }}
+        }
       >
-        {!data || data.groups.length === 0 ? (
-          <div
-            style={{
-              padding: "64px 32px",
-              textAlign: "center",
-              color: "#475569",
-            }}
-          >
+        {/* Stage Filter Dropdown */}
+        <FilterMenu
+          label="Stage Filter"
+          value={activeStage ?? ""}
+          onChange={(v) => setStage(v || undefined)}
+          options={stageMenuOptions}
+          className="w-44"
+        />
+
+        {/* Department Filter Dropdown */}
+        {departmentOptions.length > 0 && (
+          <FilterMenu
+            label="Department"
+            value={department}
+            onChange={setDepartment}
+            options={[
+              { value: "", label: "All Departments", reset: true },
+              ...departmentOptions,
+            ]}
+            icon={<Building2 className="h-4 w-4 opacity-70" />}
+            className="w-48"
+          />
+        )}
+
+        {/* Date Range Filter */}
+        <FilterDateRange
+          label="Required Date"
+          from={dateFrom}
+          to={dateTo}
+          onFrom={setDateFrom}
+          onTo={setDateTo}
+        />
+      </FilterBar>
+
+      {poolQ.error && <ErrorBanner error={poolQ.error} />}
+
+      {/* ── Demand Pool Table Card ── */}
+      <Card className="p-0 overflow-hidden border border-slate-200 shadow-sm bg-white">
+        {filteredGroups.length === 0 ? (
+          <div className="p-12 text-center text-slate-500 text-sm">
             {poolQ.isLoading
               ? "Loading demand pool…"
-              : "No outstanding demand in this pool."}
+              : "No outstanding demand matching the active filters."}
           </div>
         ) : (
-          <table
-            style={{ width: "100%", borderCollapse: "collapse" }}
-          >
+          <table className="w-full border-collapse">
             <thead>
-              <tr
-                style={{
-                  background: "rgba(255,255,255,0.04)",
-                  borderBottom: "1px solid rgba(255,255,255,0.08)",
-                }}
-              >
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-xs font-bold uppercase tracking-wider">
                 {["", "Item", "Total Qty", "Stage Breakdown", "Indents", "Earliest Required"].map(
                   (h) => (
-                    <th
-                      key={h}
-                      style={{
-                        padding: "12px 16px",
-                        color: "#475569",
-                        fontSize: 11,
-                        fontWeight: 700,
-                        textAlign: "left",
-                        letterSpacing: 0.8,
-                      }}
-                    >
-                      {h.toUpperCase()}
+                    <th key={h} className="py-3 px-4 text-left">
+                      {h}
                     </th>
                   )
                 )}
               </tr>
             </thead>
             <tbody>
-              {data.groups.map((g) => (
+              {paginatedGroups.map((g) => (
                 <GroupRow key={g.item_id} group={g} stages={stages} />
               ))}
             </tbody>
           </table>
         )}
-      </div>
+      </Card>
 
       {/* ── Pagination ── */}
       {totalPages > 1 && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            gap: 8,
-            marginTop: 24,
-          }}
-        >
+        <div className="flex justify-center gap-3 mt-6">
           <button
+            type="button"
             disabled={page <= 1}
             onClick={() => setPage(page - 1)}
-            style={{
-              padding: "8px 18px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: "rgba(255,255,255,0.06)",
-              color: "#94a3b8",
-              cursor: page > 1 ? "pointer" : "default",
-              opacity: page > 1 ? 1 : 0.4,
-            }}
+            className="px-4 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
           >
             Previous
           </button>
-          <span
-            style={{
-              padding: "8px 18px",
-              color: "#64748b",
-              fontSize: 13,
-              alignSelf: "center",
-            }}
-          >
+          <span className="px-4 py-2 text-slate-600 text-sm self-center font-medium">
             Page {page} of {totalPages}
           </span>
           <button
+            type="button"
             disabled={page >= totalPages}
             onClick={() => setPage(page + 1)}
-            style={{
-              padding: "8px 18px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: "rgba(255,255,255,0.06)",
-              color: "#94a3b8",
-              cursor: page < totalPages ? "pointer" : "default",
-              opacity: page < totalPages ? 1 : 0.4,
-            }}
+            className="px-4 py-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-sm font-medium hover:bg-slate-50 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
           >
             Next
           </button>
