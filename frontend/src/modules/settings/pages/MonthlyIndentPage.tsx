@@ -28,7 +28,9 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Switch } from "@heroui/react";
+import {
+  Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
+} from "@heroui/react";
 import {
   AlertTriangle, ArrowRight, BellRing, CalendarDays, CalendarRange, CheckCircle2,
   ChevronDown, Clock, Flag, FlagOff, Plus, RefreshCw, RotateCcw, Save, Send,
@@ -42,10 +44,12 @@ import { StepList, stepKey } from "@/modules/admin/components/StepList";
 import { adminApi } from "@/modules/admin/api";
 import type { CustomLadderStep, FlowRung, StepKind } from "@/modules/admin/types";
 import { monthlyIndentApi } from "../api";
-import type { MonthlyIndentCycle, MonthlyIndentLog, MonthlyIndentRule } from "../types";
+import type {
+  MonthlyIndentCycle, MonthlyIndentLog, MonthlyIndentRule, MonthlyIndentSubmissionRule,
+} from "../types";
 import {
-  CONDITION_CHIP, buildAgenda, dateKey, everyPhrase, longDate, monthName, monthsAfter,
-  prettyTime, shortDate,
+  CONDITION_CHIP, anchorValue, buildAgenda, cycleAnchor, cyclePeriodMonths, dateKey,
+  everyPhrase, longDate, monthName, monthsAfter, prettyTime, shortDate, TARGET_OPTIONS,
 } from "../monthlyIndentPlan";
 import type { AgendaItem } from "../monthlyIndentPlan";
 import { MonthRibbon, type DayMark } from "../components/MonthRibbon";
@@ -62,10 +66,6 @@ function monthOffsets(zero: string, one: string, rest: (n: number) => string) {
     value: n, label: n === 0 ? zero : n === 1 ? one : rest(n),
   }));
 }
-
-/** Which month the collection OPENS in. */
-const OPENS_IN = monthOffsets(
-  "This month", "Next month", (n) => `${n} months from now`);
 
 /** Which month it CLOSES in, counted from the opening month. This is the control
  *  that makes "the 1st of this month to the 31st of next" sayable at all: before it
@@ -112,6 +112,8 @@ function normalizeCycle(cycle: MonthlyIndentCycle): MonthlyIndentCycle {
     is_enabled: Boolean(cycle.is_enabled),
     scheduler_enabled: Boolean(cycle.scheduler_enabled),
     approval_flow_enabled: Boolean(cycle.approval_flow_enabled),
+    restrict_to_rules: Boolean(cycle.restrict_to_rules),
+    anchor_month: cycle.anchor_month ? cycle.anchor_month.slice(0, 10) : null,
     cycle_month_offset: Number(cycle.cycle_month_offset ?? 0),
     start_day: Number(cycle.start_day ?? 1),
     end_month_offset: Number(cycle.end_month_offset ?? 0),
@@ -128,8 +130,8 @@ function normalizeCycle(cycle: MonthlyIndentCycle): MonthlyIndentCycle {
  *  so — so every new one belongs here the day it is added. */
 const CYCLE_FIELDS: (keyof MonthlyIndentCycle)[] = [
   "is_enabled", "approval_flow_enabled", "cycle_month_offset", "start_day",
-  "end_month_offset", "end_day", "serves_month_offset",
-  "timezone", "scheduler_enabled", "scheduler_interval_minutes",
+  "end_month_offset", "end_day", "serves_month_offset", "anchor_month",
+  "restrict_to_rules", "timezone", "scheduler_enabled", "scheduler_interval_minutes",
 ];
 
 function cycleChanged(a: MonthlyIndentCycle | null, b: MonthlyIndentCycle | null): boolean {
@@ -146,6 +148,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const stepSignature = (steps: CustomLadderStep[]) => steps.map(stepKey).join("|");
 
+function emptySubmissionRule(day: number): Partial<MonthlyIndentSubmissionRule> {
+  return {
+    name: "",
+    is_active: true,
+    target_type: "HCM_ROLE",
+    target_ref_id: 0,
+    max_submissions: 1,
+    deadline_day: day,
+    allow_after_deadline: false,
+  };
+}
+
 export function MonthlyIndentPage() {
   const qc = useQueryClient();
   const toast = useToast();
@@ -158,6 +172,10 @@ export function MonthlyIndentPage() {
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [editing, setEditing] = useState<{ rule: Partial<MonthlyIndentRule>; id: number | null }
     | null>(null);
+  const [editingSubmission, setEditingSubmission] = useState<{
+    rule: Partial<MonthlyIndentSubmissionRule>;
+    id: number | null;
+  } | null>(null);
   const [showHowItRuns, setShowHowItRuns] = useState(false);
   const [needChoices, setNeedChoices] = useState(false);
 
@@ -223,10 +241,13 @@ export function MonthlyIndentPage() {
      about to save. */
   const changedParts = [
     cycle && serverCycle && CYCLE_FIELDS.some(
-      (field) => field !== "approval_flow_enabled" && cycle[field] !== serverCycle[field])
+      (field) => field !== "approval_flow_enabled" && field !== "restrict_to_rules"
+        && cycle[field] !== serverCycle[field])
       ? "the month settings" : null,
     cycle && serverCycle && cycle.approval_flow_enabled !== serverCycle.approval_flow_enabled
       ? "how monthly indents are approved" : null,
+    cycle && serverCycle && cycle.restrict_to_rules !== serverCycle.restrict_to_rules
+      ? "who may raise a monthly indent" : null,
     flowDirty ? "the approver list" : null,
   ].filter(Boolean) as string[];
   const changedSentence = changedParts.length <= 1
@@ -235,13 +256,36 @@ export function MonthlyIndentPage() {
 
   const rules = useMemo(() => settings.data?.rules ?? [], [settings.data]);
   const activeRules = rules.filter((rule) => rule.is_active);
+  const submissionRules = useMemo(
+    () => settings.data?.submission_rules ?? [],
+    [settings.data],
+  );
 
+  const shape = cycle ?? { cycle_month_offset: 0, start_day: 1, end_month_offset: 0, end_day: 31 };
   const { window: win, items: agenda } = useMemo(
-    () => buildAgenda(cycle ?? { cycle_month_offset: 0, start_day: 1,
-                                 end_month_offset: 0, end_day: 31 },
-                      rules, today),
+    () => buildAgenda(shape, rules, today),
+    // `shape` is rebuilt each render; `cycle` is what says it moved.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [cycle, rules, today],
   );
+
+  /* Which months a cycle opens in, when the window is long enough that it cannot
+     open every month. One option per distinct choice — the next `period` months —
+     and the stored anchor shown as whichever of them it lines up with. */
+  const period = cyclePeriodMonths(shape);
+  const anchor = cycleAnchor(shape, today);
+  const openingChoices = Array.from({ length: period }, (_, index) => {
+    const first = new Date(today.getFullYear(), today.getMonth() + index, 1);
+    return {
+      value: anchorValue(first.getFullYear(), first.getMonth()),
+      label: `${monthName(first.getFullYear(), first.getMonth())}, then every ${period} months`,
+    };
+  });
+  const anchorIndex = anchor.year * 12 + anchor.month;
+  const openingValue = openingChoices.find((choice) => {
+    const [year, month] = choice.value.split("-").map(Number);
+    return ((year * 12 + month - 1 - anchorIndex) % period + period) % period === 0;
+  })?.value ?? openingChoices[0]?.value;
 
   /* Both ends of the band read plainly only while they share a year: a cycle that
      opens in December and closes in January otherwise says "1 December to 31 January"
@@ -307,6 +351,29 @@ export function MonthlyIndentPage() {
     },
   });
 
+  const saveSubmissionRule = useMutation({
+    mutationFn: ({ rule, id }: {
+      rule: Partial<MonthlyIndentSubmissionRule>;
+      id: number | null;
+    }) => (id
+      ? monthlyIndentApi.updateSubmissionRule(id, rule)
+      : monthlyIndentApi.createSubmissionRule(rule)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["monthly-indent"] });
+      setEditingSubmission(null);
+      toast.success("Submission rule saved");
+    },
+  });
+
+  const turnOffSubmissionRule = useMutation({
+    mutationFn: monthlyIndentApi.deleteSubmissionRule,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["monthly-indent"] });
+      setEditingSubmission(null);
+      toast.success("Submission rule switched off");
+    },
+  });
+
   const runNow = useMutation({
     mutationFn: monthlyIndentApi.runNow,
     onSuccess: (result) => {
@@ -339,6 +406,12 @@ export function MonthlyIndentPage() {
     setNeedChoices(true);
     saveRule.reset();
     setEditing({ rule, id });
+  }
+
+  function openSubmissionEditor(rule: Partial<MonthlyIndentSubmissionRule>, id: number | null) {
+    setNeedChoices(true);
+    saveSubmissionRule.reset();
+    setEditingSubmission({ rule, id });
   }
 
   function addStep(kind: StepKind, rung: FlowRung) {
@@ -482,8 +555,7 @@ export function MonthlyIndentPage() {
               onOpenHere={() => setCycle({
                 ...cycle,
                 start_day: selectedDay.getDate(),
-                cycle_month_offset: clampOffset(
-                  monthsAfter(today.getFullYear(), today.getMonth(), selectedDay)),
+                anchor_month: anchorValue(selectedDay.getFullYear(), selectedDay.getMonth()),
               })}
               onCloseHere={() => setCycle({
                 ...cycle,
@@ -509,14 +581,27 @@ export function MonthlyIndentPage() {
                      onChange={(event) => setCycle({
                        ...cycle, start_day: Number(event.target.value) })} />
             </Field>
-            <Field label="Opening month"
-                   hint={monthName(win.start.getFullYear(), win.start.getMonth())}>
-              <Select
-                value={cycle.cycle_month_offset}
-                options={OPENS_IN}
-                onChange={(value) => setCycle({
-                  ...cycle, cycle_month_offset: Number(value) })}
-              />
+            {/* How often a cycle opens is decided by the window's own length, never
+                picked: a window longer than a month cannot open monthly without two
+                cycles being in force at once. Only then is there a choice left —
+                WHICH months — and it is stored as a month, not as "next month",
+                which meant a different month every time it was read. */}
+            <Field label="Opens"
+                   hint={period === 1
+                     ? "A new collection opens every month."
+                     : `Longer than a month, so a new one opens every ${period} months.`}>
+              {period === 1 ? (
+                <p className="flex min-h-11 items-center rounded-lg border border-line
+                              bg-content2 px-3 text-sm text-body">
+                  Every month
+                </p>
+              ) : (
+                <Select
+                  value={openingValue}
+                  options={openingChoices}
+                  onChange={(value) => setCycle({ ...cycle, anchor_month: String(value) })}
+                />
+              )}
             </Field>
             <Field label="Collection closes on day">
               <Input type="number" min={1} max={31} value={cycle.end_day}
@@ -562,6 +647,15 @@ export function MonthlyIndentPage() {
             </p>
           </div>
         </Card>
+
+        <SubmissionRulesPanel
+          rules={submissionRules}
+          windowEnd={win.end}
+          restrict={cycle.restrict_to_rules}
+          onRestrictChange={(value) => setCycle({ ...cycle, restrict_to_rules: value })}
+          onAdd={() => openSubmissionEditor(emptySubmissionRule(win.end.getDate()), null)}
+          onEdit={(rule) => openSubmissionEditor(rule, rule.id)}
+        />
 
         {/* ── The agenda: the same schedule, read as sentences ─────────────── */}
         <Card className="p-4 sm:p-5">
@@ -785,6 +879,26 @@ export function MonthlyIndentPage() {
           onPreview={monthlyIndentApi.preview}
         />
       )}
+      {editingSubmission && (
+        <SubmissionRuleEditor
+          key={editingSubmission.id ?? "new-submission"}
+          initial={editingSubmission.rule}
+          isNew={editingSubmission.id == null}
+          roles={roleChoices}
+          positions={positionChoices}
+          choicesLoading={rungs.isLoading}
+          saving={saveSubmissionRule.isPending}
+          saveError={saveSubmissionRule.error}
+          onSave={(rule) => saveSubmissionRule.mutate({
+            rule,
+            id: editingSubmission.id,
+          })}
+          onClose={() => setEditingSubmission(null)}
+          onTurnOff={editingSubmission.id
+            ? () => turnOffSubmissionRule.mutate(editingSubmission.id as number)
+            : undefined}
+        />
+      )}
     </div>
   );
 }
@@ -792,6 +906,287 @@ export function MonthlyIndentPage() {
 /* ---------------------------------------------------------------------------
  * Pieces
  * ------------------------------------------------------------------------- */
+
+function submissionTarget(rule: Partial<MonthlyIndentSubmissionRule>): string {
+  const name = rule.target_name || (rule.target_ref_id ? `#${rule.target_ref_id}` : "nobody yet");
+  if (rule.target_type === "EMPLOYEE") return name;
+  if (rule.target_type === "POSITION") return `everyone in ${name}`;
+  return `every ${name}`;
+}
+
+function SubmissionRulesPanel({
+  rules, windowEnd, restrict, onRestrictChange, onAdd, onEdit,
+}: {
+  rules: MonthlyIndentSubmissionRule[];
+  windowEnd: Date;
+  restrict: boolean;
+  onRestrictChange: (value: boolean) => void;
+  onAdd: () => void;
+  onEdit: (rule: MonthlyIndentSubmissionRule) => void;
+}) {
+  const active = rules.filter((rule) => rule.is_active);
+  const inactive = rules.filter((rule) => !rule.is_active);
+  return (
+    <Card className="p-4 sm:p-5">
+      <Heading
+        icon={Send}
+        title="Who can submit, and how many"
+        hint="Checked when a monthly indent is started and again when it is submitted."
+        action={(
+          <Button variant="soft" onClick={onAdd}>
+            <Plus className="h-4 w-4" /> Add a rule
+          </Button>
+        )}
+      />
+
+      {/* The same rules, read as an allow-list. Off, they only LIMIT the people they
+          name and everybody else submits freely; on, nobody else may raise one. */}
+      <label className="mb-3 flex min-h-11 items-center justify-between gap-3 rounded-lg
+                        border border-line bg-content1 px-3 py-2">
+        <span className="text-sm text-body">
+          Only the people named below may raise a monthly indent
+          <span className="block text-xs text-muted">
+            {restrict
+              ? "Anyone no rule names is refused, and gets no reminders to submit."
+              : "Anyone no rule names can still raise one — the rules only set limits."}
+          </span>
+        </span>
+        <Switch size="sm" isSelected={restrict} onValueChange={onRestrictChange} />
+      </label>
+      {restrict && active.length === 0 && (
+        <Alert tone="warning" title="Nobody can raise a monthly indent">
+          The list is switched on but has no active rule in it. Add one, or switch the
+          list off.
+        </Alert>
+      )}
+
+      {active.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-line px-4 py-6 text-center">
+          <p className="text-sm font-semibold text-ink">No submission limits are active.</p>
+          <p className="mt-1 text-xs text-muted">
+            {restrict
+              ? "Add a rule for each job role, post or person who raises the monthly indent."
+              : "Without a matching rule, monthly indent submission stays open for that person."}
+          </p>
+          <div className="mt-3">
+            <Button onClick={onAdd}>
+              <Plus className="h-4 w-4" /> Add the first rule
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="divide-y divide-line rounded-lg border border-line">
+          {active.map((rule) => (
+            <button
+              key={rule.id}
+              type="button"
+              onClick={() => onEdit(rule)}
+              className="grid w-full gap-2 px-3 py-3 text-left transition-colors
+                         hover:bg-content2 sm:grid-cols-[1fr_10rem_10rem]"
+            >
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold text-ink">{rule.name}</span>
+                <span className="block text-xs text-muted">{submissionTarget(rule)}</span>
+              </span>
+              <span className="text-sm text-body">
+                {rule.max_submissions} time{rule.max_submissions === 1 ? "" : "s"} per cycle
+              </span>
+              <span className="text-sm text-body">
+                last day {rule.deadline_day}
+                {rule.allow_after_deadline ? " · late allowed" : ""}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <p className="mt-3 text-xs text-muted">
+        If no earlier deadline is set, the natural last day is {longDate(windowEnd)}.
+        A person-specific rule wins over a post rule; a post rule wins over a job-role rule.
+      </p>
+
+      {inactive.length > 0 && (
+        <div className="mt-4 border-t border-line pt-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
+            Switched off
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {inactive.map((rule) => (
+              <button
+                key={rule.id}
+                type="button"
+                onClick={() => onEdit(rule)}
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-full border
+                           border-dashed border-line px-3 text-xs text-muted
+                           transition-colors hover:border-brand hover:text-brand"
+              >
+                <FlagOff className="h-3 w-3" /> {rule.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function submissionRuleComplete(rule: Partial<MonthlyIndentSubmissionRule>): boolean {
+  return Boolean(
+    rule.name?.trim()
+    && rule.target_type
+    && rule.target_ref_id
+    && Number(rule.max_submissions) >= 1
+    && Number(rule.deadline_day) >= 1
+    && Number(rule.deadline_day) <= 31,
+  );
+}
+
+function SubmissionRuleEditor({
+  initial, isNew, roles, positions, choicesLoading, saving, saveError,
+  onSave, onClose, onTurnOff,
+}: {
+  initial: Partial<MonthlyIndentSubmissionRule>;
+  isNew: boolean;
+  roles: Choice[];
+  positions: Choice[];
+  choicesLoading: boolean;
+  saving: boolean;
+  saveError: unknown;
+  onSave: (rule: Partial<MonthlyIndentSubmissionRule>) => void;
+  onClose: () => void;
+  onTurnOff?: () => void;
+}) {
+  const [rule, setRule] = useState<Partial<MonthlyIndentSubmissionRule>>(initial);
+  const set = <K extends keyof MonthlyIndentSubmissionRule>(
+    key: K, value: MonthlyIndentSubmissionRule[K],
+  ) => setRule((prev) => ({ ...prev, [key]: value }));
+  const named = rule.target_type === "EMPLOYEE";
+  const targetChoices = rule.target_type === "POSITION" ? positions : roles;
+  const complete = submissionRuleComplete(rule);
+
+  return (
+    <Modal isOpen onOpenChange={onClose} placement="center" scrollBehavior="inside" size="2xl">
+      <ModalContent>
+        <ModalHeader className="flex-col items-start gap-0.5">
+          <span className="font-display text-lg font-bold text-ink">
+            {isNew ? "New submission rule" : "Edit submission rule"}
+          </span>
+          <span className="text-xs font-normal text-muted">
+            Decide who can submit monthly indents, how often, and the last day allowed.
+          </span>
+        </ModalHeader>
+        <ModalBody className="gap-4">
+          <ErrorBanner error={saveError} />
+          <Field label="Name this rule" required>
+            <Input
+              value={rule.name ?? ""}
+              placeholder="Storekeeper monthly submission"
+              onChange={(event) => set("name", event.target.value)}
+            />
+          </Field>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Applies to" required>
+              <Select
+                value={rule.target_type ?? "HCM_ROLE"}
+                options={TARGET_OPTIONS}
+                onChange={(value) => setRule((prev) => ({
+                  ...prev,
+                  target_type: value as MonthlyIndentSubmissionRule["target_type"],
+                  target_ref_id: 0,
+                  target_name: null,
+                }))}
+              />
+            </Field>
+            {named ? (
+              <Field label="Employee ID" required>
+                <Input
+                  type="number"
+                  value={rule.target_ref_id || ""}
+                  onChange={(event) => set("target_ref_id", Number(event.target.value))}
+                />
+              </Field>
+            ) : (
+              <Field label={rule.target_type === "POSITION" ? "Which post" : "Which job role"}
+                     required>
+                <Select
+                  value={rule.target_ref_id || ""}
+                  options={targetChoices}
+                  placeholder={choicesLoading ? "Loading..." : "Choose one"}
+                  onChange={(value) => {
+                    const id = Number(value);
+                    set("target_ref_id", id);
+                    set("target_name",
+                        targetChoices.find((choice) => choice.value === id)?.label ?? null);
+                  }}
+                />
+              </Field>
+            )}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Allowed submissions per cycle" required>
+              <Input
+                type="number"
+                min={1}
+                max={50}
+                value={rule.max_submissions ?? 1}
+                onChange={(event) => set("max_submissions", Number(event.target.value))}
+              />
+            </Field>
+            <Field label="Last day to submit" required
+                   hint="Day of the month inside the collection window.">
+              <Input
+                type="number"
+                min={1}
+                max={31}
+                value={rule.deadline_day ?? 31}
+                onChange={(event) => set("deadline_day", Number(event.target.value))}
+              />
+            </Field>
+          </div>
+
+          <label className="flex min-h-11 items-center justify-between gap-3 rounded-lg
+                            border border-line bg-content1 px-3 py-2">
+            <span className="text-sm text-body">
+              Allow late submission until the collection closes
+            </span>
+            <Switch
+              size="sm"
+              isSelected={Boolean(rule.allow_after_deadline)}
+              onValueChange={(value) => set("allow_after_deadline", value)}
+            />
+          </label>
+
+          <label className="flex min-h-11 items-center justify-between gap-3 rounded-lg
+                            border border-line bg-content1 px-3 py-2">
+            <span className="text-sm text-body">Switch this rule on</span>
+            <Switch
+              size="sm"
+              isSelected={Boolean(rule.is_active)}
+              onValueChange={(value) => set("is_active", value)}
+            />
+          </label>
+        </ModalBody>
+        <ModalFooter className="justify-between">
+          <div>
+            {onTurnOff && (
+              <Button variant="ghost" className="text-bad" onClick={onTurnOff}>
+                Turn off
+              </Button>
+            )}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button onClick={() => onSave(rule)} disabled={saving || !complete}>
+              <Save className="h-4 w-4" /> {saving ? "Saving..." : "Save rule"}
+            </Button>
+          </div>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+}
 
 function Heading({ icon: Icon, title, hint, action }: {
   icon: React.ComponentType<{ className?: string }>;
@@ -1052,15 +1447,22 @@ function ActivityLog({ logs }: { logs: MonthlyIndentLog[] }) {
                   {log.status === "SENT" ? "Sent" : "Not sent"}
                 </span>
                 <span className="min-w-0 flex-1 text-body">
-                  {log.kind === "ESCALATION" ? (
+                  {log.kind.startsWith("ESCALATION") ? (
                     <>
                       {log.recipient_employee_name
                         ? <>Told <strong>{log.recipient_employee_name}</strong></>
                         : "Nobody to tell"}
                       {" "}about <strong>{log.target_employee_name}</strong>
+                      {log.kind !== "ESCALATION" && (
+                        <span className="text-muted">
+                          {" "}(level {log.kind.replace("ESCALATION_L", "")})
+                        </span>
+                      )}
                     </>
-                  ) : (
+                  ) : log.status === "SENT" ? (
                     <>Reminded <strong>{log.target_employee_name}</strong></>
+                  ) : (
+                    <>Did not remind <strong>{log.target_employee_name}</strong></>
                   )}
                   {log.reason && <span className="text-muted"> — {log.reason}</span>}
                 </span>

@@ -4,11 +4,13 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
+from app.core.exceptions import ValidationError
 from app.modules.indents.enums import IndentStatus, IndentType
 from app.modules.indents.models import Indent
 from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment, HcmRole
 from app.platform.monthly_indent.models import (
-    MonthlyIndentNotificationLog, MonthlyIndentNotificationRule,
+    MonthlyIndentNotificationLog, MonthlyIndentNotificationRule, MonthlyIndentSetting,
+    MonthlyIndentSubmissionRule,
 )
 from app.platform.monthly_indent.schemas import MonthlyIndentCycle
 from app.platform.monthly_indent import service
@@ -31,11 +33,59 @@ def test_cycle_custom_range_can_cross_month():
     cycle = MonthlyIndentCycle(
         cycle_month_offset=0, start_day=26, end_day=5, timezone="Asia/Kolkata")
 
+    # Between two cycles (the 5th has passed, the 26th has not): the next one.
     window = service.calculate_cycle(
-        cycle, datetime(2026, 9, 1, 9, 0))
+        cycle, datetime(2026, 9, 10, 9, 0))
 
     assert window.start == date(2026, 9, 26)
     assert window.end == date(2026, 10, 5)
+
+
+def test_a_cross_month_window_is_still_in_force_in_its_closing_month():
+    """On 3 October the 26 Sep - 5 Oct window is the one that is OPEN. Anchoring on
+    the current month resolved it to 26 Oct - 5 Nov, so for five days a storekeeper was
+    told collection "opens on the 26th" of a window they were standing inside."""
+    cycle = MonthlyIndentCycle(start_day=26, end_day=5, timezone="Asia/Kolkata")
+
+    window = service.calculate_cycle(cycle, datetime(2026, 10, 3, 9, 0))
+
+    assert (window.start, window.end) == (date(2026, 9, 26), date(2026, 10, 5))
+    assert window.serves == date(2026, 9, 1)
+    assert window.period == 1
+
+
+def test_a_two_month_window_repeats_every_second_month_from_its_anchor():
+    """1st of this month to the 31st of next cannot open EVERY month — two cycles would
+    be in force on every day of the second one. It opens every second month, counted
+    from the month it was anchored on, and no longer slides forward a month at a time."""
+    cycle = MonthlyIndentCycle(start_day=1, end_month_offset=1, end_day=31,
+                               anchor_month=date(2026, 9, 1), timezone="Asia/Kolkata")
+
+    october = service.calculate_cycle(cycle, datetime(2026, 10, 20, 9, 0))
+    november = service.calculate_cycle(cycle, datetime(2026, 11, 3, 9, 0))
+
+    assert (october.start, october.end) == (date(2026, 9, 1), date(2026, 10, 31))
+    assert (november.start, november.end) == (date(2026, 11, 1), date(2026, 12, 31))
+    assert october.period == 2
+
+
+def test_a_follow_up_counted_from_the_reminder_climbs_one_step_per_gap():
+    from types import SimpleNamespace
+
+    window = service.calculate_cycle(
+        MonthlyIndentCycle(start_day=1, end_day=10, timezone="Asia/Kolkata"),
+        datetime(2026, 9, 2, 9, 0))
+    rule = SimpleNamespace(
+        escalation_enabled=True, escalation_after_days=1, escalation_time=None,
+        escalation_day=None, trigger_day=3, trigger_time=time(10, 0))
+
+    due = [service.escalation_due_at(window, rule, level).date() for level in (1, 2, 3)]
+
+    # The next day, then the day after — at the reminder's own time.
+    assert due == [date(2026, 9, 4), date(2026, 9, 5), date(2026, 9, 6)]
+    assert service.escalation_due_at(window, rule, 1).time() == time(10, 0)
+    # Never past the close: the next cycle would never read it.
+    assert service.escalation_due_at(window, rule, 20).date() == date(2026, 9, 10)
 
 
 def test_window_may_run_from_this_month_to_the_end_of_the_next():
@@ -304,3 +354,239 @@ async def test_escalating_to_the_reporting_manager_needs_no_recipient_id(db):
     assert rule["escalation_target_ref_id"] is None
     # With an id it means "climb until somebody of THIS rank", so the rank is named.
     assert await service._target_name(db, "REPORTING_MANAGER", 10) == "Store Keeper"
+
+
+@pytest.mark.asyncio
+async def test_monthly_submission_quota_blocks_the_second_submitted_indent(db):
+    from types import SimpleNamespace
+
+    await _seed_role_target(db)
+    db.add(MonthlyIndentSubmissionRule(
+        name="Store keeper monthly limit",
+        target_type="HCM_ROLE",
+        target_ref_id=10,
+        target_name="Store Keeper",
+        max_submissions=1,
+        deadline_day=30,
+        is_active=True,
+    ))
+    db.add(Indent(
+        indent_no="IND-USED",
+        indent_type=IndentType.MONTHLY.value,
+        indent_date=date(2026, 9, 2),
+        required_date=date(2026, 9, 30),
+        requested_by_id=100,
+        requested_by_name="A Store Keeper",
+        status=IndentStatus.PENDING_APPROVAL.value,
+        priority="NORMAL",
+        total_items=1,
+        total_qty=Decimal("1"),
+        created_by_id=100,
+        created_by_name="A Store Keeper",
+    ))
+    await db.commit()
+
+    with pytest.raises(ValidationError, match="can submit 1 monthly indent"):
+        await service.assert_can_submit_monthly(
+            db, SimpleNamespace(id=100), now_=datetime(2026, 9, 10, 9, 0))
+
+
+@pytest.mark.asyncio
+async def test_monthly_submission_deadline_blocks_late_submit(db):
+    from types import SimpleNamespace
+
+    await _seed_role_target(db)
+    db.add(MonthlyIndentSubmissionRule(
+        name="Store keeper deadline",
+        target_type="HCM_ROLE",
+        target_ref_id=10,
+        target_name="Store Keeper",
+        max_submissions=2,
+        deadline_day=25,
+        allow_after_deadline=False,
+        is_active=True,
+    ))
+    await db.commit()
+
+    with pytest.raises(ValidationError, match="last day to submit"):
+        await service.assert_can_submit_monthly(
+            db, SimpleNamespace(id=100), now_=datetime(2026, 9, 26, 9, 0))
+
+
+@pytest.mark.asyncio
+async def test_monthly_submit_refuses_draft_from_another_cycle(db):
+    from types import SimpleNamespace
+
+    stale = Indent(
+        id=99,
+        indent_no="IND-OLD-DRAFT",
+        indent_type=IndentType.MONTHLY.value,
+        indent_date=date(2026, 8, 31),
+        required_date=date(2026, 9, 30),
+        requested_by_id=100,
+        requested_by_name="A Store Keeper",
+        status=IndentStatus.DRAFT.value,
+        priority="NORMAL",
+        total_items=1,
+        total_qty=Decimal("1"),
+    )
+
+    with pytest.raises(ValidationError, match="outside the current collection window"):
+        await service.assert_can_submit_monthly(
+            db, SimpleNamespace(id=100), indent=stale, now_=datetime(2026, 9, 10, 9, 0))
+
+
+@pytest.mark.asyncio
+async def test_employee_submission_rule_overrides_role_rule(db):
+    await _seed_role_target(db)
+    role_rule = MonthlyIndentSubmissionRule(
+        name="Store keeper default",
+        target_type="HCM_ROLE",
+        target_ref_id=10,
+        target_name="Store Keeper",
+        max_submissions=1,
+        deadline_day=30,
+        is_active=True,
+    )
+    employee_rule = MonthlyIndentSubmissionRule(
+        name="A Store Keeper exception",
+        target_type="EMPLOYEE",
+        target_ref_id=100,
+        target_name="A Store Keeper",
+        max_submissions=3,
+        deadline_day=20,
+        is_active=True,
+    )
+    db.add_all([role_rule, employee_rule])
+    await db.commit()
+
+    window = service.calculate_cycle(
+        MonthlyIndentCycle(timezone="Asia/Kolkata"),
+        datetime(2026, 9, 10, 9, 0),
+    )
+
+    resolved = await service.submission_rule_for_employee(db, 100, window)
+
+    assert resolved.id == employee_rule.id
+
+
+def _chase_rule(**overrides) -> MonthlyIndentNotificationRule:
+    values = dict(
+        name="Chase store keepers", trigger_day=21, trigger_time=time(10, 0),
+        target_type="HCM_ROLE", target_ref_id=10, target_name="Store Keeper",
+        condition="NOT_SUBMITTED", message_template="Please submit {{month}}",
+        is_active=True,
+    )
+    values.update(overrides)
+    return MonthlyIndentNotificationRule(**values)
+
+
+@pytest.mark.asyncio
+async def test_not_responded_reaches_only_people_a_first_reminder_reached(db):
+    """NOT_RESPONDED asked exactly the NOT_SUBMITTED question, so the "second nudge"
+    went to people who had never had a first."""
+    await _seed_role_target(db)
+    second = _chase_rule(name="Second nudge", trigger_day=22, condition="NOT_RESPONDED")
+    db.add(second)
+    await db.commit()
+
+    alone = await service.run_due(db, datetime(2026, 9, 22, 11, 0))
+    assert alone["sent"] == 0
+
+    first = _chase_rule(name="First nudge", trigger_day=21)
+    db.add(first)
+    await db.commit()
+    # The first nudge goes out on this run; the second only once it is on record.
+    await service.run_due(db, datetime(2026, 9, 22, 11, 0))
+    await service.run_due(db, datetime(2026, 9, 22, 11, 30))
+
+    sent_by = (await db.execute(
+        select(MonthlyIndentNotificationLog.rule_id)
+        .where(MonthlyIndentNotificationLog.status == "SENT")
+    )).scalars().all()
+    assert sorted(sent_by) == sorted([first.id, second.id])
+
+
+@pytest.mark.asyncio
+async def test_a_reminder_is_not_sent_to_somebody_past_their_last_day(db):
+    await _seed_role_target(db)
+    db.add(MonthlyIndentSubmissionRule(
+        name="Store keeper deadline", target_type="HCM_ROLE", target_ref_id=10,
+        target_name="Store Keeper", max_submissions=1, deadline_day=20,
+        allow_after_deadline=False, is_active=True,
+    ))
+    db.add(_chase_rule(trigger_day=21))
+    await db.commit()
+
+    result = await service.run_due(db, datetime(2026, 9, 21, 11, 0))
+
+    log = (await db.execute(select(MonthlyIndentNotificationLog))).scalar_one()
+    assert result == {"checked": 1, "sent": 0, "skipped": 1}
+    assert log.status == "SKIPPED" and log.recipient_employee_id == 0
+    assert (await db.execute(select(Notification))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_the_list_of_who_may_submit_refuses_somebody_it_does_not_name(db):
+    from types import SimpleNamespace
+
+    await _seed_role_target(db)
+    db.add(MonthlyIndentSetting(restrict_to_rules=True, anchor_month=date(2026, 9, 1)))
+    await db.commit()
+
+    with pytest.raises(ValidationError, match="raised only by the people listed"):
+        await service.assert_can_submit_monthly(
+            db, SimpleNamespace(id=100), now_=datetime(2026, 9, 10, 9, 0))
+
+
+@pytest.mark.asyncio
+async def test_collection_closed_is_refused_even_without_a_submission_rule(db):
+    """The window bound only the people a submission rule named."""
+    from types import SimpleNamespace
+
+    db.add(MonthlyIndentSetting(start_day=1, end_day=20, anchor_month=date(2026, 9, 1)))
+    await db.commit()
+
+    with pytest.raises(ValidationError, match="opens on 2026-10-01"):
+        await service.assert_can_submit_monthly(
+            db, SimpleNamespace(id=100), now_=datetime(2026, 9, 25, 9, 0))
+
+
+@pytest.mark.asyncio
+async def test_a_stepped_escalation_tells_the_next_manager_up_a_day_later(db):
+    await _seed_role_target(db)
+    now = utcnow()
+    # Store Keeper (200) -> vacant post (201) -> DM (202, emp 101) -> RM (203, emp 102)
+    for pid, parent, name in ((201, 202, "Vacant"), (202, 203, "DM"), (203, None, "RM")):
+        db.add(HcmPosition(id=pid, name=name, parent_position_id=parent,
+                           is_active=True, synced_at=now))
+    for eid, pid, name in ((101, 202, "The DM"), (102, 203, "The RM")):
+        db.add(HcmEmployee(id=eid, emp_code=f"E{eid}", full_name=name,
+                           is_active=True, synced_at=now))
+        db.add(HcmPositionAssignment(id=300 + eid, employee_id=eid, employee_name=name,
+                                     position_id=pid, position_name=name,
+                                     is_primary=True, is_active=True, synced_at=now))
+    sk_post = await db.get(HcmPosition, 200)
+    sk_post.parent_position_id = 201
+    db.add(_chase_rule(
+        escalation_enabled=True, escalation_after_days=1,
+        escalation_target_type="REPORTING_MANAGER", escalation_levels=2,
+        escalation_target_name="Reporting manager",
+    ))
+    await db.commit()
+
+    async def told():
+        return sorted((await db.execute(
+            select(MonthlyIndentNotificationLog.kind,
+                   MonthlyIndentNotificationLog.recipient_employee_id)
+            .where(MonthlyIndentNotificationLog.kind != "PRIMARY")
+        )).all())
+
+    await service.run_due(db, datetime(2026, 9, 22, 11, 0))
+    day_one = await told()
+    await service.run_due(db, datetime(2026, 9, 23, 11, 0))
+    day_two = await told()
+
+    # The vacant post is stepped over, not counted.
+    assert day_one == [("ESCALATION", 101)]
+    assert day_two == [("ESCALATION", 101), ("ESCALATION_L2", 102)]

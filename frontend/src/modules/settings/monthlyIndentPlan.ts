@@ -59,7 +59,7 @@ export interface CycleWindow {
  *  timezone, the scheduler, the approval switch — moves no date. */
 export type CycleShape = Pick<MonthlyIndentCycle,
   "cycle_month_offset" | "start_day" | "end_day"> &
-  Partial<Pick<MonthlyIndentCycle, "end_month_offset" | "serves_month_offset">>;
+  Partial<Pick<MonthlyIndentCycle, "end_month_offset" | "serves_month_offset" | "anchor_month">>;
 
 /** How many months after the opening month the window closes in. Mirrors
  *  `service.cycle_span_months`.
@@ -73,7 +73,54 @@ export function cycleSpanMonths(cycle: CycleShape): number {
   return cycle.end_day < cycle.start_day ? 1 : 0;
 }
 
-/** The window the server would resolve from these settings, today.
+/** How many months apart consecutive cycles open. Mirrors
+ *  `service.cycle_period_months`: a window closing on an earlier day than it opened
+ *  (26th -> 5th) can open again every `span` months; any other window reaches its own
+ *  opening day in the month it closes in, so the next one waits a month longer. */
+export function cyclePeriodMonths(cycle: CycleShape): number {
+  const span = cycleSpanMonths(cycle);
+  return span >= 1 && cycle.end_day < cycle.start_day ? span : span + 1;
+}
+
+/** "2026-09-01" read as a LOCAL date. `new Date("2026-09-01")` is midnight UTC, which
+ *  is the previous day anywhere west of Greenwich. */
+function parseDay(value: string): Date {
+  const [year, month, day] = value.slice(0, 10).split("-").map(Number);
+  return new Date(year, (month || 1) - 1, day || 1);
+}
+
+/** The first of a month a cycle opens in — mirrors `service.cycle_anchor`. */
+export function cycleAnchor(cycle: CycleShape, today: Date = new Date()) {
+  if (cycle.anchor_month) {
+    const anchor = parseDay(cycle.anchor_month);
+    return { year: anchor.getFullYear(), month: anchor.getMonth() };
+  }
+  return addMonths(today.getFullYear(), today.getMonth(), cycle.cycle_month_offset || 0);
+}
+
+/** "2026-09-01" for the first of the given month — what `anchor_month` stores. */
+export function anchorValue(year: number, month: number): string {
+  return `${year}-${String(month + 1).padStart(2, "0")}-01`;
+}
+
+function windowOpeningIn(cycle: CycleShape, year: number, month: number) {
+  const start = clampedDay(year, month, cycle.start_day);
+  const endAnchor = addMonths(year, month, cycleSpanMonths(cycle));
+  const end = clampedDay(endAnchor.year, endAnchor.month, cycle.end_day);
+  return { start, end };
+}
+
+const startOfDay = (date: Date) =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+/** The window the server would resolve from these settings, today — mirrors
+ *  `service.calculate_cycle`: the cycle in force today, or between two cycles the
+ *  next one to open.
+ *
+ *  Cycles open in the anchor's month and every `cyclePeriodMonths` either side of it.
+ *  Anchoring on the CURRENT month (which this did) is right only while the window sits
+ *  inside one month: on 3 October a 26th -> 5th cycle drew 26 Oct - 5 Nov while
+ *  26 Sep - 5 Oct was the one actually open.
  *
  *  Each end is two decisions — a day, and which month that day is in — so a cycle may
  *  run from one day to just over a year, and `months` is however many the band
@@ -81,16 +128,27 @@ export function cycleSpanMonths(cycle: CycleShape): number {
  *  the open, which is the whole reason `months` is a list.
  */
 export function cycleWindow(cycle: CycleShape, today: Date = new Date()): CycleWindow {
-  const anchor = addMonths(today.getFullYear(), today.getMonth(), cycle.cycle_month_offset || 0);
-  const start = clampedDay(anchor.year, anchor.month, cycle.start_day);
+  const day = startOfDay(today);
   const span = cycleSpanMonths(cycle);
-  const endAnchor = addMonths(anchor.year, anchor.month, span);
-  const end = clampedDay(endAnchor.year, endAnchor.month, cycle.end_day);
+  const period = cyclePeriodMonths(cycle);
+  const anchor = cycleAnchor(cycle, today);
+  const offset = (day.getFullYear() - anchor.year) * 12 + (day.getMonth() - anchor.month);
+  type Opening = { year: number; month: number; start: Date; end: Date };
+  let current: Opening | null = null;
+  let upcoming: Opening | null = null;
+  for (let k = Math.floor((offset - span) / period) - 1;
+       k <= Math.floor(offset / period) + 1; k += 1) {
+    const opening = addMonths(anchor.year, anchor.month, k * period);
+    const { start, end } = windowOpeningIn(cycle, opening.year, opening.month);
+    if (start <= day && day <= end) current = { ...opening, start, end };
+    else if (start > day && upcoming == null) upcoming = { ...opening, start, end };
+  }
+  const chosen = (current ?? upcoming)!;
   const months = Array.from({ length: span + 1 },
-                            (_, index) => addMonths(anchor.year, anchor.month, index));
-  const serves = addMonths(anchor.year, anchor.month, cycle.serves_month_offset || 0);
+                            (_, index) => addMonths(chosen.year, chosen.month, index));
+  const serves = addMonths(chosen.year, chosen.month, cycle.serves_month_offset || 0);
   return {
-    start, end, wraps: span > 0, months,
+    start: chosen.start, end: chosen.end, wraps: span > 0, months,
     serves: new Date(serves.year, serves.month, 1),
   };
 }
@@ -110,6 +168,49 @@ export function dueDate(window: CycleWindow, day: number): Date {
   }
   const first = clampedDay(window.start.getFullYear(), window.start.getMonth(), day);
   return first < window.start ? window.start : window.end;
+}
+
+/** How many follow-ups a rule sends — mirrors `service.escalation_levels`. Only a
+ *  reporting line has a "next one up", so only it climbs more than one rung. */
+export function escalationLevelCount(rule: Partial<MonthlyIndentRule>): number {
+  if (!rule.escalation_enabled || !rule.escalation_target_type) return 0;
+  if (rule.escalation_target_type !== "REPORTING_MANAGER") return 1;
+  return Math.max(1, Number(rule.escalation_levels) || 1);
+}
+
+export interface ChaseStep { level: number; date: Date; time: string; moved: boolean }
+
+/** When each follow-up goes out — mirrors `service.escalation_due_at`.
+ *
+ *  Counted from the reminder when `escalation_after_days` is set (at the reminder's
+ *  own time unless another is given), otherwise pinned to `escalation_day`. Each
+ *  further level is one more gap later — one day for a pinned follow-up — and nothing
+ *  lands after the window closes: the server pulls it back to the closing day, since
+ *  once the next cycle opens this one is never read again. */
+export function escalationSteps(window: CycleWindow, rule: Partial<MonthlyIndentRule>): ChaseStep[] {
+  const levels = escalationLevelCount(rule);
+  if (!levels) return [];
+  let first: Date;
+  let gap: number;
+  let time: string;
+  let moved = false;
+  if (rule.escalation_after_days) {
+    gap = Number(rule.escalation_after_days);
+    const remind = dueDate(window, rule.trigger_day ?? 1);
+    first = new Date(remind.getFullYear(), remind.getMonth(), remind.getDate() + gap);
+    time = timeValue(rule.escalation_time) || timeValue(rule.trigger_time) || "00:00";
+  } else {
+    if (!rule.escalation_day) return [];
+    gap = 1;
+    first = dueDate(window, rule.escalation_day);
+    moved = isDayOutsideWindow(window, rule.escalation_day);
+    time = timeValue(rule.escalation_time) || "00:00";
+  }
+  return Array.from({ length: levels }, (_, index) => {
+    const raw = new Date(first.getFullYear(), first.getMonth(), first.getDate() + gap * index);
+    const clamped = raw > window.end;
+    return { level: index + 1, date: clamped ? window.end : raw, time, moved: moved || clamped };
+  });
 }
 
 /** True when the day was moved to fire somewhere other than where it was typed —
@@ -186,13 +287,13 @@ export function everyPhrase(minutes: number): string {
 
 /** What the rule is looking for. The sentence that goes after "…who".
  *
- *  NOT_RESPONDED and NOT_SUBMITTED ask the server the SAME question (see
- *  `eligible_candidates`) — the difference is what the admin means by it, so the
- *  wording separates them by intent rather than pretending they check two things.
+ *  NOT_RESPONDED is its own check (`service._reminded_elsewhere`): only people ANOTHER
+ *  reminder has already reached this cycle, and who still have not sent it. It used to
+ *  ask the NOT_SUBMITTED question word for word.
  */
 export const CONDITION_CLAUSE: Record<MonthlyIndentCondition, string> = {
   NOT_SUBMITTED: "has not sent this month's indent yet",
-  NOT_RESPONDED: "still has not sent it after the first reminder",
+  NOT_RESPONDED: "was already sent another reminder and still has not sent it",
   PENDING_APPROVAL: "has a monthly indent sitting with them for approval",
 };
 
@@ -249,6 +350,14 @@ export function chasePhrase(rule: Partial<MonthlyIndentRule>): string {
   if (rule.escalation_target_type === "HCM_ROLE") return name ? `every ${name}` : "a job role";
   // REPORTING_MANAGER with a role filter climbs until it finds that rank.
   return name ? `their nearest manager who is a ${name}` : "their reporting manager";
+}
+
+/** Who hears at one step of a reporting-line climb. */
+export function chaseStepPhrase(rule: Partial<MonthlyIndentRule>, level: number): string {
+  if (level <= 1) return chasePhrase(rule);
+  const rank = rule.escalation_target_name && rule.escalation_target_ref_id
+    ? ` who is a ${rule.escalation_target_name}` : "";
+  return `the next manager up${rank} (level ${level})`;
 }
 
 /** The whole rule as one sentence, for the list and the day panel. */
@@ -312,16 +421,18 @@ export function buildAgenda(
       rule,
       moved: isDayOutsideWindow(window, rule.trigger_day),
     });
-    if (rule.escalation_enabled && rule.escalation_day) {
+    for (const step of escalationSteps(window, rule)) {
       items.push({
-        key: `chase-${rule.id}`,
+        key: `chase-${rule.id}-${step.level}`,
         kind: "chase",
-        date: dueDate(window, rule.escalation_day),
-        time: timeValue(rule.escalation_time) || "00:00",
-        title: `${rule.name} — no response`,
-        detail: `Tell ${chasePhrase(rule)}.`,
+        date: step.date,
+        time: step.time,
+        title: step.level === 1
+          ? `${rule.name} — no response`
+          : `${rule.name} — still no response`,
+        detail: `Tell ${chaseStepPhrase(rule, step.level)}.`,
         rule,
-        moved: isDayOutsideWindow(window, rule.escalation_day),
+        moved: step.moved,
       });
     }
   }

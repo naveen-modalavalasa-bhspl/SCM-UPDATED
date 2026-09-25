@@ -336,12 +336,24 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     vehicle_id, vehicle_number = await _resolve_vehicle(
         db, getattr(data, "vehicle_id", None))
 
+    indent_date = utcnow().date()
+    if indent_type == IndentType.MONTHLY.value:
+        from app.platform.monthly_indent import service as monthly_indent_service
+
+        # The cycle's refusals at CREATE too (window closed, not on the list, past the
+        # last day, quota used), so nobody types a whole indent only to be told at
+        # submit. Also ahead of next_number(), for the same reason as the vehicle.
+        await monthly_indent_service.assert_can_submit_monthly(db, user)
+        # Dated in the cycle's clock: a UTC date put an indent raised before 05:30 IST
+        # on the opening day into the day before the window opened.
+        indent_date = await monthly_indent_service.local_today(db)
+
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
         indent_no=await next_number(db, "indent", project=context["project_name"]),
         indent_type=indent_type,
-        indent_date=utcnow().date(),
+        indent_date=indent_date,
         required_date=data.required_date,
         vehicle_id=vehicle_id,
         vehicle_number=vehicle_number,
@@ -1447,6 +1459,11 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         raise PermissionError_("Only the requester can submit this indent")
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit an indent in {indent.status} status")
+
+    if indent.indent_type == IndentType.MONTHLY.value:
+        from app.platform.monthly_indent import service as monthly_indent_service
+
+        await monthly_indent_service.assert_can_submit_monthly(db, user, indent=indent)
 
     _seed_approval_quantities(indent)
     # A monthly indent joins its cycle document HERE, not when it is approved. It used

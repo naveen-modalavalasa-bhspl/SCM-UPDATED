@@ -24,8 +24,8 @@ import {
 import type { MonthlyIndentRule } from "../types";
 import {
   CONDITION_CLAUSE, CONDITION_OPTIONS, ESCALATION_OPTIONS, TARGET_OPTIONS,
-  TEMPLATE_VARIABLES, chasePhrase, dueDate, isDayOutsideWindow, longDate,
-  prettyTime, timeValue, whoPhrase,
+  TEMPLATE_VARIABLES, chasePhrase, chaseStepPhrase, dueDate, escalationSteps,
+  isDayOutsideWindow, longDate, prettyTime, timeValue, whoPhrase,
 } from "../monthlyIndentPlan";
 import type { CycleWindow } from "../monthlyIndentPlan";
 import { MonthRibbon, type DayMark } from "./MonthRibbon";
@@ -46,6 +46,10 @@ export function emptyReminder(day: number): Partial<MonthlyIndentRule> {
       + " Please send it before {{cycle_end}}.",
     escalation_enabled: false,
     escalation_day: null,
+    // "Tell the manager the next day" is the follow-up people ask for, so a new
+    // reminder counts from itself rather than from a fixed day of the month.
+    escalation_after_days: 1,
+    escalation_levels: 1,
     escalation_time: "10:00",
     escalation_target_type: "REPORTING_MANAGER",
     escalation_target_ref_id: null,
@@ -58,10 +62,21 @@ export function emptyReminder(day: number): Partial<MonthlyIndentRule> {
 export function reminderIsComplete(rule: Partial<MonthlyIndentRule>): boolean {
   if (!rule.name?.trim() || !rule.target_ref_id || !rule.message_template?.trim()) return false;
   if (!rule.escalation_enabled) return true;
-  if (!rule.escalation_day || !rule.escalation_time || !rule.escalation_target_type) return false;
+  if (!rule.escalation_target_type) return false;
+  if (!rule.escalation_after_days && (!rule.escalation_day || !rule.escalation_time)) return false;
   return rule.escalation_target_type === "REPORTING_MANAGER"
     || Boolean(rule.escalation_target_ref_id);
 }
+
+const AFTER_DAYS = [1, 2, 3, 4, 5, 7, 10, 14].map((value) => ({
+  value, label: value === 1 ? "The next day" : `${value} days later`,
+}));
+
+const LEVELS = [1, 2, 3, 4, 5].map((value) => ({
+  value,
+  label: value === 1 ? "Their manager only"
+    : `${value} levels — one more manager up each step`,
+}));
 
 export function ReminderEditor({
   initial, isNew, window: win, today, roles, positions, choicesLoading,
@@ -90,10 +105,11 @@ export function ReminderEditor({
 
   const remindOn = dueDate(win, rule.trigger_day ?? 1);
   const remindMoved = isDayOutsideWindow(win, rule.trigger_day ?? 1);
-  const chaseOn = rule.escalation_enabled && rule.escalation_day
-    ? dueDate(win, rule.escalation_day) : null;
-  const chaseMoved = Boolean(rule.escalation_enabled && rule.escalation_day
-    && isDayOutsideWindow(win, rule.escalation_day));
+  const steps = escalationSteps(win, rule);
+  const chaseOn = steps[0]?.date ?? null;
+  const chaseMoved = steps.some((step) => step.moved);
+  const relative = Boolean(rule.escalation_after_days);
+  const climbs = rule.escalation_target_type === "REPORTING_MANAGER";
 
   // Just this rule's own pins, so the panel shows the day being edited rather than
   // the whole month's traffic.
@@ -105,18 +121,22 @@ export function ReminderEditor({
       map.set(key, { ...at, [field]: at[field] + 1, moved: at.moved || moved });
     };
     put(remindOn, "remind", remindMoved);
-    if (chaseOn) put(chaseOn, "chase", chaseMoved);
+    for (const step of steps) put(step.date, "chase", step.moved);
     return map;
-  }, [remindOn, chaseOn, remindMoved, chaseMoved]);
+  }, [remindOn, remindMoved, steps]);
 
   const targetChoices = rule.target_type === "POSITION" ? positions : roles;
   const named = rule.target_type === "EMPLOYEE";
 
   function pickDay(date: Date) {
-    // Clicking the ribbon sets whichever day is "in play": the follow-up if it is
-    // switched on and the click is after the reminder, the reminder otherwise.
-    if (rule.escalation_enabled && date > remindOn) set("escalation_day", date.getDate());
-    else set("trigger_day", date.getDate());
+    // Clicking the ribbon sets whichever day is "in play": a pinned follow-up if it is
+    // switched on and the click is after the reminder, the reminder otherwise. A
+    // follow-up counted from the reminder moves with it, so it has no day to set.
+    if (rule.escalation_enabled && !relative && date > remindOn) {
+      set("escalation_day", date.getDate());
+    } else {
+      set("trigger_day", date.getDate());
+    }
   }
 
   async function runPreview() {
@@ -155,12 +175,22 @@ export function ReminderEditor({
               {chaseOn && (
                 <>
                   , and if there is still nothing by <strong>{longDate(chaseOn)}</strong> at{" "}
-                  <strong>{prettyTime(rule.escalation_time)}</strong> we tell{" "}
+                  <strong>{prettyTime(steps[0].time)}</strong> we tell{" "}
                   <strong>{chasePhrase(rule)}</strong>
                 </>
               )}
               .
             </p>
+            {steps.length > 1 && (
+              <ul className="mt-1.5 space-y-0.5 text-sm text-body">
+                {steps.slice(1).map((step) => (
+                  <li key={step.level}>
+                    Still nothing by <strong>{longDate(step.date)}</strong>: tell{" "}
+                    <strong>{chaseStepPhrase(rule, step.level)}</strong>.
+                  </li>
+                ))}
+              </ul>
+            )}
             {(remindMoved || chaseMoved) && (
               <p className="mt-2 text-xs font-medium text-warn">
                 That day is outside the collection window, so it will run on the nearest
@@ -293,23 +323,59 @@ export function ReminderEditor({
                 onValueChange={(value) => setRule((prev) => ({
                   ...prev,
                   escalation_enabled: value,
-                  escalation_day: value
-                    ? prev.escalation_day ?? Math.min((prev.trigger_day ?? 1) + 3, 31)
-                    : prev.escalation_day,
+                  // Nothing chosen yet: count from the reminder, one day later.
+                  escalation_after_days: value && !prev.escalation_day
+                    ? prev.escalation_after_days ?? 1 : prev.escalation_after_days,
                 }))}
               />
             </label>
             {rule.escalation_enabled && (
               <div className="space-y-3 rounded-lg border border-line bg-content2/60 p-3">
+                <Field label="When">
+                  <Select
+                    value={relative ? "after" : "day"}
+                    options={[
+                      { value: "after", label: "Counted from the reminder" },
+                      { value: "day", label: "On a fixed day of the month" },
+                    ]}
+                    onChange={(value) => setRule((prev) => (value === "after"
+                      ? { ...prev, escalation_after_days: prev.escalation_after_days || 1 }
+                      : {
+                        ...prev,
+                        escalation_after_days: null,
+                        escalation_day: prev.escalation_day
+                          ?? Math.min((prev.trigger_day ?? 1) + 1, 31),
+                        escalation_time: prev.escalation_time || prev.trigger_time || "10:00",
+                      }))}
+                  />
+                </Field>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="Day of the month" required>
-                    <Input type="number" min={1} max={31} value={rule.escalation_day ?? 1}
-                           onChange={(event) => set(
-                             "escalation_day", Number(event.target.value))} />
-                  </Field>
-                  <Field label="Time of day" required>
+                  {relative ? (
+                    <Field label="How long after the reminder" required>
+                      <Select
+                        value={Number(rule.escalation_after_days) || 1}
+                        options={AFTER_DAYS.some(
+                          (option) => option.value === Number(rule.escalation_after_days))
+                          ? AFTER_DAYS
+                          : [...AFTER_DAYS, {
+                            value: Number(rule.escalation_after_days),
+                            label: `${rule.escalation_after_days} days later`,
+                          }]}
+                        onChange={(value) => set("escalation_after_days", Number(value))}
+                      />
+                    </Field>
+                  ) : (
+                    <Field label="Day of the month" required>
+                      <Input type="number" min={1} max={31} value={rule.escalation_day ?? 1}
+                             onChange={(event) => set(
+                               "escalation_day", Number(event.target.value))} />
+                    </Field>
+                  )}
+                  <Field label="Time of day" required={!relative}
+                         hint={relative ? "Blank uses the reminder's own time." : undefined}>
                     <Input type="time" value={timeValue(rule.escalation_time)}
-                           onChange={(event) => set("escalation_time", event.target.value)} />
+                           onChange={(event) => set(
+                             "escalation_time", event.target.value || null)} />
                   </Field>
                 </div>
                 <Field label="Tell" required>
@@ -322,9 +388,24 @@ export function ReminderEditor({
                         value as MonthlyIndentRule["escalation_target_type"],
                       escalation_target_ref_id: null,
                       escalation_target_name: null,
+                      // A job role or a named person has no "next one up".
+                      escalation_levels: value === "REPORTING_MANAGER"
+                        ? prev.escalation_levels ?? 1 : 1,
                     }))}
                   />
                 </Field>
+                {climbs && (
+                  <Field label="How far up the reporting line"
+                         hint={relative
+                           ? "Each further level goes out the same number of days after the last."
+                           : "Each further level goes out one day after the last."}>
+                    <Select
+                      value={Number(rule.escalation_levels) || 1}
+                      options={LEVELS}
+                      onChange={(value) => set("escalation_levels", Number(value))}
+                    />
+                  </Field>
+                )}
                 {rule.escalation_target_type === "EMPLOYEE" ? (
                   <Field label="Employee ID" required>
                     <Input type="number" value={rule.escalation_target_ref_id || ""}

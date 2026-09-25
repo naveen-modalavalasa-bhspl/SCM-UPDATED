@@ -1,7 +1,7 @@
 import { api } from "@/shared/api/client";
 import type {
   AppSettings, CodeFormats, CodeFormatToken,
-  MonthlyIndentCycle, MonthlyIndentRule, MonthlyIndentSettings,
+  MonthlyIndentCycle, MonthlyIndentRule, MonthlyIndentSettings, MonthlyIndentSubmissionRule,
 } from "./types";
 
 export const settingsApi = {
@@ -37,6 +37,14 @@ export const monthlyIndentApi = {
     api.put<MonthlyIndentRule>(`/api/monthly-indent/rules/${id}`, body).then((r) => r.data),
   deleteRule: (id: number) =>
     api.delete(`/api/monthly-indent/rules/${id}`).then((r) => r.data),
+  createSubmissionRule: (body: Partial<MonthlyIndentSubmissionRule>) =>
+    api.post<MonthlyIndentSubmissionRule>("/api/monthly-indent/submission-rules", body)
+      .then((r) => r.data),
+  updateSubmissionRule: (id: number, body: Partial<MonthlyIndentSubmissionRule>) =>
+    api.put<MonthlyIndentSubmissionRule>(`/api/monthly-indent/submission-rules/${id}`, body)
+      .then((r) => r.data),
+  deleteSubmissionRule: (id: number) =>
+    api.delete(`/api/monthly-indent/submission-rules/${id}`).then((r) => r.data),
   preview: (template: string) =>
     api.post<{ message: string }>("/api/monthly-indent/preview", { template })
       .then((r) => r.data.message),

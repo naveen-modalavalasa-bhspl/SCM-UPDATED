@@ -7,7 +7,9 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { cycleWindow, dueDate, isDayOutsideWindow, monthsAfter } from "../monthlyIndentPlan";
+import {
+  cyclePeriodMonths, cycleWindow, dueDate, escalationSteps, isDayOutsideWindow, monthsAfter,
+} from "../monthlyIndentPlan";
 
 const SEP_21 = new Date(2026, 8, 21);
 const SEP_1 = new Date(2026, 8, 1);
@@ -35,10 +37,32 @@ describe("cycleWindow", () => {
   });
 
   it("keeps the old shorthand: a closing day before the opening one means next month", () => {
-    const win = cycleWindow({ cycle_month_offset: 0, start_day: 26, end_day: 5 }, SEP_1);
+    // Between two cycles (the 5th has passed, the 26th has not): the next one.
+    const win = cycleWindow(
+      { cycle_month_offset: 0, start_day: 26, end_day: 5 }, new Date(2026, 8, 10));
 
     expect(iso(win.start)).toBe("2026-09-26");
     expect(iso(win.end)).toBe("2026-10-05");
+  });
+
+  it("keeps a cross-month window in force through its closing month", () => {
+    const win = cycleWindow(
+      { cycle_month_offset: 0, start_day: 26, end_day: 5 }, new Date(2026, 9, 3));
+
+    expect(iso(win.start)).toBe("2026-09-26");
+    expect(iso(win.end)).toBe("2026-10-05");
+    expect(cyclePeriodMonths({ cycle_month_offset: 0, start_day: 26, end_day: 5 })).toBe(1);
+  });
+
+  it("opens a two-month window every second month from its anchor", () => {
+    const shape = {
+      cycle_month_offset: 0, start_day: 1, end_month_offset: 1, end_day: 31,
+      anchor_month: "2026-09-01",
+    };
+
+    expect(iso(cycleWindow(shape, new Date(2026, 9, 20)).start)).toBe("2026-09-01");
+    expect(iso(cycleWindow(shape, new Date(2026, 10, 3)).start)).toBe("2026-11-01");
+    expect(cyclePeriodMonths(shape)).toBe(2);
   });
 
   it("names the month it serves without moving a date", () => {
@@ -68,6 +92,38 @@ describe("dueDate", () => {
     expect(iso(dueDate(short, 28))).toBe("2026-09-20");
     expect(isDayOutsideWindow(short, 3)).toBe(true);
     expect(isDayOutsideWindow(win, 5)).toBe(false);
+  });
+});
+
+describe("escalationSteps", () => {
+  const win = cycleWindow({ cycle_month_offset: 0, start_day: 1, end_day: 10 },
+                          new Date(2026, 8, 2));
+
+  it("counts a follow-up from the reminder and climbs one step per gap", () => {
+    const steps = escalationSteps(win, {
+      escalation_enabled: true, escalation_target_type: "REPORTING_MANAGER",
+      escalation_after_days: 1, escalation_levels: 3,
+      trigger_day: 3, trigger_time: "10:00", escalation_time: null,
+    });
+
+    expect(steps.map((step) => iso(step.date)))
+      .toEqual(["2026-09-04", "2026-09-05", "2026-09-06"]);
+    expect(steps[0].time).toBe("10:00");
+  });
+
+  it("climbs only a reporting line, and never past the close", () => {
+    expect(escalationSteps(win, {
+      escalation_enabled: true, escalation_target_type: "HCM_ROLE",
+      escalation_after_days: 1, escalation_levels: 3, trigger_day: 3,
+      trigger_time: "10:00",
+    })).toHaveLength(1);
+    const late = escalationSteps(win, {
+      escalation_enabled: true, escalation_target_type: "REPORTING_MANAGER",
+      escalation_after_days: 7, escalation_levels: 2, trigger_day: 5,
+      trigger_time: "10:00",
+    });
+    expect(iso(late[1].date)).toBe("2026-09-10");
+    expect(late[1].moved).toBe(true);
   });
 });
 

@@ -195,6 +195,10 @@ ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
 # decides what every future unit is labelled with, so it is granted deliberately
 # rather than riding along with "can edit the company address".
 ADMIN_CODE_FORMATS_MANAGE = "admin.code_formats.manage"
+# Settings > Monthly Indent: the cycle, the reminders and who may submit. Carved out
+# of admin.settings.manage so a planning desk can run the month without being able
+# to change everything else in Settings (see INHERITS_GRANTS_FROM).
+MONTHLY_INDENT_MANAGE = "monthly_indent.manage"
 
 # --- Procurement: requisitions, RFQs, quotations ---
 # The buying chain, split by decision rather than by screen. Raising a requisition is
@@ -432,6 +436,8 @@ ALL_PERMISSIONS: list[Perm] = [
          "Manage system settings"),
     Perm(ADMIN_CODE_FORMATS_MANAGE, "admin", "code_formats", "manage",
          "Set the asset & consumable code formula"),
+    Perm(MONTHLY_INDENT_MANAGE, "admin", "monthly_indent", "manage",
+         "Configure the monthly indent cycle, its reminders and who may submit"),
     Perm(REQUISITION_VIEW, "procurement", "requisition", "view",
          "View purchase requisitions"),
     Perm(REQUISITION_CREATE, "procurement", "requisition", "create",
@@ -531,6 +537,9 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # could post the whole issue yesterday can hand its pieces to the floors today.
     # Fail-closed would leave the button on nobody's profile and the feature unused.
     ISSUE_SPLIT: ISSUE_ISSUE,
+    # Settings > Monthly Indent ran on admin.settings.manage; whoever configured the
+    # month yesterday still can today, and from now on it can be granted on its own.
+    MONTHLY_INDENT_MANAGE: ADMIN_SETTINGS_MANAGE,
 }
 
 

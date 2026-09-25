@@ -75,8 +75,14 @@ export interface CodeFormatToken {
 export interface MonthlyIndentCycle {
   is_enabled: boolean;
   approval_flow_enabled: boolean;
-  /** Which month the window OPENS in, counted from the current month. */
+  /** Which month the window OPENS in, counted from the current month. Only read by
+   *  the server when `anchor_month` is empty (a row saved before it existed). */
   cycle_month_offset: number;
+  /** YYYY-MM-01 of a month a cycle opens in. Cycles open there and every
+   *  `period_months` either side of it. Always served. */
+  anchor_month?: string | null;
+  /** Only people a submission rule names may raise a monthly indent. */
+  restrict_to_rules: boolean;
   start_day: number;
   /** How many months after the opening month it CLOSES in — 0 is the same month. */
   end_month_offset: number;
@@ -92,6 +98,8 @@ export interface MonthlyIndentCycle {
   cycle_key?: string;
   serves_start?: string;
   serves_month?: string;
+  /** How many months apart consecutive cycles open. Served; read-only. */
+  period_months?: number;
 }
 
 export type MonthlyIndentCondition = "NOT_SUBMITTED" | "PENDING_APPROVAL" | "NOT_RESPONDED";
@@ -116,13 +124,32 @@ export interface MonthlyIndentRule {
   escalation_target_ref_id?: number | null;
   escalation_target_name?: string | null;
   escalation_message_template?: string | null;
+  /** Follow up this many days after the reminder instead of on a fixed day. */
+  escalation_after_days?: number | null;
+  /** How many rungs of the reporting line are told, one step apart. */
+  escalation_levels?: number;
+}
+
+export interface MonthlyIndentSubmissionRule {
+  id: number;
+  name: string;
+  is_active: boolean;
+  target_type: MonthlyIndentTargetType;
+  target_ref_id: number;
+  target_name?: string | null;
+  max_submissions: number;
+  deadline_day: number;
+  allow_after_deadline: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface MonthlyIndentLog {
   id: number;
   rule_id: number;
   cycle_key: string;
-  kind: "PRIMARY" | "ESCALATION";
+  /** PRIMARY, ESCALATION (level 1) or ESCALATION_L<n> for a later rung. */
+  kind: string;
   target_employee_id: number;
   target_employee_name?: string | null;
   recipient_employee_id: number;
@@ -137,6 +164,7 @@ export interface MonthlyIndentLog {
 export interface MonthlyIndentSettings {
   cycle: MonthlyIndentCycle;
   rules: MonthlyIndentRule[];
+  submission_rules: MonthlyIndentSubmissionRule[];
   logs: MonthlyIndentLog[];
   next_run?: string | null;
 }
