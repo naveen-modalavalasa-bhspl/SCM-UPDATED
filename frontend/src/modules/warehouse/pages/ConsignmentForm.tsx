@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
-import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Layers, Lock, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Download, Layers, Lock, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, Select } from "@/shared/components";
 import { ConsignmentIdentityCard, type ConsignmentIssue } from "../components/ConsignmentIdentityCard";
 import { PrintPortal } from "../components/LabelPrint";
@@ -178,7 +179,10 @@ const ScanBarcode = memo(function ScanBarcode({ code }: { code: string }) {
   );
 });
 
-function ScanCard({ spec }: { spec: ScanCardSpec }) {
+/** One card's identity — which label a per-card download prints. */
+const scanKey = (card: ScanCardSpec) => `${card.accent}-${card.code}`;
+
+function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () => void }) {
   const accent = spec.accent === "consignment"
     ? "border-brand/40 bg-brand-050/30"
     : "border-line bg-content1";
@@ -204,8 +208,21 @@ function ScanCard({ spec }: { spec: ScanCardSpec }) {
           </div>
           {spec.subtitle && <div className="mt-1 truncate text-xs text-muted">{spec.subtitle}</div>}
         </div>
-        <div className="rounded-md bg-content1 px-2 py-1 font-mono text-[11px] font-semibold text-ink">
-          {spec.code}
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="rounded-md bg-content1 px-2 py-1 font-mono text-[11px] font-semibold text-ink">
+            {spec.code}
+          </div>
+          {onDownload && (
+            <button
+              type="button"
+              onClick={onDownload}
+              title="Download this label (choose Save as PDF)"
+              aria-label={`Download label ${spec.code}`}
+              className="flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-white text-brand hover:bg-brand-050 print:hidden"
+            >
+              <Download className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -900,6 +917,25 @@ export default function ConsignmentForm() {
     );
   };
 
+  // Which label the next print run carries: null = every card on the sheet.
+  const [printOnly, setPrintOnly] = useState<string | null>(null);
+  /** Print one label, or all of them. The browser's dialog is the download — "Save as
+   *  PDF" names the file after the label, because the page title is the label's code
+   *  for the duration of the print run. flushSync so the sheet is narrowed to that one
+   *  card BEFORE the dialog snapshots the page. */
+  const printLabels = (card: ScanCardSpec | null) => {
+    const title = document.title;
+    flushSync(() => setPrintOnly(card ? scanKey(card) : null));
+    document.title = (card ? `Label ${card.code}` : `Labels ${doc?.dispatch_no ?? ""}`)
+      .trim().replace(/[\/|:*?"<>]/g, "-");
+    try {
+      window.print();
+    } finally {
+      document.title = title;
+      setPrintOnly(null);
+    }
+  };
+
   const scanCards: ScanCardSpec[] = useMemo(() => {
     if (!doc?.public_scan_token) return [];
     return [{
@@ -1557,8 +1593,8 @@ export default function ConsignmentForm() {
             icon={ScanLine}
             hint="Consignment and package identities. Each card carries both QR and barcode for scanning."
             actions={
-              <Button onClick={() => window.print()} disabled={scanCards.length === 0}>
-                <Printer className="h-4 w-4" /> Print labels
+              <Button onClick={() => printLabels(null)} disabled={scanCards.length === 0}>
+                <Printer className="h-4 w-4" /> Print all labels
               </Button>
             }
           >
@@ -1566,13 +1602,15 @@ export default function ConsignmentForm() {
                 Printing the on-screen node put it inside a clipping card and the paper
                 came out blank; see PrintPortal. */}
             <PrintPortal id="wh-consignment-scan-labels">
-              {scanCards.map((card) => (
-                <ScanCard key={`print-${card.accent}-${card.code}`} spec={card} />
-              ))}
+              {scanCards
+                .filter((card) => printOnly === null || scanKey(card) === printOnly)
+                .map((card) => (
+                  <ScanCard key={`print-${scanKey(card)}`} spec={card} />
+                ))}
             </PrintPortal>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {scanCards.map((card) => (
-                <ScanCard key={`${card.accent}-${card.code}`} spec={card} />
+                <ScanCard key={scanKey(card)} spec={card} onDownload={() => printLabels(card)} />
               ))}
             </div>
           </ConsignmentSection>

@@ -22431,6 +22431,34 @@ async def issue_options(db: AsyncSession, search: str | None = None, *,
     ]
 
 
+async def returnable_issue_options(
+    db: AsyncSession,
+    search: str | None = None,
+) -> list[dict]:
+    stmt = select(m.MaterialIssue).where(
+        m.MaterialIssue.direction == IssueDirection.OUT.value,
+        m.MaterialIssue.is_stock_posted.is_(True),
+        m.MaterialIssue.status.in_(
+            (
+                IssueStatus.ISSUED.value,
+                IssueStatus.DISPATCHED.value,
+                IssueStatus.ACKNOWLEDGED.value,
+                IssueStatus.PARTIALLY_RETURNED.value,
+            )
+        ),
+    )
+    if search:
+        stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
+    rows = (await db.execute(
+        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
+    )).scalars().all()
+    return [{
+        "id": row.id,
+        "code": row.issue_no,
+        "name": row.issued_to_name or row.department_name or row.issue_no,
+    } for row in rows]
+
+
 async def issue_dispatch_sources(db: AsyncSession, issue_ids: str) -> dict:
     """One packing source for several issues bound for the same stocking point.
 
