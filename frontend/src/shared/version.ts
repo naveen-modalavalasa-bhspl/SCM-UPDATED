@@ -5,4 +5,4 @@
  *  is a fact about the bundle that was built, not a setting a deployment chooses —
  *  an environment variable would let two machines running the same code disagree
  *  about what they are running. */
-export const APP_VERSION = "1.15";
+export const APP_VERSION = "1.16";

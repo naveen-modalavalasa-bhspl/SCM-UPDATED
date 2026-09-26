@@ -18,17 +18,21 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_vendor, require_permission
+from app.core.dependencies import get_current_vendor, require_permission, require_permission_or
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
 from app.modules.indents.schemas import AcknowledgementRow as IndentAcknowledgementRow
 from app.modules.indents.schemas import FulfilmentStep as IndentFulfilmentStep
+from app.modules.indents import service as indent_service
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
 from app.modules.warehouse import stock_report
-from app.platform.rbac.permissions import INDENT_VIEW
+from app.platform.rbac.permissions import (
+    INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
+    STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
+)
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
@@ -595,7 +599,8 @@ async def post_issues_batch(body: s.IssueBatchIn, db: AsyncSession = Depends(get
 async def issue_stock_sources(warehouse_id: int, item_ids: str,
                               indent_id: int | None = None,
                               db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(ISSUE_VIEW))):
+                              user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """Every (batch, bin) the given items can be drawn from, oldest stock first."""
     return await service.issue_stock_sources(
         db,
@@ -609,7 +614,8 @@ async def issue_stock_sources(warehouse_id: int, item_ids: str,
 @router.post("/issues/stock-sources/fetch", response_model=list[s.IssueStockSource])
 async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
                                    db: AsyncSession = Depends(get_db),
-                                   user=Depends(require_permission(ISSUE_VIEW))):
+                                   user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """Every (batch, bin) the given items can be drawn from, oldest stock first.
     Accepts item_ids in the request body to avoid URI length limits."""
     return await service.issue_stock_sources(
@@ -624,7 +630,8 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
 @router.post("/issues/unit-supply", response_model=list[s.UnitSupplyRead])
 async def issue_unit_supply(body: s.UnitSupplyQuery,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(ISSUE_VIEW))):
+                            user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """How many identified units each (item, batch, location) could name right now.
 
     A different question from `stock-sources`, off a different table: that one is a
@@ -642,14 +649,16 @@ async def issue_unit_supply(body: s.UnitSupplyQuery,
 
 
 @router.get("/tracking-types", response_model=list[s.TrackingTypeRead])
-async def tracking_types(user=Depends(require_permission(ISSUE_VIEW))):
+async def tracking_types(user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """What each kind of unit identifier is called, so no screen names them itself."""
     return service.tracking_types()
 
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)
 async def get_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission(ISSUE_VIEW))):
+                    user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.get_issue(db, issue_id, user)
 
 
@@ -661,20 +670,23 @@ async def create_issue(data: s.IssueWrite, db: AsyncSession = Depends(get_db),
 
 @router.put("/issues/{issue_id}", response_model=s.IssueDetail)
 async def update_issue(issue_id: int, data: s.IssueWrite, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_CREATE))):
+                       user=Depends(require_permission_or(
+        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.update_issue(db, issue_id, data, user)
 
 
 @router.post("/issues/{issue_id}/submit", response_model=s.IssueDetail)
 async def submit_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_CREATE))):
+                       user=Depends(require_permission_or(
+        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.submit_issue(db, issue_id, user)
 
 
 @router.post("/issues/{issue_id}/approve", response_model=s.IssueDetail)
 async def approve_issue(issue_id: int, body: s.ApprovalIn,
                         db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission(ISSUE_POST))):
+                        user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.act_on_issue(
         db, issue_id, ApprovalAction.APPROVED.value, body.comments, user
     )
@@ -694,7 +706,8 @@ async def split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
 @router.post("/issues/{issue_id}/reject", response_model=s.IssueDetail)
 async def reject_issue(issue_id: int, body: s.ApprovalIn,
                        db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_POST))):
+                       user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.act_on_issue(
         db, issue_id, ApprovalAction.REJECTED.value, body.comments, user
     )
@@ -702,14 +715,16 @@ async def reject_issue(issue_id: int, body: s.ApprovalIn,
 
 @router.post("/issues/{issue_id}/issue", response_model=s.IssueDetail)
 async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                     user=Depends(require_permission(ISSUE_POST))):
+                     user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.post_issue(db, issue_id, user)
 
 
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
 async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(ISSUE_POST))):
+                            user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.set_issue_serials(db, issue_id, body, user)
 
 
@@ -722,7 +737,8 @@ async def acknowledge_issue(issue_id: int, body: s.AcknowledgeIssueIn,
 
 @router.post("/issues/{issue_id}/cancel", response_model=s.IssueDetail)
 async def cancel_issue(issue_id: int, body: s.ReasonIn, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_CREATE))):
+                       user=Depends(require_permission_or(
+        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.cancel_issue(db, issue_id, body.reason, user)
 
 
@@ -1239,7 +1255,8 @@ async def my_acknowledgements(search: str | None = None, status: str | None = No
                               only_actionable: bool = False,
                               indent_type: list[str] | None = Query(None),
                               db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(INDENT_VIEW))):
+                              user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     return await service.acknowledgements_for_requester(
         db, user, search=search, status=status, only_actionable=only_actionable,
         indent_types=indent_type)
@@ -1250,7 +1267,9 @@ async def my_acknowledgements(search: str | None = None, status: str | None = No
 # actor's own worklist.
 @router.get("/indents/{indent_id}/fulfilment", response_model=list[IndentFulfilmentStep])
 async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
-                            _=Depends(require_permission(INDENT_VIEW))):
+                            _=Depends(require_permission_or(
+                                INDENT_VIEW, (STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW),
+                                indent_service.str_in_reach))):
     return await service.indent_fulfilment(db, indent_id)
 
 
@@ -1570,7 +1589,8 @@ async def delete_picking(picking_id: int, db: AsyncSession = Depends(get_db),
 
 @router.delete("/issues/{issue_id}", status_code=204)
 async def delete_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_DELETE))):
+                       user=Depends(require_permission_or(
+        ISSUE_DELETE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     await service.delete_draft(db, "issue", issue_id, user)
 
 
@@ -1597,37 +1617,43 @@ async def list_outbound_inspections(params: PageParams = Depends(),
                                     search: str | None = None,
                                     stock_transfer: bool | None = None,
                                     db: AsyncSession = Depends(get_db),
-                                    user=Depends(require_permission(QC_OUTWARD_VIEW))):
+                                    user=Depends(require_permission_or(
+        QC_OUTWARD_VIEW, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.list_outbound_inspections(db, params, status=status,
                                                    warehouse_id=warehouse_id, search=search,
                                                    user=user, stock_transfer=stock_transfer)
 
 @router.get("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
 async def get_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                                  _=Depends(require_permission(QC_OUTWARD_VIEW))):
+                                  _=Depends(require_permission_or(
+        QC_OUTWARD_VIEW, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.get_outbound_inspection(db, inspection_id)
 
 @router.post("/outbound-inspections", response_model=s.OutboundInspectionDetail, status_code=201)
 async def create_outbound_inspection(data: s.OutboundInspectionWrite, db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_CREATE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_CREATE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.create_outbound_inspection(db, data, user)
 
 @router.put("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
 async def update_outbound_inspection(inspection_id: int, data: s.OutboundInspectionWrite,
                                      db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_UPDATE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_UPDATE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.update_outbound_inspection(db, inspection_id, data, user)
 
 @router.post("/outbound-inspections/{inspection_id}/complete", response_model=s.OutboundInspectionDetail)
 async def complete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                                       user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+                                       user=Depends(require_permission_or(
+        QC_OUTWARD_APPROVE, STOCK_TRANSFER_QC_APPROVE, service.transfer_qc_in_reach))):
     return await service.complete_outbound_inspection(db, inspection_id, user)
 
 @router.post("/outbound-inspections/{inspection_id}/approve",
              response_model=s.OutboundInspectionDetail)
 async def approve_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
                                       db: AsyncSession = Depends(get_db),
-                                      user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+                                      user=Depends(require_permission_or(
+        QC_OUTWARD_APPROVE, STOCK_TRANSFER_QC_APPROVE, service.transfer_qc_in_reach))):
     return await service.act_on_outbound_inspection(
         db, inspection_id, ApprovalAction.APPROVED.value, body.comments, user
     )
@@ -1637,7 +1663,8 @@ async def approve_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
              response_model=s.OutboundInspectionDetail)
 async def reject_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
                                      db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_APPROVE, STOCK_TRANSFER_QC_APPROVE, service.transfer_qc_in_reach))):
     return await service.act_on_outbound_inspection(
         db, inspection_id, ApprovalAction.REJECTED.value, body.comments, user
     )
@@ -1645,7 +1672,8 @@ async def reject_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
 
 @router.delete("/outbound-inspections/{inspection_id}", status_code=204)
 async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_DELETE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_DELETE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     await service.delete_draft(db, "whs_inspections", inspection_id, user)
     return None
 

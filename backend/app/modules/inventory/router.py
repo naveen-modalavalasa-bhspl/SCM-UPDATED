@@ -232,7 +232,7 @@ async def list_stos(params: PageParams = Depends(), status: str | None = None,
                     to_warehouse_id: int | None = None,
                     date_from: date | None = None, date_to: date | None = None,
                     db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission(perms.STOCK_VIEW))):
+                    user=Depends(require_permission(perms.STOCK_TRANSFER_VIEW))):
     return await service.list_stos(db, params, status, user=user, kind=kind,
                                    search=search, str_id=str_id, origin=origin,
                                    from_warehouse_id=from_warehouse_id,
@@ -242,7 +242,7 @@ async def list_stos(params: PageParams = Depends(), status: str | None = None,
 
 @stock_router.get("/sto/{id}", response_model=STOOut)
 async def get_sto(id: int, db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission(perms.STOCK_VIEW))):
+                  user=Depends(require_permission(perms.STOCK_TRANSFER_VIEW))):
     return await service.get_sto(db, id, user=user)
 
 

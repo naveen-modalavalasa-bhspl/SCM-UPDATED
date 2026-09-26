@@ -58,6 +58,11 @@ describe("verified button locations", () => {
       "indent.create", "indent.edit", "po.create", "po.approve", "po.reject",
       "po.send_vendor", "issue.create", "issue.issue", "stock.points.manage",
       "rfq.create", "transport.create",
+      "movement.view", "movement.create", "movement.approve", "movement.inspect",
+      "movement.complete",
+      "stock.transfer.view", "stock.transfer.request", "stock.transfer",
+      "stock.transfer.approve", "stock.transfer.serve", "stock.transfer.qc",
+      "stock.transfer.issue", "stock.transfer.receive",
     ]);
     for (const code of Object.keys(ACTION_LOCATIONS)) expect(REAL).toContain(code);
   });

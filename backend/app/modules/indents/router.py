@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.exceptions import NotFoundError
-from app.core.dependencies import require_permission
+from app.core.dependencies import require_permission, require_permission_or
 from app.core.pagination import Page, PageParams
 from app.platform.rbac import permissions as perms
 from app.platform.settings import attachments
@@ -76,6 +76,31 @@ async def list_indents(params: PageParams = Depends(), search: str | None = None
         department_ids=department_id, region_ids=region_id,
         include_unassigned_region=region_unassigned,
         is_bookmarked=is_bookmarked, sort_by=sort_by, sort_dir=sort_dir, user=user,
+    )
+
+
+# Inventory > Stock Transfer's Requests tab. An STR is an indent underneath, but the
+# list is the transfer screen's, so it is guarded by `stock.transfer.view` rather than
+# by all of Indents. Registered above `/{indent_id}`, which would otherwise match it.
+@indent_router.get("/stock-transfer-requests", response_model=Page[IndentListRow])
+async def list_stock_transfer_requests(params: PageParams = Depends(),
+                                       search: str | None = None,
+                                       created_date_from: date | None = None,
+                                       created_date_to: date | None = None,
+                                       status: list[IndentStatus] | None = Query(None),
+                                       # The To serve tab: what is still owed, and mine
+                                       # to serve — the Fulfilment Queue's own filters.
+                                       has_remainder: bool = False,
+                                       to_serve: bool = False,
+                                       db: AsyncSession = Depends(get_db),
+                                       user=Depends(require_permission_or(
+                                           perms.STOCK_TRANSFER_VIEW,
+                                           perms.STOCK_TRANSFER_SERVE,
+                                           service.anywhere_in_reach))):
+    return await service.list_indents(
+        db, params, search=search, date_from=created_date_from,
+        date_to=created_date_to, statuses=status, has_remainder=has_remainder,
+        to_serve=to_serve, indent_types=[IndentType.STR], user=user,
     )
 
 
@@ -163,7 +188,8 @@ async def notifications(params: PageParams = Depends(), search: str | None = Non
 
 @indent_router.post("", response_model=IndentOut)
 async def create(data: IndentCreate, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission(perms.INDENT_CREATE))):
+                 user=Depends(require_permission_or(
+        perms.INDENT_CREATE, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
     return await service.create_indent(db, data, user)
 
 
@@ -198,20 +224,23 @@ async def submit_monthly_cycle(body: MonthlySubmitIn,
 
 @indent_router.get("/options/offices")
 async def office_options(db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(perms.INDENT_VIEW))):
+                         user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_VIEW, service.anywhere_in_reach))):
     return await service.list_office_options(db)
 
 
 @indent_router.get("/options/regions")
 async def region_options(db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(perms.INDENT_VIEW))):
+                         user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_VIEW, service.anywhere_in_reach))):
     return await service.list_region_options(db, user)
 
 
 @indent_router.get("/options/vehicles")
 async def vehicle_options(search: str | None = None,
                           db: AsyncSession = Depends(get_db),
-                          user=Depends(require_permission(perms.INDENT_VIEW))):
+                          user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_VIEW, service.anywhere_in_reach))):
     return await service.vehicle_options(db, search)
 
 
@@ -229,7 +258,8 @@ async def vehicle_options(search: str | None = None,
 @indent_router.get("/eligible-items")
 async def eligible_items(search: str | None = None, limit: int = 500,
                          db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(perms.INDENT_CREATE))):
+                         user=Depends(require_permission_or(
+        perms.INDENT_CREATE, perms.STOCK_TRANSFER_REQUEST, service.anywhere_in_reach))):
     """The items THIS requester may raise an indent for.
 
     Its own endpoint rather than a filter on `/api/masters/items`: that one is the
@@ -255,38 +285,44 @@ async def eligible_bom_items(bom_id: int, db: AsyncSession = Depends(get_db),
 
 @indent_router.get("/{indent_id}", response_model=IndentOut)
 async def get_one(indent_id: int, db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission(perms.INDENT_VIEW))):
+                  user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_VIEW, service.str_in_reach))):
     return await service.get_indent(db, indent_id, user)
 
 
 @indent_router.get("/{indent_id}/journey", response_model=IndentJourneyOut)
 async def journey(indent_id: int, db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission(perms.INDENT_VIEW))):
+                  user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_VIEW, service.str_in_reach))):
     return await service.indent_journey(db, indent_id, user)
 
 
 @indent_router.put("/{indent_id}", response_model=IndentOut)
 async def update(indent_id: int, data: IndentUpdate, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission(perms.INDENT_VIEW))):
+                 user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
     return await service.update_indent(db, indent_id, data, user)
 
 
 @indent_router.delete("/{indent_id}", status_code=204)
 async def delete_draft(indent_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(perms.INDENT_VIEW))):
+                       user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
     await service.delete_indent(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/submit", response_model=IndentOut)
 async def submit(indent_id: int, db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission(perms.INDENT_SUBMIT))):
+                 user=Depends(require_permission_or(
+        perms.INDENT_SUBMIT, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
     return await service.submit_indent(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/return-for-correction", response_model=IndentOut)
 async def return_for_correction(indent_id: int, body: ActionIn,
                                 db: AsyncSession = Depends(get_db),
-                                user=Depends(require_permission(perms.INDENT_APPROVE))):
+                                user=Depends(require_permission_or(
+        perms.INDENT_APPROVE, perms.STOCK_TRANSFER_STR_APPROVE, service.str_in_reach))):
     return await service.return_indent_for_correction(
         db, indent_id, body.comments, user,
     )
@@ -294,14 +330,16 @@ async def return_for_correction(indent_id: int, body: ActionIn,
 
 @indent_router.post("/{indent_id}/resubmit-correction", response_model=IndentOut)
 async def resubmit_correction(indent_id: int, db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(perms.INDENT_VIEW))):
+                              user=Depends(require_permission_or(
+        perms.INDENT_VIEW, perms.STOCK_TRANSFER_REQUEST, service.str_in_reach))):
     return await service.resubmit_indent_correction(db, indent_id, user)
 
 
 @indent_router.post("/{indent_id}/acknowledge", response_model=IndentOut)
 async def acknowledge(indent_id: int, body: AcknowledgeIn,
                       db: AsyncSession = Depends(get_db),
-                      user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE))):
+                      user=Depends(require_permission_or(
+        perms.INDENT_ACKNOWLEDGE, perms.STOCK_TRANSFER_RECEIVE, service.str_in_reach))):
     lines = {line.indent_item_id: Decimal(str(line.received_quantity))
              for line in body.lines}
     return await service.acknowledge_receipt(db, indent_id, lines, user,
@@ -311,7 +349,9 @@ async def acknowledge(indent_id: int, body: AcknowledgeIn,
 
 @indent_router.get("/{indent_id}/receipt-attachments", response_model=list[AttachmentRead])
 async def receipt_attachments(indent_id: int, db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(perms.INDENT_VIEW))):
+                              user=Depends(require_permission_or(
+        perms.INDENT_VIEW,
+        (perms.STOCK_TRANSFER_RECEIVE, perms.STOCK_TRANSFER_VIEW), service.str_in_reach))):
     # `get_indent` first — the same visibility check the download route beside this one
     # already ran. Without it `indent.view` listed the file names, uploaders and
     # timestamps on every indent in the company, including the ones this login's own
@@ -326,7 +366,8 @@ async def upload_receipt_attachment(
     indent_id: int, file: UploadFile = File(...),
     doc_category: str = Query(service.ACK_PHOTO_CATEGORY),
     db: AsyncSession = Depends(get_db),
-    user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE)),
+    user=Depends(require_permission_or(
+        perms.INDENT_ACKNOWLEDGE, perms.STOCK_TRANSFER_RECEIVE, service.str_in_reach)),
 ):
     return await service.add_receipt_attachment(
         db, indent_id, file, doc_category=doc_category, user=user)
@@ -335,7 +376,9 @@ async def upload_receipt_attachment(
 @indent_router.get("/{indent_id:int}/receipt-attachments/{attachment_id:int}/download")
 async def download_receipt_attachment(
     indent_id: int, attachment_id: int, db: AsyncSession = Depends(get_db),
-    user=Depends(require_permission(perms.INDENT_VIEW)),
+    user=Depends(require_permission_or(
+        perms.INDENT_VIEW,
+        (perms.STOCK_TRANSFER_RECEIVE, perms.STOCK_TRANSFER_VIEW), service.str_in_reach)),
 ):
     """The receipt photo or bill itself, for whoever may read the indent it hangs on.
 
@@ -358,7 +401,8 @@ async def download_receipt_attachment(
 @indent_router.delete("/receipt-attachments/{attachment_id}", status_code=204)
 async def delete_receipt_attachment(
     attachment_id: int, db: AsyncSession = Depends(get_db),
-    user=Depends(require_permission(perms.INDENT_ACKNOWLEDGE)),
+    user=Depends(require_permission_or(
+        perms.INDENT_ACKNOWLEDGE, perms.STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach)),
 ):
     """Withdraw a delivery photo or bill, for the person who filed it.
 
@@ -392,7 +436,8 @@ async def unbookmark(indent_id: int, db: AsyncSession = Depends(get_db),
 # FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
 async def approve(indent_id: int, body: ActionIn,
                   db: AsyncSession = Depends(get_db),
-                  user=Depends(require_permission(perms.INDENT_APPROVE))):
+                  user=Depends(require_permission_or(
+        perms.INDENT_APPROVE, perms.STOCK_TRANSFER_STR_APPROVE, service.str_in_reach))):
     return await service.act_on_indent(
         db, indent_id, ApprovalAction.APPROVED, body.comments, user,
     )
@@ -402,7 +447,8 @@ async def approve(indent_id: int, body: ActionIn,
 # FIX: Removed default instance ActionIn() to resolve FastAPI 422 Unprocessable Entity
 async def reject(indent_id: int, body: ActionIn,
                  db: AsyncSession = Depends(get_db),
-                 user=Depends(require_permission(perms.INDENT_REJECT))):
+                 user=Depends(require_permission_or(
+        perms.INDENT_REJECT, perms.STOCK_TRANSFER_STR_APPROVE, service.str_in_reach))):
     return await service.act_on_indent(
         db, indent_id, ApprovalAction.REJECTED, body.comments, user,
     )
@@ -413,7 +459,8 @@ alloc_router = APIRouter(prefix="/api/allocations")
 
 @alloc_router.get("/proposal/{indent_id}")
 async def allocation_proposal(indent_id: int, db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+                              user=Depends(require_permission_or(
+        perms.ALLOCATION_VIEW, perms.STOCK_TRANSFER_SERVE, service.str_allocation_in_reach))):
     return await service.allocation_proposal(db, indent_id, user)
 
 
@@ -421,7 +468,8 @@ async def allocation_proposal(indent_id: int, db: AsyncSession = Depends(get_db)
 async def list_allocations(params: PageParams = Depends(), status: str | None = None,
                            indent_id: int | None = None,
                            db: AsyncSession = Depends(get_db),
-                           user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+                           user=Depends(require_permission_or(
+        perms.ALLOCATION_VIEW, perms.STOCK_TRANSFER_SERVE, service.str_allocation_in_reach))):
     return await service.list_allocations(db, params, status, indent_id, user=user)
 
 
@@ -430,8 +478,10 @@ async def list_allocations(params: PageParams = Depends(), status: str | None = 
 # the Submit action gets a 403 here, not just a hidden button.
 @alloc_router.post("", response_model=AllocationOut)
 async def create_allocation(body: AllocationIn, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.ALLOCATION_CREATE)),
-                            _submit=Depends(require_permission(perms.ALLOCATION_SUBMIT))):
+                            user=Depends(require_permission_or(
+        perms.ALLOCATION_CREATE, perms.STOCK_TRANSFER_SERVE, service.str_allocation_in_reach)),
+                            _submit=Depends(require_permission_or(
+        perms.ALLOCATION_SUBMIT, perms.STOCK_TRANSFER_SERVE, service.str_allocation_in_reach))):
     return await service.decide_allocation(db, body, user)
 
 
@@ -503,14 +553,16 @@ async def allocation_histories(body: AllocationHistoryBatchIn,
 @alloc_router.get("/{allocation_id}/availability",
                   response_model=list[AllocationLineAvailability])
 async def allocation_availability(allocation_id: int, db: AsyncSession = Depends(get_db),
-                                  user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+                                  user=Depends(require_permission_or(
+        perms.ALLOCATION_VIEW, perms.STOCK_TRANSFER_SERVE, service.str_allocation_in_reach))):
     """What each line of this allocation could actually be given, right now."""
     return await service.allocation_line_availability(db, allocation_id, user)
 
 
 @alloc_router.get("/{allocation_id}", response_model=AllocationOut)
 async def get_allocation(allocation_id: int, db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(perms.ALLOCATION_VIEW))):
+                         user=Depends(require_permission_or(
+        perms.ALLOCATION_VIEW, perms.STOCK_TRANSFER_SERVE, service.str_allocation_in_reach))):
     return await service.get_allocation(db, allocation_id, user=user)
 
 
@@ -537,8 +589,10 @@ async def reject_allocations_batch(body: AllocBatchActionIn,
 async def approve_allocation(
         allocation_id: int, body: AllocApproveIn,
         db: AsyncSession = Depends(get_db),
-        user=Depends(require_permission(perms.ALLOCATION_APPROVE)),
-        _reserve=Depends(require_permission(perms.ALLOCATION_APPROVE_RESERVE))):
+        user=Depends(require_permission_or(
+        perms.ALLOCATION_APPROVE, perms.STOCK_TRANSFER_SERVE_APPROVE, service.str_allocation_in_reach)),
+        _reserve=Depends(require_permission_or(
+        perms.ALLOCATION_APPROVE_RESERVE, perms.STOCK_TRANSFER_SERVE_APPROVE, service.str_allocation_in_reach))):
     """Approve, optionally revising the give quantities first — same permission, because
     revising is part of the approver's decision, not a separate one.
 
@@ -553,7 +607,8 @@ async def approve_allocation(
 @alloc_router.post("/{allocation_id}/reject", response_model=AllocationOut)
 async def reject_allocation(allocation_id: int, body: AllocActionIn,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(perms.ALLOCATION_REJECT))):
+                            user=Depends(require_permission_or(
+        perms.ALLOCATION_REJECT, perms.STOCK_TRANSFER_SERVE_APPROVE, service.str_allocation_in_reach))):
     return await service.act_on_allocation(
         db, allocation_id, ApprovalAction.REJECTED.value, user, body.comments)
 

@@ -32,8 +32,10 @@ from sqlalchemy.orm import aliased, selectinload
 
 from app.core.database import SessionLocal
 
-from app.core.exceptions import AppException, NotFoundError, ValidationError
+from app.core.exceptions import AppException, NotFoundError, PermissionError_, ValidationError
 from app.core.pagination import PageParams, paginate
+from app.core.dependencies import via_scoped_grant
+from app.platform.rbac.permissions import INDENT_VIEW
 from app.modules.indents.enums import IndentType
 from app.modules.inventory import allocation as stock_allocation
 from app.modules.inventory import locations as stock_locations
@@ -44,7 +46,7 @@ from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
 from app.modules.warehouse.enums import (
-    DEAD_ISSUE_STATUSES,
+    DEAD_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW,
     DispatchEventType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
@@ -8669,7 +8671,18 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
     issue = await _decorate_can_approve(
         db, issue, await _issue_doc_type_of(db, issue.id), user)
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
+    setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
     return await _decorate_issue_destination(db, issue)
+
+
+async def is_stock_transfer_issue(db: AsyncSession, issue_id: int | None) -> bool:
+    """Does this issue execute a stock transfer (an STO, or an STR it serves)? The
+    screens use it to work the issue's QC on Inventory > Stock Transfer."""
+    if not issue_id:
+        return False
+    return bool(await db.scalar(
+        select(func.count()).select_from(
+            _stock_transfer_issue_ids().where(m.MaterialIssue.id == issue_id).subquery())))
 
 
 #: An issue whose goods actually went OUT to the requester.
@@ -20347,6 +20360,9 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
                               Indent.position_id.is_(None)))
     if status:
         stmt = stmt.where(Indent.status == status)
+    # Reached through `stock.transfer.receive` alone: stock transfer requests only.
+    if via_scoped_grant(db, INDENT_VIEW):
+        indent_types = [_STR_INDENT_TYPE]
     # Indents > Acknowledgements asks for REGULAR/MONTHLY, Stock Transfer for STR.
     if indent_types:
         stmt = stmt.where(Indent.indent_type.in_(indent_types))
@@ -22820,7 +22836,11 @@ _register_stock_transfer_hooks()
 # ---------------- Outbound Quality Inspection ----------------
 
 async def get_outbound_inspection(db: AsyncSession, inspection_id: int) -> m.OutboundInspection:
-    return await _load(db, m.OutboundInspection, inspection_id, "OutboundInspection", m.OutboundInspection.items)
+    inspection = await _load(db, m.OutboundInspection, inspection_id, "OutboundInspection",
+                             m.OutboundInspection.items)
+    setattr(inspection, "is_stock_transfer",
+            await is_stock_transfer_issue(db, inspection.issue_id))
+    return inspection
 
 def _outbound_inspection_totals(inspection: m.OutboundInspection) -> None:
     inspection.total_items = len(inspection.items)
@@ -22966,6 +22986,10 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
     _outbound_inspection_totals(inspection)
 
 async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectionWrite, user) -> m.OutboundInspection:
+    # Reached through `stock.transfer.qc` alone: only a stock transfer's issue.
+    if (via_scoped_grant(db, QC_OUTWARD_CREATE)
+            and not await is_stock_transfer_issue(db, data.issue_id)):
+        raise PermissionError_("Missing permission: qc_outward.create")
     issue = await get_issue(db, data.issue_id) if data.issue_id else None
     wh = await db.get(Warehouse, data.warehouse_id) if data.warehouse_id else None
 
@@ -23226,6 +23250,10 @@ async def list_outbound_inspections(db: AsyncSession, params: PageParams,
                                     search: str | None = None, user=None,
                                     stock_transfer: bool | None = None) -> dict:
     stmt = select(m.OutboundInspection).where(m.OutboundInspection.status != InspectionStatus.CANCELLED.value)
+    # A login reaching this list only through `stock.transfer.qc` sees transfer QC and
+    # nothing else, whatever it asked for.
+    if via_scoped_grant(db, QC_OUTWARD_VIEW):
+        stock_transfer = True
     # Outward QC of a stock transfer is worked on Inventory > Stock Transfer (True);
     # the warehouse's own Outward QC list leaves it out (False). None = everything.
     if stock_transfer is not None:
@@ -23256,3 +23284,31 @@ async def list_outbound_inspections(db: AsyncSession, params: PageParams,
             )
         )
     return await paginate(db, stmt.order_by(m.OutboundInspection.created_at.desc()), params)
+
+
+# ---------------- Stock Transfer's scoped grants (require_permission_or) ----------------
+#
+# Inventory > Stock Transfer works a transfer's material issue and its outward QC on
+# this module's own endpoints. Its `stock.transfer.*` codes reach them through
+# `core.dependencies.require_permission_or`, and these say whether THIS request's
+# document is a stock transfer. A route with no document in its path answers True and
+# the service narrows instead (`list_outbound_inspections`, `create_outbound_inspection`).
+
+async def transfer_issue_in_reach(db: AsyncSession, request, user) -> bool:
+    issue_id = request.path_params.get("issue_id")
+    return True if issue_id is None else await is_stock_transfer_issue(db, int(issue_id))
+
+
+async def transfer_qc_in_reach(db: AsyncSession, request, user) -> bool:
+    inspection_id = request.path_params.get("inspection_id")
+    if inspection_id is None:
+        return True
+    issue_id = await db.scalar(select(m.OutboundInspection.issue_id)
+                               .where(m.OutboundInspection.id == int(inspection_id)))
+    return await is_stock_transfer_issue(db, issue_id)
+
+
+async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
+    """For read-only lookups a transfer's screens need (tracking types, stock sources):
+    they name no document, and what they return is already scoped to the login."""
+    return True

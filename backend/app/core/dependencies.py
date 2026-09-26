@@ -93,3 +93,52 @@ def require_permission(code: str):
         return user
 
     return checker
+
+
+def require_permission_or(primary: str, alternate: str | tuple[str, ...], in_reach):
+    """Endpoint guard: the `primary` code, OR the narrower `alternate` for a document
+    `in_reach` allows.
+
+    `primary` is checked first and on its own, so everybody who holds it today passes
+    exactly as `require_permission(primary)` let them — nothing about their access
+    changes. `alternate` is a scoped grant (a Stock Transfer code over the warehouse's
+    QC, say): it only passes when `in_reach(db, request, user)` says this request's
+    document is one it covers. `in_reach` lives in the owning module's service, and
+    returns True for a route with no document in its path (a list, a create), where the
+    service itself narrows what the alternate may see or write.
+    `alternate` may be a tuple when more than one scoped grant opens the same read.
+    """
+    alternates = (alternate,) if isinstance(alternate, str) else tuple(alternate)
+
+    async def checker(
+        request: Request,
+        user=Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ):
+        from app.platform.rbac.service import get_user_permissions
+
+        perms = await get_user_permissions(
+            db, user, getattr(user, "active_position_id", None),
+        )
+        if primary in perms:
+            return user
+        if any(code in perms for code in alternates) and await in_reach(db, request, user):
+            # Said on the request's own session, so the service can narrow what a
+            # scoped grant sees (a list, a create) — see `via_scoped_grant`.
+            db.info.setdefault(_SCOPED_GRANTS, set()).add(primary)
+            return user
+        raise PermissionError_(f"Missing permission: {primary}")
+
+    return checker
+
+
+_SCOPED_GRANTS = "scoped_grants"
+
+
+def via_scoped_grant(db: AsyncSession, primary: str) -> bool:
+    """Did THIS request pass `primary`'s guard only through its scoped alternate?
+
+    Read off the session the guard wrote to, so a service called directly — a test, a
+    script, another service — is never narrowed: only a request that came in through
+    `require_permission_or` without holding `primary` is."""
+    return primary in db.info.get(_SCOPED_GRANTS, ())

@@ -21,6 +21,7 @@ from app.core.exceptions import (
     AppException, NotFoundError, PermissionError_, ValidationError,
 )
 from app.core.pagination import PageParams, paginate
+from app.core.dependencies import via_scoped_grant
 # inventory is the base module (imports nothing from app.modules), so calling it from
 # here is the legal direction. This is the §3 stock-availability fork.
 from app.modules.inventory import allocations, locations
@@ -309,6 +310,37 @@ async def _requester_context(db: AsyncSession, user) -> dict:
     }
 
 
+# ---------------- Stock Transfer's scoped grants (require_permission_or) ----------------
+# An STR is an indent, so its approval, serving and receipt run on this module's
+# endpoints. The `stock.transfer.*` codes reach them through
+# `core.dependencies.require_permission_or`; these say whether THIS request's document
+# is an STR. No document in the path → True, and the service narrows instead.
+
+async def _is_str(db: AsyncSession, indent_id) -> bool:
+    if indent_id is None:
+        return False
+    return await db.scalar(select(Indent.indent_type).where(
+        Indent.id == int(indent_id))) == IndentType.STR.value
+
+
+async def str_in_reach(db: AsyncSession, request, user) -> bool:
+    indent_id = request.path_params.get("indent_id")
+    return True if indent_id is None else await _is_str(db, indent_id)
+
+
+async def str_allocation_in_reach(db: AsyncSession, request, user) -> bool:
+    allocation_id = request.path_params.get("allocation_id")
+    if allocation_id is not None:
+        return await _is_str(db, await db.scalar(
+            select(Allocation.indent_id).where(Allocation.id == int(allocation_id))))
+    return await str_in_reach(db, request, user)
+
+
+async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
+    """Read-only option lists an STR form needs; already scoped to the login."""
+    return True
+
+
 async def _assert_can_raise_str(db: AsyncSession, user) -> None:
     """An STR is raised through the indent routes, so its own permission is checked
     here — the route's `indent.create` alone must not let anybody request a transfer."""
@@ -326,6 +358,10 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
 
     if indent_type == IndentType.STR.value:
         await _assert_can_raise_str(db, user)
+    elif via_scoped_grant(db, perms.INDENT_CREATE):
+        # The create route also admits `stock.transfer.request` (for an STR); that
+        # grant alone must never raise an ordinary indent.
+        raise PermissionError_("Missing permission: indent.create")
     if not data.items:
         raise ValidationError("Indent must have at least one item")
     _validate_item_quantities(data.items)
@@ -5833,6 +5869,10 @@ async def decide_allocation(db: AsyncSession, body, user):
     indent = await db.get(Indent, body.indent_id)
     if indent is None:
         raise NotFoundError(f"Indent {body.indent_id} not found")
+    # Reached through `stock.transfer.serve` alone: only an STR may be served.
+    if (indent.indent_type != IndentType.STR.value
+            and via_scoped_grant(db, perms.ALLOCATION_CREATE)):
+        raise PermissionError_("Missing permission: allocation.create")
     _ensure_allocation_eligible(indent)
     # The status gate says WHAT may be allocated; this says WHO. See
     # `_in_approval_block_reason` — an indent still climbing is only the current rung's
@@ -6083,7 +6123,12 @@ async def list_allocations(
     indent_id: int | None = None,
     user=None,
 ):
-    return await allocations.list_allocations(db, params, status, indent_id, user=user)
+    # Reached through `stock.transfer.serve` alone: the allocations serving STRs only.
+    only = None
+    if via_scoped_grant(db, perms.ALLOCATION_VIEW):
+        only = select(Indent.id).where(Indent.indent_type == IndentType.STR.value)
+    return await allocations.list_allocations(db, params, status, indent_id, user=user,
+                                              only_indent_ids=only)
 
 
 async def get_allocation(db: AsyncSession, allocation_id: int, user=None):

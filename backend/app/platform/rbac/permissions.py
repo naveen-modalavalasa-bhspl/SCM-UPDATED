@@ -75,6 +75,22 @@ STOCK_TRANSFER_APPROVE = "stock.transfer.approve"
 # Raising a Stock Transfer Request (STR) — asking another point to send stock here.
 # Its own code so a storekeeper can be let raise transfers without raising indents.
 STOCK_TRANSFER_REQUEST = "stock.transfer.request"
+# Seeing Inventory > Stock Transfer's lists — requests, orders and their history.
+# Its own code so the screen can be granted without all of Indents or all of stock.
+STOCK_TRANSFER_VIEW = "stock.transfer.view"
+# Stock Transfer's own grants over the legs it borrows from other modules — the STR's
+# approval, serving it, the material issue, its outward QC and the receipt. Each is
+# SCOPED: it passes only on an STR / STO document (`core.dependencies.
+# require_permission_or`), never on an ordinary indent or warehouse issue, and each
+# inherits from the code the leg used before, so nobody loses what they do today.
+STOCK_TRANSFER_STR_APPROVE = "stock.transfer.str_approve"
+STOCK_TRANSFER_SERVE = "stock.transfer.serve"
+STOCK_TRANSFER_SERVE_APPROVE = "stock.transfer.serve_approve"
+STOCK_TRANSFER_ISSUE = "stock.transfer.issue"
+STOCK_TRANSFER_ISSUE_POST = "stock.transfer.issue_post"
+STOCK_TRANSFER_QC = "stock.transfer.qc"
+STOCK_TRANSFER_QC_APPROVE = "stock.transfer.qc_approve"
+STOCK_TRANSFER_RECEIVE = "stock.transfer.receive"
 ALLOCATION_VIEW = "allocation.view"
 ALLOCATION_CREATE = "allocation.create"
 ALLOCATION_APPROVE = "allocation.approve"
@@ -333,7 +349,25 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
          "View stock valuation and cost"),
     Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
-         "Transfer stock between warehouses"),
+         "Raise a stock transfer order (STO) directly, without a request"),
+    Perm(STOCK_TRANSFER_VIEW, "inventory", "stock", "transfer_view",
+         "See stock transfer requests, orders and their history"),
+    Perm(STOCK_TRANSFER_STR_APPROVE, "inventory", "stock", "transfer_str_approve",
+         "Approve, reject or return a stock transfer request (STR)"),
+    Perm(STOCK_TRANSFER_SERVE, "inventory", "stock", "transfer_serve",
+         "Serve a stock transfer request — decide which point gives what"),
+    Perm(STOCK_TRANSFER_SERVE_APPROVE, "inventory", "stock", "transfer_serve_approve",
+         "Approve or reject how a stock transfer request is served"),
+    Perm(STOCK_TRANSFER_ISSUE, "inventory", "stock", "transfer_issue",
+         "Work a stock transfer's material issue — picks, batches, bays, submit"),
+    Perm(STOCK_TRANSFER_ISSUE_POST, "inventory", "stock", "transfer_issue_post",
+         "Approve and post a stock transfer's material issue (stock leaves the point)"),
+    Perm(STOCK_TRANSFER_QC, "inventory", "stock", "transfer_qc",
+         "Run the outward QC of a stock transfer"),
+    Perm(STOCK_TRANSFER_QC_APPROVE, "inventory", "stock", "transfer_qc_approve",
+         "Complete, approve or reject the outward QC of a stock transfer"),
+    Perm(STOCK_TRANSFER_RECEIVE, "inventory", "stock", "transfer_receive",
+         "Acknowledge a stock transfer on arrival (credits your point)"),
     Perm(STOCK_VIEW_SUBTREE, "inventory", "stock", "view_subtree",
          "View stock at every point reporting under you, not just your own"),
     Perm(STOCK_POINTS_MANAGE, "inventory", "stock", "points_manage",
@@ -545,6 +579,16 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     MOVEMENT_CREATE: STOCK_TRANSFER,
     # Everyone who could raise a transfer yesterday can request one today.
     STOCK_TRANSFER_REQUEST: STOCK_TRANSFER,
+    # The lists were read under `stock.view`; whoever read them keeps them.
+    STOCK_TRANSFER_VIEW: STOCK_VIEW,
+    STOCK_TRANSFER_STR_APPROVE: INDENT_APPROVE,
+    STOCK_TRANSFER_SERVE: ALLOCATION_CREATE,
+    STOCK_TRANSFER_SERVE_APPROVE: ALLOCATION_APPROVE,
+    STOCK_TRANSFER_ISSUE: ISSUE_CREATE,
+    STOCK_TRANSFER_ISSUE_POST: ISSUE_ISSUE,
+    STOCK_TRANSFER_QC: QC_OUTWARD_CREATE,
+    STOCK_TRANSFER_QC_APPROVE: QC_OUTWARD_APPROVE,
+    STOCK_TRANSFER_RECEIVE: INDENT_ACKNOWLEDGE,
     MOVEMENT_INSPECT: MOVEMENT_CREATE,
     MOVEMENT_COMPLETE: MOVEMENT_CREATE,
     # Splitting is a way of DOING the issue, not a new authority over it: whoever
@@ -824,7 +868,7 @@ INHERITS_GRANTS_FROM.update({
     # whose every button 403s, which is the failure this whole screen exists to end.
     page_view_code("pro_suppliers"): VENDOR_PORTAL_MANAGE,
     page_view_code("pro_demand_pool"): REQUISITION_VIEW,
-    page_view_code("wh_demand_pool"): STOCK_VIEW,
+    page_view_code("wh_demand_pool"): ISSUE_VIEW,   # the endpoint is gated on issue.view
     # Same screen, same audience: App Integrations reads the configuration and logs
     # behind the console anybody holding `integration.view` already opens, and every
     # route on it is gated by that code. Fail-closed would put a Settings row on the
