@@ -296,6 +296,8 @@ export interface RaiserTracking {
   carriage_mode?: string | null;
   carriage_label?: string | null;
   consignment_no?: string | null;
+  /** The dispatch's own document number (`.../DSP0001`), printed on the gate pass. */
+  gate_pass_no?: string | null;
   carrier_name?: string | null;
   lr_no?: string | null;
   docket_no?: string | null;

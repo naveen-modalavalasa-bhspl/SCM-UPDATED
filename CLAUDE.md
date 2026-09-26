@@ -419,11 +419,15 @@ accuses a stocked warehouse of being empty.
 ### A delivery is acknowledged in STOPS, and each stop keeps its own proof (2026-09-19)
 
 `/indents/acknowledgements/:id` is a journey, not a page of nested lists: the handover,
-then one stop per package, then sign-off. One stop is on screen at a time and the rail
-above says where you are — but nothing is locked, because a delivery is not a wizard
-and somebody re-checking package two is not doing anything wrong. The receipt action
-itself is unchanged and still SINGLE: one press, at the last stop, over everything
-counted at the stops behind it.
+then one stop per package. One stop is on screen at a time and the rail above says
+where you are — but nothing is locked, because a delivery is not a wizard and somebody
+re-checking package two is not doing anything wrong. The receipt action itself is
+unchanged and still SINGLE: one Acknowledge press in the footer, over everything
+counted at every stop, enabled only once EVERY package is finished (counted, each item
+photographed in that package, codes matched). There is no sign-off stop and no
+Back/Next (2026-09-26); the bill moved onto the first consignment stop. A load gated
+out with no transport request is named by its DSP number off the packing list, never
+by the indent's.
 
 **A photo belongs to the thing it is a photo OF.** The proof of a sealed load and the
 proof of what was inside a particular carton are different evidence, and they used to
@@ -474,9 +478,11 @@ for it, and adding one is a platform change for a fact only this screen has (rul
 The item id comes FIRST and is the only half the server reads
 (`service.ack_category_item`, anchored so `IMAGE-9` is never mistaken for line 9);
 the package half is the screen's, so the picture is filed against the carton it was
-taken in. **Matching on the id alone is load-bearing** — an item split across two
-packages is one item, and demanding a second shot when the second carton opens
-teaches a storekeeper that the second shot is a formality.
+taken in. The SERVER matches on the id alone; the SCREEN, since 2026-09-26, matches
+the whole scope — an item split over two cartons of five is photographed, and its
+codes matched, once per carton, because a photo taken while the first was open was
+ticking the second off before anybody had opened it. The screen is the stricter of
+the two, so the save can never refuse what the screen let through.
 
 `acknowledge_receipt` refuses a receipt whose lines are not all photographed and
 **names the ones that are not**; "1 item still needs a photo" on a delivery of eleven
@@ -484,18 +490,18 @@ sends somebody back through every carton to find out which. `add_receipt_attachm
 refuses an item scope naming a line that is not on this indent, for the same reason
 it refuses a malformed package scope: proof filed where nobody can find it again.
 
-What this replaced: **the package photo is no longer required** (`ProofPanel
-optional`) and the consignment photo says "(recommended)" out loud. Both are still
+What this replaced: **the package photo is no longer required** (`PhotoStrip
+optional`) and the consignment photo says "(recommended)" out loud. A step whose
+every task is optional is its own rail state (`StopState` `optional`, a dashed ring),
+never "unfinished". The BILL is the delivery's, not a carton's: it is added once, on
+the first consignment stop, unscoped, and every bill filed at any stop is listed there. Both are still
 there and still worth taking — they are what a claim against a carrier is argued from
 — but the gate moved onto the items, and a step that reads exactly like a required
 one and is not is the reason somebody stops believing any of them.
 
 On the screen it is `ItemProofStrip`, one per line in `PackageLineRow`: amber until
 there is a picture, green after, with the shots themselves at thumbnail size and one
-`capture="environment"` press that opens the rear camera on a phone. The sign-off
-slip draws each line's own photograph beside its quantity — the last look before
-signing is at what was actually photographed, and a tick beside a name never let
-anybody see that the wrong box had been shot.
+`capture="environment"` press that opens the rear camera on a phone.
 
 
 ### The outward leg (doc Phase D+E), under Logistics

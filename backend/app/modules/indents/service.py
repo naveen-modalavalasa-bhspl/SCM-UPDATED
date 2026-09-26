@@ -2709,7 +2709,7 @@ async def _resolve_journey_document_graph(
     returned frozen sets make duplicate paths harmless and keep later queries stable.
     """
     from app.modules.warehouse.models import (
-        Dispatch, DispatchItem, MaterialIssue, MaterialIssueLine, Picking,
+        Dispatch, DispatchItem, DispatchSource, MaterialIssue, MaterialIssueLine, Picking,
     )
 
     indent_items = tuple((await db.execute(
@@ -2796,6 +2796,12 @@ async def _resolve_journey_document_graph(
         dispatch_conditions.append(and_(
             func.upper(Dispatch.ref_type).in_(("ISSUE", "WH_ISSUE")),
             Dispatch.ref_id.in_(material_issue_ids),
+        ))
+        # A consignment carrying several issues names them in `out_dispatch_sources`
+        # and leaves `ref_id` empty.
+        dispatch_conditions.append(Dispatch.id.in_(
+            select(DispatchSource.dispatch_id)
+            .where(DispatchSource.issue_id.in_(material_issue_ids))
         ))
     if issue_nos:
         dispatch_conditions.append(Dispatch.ref_no.in_(issue_nos))

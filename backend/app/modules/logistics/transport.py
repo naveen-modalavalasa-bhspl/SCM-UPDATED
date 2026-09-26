@@ -637,6 +637,9 @@ def _raiser_view(doc: TransportRequest) -> dict:
         "carriage_mode": doc.carriage_mode,
         "carriage_label": _carriage_label(doc.carriage_mode),
         "consignment_no": doc.consignment_no,
+        # The dispatch's own number (the gate pass, `.../DSP0001`) — the paper the
+        # driver hands over, so the receiving site can match it against the screen.
+        "gate_pass_no": doc.gate_pass_no,
         "carrier_name": doc.carrier_name,
         # The tracking handle and the carrier's own page, pasted by the desk at
         # dispatch. A raiser who has the number does not need to be told it twice.
@@ -1588,6 +1591,9 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     data.carrier_id = chosen[0] if chosen else None
     doc = await create_tr(db, data, user)
     doc.mode = mode
+    # The press IS the dispatch, so its document is numbered here, not at the gate:
+    # the outcome panel and the pass print it the moment this returns.
+    await _assign_dispatch_no(db, doc)
     if manual_courier:
         # `carrier_name` already belongs to the transport record and is intentionally
         # not a FK.  Reusing it records the counter courier without creating a fake
@@ -2781,6 +2787,21 @@ def _text(value) -> str | None:
     return text or None
 
 
+async def _assign_dispatch_no(db: AsyncSession, doc: TransportRequest) -> None:
+    """Give the dispatch its own document number — the gate pass — off the DISPATCH
+    series (`BHS/104/2026-27/DSP0001`), unless the desk wrote one of its own.
+
+    CHANGED 2026-09-26. The pass used to borrow the consignment's number as
+    `GP/<consignment no>`, which was also the only reason the consignment itself was
+    drawing on the DSP series. The consignment is the warehouse's document and numbers
+    as CON now; the dispatch is logistics' document and this is its number. Issued once
+    and never replaced: a number already on the row is kept, whoever wrote it.
+    """
+    if not (doc.gate_pass_no or "").strip():
+        doc.gate_pass_no = await next_number(db, DocType.DISPATCH.value,
+                                             project=doc.project_name)
+
+
 async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
                    strict: bool = True) -> None:
     """It has left. Capture the tracking handle the field will be given.
@@ -2847,8 +2868,7 @@ async def _release(db: AsyncSession, doc: TransportRequest, data, user, *,
     # references. Keep the defaults deterministic so the dialog can show them before
     # release and a direct API call records the exact same values.
     reference = doc.consignment_no or doc.tr_no
-    if not (doc.gate_pass_no or "").strip():
-        doc.gate_pass_no = f"GP/{reference}"
+    await _assign_dispatch_no(db, doc)
     if (doc.mode == TransportMode.OWN_VEHICLE.value
             and not (doc.lr_no or "").strip()):
         doc.lr_no = f"LR/{reference}"

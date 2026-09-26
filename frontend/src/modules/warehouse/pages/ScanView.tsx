@@ -1,7 +1,8 @@
+import { useEffect, useState, type FormEvent } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Package, QrCode } from "lucide-react";
-import { Button, ErrorBanner, PageHeader, StatusPill } from "@/shared/components";
+import { ArrowRight, Package, QrCode, ScanLine } from "lucide-react";
+import { Button, ErrorBanner, Input, PageHeader, StatusPill } from "@/shared/components";
 import { Section } from "../components/DocumentMeta";
 import { scanCode } from "../api";
 import { fmtQty } from "../format";
@@ -30,6 +31,27 @@ export default function ScanView() {
     .split("/")
     .map((part) => { try { return decodeURIComponent(part); } catch { return part; } })
     .join("/");
+  const [scan, setScan] = useState(decoded);
+
+  useEffect(() => setScan(decoded), [decoded]);
+
+  const openScan = (event: FormEvent) => {
+    event.preventDefault();
+    let value = scan.trim();
+    if (!value) return;
+
+    // Some handhelds paste the whole QR URL into the focused field. Accept that as
+    // well as the short value printed under the barcode, so both devices behave the
+    // same way for the operator.
+    try {
+      const url = new URL(value);
+      const match = url.pathname.match(/\/(?:logistics|warehouse)\/scan\/(.+)$/);
+      if (match) value = decodeURIComponent(match[1]);
+    } catch {
+      // A normal consignment/package code is not a URL; it is already the value wanted.
+    }
+    nav(`/logistics/scan/${encodeURIComponent(value)}`);
+  };
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["wh-scan", decoded],
@@ -44,8 +66,8 @@ export default function ScanView() {
   return (
     <div>
       <PageHeader
-        eyebrow="Scanned label"
-        title={data?.title ?? decoded}
+        eyebrow="Logistics · Label lookup"
+        title={data?.title ?? (decoded ? "Reading label" : "Scan a consignment or package")}
         actions={
           data?.deep_link ? (
             <Button onClick={() => nav(data.deep_link!)}>
@@ -54,6 +76,29 @@ export default function ScanView() {
           ) : undefined
         }
       />
+
+      <form
+        onSubmit={openScan}
+        className="mb-4 flex flex-col gap-2 rounded-xl border border-line bg-content1 p-3 shadow-sm sm:flex-row sm:items-center"
+      >
+        <div className="relative min-w-0 flex-1">
+          <ScanLine className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-brand" />
+          <Input
+            value={scan}
+            onChange={(event) => setScan(event.target.value)}
+            placeholder="Scan QR/barcode or type the label code"
+            aria-label="Scan QR or barcode"
+            autoFocus={!decoded}
+            className="pl-10 font-mono"
+          />
+        </div>
+        <Button type="submit" disabled={!scan.trim()}>
+          Show details <ArrowRight className="h-4 w-4" />
+        </Button>
+        <p className="text-[11px] leading-snug text-muted sm:max-w-52">
+          Keep this box focused and press the scanner trigger. Most scanner guns send Enter automatically.
+        </p>
+      </form>
 
       {error ? <ErrorBanner error={error} /> : null}
       {isLoading ? <div className="py-16 text-center text-muted">Reading {decoded}...</div> : null}
@@ -67,7 +112,7 @@ export default function ScanView() {
             <div className="flex flex-wrap items-center gap-3">
               <span className="inline-flex items-center gap-2 rounded-lg border border-line bg-content1 px-3 py-2 text-sm font-semibold text-ink">
                 {data.kind === "PACKAGE" ? <Package className="h-4 w-4 text-brand" /> : <QrCode className="h-4 w-4 text-brand" />}
-                {data.kind}
+                {data.kind === "DISPATCH" ? "CONSIGNMENT" : data.kind}
               </span>
               {data.status ? <StatusPill status={data.status} /> : null}
               <span className="rounded-lg bg-content2 px-3 py-2 text-xs text-body">

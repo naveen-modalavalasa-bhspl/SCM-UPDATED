@@ -1594,6 +1594,10 @@ class IssueDetail(IssueRead):
 class DispatchItemWrite(BaseModel):
     id: int | None = None
     package_id: int | None = None
+    issue_id: int | None = None
+    issue_no: str | None = None
+    mr_id: int | None = None
+    mr_no: str | None = None
     indent_id: int | None = None
     item_id: int
     batch_id: int | None = None
@@ -1643,6 +1647,10 @@ class PackageWrite(BaseModel):
 
 
 class ConsignmentPackageItemWrite(BaseModel):
+    issue_id: int | None = None
+    issue_no: str | None = None
+    mr_id: int | None = None
+    mr_no: str | None = None
     indent_id: int | None = None
     item_id: int
     batch_id: int | None = None
@@ -1684,7 +1692,8 @@ class ConsignmentPackageWrite(BaseModel):
 
 
 class ConsignmentWrite(BaseModel):
-    issue_id: int
+    issue_id: int = 0
+    issue_ids: Annotated[list[int], BatchIds] = []
     dispatch_type: DispatchType = DispatchType.TRANSFER
     dispatch_date: date
     to_warehouse_id: int | None = None
@@ -1734,6 +1743,10 @@ class DispatchItemRead(_Read):
     dispatch_id: int
     line_no: int
     package_id: int | None = None
+    issue_id: int | None = None
+    issue_no: str | None = None
+    mr_id: int | None = None
+    mr_no: str | None = None
     indent_id: int | None = None
     indent_no: str | None = None
     item_id: int
@@ -1768,6 +1781,7 @@ class DispatchPackageRead(_Read):
     status: str
     packed_by_name: str | None = None
     packed_at: datetime | None = None
+    public_scan_token: str | None = None
 
 
 class DispatchEventRead(_Read):
@@ -1784,6 +1798,23 @@ class DispatchEventRead(_Read):
     notes: str | None = None
     recorded_by_id: int | None = None
     recorded_by_name: str | None = None
+
+
+class DispatchSourceRead(_Read):
+    id: int
+    dispatch_id: int
+    source_type: str
+    source_id: int
+    source_no: str | None = None
+    issue_id: int | None = None
+    issue_no: str | None = None
+    mr_id: int | None = None
+    mr_no: str | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    destination_warehouse_id: int | None = None
+    destination_warehouse_name: str | None = None
+    quantity: Decimal
 
 
 class DispatchRead(_Read):
@@ -1851,8 +1882,11 @@ class DispatchDetail(DispatchRead):
     items: list[DispatchItemRead] = []
     packages: list[DispatchPackageRead] = []
     events: list[DispatchEventRead] = []
+    sources: list[DispatchSourceRead] = []
     #: See IssueDetail.can_approve.
     can_approve: bool = False
+    #: Opaque signed capability printed in the QR; it reveals no application route.
+    public_scan_token: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -3558,6 +3592,7 @@ class PickingIssueSource(BaseModel):
 
 
 class IssueDispatchSourceItem(DispatchItemWrite):
+    indent_no: str | None = None
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
@@ -3576,7 +3611,9 @@ class IssueDispatchSourceItem(DispatchItemWrite):
 
 class IssueDispatchSource(BaseModel):
     issue_id: int
+    issue_ids: list[int] = []
     issue_no: str
+    issue_nos: list[str] = []
     warehouse_id: int
     project_id: int | None = None
     destination_office_id: int | None = None
@@ -3591,6 +3628,40 @@ class IssueDispatchSource(BaseModel):
     destination_warehouse_name: str | None = None
     destination_is_origin: bool = False
     items: list[IssueDispatchSourceItem] = []
+
+
+class RecommendedIssue(BaseModel):
+    """One issue inside a suggested grouped consignment, as the card lists it."""
+    issue_id: int
+    issue_no: str
+    issue_date: date | None = None
+    indent_no: str | None = None
+    mr_nos: list[str] = []
+    item_lines: int = 0
+    total_qty: Decimal = Decimal("0")
+
+
+class ConsignmentRecommendation(BaseModel):
+    """Issues that can travel together: same point out, same LIP/MDP in.
+
+    `headline` and `reason` are served so every screen words a suggestion the same way.
+    """
+    key: str
+    label: str
+    headline: str = ""
+    reason: str
+    issue_ids: list[int]
+    issue_nos: list[str]
+    issues: list[RecommendedIssue] = []
+    oldest_issue_date: date | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    destination_warehouse_id: int | None = None
+    destination_warehouse_name: str | None = None
+    destination_office_name: str | None = None
+    total_qty: Decimal
+    item_lines: int
+    mr_nos: list[str] = []
 
 
 class ReasonIn(BaseModel):

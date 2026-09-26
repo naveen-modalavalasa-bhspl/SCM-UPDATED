@@ -1094,7 +1094,9 @@ export function DispatchConfirmPage() {
             ...headerFromConsignment(detail),
             ...arrangement,
             lines: linesFromConsignment(detail),
-            gate_pass_no: gatePass.trim() || `GP/${detail.dispatch_no}`,
+            // Only when the desk typed one: left blank, the server issues the
+            // dispatch its own number off the DSP series.
+            ...(gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
             // A settled mode leaves on this press. Everything the release checks is
             // on this form, so sending it to READY and asking for a second "it has
             // left" only delayed the moment the receiving site can sign for it — and
@@ -1374,7 +1376,7 @@ export function DispatchConfirmPage() {
                 />
               </Field>
               )}
-              <Field label="Gate pass no" hint="Optional.">
+              <Field label="Gate pass no" hint="Leave blank to issue the next dispatch number (DSP).">
                 <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
               </Field>
             </div>

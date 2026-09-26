@@ -15,7 +15,7 @@
  * their vendor account to quote, accept, run and report a job.
  */
 export {
-  ConsignmentsScreen, ConsignmentFormScreen,
+  ConsignmentsScreen, ConsignmentFormScreen, ScanViewScreen,
 } from "@/modules/warehouse";
 
 /** Dispatch, in Logistics, is the one decision the floor actually makes: how does

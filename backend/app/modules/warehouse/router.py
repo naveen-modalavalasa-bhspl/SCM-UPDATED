@@ -4,7 +4,9 @@ Every function here is three to five lines: resolve the guard, call the service,
 return what it gave back. There is no `if` in this file — a branch here is business
 logic that has escaped `service.py`, where it can be tested without a request.
 
-Every endpoint is guarded by `Depends(require_permission(...))`. The codes come from
+Every employee endpoint is guarded by `Depends(require_permission(...))`. The signed
+public-label capability is the one deliberate exception: possession of its unguessable
+HMAC is the permission, its response is read-only, and it is rate limited. The codes come from
 `enums.py`, which mirrors `platform/rbac/permissions.py`; the ones marked NEW there do
 not exist yet, so those endpoints will 403 for everyone until the lead adds them and
 the seed is re-run. That is the correct failure mode — an ungranted permission closes
@@ -13,11 +15,12 @@ the door rather than leaving it open.
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core import throttle
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
@@ -1162,6 +1165,17 @@ async def scan(code: str, db: AsyncSession = Depends(get_db),
     return await service.scan(db, code)
 
 
+@router.get("/public-label/{token}", response_model=s.ScanResult)
+async def public_label(token: str, request: Request,
+                       db: AsyncSession = Depends(get_db)):
+    """Read-only current details for the holder of a signed physical label."""
+    await throttle.guard(
+        request, "warehouse-public-label", 120,
+        message="Too many labels were scanned from this device. Wait a minute and try again.",
+    )
+    return await service.public_label_scan(db, token)
+
+
 # ---------------------------------------------------------------------------
 # Acknowledgements owed by a requester
 # ---------------------------------------------------------------------------
@@ -1414,9 +1428,13 @@ async def picking_issue_source(picking_id: int = Query(...),
 
 
 @router.get("/options/issues", response_model=list[s.Option])
-async def issue_options(search: str | None = None, db: AsyncSession = Depends(get_db),
+async def issue_options(search: str | None = None,
+                        warehouse_id: int | None = None,
+                        destination_warehouse_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
                         _=Depends(require_permission(DISPATCH_CREATE))):
-    return await service.issue_options(db, search)
+    return await service.issue_options(db, search, warehouse_id=warehouse_id,
+                                       destination_warehouse_id=destination_warehouse_id)
 
 
 @router.get("/options/inspectable-issues", response_model=list[s.Option])
@@ -1438,6 +1456,21 @@ async def issue_dispatch_source(issue_id: int = Query(...),
                                 db: AsyncSession = Depends(get_db),
                                 _=Depends(require_permission(DISPATCH_CREATE))):
     return await service.issue_dispatch_source(db, issue_id)
+
+
+@router.get("/options/issue-dispatch-sources", response_model=s.IssueDispatchSource)
+async def issue_dispatch_sources(issue_ids: str = Query(...),
+                                 db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.issue_dispatch_sources(db, issue_ids)
+
+
+@router.get("/options/consignment-recommendations",
+            response_model=list[s.ConsignmentRecommendation])
+async def consignment_recommendations(limit: int = Query(8, ge=1, le=20),
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.consignment_recommendations(db, user, limit=limit)
 
 
 @router.get("/options/employees", response_model=list[s.Option])

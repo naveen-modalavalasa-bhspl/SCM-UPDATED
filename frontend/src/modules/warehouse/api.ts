@@ -18,6 +18,7 @@ import type {
   OutboundInspectionWrite,
   Issue,
   IssueDispatchSource,
+  ConsignmentRecommendation,
   IssueStockSource,
   UnitSupply,
   IssueWrite,
@@ -734,6 +735,11 @@ export interface ScanResult {
 /** Finds whatever a scanned barcode is — a package, a bin, a serial or a document. */
 export const scanCode = (code: string) => get<ScanResult>(`${BASE}/scan/${encodeURIComponent(code)}`);
 
+/** Public, read-only live details. The signed token is the permission; no employee
+ * session or application route is exposed to the label holder. */
+export const getPublicLabel = (token: string) =>
+  get<ScanResult>(`${BASE}/public-label/${encodeURIComponent(token)}`);
+
 /* ------------------------------------------------------------- attachments -- */
 
 export const listAttachments = (entity_type: string, entity_id: number) =>
@@ -926,8 +932,15 @@ export const getPickingIssueSource = (picking_id: number) =>
     items: IssueWrite["items"];
   }>(`${BASE}/options/picking-issue-source`, { picking_id });
 
-export const issueOptions = (search?: string) =>
-  get<Option[]>(`${BASE}/options/issues`, { search });
+export const issueOptions = (
+  search?: string,
+  route?: { warehouse_id?: number | null; destination_warehouse_id?: number | null },
+) =>
+  get<Option[]>(`${BASE}/options/issues`, {
+    search,
+    warehouse_id: route?.warehouse_id ?? undefined,
+    destination_warehouse_id: route?.destination_warehouse_id ?? undefined,
+  });
 
 /* Issues that still owe an outward check. Deliberately not `issueOptions`, which
    lists what may be DISPATCHED and so excludes every issue this screen inspects. */
@@ -939,6 +952,14 @@ export const returnableIssueOptions = (search?: string) =>
 
 export const getIssueDispatchSource = (issue_id: number) =>
   get<IssueDispatchSource>(`${BASE}/options/issue-dispatch-source`, { issue_id });
+
+export const getIssueDispatchSources = (issueIds: number[]) =>
+  get<IssueDispatchSource>(`${BASE}/options/issue-dispatch-sources`, {
+    issue_ids: issueIds.join(","),
+  });
+
+export const consignmentRecommendations = (limit = 8) =>
+  get<ConsignmentRecommendation[]>(`${BASE}/options/consignment-recommendations`, { limit });
 
 export const employeeOptions = (search?: string) => get<Option[]>(`${BASE}/options/employees`, { search });
 

@@ -1354,6 +1354,8 @@ export interface Dispatch {
   /** Detail read only. True when this consignment landed at a relay point that put it
    *  straight on the shelf — there is no GRN here, so the way on is the consignment. */
   can_forward?: boolean;
+  /** Signed read-only capability used only by the printed QR. */
+  public_scan_token?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;
   contact_phone?: string | null;
@@ -1395,6 +1397,7 @@ export interface Dispatch {
   items?: DispatchItem[];
   packages?: DispatchPackage[];
   events?: DispatchEvent[];
+  sources?: DispatchSource[];
   /** See Issue.can_approve — whose turn it is, not who holds the permission. */
   can_approve?: boolean;
 }
@@ -1405,6 +1408,10 @@ export interface DispatchItem {
   dispatch_id: number;
   line_no: number;
   package_id?: number | null;
+  issue_id?: number | null;
+  issue_no?: string | null;
+  mr_id?: number | null;
+  mr_no?: string | null;
   indent_id?: number | null;
   indent_no?: string | null;
   item_id: number;
@@ -1442,6 +1449,7 @@ export interface DispatchPackage {
   status: string;
   packed_by_name?: string | null;
   packed_at?: string | null;
+  public_scan_token?: string | null;
 }
 
 /** `out_dispatch_events` — the custody/cold-chain trail. */
@@ -1464,6 +1472,10 @@ export interface DispatchEvent {
 export interface DispatchItemWrite {
   id?: number;
   package_id?: number | null;
+  issue_id?: number | null;
+  issue_no?: string | null;
+  mr_id?: number | null;
+  mr_no?: string | null;
   indent_id?: number | null;
   item_id: number;
   batch_id?: number | null;
@@ -1513,6 +1525,10 @@ export interface PackageWrite {
 }
 
 export interface ConsignmentPackageItemWrite {
+  issue_id?: number | null;
+  issue_no?: string | null;
+  mr_id?: number | null;
+  mr_no?: string | null;
   indent_id?: number | null;
   item_id: number;
   item_code?: string | null;
@@ -1548,6 +1564,7 @@ export interface ConsignmentPackageWrite {
 
 export interface ConsignmentWrite {
   issue_id: number;
+  issue_ids?: number[];
   dispatch_type: string;
   dispatch_date: string;
   to_warehouse_id?: number | null;
@@ -1571,6 +1588,11 @@ export interface ConsignmentWrite {
 }
 
 export interface IssueDispatchSourceItem extends DispatchItemWrite {
+  indent_no?: string | null;
+  issue_id?: number | null;
+  issue_no?: string | null;
+  mr_id?: number | null;
+  mr_no?: string | null;
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
@@ -1588,7 +1610,9 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
 
 export interface IssueDispatchSource {
   issue_id: number;
+  issue_ids?: number[];
   issue_no: string;
+  issue_nos?: string[];
   warehouse_id: number;
   project_id?: number | null;
   destination_office_id?: number | null;
@@ -1603,6 +1627,55 @@ export interface IssueDispatchSource {
   destination_warehouse_name?: string | null;
   destination_is_origin?: boolean;
   items: IssueDispatchSourceItem[];
+}
+
+export interface DispatchSource {
+  id: number;
+  dispatch_id: number;
+  source_type: string;
+  source_id: number;
+  source_no?: string | null;
+  issue_id?: number | null;
+  issue_no?: string | null;
+  mr_id?: number | null;
+  mr_no?: string | null;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  quantity: number;
+}
+
+/** One issue inside a suggested grouped consignment. */
+export interface RecommendedIssue {
+  issue_id: number;
+  issue_no: string;
+  issue_date?: string | null;
+  indent_no?: string | null;
+  mr_nos: string[];
+  item_lines: number;
+  total_qty: number;
+}
+
+/** Issues that can travel together — same point out, same LIP/MDP in. `headline`
+ *  and `reason` are served, so every screen words a suggestion the same way. */
+export interface ConsignmentRecommendation {
+  key: string;
+  label: string;
+  headline: string;
+  reason: string;
+  issue_ids: number[];
+  issue_nos: string[];
+  issues: RecommendedIssue[];
+  oldest_issue_date?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  destination_office_name?: string | null;
+  total_qty: number;
+  item_lines: number;
+  mr_nos: string[];
 }
 
 export interface DispatchEventWrite {

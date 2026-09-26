@@ -87,7 +87,8 @@ export function TransportDetailPage() {
       docket_no: doc.docket_no || "",
       tracking_url: doc.tracking_url || "",
       eway_bill_no: doc.eway_bill_no || "",
-      gate_pass_no: doc.gate_pass_no || `GP/${reference}`,
+      // Blank, not a made-up GP/ number: the release issues the dispatch its own.
+      gate_pass_no: doc.gate_pass_no || "",
     });
     // What the booking recorded, brought forward so the desk edits an answer rather
     // than retyping one. Which id was filled is itself which kind of person it was.

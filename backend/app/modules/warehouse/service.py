@@ -14,6 +14,9 @@ Snapshot columns (`item_code`, `item_name`, `uom_code`, every `*_name`) are writ
 creation from the masters and never refreshed, so a document keeps saying what things
 were called when it was raised.
 """
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -30,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.database import SessionLocal
+from app.core.config import settings
 
 from app.core.exceptions import AppException, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
@@ -41,8 +45,8 @@ from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
 from app.modules.warehouse.enums import (
-    DEAD_ISSUE_STATUSES,
-    DispatchEventType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
+    DEAD_ISSUE_STATUSES, SINGLE_ISSUE_REF_TYPES,
+    ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
     PickingStatus, PutawayStatus, PutawayType, QcStatus, ReceiptStatus, ReceiptType,
@@ -72,7 +76,7 @@ from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
 from app.shared.enums import (
     ApprovalAction, AuditAction, DespatchNoteStatus, DocType, IndentStatus,
-    InstanceStatus, POStatus,
+    InstanceStatus, MRStatus, POStatus,
     ReservationStatus,
     RefType as InventoryRefType, StockDirection, UomClass,
 )
@@ -1962,9 +1966,12 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
     # Which documents the units in this consignment are travelling under. Both, and
     # in this order: the goods were claimed against the issue when one was posted, and
     # against the consignment itself when it was gated out directly.
-    markers = (_shipped_unit_marker("dispatch", dispatch.id),)
-    if dispatch.ref_type == WarehouseDocType.WH_ISSUE.value and dispatch.ref_id:
-        markers += (_shipped_unit_marker("issue", dispatch.ref_id),)
+    # A grouped consignment carries several issues, so its units may be wearing any
+    # of their markers.
+    markers = (_shipped_unit_marker("dispatch", dispatch.id),) + tuple(
+        _shipped_unit_marker("issue", issue_id)
+        for issue_id in await _dispatch_issue_ids(db, dispatch)
+    )
 
     # Credit only what actually arrived; a shortage stays visible on the consignment
     # instead of becoming phantom stock at the destination.
@@ -6505,14 +6512,7 @@ async def _raise_consignment_for_picking(
     if picking.status != PickingStatus.COMPLETED.value:
         return None      # a short pick cannot pack to the issued quantity
 
-    existing = await db.scalar(
-        select(m.Dispatch.id).where(
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
-            m.Dispatch.ref_id == picking.ref_id,
-            m.Dispatch.status != DispatchStatus.CANCELLED.value,
-        ).limit(1)
-    )
-    if existing is not None:
+    if await _live_consignment_for_issue(db, picking.ref_id) is not None:
         return None
 
     issue = await get_issue(db, picking.ref_id)
@@ -6645,6 +6645,35 @@ async def _project_name(db: AsyncSession, project_id: int | None) -> str | None:
     from app.shared.models.master import Project
     project = await db.get(Project, project_id) if project_id else None
     return project.name if project else None
+
+
+async def _consignment_project(
+    db: AsyncSession, issue: m.MaterialIssue | None, project_id: int | None = None,
+) -> tuple[int | None, str | None]:
+    """The project a consignment is filed under: the one named on it, else the issue's,
+    else the issue's indent's — which is where the ISSUE number itself takes it from.
+
+    An issue raised off an indent carries no project of its own, so reading only the
+    issue stamped `BHS/NA/...` on a consignment whose issue reads `BHS/104/...`, left
+    the consignment's own project blank, and every shipment raised from it (its TR and
+    its dispatch number) inherited the blank.
+    """
+    from app.modules.indents.models import Indent
+
+    project_id = project_id or getattr(issue, "project_id", None)
+    if project_id:
+        return project_id, await _project_name(db, project_id)
+    if issue is not None and issue.indent_id:
+        indent = await db.get(Indent, issue.indent_id)
+        if indent is not None and indent.project_id:
+            return indent.project_id, (indent.project_name
+                                       or await _project_name(db, indent.project_id))
+    return None, None
+
+
+async def _consignment_no(db: AsyncSession, project_name: str | None = None) -> str:
+    """A consignment's number, from its own CONSIGNMENT series (`.../CON0001`)."""
+    return await next_number(db, WarehouseDocType.CONSIGNMENT.value, project=project_name)
 
 
 async def _issue_snapshot_values(
@@ -8084,6 +8113,20 @@ async def _receiver_confirmed(db: AsyncSession, issue: m.MaterialIssue) -> bool:
     )
 
 
+async def _dispatch_confirmation_caps(db: AsyncSession,
+                                      issue_ids: list[int]) -> dict[int, Decimal]:
+    """`_issue_confirmation_caps` summed over every issue a grouped consignment carries."""
+    total: dict[int, Decimal] = defaultdict(lambda: ZERO)
+    issues = (await db.execute(
+        select(m.MaterialIssue).options(selectinload(m.MaterialIssue.items))
+        .where(m.MaterialIssue.id.in_(issue_ids))
+    )).scalars().all()
+    for row in issues:
+        for item_id, qty in (await _issue_confirmation_caps(db, row)).items():
+            total[item_id] += _d(qty)
+    return dict(total)
+
+
 async def _issue_confirmation_caps(db: AsyncSession, issue: m.MaterialIssue) -> dict[int, Decimal]:
     """How much of THIS issue's quantities the requester has confirmed, per item.
 
@@ -8333,9 +8376,10 @@ async def _decorate_dispatch_destination(
     db: AsyncSession,
     dispatch: m.Dispatch,
 ) -> m.Dispatch:
-    issue = None
-    if (dispatch.ref_type or "").upper() in {"ISSUE", WarehouseDocType.WH_ISSUE.value} and dispatch.ref_id:
-        issue = await db.get(m.MaterialIssue, dispatch.ref_id)
+    # Every issue on a grouped consignment is bound for the same point
+    # (`_consignment_destination`), so the first one answers for all of them.
+    issue_ids = await _dispatch_issue_ids(db, dispatch)
+    issue = await db.get(m.MaterialIssue, issue_ids[0]) if issue_ids else None
     office_id, office_name = await _issue_destination(db, issue)
     setattr(dispatch, "destination_office_id", office_id)
     setattr(dispatch, "destination_office_name", office_name)
@@ -8668,18 +8712,22 @@ async def can_forward_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> bool:
         return False
     # Nothing was credited here unless the goods landed on our own shelf, and a forward
     # off stock that was never posted builds a draft that dies at "0 available".
-    if not _lands_on_internal_shelf(dispatch) or not dispatch.ref_id:
+    if not _lands_on_internal_shelf(dispatch):
         return False
-    if (dispatch.ref_type or "").upper() not in {"ISSUE", WarehouseDocType.WH_ISSUE.value}:
+    issue_ids = await _dispatch_issue_ids(db, dispatch)
+    if not issue_ids:
         return False
     if await requires_inward(db, dispatch.to_warehouse_id):
         return False
     if await _inward_receipt_for_dispatch(db, dispatch.id) is not None:
         return False
-    issue = await db.get(m.MaterialIssue, dispatch.ref_id)
-    if issue is None:
-        return False
-    return not await _is_final_delivery_leg(db, issue, dispatch)
+    # Forward when ANY issue on it still has a leg to go: `forward_dispatch` builds
+    # one onward draft per indent, so issues that already ended here simply add none.
+    for issue_id in issue_ids:
+        issue = await db.get(m.MaterialIssue, issue_id)
+        if issue is not None and not await _is_final_delivery_leg(db, issue, dispatch):
+            return True
+    return False
 
 
 async def forward_dispatch(db: AsyncSession, dispatch_id: int, user) -> list[m.MaterialIssue]:
@@ -10282,8 +10330,7 @@ async def _dispatch_for_issue(db: AsyncSession, issue_id: int) -> m.Dispatch | N
     # and a lazy load on an async session raises MissingGreenlet.
     return (await db.execute(
         select(m.Dispatch).options(selectinload(m.Dispatch.items)).where(
-            m.Dispatch.ref_type == WarehouseDocType.WH_ISSUE.value,
-            m.Dispatch.ref_id == issue_id,
+            _carries_issue(issue_id),
             m.Dispatch.status != DispatchStatus.CANCELLED.value,
         ).limit(1)
     )).scalar_one_or_none()
@@ -10400,17 +10447,30 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
         DispatchStatus.DISPATCHED.value, DispatchStatus.IN_TRANSIT.value,
         DispatchStatus.DELIVERED.value,
     ):
-        dispatch.status = DispatchStatus.ACKNOWLEDGED.value
-        dispatch.acknowledged_by_name = issue.acknowledged_by_name
-        dispatch.acknowledged_at = issue.acknowledged_at
-        dispatch.delivered_at = dispatch.delivered_at or issue.acknowledged_at
+        carried = await _dispatch_issue_ids(db, dispatch)
+        grouped = len(carried) > 1
         # The requester has already confirmed every quantity carried by this issue
         # (_receiver_confirmed is the caller's guard). Keep the linked consignment's
         # line evidence in sync when the warehouse signs off through the issue page —
         # without it `out_dispatch_items.delivered_qty` stays 0 forever, and the
         # Journey's Delivery phase sits PENDING on an indent that is already closed.
-        for line in dispatch.items:
+        # Only THIS issue's lines: on a grouped consignment the other issues' goods are
+        # somebody else's confirmation, still to come.
+        for line in _lines_for_issue(dispatch, issue.id, grouped=grouped):
             line.delivered_qty = _d(line.quantity)
+        others_open = grouped and bool(await db.scalar(
+            select(func.count(m.MaterialIssue.id)).where(
+                m.MaterialIssue.id.in_([issue_id for issue_id in carried
+                                        if issue_id != issue.id]),
+                m.MaterialIssue.status.in_(
+                    (IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value)),
+            )
+        ))
+        if not others_open:
+            dispatch.status = DispatchStatus.ACKNOWLEDGED.value
+            dispatch.acknowledged_by_name = issue.acknowledged_by_name
+            dispatch.acknowledged_at = issue.acknowledged_at
+            dispatch.delivered_at = dispatch.delivered_at or issue.acknowledged_at
 
     # Signing here is the same physical event as signing on the consignment screen, so
     # it owes the same inward movement. Without this the LIP storekeeper confirmed his
@@ -10437,7 +10497,8 @@ _STAMPABLE_DISPATCH_STATUSES = (
 
 
 def _stamp_confirmed_delivery(dispatch: m.Dispatch,
-                              caps: dict[int, Decimal]) -> bool:
+                              caps: dict[int, Decimal],
+                              lines: list | None = None) -> bool:
     """Book what the requester has confirmed onto the consignment's own lines.
 
     `credit_arrival` reads `delivered_qty` — it credits what ARRIVED, never what was
@@ -10461,7 +10522,9 @@ def _stamp_confirmed_delivery(dispatch: m.Dispatch,
     """
     remaining = {item_id: _d(qty) for item_id, qty in caps.items()}
     stamped = False
-    for line in dispatch.items:
+    # `lines` narrows it to one issue's lines on a grouped consignment, where the same
+    # item can be packed for two issues and only one of them is being confirmed.
+    for line in (dispatch.items if lines is None else lines):
         left = remaining.get(line.item_id, ZERO)
         if left <= ZERO:
             continue
@@ -10538,14 +10601,23 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         dispatch = await _dispatch_for_issue(db, issue.id)
         if dispatch is None:
             continue
+        carried = await _dispatch_issue_ids(db, dispatch)
+        grouped = len(carried) > 1
         # The confirmed units are the ones that arrived; write them onto the
         # consignment before crediting, because `credit_arrival` credits
         # `delivered_qty` and on a partial receipt nobody had written it yet.
         # See `_stamp_confirmed_delivery`.
         if (dispatch.status in _STAMPABLE_DISPATCH_STATUSES
-                and _stamp_confirmed_delivery(dispatch, caps)):
+                and _stamp_confirmed_delivery(
+                    dispatch, caps,
+                    _lines_for_issue(dispatch, issue.id, grouped=grouped))):
             dispatch.delivered_at = dispatch.delivered_at or utcnow()
-        await credit_arrival(db, dispatch, user, cap_by_item=caps)
+        # The credit is a running total over the WHOLE consignment, so on a grouped one
+        # its ceiling is what has been confirmed across every issue it carries — this
+        # issue's caps alone would hold back units another issue already had credited.
+        await credit_arrival(db, dispatch, user,
+                             cap_by_item=(await _dispatch_confirmation_caps(db, carried)
+                                          if grouped else caps))
 
     signed += await _sign_transport_for_indent(
         db, indent_id, user, condition=condition, remarks=remarks,
@@ -10820,6 +10892,8 @@ def _validate_issue_dispatch(dispatch: m.Dispatch, issue: m.MaterialIssue) -> No
         issued[line.item_id] = issued.get(line.item_id, ZERO) + _d(line.issued_qty)
     dispatched: dict[int, Decimal] = {}
     for line in dispatch.items:
+        if line.issue_id is not None and line.issue_id != issue.id:
+            continue
         dispatched[line.item_id] = dispatched.get(line.item_id, ZERO) + _d(line.quantity)
     for item_id, qty in dispatched.items():
         if qty > issued.get(item_id, ZERO):
@@ -10842,7 +10916,10 @@ async def _apply_dispatch_lines(db: AsyncSession, dispatch: m.Dispatch,
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
         dispatch.items.append(m.DispatchItem(
-            line_no=index, package_id=line.package_id, indent_id=line.indent_id,
+            line_no=index, package_id=line.package_id,
+            issue_id=line.issue_id, issue_no=line.issue_no,
+            mr_id=line.mr_id, mr_no=line.mr_no,
+            indent_id=line.indent_id,
             item_id=item.id, item_code=item.code, item_name=item.name, uom_code=item.uom_code,
             # 0, not NULL — out_dispatch_items.batch_id is NOT NULL DEFAULT 0 live.
             batch_id=line.batch_id or m.NO_BATCH,
@@ -10943,18 +11020,29 @@ async def _issue_available_qty_and_serials(
 async def _apply_consignment_packages(
     db: AsyncSession,
     dispatch: m.Dispatch,
-    issue: m.MaterialIssue,
+    issues: list[m.MaterialIssue],
     packages: list[s.ConsignmentPackageWrite],
     user,
+    mr_by_issue: dict[int, dict] | None = None,
 ) -> None:
     if not packages:
         raise ValidationError("Add at least one package before saving the consignment")
 
     package_numbers: set[str] = set()
     barcodes: set[str] = set()
-    packed_by_key: dict[tuple[int, int], Decimal] = {}
+    packed_by_key: dict[tuple[int, int, int], Decimal] = {}
     used_serials: set[str] = set()
-    issued_by_key, issued_serials = await _issue_available_qty_and_serials(db, issue)
+    issues_by_id = {issue.id: issue for issue in issues}
+    if len(issues_by_id) != len(issues):
+        raise ValidationError("The same material issue was selected more than once")
+    default_issue_id = issues[0].id if len(issues) == 1 else None
+    issued_by_key: dict[tuple[int, int, int], Decimal] = {}
+    issued_serials_by_issue: dict[int, dict[str, m.SerialNumber]] = {}
+    for source_issue in issues:
+        line_qty, line_serials = await _issue_available_qty_and_serials(db, source_issue)
+        for (item_id, batch_id), qty in line_qty.items():
+            issued_by_key[(source_issue.id, item_id, batch_id)] = qty
+        issued_serials_by_issue[source_issue.id] = line_serials
 
     existing_barcode_stmt = select(m.DispatchPackage.barcode).join(m.Dispatch).where(
         m.DispatchPackage.barcode.isnot(None),
@@ -11015,6 +11103,13 @@ async def _apply_consignment_packages(
         await db.flush()
 
         for item_data in package_data.items:
+            source_issue_id = item_data.issue_id or default_issue_id
+            if source_issue_id is None or source_issue_id not in issues_by_id:
+                raise ValidationError(
+                    f"{package_no}: item {item_data.item_id} does not say which "
+                    "of the selected material issues it was packed from"
+                )
+            source_issue = issues_by_id[source_issue_id]
             item = await _item_snapshot(db, item_data.item_id)
             qty = _d(item_data.quantity)
             if qty <= ZERO:
@@ -11040,25 +11135,33 @@ async def _apply_consignment_packages(
                         f"{package_no}: select exactly {int(qty)} serials for {item.code}"
                     )
 
-            key = (item.id, batch_id)
+            key = (source_issue.id, item.id, batch_id)
             packed_by_key[key] = packed_by_key.get(key, ZERO) + qty
             if packed_by_key[key] > issued_by_key.get(key, ZERO):
                 raise ValidationError(
                     f"{item.code}: packed quantity {packed_by_key[key]} exceeds "
-                    f"{issued_by_key.get(key, ZERO)} issued for this batch"
+                    f"{issued_by_key.get(key, ZERO)} issued for this batch on "
+                    f"{source_issue.issue_no}"
                 )
 
             batch = await db.get(m.Batch, batch_id) if batch_id != m.NO_BATCH else None
             rate = _d(item_data.rate)
+            # Derived here, never taken from the client: the MR a line is filed
+            # under is a trace people read, and a posted value would let any form
+            # file goods against any request.
+            source_mr = (mr_by_issue or {}).get(source_issue.id) or {}
+            source_mr_id = source_mr.get("mr_id")
+            source_mr_no = source_mr.get("mr_no")
             if is_serialized:
                 for serial in serials:
                     lowered = serial.lower()
                     if lowered in used_serials:
                         raise ValidationError(f"Serial {serial} is already packed")
+                    issued_serials = issued_serials_by_issue[source_issue.id]
                     serial_row = issued_serials.get(lowered)
                     if not serial_row or serial_row.item_id != item.id:
                         raise ValidationError(
-                            f"Serial {serial} is not issued against {issue.issue_no}"
+                            f"Serial {serial} is not issued against {source_issue.issue_no}"
                         )
                     if batch_id != m.NO_BATCH and serial_row.batch_id != batch_id:
                         raise ValidationError(
@@ -11068,8 +11171,12 @@ async def _apply_consignment_packages(
                     dispatch.items.append(m.DispatchItem(
                         line_no=line_no,
                         package_id=package.id,
-                        indent_id=item_data.indent_id or issue.indent_id,
-                        indent_no=issue.indent_no,
+                        issue_id=source_issue.id,
+                        issue_no=source_issue.issue_no,
+                        mr_id=source_mr_id,
+                        mr_no=source_mr_no,
+                        indent_id=item_data.indent_id or source_issue.indent_id,
+                        indent_no=source_issue.indent_no,
                         item_id=item.id,
                         item_code=item.code,
                         item_name=item.name,
@@ -11094,8 +11201,12 @@ async def _apply_consignment_packages(
                 dispatch.items.append(m.DispatchItem(
                     line_no=line_no,
                     package_id=package.id,
-                    indent_id=item_data.indent_id or issue.indent_id,
-                    indent_no=issue.indent_no,
+                    issue_id=source_issue.id,
+                    issue_no=source_issue.issue_no,
+                    mr_id=source_mr_id,
+                    mr_no=source_mr_no,
+                    indent_id=item_data.indent_id or source_issue.indent_id,
+                    indent_no=source_issue.indent_no,
                     item_id=item.id,
                     item_code=item.code,
                     item_name=item.name,
@@ -11117,10 +11228,12 @@ async def _apply_consignment_packages(
     for key, issued_qty in issued_by_key.items():
         packed_qty = packed_by_key.get(key, ZERO)
         if packed_qty != issued_qty:
-            item = await db.get(Item, key[0])
-            item_code = item.code if item else f"item {key[0]}"
+            source_issue = issues_by_id[key[0]]
+            item = await db.get(Item, key[1])
+            item_code = item.code if item else f"item {key[1]}"
             raise ValidationError(
-                f"{item_code}: packed quantity {packed_qty} must equal issued quantity {issued_qty}"
+                f"{source_issue.issue_no} / {item_code}: packed quantity {packed_qty} "
+                f"must equal issued quantity {issued_qty}"
             )
 
     _dispatch_totals(dispatch)
@@ -11196,7 +11309,10 @@ async def list_consignments(db: AsyncSession, params: PageParams, *, status: str
             owner_col=m.Dispatch.created_by_id,
             project_col=m.Dispatch.project_id,
         )).where(
-        m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+        # Every ref_type a consignment is written under — MULTI_ISSUE included, or a
+        # consignment bundling several issues is packed and then never listed, so
+        # neither this board nor the Dispatch queue built on it can find it again.
+        m.Dispatch.ref_type.in_([kind.value for kind in ConsignmentRefType]),
         m.Dispatch.packages.any(),
     )
     # Comma-separated, because "ready to go out" is not one status. A consignment
@@ -11226,12 +11342,16 @@ async def list_consignments(db: AsyncSession, params: PageParams, *, status: str
 
 async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispatch:
     dispatch = await _load(db, m.Dispatch, dispatch_id, "Dispatch",
-                           m.Dispatch.items, m.Dispatch.packages, m.Dispatch.events)
+                           m.Dispatch.items, m.Dispatch.packages, m.Dispatch.events,
+                           m.Dispatch.sources)
     dispatch = await _decorate_can_approve(
         db, dispatch, WarehouseDocType.DISPATCH.value, user)
     # Detail only: the relay hop needs the Forward button on the consignment it just
     # signed for, and answering this costs three queries — too much for a 50-row board.
     setattr(dispatch, "can_forward", await can_forward_dispatch(db, dispatch))
+    setattr(dispatch, "public_scan_token", public_label_token("d", dispatch.id))
+    for package in dispatch.packages:
+        setattr(package, "public_scan_token", public_label_token("p", package.id))
     return await _decorate_dispatch_destination(db, dispatch)
 
 
@@ -11254,6 +11374,277 @@ def _guard_expected_delivery(dispatch_date, expected_delivery) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Which material issues a consignment carries
+# ---------------------------------------------------------------------------
+# A consignment built from ONE issue names it on `ref_id` and lists it in
+# `out_dispatch_sources`; one carrying SEVERAL issues for the same stocking point
+# leaves `ref_id` NULL and lists them only there. Rows written before the table
+# existed have `ref_id` alone. So every reader asks through `_carries_issue` /
+# `_dispatch_issue_ids` and never through `ref_id` by itself — read `ref_id` alone and
+# a grouped consignment silently carries nothing: gate-out books the stock out a
+# second time, the issues never reach DISPATCHED, acknowledgement never closes the
+# indents, and the requester's delivery screen never finds the parcel.
+
+
+def _carries_issue(issue_id):
+    """SQL: the `m.Dispatch` in scope carries this issue.
+
+    `issue_id` may be a value or a column of an enclosing query (correlated).
+    """
+    return or_(
+        and_(m.Dispatch.ref_type.in_(SINGLE_ISSUE_REF_TYPES), m.Dispatch.ref_id == issue_id),
+        # `correlate_except`, not auto-correlation: nested inside `_relayed_onward` the
+        # issue column belongs to a query two levels out, and auto-correlation only
+        # looks one level up — it pulled the table in as a cross join instead.
+        select(m.DispatchSource.id).where(
+            m.DispatchSource.dispatch_id == m.Dispatch.id,
+            m.DispatchSource.issue_id == issue_id,
+        ).correlate_except(m.DispatchSource).exists(),
+    )
+
+
+async def _live_consignment_for_issue(db: AsyncSession, issue_id: int,
+                                      *, exclude_dispatch_id: int | None = None) -> str | None:
+    """The number of the non-cancelled consignment already carrying this issue."""
+    return await db.scalar(
+        select(m.Dispatch.dispatch_no).where(
+            m.Dispatch.id != (exclude_dispatch_id or 0),
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+            _carries_issue(issue_id),
+        ).limit(1)
+    )
+
+
+async def _issue_ids_in_live_consignments(db: AsyncSession) -> set[int]:
+    """Every issue some non-cancelled consignment already carries, either way."""
+    single = (await db.execute(
+        select(m.Dispatch.ref_id).where(
+            m.Dispatch.ref_type.in_(SINGLE_ISSUE_REF_TYPES),
+            m.Dispatch.ref_id.isnot(None),
+            m.Dispatch.status != DispatchStatus.CANCELLED.value,
+        )
+    )).scalars().all()
+    grouped = (await db.execute(
+        select(m.DispatchSource.issue_id)
+        .join(m.Dispatch, m.Dispatch.id == m.DispatchSource.dispatch_id)
+        .where(m.DispatchSource.issue_id.isnot(None),
+               m.Dispatch.status != DispatchStatus.CANCELLED.value)
+    )).scalars().all()
+    return {int(value) for value in (*single, *grouped)}
+
+
+async def _dispatch_issue_ids(db: AsyncSession, dispatch: m.Dispatch) -> list[int]:
+    """Every material issue this consignment carries, in the order they were added."""
+    ids: list[int] = []
+    if (dispatch.ref_type or "").upper() in SINGLE_ISSUE_REF_TYPES and dispatch.ref_id:
+        ids.append(int(dispatch.ref_id))
+    for issue_id in (await db.execute(
+        select(m.DispatchSource.issue_id).where(
+            m.DispatchSource.dispatch_id == dispatch.id,
+            m.DispatchSource.issue_id.isnot(None),
+        ).order_by(m.DispatchSource.id)
+    )).scalars():
+        if int(issue_id) not in ids:
+            ids.append(int(issue_id))
+    return ids
+
+
+async def _dispatch_issues(db: AsyncSession, dispatch: m.Dispatch) -> list[m.MaterialIssue]:
+    """The issues themselves, lines loaded.
+
+    Raises rather than skipping an id that no longer resolves: gate-out reads "no
+    issues" as "nothing posted the stock yet" and would book it out again.
+    """
+    ids = await _dispatch_issue_ids(db, dispatch)
+    if not ids:
+        return []
+    rows = {
+        row.id: row
+        for row in (await db.execute(
+            select(m.MaterialIssue)
+            .options(selectinload(m.MaterialIssue.items))
+            .where(m.MaterialIssue.id.in_(ids))
+        )).scalars().all()
+    }
+    missing = [issue_id for issue_id in ids if issue_id not in rows]
+    if missing:
+        raise NotFoundError(
+            f"{dispatch.dispatch_no} lists material issue(s) {missing} that no longer exist")
+    return [rows[issue_id] for issue_id in ids]
+
+
+def _lines_for_issue(dispatch: m.Dispatch, issue_id: int, *, grouped: bool) -> list:
+    """The consignment lines packed from this issue.
+
+    A line written before lines carried `issue_id` belongs to the consignment's one
+    issue; on a grouped consignment every line names its issue, so an unnamed one is
+    nobody's.
+    """
+    return [
+        line for line in dispatch.items
+        if line.issue_id == issue_id or (line.issue_id is None and not grouped)
+    ]
+
+
+def _consignment_issue_ids(data: s.ConsignmentWrite) -> list[int]:
+    ids: list[int] = []
+    if data.issue_id:
+        ids.append(data.issue_id)
+    ids.extend(data.issue_ids or [])
+    unique = list(dict.fromkeys(issue_id for issue_id in ids if issue_id))
+    if not unique:
+        raise ValidationError("Select at least one material issue for the consignment")
+    if len(unique) > MAX_ISSUES_PER_CONSIGNMENT:
+        raise ValidationError(
+            f"One consignment can carry at most {MAX_ISSUES_PER_CONSIGNMENT} material issues")
+    return unique
+
+
+async def _issue_mr_sources(db: AsyncSession, issue: m.MaterialIssue) -> list[dict]:
+    """The material requests raised for the lines this issue serves — a trace for people.
+
+    MR is the buying trail behind an indent; the issue is what physically ships. The
+    link is soft (same indent, same item), so it is shown, never checked against.
+    """
+    if not issue.indent_id:
+        return []
+    from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
+
+    item_ids = {line.item_id for line in issue.items}
+    if not item_ids:
+        return []
+    rows = (await db.execute(
+        select(MaterialRequest.id, MaterialRequest.mr_no)
+        .join(MaterialRequestItem, MaterialRequestItem.mr_id == MaterialRequest.id)
+        .where(
+            MaterialRequest.indent_id == issue.indent_id,
+            MaterialRequest.status.notin_((MRStatus.REJECTED.value, MRStatus.CANCELLED.value)),
+            MaterialRequestItem.item_id.in_(item_ids),
+        )
+        .group_by(MaterialRequest.id, MaterialRequest.mr_no)
+        .order_by(MaterialRequest.id)
+    )).all()
+    return [{"mr_id": row[0], "mr_no": row[1]} for row in rows]
+
+
+def _single_mr(mr_rows: list[dict]) -> dict:
+    """The one MR behind an issue, or nothing when there are none or several."""
+    return mr_rows[0] if len(mr_rows) == 1 else {}
+
+
+def _multi_issue_ref_no(issues: list[m.MaterialIssue]) -> str:
+    """`ISS/001 +2 more` — what a list screen shows for a grouped consignment."""
+    return f"{issues[0].issue_no} +{len(issues) - 1} more"[:50]
+
+
+async def _consignment_issues(
+    db: AsyncSession,
+    data: s.ConsignmentWrite,
+    *,
+    exclude_dispatch_id: int | None = None,
+) -> list[m.MaterialIssue]:
+    ids = _consignment_issue_ids(data)
+    # Locked for the rest of the transaction: two storekeepers bundling the same issue
+    # into two consignments at the same moment would otherwise both pass the check
+    # below. Nothing else can stop it — the rule spans two tables.
+    await db.execute(
+        select(m.MaterialIssue.id).where(m.MaterialIssue.id.in_(ids)).with_for_update()
+    )
+    issues: list[m.MaterialIssue] = []
+    for issue_id in ids:
+        issue = await get_issue(db, issue_id)
+        if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
+            raise ValidationError(
+                f"{issue.issue_no}: only a posted outward material issue can become a consignment")
+        if issue.qc_status == QcStatus.PENDING.value:
+            raise ValidationError(f"{issue.issue_no} is pending outward quality inspection")
+        if issue.qc_status == QcStatus.FAILED.value:
+            raise ValidationError(f"{issue.issue_no} failed outward quality inspection")
+        existing = await _live_consignment_for_issue(
+            db, issue.id, exclude_dispatch_id=exclude_dispatch_id)
+        if existing is not None:
+            raise ValidationError(f"{issue.issue_no} is already packed on consignment {existing}")
+        issues.append(issue)
+
+    if len({issue.warehouse_id for issue in issues}) != 1:
+        raise ValidationError(
+            "These material issues leave from different stocking points. One consignment "
+            "is one lorry from one place — pick issues from the same point.")
+    return issues
+
+
+async def _consignment_destination(
+    db: AsyncSession,
+    issues: list[m.MaterialIssue],
+    data: s.ConsignmentWrite,
+    wh: Warehouse,
+) -> Warehouse | None:
+    """Where the consignment goes.
+
+    Each issue's own destination is the stocking point serving the office it is for.
+    Several issues share a consignment only when that point is the SAME for all of
+    them — that is the whole rule of a grouped consignment. The packer may still route
+    the lot through another point (a relay via an MDP) by choosing `to_warehouse_id`,
+    but the choice applies to the lot; it never makes issues for two different LIPs
+    into one delivery.
+    """
+    natural = [await _destination_warehouse(db, issue, wh.id) for issue in issues]
+    if len(issues) > 1:
+        for issue, point in zip(issues, natural):
+            if point is None:
+                raise ValidationError(
+                    f"{issue.issue_no} has no stocking point to deliver to, so it cannot "
+                    "share a consignment. Send it on its own.")
+        names = {point.id: point.name for point in natural if point is not None}
+        if len(names) > 1:
+            raise ValidationError(
+                "These material issues are going to different stocking points ("
+                + ", ".join(sorted(names.values()))
+                + "). Only issues for the same LIP/MDP can travel in one consignment.")
+
+    explicit = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
+    to_wh = explicit or natural[0]
+    if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
+        raise ValidationError("A stock transfer consignment needs a destination warehouse")
+    if to_wh is not None and to_wh.id == wh.id:
+        raise ValidationError("A transfer cannot have the same origin and destination")
+    for issue in issues:
+        _guard_leaves_the_company(data.dispatch_type, to_wh, issue)
+    return to_wh
+
+
+async def _write_dispatch_sources(
+    db: AsyncSession,
+    dispatch: m.Dispatch,
+    issues: list[m.MaterialIssue],
+    to_wh: Warehouse | None,
+    mr_by_issue: dict[int, dict],
+) -> None:
+    """One `out_dispatch_sources` row per issue — rewritten whole on every save."""
+    dispatch.sources.clear()
+    # Flushed before the new rows go in: the unit of work inserts before it deletes,
+    # and re-listing the same issue would trip the (dispatch_id, issue_id) unique key.
+    await db.flush()
+    for issue in issues:
+        mr = mr_by_issue.get(issue.id) or {}
+        dispatch.sources.append(m.DispatchSource(
+            dispatch_id=dispatch.id,
+            source_type=DispatchSourceType.ISSUE.value,
+            source_id=issue.id,
+            source_no=issue.issue_no,
+            issue_id=issue.id,
+            issue_no=issue.issue_no,
+            mr_id=mr.get("mr_id"),
+            mr_no=mr.get("mr_no"),
+            indent_id=issue.indent_id,
+            indent_no=issue.indent_no,
+            destination_warehouse_id=to_wh.id if to_wh else None,
+            destination_warehouse_name=to_wh.name if to_wh else None,
+            quantity=_d(issue.total_qty),
+        ))
+
+
 async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -> m.Dispatch:
     """Build one consignment without committing it — see _build_picking / _build_issue.
 
@@ -11261,33 +11652,12 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
     PACKED, and gate_out() later moves that same row out of the gate. There is no
     separate dispatch document to raise.
     """
-    issue = await get_issue(db, data.issue_id)
-    if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
-        raise ValidationError("Only a posted outward material issue can become a consignment")
-    if issue.qc_status == QcStatus.PENDING.value:
-        raise ValidationError(f"{issue.issue_no} is pending outward quality inspection")
-    if issue.qc_status == QcStatus.FAILED.value:
-        raise ValidationError(f"{issue.issue_no} failed outward quality inspection")
-
-    existing = await db.scalar(
-        select(m.Dispatch.id).where(
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
-            m.Dispatch.ref_id == issue.id,
-            m.Dispatch.status != DispatchStatus.CANCELLED.value,
-        ).limit(1)
-    )
-    if existing is not None:
-        raise ValidationError(f"{issue.issue_no} already has consignment {existing}")
-
+    issues = await _consignment_issues(db, data)
+    issue = issues[0]
+    multi = len(issues) > 1
     wh = await _warehouse(db, issue.warehouse_id)
-    to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
-    if to_wh is None:
-        to_wh = await _destination_warehouse(db, issue, wh.id)
-    if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
-        raise ValidationError("A stock transfer consignment needs a destination warehouse")
-    if to_wh is not None and to_wh.id == wh.id:
-        raise ValidationError("A transfer cannot have the same origin and destination")
-    _guard_leaves_the_company(data.dispatch_type, to_wh, issue)
+    to_wh = await _consignment_destination(db, issues, data, wh)
+    mr_by_issue = {row.id: _single_mr(await _issue_mr_sources(db, row)) for row in issues}
     # Nothing to carry. The issue came OUT of the very point that raised the indent —
     # an OE serving his own LIP — so the goods are already on the requester's shelf.
     # Left to run, this wrote a consignment with a blank destination, and a blank
@@ -11295,22 +11665,23 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
     # storekeeper acknowledged the delivery and then had no consignment to raise a
     # GRN against. Say it here, where it can still be acted on.
     if to_wh is None and not data.customer_id and not data.vendor_id:
-        same_point = await _requesting_point(db, issue)
-        if same_point is not None and same_point.id == wh.id:
+        same_points = [await _requesting_point(db, row) for row in issues]
+        if all(point is not None and point.id == wh.id for point in same_points):
             raise ValidationError(
-                f"{issue.issue_no} was issued at {wh.name}, the point that raised the "
+                f"{', '.join(row.issue_no for row in issues)} was issued at {wh.name}, "
+                "the point that raised the "
                 "indent — the goods are already there. Acknowledge the issue instead "
                 "of raising a consignment, or pick a destination to forward it on."
             )
     _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
+    project_id, project_name = await _consignment_project(db, issue, data.project_id)
 
     dispatch = m.Dispatch(
-        items=[], packages=[], events=[],
+        items=[], packages=[], events=[], sources=[],
         # From the issue it ships — see the note on the GRN above.
-        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value,
-                                      project=getattr(issue, "project_name", None)),
+        dispatch_no=await _consignment_no(db, project_name),
         dispatch_type=data.dispatch_type.value,
         dispatch_date=data.dispatch_date,
         warehouse_id=wh.id,
@@ -11320,18 +11691,19 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         customer_id=data.customer_id,
         vendor_id=data.vendor_id,
         vendor_name=vendor.name if vendor else None,
-        project_id=data.project_id or issue.project_id,
+        project_id=project_id,
         # Snapshot the name beside the id, the way every other document here does
         # (rule 10). Live consignments carry project_id 4 with project_name NULL, so
         # the dispatch board and its printouts show a blank where the project goes.
-        project_name=await _project_name(db, data.project_id or issue.project_id),
+        project_name=project_name,
         delivery_address=(data.delivery_address
                           or _address_without_vehicle(destination_office_name)),
         contact_person=data.contact_person,
         contact_phone=data.contact_phone,
-        ref_type=InventoryRefType.WH_ISSUE.value,
-        ref_id=issue.id,
-        ref_no=issue.issue_no,
+        ref_type=(ConsignmentRefType.MULTI_ISSUE.value if multi
+                  else ConsignmentRefType.WH_ISSUE.value),
+        ref_id=None if multi else issue.id,
+        ref_no=_multi_issue_ref_no(issues) if multi else issue.issue_no,
         transport_mode=data.transport_mode,
         carrier_id=data.carrier_id,
         vehicle_id=data.vehicle_id,
@@ -11349,8 +11721,10 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
     )
     db.add(dispatch)
     await db.flush()
-    await _apply_consignment_packages(db, dispatch, issue, data.packages, user)
-    _validate_issue_dispatch(dispatch, issue)
+    await _write_dispatch_sources(db, dispatch, issues, to_wh, mr_by_issue)
+    await _apply_consignment_packages(db, dispatch, issues, data.packages, user, mr_by_issue)
+    for row in issues:
+        _validate_issue_dispatch(dispatch, row)
     dispatch.status = DispatchStatus.PACKED.value
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
                       entity_no=dispatch.dispatch_no, action=AuditAction.CREATE, actor=user,
@@ -11369,18 +11743,19 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch = await get_dispatch(db, dispatch_id)
     _guard(dispatch.status, {DispatchStatus.DRAFT.value, DispatchStatus.PACKED.value},
            "edit", "consignment")
-    issue = await get_issue(db, data.issue_id)
-    if dispatch.ref_id and dispatch.ref_id != issue.id:
-        raise ValidationError("A consignment cannot be moved to another material issue")
+    issues = await _consignment_issues(db, data, exclude_dispatch_id=dispatch_id)
+    # What a consignment carries is decided when it is raised. Moving it onto other
+    # issues is a different consignment — cancel this one and raise that.
+    carried = await _dispatch_issue_ids(db, dispatch)
+    if carried and set(carried) != {row.id for row in issues}:
+        raise ValidationError(
+            "A consignment cannot be moved to other material issues — cancel it and "
+            "raise a new one")
+    issue = issues[0]
+    multi = len(issues) > 1
     wh = await _warehouse(db, issue.warehouse_id)
-    to_wh = await db.get(Warehouse, data.to_warehouse_id) if data.to_warehouse_id else None
-    if to_wh is None:
-        to_wh = await _destination_warehouse(db, issue, wh.id)
-    if data.dispatch_type == DispatchType.TRANSFER and to_wh is None:
-        raise ValidationError("A stock transfer consignment needs a destination warehouse")
-    if to_wh is not None and to_wh.id == wh.id:
-        raise ValidationError("A transfer cannot have the same origin and destination")
-    _guard_leaves_the_company(data.dispatch_type, to_wh, issue)
+    to_wh = await _consignment_destination(db, issues, data, wh)
+    mr_by_issue = {row.id: _single_mr(await _issue_mr_sources(db, row)) for row in issues}
     _guard_expected_delivery(data.dispatch_date, data.expected_delivery)
     vendor = await db.get(Vendor, data.vendor_id) if data.vendor_id else None
     _, destination_office_name = await _issue_destination(db, issue)
@@ -11400,9 +11775,10 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
                                  or _address_without_vehicle(destination_office_name))
     dispatch.contact_person = data.contact_person
     dispatch.contact_phone = data.contact_phone
-    dispatch.ref_type = WarehouseDocType.WH_ISSUE.value
-    dispatch.ref_id = issue.id
-    dispatch.ref_no = issue.issue_no
+    dispatch.ref_type = (ConsignmentRefType.MULTI_ISSUE.value if multi
+                         else ConsignmentRefType.WH_ISSUE.value)
+    dispatch.ref_id = None if multi else issue.id
+    dispatch.ref_no = _multi_issue_ref_no(issues) if multi else issue.issue_no
     dispatch.transport_mode = data.transport_mode
     dispatch.carrier_id = data.carrier_id
     dispatch.vehicle_id = data.vehicle_id
@@ -11415,8 +11791,10 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.expected_delivery = data.expected_delivery
     dispatch.remarks = data.remarks
 
-    await _apply_consignment_packages(db, dispatch, issue, data.packages, user)
-    _validate_issue_dispatch(dispatch, issue)
+    await _write_dispatch_sources(db, dispatch, issues, to_wh, mr_by_issue)
+    await _apply_consignment_packages(db, dispatch, issues, data.packages, user, mr_by_issue)
+    for row in issues:
+        _validate_issue_dispatch(dispatch, row)
     dispatch.status = DispatchStatus.PACKED.value
     await db.flush()
     await write_audit(db, entity="out_dispatches", entity_id=dispatch.id,
@@ -11446,13 +11824,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
             raise ValidationError(f"{ref_issue.issue_no} has not posted stock yet")
         if ref_issue.warehouse_id != wh.id:
             raise ValidationError(f"{ref_issue.issue_no} belongs to another warehouse")
-        existing = await db.scalar(
-            select(m.Dispatch.id).where(
-                m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
-                m.Dispatch.ref_id == ref_issue.id,
-                m.Dispatch.status != DispatchStatus.CANCELLED.value,
-            ).limit(1)
-        )
+        existing = await _live_consignment_for_issue(db, ref_issue.id)
         if existing is not None:
             raise ValidationError(
                 f"{ref_issue.issue_no} already has dispatch {existing}"
@@ -11472,6 +11844,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
     if to_wh is not None and to_wh.id == wh.id:
         raise ValidationError("A transfer cannot have the same origin and destination")
     _guard_leaves_the_company(data.dispatch_type, to_wh, ref_issue)
+    project_id, project_name = await _consignment_project(db, ref_issue, data.project_id)
 
     dispatch = m.Dispatch(
         # See create_issue. All three are delete-orphan collections, so the flush wants
@@ -11479,8 +11852,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         # AsyncSession cannot do.
         items=[], packages=[], events=[],
         # From the issue it ships — see the note on the GRN above.
-        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value,
-                                      project=getattr(ref_issue, "project_name", None)),
+        dispatch_no=await _consignment_no(db, project_name),
         dispatch_type=data.dispatch_type.value,
         dispatch_date=data.dispatch_date,
         warehouse_id=wh.id, warehouse_name=wh.name,
@@ -11488,7 +11860,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         to_warehouse_name=to_wh.name if to_wh else None,
         customer_id=data.customer_id,
         vendor_id=data.vendor_id, vendor_name=vendor.name if vendor else None,
-        project_id=data.project_id,
+        project_id=project_id, project_name=project_name,
         delivery_address=data.delivery_address or destination_office_name,
         contact_person=data.contact_person, contact_phone=data.contact_phone,
         ref_type=data.ref_type, ref_id=data.ref_id,
@@ -11846,10 +12218,13 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
     exactly this and not a second, drifting copy of it. Neither commits nor audits —
     both callers are mid-transaction and own their own audit row.
     """
-    already_issued = False
-    linked_issue: m.MaterialIssue | None = None
-    if (dispatch.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and dispatch.ref_id:
-        linked_issue = await get_issue(db, dispatch.ref_id)
+    # The issues behind it posted the stock out already — every one of them, on a
+    # grouped consignment. Read through `_dispatch_issues`, never `ref_id` alone: a
+    # grouped consignment has no `ref_id`, and taking the no-issue branch below for it
+    # booked the same goods out of the warehouse a second time.
+    linked_issues = await _dispatch_issues(db, dispatch)
+    grouped = len(linked_issues) > 1
+    for linked_issue in linked_issues:
         if not linked_issue.is_stock_posted:
             raise ValidationError(
                 f"{linked_issue.issue_no} has not posted stock yet; dispatch cannot gate out"
@@ -11864,7 +12239,7 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
                 issued_by_item.get(line.item_id, ZERO) + _d(line.issued_qty)
             )
         dispatched_by_item: dict[int, Decimal] = {}
-        for line in dispatch.items:
+        for line in _lines_for_issue(dispatch, linked_issue.id, grouped=grouped):
             dispatched_by_item[line.item_id] = (
                 dispatched_by_item.get(line.item_id, ZERO) + _d(line.quantity)
             )
@@ -11874,7 +12249,7 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
                     f"Item {item_id}: dispatch quantity {qty} exceeds the "
                     f"{issued_by_item.get(item_id, ZERO)} posted on {linked_issue.issue_no}."
                 )
-        already_issued = True
+    already_issued = bool(linked_issues)
 
     if not already_issued:
         # One movement per lot, same as the inward leg — see `_dispatch_lots`. Walking
@@ -11900,11 +12275,14 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
                 serial_numbers=units or None,
             )
 
-    dispatch.gate_pass_no = gate_pass_no or f"GP/{dispatch.dispatch_no}"
+    # The dispatch's own number off the DISPATCH series, never the consignment's with
+    # GP/ in front — see `logistics.transport._assign_dispatch_no`, the other door.
+    dispatch.gate_pass_no = gate_pass_no or await next_number(
+        db, WarehouseDocType.DISPATCH.value, project=dispatch.project_name)
     dispatch.gate_out_at = utcnow()
     dispatch.security_by_name = _name(user)
     dispatch.status = DispatchStatus.DISPATCHED.value
-    if linked_issue is not None:
+    for linked_issue in linked_issues:
         linked_issue.status = IssueStatus.DISPATCHED.value
 
     for package in dispatch.packages:
@@ -12067,8 +12445,9 @@ async def _apply_dispatch_acknowledgement(db: AsyncSession, dispatch: m.Dispatch
     # A consignment addressed to an MDP on its way to a LIP ends this issue's journey —
     # it reached the point it was sent to — but the requester still has nothing, so the
     # indent stays open until the MDP forwards it on and the LIP signs for it there.
-    if dispatch.ref_type == WarehouseDocType.WH_ISSUE.value and dispatch.ref_id:
-        issue = await db.get(m.MaterialIssue, dispatch.ref_id)
+    # Every issue it carried, on a grouped consignment.
+    for issue_id in await _dispatch_issue_ids(db, dispatch):
+        issue = await db.get(m.MaterialIssue, issue_id)
         if issue is not None and issue.status in (
             IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value,
         ):
@@ -17277,7 +17656,7 @@ async def _build_return_consignment(db: AsyncSession, doc: m.PurchaseReturn, use
     vendor = await db.get(Vendor, doc.vendor_id) if doc.vendor_id else None
     wh = await db.get(Warehouse, doc.warehouse_id) if doc.warehouse_id else None
     dispatch = m.Dispatch(
-        dispatch_no=await next_number(db, WarehouseDocType.DISPATCH.value) if hasattr(WarehouseDocType, 'DISPATCH') else f"DISP-{doc.return_no}",
+        dispatch_no=await _consignment_no(db),
         dispatch_type=DispatchType.VENDOR_RETURN.value if hasattr(DispatchType, 'VENDOR_RETURN') else "VENDOR_RETURN",
         dispatch_date=ist_today() if 'ist_today' in globals() else date.today(),
         warehouse_id=doc.warehouse_id,
@@ -18649,6 +19028,36 @@ def _dispatch_destination(dispatch: m.Dispatch) -> str | None:
             or dispatch.project_name or dispatch.delivery_address)
 
 
+_PUBLIC_LABEL_TOKEN = re.compile(r"^([dp])(\d+)\.([A-Za-z0-9_-]{22})$")
+
+
+def public_label_token(kind: str, row_id: int) -> str:
+    """A short, non-enumerable capability for one printed label.
+
+    ``d`` identifies a whole consignment and ``p`` one package. The identifier is
+    visible, but changing it invalidates the HMAC, so knowing one label never grants
+    access to the next database row. Tokens deliberately do not expire: a physical
+    shipping label must remain useful for the life of the consignment. Rotating the
+    deployment SECRET_KEY revokes every old label when that is explicitly required.
+    """
+    if kind not in {"d", "p"} or row_id < 1:
+        raise ValueError("Public label tokens require kind d/p and a positive id")
+    message = f"warehouse-public-label:v1:{kind}:{row_id}".encode()
+    digest = hmac.new(settings.SECRET_KEY.encode(), message, hashlib.sha256).digest()[:16]
+    signature = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return f"{kind}{row_id}.{signature}"
+
+
+def parse_public_label_token(token: str) -> tuple[str, int] | None:
+    match = _PUBLIC_LABEL_TOKEN.fullmatch((token or "").strip())
+    if not match:
+        return None
+    kind, raw_id, supplied = match.groups()
+    row_id = int(raw_id)
+    expected = public_label_token(kind, row_id).rsplit(".", 1)[1]
+    return (kind, row_id) if hmac.compare_digest(supplied, expected) else None
+
+
 async def _dispatch_lines(db: AsyncSession, dispatch_id: int) -> list[m.DispatchItem]:
     return list((await db.scalars(
         select(m.DispatchItem).where(m.DispatchItem.dispatch_id == dispatch_id)
@@ -18708,6 +19117,7 @@ async def _scanned_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> s.ScanRes
     by_package: dict[int | None, list[m.DispatchItem]] = defaultdict(list)
     for line in lines:
         by_package[line.package_id].append(line)
+    package_no_by_id = {pkg.id: pkg.package_no for pkg in packages}
     unit_codes = await _unit_codes(db, lines)
 
     return s.ScanResult(
@@ -18736,7 +19146,8 @@ async def _scanned_dispatch(db: AsyncSession, dispatch: m.Dispatch) -> s.ScanRes
         ],
         # Unpacked lines included: a consignment scanned mid-packing must still say
         # what it is carrying, not report an empty load.
-        items=[_scan_line(line, unit_code=unit_codes.get((line.item_id, line.batch_id)))
+        items=[_scan_line(line, package_no_by_id.get(line.package_id),
+                          unit_codes.get((line.item_id, line.batch_id)))
                for line in lines],
         package_count=len(packages),
         item_count=len(lines),
@@ -18762,17 +19173,24 @@ async def _scanned_package(db: AsyncSession, value: str) -> s.ScanResult | None:
     if not pkg:
         return None
 
+    return await _scanned_package_row(db, pkg)
+
+
+async def _scanned_package_row(db: AsyncSession, pkg: m.DispatchPackage) -> s.ScanResult:
+    """The package result once its signed token or printed barcode found the row."""
+
     dispatch = await db.get(m.Dispatch, pkg.dispatch_id)
     lines = [line for line in await _dispatch_lines(db, pkg.dispatch_id)
              if line.package_id == pkg.id]
     unit_codes = await _unit_codes(db, lines)
     return s.ScanResult(
-        kind="PACKAGE", id=pkg.id, doc_no=pkg.barcode or pkg.package_no,
+        kind="PACKAGE", id=pkg.id, doc_no=pkg.package_no,
         deep_link=f"/warehouse/dispatch/consignments/{pkg.dispatch_id}",
         title=f"Package {pkg.package_no}",
         subtitle=f"Consignment {dispatch.dispatch_no}" if dispatch else None,
         status=pkg.status,
         meta=[
+            {"label": "From", "value": dispatch.warehouse_name if dispatch else None},
             {"label": "Type", "value": pkg.package_type},
             {"label": "Weight", "value": f"{pkg.weight_kg} kg" if pkg.weight_kg else None},
             {"label": "Consignment", "value": dispatch.dispatch_no if dispatch else None},
@@ -18784,6 +19202,36 @@ async def _scanned_package(db: AsyncSession, value: str) -> s.ScanResult | None:
         item_count=len(lines),
         total_qty=sum((line.quantity or Decimal(0) for line in lines), Decimal(0)),
     )
+
+
+async def public_label_scan(db: AsyncSession, token: str) -> s.ScanResult:
+    """Current read-only label details for a valid, unguessable printed capability."""
+    parsed = parse_public_label_token(token)
+    if not parsed:
+        # The same answer for malformed, forged and absent rows: the public endpoint
+        # never becomes an oracle for database identifiers.
+        raise NotFoundError("This consignment label is not valid")
+    kind, row_id = parsed
+    if kind == "d":
+        dispatch = await db.get(m.Dispatch, row_id)
+        if not dispatch:
+            raise NotFoundError("This consignment label is not valid")
+        result = await _scanned_dispatch(db, dispatch)
+        # A consignment label is a summary, not a packing manifest. Keep only the
+        # package count; package identities and item details belong to package QRs.
+        result.packages = []
+        result.items = []
+        result.item_count = 0
+        result.total_qty = Decimal(0)
+    else:
+        package = await db.get(m.DispatchPackage, row_id)
+        if not package:
+            raise NotFoundError("This consignment label is not valid")
+        result = await _scanned_package_row(db, package)
+    # A public label is a dead end by design. Never send the employee application's
+    # document route even though the internal scanner uses the same response shape.
+    result.deep_link = None
+    return result
 
 
 async def scan(db: AsyncSession, code: str) -> s.ScanResult:
@@ -18983,7 +19431,7 @@ def _relayed_onward():
         .select_from(m.Dispatch)
         .join(onward, and_(
             onward.warehouse_id == m.Dispatch.to_warehouse_id,
-            onward.id != m.Dispatch.ref_id,
+            onward.id != m.MaterialIssueLine.issue_id,
             onward.direction == IssueDirection.OUT.value,
             onward.is_stock_posted.is_(True),
         ))
@@ -18992,8 +19440,7 @@ def _relayed_onward():
             onward_line.indent_item_id == m.MaterialIssueLine.indent_item_id,
         ))
         .where(
-            m.Dispatch.ref_id == m.MaterialIssueLine.issue_id,
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+            _carries_issue(m.MaterialIssueLine.issue_id),
             m.Dispatch.to_warehouse_id.isnot(None),
         )
         .exists()
@@ -19033,9 +19480,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         select(m.MaterialIssueLine.indent_item_id,
                func.sum(m.MaterialIssueLine.issued_qty - func.coalesce(m.MaterialIssueLine.returned_qty, 0)))
         .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
-        .join(m.Dispatch, and_(
-            m.Dispatch.ref_id == m.MaterialIssue.id,
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .join(m.Dispatch, _carries_issue(m.MaterialIssue.id))
         .where(m.MaterialIssue.indent_id.in_(indent_ids),
                m.MaterialIssue.is_stock_posted.is_(True),
                m.Dispatch.status.in_(_ON_THE_ROAD),
@@ -19071,8 +19516,11 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         .select_from(m.DispatchItem)
         .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
         .join(m.MaterialIssue, and_(
-            m.Dispatch.ref_id == m.MaterialIssue.id,
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+            _carries_issue(m.MaterialIssue.id),
+            # On a grouped consignment each line names the issue it was packed from;
+            # without this a line would be counted once per issue carrying its item.
+            or_(m.DispatchItem.issue_id.is_(None),
+                m.DispatchItem.issue_id == m.MaterialIssue.id)))
         .join(m.MaterialIssueLine, and_(
             m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
             m.MaterialIssueLine.item_id == m.DispatchItem.item_id,
@@ -19177,9 +19625,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     # from — so the dispatch number is a marker like any other.
     dispatch_rows = (await db.execute(
         select(m.Dispatch.id, m.Dispatch.dispatch_no, m.MaterialIssue.id)
-        .join(m.MaterialIssue, and_(
-            m.Dispatch.ref_id == m.MaterialIssue.id,
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .join(m.MaterialIssue, _carries_issue(m.MaterialIssue.id))
         .where(m.MaterialIssue.id.in_(issue_ids or {0}),
                m.Dispatch.status != DispatchStatus.CANCELLED.value)
     )).all() if issue_ids else []
@@ -19351,47 +19797,57 @@ async def _shipments_by_indent(db: AsyncSession,
 
     dispatch_rows = (await db.execute(
         select(m.Dispatch.id, m.MaterialIssue.indent_id)
-        .join(m.MaterialIssue, and_(
-            m.Dispatch.ref_id == m.MaterialIssue.id,
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value])))
+        .join(m.MaterialIssue, _carries_issue(m.MaterialIssue.id))
         .where(m.MaterialIssue.indent_id.in_(indent_ids),
                m.Dispatch.status != DispatchStatus.CANCELLED.value)
     )).all()
-    indent_of_dispatch = {row[0]: row[1] for row in dispatch_rows}
+    # A set per consignment: a grouped one carries issues for several indents, and the
+    # leg moving it is every one of those requesters' parcel.
+    indents_of_dispatch: dict[int, set[int]] = defaultdict(set)
+    for dispatch_id, row_indent_id in dispatch_rows:
+        if row_indent_id:
+            indents_of_dispatch[dispatch_id].add(row_indent_id)
 
     legs = (await db.execute(
         select(TransportRequest)
         .where(or_(TransportRequest.indent_id.in_(indent_ids),
-                   TransportRequest.dispatch_id.in_(list(indent_of_dispatch) or [0])))
+                   TransportRequest.dispatch_id.in_(list(indents_of_dispatch) or [0])))
         .order_by(TransportRequest.id.desc())
     )).scalars().all()
 
     by_indent: dict[int, list[dict]] = {}
     for leg in legs:
-        indent_id = leg.indent_id or indent_of_dispatch.get(leg.dispatch_id)
-        if indent_id not in indent_ids:
-            continue
-        by_indent.setdefault(indent_id, []).append({
-            "dispatch_id": leg.dispatch_id,
-            "tr_id": leg.id,
-            "tr_no": leg.tr_no,
-            "mode": leg.mode,
-            "status": leg.status,
-            "carrier_name": leg.carrier_name,
-            "vehicle_number": leg.vehicle_number,
-            "driver_name": leg.driver_name,
-            "driver_phone": leg.driver_phone,
-            # The handle the field is given. A courier books on a docket, a truck on
-            # an LR; the screen shows whichever one exists.
-            "lr_no": leg.lr_no,
-            "docket_no": leg.docket_no,
-            "tracking_url": leg.tracking_url,
-            "expected_delivery": leg.expected_delivery,
-            "dispatched_at": leg.dispatched_at,
-            "delivered_at": leg.delivered_at,
-            "acknowledged_at": leg.acknowledged_at,
-        })
+        targets = ({leg.indent_id} if leg.indent_id
+                   else indents_of_dispatch.get(leg.dispatch_id, set()))
+        for indent_id in targets:
+            if indent_id not in indent_ids:
+                continue
+            by_indent.setdefault(indent_id, []).append(_shipment_row(leg))
     return by_indent
+
+
+def _shipment_row(leg) -> dict:
+    """One transport leg as the requester's delivery screen shows it."""
+    return {
+        "dispatch_id": leg.dispatch_id,
+        "tr_id": leg.id,
+        "tr_no": leg.tr_no,
+        "mode": leg.mode,
+        "status": leg.status,
+        "carrier_name": leg.carrier_name,
+        "vehicle_number": leg.vehicle_number,
+        "driver_name": leg.driver_name,
+        "driver_phone": leg.driver_phone,
+        # The handle the field is given. A courier books on a docket, a truck on
+        # an LR; the screen shows whichever one exists.
+        "lr_no": leg.lr_no,
+        "docket_no": leg.docket_no,
+        "tracking_url": leg.tracking_url,
+        "expected_delivery": leg.expected_delivery,
+        "dispatched_at": leg.dispatched_at,
+        "delivered_at": leg.delivered_at,
+        "acknowledged_at": leg.acknowledged_at,
+    }
 
 
 async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str | None = None,
@@ -19486,9 +19942,8 @@ async def indent_fulfilment(db: AsyncSession, indent_id: int) -> list[dict]:
     # marked as arrived, not merely sent.
     delivered_docs = list((await db.execute(
         select(m.Dispatch.dispatch_no, m.Dispatch.status)
-        .join(m.MaterialIssue, m.MaterialIssue.id == m.Dispatch.ref_id)
+        .join(m.MaterialIssue, _carries_issue(m.MaterialIssue.id))
         .where(m.MaterialIssue.indent_id == indent_id,
-               m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
                m.Dispatch.status.in_(_ON_THE_ROAD))
         .order_by(m.Dispatch.id.desc())
     )).all())
@@ -19966,6 +20421,11 @@ async def run_report(db: AsyncSession, key: str, *, warehouse_id: int | None = N
 # ---------------------------------------------------------------------------
 
 LOOKUP_LIMIT = 200
+# One grouped consignment is one lorry-load of issues, not a batch job. Well past any
+# real delivery, and small enough that a save stays one short request.
+MAX_ISSUES_PER_CONSIGNMENT = 50
+# How far back the recommendation list looks for issues waiting to be sent.
+RECOMMENDATION_SCAN_LIMIT = 300
 
 
 async def item_options(db: AsyncSession, search: str | None = None, *,
@@ -20929,27 +21389,90 @@ async def inspectable_issue_options(db: AsyncSession,
     ]
 
 
-async def issue_options(db: AsyncSession, search: str | None = None) -> list[dict]:
-    """Posted outward issues that have not already become a dispatch."""
-    used = set((await db.execute(
-        select(m.Dispatch.ref_id).where(
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
-            m.Dispatch.ref_id.isnot(None),
-            m.Dispatch.status != DispatchStatus.CANCELLED.value,
-        )
-    )).scalars().all())
-    stmt = select(m.MaterialIssue).where(
+async def _requesting_points(
+    db: AsyncSession,
+    issues: list[m.MaterialIssue],
+) -> dict[int, Warehouse | None]:
+    """`_requesting_point` for many issues in four queries rather than several each.
+
+    Same answer, same order of preference: the office of the person the issue names,
+    else the office on the indent, resolved to the lowest-id active point serving it.
+    The recommendation list and the grouped issue picker both ask this of up to a few
+    hundred issues, where one call per issue was a query storm per keystroke.
+    """
+    from app.platform.hcm.models import HcmEmployee
+    from app.modules.indents.models import Indent
+
+    employee_ids = {row.issued_to_id for row in issues if row.issued_to_id}
+    indent_ids = {row.indent_id for row in issues if row.indent_id}
+    office_of_employee = dict((await db.execute(
+        select(HcmEmployee.id, HcmEmployee.office_id).where(HcmEmployee.id.in_(employee_ids))
+    )).all()) if employee_ids else {}
+    office_of_indent = dict((await db.execute(
+        select(Indent.id, Indent.office_id).where(Indent.id.in_(indent_ids))
+    )).all()) if indent_ids else {}
+
+    office_of_issue: dict[int, int | None] = {}
+    for row in issues:
+        office_id = office_of_employee.get(row.issued_to_id) if row.issued_to_id else None
+        office_of_issue[row.id] = office_id or office_of_indent.get(row.indent_id)
+
+    office_ids = {value for value in office_of_issue.values() if value}
+    point_of_office: dict[int, Warehouse] = {}
+    if office_ids:
+        for point in (await db.execute(
+            select(Warehouse)
+            .where(Warehouse.office_id.in_(office_ids), Warehouse.is_active.is_(True))
+            .order_by(Warehouse.id)
+        )).scalars().all():
+            point_of_office.setdefault(point.office_id, point)
+    return {
+        issue_id: point_of_office.get(office_id) if office_id else None
+        for issue_id, office_id in office_of_issue.items()
+    }
+
+
+def _consignable_issues_stmt():
+    """Posted outward issues whose outward QC does not hold them back.
+
+    What `_consignment_issues` accepts, as a query — so a picker built on it never
+    offers an issue the save would refuse.
+    """
+    return select(m.MaterialIssue).where(
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.is_stock_posted.is_(True),
-        m.MaterialIssue.qc_status.notin_([QcStatus.PENDING.value, QcStatus.FAILED.value])
+        m.MaterialIssue.qc_status.notin_([QcStatus.PENDING.value, QcStatus.FAILED.value]),
     )
+
+
+async def issue_options(db: AsyncSession, search: str | None = None, *,
+                        warehouse_id: int | None = None,
+                        destination_warehouse_id: int | None = None) -> list[dict]:
+    """Posted outward issues that have not already become a consignment.
+
+    `warehouse_id` + `destination_warehouse_id` narrow it to issues that may share a
+    consignment with ones already chosen — same point out, same point in — so adding a
+    second issue to a grouped consignment can never pick one the save would refuse.
+    """
+    used = await _issue_ids_in_live_consignments(db)
+    stmt = _consignable_issues_stmt()
     if used:
         stmt = stmt.where(m.MaterialIssue.id.notin_(used))
+    if warehouse_id:
+        stmt = stmt.where(m.MaterialIssue.warehouse_id == warehouse_id)
     if search:
         stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
     rows = (await db.execute(
         stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
     )).scalars().all()
+    if destination_warehouse_id:
+        points = await _requesting_points(db, list(rows))
+        rows = [
+            row for row in rows
+            if (point := points.get(row.id)) is not None
+            and point.id == destination_warehouse_id
+            and point.id != row.warehouse_id
+        ]
     return [
         {
             "id": row.id,
@@ -20960,32 +21483,153 @@ async def issue_options(db: AsyncSession, search: str | None = None) -> list[dic
     ]
 
 
-async def returnable_issue_options(
-    db: AsyncSession,
-    search: str | None = None,
-) -> list[dict]:
-    stmt = select(m.MaterialIssue).where(
-        m.MaterialIssue.direction == IssueDirection.OUT.value,
-        m.MaterialIssue.is_stock_posted.is_(True),
-        m.MaterialIssue.status.in_(
-            (
-                IssueStatus.ISSUED.value,
-                IssueStatus.DISPATCHED.value,
-                IssueStatus.ACKNOWLEDGED.value,
-                IssueStatus.PARTIALLY_RETURNED.value,
-            )
-        ),
+async def issue_dispatch_sources(db: AsyncSession, issue_ids: str) -> dict:
+    """One packing source for several issues bound for the same stocking point.
+
+    The same rows `issue_dispatch_source` serves for each issue, one after another, with
+    every line naming the issue it came from — packing keys on (issue, item, batch), so
+    the same item on two issues is two separate things to pack.
+    """
+    ids: list[int] = []
+    for part in (issue_ids or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit():
+            raise ValidationError(f"'{part}' is not a material issue id")
+        ids.append(int(part))
+    unique = list(dict.fromkeys(ids))
+    if not unique:
+        raise ValidationError("Select at least one material issue")
+    if len(unique) > MAX_ISSUES_PER_CONSIGNMENT:
+        raise ValidationError(
+            f"One consignment can carry at most {MAX_ISSUES_PER_CONSIGNMENT} material issues")
+
+    sources = [await issue_dispatch_source(db, issue_id) for issue_id in unique]
+    if len({row["warehouse_id"] for row in sources}) != 1:
+        raise ValidationError(
+            "These material issues leave from different stocking points. One consignment "
+            "is one lorry from one place — pick issues from the same point.")
+    if len(sources) > 1:
+        for row in sources:
+            if not row.get("destination_warehouse_id"):
+                raise ValidationError(
+                    f"{row['issue_no']} has no stocking point to deliver to, so it cannot "
+                    "share a consignment. Send it on its own.")
+        names = {row["destination_warehouse_id"]: row.get("destination_warehouse_name")
+                 for row in sources}
+        if len(names) > 1:
+            raise ValidationError(
+                "These material issues are going to different stocking points ("
+                + ", ".join(sorted(str(name) for name in names.values()))
+                + "). Only issues for the same LIP/MDP can travel in one consignment.")
+    first = sources[0]
+    return {
+        **first,
+        "issue_ids": [row["issue_id"] for row in sources],
+        "issue_nos": [row["issue_no"] for row in sources],
+        "issue_no": first["issue_no"] if len(sources) == 1 else f"{len(sources)} material issues",
+        "items": [item for row in sources for item in row["items"]],
+    }
+
+
+async def consignment_recommendations(db: AsyncSession, user, limit: int = 8) -> list[dict]:
+    """Issues waiting at the same stocking point for the same LIP/MDP, grouped.
+
+    A suggestion, never a decision: each group is issues that are ready (posted,
+    through outward QC, on no consignment yet), leave from one point this login can
+    see, and are addressed to one other point. The biggest groups come first, and among
+    equals the one that has waited longest. Built on the same rules as the save and the
+    picker, so every suggestion can be packed as offered.
+    """
+    stmt = _consignable_issues_stmt().where(
+        m.MaterialIssue.status == IssueStatus.ISSUED.value,
     )
-    if search:
-        stmt = stmt.where(m.MaterialIssue.issue_no.ilike(f"%{search}%"))
-    rows = (await db.execute(
-        stmt.order_by(m.MaterialIssue.id.desc()).limit(LOOKUP_LIMIT)
-    )).scalars().all()
-    return [{
-        "id": row.id,
-        "code": row.issue_no,
-        "name": row.issued_to_name or row.department_name or row.issue_no,
-    } for row in rows]
+    used = await _issue_ids_in_live_consignments(db)
+    if used:
+        stmt = stmt.where(m.MaterialIssue.id.notin_(used))
+    allowed = await warehouse_ids_for_user(db, user)
+    if allowed is not None:
+        if not allowed:
+            return []
+        stmt = stmt.where(m.MaterialIssue.warehouse_id.in_(allowed))
+    rows = list((await db.execute(
+        stmt.options(selectinload(m.MaterialIssue.items))
+        .order_by(m.MaterialIssue.id.desc())
+        .limit(RECOMMENDATION_SCAN_LIMIT)
+    )).scalars().all())
+    if not rows:
+        return []
+
+    points = await _requesting_points(db, rows)
+    groups: dict[tuple[int, int], list[m.MaterialIssue]] = defaultdict(list)
+    destinations: dict[int, Warehouse] = {}
+    for issue in rows:
+        point = points.get(issue.id)
+        # No point, or the point that issued it: nothing to carry, so nothing to group.
+        if point is None or point.id == issue.warehouse_id:
+            continue
+        destinations[point.id] = point
+        groups[(issue.warehouse_id, point.id)].append(issue)
+
+    ready = [(key, members) for key, members in groups.items() if len(members) > 1]
+    ready.sort(key=lambda entry: (-len(entry[1]),
+                                  min(row.issue_date for row in entry[1])))
+    ready = ready[:limit]
+
+    origin_names = dict((await db.execute(
+        select(Warehouse.id, Warehouse.name)
+        .where(Warehouse.id.in_({key[0] for key, _ in ready}))
+    )).all()) if ready else {}
+
+    out: list[dict] = []
+    for (origin_id, destination_id), members in ready:
+        members = members[:MAX_ISSUES_PER_CONSIGNMENT]
+        members.sort(key=lambda row: (row.issue_date, row.id))
+        destination = destinations[destination_id]
+        origin_name = origin_names.get(origin_id) or members[0].warehouse_name
+        issues_out: list[dict] = []
+        mr_nos: list[str] = []
+        for issue in members:
+            issue_mrs = [row["mr_no"] for row in await _issue_mr_sources(db, issue)
+                         if row["mr_no"]]
+            mr_nos.extend(no for no in issue_mrs if no not in mr_nos)
+            issues_out.append({
+                "issue_id": issue.id,
+                "issue_no": issue.issue_no,
+                "issue_date": issue.issue_date,
+                "indent_no": issue.indent_no,
+                "mr_nos": issue_mrs,
+                "item_lines": len(issue.items),
+                "total_qty": _d(issue.total_qty),
+            })
+        oldest = members[0].issue_date
+        waited = (ist_today() - oldest).days if oldest else 0
+        out.append({
+            "key": f"{origin_id}:{destination_id}",
+            "label": destination.name,
+            "headline": f"{len(members)} issues ready for {destination.name}",
+            "reason": (
+                f"All leave from {origin_name} and go to {destination.name}. "
+                "Send them together in one consignment instead of "
+                f"{len(members)} separate trips."
+                + (f" The oldest has waited {waited} day{'s' if waited != 1 else ''}."
+                   if waited > 0 else "")
+            ),
+            "issue_ids": [row.id for row in members],
+            "issue_nos": [row.issue_no for row in members],
+            "issues": issues_out,
+            "warehouse_id": origin_id,
+            "warehouse_name": origin_name,
+            "destination_warehouse_id": destination_id,
+            "destination_warehouse_name": destination.name,
+            "destination_office_name": getattr(destination, "office_name", None),
+            "total_qty": sum((_d(row.total_qty) for row in members), ZERO),
+            "item_lines": sum(len(row.items) for row in members),
+            "mr_nos": mr_nos,
+            "oldest_issue_date": oldest,
+        })
+    return out
 
 
 async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
@@ -20994,17 +21638,9 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         raise ValidationError("Only a posted outward issue can become a dispatch")
     if issue.qc_status in (QcStatus.PENDING.value, QcStatus.FAILED.value):
         raise ValidationError("QC Outward must be completed before dispatch.")
-    existing = await db.scalar(
-        select(m.Dispatch.id).where(
-            m.Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
-            m.Dispatch.ref_id == issue.id,
-            m.Dispatch.status != DispatchStatus.CANCELLED.value,
-        ).limit(1)
-    )
+    existing = await _live_consignment_for_issue(db, issue.id)
     if existing is not None:
-        raise ValidationError(
-            f"{issue.issue_no} already has dispatch {existing}"
-        )
+        raise ValidationError(f"{issue.issue_no} is already packed on consignment {existing}")
     item_ids = {line.item_id for line in issue.items}
     item_by_id = {
         item.id: item
@@ -21076,9 +21712,14 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
             return []
         return _get_line_serials(line)
 
+    mr_rows = await _issue_mr_sources(db, issue)
+    line_mr = mr_rows[0] if len(mr_rows) == 1 else {}
+
     return {
         "issue_id": issue.id,
+        "issue_ids": [issue.id],
         "issue_no": issue.issue_no,
+        "issue_nos": [issue.issue_no],
         "warehouse_id": issue.warehouse_id,
         "project_id": issue.project_id,
         "destination_office_id": getattr(issue, "destination_office_id", None),
@@ -21099,7 +21740,12 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         "destination_is_origin": bool(requesting and requesting.id == issue.warehouse_id),
         "items": [
             {
+                "issue_id": issue.id,
+                "issue_no": issue.issue_no,
+                "mr_id": line_mr.get("mr_id"),
+                "mr_no": line_mr.get("mr_no"),
                 "indent_id": issue.indent_id,
+                "indent_no": issue.indent_no,
                 "item_id": line.item_id,
                 "item_code": line.item_code,
                 "item_name": line.item_name,
@@ -21540,11 +22186,11 @@ async def transport_released(db: AsyncSession, tr, user) -> None:
         logger.warning(
             "%s gated %s out on a release that never got its dispatch signature",
             tr.tr_no, dispatch.dispatch_no)
-    if (dispatch.ref_type or "").upper() in {"ISSUE", "WH_ISSUE"} and dispatch.ref_id:
-        issue = await db.get(m.MaterialIssue, dispatch.ref_id)
+    for issue_id in await _dispatch_issue_ids(db, dispatch):
+        issue = await db.get(m.MaterialIssue, issue_id)
         if issue is None or not issue.is_stock_posted:
             logger.warning(
-                "%s released transport but the issue behind %s has not posted stock; "
+                "%s released transport but an issue behind %s has not posted stock; "
                 "not gated out", tr.tr_no, dispatch.dispatch_no)
             return
 

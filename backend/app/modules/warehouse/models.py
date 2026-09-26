@@ -25,6 +25,7 @@ from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
 from app.modules.warehouse.enums import (
     BatchStatus,
+    DispatchSourceType,
     DispatchStatus,
     InspectionResult,
     InspectionStatus,
@@ -596,6 +597,47 @@ class Dispatch(Base):
         "DispatchEvent", back_populates="dispatch",
         cascade="all, delete-orphan", order_by="DispatchEvent.event_at",
     )
+    sources = relationship(
+        "DispatchSource", back_populates="dispatch",
+        cascade="all, delete-orphan", order_by="DispatchSource.id",
+    )
+
+
+class DispatchSource(Base):
+    """The material issues a consignment carries — ONE row per issue.
+
+    `out_dispatches.ref_id` can name only one document, so a consignment carrying
+    several issues to the same stocking point lists them here (and its `ref_id` is
+    NULL). A single-issue consignment writes its one row too, so a reader can always
+    ask this table; rows raised before it existed are found through `ref_id`, which is
+    why every reader goes through `service._carries_issue` rather than either alone.
+
+    `mr_id` / `mr_no` name the material request behind the issue only when there is
+    exactly one — it is a trace for people, never something stock is checked against.
+    """
+    __tablename__ = "out_dispatch_sources"
+    __table_args__ = (
+        Index("uq_out_dispatch_sources_dispatch_issue", "dispatch_id", "issue_id",
+              unique=True),
+    )
+
+    id = pk()
+    dispatch_id = Column(ForeignKey("out_dispatches.id", ondelete="CASCADE"),
+                         index=True, nullable=False)
+    source_type = Column(String(30), nullable=False, default=DispatchSourceType.ISSUE.value)
+    source_id = Column(BigInteger, nullable=False)
+    source_no = Column(String(50), nullable=True)
+    issue_id = Column(BigInteger, index=True, nullable=True)
+    issue_no = Column(String(50), nullable=True)
+    mr_id = Column(BigInteger, index=True, nullable=True)
+    mr_no = Column(String(50), nullable=True)
+    indent_id = Column(BigInteger, index=True, nullable=True)
+    indent_no = Column(String(50), nullable=True)
+    destination_warehouse_id = Column(BigInteger, nullable=True)
+    destination_warehouse_name = Column(String(200), nullable=True)
+    quantity = Column(QTY, nullable=False, default=0)
+
+    dispatch = relationship("Dispatch", back_populates="sources")
 
 
 class DispatchItem(Base):
@@ -609,6 +651,10 @@ class DispatchItem(Base):
     line_no = Column(Integer, nullable=False, default=1)
     package_id = Column(BigInteger, nullable=True)
 
+    issue_id = Column(BigInteger, index=True, nullable=True)
+    issue_no = Column(String(50), nullable=True)
+    mr_id = Column(BigInteger, index=True, nullable=True)
+    mr_no = Column(String(50), nullable=True)
     indent_id = Column(BigInteger, nullable=True)
     indent_no = Column(String(50), nullable=True)
 

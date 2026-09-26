@@ -168,6 +168,9 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      "receipt": "REC", "gate_entry": "GE", "inspection": "QC",
                      "putaway": "PUT", "picking": "PICK", "wh_issue": "WHI",
                      "dispatch": "DSP", "purchase_return": "PRET",
+                     # The consignment's own series. "CON" is free: consolidation is
+                     # CONS, named below for exactly that reason.
+                     "consignment": "CON",
                      # The lot stamped on stock at putaway; its pattern carries the
                      # storage path, so a lot number reads as where the stock went.
                      "lot": "LOT",

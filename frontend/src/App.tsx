@@ -66,7 +66,9 @@ const ChainEditorPage = lazy(() => import("@/modules/admin/pages/ChainEditorPage
 const CodeFormatsPage = lazy(() => import("@/modules/settings/pages/CodeFormatsPage").then((m) => ({ default: m.CodeFormatsPage })));
 const ConsignmentFormScreen = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.ConsignmentFormScreen })));
 const ConsignmentPrintPage = lazy(() => import("@/modules/warehouse/pages/ConsignmentPrintPage").then((m) => ({ default: m.ConsignmentPrintPage })));
+const PublicConsignmentScanPage = lazy(() => import("@/modules/warehouse/pages/PublicConsignmentScanPage"));
 const ConsignmentsScreen = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.ConsignmentsScreen })));
+const ScanViewScreen = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.ScanViewScreen })));
 const ConsolidationDetailPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationDetailPage })));
 const ConsolidationIssuePage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationIssuePage })));
 const ConsolidationItemPage = lazy(() => import("@/modules/approvals").then((m) => ({ default: m.ConsolidationItemPage })));
@@ -222,6 +224,7 @@ function RouteFallback() {
 
 function AppRoutes() {
   const { me, loading } = useAuth();
+  const location = useLocation();
   if (loading) return <AppSplash />;
 
   return (
@@ -236,6 +239,9 @@ function AppRoutes() {
           strand somebody who genuinely wants a new password. */}
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
+      {/* Printed QR destination: intentionally outside AppLayout and authentication.
+          The signed token loads current read-only details and exposes no application UI. */}
+      <Route path="/c/:token" element={<PublicConsignmentScanPage />} />
 
       {/* The supplier portal. Outside the employee shell entirely — a vendor holds no
           RBAC role, so there is no menu to build and no <Can> to apply. It is gated on
@@ -349,7 +355,12 @@ function AppRoutes() {
         element={me ? <GatePassPrintPage /> : <Navigate to="/login" replace />}
       />
 
-        <Route element={me ? <AppLayout /> : <Navigate to="/login" replace />}>
+        <Route element={me ? <AppLayout /> : (
+          <Navigate
+            to={`/login?next=${encodeURIComponent(`${location.pathname}${location.search}${location.hash}`)}`}
+            replace
+          />
+        )}>
         <Route index element={<HomePage />} />
         {/* Not in PAGE_TREE on purpose: everyone has a profile, so gating it behind an
             rbac_pages row would only mean a permission every role must be granted. */}
@@ -460,6 +471,9 @@ function AppRoutes() {
         <Route path="logistics/consignments" element={<ConsignmentsScreen />} />
         <Route path="logistics/consignments/new" element={<ConsignmentFormScreen />} />
         <Route path="logistics/consignments/:id" element={<ConsignmentFormScreen />} />
+        {/* A phone QR lands here directly; a scanner gun opens the same screen from
+            Consignments and enters the short barcode. */}
+        <Route path="logistics/scan/*" element={<ScanViewScreen />} />
         <Route path="logistics/dispatch" element={<DispatchPage />} />
         {/* The press itself: consignment, gate pass, mode, provider. Reached from the
          * queue and from a packed consignment — a logistics day never crosses into
