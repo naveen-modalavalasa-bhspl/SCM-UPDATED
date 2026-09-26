@@ -25,6 +25,7 @@ import type {
   LocationOption,
   VolumeBudget,
   ItemLocationsOut,
+  StockReportScopes,
   ListParams,
   LocationOccupancy,
   Notification,
@@ -47,6 +48,7 @@ import type {
   PutawayUnitCode,
   PutawayCreate,
   Receipt,
+  ReceiptRouting,
   ReceiptWrite,
   SerialNumber,
   StockAvailability,
@@ -214,6 +216,15 @@ export const convertReceiptToGrn = (id: number) =>
 
 /** Freezes the receipt and raises the inspection tasks behind it. */
 export const submitReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/${id}/submit`);
+
+/** Where each GRN line goes — a QC draft or straight to putaway. A forecast before
+ *  submit, the record after it. */
+export const getReceiptRouting = (id: number) =>
+  get<ReceiptRouting>(`${BASE}/receipts/${id}/routing`);
+
+/** Splits a GRN the retired GRN approval left at SUBMITTED with nothing raised. */
+export const routeParkedReceipt = (id: number) =>
+  post<Receipt>(`${BASE}/receipts/${id}/route`);
 
 /** Pass an arrived consignment on to the points below — the MDP leg of WH -> MDP -> LIP.
  *  Builds one DRAFT issue per indent; the storekeeper still reviews and submits. */
@@ -727,6 +738,58 @@ export const listBatches = (params: ListParams & { item_id?: number; expiring_da
 export const getItemLocations = ({ warehouse_id, item_id, location_id }: { warehouse_id: number; item_id?: number | null; location_id?: number | null }) =>
   get<ItemLocationsOut[]>(`${BASE}/stock-segregation/item-locations`, { warehouse_id, item_id, location_id });
 
+/* --------------------------------------- stock by location, as a download -- */
+
+/**
+ * What each of the two downloads would contain, BEFORE either is pulled.
+ *
+ * "The Floor 1 report" means two different files — the floor row itself, or the floor
+ * and every bay under it — and on a real building the first is usually empty. The
+ * counts are what make that visible, so they are fetched as soon as a location is
+ * picked rather than after somebody has opened a blank spreadsheet.
+ */
+export const stockReportScopes = (params: {
+  warehouse_id: number;
+  location_id?: number | null;
+  item_id?: number | null;
+}) => get<StockReportScopes>(`${BASE}/stock-segregation/report/scopes`, params);
+
+/** The file itself. Goes through the shared axios client so it carries the bearer
+ *  token — a plain <a href> would hit the endpoint unauthenticated and 401. */
+export const downloadStockReport = async (params: {
+  warehouse_id: number;
+  scope: "LOCATION" | "HIERARCHY";
+  location_id?: number | null;
+  item_id?: number | null;
+  format?: "xlsx" | "csv";
+}) => {
+  const response = await api.get<Blob>(`${BASE}/stock-segregation/report/export`, {
+    params: { format: "xlsx", ...params },
+    responseType: "blob",
+  });
+  // The server names the file — it knows the location, the scope and the timestamp,
+  // and a name invented here would drift from the header block inside the file.
+  const disposition = String(response.headers?.["content-disposition"] ?? "");
+  const named = /filename="?([^";]+)"?/.exec(disposition)?.[1];
+  return {
+    blob: response.data,
+    filename: named ?? `stock-report.${params.format ?? "xlsx"}`,
+  };
+};
+
+/** Hands a blob to the browser as a download. Kept here so no page has to know about
+ *  object URLs. */
+export const saveStockReport = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
 export interface ScanLine {
   item_code?: string | null;
   item_name?: string | null;
@@ -1028,3 +1091,35 @@ export const deleteIssue = (id: number) => del(`${BASE}/issues/${id}`);
 export const deleteDispatch = (id: number) => del(`${BASE}/dispatches/${id}`);
 export const deletePurchaseReturn = (id: number) => del(`${BASE}/returns/${id}`);
 export const deleteStockMovement = (id: number) => del(`${BASE}/stock-movements/${id}`);
+
+
+// --------------------------------------------------------------------------- //
+//  Warehouse Demand Pool  (2026-09-25)
+// --------------------------------------------------------------------------- //
+
+import type { WDemandPoolResponse, WDemandPoolStage } from './types';
+
+/** Stage metadata served by the backend � never hardcoded in the screen. */
+export const warehouseDemandPoolApi = {
+  stages: (signal?: AbortSignal) =>
+    api.get<WDemandPoolStage[]>('/api/warehouse/demand-pool/stages', { signal })
+      .then((r) => r.data),
+
+  pool: (params: {
+    search?: string;
+    item_id?: number;
+    warehouse_id?: number;
+    project_id?: number;
+    stage?: string;
+    page?: number;
+    size?: number;
+  } = {}, signal?: AbortSignal) =>
+    api.get<WDemandPoolResponse>('/api/warehouse/demand-pool', { params, signal })
+      .then((r) => r.data),
+};
+
+export const warehouseDemandPoolKeys = {
+  stages: () => ['warehouse', 'demand-pool', 'stages'] as const,
+  pool: (params: Record<string, unknown> = {}) =>
+    ['warehouse', 'demand-pool', params] as const,
+};

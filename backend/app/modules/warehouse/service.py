@@ -1800,22 +1800,21 @@ async def get_receipt(db: AsyncSession, receipt_id: int, user=None) -> m.Receipt
     item_ids = {line.item_id for line in receipt.items}
     if item_ids:
         rows = (await db.execute(
-            select(Item.id, Item.is_asset, Item.is_serial_tracked, Item.is_imei_tracked)
+            select(Item.id, Item.is_asset, Item.is_serial_tracked, Item.is_imei_tracked,
+                   Item.requires_qi)
             .where(Item.id.in_(item_ids))
         )).all()
-        asset_by_item = {item_id: bool(is_asset) for item_id, is_asset, _, _ in rows}
-        serial_by_item = {
-            item_id: bool(is_serial_tracked)
-            for item_id, _, is_serial_tracked, _ in rows
-        }
-        imei_by_item = {
-            item_id: bool(is_imei_tracked)
-            for item_id, _, _, is_imei_tracked in rows
-        }
+        asset_by_item = {row[0]: bool(row[1]) for row in rows}
+        serial_by_item = {row[0]: bool(row[2]) for row in rows}
+        imei_by_item = {row[0]: bool(row[3]) for row in rows}
+        # Served so the QC form can say which lines of a delivery are its business —
+        # the item master decides, never the screen.
+        qi_by_item = {row[0]: bool(row[4]) for row in rows}
         for line in receipt.items:
             line.is_asset = asset_by_item.get(line.item_id, False)
             line.is_serial_tracked = serial_by_item.get(line.item_id, False)
             line.is_imei_tracked = imei_by_item.get(line.item_id, False)
+            line.requires_qi = qi_by_item.get(line.item_id, False)
     return receipt
 
 
@@ -2340,17 +2339,14 @@ async def _name_received_units(db: AsyncSession, receipt: m.Receipt) -> None:
 
 
 async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
-    """Freeze the GRN — through approval first, if this project configured one.
+    """Freeze the GRN and split it, in the same press.
 
-    A goods receipt was the one document on the Approval Flow screen that could be
-    configured and then ignored: nothing ever called the engine for `GRN`, so a chain
-    saved against it was written and never read.
-
-    The guard is the same one `dispatch_consignment` uses: ask whether a chain exists
-    BEFORE starting anything. With none configured — which is every project today —
-    `_process_submitted_receipt` runs exactly as this function always did, in the same
-    transaction, and the GRN never learns that approvals happened. Only a project that
-    has deliberately built a chain gets the extra rung.
+    A GRN takes NO approval (2026-09-21). A Goods Receipt ladder configured on Settings
+    > Approval Flow used to park the receipt at SUBMITTED with nothing raised behind it
+    — no QC draft, no putaway — while the goods stood on the floor; REC0031 and REC0036
+    sat like that for two weeks. The check on a delivery is QC itself, so submit goes
+    straight to `_process_submitted_receipt`: a DRAFT inspection for the lines whose
+    item requires QI, and putaway tasks (or stock, on a point with no bins) for the rest.
     """
     receipt = await get_receipt(db, receipt_id)
     _guard(receipt.status, {ReceiptStatus.DRAFT.value, ReceiptStatus.GATE_ENTRY.value},
@@ -2358,108 +2354,199 @@ async def submit_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
     if not receipt.items:
         raise ValidationError("A receipt with no lines has nothing to inspect")
 
-    # Before the branch, so an approved GRN and an unapproved one both leave here with
-    # every unit named. See `_name_received_units`.
     await _name_received_units(db, receipt)
-
-    if await _grn_needs_approval(db, receipt, user):
-        return await _send_receipt_for_approval(db, receipt, user)
     return await _process_submitted_receipt(db, receipt, user)
 
 
-async def _grn_needs_approval(db: AsyncSession, receipt: m.Receipt, user) -> bool:
-    """Is a GRN chain configured for this receipt's project?
+#: Putaway states in which a task has not moved anything. Stock lands in a bin only
+#: when a task is confirmed, so these can be withdrawn without a stock correction.
+_PUTAWAY_UNMOVED = (PutawayStatus.DRAFT.value, PutawayStatus.PENDING.value)
 
-    Read through `find_ladder`, which is what the engine itself would consult, so the
-    answer here and the routing there can never disagree.
+
+async def _receipt_goods_moved(db: AsyncSession, receipt: m.Receipt) -> bool:
+    """Has any of this receipt reached stock, or started to?"""
+    if receipt.is_stock_posted:
+        return True
+    moved = await db.scalar(
+        select(func.count()).select_from(m.PutawayTask).where(
+            m.PutawayTask.grn_id == receipt.id,
+            m.PutawayTask.status.notin_(
+                _PUTAWAY_UNMOVED + (PutawayStatus.CANCELLED.value,)),
+        ))
+    return bool(moved)
+
+
+async def _withdraw_receipt_work(db: AsyncSession, receipt: m.Receipt, user,
+                                 reason: str) -> None:
+    """Cancel the QC draft and the putaway tasks a submitted receipt raised.
+
+    Only what has not moved anything: an inspection still open, a task still pending.
+    The caller has already refused when goods reached stock (`_receipt_goods_moved`).
+    Without this a cancelled GRN left its QC draft in the inspector's queue and its
+    putaway tasks in the storekeeper's, both pointing at goods the store did not keep.
     """
-    position_id = getattr(user, "active_position_id", None)
-    project_id = receipt.project_id
-    if project_id is None:
-        project_id, _name = await wf_ladder.project_for(db, position_id, user)
-    raiser_role_id = await wf_ladder.role_of_position(db, position_id)
-    found = await wf_ladder.find_ladder(
-        db, project_id, DocType.GRN.value, raiser_role_id)
-    return found is not None
-
-
-async def _send_receipt_for_approval(db: AsyncSession, receipt: m.Receipt,
-                                     user) -> m.Receipt:
-    """Park the GRN on SUBMITTED and hand it to the engine.
-
-    Nothing is inspected, nothing is posted and no putaway is raised until somebody
-    signs — the whole point of asking. `SUBMITTED` is an existing ReceiptStatus that
-    nothing else sets, and `cancel_receipt` already accepts it, so a GRN waiting on a
-    signature can still be withdrawn.
-    """
-    position_id = getattr(user, "active_position_id", None)
-    project_id = receipt.project_id
-    if project_id is None:
-        project_id, _name = await wf_ladder.project_for(db, position_id, user)
-    context = {
-        "doc_no": receipt.grn_no,
-        "doc_summary": f"Goods receipt {receipt.grn_no}",
-        "requester_position_id": position_id,
-        "project_id": project_id,
-        "warehouse_id": receipt.warehouse_id,
-    }
-    instance = await engine.start(db, DocType.GRN.value, receipt.id, context, user)
-    if instance.status == InstanceStatus.APPROVED.value:
-        # A chain the raiser sits at the top of (or one set to "no approval needed")
-        # comes back already approved. Carry straight on rather than parking a GRN
-        # nobody will ever be asked to sign.
-        return await _process_submitted_receipt(db, receipt, user)
-
-    receipt.status = ReceiptStatus.SUBMITTED.value
-    await write_audit(db, entity="inb_receipts", entity_id=receipt.id,
-                      entity_no=receipt.grn_no, action=AuditAction.UPDATE, actor=user,
-                      before={"status": ReceiptStatus.DRAFT.value},
-                      after={"status": receipt.status, "sent_for_approval": True})
-    await db.commit()
-    return await get_receipt(db, receipt.id)
-
-
-async def approve_receipt(db: AsyncSession, receipt_id: int, user, *,
-                          approve: bool = True, comments: str = "") -> m.Receipt:
-    """Record one decision on a GRN waiting for approval.
-
-    The engine decides whether this caller may act and whether the chain is finished;
-    this only reacts to what it says. On the last approval the GRN carries on into
-    exactly the path an unapproved one takes — one implementation of "what a submitted
-    receipt does", reached two ways.
-    """
-    receipt = await get_receipt(db, receipt_id)
-    _guard(receipt.status, {ReceiptStatus.SUBMITTED.value}, "approve", "receipt")
-    instance = await engine.act(
-        db, DocType.GRN.value, receipt.id,
-        (ApprovalAction.APPROVED if approve else ApprovalAction.REJECTED).value,
-        user, comments,
-        {"requester_position_id": getattr(user, "active_position_id", None)},
-    )
-    if instance.status == InstanceStatus.REJECTED.value:
-        receipt.status = ReceiptStatus.CANCELLED.value
-        note = comments or "no reason given"
-        receipt.remarks = (
-            f"{receipt.remarks or ''}\nRejected in approval: {note}"
-        ).strip()
+    inspections = (await db.execute(
+        select(m.Inspection).where(
+            m.Inspection.receipt_id == receipt.id,
+            m.Inspection.status.in_((InspectionStatus.DRAFT.value,
+                                     InspectionStatus.IN_PROGRESS.value)),
+        ))).scalars().all()
+    for inspection in inspections:
+        inspection.status = InspectionStatus.CANCELLED.value
+        inspection.remarks = f"{inspection.remarks or ''}\nCancelled: {reason}".strip()
+        await write_audit(db, entity="inb_inspections", entity_id=inspection.id,
+                          entity_no=inspection.inspection_no, action=AuditAction.UPDATE,
+                          actor=user, after={"status": inspection.status,
+                                             "reason": reason})
+    tasks = (await db.execute(
+        select(m.PutawayTask).where(
+            m.PutawayTask.grn_id == receipt.id,
+            m.PutawayTask.status.in_(_PUTAWAY_UNMOVED),
+        ))).scalars().all()
+    for task in tasks:
+        task.status = PutawayStatus.CANCELLED.value
+    if tasks:
         await write_audit(db, entity="inb_receipts", entity_id=receipt.id,
                           entity_no=receipt.grn_no, action=AuditAction.UPDATE,
-                          actor=user, after={"status": receipt.status})
-        await db.commit()
-        return await get_receipt(db, receipt.id)
-    if instance.status != InstanceStatus.APPROVED.value:
-        # More rungs to climb; the GRN stays parked.
-        await db.commit()
-        return await get_receipt(db, receipt.id)
-    return await _process_submitted_receipt(db, receipt, user)
+                          actor=user, after={"putaway_cancelled": len(tasks),
+                                             "reason": reason})
+
+
+async def route_parked_receipt(db: AsyncSession, receipt_id: int, user) -> m.Receipt:
+    """Split a GRN the old approval flow parked at SUBMITTED with nothing raised.
+
+    Brings it to where a receipt submitted today already is, and closes the approval
+    task it left in somebody's inbox — there is no GRN approval any more, so that task
+    has nothing left to decide. Only a receipt still at SUBMITTED is touched.
+    """
+    receipt = await get_receipt(db, receipt_id)
+    _guard(receipt.status, {ReceiptStatus.SUBMITTED.value}, "route", "receipt")
+    await engine.abandon(db, DocType.GRN.value, receipt.id, user,
+                         "GRN approval retired; QC and putaway raised directly")
+    await _name_received_units(db, receipt)
+    return await _process_submitted_receipt(db, receipt, user,
+                                            before_status=ReceiptStatus.SUBMITTED.value)
+
+
+#: Receipt statuses at which submit has not happened yet — the routing is a forecast.
+_RECEIPT_UNROUTED = (ReceiptStatus.DRAFT.value, ReceiptStatus.GATE_ENTRY.value)
+
+
+async def receipt_routing(db: AsyncSession, receipt_id: int, user=None) -> dict:
+    """Where each line of a GRN goes: to QC, or straight to putaway / stock.
+
+    Before submit it is a FORECAST read off the item master's "Requires QI", so the
+    storekeeper knows what the press will do before pressing it. After submit it is the
+    RECORD: a line is a QC line when the inspection raised off this receipt carries it,
+    whatever the item master says today, and each line names the putaway task it
+    became. Every sentence the screen shows is served here, never composed there.
+    """
+    receipt = await get_receipt(db, receipt_id, user=user)
+    wh = await db.get(Warehouse, receipt.warehouse_id)
+    bin_managed = bool(wh and wh.is_bin_managed)
+    forecast = receipt.status in _RECEIPT_UNROUTED
+    parked = receipt.status == ReceiptStatus.SUBMITTED.value
+
+    inspection = (await db.execute(
+        select(m.Inspection)
+        .where(m.Inspection.receipt_id == receipt.id,
+               m.Inspection.status != InspectionStatus.CANCELLED.value)
+        .order_by(m.Inspection.id.desc()).limit(1)
+    )).scalars().first()
+    inspected_line_ids: set[int] = set()
+    if inspection is not None:
+        inspected_line_ids = set((await db.execute(
+            select(m.InspectionItem.receipt_item_id)
+            .where(m.InspectionItem.inspection_id == inspection.id)
+        )).scalars().all())
+
+    tasks_by_line: dict[int, m.PutawayTask] = {}
+    for task in (await db.execute(
+        select(m.PutawayTask)
+        .where(m.PutawayTask.grn_id == receipt.id,
+               m.PutawayTask.status != PutawayStatus.CANCELLED.value)
+        .order_by(m.PutawayTask.id)
+    )).scalars().all():
+        tasks_by_line.setdefault(task.grn_item_id, task)
+
+    lines: list[dict] = []
+    for line in receipt.items:
+        if forecast or parked:
+            needs_qc = bool(getattr(line, "requires_qi", False))
+        elif inspection is not None:
+            needs_qc = line.id in inspected_line_ids
+        else:
+            # Submitted with no live inspection: nothing needed QC, or the QC was
+            # cancelled. A line still PENDING is owed one either way.
+            needs_qc = line.qc_status == QcStatus.PENDING.value
+        task = tasks_by_line.get(line.id)
+        lines.append({
+            "receipt_item_id": line.id,
+            "line_no": line.line_no,
+            "item_id": line.item_id,
+            "item_code": line.item_code,
+            "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "received_qty": _d(line.received_qty),
+            "accepted_qty": _d(line.accepted_qty),
+            "rejected_qty": _d(line.rejected_qty),
+            "requires_qi": bool(getattr(line, "requires_qi", False)),
+            "route": "QC" if needs_qc else ("PUTAWAY" if bin_managed else "STOCK"),
+            "qc_status": line.qc_status,
+            "putaway_id": task.id if task else None,
+            "putaway_no": task.putaway_no if task else None,
+            "putaway_status": task.status if task else None,
+        })
+
+    qc_lines = [l for l in lines if l["route"] == "QC"]
+    direct_lines = [l for l in lines if l["route"] != "QC"]
+    tasks = list(tasks_by_line.values())
+    tasks_done = sum(1 for t in tasks if t.status == PutawayStatus.COMPLETED.value)
+
+    direct_word = "putaway" if bin_managed else "stock"
+    if forecast:
+        headline = (
+            f"On submit, {len(qc_lines)} of {len(lines)} line(s) go to a QC draft and "
+            f"{len(direct_lines)} go straight to {direct_word}."
+            if lines else "Add lines to see where they will go.")
+    elif parked:
+        headline = ("This GRN was held for an approval that no longer exists, so its QC "
+                    "and putaway were never raised. Split it now to raise them.")
+    else:
+        parts = []
+        if qc_lines:
+            parts.append(f"{len(qc_lines)} line(s) in QC"
+                         + (f" on {inspection.inspection_no}" if inspection else ""))
+        if direct_lines:
+            parts.append(f"{len(direct_lines)} line(s) sent straight to {direct_word}")
+        headline = "; ".join(parts) + "." if parts else "Nothing to route."
+
+    return {
+        "receipt_id": receipt.id,
+        "grn_no": receipt.grn_no,
+        "status": receipt.status,
+        "stage": "FORECAST" if forecast else ("PARKED" if parked else "ROUTED"),
+        "is_bin_managed": bin_managed,
+        "headline": headline,
+        "inspection_id": inspection.id if inspection else None,
+        "inspection_no": inspection.inspection_no if inspection else None,
+        "inspection_status": inspection.status if inspection else None,
+        "putaway_total": len(tasks),
+        "putaway_done": tasks_done,
+        "qc_lines": qc_lines,
+        "direct_lines": direct_lines,
+    }
 
 
 async def _process_submitted_receipt(db: AsyncSession, receipt: m.Receipt,
-                                     user) -> m.Receipt:
-    """Everything submitting a GRN does once it is allowed to proceed.
+                                     user, *,
+                                     before_status: str = ReceiptStatus.DRAFT.value,
+                                     ) -> m.Receipt:
+    """Split a submitted GRN: QC draft for the lines whose item requires QI, putaway
+    (or stock, on a point with no bins) for the rest.
 
-    Lifted out of `submit_receipt` unchanged so the approved path and the
-    nobody-configured-a-chain path are the same code, not two that drift.
+    One implementation of "what a submitted receipt does", reached from submit and
+    from `route_parked_receipt`.
     """
     qc_lines: list[m.ReceiptItem] = []
     direct_lines: list[m.ReceiptItem] = []
@@ -2500,7 +2587,7 @@ async def _process_submitted_receipt(db: AsyncSession, receipt: m.Receipt,
 
     await write_audit(db, entity="inb_receipts", entity_id=receipt.id, entity_no=receipt.grn_no,
                       action=AuditAction.UPDATE, actor=user,
-                      before={"status": ReceiptStatus.DRAFT.value},
+                      before={"status": before_status},
                       after={
                           "status": receipt.status,
                           "inspection_no": inspection.inspection_no if inspection else None,
@@ -3083,7 +3170,16 @@ async def cancel_receipt(db: AsyncSession, receipt_id: int, reason: str | None,
             ReceiptStatus.PENDING_QC.value, ReceiptStatus.SUBMITTED.value},
            "cancel", "receipt")
 
+    if await _receipt_goods_moved(db, receipt):
+        raise ValidationError(
+            f"{receipt.grn_no} has goods already put away. Raise a purchase return "
+            "instead — cancelling would leave stock nothing accounts for.")
+
     before = {"status": receipt.status}
+    await _withdraw_receipt_work(db, receipt, user, f"GRN {receipt.grn_no} cancelled")
+    # Only a receipt parked by the retired GRN approval has one; it has nothing to sign.
+    await engine.abandon(db, DocType.GRN.value, receipt.id, user,
+                         reason or "Receipt cancelled")
     receipt.status = ReceiptStatus.CANCELLED.value
     receipt.remarks = f"{receipt.remarks or ''}\nCancelled: {reason or 'no reason given'}".strip()
 
@@ -3779,6 +3875,10 @@ async def get_inspection(db: AsyncSession, inspection_id: int, user=None) -> m.I
 
 async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
                                   lines: list[s.InspectionItemWrite]) -> None:
+    # Lines this inspection already carries stay editable even if somebody has since
+    # switched "Requires QI" off on the item: the inspection was raised when it was on,
+    # and refusing would strand a QC nobody could finish.
+    already_on = {line.receipt_item_id for line in inspection.items if line.receipt_item_id}
     inspection.items.clear()
     await db.flush()
 
@@ -3828,6 +3928,16 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
                     inspection.inspection_no, line.receipt_item_id, repointed,
                 )
                 line.receipt_item_id = repointed
+            # QC IS OWED ONLY WHERE THE ITEM MASTER SAYS SO. Submit already sends the
+            # other lines straight to putaway, marked PASSED; an inspection naming one
+            # would re-decide goods already released — reject units a storekeeper may
+            # already be shelving. The form lists only these lines; this is the rule.
+            if (inspection.receipt_id and not item.requires_qi
+                    and line.receipt_item_id not in already_on):
+                raise ValidationError(
+                    f"{item.code} does not require quality inspection (Requires QI is "
+                    "off in the item master), so it went straight to putaway. Switch it "
+                    "on in the item master if this item must be inspected.")
             received = received_by_line[line.receipt_item_id]
             if inspected > received:
                 raise ValidationError(
@@ -6187,7 +6297,7 @@ async def submit_stock_movement_order(db: AsyncSession, order_id: int, user) -> 
     # approval, exactly as a movement behaved before drafts existed.
     if await wf_ladder.find_ladder(
             db, project_id, DocType.STOCK_MOVEMENT_ORDER.value) is None:
-        _approve_movement_order(order, user)
+        await _perform_movement_order(db, order, user)
     else:
         order.status = MovementOrderStatus.PENDING_APPROVAL.value
         instance = await engine.start(
@@ -6206,7 +6316,7 @@ async def submit_stock_movement_order(db: AsyncSession, order_id: int, user) -> 
         # The ladder can finish AT SUBMIT — the submitter at the top of a self-owned
         # chain, or a ladder set to NO_APPROVAL. Then the stock moves now.
         if instance.status == InstanceStatus.APPROVED.value:
-            _approve_movement_order(order, user)
+            await _perform_movement_order(db, order, user)
         elif instance.status == InstanceStatus.REJECTED.value:
             order.status = MovementOrderStatus.REJECTED.value
 

@@ -14,7 +14,7 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -28,6 +28,7 @@ from app.modules.indents import service as indent_service
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
+from app.modules.warehouse import stock_report
 from app.platform.rbac.permissions import (
     INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
@@ -267,24 +268,19 @@ async def submit_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_receipt(db, receipt_id, user)
 
 
-# A GRN only reaches SUBMITTED when this project configured a Goods Receipt chain on
-# Settings > Approval Flow; with none configured nothing ever lands here. Gated on
-# RECEIPT_CREATE only as a floor — `engine.act` is what decides whether THIS caller is
-# on the current rung, exactly as everywhere else (rule 8).
-@router.post("/receipts/{receipt_id}/approve", response_model=s.ReceiptDetail)
-async def approve_receipt(receipt_id: int, body: s.ReasonIn = s.ReasonIn(),
-                          db: AsyncSession = Depends(get_db),
-                          user=Depends(require_permission(RECEIPT_CREATE))):
-    return await service.approve_receipt(db, receipt_id, user, approve=True,
-                                         comments=body.reason or "")
+# Where each line goes — QC or straight to putaway. A forecast before submit, the
+# record after it.
+@router.get("/receipts/{receipt_id}/routing", response_model=s.ReceiptRouting)
+async def receipt_routing(receipt_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.receipt_routing(db, receipt_id, user=user)
 
 
-@router.post("/receipts/{receipt_id}/reject", response_model=s.ReceiptDetail)
-async def reject_receipt(receipt_id: int, body: s.ReasonIn,
-                         db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(RECEIPT_CREATE))):
-    return await service.approve_receipt(db, receipt_id, user, approve=False,
-                                         comments=body.reason or "")
+# Splits a GRN the retired GRN approval parked at SUBMITTED with nothing raised.
+@router.post("/receipts/{receipt_id}/route", response_model=s.ReceiptDetail)
+async def route_parked_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.route_parked_receipt(db, receipt_id, user)
 
 
 @router.post("/receipts/{receipt_id}/complete", response_model=s.ReceiptDetail)
@@ -1187,6 +1183,49 @@ async def item_locations(warehouse_id: int, item_id: int | None = None, location
         db, warehouse_id=warehouse_id, item_id=item_id, location_id=location_id, user=user)
 
 
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/stock-segregation/report/scopes", response_model=s.StockReportScopes)
+async def stock_report_scopes(warehouse_id: int, location_id: int | None = None,
+                              item_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """What each of the two downloads would contain, counted before either is pulled."""
+    return await stock_report.report_scopes(
+        db, warehouse_id=warehouse_id, location_id=location_id, item_id=item_id,
+        user=user)
+
+
+@router.get("/stock-segregation/report/export")
+async def stock_report_export(warehouse_id: int, scope: str = stock_report.SCOPE_HIERARCHY,
+                              location_id: int | None = None,
+                              item_id: int | None = None, format: str = "xlsx",
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """The file. Excel by default — it is the only format that carries the scope
+    header, the styling and the per-location roll-up; `?format=csv` for a plain one."""
+    actor = getattr(user, "full_name", None)
+    args = dict(warehouse_id=warehouse_id, location_id=location_id, scope=scope,
+                item_id=item_id, actor=actor, user=user)
+    # `content_disposition` builds the header, never an f-string here: HTTP headers are
+    # latin-1 and this file's name carries an em dash, so the hand-built version raised
+    # UnicodeEncodeError inside `Response.__init__` and answered 500 with the workbook
+    # already built.
+    if format == "csv":
+        filename, text = await stock_report.export_csv(db, **args)
+        # The BOM is what makes Excel read a CSV as UTF-8 — without it the "›" in the
+        # location path opens as mojibake.
+        return Response(
+            content="﻿" + text, media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition":
+                     stock_report.content_disposition(filename)})
+    filename, body = await stock_report.export_xlsx(db, **args)
+    return Response(
+        content=body, media_type=XLSX_MEDIA,
+        headers={"Content-Disposition": stock_report.content_disposition(filename)})
+
+
 @router.get("/batches", response_model=Page[s.BatchRead])
 async def list_batches(params: PageParams = Depends(), item_id: int | None = None,
                        expiring_days: int | None = None, search: str | None = None,
@@ -1860,3 +1899,57 @@ async def vendor_dispatch_replacement(return_id: int,
     """
     return await service.vendor_dispatch_replacement(
         db, account.vendor_id, return_id, body)
+
+
+# --------------------------------------------------------------------------- #
+#  Warehouse Demand Pool — item-wise view of outstanding indent demand in the
+#  outward chain.  Two endpoints: the pool (paginated groups) and stage metadata.
+#  Both gated on `issue.view`: the same permission that governs the issue register.
+# --------------------------------------------------------------------------- #
+from app.modules.warehouse import demand_pool as dp_warehouse  # noqa: E402
+
+
+@router.get("/demand-pool/stages", response_model=list[dict])
+async def warehouse_demand_pool_stages(
+        user=Depends(require_permission(ISSUE_VIEW))):
+    """Ordered stage metadata for the warehouse demand pool UI strip.
+
+    Served so screens can render stage chips, tooltips and deep links without
+    any hardcoded enum values — the same served-meta pattern as
+    `ACTIVITY_META` / `TRACKING_META` in the logistics module.
+    """
+    return list(dp_warehouse.WAREHOUSE_STAGES)
+
+
+@router.get("/demand-pool", response_model=dict)
+async def warehouse_demand_pool(
+        params: PageParams = Depends(),
+        search: str | None = None,
+        item_id: int | None = None,
+        warehouse_id: int | None = None,
+        project_id: int | None = None,
+        stage: str | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(ISSUE_VIEW))):
+    """Item-wise warehouse demand pool.
+
+    Every outstanding indent quantity that has a signed allocation and has not
+    yet been acknowledged by the requester appears here, grouped by item, with
+    each contributing indent line showing which outward stage its quantity is at
+    (TO_ISSUE → IN_ISSUE → ISSUED → OUTWARD_QC → CONSIGNMENT → IN_TRANSIT →
+    DELIVERED).
+
+    When the requester confirms receipt (`indents.acknowledge_receipt`) the
+    quantity drops out of the pool by itself — nothing is stored, everything is
+    read.
+
+    `?stage=` narrows to one bucket so KPI tile counts and the list they open
+    can never disagree.
+    """
+    return await dp_warehouse.demand_pool(
+        db, params,
+        search=search, item_id=item_id,
+        warehouse_id=warehouse_id, project_id=project_id,
+        stage=stage, user=user,
+    )
+

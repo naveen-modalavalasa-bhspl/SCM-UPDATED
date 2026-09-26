@@ -659,6 +659,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # gated separately on the document family it counts, so the screen's own code is
     # only "may open the board".
     ("pro_overview", "procurement", "Procurement · Dashboard"),
+    ("pro_demand_pool", "procurement", "Procurement · Demand Pool"),
     # Settings > Mail. Fail-closed to Admin on purpose: it reads a shared mailbox and
     # can send under the company's address, and neither is something to hand out by
     # inheritance. No INHERITS_GRANTS_FROM entry for exactly that reason.
@@ -673,6 +674,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("rep_live_tracking", "reports", "Reports · Live Tracking"),
     ("grp_warehouse", "warehouse", "Warehouse"),
     ("wh_dashboard", "warehouse", "Warehouse · Dashboard"),
+    ("wh_demand_pool", "warehouse", "Warehouse · Demand Pool"),
     ("wh_inward", "warehouse", "Warehouse » Material Inward"),
     ("wh_grn", "warehouse", "Warehouse » Goods Receipt"),
     ("wh_qc", "warehouse", "Warehouse » Quality Inspection"),
@@ -865,6 +867,8 @@ INHERITS_GRANTS_FROM.update({
     # today. Granting the page to somebody WITHOUT that code would show them a list
     # whose every button 403s, which is the failure this whole screen exists to end.
     page_view_code("pro_suppliers"): VENDOR_PORTAL_MANAGE,
+    page_view_code("pro_demand_pool"): REQUISITION_VIEW,
+    page_view_code("wh_demand_pool"): ISSUE_VIEW,   # the endpoint is gated on issue.view
     # Same screen, same audience: App Integrations reads the configuration and logs
     # behind the console anybody holding `integration.view` already opens, and every
     # route on it is gated by that code. Fail-closed would put a Settings row on the

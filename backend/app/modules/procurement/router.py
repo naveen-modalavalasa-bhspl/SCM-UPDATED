@@ -1005,6 +1005,61 @@ async def enable_supplier_login(
     return await suppliers.set_login_active(db, vendor_id, True, user)
 
 
+
+# --------------------------------------------------------------------------- #
+#  Procurement Demand Pool — item-wise view of outstanding indent demand in
+#  the buying chain. Two endpoints: the pool itself (paginated groups) and
+#  the stage metadata the UI renders without hardcoding any label or colour.
+#  Both gated on `requisition.view`: the pool shows exactly the demand a
+#  buyer can already read, never a company-wide total from documents they
+#  cannot reach.
+# --------------------------------------------------------------------------- #
+from app.modules.procurement import demand_pool as dp_procurement  # noqa: E402
+
+
+@ledger_api.get("/demand-pool/stages", response_model=list[dict])
+async def procurement_demand_pool_stages(
+        user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    """Ordered stage metadata for the procurement demand pool UI strip.
+
+    Served rather than hardcoded so the screen can render stage chips, tooltips
+    and deep links without knowing the enum values — rule 12 (`IDENT_STATUS_CONFIG`
+    anti-pattern).  The same list drives KPI tiles on the left and row badges on
+    the right, so the two can never drift apart.
+    """
+    return list(dp_procurement.PROCUREMENT_STAGES)
+
+
+@ledger_api.get("/demand-pool", response_model=dict)
+async def procurement_demand_pool(
+        params: PageParams = Depends(),
+        search: str | None = None,
+        item_id: int | None = None,
+        warehouse_id: int | None = None,
+        project_id: int | None = None,
+        stage: str | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.REQUISITION_VIEW))):
+    """Item-wise procurement demand pool.
+
+    Every outstanding indent quantity that is being BOUGHT appears here, grouped
+    by item, with each contributing indent line showing which stage its quantity
+    is sitting at (TO_SOURCE → MR → REQUISITION → CONSOLIDATION → RFQ → PO).
+
+    When the goods arrive at the warehouse the quantity drops out of this pool
+    by itself — nothing is stored, everything is read.
+
+    `?stage=` narrows to one bucket (what a KPI tile click sets) so the tile's
+    count and the filtered list it opens can never disagree.
+    """
+    return await dp_procurement.demand_pool(
+        db, params,
+        search=search, item_id=item_id,
+        warehouse_id=warehouse_id, project_id=project_id,
+        stage=stage, user=user,
+    )
+
+
 # One router for main.py, six underneath. The parent adds no prefix of its own, so
 # every path stays exactly where it was - no existing PO URL moves.
 router = APIRouter()

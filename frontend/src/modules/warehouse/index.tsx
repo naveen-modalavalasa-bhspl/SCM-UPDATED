@@ -33,6 +33,7 @@ import StockMovementDetail from "./pages/StockMovementDetail";
 import PurchaseReturnForm from "./pages/PurchaseReturnForm";
 import PurchaseReturns from "./pages/PurchaseReturns";
 import PurchaseReturnDetail from "./pages/PurchaseReturnDetail";
+import WarehouseDemandPoolPage from "./pages/WarehouseDemandPoolPage";
 
 /**
  * The warehouse module's own router.
@@ -55,6 +56,7 @@ export function WarehouseModule() {
     <Routes>
       <Route index element={<WarehouseDashboard />} />
       <Route path="dashboard" element={<WarehouseDashboard />} />
+      <Route path="demand-pool" element={<WarehouseDemandPoolPage />} />
 
       <Route path="transactions" element={<TransactionsLayout />}>
         <Route index element={<Navigate to="material-inward" replace />} />

@@ -226,8 +226,17 @@ async def resolve_lookups(defn, db: AsyncSession,
             # numeric. A name that matches wins over a number that merely looks like
             # an id, because the sheet asked for the name.
             hits: list = []
-            for column in lk.match:
-                hits = index[field].get(f"{column}:{_norm(text)}", [])
+            keys = [text]
+            normalize = getattr(lk, "normalize", None)
+            if normalize is not None:
+                alt = normalize(text)
+                if alt and alt != text:
+                    keys.append(alt)       # e.g. an HSN code that lost its leading zero
+            for key in keys:
+                for column in lk.match:
+                    hits = index[field].get(f"{column}:{_norm(key)}", [])
+                    if hits:
+                        break
                 if hits:
                     break
 
@@ -286,18 +295,78 @@ _TRUE = {"true", "yes", "y", "1", "active"}
 _FALSE = {"false", "no", "n", "0", "inactive", ""}
 
 
-def _cell_in(raw: Any, annotation: Any) -> Any:
+def _cell_text(raw: Any) -> str:
+    """A cell as the text a person typed into it.
+
+    Excel decides a cell is NUMERIC the moment it holds only digits, so a code
+    column — HSN 10005040, a pincode, a numeric SKU — reads back as an int, or as
+    10005040.0 from a sheet that went through a CSV. The schema declares those
+    columns `str` and Pydantic, rightly, will not guess a string out of a number:
+    that was "Input should be a valid string" on every row of an HSN import. So a
+    whole number is written without its ".0", and nothing else is reformatted.
+    """
+    if isinstance(raw, bool):
+        return "TRUE" if raw else "FALSE"
+    if isinstance(raw, float) and raw.is_integer():
+        return str(int(raw))
+    if isinstance(raw, Decimal) and raw == raw.to_integral_value():
+        return str(int(raw))
+    if isinstance(raw, datetime):
+        return raw.isoformat()[:10] if raw.time() == datetime.min.time() \
+            else raw.isoformat()
+    if isinstance(raw, date):
+        return raw.isoformat()
+    return str(raw).strip()
+
+
+def fixed_width(field: Any) -> int | None:
+    """The width of a fixed-width code column (min_length == max_length), if the
+    field is one — HSN is 8. Read off the schema so no master is named here."""
+    low = high = None
+    for meta in getattr(field, "metadata", ()):
+        low = getattr(meta, "min_length", low)
+        high = getattr(meta, "max_length", high)
+    return low if low and low == high else None
+
+
+# How far down the template's code columns are pre-formatted as text.
+TEXT_FORMATTED_ROWS = 1000
+
+
+def _is_code_column(name: str, field: Any) -> bool:
+    """A text column whose values are codes, which Excel would read as numbers."""
+    return _unwrap_optional(field.annotation) is str and (
+        fixed_width(field) is not None or name == "code" or name.endswith("_code"))
+
+
+def _cell_in(raw: Any, annotation: Any, width: int | None = None) -> Any:
     """Cell -> something the Pydantic schema will accept.
 
     Only the conversions a spreadsheet forces on us: Excel hands back "TRUE" as a
-    string in one file and a real bool in the next, and 1.0 for a column of ids.
-    Everything else is left for the schema to judge, so validation stays in one place.
+    string in one file and a real bool in the next, 1.0 for a column of ids, and a
+    NUMBER for any text column that happens to hold only digits. Everything else is
+    left for the schema to judge, so validation stays in one place.
+
+    `width` is a fixed-width code column's length. A number cannot carry a leading
+    zero, so "01012100" typed into Excel comes back as 1012100; when a NUMERIC cell in
+    such a column is one digit short, the zero it lost is put back. A TEXT cell is never
+    padded — a short code typed as text is a typo, and the schema says so.
     """
     inner = _unwrap_optional(annotation)
     if isinstance(raw, str):
         raw = raw.strip()
     if raw in (None, ""):
         return None
+
+    if inner is str and not isinstance(raw, (str, bool)):
+        text = _cell_text(raw)
+        # ONE digit only: a code that is several digits short is not a lost zero,
+        # it is the wrong number, and padding it would make the error quote a value
+        # nobody typed ("00001234" for a cell reading 1234).
+        if width and isinstance(raw, (int, float, Decimal)) \
+                and text.isdigit() and len(text) == width - 1:
+            text = "0" + text
+        return text
 
     if get_origin(inner) is list:
         member = (get_args(inner) or (str,))[0]
@@ -435,6 +504,12 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
             _dropdown(sheet, lists, position, ["Yes", "No"])
         elif _enum_choices(defn, name):
             _dropdown(sheet, lists, position, _enum_choices(defn, name))
+        elif _is_code_column(name, field):
+            # Formatted as TEXT before anyone types into it, so Excel keeps
+            # "01012100" as typed instead of turning it into the number 1012100.
+            letter = get_column_letter(position)
+            for row in range(2, TEXT_FORMATTED_ROWS + 2):
+                sheet[f"{letter}{row}"].number_format = "@"
     lists.sheet_state = "hidden"
 
     guide = book.create_sheet("How to fill")
@@ -458,6 +533,11 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
             how = " / ".join(_enum_choices(defn, name))
         else:
             how = _type_hint(field.annotation)
+            width = fixed_width(field)
+            if width:
+                how = f"exactly {width} characters"
+                note = note or ("Keep any leading zeros. The column is formatted as "
+                                "text; a number that lost them is repaired on upload.")
             if name == "id":
                 note = note or "Leave blank to create. Fill to update that row."
             elif name.endswith("_ids"):
@@ -590,13 +670,14 @@ def parse_upload(defn, content: bytes) -> tuple[list[dict], list[str]]:
             if name in by_field:
                 # Held as typed and resolved against the target master afterwards.
                 # Running it through _cell_in here would try int(float("Antibiotics")).
-                text = str(raw).strip() if raw is not None else ""
+                text = _cell_text(raw) if raw is not None else ""
                 if text:
                     record["__lookup__"][name] = text
                 continue
             annotation = int if name == "id" else fields[name].annotation
+            width = None if name == "id" else fixed_width(fields[name])
             try:
-                parsed_value = _cell_in(raw, annotation)
+                parsed_value = _cell_in(raw, annotation, width)
             except (ValueError, TypeError) as exc:
                 errors.append(f"Row {offset}, {name}: {exc}")
                 continue
@@ -623,7 +704,7 @@ def _exported_record(defn, row, fields) -> dict:
     for name, field in fields.items():
         try:
             value = _cell_in(_cell_out(payload.get(name, getattr(row, name, None))),
-                             field.annotation)
+                             field.annotation, fixed_width(field))
         except (ValueError, TypeError):
             return {}            # cannot be compared, so treat the row as changed
         if value is not None:
@@ -670,7 +751,9 @@ def validate_rows(defn, parsed: list[dict]) -> tuple[list[tuple[int, int | None,
         except PydanticValidationError as exc:
             for problem in exc.errors():
                 where = ".".join(str(p) for p in problem["loc"]) or "row"
-                errors.append(f"Row {line}, {where}: {problem['msg']}")
+                # "Value error, ..." is Pydantic describing its own plumbing.
+                message = problem["msg"].removeprefix("Value error, ")
+                errors.append(f"Row {line}, {where}: {message}")
     return ready, errors
 
 
@@ -697,6 +780,19 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
             )).scalars().all()
             by_code = {row.code: row for row in existing}
 
+    async def run_apply(line: int, row, data) -> None:
+        # A rule that lives in the master's apply (uniqueness, a parent that must
+        # exist) raises without knowing which sheet row it was judging, and four
+        # hundred rows in, "HSN code already exists" alone sends the admin hunting.
+        try:
+            await (defn.apply(db, row, data, user) if defn.apply_needs_user
+                   else defn.apply(db, row, data))
+        except ValidationError as exc:
+            if not exc.message.startswith("Row "):
+                exc.message = f"Row {line}: {exc.message}"
+                exc.args = (exc.message,)
+            raise
+
     created = updated = 0
     for line, row_id, data in ready:
         row = None
@@ -719,8 +815,7 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
                 # Same call the CRUD route makes: a master whose apply checks the
                 # caller must get the caller here too, or a spreadsheet would be
                 # the way around a check the form enforces.
-                await (defn.apply(db, row, data, user) if defn.apply_needs_user
-                       else defn.apply(db, row, data))
+                await run_apply(line, row, data)
             else:
                 for key, value in data.model_dump().items():
                     setattr(row, key, value)
@@ -743,8 +838,7 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
         else:
             before = defn.serialize(row)
             if defn.apply is not None:
-                await (defn.apply(db, row, data, user) if defn.apply_needs_user
-                       else defn.apply(db, row, data))
+                await run_apply(line, row, data)
             else:
                 for key, value in data.model_dump().items():
                     setattr(row, key, value)
@@ -857,6 +951,18 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
         ready, schema_errors = validate_rows(defn, [dict(r) for r in parsed])
         await db.rollback()
 
+        # Show each row as it WILL be saved, not as the sheet spelled it: the code
+        # whose lost leading zero came back, the "8471 30 10" that is 84713010, the
+        # CGST and SGST worked out from an IGST-only row. The review is where the
+        # admin checks what they are about to commit, so it must be the real thing.
+        # A row that failed validation keeps its raw cells, which is what they fix.
+        understood = {line: data.model_dump(mode="json", exclude_none=True)
+                      for line, _, data in ready}
+        for record in parsed:
+            normalised = understood.get(record.get("__row__"))
+            if normalised:
+                record.update(normalised)
+
         # The review is editable, so every mapped column carries its familiar names.
         # A user can correct a blank or wrong selection without returning to Excel.
         options = await lookup_choices(defn, db)
@@ -951,12 +1057,28 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             raise ValidationError(
                 f"That is more than {MAX_IMPORT_ROWS} rows. Split it into "
                 "smaller files.")
+        fields = defn.schema.model_fields
         parsed = []
         for offset, row in enumerate(rows, start=2):
             if not isinstance(row, dict):
                 raise ValidationError(f"Row {offset} is not a row.")
-            record = {k: v for k, v in row.items()
-                      if k not in ("__row__", "__lookup__") and v is not None}
+            record = {}
+            for key, value in row.items():
+                if key in ("__row__", "__lookup__") or value is None:
+                    continue
+                # The review screen edits every cell as text and posts back whatever
+                # the preview served, numbers included, so a value is read the way a
+                # sheet cell is: a number in a text column (an HSN code) is its text,
+                # and a cell cleared on screen means "say nothing", as it does in Excel.
+                field = fields.get(key)
+                if field is not None and not isinstance(value, (list, dict)):
+                    try:
+                        value = _cell_in(value, field.annotation, fixed_width(field))
+                    except (ValueError, TypeError):
+                        pass                        # left for the schema to report
+                    if value is None:
+                        continue
+                record[key] = value
             record["__row__"] = int(row.get("__row__") or offset)
             parsed.append(record)
 

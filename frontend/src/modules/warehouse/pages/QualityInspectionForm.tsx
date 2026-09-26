@@ -198,7 +198,9 @@ export default function QualityInspectionForm({
       setForm((f) => ({
         ...f,
         warehouse_id: receipt.warehouse_id,
-        items: (receipt.items ?? []).map((l) => ({
+        // Only the lines the item master sends to QC. The rest went straight to
+        // putaway when the GRN was submitted, and the server refuses them here.
+        items: (receipt.items ?? []).filter((l) => l.requires_qi).map((l) => ({
           receipt_item_id: l.id,
           item_id: l.item_id,
           item_code: l.item_code,

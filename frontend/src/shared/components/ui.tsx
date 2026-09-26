@@ -10,6 +10,7 @@ import {
   Textarea as HTextarea,
   Select as HSelect,
   SelectItem as HSelectItem,
+  Tooltip,
 } from "@heroui/react";
 
 /* ---------------------------------------------------------------------------
@@ -311,7 +312,11 @@ export function Select({
         classNames={{ trigger: `min-h-11 border-line bg-content1 ${className ?? ""}` }}
       >
         {(option: SelectOption) => (
-          <HSelectItem key={String(option.value)}>{option.label}</HSelectItem>
+          <HSelectItem key={String(option.value)} textValue={option.label} title={option.label}>
+          <Tooltip content={option.label} placement="top" delay={0} closeDelay={0} classNames={{ base: "z-[99999]" }} className="max-w-xs text-sm">
+            <span className="pointer-events-auto block w-full truncate">{option.label}</span>
+          </Tooltip>
+        </HSelectItem>
         )}
       </HSelect>
     );
@@ -331,7 +336,11 @@ export function Select({
       }}
     >
       {(option: SelectOption) => (
-        <AutocompleteItem key={String(option.value)}>{option.label}</AutocompleteItem>
+        <AutocompleteItem key={String(option.value)} textValue={option.label} title={option.label}>
+        <Tooltip content={option.label} placement="top" delay={0} closeDelay={0} classNames={{ base: "z-[99999]" }} className="max-w-xs text-sm">
+          <span className="pointer-events-auto block w-full truncate">{option.label}</span>
+        </Tooltip>
+      </AutocompleteItem>
       )}
     </Autocomplete>
   );

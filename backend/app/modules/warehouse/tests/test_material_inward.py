@@ -592,3 +592,98 @@ async def test_unsaved_items_are_not_left_behind(db):
     from app.modules.warehouse import models as m
     rows = (await db.execute(select(m.Receipt))).scalars().all()
     assert rows == []
+
+
+async def _split_fixtures(db):
+    """A bin-managed store and one item of each kind: one the master sends to QC, one
+    it does not."""
+    wh = Warehouse(code="WH-SPLIT", name="Split store", warehouse_type="MAIN",
+                   is_bin_managed=True, is_active=True)
+    qc_item = Item(code="ELE-GEN-0101", name="Relay", uom_code="NOS",
+                   requires_qi=True, is_active=True)
+    plain = Item(code="ELE-GEN-0102", name="Cable tie", uom_code="NOS",
+                 requires_qi=False, is_active=True)
+    db.add_all([wh, qc_item, plain])
+    await db.commit()
+    return wh, qc_item, plain
+
+
+async def _submitted_split_grn(client, headers, wh, qc_item, plain):
+    created = await client.post("/api/warehouse/receipts", json={
+        "receipt_type": "PURCHASE",
+        "grn_date": "2026-09-21",
+        "warehouse_id": wh.id,
+        "items": [{"item_id": qc_item.id, "received_qty": 3},
+                  {"item_id": plain.id, "received_qty": 50}],
+    }, headers=headers)
+    assert created.status_code == 201, created.text
+    receipt_id = created.json()["id"]
+
+    forecast = await client.get(f"/api/warehouse/receipts/{receipt_id}/routing",
+                                headers=headers)
+    assert forecast.status_code == 200, forecast.text
+    assert forecast.json()["stage"] == "FORECAST"
+    assert [l["item_code"] for l in forecast.json()["qc_lines"]] == ["ELE-GEN-0101"]
+    assert [l["item_code"] for l in forecast.json()["direct_lines"]] == ["ELE-GEN-0102"]
+
+    submitted = await client.post(f"/api/warehouse/receipts/{receipt_id}/submit",
+                                  headers=headers)
+    assert submitted.status_code == 200, submitted.text
+    return receipt_id, submitted.json()
+
+
+async def test_submit_sends_qc_items_to_a_draft_and_the_rest_to_putaway(
+    db, client, make_user, login,
+):
+    """Requires-QI lines land on a DRAFT inspection; every other line gets its putaway
+    task in the same press, and the routing endpoint says exactly that."""
+    wh, qc_item, plain = await _split_fixtures(db)
+    await make_user(username="store", permissions=[RECEIPT_CREATE, RECEIPT_VIEW,
+                                                   INSPECTION_VIEW, PUTAWAY_VIEW])
+    headers = await login("store", "pw")
+    receipt_id, receipt = await _submitted_split_grn(client, headers, wh, qc_item, plain)
+    assert receipt["status"] == "PENDING_QC"
+
+    routing = (await client.get(f"/api/warehouse/receipts/{receipt_id}/routing",
+                                headers=headers)).json()
+    assert routing["stage"] == "ROUTED"
+    assert routing["inspection_status"] == "DRAFT"
+    assert [l["item_code"] for l in routing["qc_lines"]] == ["ELE-GEN-0101"]
+    [direct] = routing["direct_lines"]
+    assert direct["item_code"] == "ELE-GEN-0102"
+    assert direct["route"] == "PUTAWAY" and direct["putaway_no"]
+
+    inspection = await client.get(f"/api/warehouse/inspections/{routing['inspection_id']}",
+                                  headers=headers)
+    assert [l["item_code"] for l in inspection.json()["items"]] == ["ELE-GEN-0101"]
+
+
+async def test_an_inspection_cannot_take_a_line_that_needs_no_qc(
+    db, client, make_user, login,
+):
+    """The form lists only Requires-QI lines; the server refuses the rest, because that
+    line was already released to putaway at submit."""
+    wh, qc_item, plain = await _split_fixtures(db)
+    await make_user(username="store", permissions=[RECEIPT_CREATE, RECEIPT_VIEW,
+                                                   INSPECTION_VIEW, INSPECTION_EXECUTE])
+    headers = await login("store", "pw")
+    receipt_id, receipt = await _submitted_split_grn(client, headers, wh, qc_item, plain)
+    routing = (await client.get(f"/api/warehouse/receipts/{receipt_id}/routing",
+                                headers=headers)).json()
+    qc_line = routing["qc_lines"][0]
+    plain_line = routing["direct_lines"][0]
+
+    refused = await client.put(f"/api/warehouse/inspections/{routing['inspection_id']}", json={
+        "inspection_date": "2026-09-21",
+        "receipt_id": receipt_id,
+        "warehouse_id": wh.id,
+        "inspection_type": "INCOMING",
+        "items": [
+            {"receipt_item_id": qc_line["receipt_item_id"], "item_id": qc_item.id,
+             "inspected_qty": 3, "accepted_qty": 3, "result": "PASSED"},
+            {"receipt_item_id": plain_line["receipt_item_id"], "item_id": plain.id,
+             "inspected_qty": 50, "accepted_qty": 50, "result": "PASSED"},
+        ],
+    }, headers=headers)
+    assert refused.status_code == 422, refused.text
+    assert "does not require quality inspection" in refused.text

@@ -11,7 +11,7 @@ import {
   getStockMovementOrder,
   submitStockMovementOrder,
 } from "../api";
-import { Modal, ModalBody, ModalContent, ModalHeader, ModalFooter } from "@heroui/react";
+import { Modal, ModalBody, ModalContent, ModalHeader, ModalFooter , Tooltip} from "@heroui/react";
 import { useState } from "react";
 import { Section } from "../components/DocumentMeta";
 import { fmtDateTime, fmtQty } from "../format";
@@ -281,7 +281,9 @@ export default function StockMovementDetail() {
               header: "Item",
               render: (row) => (
                 <div>
-                  <div className="font-semibold text-ink">{row.item_name}</div>
+                  <Tooltip content={row.item_name} placement="top" closeDelay={0}>
+                    <div className="font-semibold text-ink truncate cursor-help">{row.item_name}</div>
+                  </Tooltip>
                   <div className="font-mono text-[11px] text-muted">{row.item_code}</div>
                   <ViewSerials serials={row.serial_numbers} />
                 </div>
@@ -323,7 +325,9 @@ export default function StockMovementDetail() {
           renderCard={(row) => (
             <div className="space-y-2">
               <div className="flex justify-between font-semibold">
-                <span>{row.item_name}</span>
+                <Tooltip content={row.item_name} placement="top" closeDelay={0}>
+                  <span className="truncate cursor-help max-w-[200px] block">{row.item_name}</span>
+                </Tooltip>
                 <span>{fmtQty(row.quantity)} <span className="text-xs text-muted">{row.uom_code}</span></span>
               </div>
               <div className="text-sm">

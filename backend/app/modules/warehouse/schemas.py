@@ -605,6 +605,9 @@ class ReceiptItemRead(_Read):
     uom_code: str | None = None
     is_asset: bool = False
     is_serial_tracked: bool = False
+    #: The item master's "Requires QI". Decides whether this line goes to QC or
+    #: straight to putaway on submit.
+    requires_qi: bool = False
     ordered_qty: Decimal
     received_qty: Decimal
     accepted_qty: Decimal
@@ -685,6 +688,44 @@ class ReceiptRead(_Read):
 
 class ReceiptDetail(ReceiptRead):
     items: list[ReceiptItemRead] = Field(default_factory=list)
+
+
+class ReceiptRouteLine(BaseModel):
+    """One GRN line and where it goes. `route` is QC, PUTAWAY or STOCK (a point with
+    no bins banks the goods directly)."""
+    receipt_item_id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    received_qty: Decimal
+    accepted_qty: Decimal
+    rejected_qty: Decimal
+    requires_qi: bool = False
+    route: str
+    qc_status: str | None = None
+    putaway_id: int | None = None
+    putaway_no: str | None = None
+    putaway_status: str | None = None
+
+
+class ReceiptRouting(BaseModel):
+    """`service.receipt_routing`. `stage` is FORECAST (not submitted yet), PARKED (the
+    retired GRN approval held it with nothing raised) or ROUTED."""
+    receipt_id: int
+    grn_no: str
+    status: str
+    stage: str
+    is_bin_managed: bool
+    headline: str
+    inspection_id: int | None = None
+    inspection_no: str | None = None
+    inspection_status: str | None = None
+    putaway_total: int = 0
+    putaway_done: int = 0
+    qc_lines: list[ReceiptRouteLine] = Field(default_factory=list)
+    direct_lines: list[ReceiptRouteLine] = Field(default_factory=list)
 
 
 class PoLineOption(BaseModel):
@@ -1262,9 +1303,9 @@ class StockMovementOrderRead(BaseModel):
     line, so `items` is empty there and populated on create.
     """
     order_no: str
-    #: 0 when no ladder is configured and the movement completed on the press — that
-    #: path writes no document row, exactly as it always did. Non-zero means there is
-    #: an `inv_sto` row to approve (2026-08-21).
+    #: 0 only for movements completed before orders were stored — those have ledger
+    #: rows and no document row. Every order raised since carries a non-zero
+    #: `inv_sto` row moving DRAFT → PENDING_APPROVAL → APPROVED → COMPLETED.
     id: int = 0
     warehouse_id: int
     warehouse_name: str | None = None
@@ -3808,6 +3849,56 @@ class ItemLocationsOut(BaseModel):
     total_reserved: float
     total_on_hand: float
     locations: list[ItemLocation]
+
+
+# --------------------------------------------------------------------------- #
+# Stock by storage location, as a download (`warehouse/stock_report.py`)
+# --------------------------------------------------------------------------- #
+
+class StockReportScopeOption(BaseModel):
+    """One of the two downloads, already counted.
+
+    Every string on it is composed by the service, so the button and the file it
+    produces cannot describe the same scope differently.
+    """
+    key: str                       #: LOCATION | HIERARCHY
+    title: str                     #: "Only F1 — Ground floor"
+    sentence: str                  #: the same line the file's header block prints
+    hint: str                      #: why you would pick this one, or must not
+    locations_in_scope: int        #: locations the scope covers, stock or no stock
+    locations: int                 #: of those, how many actually hold something
+    items: int
+    rows: int
+    total_qty: Decimal
+    is_empty: bool
+    #: True when this location has nothing inside it, so both scopes are one file.
+    same_as_other: bool
+    recommended: bool
+
+
+class StockReportScopes(BaseModel):
+    """`GET /stock-segregation/report/scopes` — what each download would contain.
+
+    Asked BEFORE anything is downloaded, because "the Floor 1 report" means two
+    different files and the counts are what make the difference visible.
+    """
+    warehouse_id: int
+    warehouse_name: str | None = None
+    location_id: int | None = None
+    location_code: str | None = None
+    location_name: str | None = None
+    location_label: str
+    location_kind: str | None = None
+    location_path: list[str] = Field(default_factory=list)
+    depth: int = 0
+    child_count: int = 0
+    descendant_count: int = 0
+    item_filter: int | None = None
+    #: The person only sees the floors they are assigned; another may pull more.
+    floor_restricted: bool = False
+    row_cap: int
+    options: list[StockReportScopeOption] = Field(default_factory=list)
+
 
 # Forward references: LocationOccupancy names CapacityGate/OccupancyLine and
 # PutawayRead names HandlingUnit, all declared after them.

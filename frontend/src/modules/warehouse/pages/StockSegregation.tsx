@@ -5,6 +5,7 @@ import { Card, ErrorBanner, PageHeader, ResponsiveList, StatCard, StatusPill, Su
 import { FilterBar, FilterSelect } from "../components/FilterBar";
 import { LabelSheet, type LabelSpec } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
+import { StockReportPanel } from "../components/StockReportPanel";
 import { listBatches, listSerials, warehouseOptions, itemOptions, getItemLocations, listLocations } from "../api";
 import { daysUntil, fmtDate, fmtQty, normaliseStatus } from "../format";
 import type { Batch, SerialNumber } from "../types";
@@ -251,6 +252,16 @@ function LocationsTab() {
                 onChange={(id) => setItemId(id === "" ? null : Number(id))}
               />
             </div>
+
+            {/* The download sits ABOVE the stock it describes, and carries the item
+                filter and the browsed location with it — a report button that ignores
+                the filters on screen produces a file nobody can reconcile with what
+                they were looking at. */}
+            <StockReportPanel
+              warehouseId={warehouseId}
+              locationId={selectedLocationId}
+              itemId={itemId}
+            />
 
             <ErrorBanner error={stockQuery.error} />
 

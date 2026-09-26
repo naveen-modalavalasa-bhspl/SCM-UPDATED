@@ -581,6 +581,43 @@ export interface Receipt {
   items?: ReceiptItem[];
 }
 
+/** One GRN line and where it goes (`GET /receipts/{id}/routing`). */
+export interface ReceiptRouteLine {
+  receipt_item_id: number;
+  line_no: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  received_qty: number;
+  accepted_qty: number;
+  rejected_qty: number;
+  requires_qi: boolean;
+  route: "QC" | "PUTAWAY" | "STOCK";
+  qc_status?: string | null;
+  putaway_id?: number | null;
+  putaway_no?: string | null;
+  putaway_status?: string | null;
+}
+
+/** Where a GRN's lines go: QC draft or straight to putaway. FORECAST before submit,
+ *  ROUTED after, PARKED for a GRN the retired approval held with nothing raised. */
+export interface ReceiptRouting {
+  receipt_id: number;
+  grn_no: string;
+  status: string;
+  stage: "FORECAST" | "PARKED" | "ROUTED";
+  is_bin_managed: boolean;
+  headline: string;
+  inspection_id?: number | null;
+  inspection_no?: string | null;
+  inspection_status?: string | null;
+  putaway_total: number;
+  putaway_done: number;
+  qc_lines: ReceiptRouteLine[];
+  direct_lines: ReceiptRouteLine[];
+}
+
 /** `inb_receipt_items`. */
 export interface ReceiptItem {
   id: number;
@@ -596,6 +633,8 @@ export interface ReceiptItem {
   is_asset?: boolean;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
+  /** The item master's "Requires QI": QC line on submit, else straight to putaway. */
+  requires_qi?: boolean;
   ordered_qty: number;
   received_qty: number;
   accepted_qty: number;
@@ -2309,6 +2348,53 @@ export interface ItemLocationsOut {
   locations: ItemLocation[];
 }
 
+/* ------------------------------------------- stock by location, as a file -- */
+
+/**
+ * One of the two downloads offered for a storage location, already counted.
+ *
+ * Every string here is composed by `warehouse/stock_report.py` — the title, the
+ * sentence and the hint — so the button and the file it produces can never describe
+ * the same scope differently. The screen renders them; it words nothing itself.
+ */
+export interface StockReportScopeOption {
+  key: "LOCATION" | "HIERARCHY";
+  title: string;
+  sentence: string;
+  hint: string;
+  /** Locations the scope covers, whether or not they hold anything. */
+  locations_in_scope: number;
+  /** Of those, how many actually hold stock. */
+  locations: number;
+  items: number;
+  rows: number;
+  total_qty: number;
+  is_empty: boolean;
+  /** This location has nothing inside it, so both scopes are the same file. */
+  same_as_other: boolean;
+  recommended: boolean;
+}
+
+/** `GET /stock-segregation/report/scopes` — what each download would contain, asked
+ *  before either is pulled. */
+export interface StockReportScopes {
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  location_id?: number | null;
+  location_code?: string | null;
+  location_name?: string | null;
+  location_label: string;
+  location_kind?: string | null;
+  location_path: string[];
+  depth: number;
+  child_count: number;
+  descendant_count: number;
+  item_filter?: number | null;
+  floor_restricted: boolean;
+  row_cap: number;
+  options: StockReportScopeOption[];
+}
+
 
 /* ------------------------------------------------------------- supporting -- */
 
@@ -2567,9 +2653,9 @@ export interface StockAvailability {
 }
 
 export interface StockMovementOrder {
-  /** 0 when no approval ladder is configured and the movement completed on the press —
-   *  that path writes no document row, exactly as it always did. Non-zero means there
-   *  is a record to approve (2026-08-21). */
+  /** 0 only for movements completed before orders were stored — those have ledger
+   *  rows and no document row. Every order raised since carries a non-zero id and
+   *  moves DRAFT → PENDING_APPROVAL → APPROVED → COMPLETED. */
   id: number;
   order_no: string;
   warehouse_id: number;
@@ -2596,4 +2682,67 @@ export interface StockMovementOrderWrite {
   warehouse_id: number;
   reason?: string | null;
   items: StockMovementOrderItemWrite[];
+}
+
+// ---------------------------------------------------------------------------
+// Warehouse Demand Pool
+// ---------------------------------------------------------------------------
+
+export interface WDemandPoolStage {
+  stage: string;
+  label: string;
+  tone: string;
+  hint: string;
+  deep_link: string;
+}
+
+export interface WDemandPoolDoc {
+  kind: string;
+  id: number;
+  no: string | null;
+  status: string;
+  qty: number;
+  stage?: string;
+}
+
+export interface WDemandPoolSource {
+  indent_id: number;
+  indent_no: string;
+  indent_item_id: number;
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  requested_qty: number;
+  owed_qty: number;
+  stage: string;
+  stages: Record<string, number>;
+  required_date: string | null;
+  priority: string | null;
+  requested_by_name: string | null;
+  department_name: string | null;
+  project_name: string | null;
+  docs: WDemandPoolDoc[];
+}
+
+export interface WDemandPoolGroup {
+  item_id: number;
+  item_code: string | null;
+  item_name: string | null;
+  uom_code: string | null;
+  total_qty: number;
+  indent_count: number;
+  stage_summary: Record<string, number>;
+  earliest_required: string | null;
+  sources: WDemandPoolSource[];
+}
+
+export interface WDemandPoolResponse {
+  groups: WDemandPoolGroup[];
+  group_count: number;
+  indent_count: number;
+  stage_totals: Record<string, number>;
+  page: number;
+  size: number;
+  total: number;
 }

@@ -521,3 +521,36 @@ export const supplierRegisterApi = {
     api.post<Supplier>(
       `${SUPPLIERS}/${id}/login/${active ? "enable" : "disable"}`).then((r) => r.data),
 };
+
+
+// --------------------------------------------------------------------------- //
+//  Procurement Demand Pool  (2026-09-25)
+// --------------------------------------------------------------------------- //
+
+import type { DemandPoolResponse, DemandPoolStage } from './types';
+
+/** Stage metadata served by the backend — stage codes, labels, tones, deep links.
+ *  Never hardcoded in the screen: the backend is the single source of truth. */
+export const procurementDemandPoolApi = {
+  stages: (signal?: AbortSignal) =>
+    api.get<DemandPoolStage[]>('/api/procurement/demand-pool/stages', { signal })
+      .then((r) => r.data),
+
+  pool: (params: {
+    search?: string;
+    item_id?: number;
+    warehouse_id?: number;
+    project_id?: number;
+    stage?: string;
+    page?: number;
+    size?: number;
+  } = {}, signal?: AbortSignal) =>
+    api.get<DemandPoolResponse>('/api/procurement/demand-pool', { params, signal })
+      .then((r) => r.data),
+};
+
+export const procurementDemandPoolKeys = {
+  stages: () => ['procurement', 'demand-pool', 'stages'] as const,
+  pool: (params: Record<string, unknown> = {}) =>
+    ['procurement', 'demand-pool', params] as const,
+};

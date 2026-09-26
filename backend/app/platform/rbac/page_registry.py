@@ -150,6 +150,9 @@ PAGES: list[PageDef] = [
     PageDef("pro_overview", "/procurement/overview", "Dashboard",
             parent="grp_purchasing", module="procurement", icon="layout-dashboard",
             sort_order=24),
+    PageDef("pro_demand_pool", "/procurement/demand-pool", "Demand Pool",
+            parent="grp_purchasing", module="procurement", icon="pie-chart",
+            sort_order=25),
     PageDef("pro_requisitions", "/procurement/requisitions", "Requisitions",
             parent="grp_purchasing", module="procurement", icon="file-text",
             sort_order=25),
@@ -392,6 +395,9 @@ PAGES: list[PageDef] = [
     PageDef("wh_qc_outward", "/warehouse/qc-outward", "Outward QC",
             parent="grp_warehouse", module="warehouse",
             icon="clipboard-check", sort_order=51),
+    PageDef("wh_demand_pool", "/warehouse/demand-pool", "Demand Pool",
+            parent="grp_warehouse", module="warehouse", icon="pie-chart",
+            sort_order=41),
 
     # ------------------------------------------------------------------ #
     #  Reports — ledgers that already existed with no way in
