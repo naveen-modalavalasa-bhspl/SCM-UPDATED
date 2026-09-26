@@ -45,7 +45,7 @@ export function SupplierRFQListPage() {
       render: (r) => (
         <div className="min-w-0">
           <div className="font-mono text-xs font-semibold text-ink">{r.rfq_no}</div>
-          <div className="truncate text-[11px] text-muted">{r.title ?? "Untitled"}</div>
+          <div className="truncate text-[11px] text-muted">{r.title && r.title.trim() !== "" && r.title !== "Untitled" ? r.title : null}</div>
         </div>
       ),
     },
@@ -145,7 +145,7 @@ export function SupplierRFQListPage() {
                   <StatusPill status={r.status} label={vendorRfqLabel(r.status)} />
                 )}
               </div>
-              <div className="text-base font-medium text-body">{r.title ?? "Untitled"}</div>
+              <div className="text-base font-medium text-body">{r.title && r.title.trim() !== "" && r.title !== "Untitled" ? r.title : null}</div>
               <div className="flex items-center gap-3 text-xs text-muted">
                 <span className="flex items-center gap-1 rounded-md bg-surface-2 px-2 py-1">
                   {r.total_items} item{r.total_items === 1 ? "" : "s"}

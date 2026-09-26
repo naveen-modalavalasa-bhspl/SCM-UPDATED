@@ -1,148 +1,195 @@
-import { useNavigate } from "react-router-dom";
+import { useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Snowflake } from "lucide-react";
 import {
-  Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill,
-  type Column,
+  Card, ErrorBanner, PageHeader, Select, StatusPill,
 } from "@/shared/components";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
 import { money } from "./RequisitionListPage";
-import type { QuoteListRow } from "../types";
-import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
-import { QuotationKpis } from "../components/ProcurementKpis";
-import { useUrlFilters } from "../urlFilters";
+import type { RFQListRow, QuoteListRow } from "../types";
 
-const SIZE = 20;
-
-/** Every filter this screen owns, so Clear knows what to drop. */
-const FILTER_KEYS = ["status", "search", "vendor"];
+const SIZE = 100;
 
 /**
- * Every quotation across every RFQ.
+ * Quotations — the reading room (2026-09-26).
  *
- * Behind `rfq.compare` rather than `rfq.view`: this is the one screen that shows
- * what every vendor charges, side by side, with no RFQ to scope it.
+ * This register no longer answers "what does everyone charge" — that is Price
+ * Compare's job, one tab over. It answers "what came back on THIS tender": pick
+ * an RFQ at the top, and beneath it one card per supplier's quotation against
+ * that tender. No rank, no best-price chips, no cross-RFQ price list — a buyer
+ * reads one supplier's paper here and compares every paper in the studio.
+ *
+ * The drill-in (`/procurement/quotations/:id`) is where the quote's own life
+ * happens: Request change, the price trail, the thread with the supplier.
  */
 export function QuotationListPage() {
   const nav = useNavigate();
-  // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
-  const { get, set, clear, page, setPage, activeCount } = useUrlFilters();
-  const search = get("search");
-  // Status is a SERVER filter now (2026-08-23): a KPI tile counts every row in a
-  // bucket, and filtering in the browser would only have narrowed the twenty rows in
-  // hand — so the tile said 41 and the list showed 6. Vendor stays in the browser:
-  // its options are built from the rows themselves, and a vendor who has never quoted
-  // is not a filter worth offering.
-  const status = get("status");
-  const vendor = get("vendor");
-  // Debounce the search input to avoid spamming the API on every keystroke
-  const debouncedSearch = useDebouncedValue(search);
+  const [params, setParams] = useSearchParams();
+  const rfqId = Number(params.get("rfq") ?? 0);
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["quotations", debouncedSearch, status, page],
-    queryFn: () => rfqApi.quotations({
-      search: debouncedSearch || undefined,
-      status: status || undefined,
-      page, size: SIZE,
-    }),
+  // The tenders that can show something here. Any reply state is eligible —
+  // even one response makes the tender worth opening.
+  const { data: rfqPage, error: rfqError } = useQuery({
+    queryKey: ["quotations-rfqs"],
+    queryFn: () => rfqApi.list({ status: "PUBLISHED", page: 1, size: SIZE }),
+  });
+  const { data: closedPage } = useQuery({
+    queryKey: ["quotations-rfqs-closed"],
+    queryFn: () => rfqApi.list({ status: "CLOSED", page: 1, size: SIZE }),
+  });
+  const { data: awardedPage } = useQuery({
+    queryKey: ["quotations-rfqs-awarded"],
+    queryFn: () => rfqApi.list({ status: "AWARDED", page: 1, size: SIZE }),
   });
 
-  const all = data?.items ?? [];
-  const vendorOptions = [...new Map(all
-    .filter((r) => r.vendor_name)
-    .map((r) => [String(r.vendor_id), r.vendor_name!])).entries()]
-    .map(([value, label]) => ({ value, label }))
-    .sort((a, b) => a.label.localeCompare(b.label));
-  const statusOptions = [...new Set(all.map((r) => r.status).filter(Boolean))]
-    .map((v) => ({ value: v as string, label: (v as string).replace(/_/g, " ") }));
-  const rows = all.filter((r) => !vendor || String(r.vendor_id) === vendor);
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / SIZE));
+  const rfqOptions: RFQListRow[] = useMemo(() => {
+    const seen = new Set<number>();
+    const merged: RFQListRow[] = [];
+    for (const page of [rfqPage, closedPage, awardedPage]) {
+      for (const row of page?.items ?? []) {
+        if (row.response_count > 0 && !seen.has(row.id)) {
+          seen.add(row.id);
+          merged.push(row);
+        }
+      }
+    }
+    return merged.sort((a, b) => b.id - a.id);
+  }, [rfqPage, closedPage, awardedPage]);
 
-  const columns: Column<QuoteListRow>[] = [
-    {
-      key: "quote",
-      header: "Quotation",
-      render: (r) => (
-        <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{r.quotation_no}</div>
-          <div className="text-[11px] text-muted">against {r.rfq_no ?? `RFQ ${r.rfq_id}`}</div>
-        </div>
-      ),
-    },
-    { key: "vendor", header: "Vendor", render: (r) => r.vendor_name ?? `Vendor ${r.vendor_id}` },
-    { key: "status", header: "Status", render: (r) => <StatusPill status={r.status} /> },
-    {
-      key: "total",
-      header: "Grand total",
-      className: "text-right",
-      render: (r) => <span className="font-semibold text-ink">{money(r.grand_total)}</span>,
-    },
-    {
-      key: "rank",
-      header: "Rank",
-      className: "text-right",
-      hideOnNarrow: true,
-      render: (r) => r.rank_position ?? "—",
-    },
-    {
-      key: "submitted",
-      header: "Submitted",
-      hideOnNarrow: true,
-      render: (r) => (r.submitted_at ? fmtDate(r.submitted_at) : "Not yet"),
-    },
-  ];
+  // Default to the newest tender with replies — the one a buyer most likely
+  // came here for — while keeping their explicit choice sticky in the URL.
+  const effectiveRfqId = rfqId || rfqOptions[0]?.id || 0;
+
+  const selected = rfqOptions.find((r) => r.id === effectiveRfqId);
+
+  const { data: quotes, isLoading, error } = useQuery({
+    queryKey: ["quotations", effectiveRfqId],
+    queryFn: () => rfqApi.quotations({ rfq_id: effectiveRfqId, page: 1, size: SIZE }),
+    enabled: effectiveRfqId > 0,
+  });
+
+  const rows: QuoteListRow[] = quotes?.items ?? [];
+  const quoted = rows.filter((r) => r.status !== "DRAFT");
 
   return (
     <div>
-      <PageHeader eyebrow="Procurement" title="Quotations" />
+      <PageHeader
+        eyebrow="Procurement"
+        title="Quotations"
+        actions={selected?.is_price_frozen ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700">
+            <Snowflake className="h-3.5 w-3.5" /> Prices frozen
+          </span>
+        ) : undefined}
+      />
 
-      {/* The KPI strip. Gated inside the component on `rfq.compare` — the same code
-          this screen's endpoint checks, because these numbers are vendor PRICES. */}
-      <div className="mb-4">
-        <QuotationKpis />
-      </div>
-
-      {/* Shared filter strip — see RequisitionListPage for why the local copies went. */}
-      <FilterBar
-        search={search}
-        onSearch={(value) => set({ search: value })}
-        searchPlaceholder="Search quotation, vendor or RFQ no…"
-        active={activeCount(FILTER_KEYS)}
-        onClear={() => clear(FILTER_KEYS)}
-      >
-        <FilterMenu label="Status" value={status}
-                    onChange={(value) => set({ status: value })} options={statusOptions} />
-        <FilterMenu label="Vendor" value={vendor}
-                    onChange={(value) => set({ vendor: value })} options={vendorOptions} />
-      </FilterBar>
-
-      <ErrorBanner error={error} />
-
-      <Card className="p-2">
-        <ResponsiveList
-          data={rows}
-          columns={columns}
-          keyOf={(r) => r.id}
-          loading={isLoading}
-          onRowClick={(r) => nav(`/procurement/rfqs/${r.rfq_id}`)}
-          page={page}
-          totalPages={totalPages}
-          onPageChange={setPage}
-          empty={status || vendor || search ? "No quotations match these filters." : "No quotations yet. They arrive once an RFQ is published."}
-          renderCard={(r) => (
-            <div className="space-y-1.5">
-              <div className="flex items-start justify-between gap-2">
-                <span className="font-mono text-xs font-semibold text-ink">{r.quotation_no}</span>
-                <StatusPill status={r.status} />
-              </div>
-              <div className="text-sm text-body">{r.vendor_name ?? "—"}</div>
-              <div className="text-xs text-muted">
-                {r.rfq_no ?? `RFQ ${r.rfq_id}`} · {money(r.grand_total)}
-              </div>
+      {/* The tender switcher. Carries the RFQ's identity and how far the replies
+          have got, so the page answers "what came back on this tender" before
+          the first card is read. */}
+      <Card className="mb-4 p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="min-w-[300px] flex-1">
+            <Select
+              value={effectiveRfqId ? String(effectiveRfqId) : ""}
+              placeholder="Pick a tender…"
+              options={rfqOptions.map((r) => {
+                const titleStr = r.title && r.title.trim() !== "" && r.title !== "Untitled" ? ` · ${r.title}` : "";
+                return {
+                  value: String(r.id),
+                  label: `${r.rfq_no}${titleStr} · ${r.response_count}/${r.vendor_count} replied`,
+                };
+              })}
+              onChange={(value) => {
+                const next = new URLSearchParams(params);
+                next.set("rfq", value);
+                setParams(next, { replace: true });
+              }}
+            />
+          </div>
+          {selected && (
+            <div className="flex items-center gap-3 text-xs text-muted">
+              <span>
+                Closes {selected.due_date ? fmtDate(selected.due_date) : "—"}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-24 overflow-hidden rounded-full bg-surface-2">
+                  <span
+                    className="block h-full rounded-full bg-brand"
+                    style={{
+                      width: `${selected.vendor_count
+                        ? Math.round((selected.response_count / selected.vendor_count) * 100)
+                        : 0}%`,
+                    }}
+                  />
+                </span>
+                {selected.response_count} of {selected.vendor_count} suppliers responded
+              </span>
             </div>
           )}
-        />
+        </div>
       </Card>
+
+      <ErrorBanner error={rfqError ?? error} />
+
+      {effectiveRfqId > 0 && (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {quoted.map((q) => (
+            <button
+              key={q.id}
+              type="button"
+              onClick={() => nav(`/procurement/quotations/${q.id}`)}
+              className="group rounded-2xl border border-line bg-surface-2/40 p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand/40 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-brand/30"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-3">
+                  {/* Supplier initial tile — one glance says whose paper this is. */}
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-sm font-bold text-brand">
+                    {(q.vendor_name ?? "?").trim().charAt(0).toUpperCase()}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-ink">
+                      {q.vendor_name ?? `Vendor ${q.vendor_id}`}
+                    </div>
+                    <div className="font-mono text-[11px] text-muted">
+                      {q.quotation_no}
+                    </div>
+                  </div>
+                </div>
+                <StatusPill status={q.status} />
+              </div>
+              <div className="mt-3 flex items-end justify-between border-t border-line/60 pt-3">
+                <div className="text-xs text-muted">
+                  {q.submitted_at ? `Submitted ${fmtDate(q.submitted_at)}` : "Not submitted"}
+                  {q.revision_count > 0 ? ` · ${q.revision_count} revision${q.revision_count === 1 ? "" : "s"}` : ""}
+                </div>
+                <div className="font-mono text-base font-bold text-ink group-hover:text-brand">
+                  {money(q.grand_total)}
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {effectiveRfqId > 0 && !isLoading && quoted.length === 0 && (
+        <Card className="p-10 text-center">
+          <p className="text-sm font-semibold text-ink">No supplier has quoted this RFQ yet</p>
+          <p className="mt-1 text-sm text-muted">
+            Quotations appear here the moment a supplier submits from their portal.
+          </p>
+        </Card>
+      )}
+
+      {rfqOptions.length === 0 && !rfqError && (
+        <Card className="p-10 text-center">
+          <p className="text-sm font-semibold text-ink">Nothing to read yet</p>
+          <p className="mt-1 text-sm text-muted">
+            Publish an RFQ and its replies will gather here, one tender at a time.
+          </p>
+        </Card>
+      )}
     </div>
   );
 }

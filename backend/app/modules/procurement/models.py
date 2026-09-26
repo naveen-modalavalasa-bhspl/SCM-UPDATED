@@ -327,6 +327,24 @@ class RFQ(Base):
     terms = Column(Text, nullable=True)
     current_approver_name = Column(String(200), nullable=True)
 
+    # ── Freeze Prices (2026-09-26) ───────────────────────────────────────── #
+    # The lock a buyer closes BEFORE comparing and awarding, and the gate every
+    # PO raised off this tender hangs on. While it is open, a supplier's price is
+    # still an opinion; once it is closed, prices are arithmetic.
+    #
+    # Deliberately a COLUMN, not a status: every existing RFQStatus filter, KPI,
+    # badge and report keeps its meaning, and "open but frozen" — the state a
+    # buyer needs while they read the sheet — is expressible without inventing a
+    # status no other reader knows.
+    is_price_frozen = Column(Boolean, nullable=False, default=False)
+    frozen_at = Column(DateTime(timezone=True), nullable=True)
+    frozen_by_id = soft_fk()
+    frozen_by_name = Column(String(200), nullable=True)   # snapshot
+    # How many quotations were in when the buyer closed the door. A comparison
+    # sheet whose row count changed after the freeze date is worth a question —
+    # this is what makes "frozen at 4 quotes, 5 came in later" checkable.
+    frozen_at_revision = Column(Integer, nullable=True)
+
     created_by_id = soft_fk()
     created_by_name = Column(String(200), nullable=True)  # snapshot
     created_at = created_at_col()
@@ -433,11 +451,100 @@ class Quotation(Base):
     revision_count = Column(Integer, nullable=False, default=0)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # ── Quotation negotiation (2026-09-26) ───────────────────────────────── #
+    # A buyer asking the supplier for a better number, carried on the quotation
+    # itself. A badge COLUMN rather than a QuotationStatus value: negotiation is
+    # an overlay on SUBMITTED/REVISED, not a place the document moved to, and a
+    # new status would have made every existing filter, KPI and report lie.
+    under_negotiation = Column(Boolean, nullable=False, default=False)
+    # How many change requests the supplier has ACCEPTED. "v2 pricing" is a
+    # number, not archaeology; `revision_count` beside it still counts every
+    # resubmission of any kind.
+    accepted_revision = Column(Integer, nullable=False, default=0)
+
     created_by_id = soft_fk()
     created_at = created_at_col()
 
     items = relationship("QuotationItem", back_populates="quotation",
                          cascade="all, delete-orphan", lazy="selectin")
+
+
+class QuoteChangeRequest(Base):
+    """`pro_quote_change_requests` — the buyer's ask on a supplier's quotation.
+
+    An amendment for a quotation, cut from the same cloth as `PORevision` and
+    `amend_po`: the quote as the supplier priced it is snapshotted BEFORE anything
+    is proposed, so the price trail always has a version that still exists to diff
+    against; the proposed change is applied only when the COUNTERPARTY accepts it;
+    and the trail is append-only (rule 9) — nothing deletes a row, including a
+    decline, which files its reason and stands in the history like any decision.
+
+    One open (AWAITING_SUPPLIER) request per quotation, enforced in the service:
+    two parallel asks on one price is how contracts end up with two truths.
+    """
+    __tablename__ = "pro_quote_change_requests"
+    id = pk()
+    quotation_id = Column(ForeignKey("pro_quotations.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    # Denormalised for the same reason every pointer here carries one: the RFQ is
+    # the tender the request is negotiating against, and listing a vendor's open
+    # requests must not chase two joins.
+    rfq_id = Column(ForeignKey("pro_rfqs.id"), index=True, nullable=False)
+    cr_no = Column(String(30), unique=True, nullable=False)   # CR-2026-27/0001
+    # DRAFT is never persisted — a proposed request goes straight to the supplier.
+    # AWAITING_SUPPLIER -> ACCEPTED | DECLINED, or WITHDRAWN by the buyer, or
+    # SUPERSEDED when a different request on the same quote was accepted first.
+    status = Column(String(30), nullable=False, index=True)
+    # "Say why" — the same rule `amend_po` holds. A price change with no recorded
+    # reason answers no question six months later.
+    reason = Column(Text, nullable=False)
+    # The buyer's proposed lines: one entry per quotation line touched.
+    # {quotation_item_id, item_id, proposed_quantity, proposed_rate,
+    #  proposed_discount_percent, note}. Applied only on ACCEPT, through
+    # `_quote_totals`, never by the screen.
+    proposed_lines = Column(JSON, nullable=False)
+    # The quote's header + lines as they stood when the ask was made — the price
+    # trail's "from" version. Same shape as `_po_snapshot`'s output, via
+    # `_quote_snapshot` beside it in service.py.
+    snapshot_before = Column(JSON, nullable=False)
+    proposed_by_id = soft_fk()
+    proposed_by_name = Column(String(200), nullable=True)  # snapshot
+    supplier_decision_note = Column(Text, nullable=True)
+    supplier_decided_at = Column(DateTime(timezone=True), nullable=True)
+    supplier_counter_lines = Column(JSON, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+
+Index("ix_pro_quote_cr_quote_status", QuoteChangeRequest.quotation_id,
+      QuoteChangeRequest.status)
+
+
+class QuotationComment(Base):
+    """Discussion on a quotation between the buyer and THE SUPPLIER.
+
+    Shaped on `POComment` with no new ideas — a thread beside the paper, append
+    only. One thread per quotation, and a quotation already answers to exactly one
+    supplier on one RFQ, so "unique to that supplier" falls out of the table's
+    shape: two suppliers' threads can never mix because their quotations cannot.
+    Both sides write into the same thread, so the negotiation the audit needs to
+    see is not happening over WhatsApp.
+    """
+    __tablename__ = "pro_quotation_comments"
+    id = pk()
+    quotation_id = Column(ForeignKey("pro_quotations.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    author_id = soft_fk()
+    author_name = Column(String(200), nullable=True)
+    # "BUYER" or "SUPPLIER" — written at post time from which side sent it, so the
+    # screen never has to guess from an id which tint to draw a bubble in.
+    author_side = Column(String(10), nullable=False, default="BUYER")
+    message = Column(Text, nullable=False)
+    created_at = created_at_col()
+
+
+Index("ix_pro_quotation_comments_q_created", QuotationComment.quotation_id,
+      QuotationComment.created_at)
 
 
 class QuotationItem(Base):
@@ -455,13 +562,11 @@ class QuotationItem(Base):
     quantity = Column(Numeric(16, 3), nullable=False)
     rate = Column(Numeric(16, 2), nullable=False, default=0)
     discount_percent = Column(Numeric(5, 2), nullable=False, default=0)
+    # The GST the vendor actually quoted, as one rate. A within-state supply is
+    # charged half as CGST and half as SGST and an across-state one as the whole as
+    # IGST — the same number on two routes — so the offer states one figure and the
+    # split is derived from it wherever a document needs the halves.
     tax_percent = Column(Numeric(5, 2), nullable=False, default=0)
-    # Added: the split the vendor actually quoted. Derived from the HSN at read time
-    # would be wrong — a quotation is an offer, and the offer's own numbers are what
-    # a buyer compares and what the PO is raised against.
-    cgst_rate = Column(Numeric(5, 2), nullable=True)
-    sgst_rate = Column(Numeric(5, 2), nullable=True)
-    igst_rate = Column(Numeric(5, 2), nullable=True)
     amount = Column(Numeric(16, 2), nullable=False, default=0)
     delivery_days = Column(Integer, nullable=True)
 
@@ -759,6 +864,10 @@ class POComment(Base):
 
 
 Index("ix_pro_po_comments_po_created", POComment.po_id, POComment.created_at)
+
+# The CR-number series and the comment routes both live under /api/rfqs, which the
+# supplier portal routes mirror under /api/supplier — the doc series is registered
+# once, beside the other procurement series, in `shared/numbering.py`.
 
 
 class QuoteOtp(Base):

@@ -33,12 +33,12 @@ describe("master form validation", () => {
   });
 
   it("checks a number's range", () => {
-    const rate: FormField = { key: "cgst_rate", label: "CGST %", type: "number", min: 0, max: 100 };
-    expect(validateForm([rate], { cgst_rate: 120 }).cgst_rate)
-      .toBe("CGST % cannot be above 100");
-    expect(validateForm([rate], { cgst_rate: -1 }).cgst_rate)
-      .toBe("CGST % cannot be below 0");
-    expect(validateForm([rate], { cgst_rate: 18 })).toEqual({});
+    const rate: FormField = { key: "gst_rate", label: "GST %", type: "number", min: 0, max: 100 };
+    expect(validateForm([rate], { gst_rate: 120 }).gst_rate)
+      .toBe("GST % cannot be above 100");
+    expect(validateForm([rate], { gst_rate: -1 }).gst_rate)
+      .toBe("GST % cannot be below 0");
+    expect(validateForm([rate], { gst_rate: 18 })).toEqual({});
   });
 
   it("skips every rule when an optional field is left blank", () => {
@@ -52,21 +52,21 @@ describe("master form validation", () => {
   });
 
   it("runs a custom rule that reads the rest of the form", () => {
-    // CGST + SGST is the within-state route and IGST the across-state one. They must
-    // total the same, or the same sale is taxed differently by destination.
-    const igst: FormField = {
-      key: "igst_rate", label: "IGST %", type: "number",
+    // One field can validate against another: a maximum order quantity below the
+    // minimum is a row nobody can buy against.
+    const maxQty: FormField = {
+      key: "max_order_qty", label: "Maximum order qty", type: "number",
       validate: (value, all) => {
-        const split = Number(all.cgst_rate ?? 0) + Number(all.sgst_rate ?? 0);
-        const rate = Number(value ?? 0);
-        return rate && Math.abs(split - rate) > 0.001
-          ? `CGST + SGST is ${split}%, which must equal IGST` : null;
+        const min = Number(all.min_order_qty ?? 0);
+        const max = Number(value ?? 0);
+        return max && max < min
+          ? `Maximum order qty cannot be below the minimum of ${min}` : null;
       },
     };
-    const form = { cgst_rate: 6, sgst_rate: 6, igst_rate: 18 };
-    expect(validateForm([igst], form).igst_rate)
-      .toBe("CGST + SGST is 12%, which must equal IGST");
-    expect(validateForm([igst], { ...form, igst_rate: 12 })).toEqual({});
+    const form = { min_order_qty: 10, max_order_qty: 5 };
+    expect(validateForm([maxQty], form).max_order_qty)
+      .toBe("Maximum order qty cannot be below the minimum of 10");
+    expect(validateForm([maxQty], { ...form, max_order_qty: 20 })).toEqual({});
   });
 
   it("requires at least one choice in a required multiselect", () => {

@@ -212,8 +212,7 @@ async def resolve_hsn_code(
     if existing is not None:
         return hsn_out(existing)
 
-    row = HsnCode(code=data.code, cgst_rate=0, sgst_rate=0, igst_rate=0,
-                  cess_rate=0, is_active=True)
+    row = HsnCode(code=data.code, gst_rate=0, is_active=True)
     db.add(row)
     await db.flush()
 

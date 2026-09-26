@@ -203,4 +203,32 @@ describe("QuotationComparison awards", () => {
     ) as HTMLInputElement;
     expect(additional.value).toBe("");
   });
+
+  it("automatically fills the RFQ quantity for an item mapped to a single supplier and allows editing it", () => {
+    const singleSupplierComparison = {
+      ...comparison,
+      items: [{
+        rfq_item_id: 102,
+        item_id: 502,
+        item_code: "IT-502",
+        item_name: "Keyboard",
+        uom_code: "NOS",
+        quantity: 15,
+        cells: [cell(11, 21)], // Only Supplier 21 quoted Keyboard
+      }],
+    } as unknown as Comparison;
+
+    renderComparison({ comparison: singleSupplierComparison });
+
+    fireEvent.click(screen.getByRole("button", {
+      name: "Share items between suppliers",
+    }));
+
+    const input = screen.getByLabelText("Quantity for Supplier 21 on Keyboard") as HTMLInputElement;
+    expect(input.value).toBe("15");
+
+    // Ensure it is editable
+    fireEvent.change(input, { target: { value: "10" } });
+    expect(input.value).toBe("10");
+  });
 });

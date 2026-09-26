@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { History } from "lucide-react";
 import {
-  Card, ErrorBanner, Field, Input, StatusPill, useToast,
+  Card, ConfirmModal, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
 } from "@/shared/components";
+import { Button } from "@/modules/procurement/components/ActionButton";
 import { fmtDate, todayIst } from "@/shared/datetime";
 import { errorMessage } from "@/shared/api/errors";
 import { supplierApi } from "@/modules/procurement/api";
-import type { QuoteOtpSent, QuoteSubmit } from "@/modules/procurement/types";
+import { QuotationChat } from "@/modules/procurement/components/QuotationChat";
+import { QuotePriceTrail } from "@/modules/procurement/components/QuotePriceTrail";
+import type { QuoteChangeRequest, QuoteOtpSent, QuoteSubmit } from "@/modules/procurement/types";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -24,14 +28,13 @@ interface QuoteLine {
   required_date?: string | null;
   rate: string;
   discount_percent: string;
-  cgst_rate: string;
-  sgst_rate: string;
-  igst_rate: string;
+  /** The whole GST rate. Which half applies — CGST + SGST or IGST — is decided by the
+   *  two GSTINs and only changes how the tax is described, not how much it is. */
+  gst_rate: string;
   delivery_days: string;
   hsn_code?: string | null;
-  max_cgst: number | null;
-  max_sgst: number | null;
-  max_igst: number | null;
+  /** The rate the item's HSN notifies, or null where the item has no HSN. */
+  max_gst: number | null;
 }
 
 /**
@@ -41,11 +44,10 @@ interface QuoteLine {
  * the browser's arithmetic is never trusted into the database. A vendor may re-submit
  * until the deadline; each save bumps `revision_count`, which the buyer can see.
  *
- * The tax boxes are not a free choice. Which ones open is decided by the two GSTINs —
- * same state is CGST + SGST, any other state is IGST — and how high they go is capped
- * by the rate notified for the item's HSN. Both rules are the server's; this screen
- * draws them so the vendor is never rejected for something they could not have known,
- * and the submit endpoint enforces them again regardless of what the browser sent.
+ * The tax box is not a free choice: the rate is capped by the rate notified for the
+ * item's HSN. Whether that rate is charged as CGST + SGST or as IGST is decided by the
+ * two GSTINs, so the vendor types ONE figure and the server enforces the ceiling again
+ * regardless of what the browser sent.
  */
 export function SupplierRFQDetailPage() {
   const { id } = useParams();
@@ -70,6 +72,21 @@ export function SupplierRFQDetailPage() {
     queryFn: () => supplierApi.quotation(rfqId),
   });
 
+  const { data: priceTrailVersions = [] } = useQuery({
+    queryKey: ["supplier-quote-price-trail", id],
+    queryFn: () => supplierApi.priceTrail(rfqId),
+    enabled: Number.isFinite(rfqId) && rfqId > 0,
+  });
+
+  const [selectedVersionNum, setSelectedVersionNum] = useState<number | null>(null);
+  const latestVersionNum = priceTrailVersions.length
+    ? Math.max(...priceTrailVersions.map((v) => v.version))
+    : 1;
+
+  const activeVersionObj = selectedVersionNum != null
+    ? priceTrailVersions.find((v) => v.version === selectedVersionNum)
+    : null;
+
   useEffect(() => {
     if (!quote) return;
     setHeader({
@@ -93,32 +110,23 @@ export function SupplierRFQDetailPage() {
       discount_percent: item.discount_percent ? String(item.discount_percent) : "",
       // Opens at the notified rate. That is what is normally charged, so the vendor
       // types nothing in the usual case and can only bring it down from there.
-      cgst_rate: (item.cgst_rate ?? item.max_cgst_rate) != null && (item.cgst_rate ?? item.max_cgst_rate) !== 0 ? String(item.cgst_rate ?? item.max_cgst_rate) : "",
-      sgst_rate: (item.sgst_rate ?? item.max_sgst_rate) != null && (item.sgst_rate ?? item.max_sgst_rate) !== 0 ? String(item.sgst_rate ?? item.max_sgst_rate) : "",
-      igst_rate: (item.igst_rate ?? item.max_igst_rate) != null && (item.igst_rate ?? item.max_igst_rate) !== 0 ? String(item.igst_rate ?? item.max_igst_rate) : "",
+      gst_rate: (item.tax_percent || item.max_gst_rate)
+        ? String(item.tax_percent || item.max_gst_rate) : "",
       delivery_days: item.delivery_days == null ? "" : String(item.delivery_days),
       hsn_code: item.hsn_code,
-      max_cgst: item.max_cgst_rate ?? null,
-      max_sgst: item.max_sgst_rate ?? null,
-      max_igst: item.max_igst_rate ?? null,
+      max_gst: item.max_gst_rate ?? null,
     })));
   }, [quote]);
 
+  // Whether the supply is within a state or across one: it decides how the rate is
+  // DESCRIBED (CGST + SGST, or IGST), never how much it is.
   const interstate = quote?.tax_region !== "INTRA";
 
-  /** What this line is taxed at, given which half of the split applies. */
-  const taxRate = (line: QuoteLine) =>
-    interstate
-      ? Number(line.igst_rate || 0)
-      : Number(line.cgst_rate || 0) + Number(line.sgst_rate || 0);
+  /** What this line is taxed at. One rate, whichever route the goods travel. */
+  const taxRate = (line: QuoteLine) => Number(line.gst_rate || 0);
 
   /** The ceiling this line may quote up to, or null where the item has no HSN. */
-  const ceiling = (line: QuoteLine) =>
-    interstate
-      ? line.max_igst
-      : line.max_cgst == null && line.max_sgst == null
-        ? null
-        : (line.max_cgst ?? 0) + (line.max_sgst ?? 0);
+  const ceiling = (line: QuoteLine) => line.max_gst;
 
   const overCeiling = lines.filter((line) => {
     const limit = ceiling(line);
@@ -170,18 +178,14 @@ export function SupplierRFQDetailPage() {
         freight_amount: Number(header.freight_amount || 0),
         discount_amount: Number(header.discount_amount || 0),
         remarks: header.remarks || null,
-        // Only the half of the split that applies is sent. The other one is not zero
-        // "for safety" — sending it at all is what the server rejects, because a rate
-        // on the wrong side is a vendor charging something they cannot charge.
+        // One GST rate per line. The server caps it at the HSN's notified rate and
+        // decides which half of it applies from the two GSTINs.
         lines: lines.map((line) => ({
           rfq_item_id: line.rfq_item_id,
           quantity: Number(line.quantity || 0),
           rate: Number(line.rate || 0),
           discount_percent: Number(line.discount_percent || 0),
           tax_percent: taxRate(line),
-          cgst_rate: interstate ? null : Number(line.cgst_rate || 0),
-          sgst_rate: interstate ? null : Number(line.sgst_rate || 0),
-          igst_rate: interstate ? Number(line.igst_rate || 0) : null,
           delivery_days: line.delivery_days ? Number(line.delivery_days) : null,
         })),
       };
@@ -222,6 +226,57 @@ export function SupplierRFQDetailPage() {
   const set = (index: number, patch: Partial<QuoteLine>) =>
     setLines(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
 
+  // ── The buyer's change request (2026-09-26) ───────────────────────────────
+  // The buyer may ask for different numbers; the SUPPLIER decides. This banner
+  // is where that decision is made — accept re-prices the quotation through the
+  // server's own arithmetic, decline leaves it byte-for-byte as quoted.
+  const { data: changeRequests = [] } = useQuery({
+    queryKey: ["supplier-quote-change-requests", id],
+    queryFn: () => supplierApi.changeRequests(rfqId),
+    enabled: Number.isFinite(rfqId) && rfqId > 0,
+  });
+  const openCr: QuoteChangeRequest | undefined =
+    changeRequests.find((c) => c.status === "AWAITING_SUPPLIER");
+  const [decideNote, setDecideNote] = useState("");
+  const [decide, setDecide] = useState<"ACCEPT" | "DECLINE" | null>(null);
+  const [counterMode, setCounterMode] = useState(false);
+  const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string }>>({});
+
+  useEffect(() => {
+    if (openCr) {
+      const edits: Record<number, { qty: string; rate: string; discount: string }> = {};
+      openCr.lines.forEach((line) => {
+        edits[line.quotation_item_id] = {
+          qty: String(line.proposed_quantity),
+          rate: String(line.proposed_rate),
+          discount: String(line.proposed_discount_percent || 0),
+        };
+      });
+      setCounterEdits(edits);
+    }
+  }, [openCr]);
+
+  const answerCr = useMutation({
+    mutationFn: ({ action, note, counterLines }: { action: "ACCEPT" | "DECLINE"; note: string; counterLines?: Record<string, unknown>[] }) =>
+      action === "ACCEPT"
+        ? supplierApi.acceptChange(rfqId, openCr!.id, note, counterLines, otpCode.trim())
+        : supplierApi.declineChange(rfqId, openCr!.id, note),
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["supplier-quote", id] });
+      queryClient.invalidateQueries({ queryKey: ["supplier-quote-change-requests", id] });
+      queryClient.invalidateQueries({ queryKey: ["supplier-quote-price-trail", id] });
+      setDecide(null);
+      setDecideNote("");
+      setCounterMode(false);
+      setOtpCode("");
+      setOtpSent(null);
+      toast.success(vars.action === "ACCEPT"
+        ? (vars.counterLines?.length ? "Counter offer submitted & accepted" : "Accepted — your quotation now carries the agreed numbers")
+        : "Declined — your quotation stands as you priced it");
+    },
+    onError: (e: unknown) => toast.error(errorMessage(e)),
+  });
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       {/* Premium Hero Header */}
@@ -253,10 +308,12 @@ export function SupplierRFQDetailPage() {
         <Card className="mb-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-gradient-to-r from-sky-50 to-indigo-50">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="font-display text-lg font-bold text-ink">
-                {rfq.title ?? "Untitled request"}
-              </h2>
-              <p className="mt-1 text-sm text-muted">
+              {rfq.title && rfq.title.trim() !== "" && rfq.title !== "Untitled" && rfq.title !== "Untitled request" && (
+                <h2 className="font-display text-lg font-bold text-ink mb-1">
+                  {rfq.title}
+                </h2>
+              )}
+              <p className="text-sm text-muted">
                 {rfq.due_date ? `Closes ${fmtDate(rfq.due_date)}` : "No deadline"}
                 {quote?.revision_count ? ` · you have revised ${quote.revision_count} time${quote.revision_count === 1 ? "" : "s"}` : ""}
               </p>
@@ -279,15 +336,232 @@ export function SupplierRFQDetailPage() {
         </Card>
       )}
 
+      {/* The buyer's ask. Amber, at the top, naming the buyer — a supplier should
+          know WHO is asking before WHAT they are asking for. */}
+      {openCr && (
+        <Card className="mb-6 border border-amber-300 bg-amber-50 p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-bold text-amber-800">
+                The buyer has proposed changes — {openCr.cr_no}
+              </h2>
+              <p className="mt-0.5 text-xs text-amber-700">
+                Proposed by {openCr.proposed_by_name ?? "the buyer"} · {fmtDate(openCr.created_at)}
+              </p>
+              <p className="mt-2 text-sm italic text-amber-800">“{openCr.reason}”</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button className="bg-emerald-600 text-white hover:bg-emerald-700"
+                      onClick={() => { setDecide("ACCEPT"); setDecideNote(""); }}>
+                Accept buyer prices
+              </Button>
+              <Button variant="subtle" className="border-brand text-brand hover:bg-brand/10"
+                      onClick={() => setCounterMode(!counterMode)}>
+                {counterMode ? "Cancel counter" : "Counter-propose prices"}
+              </Button>
+              <Button variant="subtle" className="border-amber-300"
+                      onClick={() => { setDecide("DECLINE"); setDecideNote(""); }}>
+                Decline
+              </Button>
+            </div>
+          </div>
+
+          {counterMode ? (
+            <div className="mt-4 space-y-3 rounded-xl border border-brand/30 bg-white p-4">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-brand">
+                Counter-Offer: Adjust Prices or Quantities
+              </h3>
+              <p className="text-xs text-muted">
+                Specify your requested rates and quantities. Submitting will update the quotation with these agreed counter values.
+              </p>
+              <div className="space-y-3">
+                {openCr.lines.map((line) => {
+                  const edit = counterEdits[line.quotation_item_id] ?? {
+                    qty: String(line.proposed_quantity),
+                    rate: String(line.proposed_rate),
+                    discount: String(line.proposed_discount_percent || 0),
+                  };
+                  return (
+                    <div key={line.quotation_item_id} className="rounded-lg border border-line bg-surface-2/30 p-3">
+                      <div className="text-xs font-semibold text-ink">
+                        {line.item_name ?? `Item ${line.item_id}`}
+                        <span className="ml-2 text-muted">Original: Qty {line.current_quantity} @ ₹{line.current_rate} | Buyer Asked: Qty {line.proposed_quantity} @ ₹{line.proposed_rate}</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[11px] text-muted">Counter Quantity</label>
+                          <input
+                            type="number" min="0" step="0.001"
+                            value={edit.qty}
+                            onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, qty: e.target.value } })}
+                            className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-muted">Counter Rate (₹)</label>
+                          <input
+                            type="number" min="0" step="0.01"
+                            value={edit.rate}
+                            onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, rate: e.target.value } })}
+                            className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-muted">Counter Discount %</label>
+                          <input
+                            type="number" min="0" max="100" step="0.01"
+                            value={edit.discount}
+                            onChange={(e) => setCounterEdits({ ...counterEdits, [line.quotation_item_id]: { ...edit, discount: e.target.value } })}
+                            className="h-9 w-full rounded-md border border-line bg-white px-2 text-xs text-ink outline-none focus:border-brand"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line/60 pt-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-ink">OTP:</span>
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="6-digit code"
+                    className="h-8 w-32 rounded border border-line px-2 text-center text-xs font-mono outline-none focus:border-brand"
+                  />
+                  <button
+                    type="button"
+                    disabled={requestOtp.isPending}
+                    onClick={() => requestOtp.mutate()}
+                    className="rounded bg-brand/10 px-2.5 py-1 text-xs font-semibold text-brand hover:bg-brand/20 disabled:opacity-50"
+                  >
+                    {requestOtp.isPending ? "Sending…" : otpSent ? "Resend OTP" : "Request OTP"}
+                  </button>
+                </div>
+                <Button
+                  className="bg-brand text-white hover:bg-brand/90"
+                  disabled={answerCr.isPending || otpCode.trim().length < 5}
+                  onClick={() => {
+                    const counterLinesPayload = openCr.lines.map((l) => {
+                      const ed = counterEdits[l.quotation_item_id];
+                      return {
+                        quotation_item_id: l.quotation_item_id,
+                        proposed_quantity: Number(ed?.qty ?? l.proposed_quantity),
+                        proposed_rate: Number(ed?.rate ?? l.proposed_rate),
+                        proposed_discount_percent: Number(ed?.discount ?? l.proposed_discount_percent),
+                      };
+                    });
+                    answerCr.mutate({
+                      action: "ACCEPT",
+                      note: decideNote.trim() || "Counter offer submitted by supplier",
+                      counterLines: counterLinesPayload,
+                    });
+                  }}
+                >
+                  {answerCr.isPending ? "Submitting counter…" : "Submit Counter-Offer & Accept"}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-4 space-y-2">
+              {openCr.lines.map((line) => {
+                const rateDelta = line.proposed_rate - line.current_rate;
+                const qtyDelta = line.proposed_quantity - line.current_quantity;
+                return (
+                  <div key={line.quotation_item_id}
+                       className="rounded-xl border border-amber-200 bg-white px-3 py-2">
+                    <div className="text-sm font-medium text-ink">
+                      {line.item_name ?? `Item ${line.item_id}`}
+                      {line.item_code
+                        && <span className="ml-2 font-mono text-[11px] text-muted">{line.item_code}</span>}
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-6 gap-y-1 text-xs">
+                      <span className="text-muted">
+                        Qty: <span className="line-through">{line.current_quantity}</span>{" "}
+                        <span className="font-semibold text-ink">{line.proposed_quantity}</span>
+                        {qtyDelta !== 0 && (
+                          <span className={qtyDelta < 0 ? " text-danger" : " text-success"}>
+                            ({qtyDelta > 0 ? "+" : ""}{qtyDelta})
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-muted">
+                        Rate: <span className="line-through">₹{line.current_rate}</span>{" "}
+                        <span className="font-semibold text-ink">₹{line.proposed_rate}</span>
+                        {rateDelta !== 0 && (
+                          <span className={rateDelta > 0 ? " text-success" : " text-danger"}>
+                            ({rateDelta > 0 ? "+" : "−"}₹{Math.abs(rateDelta).toLocaleString("en-IN")})
+                          </span>
+                        )}
+                        {rateDelta > 0 && <span className="ml-1 text-success">(you gain)</span>}
+                      </span>
+                      {line.note && <span className="text-muted">Note: {line.note}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <p className="mt-3 text-[11px] text-amber-700">
+            Accepting re-prices your quotation to the agreed numbers. Declining leaves
+            it exactly as you quoted. Your answer is recorded either way.
+          </p>
+        </Card>
+      )}
+
+      {/* The thread with the buyer, beside the paper. Always accessible for supplier. */}
+      <div className="mb-6">
+        <QuotationChat rfqId={rfqId} quotationId={quote?.id ?? 0} vendorName={quote?.vendor_name ?? rfq?.title}
+                       side="SUPPLIER" />
+      </div>
+
       <Card className="mb-6 space-y-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-white">
+        {priceTrailVersions.length > 1 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-surface-2/60 p-2.5">
+            <div className="flex items-center gap-1.5">
+              <History className="h-4 w-4 text-brand" />
+              <span className="text-xs font-bold text-ink uppercase tracking-wider">Version History:</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              {priceTrailVersions.map((v) => {
+                const isSelected = (selectedVersionNum === v.version) || (selectedVersionNum === null && v.version === latestVersionNum);
+                return (
+                  <button
+                    key={v.version}
+                    type="button"
+                    onClick={() => setSelectedVersionNum(v.version === latestVersionNum ? null : v.version)}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
+                      isSelected
+                        ? "bg-brand text-white shadow-sm"
+                        : "bg-white/80 text-muted hover:bg-white hover:text-ink border border-line"
+                    }`}
+                  >
+                    v{v.version} {v.version === 1 ? "(Original)" : v.cr_no ? `(${v.cr_no})` : ""}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {activeVersionObj && (
+          <div className="rounded-xl border border-sky-300 bg-sky-50 p-4 text-sky-900 text-xs font-medium flex items-center justify-between gap-2">
+            <div>
+              <span className="font-bold">Viewing Version {activeVersionObj.version} Snapshot ({activeVersionObj.source})</span> — Historical view only.
+            </div>
+            <button
+              onClick={() => setSelectedVersionNum(null)}
+              className="text-xs bg-sky-600 text-white font-semibold px-3 py-1.5 rounded-lg hover:bg-sky-700 shrink-0"
+            >
+              Return to latest (v{latestVersionNum})
+            </button>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-ink">Your prices</h2>
-          {/* Said out loud, with the reason. A vendor who sees only an IGST box and no
-            * explanation assumes the form is broken. */}
-          <span className="rounded-full bg-surface-2 px-3 py-1 text-[11px] text-body">
-            Tax region: {interstate ? "Inter-state (IGST)" : "Intra-state (CGST + SGST)"}
-            {quote?.vendor_gstin ? ` · your GSTIN ${quote.vendor_gstin}` : ""}
-          </span>
         </div>
         <p className="text-xs text-muted">
           Rates open at what the item's HSN notifies. You may quote below them, not
@@ -296,127 +570,148 @@ export function SupplierRFQDetailPage() {
 
         {isLoading && <p className="text-sm text-muted">Loading…</p>}
 
-        {lines.map((line, index) => {
-          const gross = Number(line.quantity || 0) * Number(line.rate || 0);
-          const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
-          const limit = ceiling(line);
-          const over = limit != null && taxRate(line) > limit + 1e-9;
-          const short = Number(line.quantity || 0) < line.requested;
-          const taxed = net + (net * taxRate(line)) / 100;
-
-          // Eye-feasting colors to differentiate lines
-          const LINE_COLORS = [
-            { bg: "#f0f9ff", border: "#bae6fd" }, // sky
-            { bg: "#ecfdf5", border: "#a7f3d0" }, // emerald
-            { bg: "#fdf4ff", border: "#fbcfe8" }, // fuchsia
-            { bg: "#fffbeb", border: "#fde68a" }, // amber
-            { bg: "#f5f3ff", border: "#ddd6fe" }, // violet
-          ];
-          const color = LINE_COLORS[index % LINE_COLORS.length];
-
-          return (
-            <div 
-              key={line.rfq_item_id} 
-              className="rounded-2xl border p-5 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5"
-              style={{ backgroundColor: color.bg, borderColor: color.border }}
-            >
-              <div className="mb-3">
-                <div className="text-sm font-medium text-ink">{line.item_name}</div>
-                <div className="font-mono text-[11px] text-muted">
-                  {line.item_code} · asked {line.requested} {line.uom_code}
-                  {line.required_date ? ` · needed by ${fmtDate(line.required_date)}` : ""}
-                  {line.hsn_code ? ` · HSN ${line.hsn_code}` : ""}
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
-                {/* Short is an ordinary answer — say what you can actually supply. More
-                  * than was asked for is refused by the server: a quotation answers a
-                  * request, it does not enlarge it. */}
-                <Field
-                  label="Quantity"
-                  hint={short ? `${line.requested} asked for` : undefined}
+        {activeVersionObj ? (
+          <div className="space-y-4">
+            {(activeVersionObj.lines as Record<string, unknown>[]).map((vLine, index) => {
+              const qty = Number(vLine.quantity || 0);
+              const rate = Number(vLine.rate || 0);
+              const disc = Number(vLine.discount_percent || 0);
+              const taxPct = Number(vLine.tax_percent || 0);
+              const gross = qty * rate;
+              const net = gross - (gross * disc) / 100;
+              const tax = (net * taxPct) / 100;
+              const total = net + tax;
+              return (
+                <div
+                  key={index}
+                  className="rounded-2xl border border-sky-200 bg-sky-50/40 p-5 shadow-sm"
                 >
-                  <Input
-                    type="number" min="0" step="0.001" max={line.requested}
-                    value={line.quantity} disabled={!open}
-                    onChange={(e) => set(index, { quantity: e.target.value })}
-                  />
-                </Field>
-                <Field label="Rate" required>
-                  <Input
-                    type="number" min="0" step="0.01" value={line.rate} disabled={!open}
-                    onChange={(e) => set(index, { rate: e.target.value })}
-                  />
-                </Field>
-                <Field label="Discount %">
-                  <Input
-                    type="number" min="0" max="100" step="0.01"
-                    value={line.discount_percent} disabled={!open}
-                    onChange={(e) => set(index, { discount_percent: e.target.value })}
-                  />
-                </Field>
-
-                {/* One side of the split only. The other is not disabled, it is not
-                  * drawn — an interstate supply has no CGST field to grey out. */}
-                {interstate ? (
-                  <Field
-                    label="IGST %"
-                    hint={line.max_igst != null ? `Up to ${line.max_igst}%` : undefined}
-                  >
-                    <Input
-                      type="number" min="0" step="0.01"
-                      max={line.max_igst ?? undefined}
-                      value={line.igst_rate} disabled={!open}
-                      onChange={(e) => set(index, { igst_rate: e.target.value })}
-                    />
-                  </Field>
-                ) : (
-                  <>
-                    <Field
-                      label="CGST %"
-                      hint={line.max_cgst != null ? `Up to ${line.max_cgst}%` : undefined}
-                    >
-                      <Input
-                        type="number" min="0" step="0.01"
-                        max={line.max_cgst ?? undefined}
-                        value={line.cgst_rate} disabled={!open}
-                        onChange={(e) => set(index, { cgst_rate: e.target.value })}
-                      />
-                    </Field>
-                    <Field
-                      label="SGST %"
-                      hint={line.max_sgst != null ? `Up to ${line.max_sgst}%` : undefined}
-                    >
-                      <Input
-                        type="number" min="0" step="0.01"
-                        max={line.max_sgst ?? undefined}
-                        value={line.sgst_rate} disabled={!open}
-                        onChange={(e) => set(index, { sgst_rate: e.target.value })}
-                      />
-                    </Field>
-                  </>
-                )}
-
-                <div className="flex items-end pb-2">
-                  <div>
-                    <div className="text-[11px] text-muted">Line total</div>
-                    <div className="font-semibold text-ink">{money(taxed)}</div>
-                    <div className="text-[11px] text-muted">
-                      {money(net)} + {taxRate(line)}% tax
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="text-sm font-semibold text-ink">{String(vLine.item_name ?? `Item ${vLine.item_id}`)}</div>
+                    {Boolean(vLine.item_code) && <span className="font-mono text-xs text-muted">{String(vLine.item_code)}</span>}
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 sm:grid-cols-5 text-xs">
+                    <div>
+                      <span className="block text-muted text-[11px]">Quantity</span>
+                      <span className="font-semibold text-ink">{qty} {String(vLine.uom_code || "")}</span>
+                    </div>
+                    <div>
+                      <span className="block text-muted text-[11px]">Rate</span>
+                      <span className="font-semibold text-ink">₹{rate.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+                    </div>
+                    <div>
+                      <span className="block text-muted text-[11px]">Discount</span>
+                      <span className="text-body">{disc}%</span>
+                    </div>
+                    <div>
+                      <span className="block text-muted text-[11px]">GST</span>
+                      <span className="text-body">{taxPct}%</span>
+                    </div>
+                    <div>
+                      <span className="block text-muted text-[11px]">Amount</span>
+                      <span className="font-bold text-ink">{money(total)}</span>
                     </div>
                   </div>
                 </div>
+              );
+            })}
+          </div>
+        ) : (
+          lines.map((line, index) => {
+            const gross = Number(line.quantity || 0) * Number(line.rate || 0);
+            const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
+            const limit = ceiling(line);
+            const over = limit != null && taxRate(line) > limit + 1e-9;
+            const short = Number(line.quantity || 0) < line.requested;
+            const taxed = net + (net * taxRate(line)) / 100;
+
+            // Eye-feasting colors to differentiate lines
+            const LINE_COLORS = [
+              { bg: "#f0f9ff", border: "#bae6fd" }, // sky
+              { bg: "#ecfdf5", border: "#a7f3d0" }, // emerald
+              { bg: "#fdf4ff", border: "#fbcfe8" }, // fuchsia
+              { bg: "#fffbeb", border: "#fde68a" }, // amber
+              { bg: "#f5f3ff", border: "#ddd6fe" }, // violet
+            ];
+            const color = LINE_COLORS[index % LINE_COLORS.length];
+
+            return (
+              <div 
+                key={line.rfq_item_id} 
+                className="rounded-2xl border p-5 shadow-sm transition-all hover:shadow-md hover:-translate-y-0.5"
+                style={{ backgroundColor: color.bg, borderColor: color.border }}
+              >
+                <div className="mb-3">
+                  <div className="text-sm font-medium text-ink">{line.item_name}</div>
+                  <div className="font-mono text-[11px] text-muted">
+                    {line.item_code} · asked {line.requested} {line.uom_code}
+                    {line.required_date ? ` · needed by ${fmtDate(line.required_date)}` : ""}
+                    {line.hsn_code ? ` · HSN ${line.hsn_code}` : ""}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+                  {/* Short is an ordinary answer — say what you can actually supply. More
+                    * than was asked for is refused by the server: a quotation answers a
+                    * request, it does not enlarge it. */}
+                  <Field
+                    label="Quantity"
+                    hint={short ? `${line.requested} asked for` : undefined}
+                  >
+                    <Input
+                      type="number" min="0" step="0.001" max={line.requested}
+                      value={line.quantity} disabled={!open}
+                      onChange={(e) => set(index, { quantity: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Rate" required>
+                    <Input
+                      type="number" min="0" step="0.01" value={line.rate} disabled={!open}
+                      onChange={(e) => set(index, { rate: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Discount %">
+                    <Input
+                      type="number" min="0" max="100" step="0.01"
+                      value={line.discount_percent} disabled={!open}
+                      onChange={(e) => set(index, { discount_percent: e.target.value })}
+                    />
+                  </Field>
+
+                  {/* One rate. Which half of it applies is the two GSTINs' business, not
+                    * the vendor's, so there is a single box rather than one per half. */}
+                  <Field
+                    label="GST %"
+                    hint={line.max_gst != null ? `Up to ${line.max_gst}%` : undefined}
+                  >
+                    <Input
+                      type="number" min="0" step="0.01"
+                      max={line.max_gst ?? undefined}
+                      value={line.gst_rate} disabled={!open}
+                      onChange={(e) => set(index, { gst_rate: e.target.value })}
+                    />
+                  </Field>
+
+                  <div className="flex items-end pb-2">
+                    <div>
+                      <div className="text-[11px] text-muted">Line total</div>
+                      <div className="font-semibold text-ink">{money(taxed)}</div>
+                      <div className="text-[11px] text-muted">
+                        {money(net)} + {taxRate(line)}% tax
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                {over && (
+                  <p className="mt-2 text-xs text-danger">
+                    Above the {limit}% notified for
+                    {line.hsn_code ? ` HSN ${line.hsn_code}` : " this item"}. Quote at or
+                    below it — the submission will be refused otherwise.
+                  </p>
+                )}
               </div>
-              {over && (
-                <p className="mt-2 text-xs text-danger">
-                  Above the {limit}% notified for
-                  {line.hsn_code ? ` HSN ${line.hsn_code}` : " this item"}. Quote at or
-                  below it — the submission will be refused otherwise.
-                </p>
-              )}
-            </div>
-          );
-        })}
+            );
+          })
+        )}
 
         {!isLoading && !lines.length && (
           <p className="text-sm text-muted">This request has no lines to price.</p>
@@ -551,13 +846,11 @@ export function SupplierRFQDetailPage() {
           </div>
         )}
 
-        {open && (
+        {open && !openCr && (
           <button
-            className="w-full sm:w-auto rounded-xl bg-gradient-to-r from-brand to-brand/80 px-6 py-3 text-sm font-bold text-white shadow-lg transition-all hover:scale-105 hover:shadow-xl hover:from-brand/90 hover:to-brand focus:outline-none focus:ring-4 focus:ring-brand/30 disabled:opacity-50 disabled:pointer-events-none"
-            // The code is part of what makes the press legal, so it gates the button
-            // alongside the price checks. The server checks it again regardless.
+            className="w-full sm:w-auto rounded-xl bg-gradient-to-r from-brand to-brand/90 px-8 py-3.5 text-base font-bold text-white shadow-xl transition-all hover:scale-105 hover:shadow-2xl hover:from-brand/90 hover:to-brand focus:outline-none focus:ring-4 focus:ring-brand/30 disabled:opacity-40 disabled:pointer-events-none disabled:transform-none"
             disabled={save.isPending || !lines.length || overCeiling.length > 0
-              || gaps.length > 0 || otpCode.length !== 6}
+              || gaps.length > 0 || otpCode.trim().length < 5}
             onClick={() => save.mutate()}
           >
             {save.isPending
@@ -565,7 +858,77 @@ export function SupplierRFQDetailPage() {
               : quote?.status === "DRAFT" ? "Submit quotation" : "Edit & submit quote"}
           </button>
         )}
+        {open && openCr && (
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
+            The buyer's change request above is waiting for your answer — answer it
+            before submitting your own prices.
+          </p>
+        )}
       </Card>
+
+      {/* Accept / decline confirm: the ONE place the quotation re-prices. */}
+      <ConfirmModal
+        isOpen={decide != null}
+        title={decide === "ACCEPT" ? "Accept the buyer's changes?" : "Decline the buyer's changes?"}
+        message={decide === "ACCEPT"
+          ? "Your quotation will be re-priced to the buyer's numbers immediately. Please enter your OTP code to confirm."
+          : "Your quotation stays exactly as you quoted it. The buyer will see your answer"}
+        confirmLabel={decide === "ACCEPT" ? "Accept changes" : "Decline"}
+        tone="warning"
+        busy={answerCr.isPending}
+        onConfirm={() => {
+          if (decide === "ACCEPT" && otpCode.trim().length < 5) {
+            toast.error("Please request & enter a valid 6-digit OTP code before accepting");
+            return;
+          }
+          if (decide) {
+            answerCr.mutate({ action: decide, note: decideNote.trim() });
+          }
+        }}
+        onClose={() => setDecide(null)}
+      >
+        <div className="space-y-3 pt-2">
+          <Textarea
+            value={decideNote}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setDecideNote(e.target.value)}
+            minRows={2}
+            placeholder={decide === "DECLINE"
+              ? "Optional — tell the buyer why you are declining"
+              : "Optional — a note to the buyer"}
+            aria-label="Note to the buyer"
+          />
+          {decide === "ACCEPT" && (
+            <div className="rounded-xl border border-line bg-surface-2/50 p-3">
+              <label className="block text-xs font-semibold text-ink mb-1">Enter OTP Code</label>
+              <div className="flex gap-2">
+                <input
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="6-digit OTP"
+                  className="h-9 flex-1 rounded-lg border border-line px-3 text-center text-sm font-mono tracking-widest outline-none focus:border-brand"
+                />
+                <button
+                  type="button"
+                  disabled={requestOtp.isPending}
+                  onClick={() => requestOtp.mutate()}
+                  className="rounded-lg bg-brand/10 px-3 py-1.5 text-xs font-semibold text-brand hover:bg-brand/20 disabled:opacity-50"
+                >
+                  {requestOtp.isPending ? "Sending…" : otpSent ? "Resend" : "Request OTP"}
+                </button>
+              </div>
+              {otpSent && (
+                <p className="mt-1 text-[11px] text-muted">Sent to {otpSent.sent_to}</p>
+              )}
+            </div>
+          )}
+        </div>
+      </ConfirmModal>
+
+      <div className="mt-8">
+        <QuotePriceTrail rfqId={rfqId} side="SUPPLIER" />
+      </div>
     </div>
   );
 }

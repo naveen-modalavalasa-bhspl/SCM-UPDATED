@@ -298,10 +298,9 @@ export function PODetailPage() {
               )}
             </div>
           </div>
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             {[
               { label: "Vendor", value: po.data.vendor_name, icon: Building2, tint: "bg-black/25" },
-              { label: "Indent", value: po.data.indent_no ?? "—", icon: FileText, tint: "bg-black/25" },
               { label: "Project", value: po.data.project_name ?? "—", icon: ShoppingCart, tint: "bg-black/25" },
               { label: "Expected", value: fmtDate(po.data.expected_date), icon: Calendar, tint: "bg-black/25" },
             ].map((k) => (
@@ -331,16 +330,15 @@ export function PODetailPage() {
             <h2 className="text-sm font-extrabold uppercase tracking-widest">Order overview</h2>
             <span className="ml-auto rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-700">Snapshot</span>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-3">
             {[
               { label: "Vendor", value: po.data.vendor_name ?? "—" },
-              { label: "Indent", value: po.data.indent_no ?? "—", mono: true },
               { label: "Project", value: po.data.project_name ?? "—" },
               { label: "Expected date", value: fmtDate(po.data.expected_date) },
             ].map((f) => (
               <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-amber-100">
                 <div className="text-[11px] font-bold uppercase tracking-widest text-amber-700/70">{f.label}</div>
-                <div className={`mt-1 truncate text-sm font-bold text-ink ${f.mono ? "font-mono" : ""}`}>{f.value}</div>
+                <div className="mt-1 truncate text-sm font-bold text-ink">{f.value}</div>
               </div>
             ))}
           </div>
@@ -350,9 +348,8 @@ export function PODetailPage() {
             </div>
           )}
           {po.data.quotation_no && (
-            <div className="mt-4 grid gap-3 rounded-xl bg-white p-3 ring-1 ring-amber-100 sm:grid-cols-3">
+            <div className="mt-4 grid gap-3 rounded-xl bg-white p-3 ring-1 ring-amber-100 sm:grid-cols-2">
               {[
-                { label: "Requisition", value: po.data.requisition_no },
                 { label: "RFQ", value: po.data.rfq_no },
                 { label: "Quotation", value: po.data.quotation_no },
               ].map((f) => (

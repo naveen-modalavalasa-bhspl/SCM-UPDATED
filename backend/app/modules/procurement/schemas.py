@@ -571,6 +571,10 @@ class RFQListRow(BaseModel):
     # because a screen can only see the document's status and its own permission
     # codes, and neither answers "is it with me". See service._attach_pending_one.
     awaiting_me: bool = False
+    # Freeze Prices (2026-09-26): the lock a buyer closes before comparing and
+    # awarding. On the LIST row so the register can show the lock glyph without
+    # a detail fetch; the detail fields ride `RFQOut` below.
+    is_price_frozen: bool = False
     created_at: datetime
 
 
@@ -615,6 +619,13 @@ class RFQOut(RFQListRow):
     priority: str | None = None
     requisition_status: str | None = None
     source_indent_nos: list[str] = []
+    # Freeze Prices detail (2026-09-26): when the door was closed, by whom, and
+    # how many quotations were in at the time. All four null/False on an open
+    # tender; `frozen_at_revision` is what makes "frozen at 4 quotes, 5 came in
+    # later" a checkable sentence instead of a memory.
+    frozen_at: datetime | None = None
+    frozen_by_name: str | None = None
+    frozen_at_revision: int | None = None
     items: list[RFQItemOut] = []
     vendors: list[RFQVendorOut] = []
 
@@ -661,6 +672,13 @@ class ConsolidationItemOut(BaseModel):
     sources: str | None = None
     source_count: int
     remarks: str | None = None
+    # Buying ceiling served by the backend (`consolidation._attach_caps`): what
+    # was requested plus the replenishment top-up at the shipment warehouses
+    # that asked for the line. The save enforces it; the screen reads it so the
+    # two cannot drift. None on old rows the attach step never visited.
+    max_allowed_qty: float | None = None
+    replenishment_qty: float | None = None
+    replenishment_at: str | None = None
 
 
 class ConsolidationSourceOut(BaseModel):
@@ -732,10 +750,9 @@ class QuoteLineIn(BaseModel):
     quantity: float | None = Field(default=None, gt=0)
     rate: float = Field(ge=0)
     discount_percent: float = Field(ge=0, le=100, default=0)
+    # One GST rate. Which half it is charged as is decided by the two GSTINs, not by
+    # the vendor — see `_checked_gst_percent`.
     tax_percent: float = Field(ge=0, default=0)
-    cgst_rate: float | None = None
-    sgst_rate: float | None = None
-    igst_rate: float | None = None
     delivery_days: int | None = None
 
 
@@ -780,19 +797,14 @@ class QuoteItemOut(BaseModel):
     rate: float
     discount_percent: float
     tax_percent: float
-    cgst_rate: float | None = None
-    sgst_rate: float | None = None
-    igst_rate: float | None = None
     amount: float
     delivery_days: int | None = None
-    # The classification and the rates it notifies — the ceiling this line may quote up
+    # The classification and the rate it notifies — the ceiling this line may quote up
     # to. Read at request time off the HSN, never stored: a rate change is a government
     # notification, not an edit to a quotation. Null when the item has no HSN, which
     # means no ceiling rather than a ceiling of zero.
     hsn_code: str | None = None
-    max_cgst_rate: float | None = None
-    max_sgst_rate: float | None = None
-    max_igst_rate: float | None = None
+    max_gst_rate: float | None = None
     # What the RFQ line asked for, and when it is wanted. Read off the RFQ at request
     # time rather than copied: `quantity` above is the vendor's ANSWER and may be
     # short, so without this the buyer cannot see that the offer covers only part of
@@ -835,7 +847,99 @@ class QuoteOut(QuoteListRow):
     tax_region: str | None = None
     company_gstin: str | None = None
     vendor_gstin: str | None = None
+    # The negotiation overlay (2026-09-26). `under_negotiation` is the amber badge
+    # a buyer sees while their change request sits with the supplier; the two
+    # revision counters tell a first offer from a renegotiated one.
+    under_negotiation: bool = False
+    accepted_revision: int = 0
     items: list[QuoteItemOut] = []
+
+
+# --------------------------------------------------------------------------- #
+#  Quotation change request — the buyer asks, the supplier decides
+# --------------------------------------------------------------------------- #
+
+class QuoteChangeLineIn(BaseModel):
+    """One line of the buyer's ask. `quotation_item_id` names the supplier's own
+    line; what follows is what the buyer proposes it becomes."""
+    quotation_item_id: int
+    proposed_quantity: float = Field(ge=0)
+    proposed_rate: float = Field(ge=0)
+    proposed_discount_percent: float = Field(ge=0, le=100, default=0)
+    note: str | None = None
+
+
+class QuoteChangeRequestIn(BaseModel):
+    """The buyer's proposal. `reason` is required — a price change with no
+    recorded reason answers no question six months later."""
+    reason: str = Field(min_length=3)
+    lines: list[QuoteChangeLineIn] = Field(min_length=1)
+
+
+class QuoteChangeDecisionIn(BaseModel):
+    """The supplier's answer. A decline may say why; an acceptance need not.
+    If the supplier counter-proposes rates or quantities, counter_lines are sent."""
+    note: str = ""
+    otp_code: str | None = None
+    counter_lines: list[QuoteChangeLineIn] | None = None
+
+
+class QuoteUnfreezeIn(BaseModel):
+    """Reopen bidding. The reason is required — unfreezing after people were
+    told prices are settled is the one freeze action that can surprise a
+    supplier, and the trail has to say why it happened."""
+    reason: str = Field(min_length=3)
+
+
+class QuoteChangeLineOut(BaseModel):
+    quotation_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    # What the supplier had priced, as the trail's "from".
+    current_quantity: float
+    current_rate: float
+    current_discount_percent: float
+    current_amount: float
+    # What the buyer proposes.
+    proposed_quantity: float
+    proposed_rate: float
+    proposed_discount_percent: float
+    note: str | None = None
+
+
+class QuoteChangeRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    quotation_id: int
+    rfq_id: int
+    cr_no: str
+    status: str
+    reason: str
+    proposed_by_name: str | None = None
+    supplier_decision_note: str | None = None
+    supplier_decided_at: datetime | None = None
+    created_at: datetime
+    # The proposed lines, decorated with the "before" figures read off the
+    # snapshot — the diff the screen draws is served, never recomputed there.
+    lines: list[QuoteChangeLineOut] = []
+    supplier_counter_lines: list[dict] | None = None
+
+
+class QuoteCommentIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class QuoteCommentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    quotation_id: int
+    author_id: int | None = None
+    author_name: str | None = None
+    author_side: str
+    message: str
+    created_at: datetime
 
 
 class RFQAwardAllocationIn(BaseModel):
@@ -853,6 +957,7 @@ class AwardIn(BaseModel):
     quotation_ids: Annotated[list[int], BatchIds] = []
     allocations: Annotated[list[RFQAwardAllocationIn], BatchIds] | None = None
     comments: str = ""
+    generate_pos: bool = True
 
     @model_validator(mode="after")
     def _one_shape(self):

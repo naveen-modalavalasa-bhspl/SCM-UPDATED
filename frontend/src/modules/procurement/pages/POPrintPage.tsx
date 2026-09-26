@@ -69,8 +69,6 @@ export function POPrintPage() {
       metadata={[
         { label: "Vendor", value: order.vendor_name ?? "—", fullWidth: true },
         { label: "Project", value: order.project_name || "—" },
-        { label: "Indent", value: order.indent_no || "—", mono: true },
-        { label: "Requisition", value: order.requisition_no || "—", mono: true },
         { label: "RFQ", value: order.rfq_no || "—", mono: true },
         { label: "Quotation", value: order.quotation_no || "—", mono: true },
       ]}

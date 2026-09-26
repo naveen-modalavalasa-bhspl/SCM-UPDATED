@@ -1627,46 +1627,12 @@ class HsnIn(BaseModel):
     # the importer reads it to tell a fixed-width code column from free text.
     code: str = Field(min_length=HSN_CODE_LENGTH, max_length=HSN_CODE_LENGTH)
     description: str | None = Field(None, max_length=300)
-    cgst_rate: float = Field(0, ge=0, le=100)
-    sgst_rate: float = Field(0, ge=0, le=100)
-    igst_rate: float = Field(0, ge=0, le=100)
-    cess_rate: float = Field(0, ge=0, le=100)
+    # The single GST rate for this classification. The within-state split (CGST +
+    # SGST) and the across-state rate (IGST) are the same number on two routes, so
+    # they are one field here and documents derive the halves when they need them.
+    gst_rate: float = Field(0, ge=0, le=100)
     effective_from: date | None = None
     is_active: bool = True
-
-    @model_validator(mode="before")
-    @classmethod
-    def _complete_the_gst_split(cls, data):
-        """Fill in the GST figures a sheet commonly leaves out, from the ones it gave.
-
-        Only a rate that was NOT SUPPLIED is derived; a stated figure is never
-        overwritten, so a contradiction is still reported rather than repaired.
-        Tariff lists are routinely published with only the IGST column, and CGST and
-        SGST are by law each half of it — refusing such a row, or saving it as 0 + 0
-        and undertaxing every intra-state sale, are both worse than the arithmetic.
-        """
-        if not isinstance(data, dict):
-            return data
-        data = dict(data)
-
-        def number(key):
-            try:
-                return None if _is_blank(data.get(key)) else float(data[key])
-            except (TypeError, ValueError):
-                return None                       # left for the field to refuse
-
-        blank = {k: _is_blank(data.get(k)) for k in ("cgst_rate", "sgst_rate", "igst_rate")}
-        cgst, sgst, igst = number("cgst_rate"), number("sgst_rate"), number("igst_rate")
-        # CGST and SGST are always equal, so either one states the other.
-        if blank["cgst_rate"] and sgst is not None:
-            data["cgst_rate"], cgst, blank["cgst_rate"] = sgst, sgst, False
-        elif blank["sgst_rate"] and cgst is not None:
-            data["sgst_rate"], sgst, blank["sgst_rate"] = cgst, cgst, False
-        if blank["cgst_rate"] and blank["sgst_rate"] and igst is not None:
-            data["cgst_rate"] = data["sgst_rate"] = round(igst / 2, 3)
-        elif blank["igst_rate"] and cgst is not None and sgst is not None:
-            data["igst_rate"] = round(cgst + sgst, 3)
-        return data
 
     @field_validator("code", mode="before")
     @classmethod
@@ -1681,36 +1647,18 @@ class HsnIn(BaseModel):
         text = str(value).strip()
         return text or None
 
-    @field_validator("igst_rate")
-    @classmethod
-    def _igst_matches_the_split(cls, value, info):
-        # GST is split as CGST + SGST within a state and charged as IGST across
-        # states, so the two routes must come to the same number. They disagreeing
-        # means one of them is wrong, and the document would tax the same sale
-        # differently by destination. Checked on the schema, not in apply_hsn, so an
-        # import preview reports it against the row instead of the Save failing.
-        cgst, sgst = info.data.get("cgst_rate"), info.data.get("sgst_rate")
-        if value and cgst is not None and sgst is not None \
-                and round(cgst + sgst, 3) != round(value, 3):
-            raise PydanticCustomError(
-                "gst_split",
-                "CGST {cgst}% + SGST {sgst}% = {split}%, which must equal IGST {igst}%",
-                {"cgst": _pct(cgst), "sgst": _pct(sgst),
-                 "split": _pct(round(cgst + sgst, 3)), "igst": _pct(value)})
-        return value
 
 
 def hsn_out(h: HsnCode) -> dict:
     return {"id": h.id, "code": h.code, "description": h.description,
-            "cgst_rate": _num(h.cgst_rate), "sgst_rate": _num(h.sgst_rate),
-            "igst_rate": _num(h.igst_rate), "cess_rate": _num(h.cess_rate),
+            "gst_rate": _num(h.gst_rate),
             "effective_from": h.effective_from.isoformat() if h.effective_from else None,
             "is_active": h.is_active}
 
 
 async def apply_hsn(db: AsyncSession, row: HsnCode, data: HsnIn) -> None:
-    # The 0-100 range and CGST + SGST = IGST are enforced by HsnIn itself, so the
-    # form, the API and every import door refuse the same rows in the same words.
+    # The 0-100 range is enforced by HsnIn itself, so the form, the API and every
+    # import door refuse the same rows in the same words.
     await require_unique(db, HsnCode, "code", data.code, row, "HSN code")
     for key, value in data.model_dump().items():
         setattr(row, key, value)

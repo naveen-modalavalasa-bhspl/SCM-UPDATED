@@ -492,6 +492,28 @@ class QuotationStatus(str, Enum):
     ACCEPTED = "ACCEPTED"
 
 
+class QuoteChangeStatus(str, Enum):
+    """pro_quote_change_requests.status — the buyer's ask on a supplier's price.
+
+    The negotiation overlay lives on its own table, NOT on QuotationStatus: a
+    request being open does not move the quotation anywhere, and folding it into
+    the quote's status would have made every existing filter, KPI and report
+    invent a meaning for a value they never knew about.
+    """
+    # The buyer's ask, sent and waiting. One per quotation, enforced in service.
+    AWAITING_SUPPLIER = "AWAITING_SUPPLIER"
+    # The supplier took the new numbers — service applied them through
+    # `_quote_totals` and the quotation re-prices on the spot.
+    ACCEPTED = "ACCEPTED"
+    # The supplier said no. The quote stands exactly as it was — nothing was ever
+    # pre-applied, so unlike the PO revert there is nothing to put back.
+    DECLINED = "DECLINED"
+    # The buyer took their own ask back before an answer.
+    WITHDRAWN = "WITHDRAWN"
+    # A different request on the same quotation was accepted first.
+    SUPERSEDED = "SUPERSEDED"
+
+
 class PickStrategy(str, Enum):
     """FEFO for anything carrying a batch or an expiry date — picking the nearest
     expiry first is the entire point of tracking expiry. FIFO for everything else."""
