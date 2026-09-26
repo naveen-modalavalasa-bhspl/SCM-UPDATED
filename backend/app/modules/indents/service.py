@@ -21,6 +21,7 @@ from app.core.exceptions import (
     AppException, NotFoundError, PermissionError_, ValidationError,
 )
 from app.core.pagination import PageParams, paginate
+from app.core.dependencies import via_scoped_grant
 # inventory is the base module (imports nothing from app.modules), so calling it from
 # here is the legal direction. This is the §3 stock-availability fork.
 from app.modules.inventory import allocations, locations
@@ -309,12 +310,58 @@ async def _requester_context(db: AsyncSession, user) -> dict:
     }
 
 
+# ---------------- Stock Transfer's scoped grants (require_permission_or) ----------------
+# An STR is an indent, so its approval, serving and receipt run on this module's
+# endpoints. The `stock.transfer.*` codes reach them through
+# `core.dependencies.require_permission_or`; these say whether THIS request's document
+# is an STR. No document in the path → True, and the service narrows instead.
+
+async def _is_str(db: AsyncSession, indent_id) -> bool:
+    if indent_id is None:
+        return False
+    return await db.scalar(select(Indent.indent_type).where(
+        Indent.id == int(indent_id))) == IndentType.STR.value
+
+
+async def str_in_reach(db: AsyncSession, request, user) -> bool:
+    indent_id = request.path_params.get("indent_id")
+    return True if indent_id is None else await _is_str(db, indent_id)
+
+
+async def str_allocation_in_reach(db: AsyncSession, request, user) -> bool:
+    allocation_id = request.path_params.get("allocation_id")
+    if allocation_id is not None:
+        return await _is_str(db, await db.scalar(
+            select(Allocation.indent_id).where(Allocation.id == int(allocation_id))))
+    return await str_in_reach(db, request, user)
+
+
+async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
+    """Read-only option lists an STR form needs; already scoped to the login."""
+    return True
+
+
+async def _assert_can_raise_str(db: AsyncSession, user) -> None:
+    """An STR is raised through the indent routes, so its own permission is checked
+    here — the route's `indent.create` alone must not let anybody request a transfer."""
+    user_perms = await rbac_service.get_user_permissions(
+        db, user, getattr(user, "active_position_id", None))
+    if perms.STOCK_TRANSFER_REQUEST not in user_perms:
+        raise PermissionError_("You are not allowed to raise a stock transfer request")
+
+
 async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     _validate_required_date(data.required_date)
     priority = _validate_priority(data.priority) or Priority.NORMAL.value
     indent_type = _validate_indent_type(
         getattr(data, "indent_type", None)) or IndentType.REGULAR.value
 
+    if indent_type == IndentType.STR.value:
+        await _assert_can_raise_str(db, user)
+    elif via_scoped_grant(db, perms.INDENT_CREATE):
+        # The create route also admits `stock.transfer.request` (for an STR); that
+        # grant alone must never raise an ordinary indent.
+        raise PermissionError_("Missing permission: indent.create")
     if not data.items:
         raise ValidationError("Indent must have at least one item")
     _validate_item_quantities(data.items)
@@ -351,7 +398,11 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
-        indent_no=await next_number(db, "indent", project=context["project_name"]),
+        # An STR carries its own series (STR prefix) so a transfer is never read as an
+        # indent on paper.
+        indent_no=await next_number(
+            db, "str" if indent_type == IndentType.STR.value else "indent",
+            project=context["project_name"]),
         indent_type=indent_type,
         indent_date=indent_date,
         required_date=data.required_date,
@@ -417,9 +468,15 @@ def unknown_indent_statuses(statuses) -> set[str]:
 
 
 def _workflow_context_for_indent(indent: Indent) -> dict:
+    is_str = indent.indent_type == IndentType.STR.value
     return {
+        # An STR is an indent on its own ladder: the instance stays INDENT (inbox, deep
+        # links, approve permission), only the ladder lookup reads the STR's chain.
+        **({engine.LADDER_DOC_TYPE_KEY: DocType.STOCK_TRANSFER_REQUEST.value}
+           if is_str else {}),
         "doc_no": indent.indent_no,
-        "doc_summary": f"Indent {indent.indent_no}",
+        "doc_summary": (f"Stock transfer request {indent.indent_no}" if is_str
+                        else f"Indent {indent.indent_no}"),
         "department_id": indent.department_id,
         "project_id": getattr(indent, "project_id", None),
         "requester_position_id": indent.position_id,
@@ -763,7 +820,8 @@ async def indent_access_condition(db: AsyncSession, user):
     A batch approval asked for the identical clause once per indent and paid nine
     round trips each time to rebuild it.
     """
-    cache = db.info.setdefault("indent_access_memo", {})
+    session_info = getattr(db, "info", None)
+    cache = session_info.setdefault("indent_access_memo", {}) if isinstance(session_info, dict) else {}
     key = (user.id, getattr(user, "active_position_id", None))
     if key in cache:
         return cache[key]
@@ -796,6 +854,37 @@ async def indent_access_condition(db: AsyncSession, user):
             Indent.project_id == project_id,
         ))
 
+    visible.append(await indent_participant_condition(db, user))
+
+    # Inventory works the fulfilment queue for requests it neither raised nor approved,
+    # and the SCM department sits on posts with no children, so no branch above can ever
+    # show them one. Holding the SCM read permissions does — and only from the point the
+    # request reaches inventory, never before approval.
+    scm_statuses = await _scm_stage_statuses(db, user)
+    if scm_statuses:
+        visible.append(Indent.status.in_(scm_statuses))
+
+    clause = or_(*visible)
+    cache[key] = clause
+    return clause
+
+
+async def indent_participant_condition(db: AsyncSession, user):
+    """Indents this login is a PARTY to: awaiting their signature, or carrying a
+    decision they took in the hat they are wearing.
+
+    One definition, read twice — by `indent_access_condition` as one of the ways a
+    document can be your business, and by `_indent_visibility` as the one thing no
+    rung may take away. Two copies that could disagree is how an approver comes to
+    be told a document they are holding does not exist.
+    """
+    session_info = getattr(db, "info", None)
+    cache = session_info.setdefault("indent_participant_memo", {}) if isinstance(session_info, dict) else {}
+    key = (user.id, getattr(user, "active_position_id", None))
+    if key in cache:
+        return cache[key]
+
+    _, position = await _current_assignment(db, user)
     participant_conditions = [
         Instance.id.in_(select(Pending.instance_id).where(Pending.approver_id == user.id)),
     ]
@@ -809,21 +898,10 @@ async def indent_access_condition(db: AsyncSession, user):
                 Action.actor_position == position.name,
             )
         ))
-    participant_instances = select(Instance.doc_id).where(
+    clause = Indent.id.in_(select(Instance.doc_id).where(
         Instance.doc_type == DocType.INDENT.value,
         or_(*participant_conditions),
-    )
-    visible.append(Indent.id.in_(participant_instances))
-
-    # Inventory works the fulfilment queue for requests it neither raised nor approved,
-    # and the SCM department sits on posts with no children, so no branch above can ever
-    # show them one. Holding the SCM read permissions does — and only from the point the
-    # request reaches inventory, never before approval.
-    scm_statuses = await _scm_stage_statuses(db, user)
-    if scm_statuses:
-        visible.append(Indent.status.in_(scm_statuses))
-
-    clause = or_(*visible)
+    ))
     cache[key] = clause
     return clause
 
@@ -840,15 +918,26 @@ async def _indent_visibility(db: AsyncSession, user):
     technician open 102 indents on /indents while Home — which already ANDed the two —
     showed 2 for the same login. Every indent reader goes through here so the list,
     the dashboard and the tile can never drift apart again.
+
+    Except for one thing a rung may never take away: a document this login is a PARTY
+    to. The rung answers "whose rows may I read", and a document waiting on my
+    signature is not somebody else's row — it was handed to me. ANDing it away means
+    the inbox lists an approval the review screen then 404s, which is a document
+    stranded in the ladder with nobody able to move it. It is OR-ed OUTSIDE the AND
+    for the same reason `scope_condition` always OR-s in `mine`: narrow the rung and
+    you narrow whose work you see, never whether you can do your own.
     """
-    return and_(
-        await indent_access_condition(db, user),
-        await scope_condition(
-            db, user,
-            owner_col=Indent.requested_by_id,
-            position_col=Indent.position_id,
-            office_col=Indent.office_id,
-            project_col=Indent.project_id,
+    return or_(
+        await indent_participant_condition(db, user),
+        and_(
+            await indent_access_condition(db, user),
+            await scope_condition(
+                db, user,
+                owner_col=Indent.requested_by_id,
+                position_col=Indent.position_id,
+                office_col=Indent.office_id,
+                project_col=Indent.project_id,
+            ),
         ),
     )
 
@@ -1339,7 +1428,14 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
     if data.priority is not None:
         indent.priority = _validate_priority(data.priority)
     if data.indent_type is not None:
-        indent.indent_type = _validate_indent_type(data.indent_type)
+        new_type = _validate_indent_type(data.indent_type)
+        # The number was minted from the type's own series (IND vs STR); flipping an
+        # STR into an indent, or back, would leave a document numbered as the other.
+        if (new_type == IndentType.STR.value) != (indent.indent_type == IndentType.STR.value):
+            raise ValidationError(
+                "A stock transfer request cannot be turned into an indent, or back — "
+                "raise a new document instead")
+        indent.indent_type = new_type
     # Explicitly sent, so a null clears the vehicle. Omitting the key leaves whatever
     # is already attached — the same contract office_id follows below.
     if "vehicle_id" in data.model_fields_set:
@@ -5858,6 +5954,10 @@ async def decide_allocation(db: AsyncSession, body, user):
     indent = await db.get(Indent, body.indent_id)
     if indent is None:
         raise NotFoundError(f"Indent {body.indent_id} not found")
+    # Reached through `stock.transfer.serve` alone: only an STR may be served.
+    if (indent.indent_type != IndentType.STR.value
+            and via_scoped_grant(db, perms.ALLOCATION_CREATE)):
+        raise PermissionError_("Missing permission: allocation.create")
     _ensure_allocation_eligible(indent)
     # The status gate says WHAT may be allocated; this says WHO. See
     # `_in_approval_block_reason` — an indent still climbing is only the current rung's
@@ -6108,7 +6208,12 @@ async def list_allocations(
     indent_id: int | None = None,
     user=None,
 ):
-    return await allocations.list_allocations(db, params, status, indent_id, user=user)
+    # Reached through `stock.transfer.serve` alone: the allocations serving STRs only.
+    only = None
+    if via_scoped_grant(db, perms.ALLOCATION_VIEW):
+        only = select(Indent.id).where(Indent.indent_type == IndentType.STR.value)
+    return await allocations.list_allocations(db, params, status, indent_id, user=user,
+                                              only_indent_ids=only)
 
 
 async def get_allocation(db: AsyncSession, allocation_id: int, user=None):

@@ -294,10 +294,11 @@ def _include_routers() -> None:
         # A module may expose further routers when its routes belong under two
         # prefixes with two different guards — `platform.mail` serves /api/mail behind
         # `require_permission` and the /api/auth reset pair with no guard at all, and
-        # they cannot share one object. `warehouse.supplier_router` is the same shape:
-        # /api/supplier/returns is guarded by the vendor token rather than by RBAC, and
-        # it has to live in warehouse because procurement — where the rest of the
-        # portal is served — may not import a later module (rule 5).
+        # they cannot share one object. Looked up by name so nothing else changes.
+        # `warehouse.supplier_router` is the same shape: /api/supplier/returns is
+        # guarded by the vendor token rather than by RBAC, and it has to live in
+        # warehouse because procurement — where the rest of the portal is served —
+        # may not import a later module (rule 5).
         # Looked up by name so a module that exposes neither is unaffected.
         for extra_name in ("auth_router", "supplier_router"):
             extra = getattr(module, extra_name, None)

@@ -16,25 +16,30 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core import throttle
-from app.core.dependencies import get_current_vendor, require_permission
+from app.core.dependencies import get_current_vendor, require_permission, require_permission_or
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
 from app.modules.indents.schemas import AcknowledgementRow as IndentAcknowledgementRow
 from app.modules.indents.schemas import FulfilmentStep as IndentFulfilmentStep
+from app.modules.indents import service as indent_service
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
-from app.platform.rbac.permissions import INDENT_VIEW
+from app.modules.warehouse import stock_report
+from app.platform.rbac.permissions import (
+    INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
+    STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
+)
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
     DISPATCH_GATE_OUT, DISPATCH_VIEW, INSPECTION_DELETE, ISSUE_DELETE, MOVEMENT_DELETE,
-    MOVEMENT_APPROVE, MOVEMENT_CREATE, MOVEMENT_VIEW,
+    MOVEMENT_APPROVE, MOVEMENT_COMPLETE, MOVEMENT_CREATE, MOVEMENT_INSPECT, MOVEMENT_VIEW,
     PICKING_DELETE, PUTAWAY_DELETE, RECEIPT_DELETE, RETURN_DELETE,
     INSPECTION_EXECUTE, INSPECTION_VIEW, ISSUE_CREATE, ISSUE_FORWARD, ISSUE_POST,
     ISSUE_SPLIT,
@@ -266,24 +271,19 @@ async def submit_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
     return await service.submit_receipt(db, receipt_id, user)
 
 
-# A GRN only reaches SUBMITTED when this project configured a Goods Receipt chain on
-# Settings > Approval Flow; with none configured nothing ever lands here. Gated on
-# RECEIPT_CREATE only as a floor — `engine.act` is what decides whether THIS caller is
-# on the current rung, exactly as everywhere else (rule 8).
-@router.post("/receipts/{receipt_id}/approve", response_model=s.ReceiptDetail)
-async def approve_receipt(receipt_id: int, body: s.ReasonIn = s.ReasonIn(),
-                          db: AsyncSession = Depends(get_db),
-                          user=Depends(require_permission(RECEIPT_CREATE))):
-    return await service.approve_receipt(db, receipt_id, user, approve=True,
-                                         comments=body.reason or "")
+# Where each line goes — QC or straight to putaway. A forecast before submit, the
+# record after it.
+@router.get("/receipts/{receipt_id}/routing", response_model=s.ReceiptRouting)
+async def receipt_routing(receipt_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(RECEIPT_VIEW))):
+    return await service.receipt_routing(db, receipt_id, user=user)
 
 
-@router.post("/receipts/{receipt_id}/reject", response_model=s.ReceiptDetail)
-async def reject_receipt(receipt_id: int, body: s.ReasonIn,
-                         db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(RECEIPT_CREATE))):
-    return await service.approve_receipt(db, receipt_id, user, approve=False,
-                                         comments=body.reason or "")
+# Splits a GRN the retired GRN approval parked at SUBMITTED with nothing raised.
+@router.post("/receipts/{receipt_id}/route", response_model=s.ReceiptDetail)
+async def route_parked_receipt(receipt_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(RECEIPT_CREATE))):
+    return await service.route_parked_receipt(db, receipt_id, user)
 
 
 @router.post("/receipts/{receipt_id}/complete", response_model=s.ReceiptDetail)
@@ -462,6 +462,13 @@ async def create_stock_movement_order(data: s.StockMovementOrderWrite,
     return await service.create_stock_movement_order(db, data, user)
 
 
+@router.post("/stock-movement-orders/{order_id}/submit", response_model=s.StockMovementOrderRead)
+async def submit_stock_movement_order(order_id: int,
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(MOVEMENT_CREATE))):
+    return await service.submit_stock_movement_order(db, order_id, user)
+
+
 # The approval door. `movement.approve` was defined months ago and NO route used it, so
 # a stock movement went through no ladder at all: pressing create moved the stock. It
 # now behaves like every other document — with no chain configured (every project
@@ -473,6 +480,22 @@ async def act_on_stock_movement_order(order_id: int, body: s.MovementOrderAction
                                       user=Depends(require_permission(MOVEMENT_APPROVE))):
     return await service.act_on_stock_movement_order(
         db, order_id, body.action, body.comments, user)
+
+
+@router.post("/stock-movement-orders/{order_id}/complete-inspection",
+             response_model=s.StockMovementOrderRead)
+async def complete_stock_movement_inspection(
+        order_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(MOVEMENT_INSPECT))):
+    return await service.complete_stock_movement_inspection(db, order_id, user)
+
+
+@router.post("/stock-movement-orders/{order_id}/complete",
+             response_model=s.StockMovementOrderRead)
+async def complete_stock_movement_order(
+        order_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(MOVEMENT_COMPLETE))):
+    return await service.complete_stock_movement_order(db, order_id, user)
 
 
 @router.get("/stock-movements/availability", response_model=s.StockAvailabilityRead)
@@ -579,7 +602,8 @@ async def post_issues_batch(body: s.IssueBatchIn, db: AsyncSession = Depends(get
 async def issue_stock_sources(warehouse_id: int, item_ids: str,
                               indent_id: int | None = None,
                               db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(ISSUE_VIEW))):
+                              user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """Every (batch, bin) the given items can be drawn from, oldest stock first."""
     return await service.issue_stock_sources(
         db,
@@ -593,7 +617,8 @@ async def issue_stock_sources(warehouse_id: int, item_ids: str,
 @router.post("/issues/stock-sources/fetch", response_model=list[s.IssueStockSource])
 async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
                                    db: AsyncSession = Depends(get_db),
-                                   user=Depends(require_permission(ISSUE_VIEW))):
+                                   user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """Every (batch, bin) the given items can be drawn from, oldest stock first.
     Accepts item_ids in the request body to avoid URI length limits."""
     return await service.issue_stock_sources(
@@ -608,7 +633,8 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
 @router.post("/issues/unit-supply", response_model=list[s.UnitSupplyRead])
 async def issue_unit_supply(body: s.UnitSupplyQuery,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(ISSUE_VIEW))):
+                            user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """How many identified units each (item, batch, location) could name right now.
 
     A different question from `stock-sources`, off a different table: that one is a
@@ -626,14 +652,16 @@ async def issue_unit_supply(body: s.UnitSupplyQuery,
 
 
 @router.get("/tracking-types", response_model=list[s.TrackingTypeRead])
-async def tracking_types(user=Depends(require_permission(ISSUE_VIEW))):
+async def tracking_types(user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
     """What each kind of unit identifier is called, so no screen names them itself."""
     return service.tracking_types()
 
 
 @router.get("/issues/{issue_id}", response_model=s.IssueDetail)
 async def get_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission(ISSUE_VIEW))):
+                    user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.get_issue(db, issue_id, user)
 
 
@@ -645,20 +673,23 @@ async def create_issue(data: s.IssueWrite, db: AsyncSession = Depends(get_db),
 
 @router.put("/issues/{issue_id}", response_model=s.IssueDetail)
 async def update_issue(issue_id: int, data: s.IssueWrite, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_CREATE))):
+                       user=Depends(require_permission_or(
+        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.update_issue(db, issue_id, data, user)
 
 
 @router.post("/issues/{issue_id}/submit", response_model=s.IssueDetail)
 async def submit_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_CREATE))):
+                       user=Depends(require_permission_or(
+        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.submit_issue(db, issue_id, user)
 
 
 @router.post("/issues/{issue_id}/approve", response_model=s.IssueDetail)
 async def approve_issue(issue_id: int, body: s.ApprovalIn,
                         db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission(ISSUE_POST))):
+                        user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.act_on_issue(
         db, issue_id, ApprovalAction.APPROVED.value, body.comments, user
     )
@@ -678,7 +709,8 @@ async def split_issue(issue_id: int, db: AsyncSession = Depends(get_db),
 @router.post("/issues/{issue_id}/reject", response_model=s.IssueDetail)
 async def reject_issue(issue_id: int, body: s.ApprovalIn,
                        db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_POST))):
+                       user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.act_on_issue(
         db, issue_id, ApprovalAction.REJECTED.value, body.comments, user
     )
@@ -686,14 +718,16 @@ async def reject_issue(issue_id: int, body: s.ApprovalIn,
 
 @router.post("/issues/{issue_id}/issue", response_model=s.IssueDetail)
 async def post_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                     user=Depends(require_permission(ISSUE_POST))):
+                     user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.post_issue(db, issue_id, user)
 
 
 @router.put("/issues/{issue_id}/serials", response_model=s.IssueDetail)
 async def set_issue_serials(issue_id: int, body: s.IssueSerialsIn,
                             db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(ISSUE_POST))):
+                            user=Depends(require_permission_or(
+        ISSUE_POST, STOCK_TRANSFER_ISSUE_POST, service.transfer_issue_in_reach))):
     return await service.set_issue_serials(db, issue_id, body, user)
 
 
@@ -706,7 +740,8 @@ async def acknowledge_issue(issue_id: int, body: s.AcknowledgeIssueIn,
 
 @router.post("/issues/{issue_id}/cancel", response_model=s.IssueDetail)
 async def cancel_issue(issue_id: int, body: s.ReasonIn, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_CREATE))):
+                       user=Depends(require_permission_or(
+        ISSUE_CREATE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.cancel_issue(db, issue_id, body.reason, user)
 
 
@@ -1100,13 +1135,15 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                        item_id: int | None = None, batch_id: int | None = None,
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
-                       issue_line_id: int | None = None,
+                       issue_line_id: int | None = None, unbatched: bool = False,
+                       claim_free: bool = False,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
                                       bin_id=bin_id, search=search, issue_id=issue_id,
-                                      issue_line_id=issue_line_id, user=user)
+                                      issue_line_id=issue_line_id, unbatched=unbatched,
+                                      claim_free=claim_free, user=user)
 
 
 @router.get("/serials/lookup")
@@ -1149,6 +1186,49 @@ async def item_locations(warehouse_id: int, item_id: int | None = None, location
         db, warehouse_id=warehouse_id, item_id=item_id, location_id=location_id, user=user)
 
 
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/stock-segregation/report/scopes", response_model=s.StockReportScopes)
+async def stock_report_scopes(warehouse_id: int, location_id: int | None = None,
+                              item_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """What each of the two downloads would contain, counted before either is pulled."""
+    return await stock_report.report_scopes(
+        db, warehouse_id=warehouse_id, location_id=location_id, item_id=item_id,
+        user=user)
+
+
+@router.get("/stock-segregation/report/export")
+async def stock_report_export(warehouse_id: int, scope: str = stock_report.SCOPE_HIERARCHY,
+                              location_id: int | None = None,
+                              item_id: int | None = None, format: str = "xlsx",
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """The file. Excel by default — it is the only format that carries the scope
+    header, the styling and the per-location roll-up; `?format=csv` for a plain one."""
+    actor = getattr(user, "full_name", None)
+    args = dict(warehouse_id=warehouse_id, location_id=location_id, scope=scope,
+                item_id=item_id, actor=actor, user=user)
+    # `content_disposition` builds the header, never an f-string here: HTTP headers are
+    # latin-1 and this file's name carries an em dash, so the hand-built version raised
+    # UnicodeEncodeError inside `Response.__init__` and answered 500 with the workbook
+    # already built.
+    if format == "csv":
+        filename, text = await stock_report.export_csv(db, **args)
+        # The BOM is what makes Excel read a CSV as UTF-8 — without it the "›" in the
+        # location path opens as mojibake.
+        return Response(
+            content="﻿" + text, media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition":
+                     stock_report.content_disposition(filename)})
+    filename, body = await stock_report.export_xlsx(db, **args)
+    return Response(
+        content=body, media_type=XLSX_MEDIA,
+        headers={"Content-Disposition": stock_report.content_disposition(filename)})
+
+
 @router.get("/batches", response_model=Page[s.BatchRead])
 async def list_batches(params: PageParams = Depends(), item_id: int | None = None,
                        expiring_days: int | None = None, search: str | None = None,
@@ -1187,10 +1267,13 @@ async def public_label(token: str, request: Request,
 @router.get("/acknowledgements/mine", response_model=list[IndentAcknowledgementRow])
 async def my_acknowledgements(search: str | None = None, status: str | None = None,
                               only_actionable: bool = False,
+                              indent_type: list[str] | None = Query(None),
                               db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(INDENT_VIEW))):
+                              user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     return await service.acknowledgements_for_requester(
-        db, user, search=search, status=status, only_actionable=only_actionable)
+        db, user, search=search, status=status, only_actionable=only_actionable,
+        indent_types=indent_type)
 
 
 # The delivery half of an indent's journey, for the stepper on its detail page. Any
@@ -1198,7 +1281,9 @@ async def my_acknowledgements(search: str | None = None, status: str | None = No
 # actor's own worklist.
 @router.get("/indents/{indent_id}/fulfilment", response_model=list[IndentFulfilmentStep])
 async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
-                            _=Depends(require_permission(INDENT_VIEW))):
+                            _=Depends(require_permission_or(
+                                INDENT_VIEW, (STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW),
+                                indent_service.str_in_reach))):
     return await service.indent_fulfilment(db, indent_id)
 
 
@@ -1537,7 +1622,8 @@ async def delete_picking(picking_id: int, db: AsyncSession = Depends(get_db),
 
 @router.delete("/issues/{issue_id}", status_code=204)
 async def delete_issue(issue_id: int, db: AsyncSession = Depends(get_db),
-                       user=Depends(require_permission(ISSUE_DELETE))):
+                       user=Depends(require_permission_or(
+        ISSUE_DELETE, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     await service.delete_draft(db, "issue", issue_id, user)
 
 
@@ -1561,38 +1647,46 @@ async def delete_stock_movement(order_id: int, db: AsyncSession = Depends(get_db
 @router.get("/outbound-inspections", response_model=Page[s.OutboundInspectionRead])
 async def list_outbound_inspections(params: PageParams = Depends(),
                                     status: str | None = None, warehouse_id: int | None = None,
-                                    search: str | None = None, db: AsyncSession = Depends(get_db),
-                                    user=Depends(require_permission(QC_OUTWARD_VIEW))):
+                                    search: str | None = None,
+                                    stock_transfer: bool | None = None,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission_or(
+        QC_OUTWARD_VIEW, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.list_outbound_inspections(db, params, status=status,
                                                    warehouse_id=warehouse_id, search=search,
-                                                   user=user)
+                                                   user=user, stock_transfer=stock_transfer)
 
 @router.get("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
 async def get_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                                  _=Depends(require_permission(QC_OUTWARD_VIEW))):
+                                  _=Depends(require_permission_or(
+        QC_OUTWARD_VIEW, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.get_outbound_inspection(db, inspection_id)
 
 @router.post("/outbound-inspections", response_model=s.OutboundInspectionDetail, status_code=201)
 async def create_outbound_inspection(data: s.OutboundInspectionWrite, db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_CREATE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_CREATE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.create_outbound_inspection(db, data, user)
 
 @router.put("/outbound-inspections/{inspection_id}", response_model=s.OutboundInspectionDetail)
 async def update_outbound_inspection(inspection_id: int, data: s.OutboundInspectionWrite,
                                      db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_UPDATE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_UPDATE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     return await service.update_outbound_inspection(db, inspection_id, data, user)
 
 @router.post("/outbound-inspections/{inspection_id}/complete", response_model=s.OutboundInspectionDetail)
 async def complete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                                       user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+                                       user=Depends(require_permission_or(
+        QC_OUTWARD_APPROVE, STOCK_TRANSFER_QC_APPROVE, service.transfer_qc_in_reach))):
     return await service.complete_outbound_inspection(db, inspection_id, user)
 
 @router.post("/outbound-inspections/{inspection_id}/approve",
              response_model=s.OutboundInspectionDetail)
 async def approve_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
                                       db: AsyncSession = Depends(get_db),
-                                      user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+                                      user=Depends(require_permission_or(
+        QC_OUTWARD_APPROVE, STOCK_TRANSFER_QC_APPROVE, service.transfer_qc_in_reach))):
     return await service.act_on_outbound_inspection(
         db, inspection_id, ApprovalAction.APPROVED.value, body.comments, user
     )
@@ -1602,7 +1696,8 @@ async def approve_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
              response_model=s.OutboundInspectionDetail)
 async def reject_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
                                      db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_APPROVE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_APPROVE, STOCK_TRANSFER_QC_APPROVE, service.transfer_qc_in_reach))):
     return await service.act_on_outbound_inspection(
         db, inspection_id, ApprovalAction.REJECTED.value, body.comments, user
     )
@@ -1610,7 +1705,8 @@ async def reject_outbound_inspection(inspection_id: int, body: s.ApprovalIn,
 
 @router.delete("/outbound-inspections/{inspection_id}", status_code=204)
 async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depends(get_db),
-                                     user=Depends(require_permission(QC_OUTWARD_DELETE))):
+                                     user=Depends(require_permission_or(
+        QC_OUTWARD_DELETE, STOCK_TRANSFER_QC, service.transfer_qc_in_reach))):
     await service.delete_draft(db, "whs_inspections", inspection_id, user)
     return None
 
@@ -1836,3 +1932,57 @@ async def vendor_dispatch_replacement(return_id: int,
     """
     return await service.vendor_dispatch_replacement(
         db, account.vendor_id, return_id, body)
+
+
+# --------------------------------------------------------------------------- #
+#  Warehouse Demand Pool — item-wise view of outstanding indent demand in the
+#  outward chain.  Two endpoints: the pool (paginated groups) and stage metadata.
+#  Both gated on `issue.view`: the same permission that governs the issue register.
+# --------------------------------------------------------------------------- #
+from app.modules.warehouse import demand_pool as dp_warehouse  # noqa: E402
+
+
+@router.get("/demand-pool/stages", response_model=list[dict])
+async def warehouse_demand_pool_stages(
+        user=Depends(require_permission(ISSUE_VIEW))):
+    """Ordered stage metadata for the warehouse demand pool UI strip.
+
+    Served so screens can render stage chips, tooltips and deep links without
+    any hardcoded enum values — the same served-meta pattern as
+    `ACTIVITY_META` / `TRACKING_META` in the logistics module.
+    """
+    return list(dp_warehouse.WAREHOUSE_STAGES)
+
+
+@router.get("/demand-pool", response_model=dict)
+async def warehouse_demand_pool(
+        params: PageParams = Depends(),
+        search: str | None = None,
+        item_id: int | None = None,
+        warehouse_id: int | None = None,
+        project_id: int | None = None,
+        stage: str | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(ISSUE_VIEW))):
+    """Item-wise warehouse demand pool.
+
+    Every outstanding indent quantity that has a signed allocation and has not
+    yet been acknowledged by the requester appears here, grouped by item, with
+    each contributing indent line showing which outward stage its quantity is at
+    (TO_ISSUE → IN_ISSUE → ISSUED → OUTWARD_QC → CONSIGNMENT → IN_TRANSIT →
+    DELIVERED).
+
+    When the requester confirms receipt (`indents.acknowledge_receipt`) the
+    quantity drops out of the pool by itself — nothing is stored, everything is
+    read.
+
+    `?stage=` narrows to one bucket so KPI tile counts and the list they open
+    can never disagree.
+    """
+    return await dp_warehouse.demand_pool(
+        db, params,
+        search=search, item_id=item_id,
+        warehouse_id=warehouse_id, project_id=project_id,
+        stage=stage, user=user,
+    )
+

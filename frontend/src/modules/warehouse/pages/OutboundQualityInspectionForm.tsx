@@ -50,10 +50,14 @@ const deriveResult = (inspected: number, accepted: number): InspectionItemWrite[
   return "PARTIAL";
 };
 
+/** `basePath` re-homes the form — Inventory > Stock Transfer mounts it at
+ *  `/inventory/transfers/qc` for the QC of a transfer's material issue. */
 export default function OutboundQualityInspectionForm({
   type = "OUTGOING",
+  basePath,
 }: {
   type?: "INCOMING" | "OUTGOING";
+  basePath?: string;
 }) {
   const pointLabel = usePointLabel();
   const { id } = useParams();
@@ -62,7 +66,7 @@ export default function OutboundQualityInspectionForm({
   const editing = !!id && id !== "new";
   /* Absolute: this screen is mounted at two depths, so `".."` resolved against the
    * matched route and Back landed somewhere different depending on the entry URL. */
-  const listPath = "/warehouse/qc-outward";
+  const listPath = basePath ?? "/warehouse/qc-outward";
   const [searchParams] = window.location.search ? [new URLSearchParams(window.location.search)] : [new URLSearchParams()];
   const initialIssueId = searchParams.get("issue_id");
 
@@ -115,6 +119,23 @@ export default function OutboundQualityInspectionForm({
       })),
     });
   }, [doc]);
+
+  // A stock transfer's QC is worked on Inventory > Stock Transfer. Whatever link
+  // opened it here — the approvals inbox, a notification, the issue list's QC button —
+  // hand it over there, same id, same issue.
+  const { data: startIssue } = useQuery({
+    queryKey: ["wh-issue", String(initialIssueId ?? "")],
+    queryFn: () => getIssue(Number(initialIssueId)),
+    enabled: !basePath && !editing && !!initialIssueId,
+  });
+  useEffect(() => {
+    if (basePath) return;
+    if (editing && (doc as { is_stock_transfer?: boolean } | undefined)?.is_stock_transfer) {
+      nav(`/inventory/transfers/qc/${id}`, { replace: true });
+    } else if (!editing && (startIssue as { is_stock_transfer?: boolean } | undefined)?.is_stock_transfer) {
+      nav(`/inventory/transfers/qc/new?issue_id=${initialIssueId}`, { replace: true });
+    }
+  }, [basePath, editing, doc, startIssue, id, initialIssueId, nav]);
 
   useEffect(() => {
     if (!editing && initialIssueId && !pulled) {
@@ -257,25 +278,49 @@ export default function OutboundQualityInspectionForm({
 
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
+  /** A line whose issue line sent out named units — serials, IMEIs, asset tags or
+   *  consumable codes. Those are picked here whatever the kind; the server checks each
+   *  against what the issue line actually carried. Whole-unit rules for counted UOMs
+   *  (Nos, Box…) are the server's, which knows the unit master. */
   const validateAcceptedSerials = () => {
     for (const [index, line] of form.items.entries()) {
       const available = availableSerials(index);
-      if (!available) continue;
+      if (!available && !isSerialTracked(index)) continue;
+      const label = `Line ${index + 1} (${line.item_code ?? line.item_name ?? "item"})`;
       const required = Math.floor(num(line.accepted_qty));
       if (num(line.accepted_qty) !== required) {
-        throw new Error(`Line ${index + 1}: accepted quantity must be a whole number for serialized items.`);
+        const rest = num(line.inspected_qty) - required;
+        throw new Error(
+          `${label}: units named one by one are accepted whole. ` +
+          `Accept ${required} and reject the remaining ${rest} with a reason.`,
+        );
       }
+      if (!available) continue;
       const actual = line.serial_numbers?.length ?? available.length;
       if (actual !== required) {
-        throw new Error(`Line ${index + 1}: select exactly ${required} accepted serial numbers.`);
+        throw new Error(`${label}: select exactly ${required} accepted units.`);
       }
     }
   };
 
+  /** An untouched picker means "every unit passed" (see the column below). Say so on
+   *  the wire: the server counts what it is sent, and null reads as zero selected. */
+  const payload = (): InspectionWrite => ({
+    ...form,
+    items: form.items.map((line, index) => {
+      const available = availableSerials(index);
+      return line.serial_numbers == null && available
+        ? { ...line, serial_numbers: available }
+        : line;
+    }),
+  });
+
   const save = useMutation({
     mutationFn: () => {
       validateAcceptedSerials();
-      return editing ? updateOutboundInspection(Number(id), form) : createOutboundInspection(form);
+      return editing
+        ? updateOutboundInspection(Number(id), payload())
+        : createOutboundInspection(payload());
     },
     onSuccess: (saved: Inspection) => {
       qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
@@ -291,7 +336,7 @@ export default function OutboundQualityInspectionForm({
      * while the confirm modal in front of them counted their own unsaved passes. */
     mutationFn: async () => {
       validateAcceptedSerials();
-      await updateOutboundInspection(Number(id), form);
+      await updateOutboundInspection(Number(id), payload());
       return completeOutboundInspection(Number(id));
     },
     onSuccess: () => {
@@ -424,13 +469,14 @@ export default function OutboundQualityInspectionForm({
     },
     {
       key: "serials",
-      header: "Accepted serials",
+      // Serials, IMEIs, asset tags and consumable codes alike: whatever named the
+      // units this issue line sent out. Only serial-tracked lines used to get it.
+      header: "Accepted units",
       width: "w-32",
       hideOnNarrow: true,
       render: (line, index) => {
-        if (!isSerialTracked(index)) return <span className="text-muted">—</span>;
-
         const available = availableSerials(index);
+        if (!available && !isSerialTracked(index)) return <span className="text-muted">—</span>;
         // An untouched line has decided nothing, which means nothing rejected — show it
         // as all accepted rather than as zero.
         const accepted = line.serial_numbers?.length ?? available?.length ?? 0;

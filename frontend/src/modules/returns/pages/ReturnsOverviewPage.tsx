@@ -92,7 +92,7 @@ export default function ReturnsOverviewPage() {
     <div>
       <PageHeader
         eyebrow="RETURN"
-        title="Overview"
+        title="Dashboard"
         actions={
           // Deliberately not wrapped in <Can do="stock.transfer">: raising a return is
           // the whole point of the screen, and hiding the only way in left storekeepers

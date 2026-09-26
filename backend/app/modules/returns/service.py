@@ -41,12 +41,13 @@ import logging
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.pagination import PageParams, paginate
 from app.platform.rbac import permissions as perms
+from app.platform.rbac.service import get_user_permissions
 from app.shared.scope import scope_condition
 from app.modules.inventory import allocation, locations
 from app.modules.inventory import service as inventory
@@ -1320,6 +1321,10 @@ async def list_returns(db: AsyncSession, params: PageParams, user, *,
     owner = _raised_by_me(user)
     if mine_only:
         stmt = stmt.where(owner)
+    elif await _sees_every_return(db, user):
+        # No narrowing at all. See `_sees_every_return` — this is the desks' own reach,
+        # applied to the register they were always missing from.
+        pass
     elif visible:
         # Either end of the move: a returner must keep seeing the document after it
         # leaves them, and the receiving MDP has to see what is coming.
@@ -1455,6 +1460,33 @@ def _matches_term(row: dict, fields: tuple[str, ...], term: str) -> bool:
     """Case-insensitive substring match over the row's own visible fields."""
     needle = term.casefold()
     return any(needle in str(_field(row, field) or "").casefold() for field in fields)
+
+
+async def _sees_every_return(db: AsyncSession, user) -> bool:
+    """Whether this login reads the whole register rather than their own subtree.
+
+    The subtree rule (`location_ids_for_user`) is written for the person standing at a
+    shelf: you see what came off a point you or your reportees hold. Every desk ABOVE a
+    shelf fails it — the SCM Head holds ONE nominal stocking point out of nine hundred,
+    so All Returns showed him nothing while his decision desk was full, and a document
+    he had just signed disappeared from every screen he could open.
+
+    This is not a widening. `_queue_page` already serves those desks every pending
+    return in the company regardless of location, deliberately and for this exact
+    reason. The register simply never got the same exemption, so the two screens
+    disagreed about which documents exist.
+
+    Gated on `return.view_all`, which inherits its grants from `return.decide`
+    (permissions.INHERITS_GRANTS_FROM), so the desks that already see these rows keep
+    them and nobody else gains anything. A storekeeper holding only `return.view` is
+    scoped exactly as before.
+    """
+    if user is None:
+        return False
+    held = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    return perms.RETURN_VIEW_ALL in held
 
 
 async def _queue_page(db: AsyncSession, params: PageParams, user,
@@ -1608,11 +1640,17 @@ async def summary(db: AsyncSession, user) -> dict:
     over whichever page happened to be fetched."""
     visible = await locations.location_ids_for_user(db, user)
     owner = _raised_by_me(user)
-    scope = or_(
-        owner,
-        StockTransferOrder.from_warehouse_id.in_(visible),
-        StockTransferOrder.to_warehouse_id.in_(visible),
-    ) if visible else owner
+    # The same reach `list_returns` applies: a login holding `return.view_all` reads the
+    # whole register, so its tiles must count the whole register too — or the tiles say
+    # 0 over a Recent returns list that is full.
+    if await _sees_every_return(db, user):
+        scope = true()
+    else:
+        scope = or_(
+            owner,
+            StockTransferOrder.from_warehouse_id.in_(visible),
+            StockTransferOrder.to_warehouse_id.in_(visible),
+        ) if visible else owner
 
     rows = (await db.execute(
         select(StockTransferOrder.status, func.count(StockTransferOrder.id))

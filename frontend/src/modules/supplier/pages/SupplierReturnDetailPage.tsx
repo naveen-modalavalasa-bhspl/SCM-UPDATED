@@ -8,13 +8,13 @@ import {
   Button, Card, ConfirmModal, ErrorBanner, errorMessage, Field, Input, PageHeader,
   ResponsiveList, StatusPill, Textarea, useToast, type Column,
 } from "@/shared/components";
-import { fmtDate, fmtDateTime } from "@/shared/datetime";
+import { fmtDate, fmtDateTime, todayIst } from "@/shared/datetime";
 import { supplierApi } from "@/modules/procurement/api";
 import type {
   ReplacementDocumentRow, ReplacementDocumentType,
   VendorReturnDetail, VendorReturnItemRow,
 } from "@/modules/procurement/types";
-import { vendorReturnLabel } from "../status";
+import { vendorReturnPillLabel } from "../status";
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -95,7 +95,9 @@ const ASKS: Record<Exclude<Rung, null>, {
   decide: {
     title: "Do you accept this return?",
     hint: "Check it against the GRN, the purchase order and the QC inspection below. "
-      + "Nothing has been shipped yet — if this is wrong, reject it and say why.",
+      + "Nothing has been shipped yet — if this is wrong, reject it and say why. "
+      + "Accepting it also asks whether you are refunding the value or replacing the "
+      + "goods.",
     label: "Approve", icon: Check,
   },
   settle: {
@@ -311,10 +313,24 @@ export function SupplierReturnDetailPage() {
     mutationFn: async () => {
       if (!ret) throw new Error("not loaded");
       switch (asking) {
-        case "decide":
-          return supplierApi.decideReturn(returnId, {
+        case "decide": {
+          const decided = await supplierApi.decideReturn(returnId, {
             action: decision, remarks: note.trim() || null,
           });
+          // A rejection ends here; an approval carries straight on into the settlement
+          // the same dialog collected. Sequential rather than parallel: the settle route
+          // refuses a return that is not yet VENDOR_APPROVED, so the decision has to be
+          // on the row before the second call goes out. If the settle fails the approval
+          // still stands — the document lands on the `settle` rung and the supplier is
+          // asked the one question that did not get through, which is the pre-merge
+          // behaviour and not a dead end.
+          if (decision !== "APPROVED") return decided;
+          return supplierApi.settleReturn(returnId, {
+            settlement,
+            refund_amount: settlement === "REFUNDED" ? Number(refundAmount) : null,
+            remarks: note.trim() || null,
+          });
+        }
         case "settle":
           return supplierApi.settleReturn(returnId, {
             settlement,
@@ -418,6 +434,16 @@ export function SupplierReturnDetailPage() {
 
   const rung = rungOf(ret);
   const ask = rung ? ASKS[rung] : null;
+  // MERGED 2026-09-19. Approving and saying what you are giving back are ONE press.
+  // They were two: Approve closed, the card came back reading "What are you giving
+  // back?", and the supplier pressed again. The second press asks nothing the first
+  // could not — a supplier who has decided to accept a return has, by then, decided
+  // whether they are refunding it — and a return left sitting on VENDOR_APPROVED
+  // because nobody came back for the second press is a return the warehouse cannot
+  // move either. The `settle` rung stays reachable on its own for exactly those rows:
+  // anything already approved under the old two-press flow still lands on it.
+  const settling = asking === "settle"
+    || (asking === "decide" && decision === "APPROVED");
   const returnedValue = Number(ret.total_value ?? 0);
   const parsedRefund = Number(refundAmount);
   const refundValid = refundAmount.trim() !== "" && Number.isFinite(parsedRefund)
@@ -429,7 +455,7 @@ export function SupplierReturnDetailPage() {
       return "Say why you are rejecting this return — the warehouse that raised it "
         + "has to act on your answer.";
     }
-    if (asking === "settle" && settlement === "REFUNDED" && !refundValid) {
+    if (settling && settlement === "REFUNDED" && !refundValid) {
       if (refundAmount.trim() === "") return "Enter the amount you are refunding.";
       if (!(parsedRefund > 0)) return "Enter a refund greater than zero.";
       return `The refund cannot exceed the ₹ ${money(returnedValue)} of goods returned.`;
@@ -497,9 +523,9 @@ export function SupplierReturnDetailPage() {
         title={ret.return_no}
         back={{ to: "/supplier/returns", label: "Back to returns" }}
         actions={<StatusPill status={ret.status}
-                             label={ret.status_label
-                               ?? vendorReturnLabel(ret.status,
-                                                    ret.vendor_response_label)} />}
+                             label={vendorReturnPillLabel(ret.status,
+                                                          ret.vendor_response_label,
+                                                          ret.status_label)} />}
       />
 
       {/* ---- the one thing being asked, above everything read-only ---- */}
@@ -651,7 +677,9 @@ export function SupplierReturnDetailPage() {
         isOpen={!!asking}
         title={ask?.title ?? ""}
         confirmLabel={asking === "decide"
-          ? (decision === "APPROVED" ? "Approve" : "Reject")
+          ? (decision !== "APPROVED"
+              ? "Reject"
+              : settlement === "REFUNDED" ? "Approve and refund" : "Approve and replace")
           : (ask?.label ?? "Confirm")}
         tone={asking === "decide" && decision === "REJECTED" ? "danger" : "warning"}
         busy={act.isPending}
@@ -662,7 +690,7 @@ export function SupplierReturnDetailPage() {
         message=""
       >
         <div className="space-y-4">
-          {asking === "settle" && (
+          {settling && (
             <div className="grid gap-2">
               {([
                 ["REFUNDED", "Refund the value", IndianRupee],
@@ -682,7 +710,7 @@ export function SupplierReturnDetailPage() {
             </div>
           )}
 
-          {asking === "settle" && settlement === "REFUNDED" && (
+          {settling && settlement === "REFUNDED" && (
             <Field label="Refund amount"
                    hint={`Up to ₹ ${money(returnedValue)} — the value returned to you.`}>
               <div className="flex gap-2">
@@ -720,7 +748,11 @@ export function SupplierReturnDetailPage() {
                        onChange={(e) => setVehicle({ ...vehicle, lr_no: e.target.value })} />
               </Field>
               <Field label={asking === "pickup" ? "Collected on" : "Expected to collect"}>
+                {/* A collection still to happen cannot be dated in the past; the same
+                    field recording a collection that ALREADY happened can be, so the
+                    floor is only on the forward-looking half. */}
                 <Input type="date" value={vehicle.expected_date}
+                       min={asking === "pickup" ? undefined : todayIst()}
                        onChange={(e) => setVehicle({ ...vehicle, expected_date: e.target.value })} />
               </Field>
             </div>
@@ -759,7 +791,7 @@ export function SupplierReturnDetailPage() {
                          onChange={(e) => setDispatch({ ...dispatch, dispatch_date: e.target.value })} />
                 </Field>
                 <Field label="Expected to reach them">
-                  <Input type="date" value={dispatch.expected_date}
+                  <Input type="date" value={dispatch.expected_date} min={todayIst()}
                          onChange={(e) => setDispatch({ ...dispatch, expected_date: e.target.value })} />
                 </Field>
                 <Field label="Transporter">

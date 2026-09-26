@@ -39,7 +39,10 @@ const TABS = [
  *
  *  Order and membership only. Every tab still renders the same component with the
  *  same props and the same permission checks as before. */
-const GROUPS: { label: string; tabs: (typeof TABS)[number][] }[] = [
+export type MasterTab = (typeof TABS)[number];
+export type MasterGroup = { label: string; tabs: MasterTab[] };
+
+const GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups", "item-eligibility"] },
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
@@ -47,6 +50,52 @@ const GROUPS: { label: string; tabs: (typeof TABS)[number][] }[] = [
   { label: "Vendors", tabs: ["vendors", "vendor-items"] },
   { label: "BOM", tabs: ["boms", "bom-groups"] },
   { label: "Locations", tabs: ["warehouses", "facilities", "projects", "departments"] },
+];
+
+/** The same masters, split by the module that OWNS them, for the per-module Masters
+ *  screens (`/inventory/masters`, `/procurement/masters`, `/indents/masters`,
+ *  `/admin/org-masters`).
+ *
+ *  Membership only — every entry below renders exactly the tab component the
+ *  all-in-one `/masters` screen renders, with the same `<Can>` gating inside it, so
+ *  putting a master on a module's screen widens no permission. What gates the SCREEN
+ *  is its own `page.<code>.view`, catalogued in `platform/rbac/permissions.py` and
+ *  inheriting from `page.masters.view` so whoever can open Masters today can open
+ *  these on the day they deploy.
+ *
+ *  `/masters` is deliberately still here and still whole: these are a second door on
+ *  the same data, not a migration off it.
+ *
+ *  Warehouses and Bins are absent on purpose — the warehouse module has owned its own
+ *  masters screen (`/warehouse/masters`) since the storage-type work, and a second
+ *  editor for the same rows is how two screens come to disagree. */
+export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
+  { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups"] },
+  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms"] },
+  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
+  { label: "Units", tabs: ["uom", "conversions"] },
+];
+
+/** Tax lives on the HSN code and is read at PO/GRN time, never copied onto an item —
+ *  so it is the buyer's master, not the catalogue's. */
+export const PROCUREMENT_MASTER_GROUPS: MasterGroup[] = [
+  { label: "Vendors", tabs: ["vendors", "vendor-items"] },
+  { label: "Tax", tabs: ["hsn-codes"] },
+];
+
+/** Both of these are rules about RAISING a request: a BOM is what an indent is built
+ *  from, and eligibility is which items a role or region may ask for at all
+ *  (`modules/indents/eligibility.py` on the backend). */
+export const INDENT_MASTER_GROUPS: MasterGroup[] = [
+  { label: "BOM", tabs: ["boms", "bom-groups"] },
+  { label: "Eligibility", tabs: ["item-eligibility"] },
+];
+
+/** HCM mirrors. Read-only here because HCM owns them (rule 10) — the write routes are
+ *  not even registered — which is why they sit under Settings rather than in a module
+ *  that would imply somebody here can change them. */
+export const ORG_MASTER_GROUPS: MasterGroup[] = [
+  { label: "Organisation", tabs: ["projects", "facilities", "departments"] },
 ];
 
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
@@ -76,15 +125,32 @@ const NEEDS: Record<string, readonly string[]> = {
 };
 
 export function MastersPage() {
+  return <MastersShell groups={GROUPS} />;
+}
+
+/** The masters screen over a SUBSET of the masters.
+ *
+ *  One component, so a module's Masters screen cannot drift from `/masters`: the
+ *  index, the search, the per-tab dropdown sources and every tab component are the
+ *  same code. A module page supplies only which groups it shows and what the header
+ *  says. */
+export function MastersShell({
+  groups: source, eyebrow = "Masters", title = "Master data",
+}: { groups: MasterGroup[]; eyebrow?: string; title?: string }) {
   // The tab lives in the URL so refresh and Back keep your place, and so a link to
   // ?tab=vendors opens on Vendors rather than on Items.
   const [params, setParams] = useSearchParams();
   const fromUrl = params.get("tab") ?? "";
-  const tab = (TABS as readonly string[]).includes(fromUrl) ? fromUrl : "items";
+  // The subset's own tabs, not TABS: a `?tab=` naming a master this screen does not
+  // carry must fall back to this screen's home rather than render a tab with no entry
+  // in the index beside it.
+  const shown = useMemo(() => source.flatMap((g) => g.tabs), [source]);
+  const home = shown[0] ?? "items";
+  const tab = shown.includes(fromUrl as MasterTab) ? fromUrl : home;
   const setTab = (next: string) => {
     // replace, not push: clicking through six masters should not mean six Backs to
     // leave the screen.
-    setParams(next === "items" ? {} : { tab: next }, { replace: true });
+    setParams(next === home ? {} : { tab: next }, { replace: true });
   };
 
   // No scroll-into-view any more. It existed because the tab strip pushed the table
@@ -93,11 +159,11 @@ export function MastersPage() {
   const [q, setQ] = useState("");
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    if (!needle) return GROUPS;
-    return GROUPS
+    if (!needle) return source;
+    return source
       .map((g) => ({ ...g, tabs: g.tabs.filter((t) => TAB_LABELS[t].toLowerCase().includes(needle)) }))
       .filter((g) => g.tabs.length);
-  }, [q]);
+  }, [q, source]);
 
   const wanted = (source: string) => NEEDS[source].includes(tab);
 
@@ -133,7 +199,7 @@ export function MastersPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Masters" title="Master data" />
+      <PageHeader eyebrow={eyebrow} title={title} />
 
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
         {/* Phone and tablet: one control, because a 26-row list above the table is
@@ -151,7 +217,7 @@ export function MastersPage() {
               if (next) setTab(String(next));
             }}
           >
-            {TABS.map((key) => <SelectItem key={key}>{TAB_LABELS[key]}</SelectItem>)}
+            {shown.map((key) => <SelectItem key={key}>{TAB_LABELS[key]}</SelectItem>)}
           </Select>
         </div>
 

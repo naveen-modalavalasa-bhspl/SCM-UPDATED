@@ -21,7 +21,7 @@ from app.shared.models.base import utcnow
 
 PAGE_NAMES = {
     "grp_indents": "Indents",
-    "ind_dashboard": "Overview",
+    "ind_dashboard": "Dashboard",
     "ind_list": "All Requests",
     "ind_board": "Status Board",
     "ind_reports": "Activity Ledger",

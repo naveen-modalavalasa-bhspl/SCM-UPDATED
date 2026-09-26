@@ -605,6 +605,9 @@ class ReceiptItemRead(_Read):
     uom_code: str | None = None
     is_asset: bool = False
     is_serial_tracked: bool = False
+    #: The item master's "Requires QI". Decides whether this line goes to QC or
+    #: straight to putaway on submit.
+    requires_qi: bool = False
     ordered_qty: Decimal
     received_qty: Decimal
     accepted_qty: Decimal
@@ -685,6 +688,44 @@ class ReceiptRead(_Read):
 
 class ReceiptDetail(ReceiptRead):
     items: list[ReceiptItemRead] = Field(default_factory=list)
+
+
+class ReceiptRouteLine(BaseModel):
+    """One GRN line and where it goes. `route` is QC, PUTAWAY or STOCK (a point with
+    no bins banks the goods directly)."""
+    receipt_item_id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    received_qty: Decimal
+    accepted_qty: Decimal
+    rejected_qty: Decimal
+    requires_qi: bool = False
+    route: str
+    qc_status: str | None = None
+    putaway_id: int | None = None
+    putaway_no: str | None = None
+    putaway_status: str | None = None
+
+
+class ReceiptRouting(BaseModel):
+    """`service.receipt_routing`. `stage` is FORECAST (not submitted yet), PARKED (the
+    retired GRN approval held it with nothing raised) or ROUTED."""
+    receipt_id: int
+    grn_no: str
+    status: str
+    stage: str
+    is_bin_managed: bool
+    headline: str
+    inspection_id: int | None = None
+    inspection_no: str | None = None
+    inspection_status: str | None = None
+    putaway_total: int = 0
+    putaway_done: int = 0
+    qc_lines: list[ReceiptRouteLine] = Field(default_factory=list)
+    direct_lines: list[ReceiptRouteLine] = Field(default_factory=list)
 
 
 class PoLineOption(BaseModel):
@@ -919,6 +960,8 @@ class OutboundInspectionRead(_Read):
 
 class OutboundInspectionDetail(OutboundInspectionRead):
     items: list[OutboundInspectionItemRead] = []
+    # Its issue executes a stock transfer, so it is worked on Inventory > Stock Transfer.
+    is_stock_transfer: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1170,9 +1213,24 @@ class StockMovementRead(BaseModel):
 
 
 class StockAvailabilityRead(BaseModel):
+    """One movement line's source, and how its units must be named.
+
+    `units_required`, `unit_mode` and `tracking_type` are read off the item master
+    (see `service._movement_units`), so a screen never decides for itself whether an
+    item is serial, IMEI, asset or consumable tracked. `units_available` is bounded:
+    with `units_capped` it means "at least this many".
+    """
     available_qty: Decimal = Decimal("0")
     serial_numbers: list[str] = Field(default_factory=list)
     is_serial_tracked: bool = False
+    units_required: bool = False
+    unit_mode: str | None = None
+    tracking_type: str | None = None
+    units_available: int | None = None
+    units_capped: bool = False
+    bin_code: str | None = None
+    bin_path: str | None = None
+    batch_no: str | None = None
 
 
 class StockMovementOrderItemWrite(BaseModel):
@@ -1224,6 +1282,7 @@ class StockMovementOrderItemRead(BaseModel):
     destination_bin_code: str | None = None
     quantity: Decimal
     batch_id: int | None = None
+    batch_no: str | None = None
     serial_numbers: list[str] | str | None = Field(default_factory=list)
 
     @field_validator("serial_numbers", mode="before")
@@ -1244,9 +1303,9 @@ class StockMovementOrderRead(BaseModel):
     line, so `items` is empty there and populated on create.
     """
     order_no: str
-    #: 0 when no ladder is configured and the movement completed on the press — that
-    #: path writes no document row, exactly as it always did. Non-zero means there is
-    #: an `inv_sto` row to approve (2026-08-21).
+    #: 0 only for movements completed before orders were stored — those have ledger
+    #: rows and no document row. Every order raised since carries a non-zero
+    #: `inv_sto` row moving DRAFT → PENDING_APPROVAL → APPROVED → COMPLETED.
     id: int = 0
     warehouse_id: int
     warehouse_name: str | None = None
@@ -1577,6 +1636,8 @@ class IssueRead(_Read):
 
 class IssueDetail(IssueRead):
     items: list[IssueItemRead] = []
+    # Executes a stock transfer (STO / STR) — its QC is worked on Inventory > Stock Transfer.
+    is_stock_transfer: bool = False
     # True only for the person the document is waiting on RIGHT NOW. Holding the
     # permission is not enough: every warehouse post shares one HCM rank, so all
     # eleven of them hold `issue.issue` and a permission-gated button appeared for
@@ -2703,6 +2764,24 @@ class ReturnVehicleArrangementIn(BaseModel):
     #: been assigned.
     ready_date: date | None = None
     remarks: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _ready_date_is_not_behind_us(self):
+        """No day that has already gone.
+
+        The screen's calendar stops offering one (`min` on the Ready-from input), and
+        this is the same rule where the save can actually enforce it — a form is not a
+        guard. Worded like `ReplacementDispatchIn`'s identical check, because it is the
+        same mistake on the other end of the same journey.
+
+        Still OPTIONAL: a leg may be confirmed with no ready date at all, which says
+        "as soon as it is packed". Only a date that is stated AND behind us is refused.
+        """
+        if self.ready_date is not None and self.ready_date < ist_today():
+            raise ValueError(
+                "The ready date is in the past. Give the date the load will actually "
+                "be ready to leave.")
+        return self
 
 
 class ReturnInboundVehicleIn(BaseModel):
@@ -3841,6 +3920,56 @@ class ItemLocationsOut(BaseModel):
     total_reserved: float
     total_on_hand: float
     locations: list[ItemLocation]
+
+
+# --------------------------------------------------------------------------- #
+# Stock by storage location, as a download (`warehouse/stock_report.py`)
+# --------------------------------------------------------------------------- #
+
+class StockReportScopeOption(BaseModel):
+    """One of the two downloads, already counted.
+
+    Every string on it is composed by the service, so the button and the file it
+    produces cannot describe the same scope differently.
+    """
+    key: str                       #: LOCATION | HIERARCHY
+    title: str                     #: "Only F1 — Ground floor"
+    sentence: str                  #: the same line the file's header block prints
+    hint: str                      #: why you would pick this one, or must not
+    locations_in_scope: int        #: locations the scope covers, stock or no stock
+    locations: int                 #: of those, how many actually hold something
+    items: int
+    rows: int
+    total_qty: Decimal
+    is_empty: bool
+    #: True when this location has nothing inside it, so both scopes are one file.
+    same_as_other: bool
+    recommended: bool
+
+
+class StockReportScopes(BaseModel):
+    """`GET /stock-segregation/report/scopes` — what each download would contain.
+
+    Asked BEFORE anything is downloaded, because "the Floor 1 report" means two
+    different files and the counts are what make the difference visible.
+    """
+    warehouse_id: int
+    warehouse_name: str | None = None
+    location_id: int | None = None
+    location_code: str | None = None
+    location_name: str | None = None
+    location_label: str
+    location_kind: str | None = None
+    location_path: list[str] = Field(default_factory=list)
+    depth: int = 0
+    child_count: int = 0
+    descendant_count: int = 0
+    item_filter: int | None = None
+    #: The person only sees the floors they are assigned; another may pull more.
+    floor_restricted: bool = False
+    row_cap: int
+    options: list[StockReportScopeOption] = Field(default_factory=list)
+
 
 # Forward references: LocationOccupancy names CapacityGate/OccupancyLine and
 # PutawayRead names HandlingUnit, all declared after them.

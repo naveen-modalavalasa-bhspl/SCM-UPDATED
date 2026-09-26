@@ -39,6 +39,14 @@ class StockRow(BaseModel):
     reserved_qty: float
     transit_qty: float = 0
     total_qty: float
+    # REQ_032 — the outward pipeline for this ITEM at this POINT (not this lot), READ
+    # off the warehouse documents on every call (`service.stock_pipeline`):
+    #   issued_pending_qty  posted out of stock here, consignment not yet gone
+    #   outgoing_qty        left here on a consignment, not yet received
+    #   incoming_qty        on a consignment addressed here, not yet received
+    issued_pending_qty: float = 0
+    outgoing_qty: float = 0
+    incoming_qty: float = 0
     # The costed rate and what the lot is worth. Both are real stk_balance columns and
     # were simply missing from this model, so response_model dropped them on the way
     # out and the screen showed "Not costed" against stock that had a perfectly good
@@ -117,6 +125,11 @@ class StockSummaryOut(BaseModel):
     # `below_reorder` an artefact rather than an answer. Defaults True so an older
     # client that never reads it behaves exactly as before.
     reorder_configured: bool = True
+    # REQ_032 — the same three pipeline figures as StockRow, totalled over the points
+    # this screen is showing.
+    issued_pending_qty: float = 0
+    outgoing_qty: float = 0
+    incoming_qty: float = 0
 
 
 class MovementSummaryOut(BaseModel):
@@ -407,12 +420,20 @@ class AllocationOut(AllocationListRow):
 # ---------------- Stock Adjustment Schemas ----------------
 
 class AdjustmentItemIn(BaseModel):
+    """One line of a stock audit or adjustment.
+
+    A COUNTED line sends `physical_qty` and nothing else about quantity: the server
+    reads the system figure itself and derives the direction and the correction, so
+    a screen holding a stale system number cannot post the wrong difference. A DIRECT
+    line (a known write-off) sends `direction` and `quantity` instead.
+    """
     item_id: int
     bin_id: int = 0
     batch_id: int = 0
     project_id: int = 0
-    direction: str  # IN | OUT
-    quantity: float = Field(gt=0)
+    physical_qty: float | None = Field(default=None, ge=0)
+    direction: str | None = None  # IN | OUT, direct lines only
+    quantity: float | None = Field(default=None, gt=0)
     unit_cost: float = 0.0
     remarks: str | None = None
 
@@ -431,6 +452,16 @@ class AdjustmentRejectIn(BaseModel):
     remarks: str | None = None
 
 
+class CountSheetRow(BaseModel):
+    """What the system holds of one item at one warehouse — the audit's left column."""
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    system_qty: float
+    reserved_qty: float
+
+
 class AdjustmentItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -443,6 +474,8 @@ class AdjustmentItemOut(BaseModel):
     project_id: int
     direction: str
     quantity: float
+    system_qty: float | None = None
+    physical_qty: float | None = None
     unit_cost: float | None = 0.0
     remarks: str | None = None
 
@@ -455,15 +488,19 @@ class AdjustmentListRow(BaseModel):
     warehouse_name: str | None = None
     reason: str
     status: str
+    created_by_id: int | None = None
     created_by_name: str | None = None
     approved_by_name: str | None = None
     approved_at: datetime | None = None
+    current_approver_name: str | None = None
     created_at: datetime
 
 
 class AdjustmentOut(AdjustmentListRow):
     remarks: str | None = None
     items: list[AdjustmentItemOut] = Field(default_factory=list)
+    # Set per caller by the detail read: may THIS login approve or reject it now.
+    can_act: bool = False
 
 
 # ---------------- Stock Replenishment Schema ----------------
@@ -692,9 +729,22 @@ class STOListRow(BaseModel):
     to_warehouse_id: int
     to_warehouse_name: str | None = None
     status: str
+    doc_kind: str | None = None
     requested_by_name: str | None = None
     approved_by_name: str | None = None
+    # The STR this order serves (NULL when raised directly) and the material issue
+    # executing it. `stage` is READ off that issue — see service._STO_STAGE_BY_ISSUE.
+    str_id: int | None = None
+    str_no: str | None = None
+    issue_id: int | None = None
+    issue_no: str | None = None
+    issue_status: str | None = None
+    stage: str | None = None
     created_at: datetime
+
+
+class STOReject(BaseModel):
+    comments: str = Field(min_length=1, max_length=1000)
 
 
 class STOOut(STOListRow):

@@ -11,6 +11,7 @@ import {
   Textarea as HTextarea,
   Select as HSelect,
   SelectItem as HSelectItem,
+  Tooltip,
 } from "@heroui/react";
 
 /* ---------------------------------------------------------------------------
@@ -289,11 +290,20 @@ const SEARCHABLE_FROM = 10;
  *  consignment screen, which re-renders on every package edit and every button
  *  press, that was ~2000 nodes of pure waste per keystroke. Hoisted, the collection
  *  is built once per list and the dropdown costs nothing until its options change. */
+// A long option is truncated in the list, so the full label rides on a tooltip.
 const renderSelectItem = (option: SelectOption) => (
-  <HSelectItem key={String(option.value)}>{option.label}</HSelectItem>
+  <HSelectItem key={String(option.value)} textValue={option.label} title={option.label}>
+    <Tooltip content={option.label} placement="top" delay={0} closeDelay={0} classNames={{ base: "z-[99999]" }} className="max-w-xs text-sm">
+      <span className="pointer-events-auto block w-full truncate">{option.label}</span>
+    </Tooltip>
+  </HSelectItem>
 );
 const renderAutocompleteItem = (option: SelectOption) => (
-  <AutocompleteItem key={String(option.value)}>{option.label}</AutocompleteItem>
+  <AutocompleteItem key={String(option.value)} textValue={option.label} title={option.label}>
+    <Tooltip content={option.label} placement="top" delay={0} closeDelay={0} classNames={{ base: "z-[99999]" }} className="max-w-xs text-sm">
+      <span className="pointer-events-auto block w-full truncate">{option.label}</span>
+    </Tooltip>
+  </AutocompleteItem>
 );
 
 interface SelectProps {

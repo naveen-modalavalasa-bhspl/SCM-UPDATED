@@ -813,9 +813,41 @@ async def get_user_menu(db: AsyncSession, permissions: set[str],
         required = gate(page)
         if not required or required in permissions:
             visible_ids.add(page.id)
+    # A group is visible when any of its children is (2026-09-19).
+    #
+    # The module row is a page like any other and carries its own
+    # `page.grp_<module>.view`, so granting the SCREENS of a module without also
+    # ticking the row that holds them left every one of them an orphan and the module
+    # simply did not appear — six `page.returns_*.view` grants on a store keeper's job
+    # profile showing nothing at all, with no error and nothing on the screen to say
+    # which tick was missing. Ticking "select all" worked only because it happens to
+    # include the group row too, which is what made it look like a save bug.
+    #
+    # Climbing to the ancestors of what IS visible states the rule the admin was
+    # already expressing: a module they can see a screen in is a module they can see.
+    # It does not promote a child — the rail opens a module on its first VISIBLE child
+    # — and the empty-folder rule below still drops a group whose children are all
+    # hidden, so a group granted on its own continues to show nothing.
+    #
+    # Only ancestors that are themselves live rows (`is_active`) are added, or a page
+    # under a retired group would hold a phantom id and survive the orphan sweep.
+    row_ids = {page.id for page in rows}
+    while True:
+        parent_ids = {
+            page.parent_id for page in rows
+            if page.id in visible_ids
+            and page.parent_id is not None
+            and page.parent_id in row_ids
+            and page.parent_id not in visible_ids
+        }
+        if not parent_ids:
+            break
+        visible_ids |= parent_ids
+
     # A child is meaningful only inside its visible parent. Repeatedly remove pages
     # whose parent is absent so a hidden group can never leak one of its children into
-    # the top-level rail, including for deeper-than-one-level trees.
+    # the top-level rail, including for deeper-than-one-level trees. After the climb
+    # above this can only still fire for a child whose parent row is retired.
     while True:
         orphan_ids = {
             page.id for page in rows

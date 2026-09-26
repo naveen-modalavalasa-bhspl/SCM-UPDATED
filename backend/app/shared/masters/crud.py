@@ -70,6 +70,10 @@ class Lookup:
     # column is free text and the review screen resolves it: Excel chokes on a
     # validation list of nine hundred warehouses, and so does the person reading it.
     max_options: int = 500
+    # Turns a cell into the form the target stores, when the two can differ — an HSN
+    # code typed into Excel loses its leading zero. Tried only after the cell as
+    # typed has failed to match, and only ever to FIND a row, never to create one.
+    normalize: Callable[[str], str] | None = None
 
 
 @dataclass
@@ -326,6 +330,11 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         before = defn.serialize(row)
         await _apply_fields(db, defn, row, data, user)
         await _write(db, defn)
+        # Flush expires SQL expressions such as Bom.line_count. Serializing one here
+        # would otherwise start an implicit SELECT from async code and fail with
+        # MissingGreenlet/StatementError before the audit or commit can complete.
+        # Refresh while IO can be awaited, just as the create path does above.
+        await db.refresh(row)
         await _prepare_rows(db, defn, [row])
         await _audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                      action=AuditAction.UPDATE, actor=user,

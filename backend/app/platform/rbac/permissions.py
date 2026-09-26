@@ -66,6 +66,10 @@ STOCK_VIEW = "stock.view"
 # network — they choose which warehouse fills an indent — so they see every one.
 STOCK_VIEW_ALL = "stock.view.all"
 STOCK_ADJUST = "stock.adjust"
+# Signing a stock audit. Carved out of STOCK_ADJUST (2026-09-24), which guarded both
+# raising and approving, so the second pair of eyes was only ever "somebody else with
+# the same tick". Inherits its grants below, so nobody who approves today loses it.
+STOCK_ADJUST_APPROVE = "stock.adjust.approve"
 STOCK_RESERVE = "stock.reserve"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
 STOCK_VALUATION_VIEW = "stock.valuation.view"
@@ -79,6 +83,25 @@ STOCK_POINTS_MANAGE = "stock.points.manage"
 # Under `stock`, not a resource of its own: a one-permission resource would open a
 # lone group in Job Profiles beside the real ones, which reads as a mistake.
 STOCK_TRANSFER_APPROVE = "stock.transfer.approve"
+# Raising a Stock Transfer Request (STR) — asking another point to send stock here.
+# Its own code so a storekeeper can be let raise transfers without raising indents.
+STOCK_TRANSFER_REQUEST = "stock.transfer.request"
+# Seeing Inventory > Stock Transfer's lists — requests, orders and their history.
+# Its own code so the screen can be granted without all of Indents or all of stock.
+STOCK_TRANSFER_VIEW = "stock.transfer.view"
+# Stock Transfer's own grants over the legs it borrows from other modules — the STR's
+# approval, serving it, the material issue, its outward QC and the receipt. Each is
+# SCOPED: it passes only on an STR / STO document (`core.dependencies.
+# require_permission_or`), never on an ordinary indent or warehouse issue, and each
+# inherits from the code the leg used before, so nobody loses what they do today.
+STOCK_TRANSFER_STR_APPROVE = "stock.transfer.str_approve"
+STOCK_TRANSFER_SERVE = "stock.transfer.serve"
+STOCK_TRANSFER_SERVE_APPROVE = "stock.transfer.serve_approve"
+STOCK_TRANSFER_ISSUE = "stock.transfer.issue"
+STOCK_TRANSFER_ISSUE_POST = "stock.transfer.issue_post"
+STOCK_TRANSFER_QC = "stock.transfer.qc"
+STOCK_TRANSFER_QC_APPROVE = "stock.transfer.qc_approve"
+STOCK_TRANSFER_RECEIVE = "stock.transfer.receive"
 ALLOCATION_VIEW = "allocation.view"
 ALLOCATION_CREATE = "allocation.create"
 ALLOCATION_APPROVE = "allocation.approve"
@@ -159,6 +182,8 @@ MOVEMENT_VIEW = "movement.view"
 MOVEMENT_CREATE = "movement.create"
 MOVEMENT_UPDATE = "movement.update"
 MOVEMENT_APPROVE = "movement.approve"
+MOVEMENT_INSPECT = "movement.inspect"
+MOVEMENT_COMPLETE = "movement.complete"
 
 # --- Masters ---
 MASTER_ITEM_MANAGE = "master.item.manage"
@@ -279,6 +304,16 @@ RETURN_ENDORSE = "return.endorse"
 # rather than with the document ones.
 RETURN_CONFIG_MANAGE = "return.config.manage"
 
+# Every return, not only the ones raised from a shelf this login owns (2026-09-19).
+#
+# The register (`returns.list_returns`) narrows to the raiser's own stocking-point
+# subtree, which is right for a storekeeper and wrong for every desk ABOVE one: the
+# SCM Head holds one nominal point out of nine hundred, so All Returns showed him
+# nothing while his decision desk was full — he could sign a document he could not
+# find. The desks already bypass that narrowing (`_queue_page`), so this widens the
+# REGISTER to the set those screens were always serving, and nothing beyond it.
+RETURN_VIEW_ALL = "return.view_all"
+
 # --- Integrations (the API console) ---
 # Not admin.settings.manage: that code also unscopes stock lists and covers the
 # company address. Minting a key that lets an outside system read the database is its
@@ -325,17 +360,39 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_VIEW_ALL, "inventory", "stock", "view_all",
          "View stock in every warehouse, not just your own office"),
     Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
+    Perm(STOCK_ADJUST_APPROVE, "inventory", "stock", "adjust_approve",
+         "Approve or reject a stock audit / adjustment"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
          "View stock valuation and cost"),
     Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
-         "Transfer stock between warehouses"),
+         "Raise a stock transfer order (STO) directly, without a request"),
+    Perm(STOCK_TRANSFER_VIEW, "inventory", "stock", "transfer_view",
+         "See stock transfer requests, orders and their history"),
+    Perm(STOCK_TRANSFER_STR_APPROVE, "inventory", "stock", "transfer_str_approve",
+         "Approve, reject or return a stock transfer request (STR)"),
+    Perm(STOCK_TRANSFER_SERVE, "inventory", "stock", "transfer_serve",
+         "Serve a stock transfer request — decide which point gives what"),
+    Perm(STOCK_TRANSFER_SERVE_APPROVE, "inventory", "stock", "transfer_serve_approve",
+         "Approve or reject how a stock transfer request is served"),
+    Perm(STOCK_TRANSFER_ISSUE, "inventory", "stock", "transfer_issue",
+         "Work a stock transfer's material issue — picks, batches, bays, submit"),
+    Perm(STOCK_TRANSFER_ISSUE_POST, "inventory", "stock", "transfer_issue_post",
+         "Approve and post a stock transfer's material issue (stock leaves the point)"),
+    Perm(STOCK_TRANSFER_QC, "inventory", "stock", "transfer_qc",
+         "Run the outward QC of a stock transfer"),
+    Perm(STOCK_TRANSFER_QC_APPROVE, "inventory", "stock", "transfer_qc_approve",
+         "Complete, approve or reject the outward QC of a stock transfer"),
+    Perm(STOCK_TRANSFER_RECEIVE, "inventory", "stock", "transfer_receive",
+         "Acknowledge a stock transfer on arrival (credits your point)"),
     Perm(STOCK_VIEW_SUBTREE, "inventory", "stock", "view_subtree",
          "View stock at every point reporting under you, not just your own"),
     Perm(STOCK_POINTS_MANAGE, "inventory", "stock", "points_manage",
          "Tag positions to stocking points (MDP / LIP)"),
     Perm(STOCK_TRANSFER_APPROVE, "inventory", "stock", "transfer_approve",
-         "Approve a stock transfer that crosses a project boundary"),
+         "Approve a stock transfer order (STO)"),
+    Perm(STOCK_TRANSFER_REQUEST, "inventory", "stock", "transfer_request",
+         "Raise a stock transfer request (STR)"),
     Perm(ALLOCATION_VIEW, "inventory", "allocation", "view", "View stock allocations"),
     Perm(ALLOCATION_CREATE, "inventory", "allocation", "create",
          "Decide how much stock an indent gets"),
@@ -405,6 +462,10 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MOVEMENT_CREATE, "warehouse", "movement", "create", "Create stock movements"),
     Perm(MOVEMENT_UPDATE, "warehouse", "movement", "update", "Update stock movements"),
     Perm(MOVEMENT_APPROVE, "warehouse", "movement", "approve", "Approve stock movements"),
+    Perm(MOVEMENT_INSPECT, "warehouse", "movement", "inspect",
+         "Complete stock movement inspections"),
+    Perm(MOVEMENT_COMPLETE, "warehouse", "movement", "complete",
+         "Complete approved stock movements"),
     Perm(MASTER_ITEM_MANAGE, "masters", "item", "manage", "Manage items"),
     Perm(MASTER_VENDOR_MANAGE, "masters", "vendor", "manage", "Manage vendors"),
     Perm(MASTER_CATEGORY_MANAGE, "masters", "category", "manage", "Manage item categories"),
@@ -493,6 +554,8 @@ ALL_PERMISSIONS: list[Perm] = [
          "Endorse or object to a return decision"),
     Perm(RETURN_CONFIG_MANAGE, "returns", "return", "config_manage",
          "Set which posts receive returns"),
+    Perm(RETURN_VIEW_ALL, "returns", "return", "view_all",
+         "See every return, not only those from your own stocking points"),
     Perm(INTEGRATION_VIEW, "integrations", "integration", "view",
          "See connected applications and their endpoints"),
     Perm(INTEGRATION_MANAGE, "integrations", "integration", "manage",
@@ -533,6 +596,20 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
+    # Everyone who could raise a transfer yesterday can request one today.
+    STOCK_TRANSFER_REQUEST: STOCK_TRANSFER,
+    # The lists were read under `stock.view`; whoever read them keeps them.
+    STOCK_TRANSFER_VIEW: STOCK_VIEW,
+    STOCK_TRANSFER_STR_APPROVE: INDENT_APPROVE,
+    STOCK_TRANSFER_SERVE: ALLOCATION_CREATE,
+    STOCK_TRANSFER_SERVE_APPROVE: ALLOCATION_APPROVE,
+    STOCK_TRANSFER_ISSUE: ISSUE_CREATE,
+    STOCK_TRANSFER_ISSUE_POST: ISSUE_ISSUE,
+    STOCK_TRANSFER_QC: QC_OUTWARD_CREATE,
+    STOCK_TRANSFER_QC_APPROVE: QC_OUTWARD_APPROVE,
+    STOCK_TRANSFER_RECEIVE: INDENT_ACKNOWLEDGE,
+    MOVEMENT_INSPECT: MOVEMENT_CREATE,
+    MOVEMENT_COMPLETE: MOVEMENT_CREATE,
     # Splitting is a way of DOING the issue, not a new authority over it: whoever
     # could post the whole issue yesterday can hand its pieces to the floors today.
     # Fail-closed would leave the button on nobody's profile and the feature unused.
@@ -540,6 +617,7 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Settings > Monthly Indent ran on admin.settings.manage; whoever configured the
     # month yesterday still can today, and from now on it can be granted on its own.
     MONTHLY_INDENT_MANAGE: ADMIN_SETTINGS_MANAGE,
+    STOCK_ADJUST_APPROVE: STOCK_ADJUST,
 }
 
 
@@ -561,7 +639,7 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
 PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # (page code, module, page name)
     ("grp_indents", "indents", "Indents"),
-    ("ind_dashboard", "indents", "Indents · Overview"),
+    ("ind_dashboard", "indents", "Indents · Dashboard"),
     ("ind_list", "indents", "Indents · All Requests"),
     # Code kept as `ind_deliveries` on purpose: it is the identity every existing
     # rbac_page_permissions grant hangs off. Only the screen's name and path moved
@@ -577,7 +655,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Rode on `indent.approve` because it was never catalogued: unticking the screen
     # revoked the approve BUTTON on every indent screen, and ticking it handed the
     # button back. Same split as the rest.
-    ("approval_overview", "approvals", "Approvals · Overview"),
+    ("approval_overview", "approvals", "Approvals · Dashboard"),
     ("approval_consolidation", "approvals", "Approvals · Consolidation"),
     ("approval_waiting", "approvals", "Approvals · Waiting for Me"),
     ("approval_decisions", "approvals", "Approvals · My Decisions"),
@@ -602,7 +680,8 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # what each rung is holding, and the demand pool underneath it. Every tile on it is
     # gated separately on the document family it counts, so the screen's own code is
     # only "may open the board".
-    ("pro_overview", "procurement", "Procurement · Overview"),
+    ("pro_overview", "procurement", "Procurement · Dashboard"),
+    ("pro_demand_pool", "procurement", "Procurement · Demand Pool"),
     # Settings > Mail. Fail-closed to Admin on purpose: it reads a shared mailbox and
     # can send under the company's address, and neither is something to hand out by
     # inheritance. No INHERITS_GRANTS_FROM entry for exactly that reason.
@@ -617,6 +696,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("rep_live_tracking", "reports", "Reports · Live Tracking"),
     ("grp_warehouse", "warehouse", "Warehouse"),
     ("wh_dashboard", "warehouse", "Warehouse · Dashboard"),
+    ("wh_demand_pool", "warehouse", "Warehouse · Demand Pool"),
     ("wh_inward", "warehouse", "Warehouse » Material Inward"),
     ("wh_grn", "warehouse", "Warehouse » Goods Receipt"),
     ("wh_qc", "warehouse", "Warehouse » Quality Inspection"),
@@ -646,11 +726,11 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("wh_reports", "warehouse", "Warehouse · Reports"),
     ("wh_masters", "warehouse", "Warehouse · Masters"),
     ("grp_inventory", "inventory", "Inventory"),
-    ("inv_overview", "inventory", "Inventory · Overview"),
+    ("inv_overview", "inventory", "Inventory · Dashboard"),
     ("inv_balance", "inventory", "Inventory · Stock Balance"),
     ("inv_ledger", "inventory", "Inventory · Stock Ledger"),
     ("inv_replenishment", "inventory", "Inventory · Replenishment"),
-    ("inv_transfers", "inventory", "Inventory · Transfers"),
+    ("inv_transfers", "inventory", "Inventory · Stock Transfer"),
     # Retired 2026-08-21, replaced by the Fulfilment Desk below. Catalogued still,
     # because `seed_permissions` never prunes: the rows and every grant on them are in
     # the database, and the new screen's own code inherits from the first of them.
@@ -662,6 +742,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # can inherit below instead of landing Admin-only.
     ("pro_ledger", "procurement", "Procurement · Ledger"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
+    ("inv_adjustments", "inventory", "Inventory · Stock Audit"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
     # Rode on `stock.points.manage`, which is the action that RE-TAGS a stocking point.
     ("inv_stocking_points", "inventory", "Inventory · Stocking Points"),
@@ -672,7 +753,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # Every code here already existed as an auto-created row except the last two;
     # listing them changes no module, resource or action, only who may refresh them.
     ("grp_logistics", "logistics", "Logistics"),
-    ("logistics_overview", "logistics", "Logistics · Overview"),
+    ("logistics_overview", "logistics", "Logistics · Dashboard"),
     ("logistics_consignments", "logistics", "Logistics · Consignments"),
     ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
     ("logistics_transport", "logistics", "Logistics · Shipments"),
@@ -685,6 +766,16 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_acknowledgements", "logistics", "Logistics · Acknowledgements"),
     ("logistics_exceptions", "logistics", "Logistics · Exceptions"),
     ("masters", "masters", "Masters"),
+    # The same masters, on the module that owns them (2026-09-18). `/masters` keeps
+    # its own code above and stays whole — these are a second door, catalogued here
+    # rather than left for `sync_pages` to invent, so each can be labelled by
+    # `sync_permission_labels` and can inherit its grants below instead of landing
+    # Admin-only. One code per module is the whole point: `page.masters.view` is a
+    # single tick that hands out every master in the company.
+    ("inv_masters", "inventory", "Inventory · Masters"),
+    ("pro_masters", "procurement", "Procurement · Masters"),
+    ("ind_masters", "indents", "Indents · Masters"),
+    ("admin_org_masters", "admin", "Settings · Organisation Masters"),
     ("grp_reports", "reports", "Reports"),
     ("rep_indents", "reports", "Reports · Indent Ledger"),
     ("rep_approvals", "reports", "Reports · Approval Ledger"),
@@ -791,12 +882,17 @@ INHERITS_GRANTS_FROM.update({
     # can open it. Fail-closed would retire a landing page nobody granted yet.
     page_view_code("approval_overview"): page_view_code("approval_waiting"),
     page_view_code("inv_stocking_points"): STOCK_POINTS_MANAGE,
+    # Stock Audit comes back on the rail (2026-09-24). The screen was always gated on
+    # `stock.adjust`, so it lands with exactly the people who could open it by URL.
+    page_view_code("inv_adjustments"): STOCK_ADJUST,
     # The supplier register (2026-08-24). Not fail-closed: every route behind it is
     # already gated on `vendor.portal.manage`, the code that has governed minting a
     # vendor login since the portal landed, so whoever holds it today opens the screen
     # today. Granting the page to somebody WITHOUT that code would show them a list
     # whose every button 403s, which is the failure this whole screen exists to end.
     page_view_code("pro_suppliers"): VENDOR_PORTAL_MANAGE,
+    page_view_code("pro_demand_pool"): REQUISITION_VIEW,
+    page_view_code("wh_demand_pool"): ISSUE_VIEW,   # the endpoint is gated on issue.view
     # Same screen, same audience: App Integrations reads the configuration and logs
     # behind the console anybody holding `integration.view` already opens, and every
     # route on it is gated by that code. Fail-closed would put a Settings row on the
@@ -836,6 +932,25 @@ INHERITS_GRANTS_FROM.update({
     # document a reader could not open one at a time from Reports today — it only
     # saves them doing it by hand — and its endpoints are gated on `report.view`
     # independently.
+    # The per-module Masters screens. They inherit from `page.masters.view` — the
+    # all-in-one screen — because they show a SUBSET of what that screen already
+    # shows to the same people: whoever can open Masters today opens these on the day
+    # they deploy, and nobody else. Fail-closed is right for a new capability and
+    # wrong here, where the capability is not new, only re-filed.
+    #
+    # The WRITE side is untouched either way: every tab is still gated by its own
+    # `master.*.manage` code, in the component and on the endpoint.
+    page_view_code("inv_masters"): page_view_code("masters"),
+    page_view_code("pro_masters"): page_view_code("masters"),
+    page_view_code("ind_masters"): page_view_code("masters"),
+    page_view_code("admin_org_masters"): page_view_code("masters"),
+    # The desks already show these people every pending return in the company,
+    # whatever point it came from, so handing them the register changes what they can
+    # SEE nowhere — only where they can see it. Inherited from `return.decide` because
+    # the decision desk is the role the gap was reported on and the one that cannot do
+    # its job without it; a storekeeper holding only `return.view` keeps the subtree
+    # scoping they have today.
+    RETURN_VIEW_ALL: RETURN_DECIDE,
     page_view_code("rep_traceability"): REPORT_VIEW,
     # Same reasoning as the Document Trail beside them. The Attachments register shows
     # files hanging off documents the other ledgers already show this login (and its

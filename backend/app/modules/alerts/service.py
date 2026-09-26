@@ -207,6 +207,12 @@ _DEFINITIONS: list[AlertDef] = [
         confirm="Post Adjustment",
     ),
     _confirm(
+        "stock.audit.submit", AlertVariant.WARNING, "Submit this stock audit?",
+        "{count} counted at {warehouse}; {diff} differ from system stock. Differences "
+        "are posted to the ledger once the audit is approved.",
+        confirm="Submit Audit",
+    ),
+    _confirm(
         "adjustment.approve", AlertVariant.WARNING, "Approve this adjustment?",
         "Approving writes the counted quantity for {item} into the ledger. The "
         "ledger is append-only, so a mistake has to be corrected with a second "
@@ -495,6 +501,10 @@ _DEFINITIONS: list[AlertDef] = [
         "material_request.revised", AlertVariant.SUCCESS, "Quantities saved",
         "{number} now asks for the amounts you entered. Approve it to send them to "
         "procurement.",
+    ),
+    _alert(
+        "stock.audit.saved", AlertVariant.SUCCESS, "Stock audit saved",
+        "{number} is {status}.",
     ),
     _alert(
         "adjustment.approved", AlertVariant.SUCCESS, "Adjustment approved",

@@ -20,6 +20,7 @@ import {
 import {
   createReturn,
   getReturn,
+  warehouseOptions,
   purchaseReturnReasons,
   purchaseReturnSourceDetail,
   purchaseReturnSourceOptions,
@@ -176,6 +177,15 @@ export default function PurchaseReturnForm() {
   const [listKind, setListKind] = useState<"" | "GRN" | "PO" | "INDENT">("");
   const [manualVendor, setManualVendor] = useState({ ...EMPTY_MANUAL_VENDOR });
   const [manualLines, setManualLines] = useState<ManualLine[]>([blankManualLine()]);
+  // WHICH OF OUR POINTS THE GOODS ARE STANDING ON, asked only on a manual return.
+  // A sourced return reads it off the purchase it is returning against; a manual one has
+  // no purchase, so this was posting null and the document reached the transport band
+  // unable to say where the vehicle collects from — `out_dispatches.warehouse_id` is NOT
+  // NULL, so the consignment could not be raised at all. The server still resolves it
+  // (`_ensure_return_warehouse`) for drafts raised before this and for anyone who leaves
+  // it alone; this is for the case the resolver cannot answer — goods standing at a
+  // point other than the raiser's own, or a person holding posts at two stores.
+  const [manualWarehouseId, setManualWarehouseId] = useState<string>("");
 
   // --- form state ---
   const [returnDate, setReturnDate] = useState<string>(today());
@@ -213,6 +223,14 @@ export default function PurchaseReturnForm() {
     refetchOnWindowFocus: false,
   });
 
+  // Scoped to the points this login actually holds — the same list every other
+  // warehouse picker in the module uses.
+  const { data: warehousePoints } = useQuery({
+    queryKey: ["warehouse", "options", "warehouses"],
+    queryFn: () => warehouseOptions(),
+    enabled: manualEntry,
+  });
+
   const { data: existing } = useQuery({
     queryKey: ["warehouse", "purchase-return", existingId],
     queryFn: () => getReturn(existingId as number),
@@ -240,6 +258,7 @@ export default function PurchaseReturnForm() {
     // into the boxes it was typed into.
     if (existing.is_manual) {
       setSourceMode("manual");
+      setManualWarehouseId(existing.warehouse_id ? String(existing.warehouse_id) : "");
       setManualVendor({
         vendor_name: existing.vendor_name ?? "",
         vendor_code: existing.vendor_code ?? "",
@@ -528,7 +547,9 @@ export default function PurchaseReturnForm() {
           ? null
           : purchase?.po_id ?? (pickedSource?.type === "PO" ? pickedSource.id : null),
         vendor_id: manualEntry ? null : vendor?.vendor_id ?? null,
-        warehouse_id: manualEntry ? null : detail?.warehouse_id ?? null,
+        warehouse_id: manualEntry
+          ? (manualWarehouseId ? Number(manualWarehouseId) : null)
+          : detail?.warehouse_id ?? null,
       });
     },
     onSuccess: (sent) => {
@@ -818,6 +839,21 @@ export default function PurchaseReturnForm() {
               looked up, and this return is not tied to a vendor master record.
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <Field label="Leaving from which warehouse"
+                     hint="The point the goods are standing on. Left blank, the return
+                           takes the stocking point you work.">
+                <Select
+                  value={manualWarehouseId}
+                  onChange={setManualWarehouseId}
+                  options={(warehousePoints ?? []).map((w) => ({
+                    value: String(w.id),
+                    label: w.code ? `${w.code} — ${w.name}` : w.name,
+                  }))}
+                  placeholder="Pick the warehouse the goods are standing in"
+                  ariaLabel="Leaving from which warehouse"
+                  isDisabled={locked}
+                />
+              </Field>
               <Field label="Vendor Name" required>
                 <Input
                   value={manualVendor.vendor_name}

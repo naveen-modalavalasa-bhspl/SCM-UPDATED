@@ -135,6 +135,20 @@ class IssueStatus(str, Enum):
 # what the one-issue-per-indent rule counts.
 DEAD_ISSUE_STATUSES = (IssueStatus.CANCELLED.value, IssueStatus.REJECTED.value)
 
+# Issues that have left the warehouse — stock posted AND acknowledged as dispatched.
+# A return (PARTIALLY_RETURNED / RETURNED) only happens to something that left, so
+# both return rungs count. Read by the warehouse demand pool to know when a quantity
+# has gone out and is waiting on site-acknowledgement rather than still sitting in a
+# material issue.  Promoted here from the private `_GONE_OUT_STATUSES` in service.py
+# so the pool file can import a public name (rule: never import a _private from a
+# 23k-line service into a sibling module).
+GONE_OUT_ISSUE_STATUSES = (
+    IssueStatus.DISPATCHED.value,
+    IssueStatus.ACKNOWLEDGED.value,
+    IssueStatus.PARTIALLY_RETURNED.value,
+    IssueStatus.RETURNED.value,
+)
+
 
 class IssueType(str, Enum):
     """`out_issues.issue_type` - what an issue IS, not what it was for.
@@ -944,8 +958,10 @@ from app.platform.rbac.permissions import (  # noqa: F401  (re-exported)
     ISSUE_VIEW,
     MASTER_LOCATION_MANAGE,
     MOVEMENT_APPROVE,
+    MOVEMENT_COMPLETE,
     MOVEMENT_CREATE,
     MOVEMENT_DELETE,
+    MOVEMENT_INSPECT,
     MOVEMENT_UPDATE,
     MOVEMENT_VIEW,
     PICKING_DELETE,

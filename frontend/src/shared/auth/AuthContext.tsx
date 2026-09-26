@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/shared/api/client";
 import type { Me } from "@/shared/types";
+import { SCOPED_GRANTS } from "./scopedGrants";
 
 interface AuthState {
   me: Me | null;
@@ -63,7 +64,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setMe(null);
   }
 
-  const can = (code: string) => !!me?.permissions.includes(code);
+  // A button's own code, or the Stock Transfer grant scoped over it (see
+  // scopedGrants.ts — the server enforces the scope).
+  const can = (code: string) => !!me && (
+    me.permissions.includes(code)
+    || (SCOPED_GRANTS[code] !== undefined && me.permissions.includes(SCOPED_GRANTS[code])));
 
   return (
     <AuthContext.Provider value={{ me, loading, login, switchPosition, logout, can }}>

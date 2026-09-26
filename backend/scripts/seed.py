@@ -98,10 +98,10 @@ PAGE_TREE = [
     ("home", "/", "Home", "home", None, 0, None),
 
     # One code per page (P.page_view_code), not one shared indent.view: ticking
-    # Overview must not hand out the Activity Ledger.
+    # Dashboard must not hand out the Activity Ledger.
     ("grp_indents", "/indents/dashboard", "Indents", "file-text",
      P.page_view_code("grp_indents"), 10, None),
-    ("ind_dashboard", "/indents/dashboard", "Overview", "layout-dashboard",
+    ("ind_dashboard", "/indents/dashboard", "Dashboard", "layout-dashboard",
      P.page_view_code("ind_dashboard"), 11, "grp_indents"),
     ("ind_list", "/indents", "All Requests", "list",
      P.page_view_code("ind_list"), 12, "grp_indents"),
@@ -121,9 +121,14 @@ PAGE_TREE = [
      P.page_view_code("ind_reports"), 15, "grp_indents"),
     ("ind_notifications", "/indents/notifications", "Notifications", "bell",
      P.page_view_code("ind_notifications"), 16, "grp_indents"),
+    # What a BOM puts on the form, and which items a role or region may ask for at
+    # all. LAST in the group — the rail opens a module on its first child and a master
+    # is never what somebody came to Indents to do.
+    ("ind_masters", "/indents/masters", "Masters", "database",
+     P.page_view_code("ind_masters"), 17, "grp_indents"),
 
     ("approvals", "/approvals", "Approvals", "check-circle", P.INDENT_VIEW, 20, None),
-    ("approval_overview", "/approvals/overview", "Overview", "layout-dashboard",
+    ("approval_overview", "/approvals/overview", "Dashboard", "layout-dashboard",
      P.page_view_code("approval_overview"), 20, "approvals"),
     ("approval_waiting", "/approvals", "Waiting for Me", "inbox", P.INDENT_VIEW, 21, "approvals"),
     # Built, routed and working since the monthly-cycle work, but no row ever pointed
@@ -140,7 +145,12 @@ PAGE_TREE = [
     # redirects to the inbox. Existing wf_delegations rows are left as history.
 
     ("grp_purchasing", "/pos", "Purchasing", "shopping-cart", P.PO_VIEW, 30, None),
+    ("pro_demand_pool", "/procurement/demand-pool", "Demand Pool", "pie-chart",
+     P.page_view_code("pro_demand_pool"), 30, "grp_purchasing"),
     ("po_list", "/pos", "Purchase Orders", "receipt", P.PO_VIEW, 31, "grp_purchasing"),
+    # Vendors, vendor rates and HSN codes — who we buy from and at what tax.
+    ("pro_masters", "/procurement/masters", "Masters", "database",
+     P.page_view_code("pro_masters"), 34, "grp_purchasing"),
 
     # Every working screen is its own menu entry. A single "Transactions" entry that
     # hid six screens behind in-page tabs meant nobody could reach a screen from the
@@ -150,12 +160,15 @@ PAGE_TREE = [
     # Ordered the way the floor works: goods in (inward -> receipt -> QC -> put-away),
     # then goods out (picklist -> issue -> dispatch), then returns.
     ("grp_warehouse", "/warehouse", "Warehouse", "warehouse", P.STOCK_VIEW, 40, None),
-    # "Overview", not "Dashboard": the page heading has always said Overview, and
-    # every other module's first child is called Overview too (ind_dashboard,
-    # approval_overview, inv_overview). The row was the only thing still saying
-    # Dashboard, so the rail and the screen disagreed on the name of the same page.
-    ("wh_dashboard", "/warehouse", "Overview", "layout-dashboard",
+    # "Dashboard" everywhere (2026-09-21, business request): every module's first
+    # child is now called Dashboard — ind_dashboard, approval_overview, inv_overview,
+    # pro_overview, logistics_overview, returns_overview — and each screen's own
+    # heading says the same word. The CODES are untouched, so every grant already
+    # issued still resolves; only the name a person reads moved.
+    ("wh_dashboard", "/warehouse", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 41, "grp_warehouse"),
+    ("wh_demand_pool", "/warehouse/demand-pool", "Demand Pool", "pie-chart",
+     P.page_view_code("wh_demand_pool"), 41, "grp_warehouse"),
     ("wh_inward", "/warehouse/material-inward", "Material Inward", "truck",
      P.RECEIPT_VIEW, 42, "grp_warehouse"),
     ("wh_grn", "/warehouse/grn", "Goods Receipt", "file-text",
@@ -206,7 +219,7 @@ PAGE_TREE = [
 
     ("grp_inventory", "/inventory", "Inventory", "package",
      P.STOCK_VIEW, 50, None),
-    ("inv_overview", "/inventory", "Overview", "layout-dashboard",
+    ("inv_overview", "/inventory", "Dashboard", "layout-dashboard",
      P.STOCK_VIEW, 51, "grp_inventory"),
     ("inv_balance", "/inventory/stock-balance", "Stock Balance", "boxes",
      P.STOCK_VIEW, 52, "grp_inventory"),
@@ -217,7 +230,7 @@ PAGE_TREE = [
     # Read-only since 2026-08-20 — the screen shows STO/SMO records and can no longer
     # raise or advance one, so it is gated on STOCK_VIEW rather than STOCK_ADJUST: a
     # register nobody can write to should not need the write permission to open.
-    ("inv_transfers", "/inventory/transfers", "Transfer Records", "arrow-left-right",
+    ("inv_transfers", "/inventory/transfers", "Stock Transfer", "arrow-left-right",
      P.STOCK_VIEW, 55, "grp_inventory"),
     # The Fulfilment Queue and Allocation Approvals as one screen (2026-08-21): decide
     # what to give and sign it in the same place. Both old rows are in
@@ -232,7 +245,7 @@ PAGE_TREE = [
      P.page_view_code("inv_fulfilment_desk"), 56, "grp_inventory"),
     ("inv_stocking_points", "/inventory/stocking-points", "Stocking Points", "map-pin",
      P.STOCK_POINTS_MANAGE, 58, "grp_inventory"),
-    # Parked, not deleted: Demand by Item, Adjustments and Valuation & Ageing are
+    # Parked, not deleted: Demand by Item and Valuation & Ageing are
     # off the menu (rbac_pages.is_active = 0) until they are implemented properly.
     # seed_pages sets is_active = True for everything in PAGE_TREE, so leaving the
     # rows here would put the screens back on the rail at the next seed. The routes
@@ -241,12 +254,17 @@ PAGE_TREE = [
     #  P.ALLOCATION_VIEW, 58, "grp_inventory"),
     ("inv_mr", "/inventory/material-requests", "Material Requests", "file-text",
      P.MR_VIEW, 59, "grp_inventory"),
-    # ("inv_adjustments", "/inventory/adjustments", "Adjustments", "sliders",
-    #  P.STOCK_ADJUST, 60, "grp_inventory"),
+    ("inv_adjustments", "/inventory/adjustments", "Stock Audit", "sliders",
+     P.page_view_code("inv_adjustments"), 60, "grp_inventory"),
     # ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
     #  P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",
      P.STOCK_VIEW, 64, "grp_inventory"),
+    # The item catalogue, on the module that owns stock. `/masters` still carries the
+    # whole set; this is the inventory slice of it, with its own page code so the
+    # catalogue can be granted without the vendor or BOM masters coming with it.
+    ("inv_masters", "/inventory/masters", "Masters", "database",
+     P.page_view_code("inv_masters"), 65, "grp_inventory"),
 
     ("masters", "/masters", "Masters", "database", P.MASTER_ITEM_MANAGE, 60, None),
 
@@ -308,6 +326,10 @@ PAGE_TREE = [
     # database picks it up on startup without a reseed.
     ("admin_code_formats", "/admin/code-formats", "Code Formats", "braces",
      P.ADMIN_CODE_FORMATS_MANAGE, 102, "grp_settings"),
+    # Projects, facilities and departments: HCM mirrors, read-only here because HCM
+    # owns them (rule 10) and the write routes are not registered.
+    ("admin_org_masters", "/admin/org-masters", "Organisation Masters", "building-2",
+     P.page_view_code("admin_org_masters"), 106, "grp_settings"),
 ]
 
 

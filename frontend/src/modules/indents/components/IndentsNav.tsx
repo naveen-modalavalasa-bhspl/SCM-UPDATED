@@ -21,10 +21,10 @@ interface Destination {
 }
 
 const destinations: Destination[] = [
-  // LayoutDashboard, not Gauge: every other module's Overview is the `layout-dashboard`
+  // LayoutDashboard, not Gauge: every other module's Dashboard is the `layout-dashboard`
   // row from rbac_pages (Approvals, Inventory, Warehouse, Procurement), and Indents was
   // the one tab strip drawing a different glyph for the same screen.
-  { key: "/indents/dashboard", label: "Overview", icon: LayoutDashboard },
+  { key: "/indents/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "/indents", label: "All requests", icon: List, end: true },
   // Board is parked: the route and BoardPage are still here, just off the tab bar.
   // { key: "/indents/board", label: "Board", icon: Columns3 },

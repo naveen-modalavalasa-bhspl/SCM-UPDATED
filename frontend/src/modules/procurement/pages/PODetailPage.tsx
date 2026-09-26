@@ -626,6 +626,7 @@ export function PODetailPage() {
               showDate={false}
               allowRepricing
               capQuantityAtOriginal={false}
+              hideAddLine
             />
           </div>
           <div className="border-t border-line pt-4">

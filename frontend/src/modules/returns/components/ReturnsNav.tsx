@@ -42,7 +42,7 @@ type Tab = {
 };
 
 const destinations: Tab[] = [
-  { key: "/returns/dashboard", label: "Overview", icon: Gauge },
+  { key: "/returns/dashboard", label: "Dashboard", icon: Gauge },
   { key: "/returns", label: "All returns", icon: List, end: true },
   { key: "/returns/approvals", label: "To approve", icon: ClipboardCheck },
   // The two desks. Shown to everyone for the same reason the rest of the strip is: the

@@ -13,7 +13,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from datetime import date
-from sqlalchemy import exists, func, select, true, or_
+from sqlalchemy import exists, false, func, select, true, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -51,6 +51,7 @@ from app.platform.settings.service import (
     get_company_letterhead, get_setting, write_audit,
 )
 from app.platform.workflow import engine
+from app.platform.workflow.models import Action as WorkflowAction
 from app.platform.workflow.models import Instance as WorkflowInstance
 from app.shared import evaluation
 from app.shared.models.warehouse import Warehouse
@@ -404,6 +405,18 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
     return po
 
 
+def _assert_po_addresses(billing, shipping) -> None:
+    """BUG_SCM_016: an order must say where it is invoiced and where the goods land.
+    Checked on the hand-raised create and again on submit, which is the gate every
+    order passes — one drafted from an indent or a quotation arrives with neither."""
+    missing = [label for label, value in (("Billing address", billing),
+                                          ("Shipping address", shipping))
+               if not (value or "").strip()]
+    if missing:
+        raise ValidationError(f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} "
+                              "required on a purchase order")
+
+
 async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     """Raise a purchase order directly — no indent, no quotation behind it.
 
@@ -420,6 +433,8 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     """
     if not data.lines:
         raise ValidationError("A purchase order must have at least one line")
+    _assert_po_addresses(getattr(data, "billing_address", None),
+                         getattr(data, "shipping_address", None))
 
     vendor = await db.get(Vendor, data.vendor_id)
     if vendor is None:
@@ -883,7 +898,6 @@ async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
         raise NotFoundError(f"PO {po_id} not found")
     
     if not po.vendor_name and po.vendor_id:
-        from app.modules.master.models import Vendor
         vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
         if vendor_name:
             po.vendor_name = vendor_name
@@ -1051,6 +1065,7 @@ async def submit_po(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
     po = await get_po(db, po_id)
     if po.status != POStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit a PO in {po.status} status")
+    _assert_po_addresses(po.billing_address, po.shipping_address)
     instance = await engine.start(db, DocType.PO.value, po.id,
                                   context={"total_amount": float(po.total_amount),
                                            # The ORDER's project, not the buyer's. The
@@ -1931,7 +1946,8 @@ async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
 
 async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
     return await _attach_pending_one(
-        db, DocType.RFQ.value, await get_rfq(db, rfq_id, user), user)
+        db, DocType.RFQ.value,
+        await get_rfq(db, rfq_id, user, include_approver=True), user)
 
 
 async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
@@ -1953,7 +1969,7 @@ async def requisition_approval_trail(db: AsyncSession, req_id: int, user=None) -
 
 
 async def rfq_approval_trail(db: AsyncSession, rfq_id: int, user=None) -> dict:
-    rfq = await get_rfq(db, rfq_id, user)
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
     return await _approval_trail(db, DocType.RFQ.value, rfq.id)
 
 
@@ -2887,10 +2903,40 @@ async def _set_rfq_vendors(db: AsyncSession, rfq: RFQ, vendor_ids,
     rfq.vendor_count = len(wanted)
 
 
-async def get_rfq(db: AsyncSession, rfq_id: int, user=None) -> RFQ:
+async def _rfq_approver_condition(db: AsyncSession, user):
+    """RFQs this login is signing, or has signed — whatever its scope rung says.
+
+    `pro_rfqs` has only an owner column, so below ALL the rung collapses to "mine" and
+    an approver was shown "RFQ 13 not found" for the very document sitting in their
+    queue (BUG_SCM_0002). Being on the chain is its own reason to read a document, as
+    indents already treat it. The queue comes from `engine.pending_for_user`, so
+    delegation and the other-hat rule are decided in the engine, not here.
+
+    Read-and-sign only: callers that edit, submit, close, cancel or award keep the
+    raiser's scope, and every route still holds its own permission check.
+    """
+    pending = await _pending_doc_ids(db, user, DocType.RFQ.value)
+    signed = (
+        select(WorkflowInstance.doc_id)
+        .join(WorkflowAction, WorkflowAction.instance_id == WorkflowInstance.id)
+        .where(WorkflowInstance.doc_type == DocType.RFQ.value,
+               WorkflowAction.actor_id == user.id)
+    )
+    return or_(RFQ.id.in_(pending) if pending else false(), RFQ.id.in_(signed))
+
+
+async def _rfq_scope(db: AsyncSession, user, *, include_approver: bool = False):
+    condition = await scope_condition(db, user, owner_col=RFQ.created_by_id)
+    if include_approver:
+        condition = or_(condition, await _rfq_approver_condition(db, user))
+    return condition
+
+
+async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
+                  include_approver: bool = False) -> RFQ:
     rfq = (await db.execute(select(RFQ).where(
         RFQ.id == rfq_id,
-        await scope_condition(db, user, owner_col=RFQ.created_by_id)
+        await _rfq_scope(db, user, include_approver=include_approver)
         if user is not None else true(),
     ))).scalar_one_or_none()
     if not rfq:
@@ -2985,7 +3031,7 @@ async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = N
                     ready_to_award: bool = False, user=None) -> dict:
     stmt = select(RFQ)
     if user is not None:
-        stmt = stmt.where(await scope_condition(db, user, owner_col=RFQ.created_by_id))
+        stmt = stmt.where(await _rfq_scope(db, user, include_approver=True))
     stmt = _status_in(stmt, RFQ.status, status)
     if pending_for_me and user is not None:
         stmt = _only_ids(stmt, RFQ.id, await _pending_doc_ids(
@@ -3084,7 +3130,8 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
     without exceeding the demand. 0 removes the line; removing the last line is
     refused so the RFQ never publishes empty.
     """
-    rfq = await get_rfq(db, rfq_id, user)
+    # The approver's own edit, so the approver's own reach (BUG_SCM_0002).
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
     if rfq.status not in EDITABLE:
         raise ValidationError(

@@ -2,7 +2,14 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, Download, MapPin, ScanLine, X } from "lucide-react";
+import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, Download, MapPin, ScanLine, Truck, X } from "lucide-react";
+
+/** REQ_032 — the outward pipeline, served per item per point (`service.stock_pipeline`). */
+const PIPELINE = [
+  ["issued_pending_qty", "Issued, not sent", "text-warn"],
+  ["outgoing_qty", "Going out", "text-brand"],
+  ["incoming_qty", "Incoming", "text-ok"],
+] as const;
 import {
   Button, Card, KpiTiles, PageHeader, ResponsiveGrid, ResponsiveList,
   type Column, type KpiTileSpec,
@@ -405,6 +412,18 @@ export function StockBalanceView() {
         <span className={r.reserved_qty > 0 ? "font-semibold text-warn" : "text-muted"}>{r.reserved_qty}</span>
       ),
     },
+    // REQ_032. Item-at-point figures, not per lot — every lot row of one item at one
+    // point carries the same three, so they are never summed down the column.
+    ...PIPELINE.map(([key, header, tone]) => ({
+      key,
+      header,
+      className: "text-right",
+      hideOnNarrow: true,
+      render: (r: StockBalanceItem) => {
+        const v = Number(r[key] ?? 0);
+        return <span className={v > 0 ? `font-semibold ${tone}` : "text-muted"}>{v}</span>;
+      },
+    })),
     {
       // "On Hand" was available + reserved, and reserved stock is precisely what is
       // NOT on hand — it belongs to somebody else's indent. Showing it invited people
@@ -526,6 +545,13 @@ export function StockBalanceView() {
           active: belowReorder,
           onPress: () => { setBelowReorder((on) => !on); setPage(1); },
         } as KpiTileSpec]),
+        // REQ_032 read-outs: what is between shelves, over the points on screen.
+        { key: "issued_pending", label: "Issued, not sent", icon: Layers, tone: "warn",
+          value: stat(summary?.issued_pending_qty) },
+        { key: "outgoing", label: "Going out (in transit)", icon: Truck, tone: "brand",
+          value: stat(summary?.outgoing_qty) },
+        { key: "incoming", label: "Incoming", icon: Truck, tone: "ok",
+          value: stat(summary?.incoming_qty) },
         {
           key: "expiring", label: "Expiring ≤30d", value: stat(summary?.expiring_30_days),
           icon: CalendarClock, tone: summary?.expiring_30_days ? "warn" : "neutral",
@@ -747,11 +773,19 @@ export function StockBalanceView() {
                   </div>
                 ))}
               </ResponsiveGrid>
-              {(selected.transit_qty ?? 0) > 0 && (
-                <p className="mt-2 text-xs text-muted">
-                  In transit: {selected.transit_qty} {uomOf(selected)}
-                </p>
-              )}
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {PIPELINE.map(([key, label, tone]) => (
+                  <div key={key} className="rounded-lg border border-line/70 p-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</div>
+                    <div className={`text-base font-bold ${Number(selected[key] ?? 0) > 0 ? tone : "text-muted"}`}>
+                      {Number(selected[key] ?? 0).toLocaleString("en-IN")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-1 text-[11px] text-muted">
+                For this item at {selected.warehouse_name || "this point"}, across all its lots.
+              </p>
             </SheetSection>
 
             <SheetSection title="Where it sits">

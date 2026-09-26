@@ -44,7 +44,13 @@ def _memo(db: AsyncSession, bucket: str) -> dict:
     rung and the subtree are still computed from the database, still per login, still
     per active position. Nothing about who may see what moves.
     """
-    return db.info.setdefault(f"scope_memo_{bucket}", {})
+    session_info = getattr(db, "info", None)
+    if isinstance(session_info, dict):
+        return session_info.setdefault(f"scope_memo_{bucket}", {})
+    # Lightweight read adapters and unit-test doubles do not necessarily expose
+    # SQLAlchemy's session scratchpad. They still get the same scoped predicate;
+    # only the per-request optimization is skipped.
+    return {}
 
 
 async def descendant_position_ids(
@@ -90,10 +96,19 @@ async def rung_for(db: AsyncSession, user) -> ScopeRung:
     position has to move the data as well as the menu, or a storekeeper who is also
     a lab technician reads both sets from either session.
 
-    No profile — an unconfigured position, or a login with no position at all like
-    the System Admin — means the old behaviour is still in force, so this returns
-    ALL and the caller's existing rules decide. Profiles are opt-in; this must not
-    silently tighten a screen nobody has configured yet.
+    A position nobody has configured a profile for reads as SELF, NOT as ALL.
+    Opt-in was the wrong default for the one thing this function decides: a job with
+    no profile is a job nobody has said anything about, and the safe reading of
+    silence is "their own rows", exactly as an unreadable rung is read below. Read as
+    ALL it was the opposite — every list in every module ANDs `scope_condition` in,
+    and at ALL that predicate is `literal(True)`, so one missing configuration row
+    unscoped the whole application for that job. 948 live DEO posts had no profile,
+    which is how a data entry operator at one PHC came to read all 983 warehouses'
+    stock, and the indents of districts they have no relationship with.
+
+    A login with NO position at all still reads ALL: that is the System Admin and the
+    scheduler, neither of which owns rows, and narrowing them to "mine" would empty
+    every screen they exist to work.
     """
     from app.platform.rbac.profiles import parse_description, profile_role_for_position
 
@@ -108,7 +123,7 @@ async def rung_for(db: AsyncSession, user) -> ScopeRung:
 
     role = await profile_role_for_position(db, position_id)
     if role is None:
-        rung = ScopeRung.ALL
+        rung = ScopeRung.SELF
     else:
         _, scope = parse_description(role.description)
         try:

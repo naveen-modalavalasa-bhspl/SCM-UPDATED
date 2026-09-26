@@ -829,8 +829,13 @@ async def get(db: AsyncSession, allocation_id: int, user=None) -> Allocation:
 
 async def list_allocations(db: AsyncSession, params: PageParams,
                            status: str | None = None,
-                           indent_id: int | None = None, user=None) -> dict:
+                           indent_id: int | None = None, user=None,
+                           only_indent_ids=None) -> dict:
     stmt = select(Allocation)
+    # A subquery of indent ids to keep to — indents narrows a Stock Transfer-only
+    # login to the allocations serving STRs (inventory cannot import indents).
+    if only_indent_ids is not None:
+        stmt = stmt.where(Allocation.indent_id.in_(only_indent_ids))
     if user is not None:
         # Allocation Approvals used to return every allocation in the company: this
         # was the last unscoped reader in the module. Bounded by the stocking points

@@ -53,7 +53,13 @@ export const INDENT_PRIORITY = {
 export const INDENT_TYPE = {
   REGULAR: "REGULAR",
   MONTHLY: "MONTHLY",
+  // A Stock Transfer Request. Deliberately NOT in INDENT_TYPE_OPTIONS: it is raised
+  // from Inventory > Stock Transfer, never picked on the indent form.
+  STR: "STR",
 } as const;
+
+/** The types the Indents screens list — an STR lives on Inventory > Stock Transfer. */
+export const INDENT_LIST_TYPES: string[] = [INDENT_TYPE.REGULAR, INDENT_TYPE.MONTHLY];
 
 /**
  * Regular is the ad-hoc, one-off request; Monthly is the recurring one. Regular is
@@ -66,9 +72,10 @@ export const INDENT_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: INDENT_TYPE.MONTHLY, label: "Monthly indent" },
 ];
 
-const INDENT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
-  INDENT_TYPE_OPTIONS.map((option) => [option.value, option.label]),
-);
+const INDENT_TYPE_LABELS: Record<string, string> = {
+  ...Object.fromEntries(INDENT_TYPE_OPTIONS.map((option) => [option.value, option.label])),
+  [INDENT_TYPE.STR]: "Stock transfer request",
+};
 
 /** Falls back to the raw value so an unknown type still reads as something. */
 export function indentTypeLabel(value?: string | null) {

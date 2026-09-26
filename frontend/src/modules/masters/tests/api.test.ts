@@ -19,7 +19,7 @@ describe("masters api", () => {
       "dosageForms", "facilities", "features", "generalNames", "hsnCodes",
       "itemClasses", "itemComponents", "itemEligibility", "itemGroups", "itemPackaging",
       "itemSpecs", "itemSubClasses", "items", "manufacturers",
-      "packaging", "projects", "specs", "unitCodeTracking", "uom", "uomConversions",
+      "ownershipDepartments", "packaging", "projects", "specs", "unitCodeTracking", "uom", "uomConversions",
       "userGroups", "vendorItems", "vendors", "warehouses",
     ]);
   });
@@ -54,6 +54,7 @@ describe("masters api", () => {
     // hcm_* is written only by the sync (rule 10), so these are plain fetchers
     // with no create/update attached.
     expect(typeof mastersApi.departments).toBe("function");
+    expect(typeof mastersApi.ownershipDepartments).toBe("function");
     expect(typeof mastersApi.facilities).toBe("function");
   });
 

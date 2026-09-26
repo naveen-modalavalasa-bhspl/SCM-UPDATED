@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Boxes, Check, MapPin, ScanLine, Trash2, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Boxes, Check, MapPin, ScanLine, Trash2, X } from "lucide-react";
 import { Button, ErrorBanner } from "@/shared/components";
 import { listSerials } from "../api";
 import { TrackingBadge } from "../components/TrackingBadge";
@@ -43,6 +43,22 @@ export interface CodeScope {
   splitLabel?: string | null;
 }
 
+/**
+ * Where the picked units are going — a stock movement's destination location and the
+ * batch they keep. Given, the screen grows a third view listing every unit already
+ * standing at that location in that batch, so the storekeeper sees what the bay holds
+ * before he adds to it, and afterwards finds the moved units exactly there.
+ */
+export interface CodeDestination {
+  binId: number;
+  binCode?: string | null;
+  binPath?: string | null;
+  batchId?: number | null;
+  batchNo?: string | null;
+}
+
+type View = "shelf" | "picked" | "destination";
+
 /** How many rows one page carries. Well inside `core/pagination.MAX_PAGE_SIZE` (500),
  *  and small enough that a page renders in one frame on the tablets on the floor. */
 const PAGE_SIZE = 200;
@@ -66,6 +82,11 @@ export function CodeAssignmentScreen({
   binId,
   issueId,
   issueLineId,
+  backLabel = "Back to the issue",
+  unbatched = false,
+  claimFree = false,
+  destination,
+  browse = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -85,6 +106,15 @@ export function CodeAssignmentScreen({
   binId?: number;
   issueId?: number;
   issueLineId?: number;
+  /** The way back names the document the screen was opened from. */
+  backLabel?: string;
+  /** No batch named means the UNBATCHED lot, not every batch in the bay. */
+  unbatched?: boolean;
+  /** Offer only units no document is holding — for a picker with no line of its own. */
+  claimFree?: boolean;
+  destination?: CodeDestination;
+  /** A viewer, not a picker: lists the units at the scope, selects nothing. */
+  browse?: boolean;
 }) {
   const qc = useQueryClient();
   const [picked, setPicked] = useState<string[]>([]);
@@ -92,7 +122,10 @@ export function CodeAssignmentScreen({
   const [entry, setEntry] = useState("");
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [showPicked, setShowPicked] = useState(false);
+  const [view, setView] = useState<View>("shelf");
+  const showPicked = view === "picked";
+  /** Which pool the list and the pager are reading. */
+  const listView: "shelf" | "destination" = view === "destination" ? "destination" : "shelf";
   const [busyScan, setBusyScan] = useState(false);
 
   const required = Math.floor(quantity);
@@ -108,7 +141,7 @@ export function CodeAssignmentScreen({
     setEntry("");
     setSearch("");
     setError(null);
-    setShowPicked(false);
+    setView("shelf");
     // "" is what has effectively been sent: the first query goes out unsearched. Left
     // at its initial null, the very first debounce sees null !== "" , calls that a
     // changed needle and resets the reader to page 1 — 300 ms after every press of
@@ -142,26 +175,35 @@ export function CodeAssignmentScreen({
   }, [entry, open]);
 
   const ready = !!(itemId && warehouseId);
-  const args = (which: number, needle: string) => ({
-    item_id: itemId!,
-    batch_id: batchId || undefined,
-    bin_id: binId || undefined,
-    warehouse_id: warehouseId!,
-    issue_id: issueId || undefined,
-    issue_line_id: issueLineId || undefined,
-    status: "available",
-    page: which,
-    size: PAGE_SIZE,
-    search: needle || undefined,
-  });
-  const key = (which: number, needle: string) => [
-    "wh-issue-codes", itemId ?? 0, warehouseId ?? 0, batchId ?? 0, binId ?? 0,
+  /** One page of either pool. The destination is read with no claim filter: a unit
+   *  already standing there is shown whatever holds it — it is not being offered. */
+  const args = (which: number, needle: string, where: "shelf" | "destination" = "shelf") => {
+    const atDest = where === "destination" && !!destination;
+    const batch = atDest ? destination!.batchId : batchId;
+    return {
+      item_id: itemId!,
+      batch_id: batch || undefined,
+      bin_id: (atDest ? destination!.binId : binId) || undefined,
+      unbatched: (unbatched && !batch) || undefined,
+      claim_free: (!atDest && claimFree) || undefined,
+      warehouse_id: warehouseId!,
+      issue_id: atDest ? undefined : issueId || undefined,
+      issue_line_id: atDest ? undefined : issueLineId || undefined,
+      status: "available",
+      page: which,
+      size: PAGE_SIZE,
+      search: needle || undefined,
+    };
+  };
+  const key = (which: number, needle: string, where: "shelf" | "destination" = "shelf") => [
+    "wh-issue-codes", where, itemId ?? 0, warehouseId ?? 0, batchId ?? 0, binId ?? 0,
+    destination?.binId ?? 0, destination?.batchId ?? 0, unbatched, claimFree,
     issueLineId ?? 0, which, needle,
   ];
 
   const codes = useQuery({
-    queryKey: key(page, search),
-    queryFn: () => listSerials(args(page, search)),
+    queryKey: key(page, search, listView),
+    queryFn: () => listSerials(args(page, search, listView)),
     enabled: open && ready,
     // The page being read must not blank out while the next one loads: a list that
     // empties and refills reads as stock disappearing off the shelf.
@@ -184,7 +226,7 @@ export function CodeAssignmentScreen({
    * arrives; a fresh search resets it, because that genuinely is a different pool.
    */
   const lastTotal = useRef(0);
-  useEffect(() => { lastTotal.current = 0; }, [search, itemId, batchId, binId]);
+  useEffect(() => { lastTotal.current = 0; }, [search, itemId, batchId, binId, listView]);
   if (codes.data?.total != null) lastTotal.current = codes.data.total;
   const total = codes.data?.total ?? lastTotal.current;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -211,13 +253,13 @@ export function CodeAssignmentScreen({
     for (const which of [page + 1, page - 1]) {
       if (which < 1 || which > pageCount || which === page) continue;
       void qc.prefetchQuery({
-        queryKey: key(which, search),
-        queryFn: () => listSerials(args(which, search)),
+        queryKey: key(which, search, listView),
+        queryFn: () => listSerials(args(which, search, listView)),
         staleTime: 5 * 60_000,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ready, page, pageCount, search, total]);
+  }, [open, ready, page, pageCount, search, total, listView]);
 
   const room = required - selected.size;
 
@@ -242,9 +284,9 @@ export function CodeAssignmentScreen({
    */
   const commit = async () => {
     const value = entry.trim();
-    if (!value) return;
+    if (!value || browse) return;
     const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
-    const onPage = rows.find((row) =>
+    const onPage = listView !== "shelf" ? undefined : rows.find((row) =>
       same(keyOf(row), value)
       || [row.serial_number, row.imei, row.asset_code, row.consumable_code]
         .some((token) => token && same(token, value)));
@@ -291,23 +333,35 @@ export function CodeAssignmentScreen({
       <header className="shrink-0 border-b border-line bg-content2/60 px-4 py-3 sm:px-6">
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="subtle" onClick={onClose}>
-            <ArrowLeft className="h-4 w-4" /> Back to the issue
+            <ArrowLeft className="h-4 w-4" /> {backLabel}
           </Button>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="font-display text-lg font-bold text-ink">
-                {readOnly ? "Assigned" : "Assign"} {noun}s
+                {browse ? `${noun}s here` : `${readOnly ? "Assigned" : "Select"} ${noun}s`}
               </h1>
-              <TrackingBadge type={trackingType} meta={trackingMeta} />
+              {trackingType !== "NONE" && <TrackingBadge type={trackingType} meta={trackingMeta} />}
             </div>
             <p className="truncate text-xs text-muted">{itemLabel}</p>
           </div>
-          <div className="text-right">
-            <p className={`font-display text-2xl font-bold tabular ${complete ? "text-ok" : "text-warn"}`}>
-              {selected.size} <span className="text-muted">/ {required}</span>
-            </p>
-            <p className="text-[11px] uppercase tracking-wider text-muted">selected</p>
-          </div>
+          {browse ? (
+            <div className="text-right">
+              <p className="font-display text-2xl font-bold tabular text-ink">{total.toLocaleString()}</p>
+              <p className="text-[11px] uppercase tracking-wider text-muted">available</p>
+            </div>
+          ) : (
+            <div className="text-right">
+              <p className={`font-display text-2xl font-bold tabular ${complete ? "text-ok" : "text-warn"}`}>
+                {selected.size} <span className="text-muted">/ {required}</span>
+              </p>
+              <p className="text-[11px] uppercase tracking-wider text-muted">selected</p>
+              {/* How far along, at a glance from across the aisle. */}
+              <div className="mt-1 h-1.5 w-28 overflow-hidden rounded-full bg-content3">
+                <div className={`h-full transition-all duration-300 ${complete ? "bg-ok" : "bg-warn"}`}
+                     style={{ width: `${required ? Math.min(100, (selected.size / required) * 100) : 0}%` }} />
+              </div>
+            </div>
+          )}
         </div>
 
         {scope && (
@@ -333,9 +387,18 @@ export function CodeAssignmentScreen({
             {scope.available != null && (
               <span className="text-muted">Holds <b className="tabular text-ink">{scope.available}</b></span>
             )}
-            <span className="ml-auto text-muted">
-              <b className="tabular text-ink">{total.toLocaleString()}</b> here to choose from
-            </span>
+            {destination && (
+              <span className="flex items-center gap-1.5 text-muted">
+                <ArrowRight className="h-3.5 w-3.5 text-ok" aria-hidden />
+                to <b className="font-mono text-ink">{destination.binPath || destination.binCode || "destination"}</b>
+              </span>
+            )}
+            {listView === "shelf" && (
+              <span className="ml-auto text-muted">
+                <b className="tabular text-ink">{total.toLocaleString()}</b>{" "}
+                {browse ? "available here" : "here to choose from"}
+              </span>
+            )}
           </div>
         )}
       </header>
@@ -351,7 +414,9 @@ export function CodeAssignmentScreen({
               value={entry}
               onChange={(e) => setEntry(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void commit(); } }}
-              placeholder={`Scan or search any ${noun} — every page, not just this one`}
+              placeholder={browse
+                ? `Search any ${noun} here — every page, not just this one`
+                : `Scan or search any ${noun} — every page, not just this one`}
               aria-label={`Scan or search ${noun}s`}
               className="min-h-11 w-full rounded-md border border-line bg-content1 pl-9 pr-3 text-sm text-ink outline-none placeholder:text-muted focus:border-brand"
             />
@@ -359,17 +424,26 @@ export function CodeAssignmentScreen({
         )}
         <ErrorBanner error={error} />
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button variant={showPicked ? "ghost" : "soft"} onClick={() => setShowPicked(false)}>
-            On this shelf
+          <Button variant={view === "shelf" ? "soft" : "ghost"}
+                  onClick={() => { setView("shelf"); setPage(1); }}>
+            {destination ? "At source" : "On this shelf"}
           </Button>
           {/* The picks made on OTHER pages are invisible in a paged list, so there has
             * to be somewhere to see and undo them. Read straight off the selection —
             * it costs no request. */}
-          <Button variant={showPicked ? "soft" : "ghost"} onClick={() => setShowPicked(true)}>
-            Selected ({selected.size})
-          </Button>
+          {!browse && (
+            <Button variant={showPicked ? "soft" : "ghost"} onClick={() => setView("picked")}>
+              Selected ({selected.size})
+            </Button>
+          )}
+          {destination && (
+            <Button variant={view === "destination" ? "soft" : "ghost"}
+                    onClick={() => { setView("destination"); setPage(1); }}>
+              <ArrowRight className="h-4 w-4" /> At destination
+            </Button>
+          )}
           <span className="flex-1" />
-          {!readOnly && !showPicked && (
+          {!readOnly && !browse && view === "shelf" && (
             <Button variant="subtle" disabled={selected.size === 0} onClick={() => setPicked([])}>
               Clear all
             </Button>
@@ -418,32 +492,47 @@ export function CodeAssignmentScreen({
           <p className="py-16 text-center text-sm text-muted">
             {search
               ? `Nothing in this batch and location matches “${search}”.`
-              : `No ${noun}s are available in this batch and location.`}
+              : listView === "destination"
+                ? `No ${noun}s of this item and batch are at the destination yet — the ${selected.size || ""} you select land here.`
+                : `No ${noun}s are available in this batch and location.`}
           </p>
         ) : (
+          <>
+          {listView === "destination" && (
+            <p className="mb-3 rounded-lg border border-ok/30 bg-ok/5 px-3 py-2 text-xs text-body">
+              Already standing at the destination in this batch. The{" "}
+              <b className="tabular">{selected.size}</b> selected {noun}
+              {selected.size === 1 ? "" : "s"} join them when the movement completes.
+            </p>
+          )}
           <ul className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
             {rows.map((row, index) => {
               const value = keyOf(row);
-              const isOn = selected.has(value);
+              const isOn = listView === "shelf" && selected.has(value);
+              const fixed = readOnly || browse || listView !== "shelf";
               return (
                 <li key={row.id}>
                   <label
                     className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 transition ${
                       isOn ? "border-brand bg-brand/5" : "border-line/70 bg-content1 hover:border-line"
-                    } ${readOnly ? "cursor-default" : ""}`}
+                    } ${fixed ? "cursor-default" : ""}`}
                   >
                     <input
                       type="checkbox"
                       className="sr-only"
                       checked={isOn}
-                      disabled={readOnly}
-                      onChange={() => !readOnly && toggle(value)}
+                      disabled={fixed}
+                      onChange={() => !fixed && toggle(value)}
                     />
-                    <span className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border ${
-                      isOn ? "border-brand bg-brand text-white" : "border-line"
-                    }`}>
-                      {isOn && <Check className="h-3.5 w-3.5" />}
-                    </span>
+                    {fixed ? (
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${listView === "destination" ? "bg-ok" : "bg-brand/50"}`} />
+                    ) : (
+                      <span className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border ${
+                        isOn ? "border-brand bg-brand text-white" : "border-line"
+                      }`}>
+                        {isOn && <Check className="h-3.5 w-3.5" />}
+                      </span>
+                    )}
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-mono text-sm text-ink">{value}</span>
                       {/* The unit's other numbers. A handset carries a serial AND an
@@ -469,6 +558,7 @@ export function CodeAssignmentScreen({
               );
             })}
           </ul>
+          </>
         )}
       </div>
 
@@ -495,7 +585,7 @@ export function CodeAssignmentScreen({
           )}
           <span className="flex-1" />
           {busyScan && <span className="text-xs text-muted">looking it up…</span>}
-          {!complete && !readOnly && (
+          {!complete && !readOnly && !browse && (
             <span className="text-xs text-muted">
               {room > 0
                 ? `${room} more to assign before this pick can be saved.`
@@ -503,9 +593,9 @@ export function CodeAssignmentScreen({
             </span>
           )}
           <Button variant="subtle" onClick={onClose}>
-            <X className="h-4 w-4" /> {readOnly ? "Close" : "Cancel"}
+            <X className="h-4 w-4" /> {readOnly || browse ? "Close" : "Cancel"}
           </Button>
-          {!readOnly && (
+          {!readOnly && !browse && (
             <Button
               disabled={!complete}
               onClick={() => {

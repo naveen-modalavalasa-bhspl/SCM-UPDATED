@@ -204,6 +204,12 @@ export default function PurchaseReturnDetail() {
   }
 
   const isDraft = doc.status === "DRAFT";
+  // Sending is no longer the same question as editing (2026-09-19). A return that has
+  // been through its ladder is APPROVED, not DRAFT, and the server will now take it —
+  // so the button follows the SERVER's answer (`can_send_to_vendor`) rather than the
+  // status, and cannot drift from what the save would accept. Edit and Delete stay
+  // DRAFT-only: an approved return is not a document to rewrite.
+  const maySend = isDraft || !!doc.can_send_to_vendor;
   const mayDelete = isDraft && can(DRAFT_DELETE_PERMISSION.return);
   // Stored first, traced second. A return the returns module raised off a branch
   // consignment carries neither GRN nor PO nor vendor of its own, and the chain behind
@@ -631,6 +637,12 @@ export default function PurchaseReturnDetail() {
       </Card>
 
       <div className="flex flex-wrap gap-3">
+        {maySend && !isDraft && (
+          <Button className={TONE_DEEP_MINT} disabled={!!blocked || send.isPending}
+                  onClick={openSend}>
+            {send.isPending ? "Sending…" : "Send to Vendor"}
+          </Button>
+        )}
         {isDraft && (
           <>
             <Button variant="soft" className={TONE_MINT}

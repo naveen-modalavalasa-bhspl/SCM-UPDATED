@@ -36,6 +36,8 @@ import type {
   VendorOption,
   WarehouseOption,
   WorkflowPending,
+  CountSheetRow,
+  StockAdjustment,
 } from "./types";
 
 /**
@@ -78,6 +80,9 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   physical_qty: num(r.total_qty),
   reserved_qty: num(r.reserved_qty),
   transit_qty: num(r.transit_qty),
+  issued_pending_qty: num(r.issued_pending_qty),
+  outgoing_qty: num(r.outgoing_qty),
+  incoming_qty: num(r.incoming_qty),
   available_qty: num(r.available_qty),
   reorder_level: num(r.reorder_level),
   valuation_rate: num(r.valuation_rate),
@@ -522,14 +527,18 @@ export const getFulfilmentBatches = (includeDone = false) =>
  *  belongs to the rung it is parked on, who serves it from his own stock at the moment
  *  he approves. An approver who has already signed and passed it up keeps seeing it on
  *  /indents and in its journey — it is simply no longer work waiting on him. */
-export const getFulfillmentQueue = (status?: string, owedOnly = true) =>
+export const getFulfillmentQueue = (status?: string, owedOnly = true, indentType?: string) =>
   api
-    .get<Page<Record<string, unknown>>>("/api/indents", {
+    // STRs come from Stock Transfer's own list, so serving one needs
+    // `stock.transfer.serve` rather than all of Indents.
+    .get<Page<Record<string, unknown>>>(
+      indentType === "STR" ? "/api/indents/stock-transfer-requests" : "/api/indents", {
       params: {
         size: 100,
         to_serve: true,
         ...(owedOnly ? { has_remainder: true } : {}),
         ...(status ? { status } : {}),
+        ...(indentType && indentType !== "STR" ? { indent_type: indentType } : {}),
       },
     })
     .then((r) => r.data);
@@ -609,14 +618,26 @@ export const getOverviewKPIs = () =>
 export const createStockAdjustment = (data: any) =>
   api.post("/api/stock/adjust", data).then((r) => r.data);
 
-export const listStockAdjustments = (params?: { warehouse_id?: number; status?: string; page?: number; size?: number }) =>
+export const listStockAdjustments = (params?: {
+  warehouse_id?: number; status?: string; search?: string; reason?: string;
+  date_from?: string; date_to?: string; page?: number; size?: number;
+}) =>
   api.get("/api/stock/adjustments", { params }).then((r) => r.data);
 
-export const approveStockAdjustment = (id: number) =>
-  api.post(`/api/stock/adjustments/${id}/approve`).then((r) => r.data);
+export const getStockAdjustment = (id: number) =>
+  api.get<StockAdjustment>(`/api/stock/adjustments/${id}`).then((r) => r.data);
 
-export const rejectStockAdjustment = (id: number) =>
-  api.post(`/api/stock/adjustments/${id}/reject`).then((r) => r.data);
+/** What the system holds of every item at a warehouse - the audit's left column. */
+export const getAdjustmentCountSheet = (warehouseId: number) =>
+  api
+    .get<CountSheetRow[]>("/api/stock/adjustments/count-sheet", { params: { warehouse_id: warehouseId } })
+    .then((r) => r.data);
+
+export const approveStockAdjustment = (id: number, remarks?: string) =>
+  api.post(`/api/stock/adjustments/${id}/approve`, { remarks: remarks || null }).then((r) => r.data);
+
+export const rejectStockAdjustment = (id: number, remarks?: string) =>
+  api.post(`/api/stock/adjustments/${id}/reject`, { remarks: remarks || null }).then((r) => r.data);
 
 export const getReplenishments = (params?: { warehouse_id?: number; category_id?: number; criticality?: string }) =>
   api.get("/api/stock/replenishment", { params }).then((r) => r.data);
@@ -653,8 +674,25 @@ export const getNearExpiryAlerts = (days = 90) =>
 export const createSTO = (data: any) =>
   api.post("/api/stock/sto", data).then((r) => r.data);
 
-export const listSTOs = (params?: { status?: string; page?: number; size?: number }) =>
-  api.get("/api/stock/sto", { params }).then((r) => r.data);
+export const listSTOs = (params?: {
+  status?: string; page?: number; size?: number; kind?: string; search?: string;
+  str_id?: number; origin?: string; from_warehouse_id?: number; to_warehouse_id?: number;
+  date_from?: string; date_to?: string;
+}) => api.get("/api/stock/sto", { params }).then((r) => r.data);
+
+export const rejectSTO = (id: number, comments: string) =>
+  api.post(`/api/stock/sto/${id}/reject`, { comments }).then((r) => r.data);
+
+/** Stock Transfer Requests — indents of type STR, listed on Inventory > Stock Transfer. */
+export const listSTRs = (params?: {
+  page?: number; size?: number; search?: string; status?: string;
+  created_date_from?: string; created_date_to?: string;
+}) =>
+  // The transfer screen's own list, under `stock.transfer.view` — not /api/indents,
+  // which would demand all of Indents to see a transfer request.
+  api.get<Page<Record<string, any>>>("/api/indents/stock-transfer-requests", {
+    params: { size: 50, ...params },
+  }).then((r) => r.data);
 
 export const getSTO = (id: number) =>
   api.get(`/api/stock/sto/${id}`).then((r) => r.data);

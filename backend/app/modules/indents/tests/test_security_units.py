@@ -1063,7 +1063,7 @@ async def test_acknowledgment_search_uses_same_visibility_and_search_filters(mon
     db = CapturingDb()
     monkeypatch.setattr(
         service,
-        "indent_access_condition",
+        "_indent_visibility",
         AsyncMock(return_value=service.Indent.requested_by_id == 10),
     )
 

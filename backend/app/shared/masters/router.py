@@ -2,7 +2,7 @@
 written by hand here are the two HCM mirrors (read-only, rule 10) and item specs,
 whose primary key is item_id rather than a surrogate id."""
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +14,7 @@ from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
-    MASTERS, UOM_SUGGESTIONS, hsn_out, packaging_breakdown,
+    MASTERS, UOM_SUGGESTIONS, check_hsn_code, hsn_out, packaging_breakdown,
 )
 from app.shared.models.master import HsnCode, Item, ItemSpec, Uom
 
@@ -31,6 +31,49 @@ async def list_departments(db: AsyncSession = Depends(get_db),
         .order_by(HcmDepartment.name)
     )).scalars().all()
     return {"items": [{"id": d.id, "code": d.code, "name": d.name} for d in rows]}
+
+
+def _ownership_department_options(rows) -> list[dict]:
+    """One routing option per department name, despite HCM's office-scoped rows.
+
+    The current HCM feed contains hundreds of separate department IDs named `104`,
+    one for each office. Item ownership is a company-level routing choice, so showing
+    every office copy makes the selector unusable. Keep one deterministic HCM row per
+    normalised name: prefer a row carrying a code, then the lowest HCM ID.
+
+    This intentionally powers only the Item Master ownership selector. The ordinary
+    `/api/departments` endpoint remains lossless for screens that need office-specific
+    HCM department records.
+    """
+    chosen: dict[str, HcmDepartment] = {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        name = (row.name or "").strip()
+        if not name:
+            continue
+        key = name.casefold()
+        counts[key] = counts.get(key, 0) + 1
+        current = chosen.get(key)
+        candidate_rank = (0 if row.code else 1, row.id)
+        current_rank = ((0 if current.code else 1), current.id) if current else None
+        if current is None or candidate_rank < current_rank:
+            chosen[key] = row
+    return [{
+        "id": chosen[key].id,
+        "code": chosen[key].code,
+        "name": chosen[key].name.strip(),
+        "duplicate_count": counts[key],
+    } for key in sorted(chosen, key=lambda value: chosen[value].name.casefold())]
+
+
+@_hcm.get("/api/departments/ownership-options")
+async def list_ownership_departments(db: AsyncSession = Depends(get_db),
+                                     user=Depends(get_current_user)):
+    rows = (await db.execute(
+        select(HcmDepartment).where(HcmDepartment.is_active.is_(True))
+        .order_by(HcmDepartment.id)
+    )).scalars().all()
+    return {"items": _ownership_department_options(rows)}
 
 
 @_hcm.get("/api/facilities")
@@ -144,7 +187,14 @@ _hsn = APIRouter(tags=["masters"])
 
 
 class HsnResolveIn(BaseModel):
-    code: str = Field(min_length=8, max_length=8, pattern=r"^\d{8}$")
+    code: str = Field(min_length=8, max_length=8)
+
+    # The same reading of a code as the HSN master's own schema, so a number, a
+    # grouped "8471 30 10" and the canonical text all resolve to one row.
+    @field_validator("code", mode="before")
+    @classmethod
+    def _code(cls, value):
+        return check_hsn_code(value)
 
 
 @_hsn.post("/api/hsn-codes/resolve")

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/shared/components";
 
@@ -187,7 +187,7 @@ export function QtyInput({
   disabled,
   invalid,
   ariaLabel,
-  step = "0.001",
+  step = "0.01",
 }: {
   value: number | string;
   onChange: (value: any) => void;
@@ -195,11 +195,25 @@ export function QtyInput({
   disabled?: boolean;
   invalid?: boolean;
   ariaLabel: string;
-  /** Quantities carry three decimals in the schema and default to them. Money does
-   *  not: a rate box passes "0.01" so the arrows step in paise and the browser's own
-   *  validation refuses a third digit. */
+  /** Warehouse quantities and money are entered at two decimal places. */
   step?: string;
 }) {
+  const [local, setLocal] = useState<string>(
+    value === 0 ? "0.00" : value === "" || value == null ? "" : Number(value).toFixed(2)
+  );
+
+  useEffect(() => {
+    if (value === "" || value == null) {
+      if (local !== "") setLocal("");
+    } else {
+      const currentNum = Number(local);
+      const newNum = Number(value);
+      if (currentNum !== newNum && !(Number.isNaN(currentNum) && Number.isNaN(newNum))) {
+        setLocal(Number(value).toFixed(2));
+      }
+    }
+  }, [value, local]);
+
   return (
     <input
       type="number"
@@ -207,10 +221,23 @@ export function QtyInput({
       min={0}
       max={max}
       step={step}
-      value={value === 0 ? "0" : String(value ?? "")}
+      value={local}
       disabled={disabled}
       aria-label={ariaLabel}
-      onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
+      onChange={(e) => {
+        setLocal(e.target.value);
+        onChange(e.target.value === "" ? "" : e.target.value);
+      }}
+      onBlur={(e) => {
+        if (e.target.value !== "") {
+          const num = Number(e.target.value);
+          if (!Number.isNaN(num)) {
+            const formatted = num.toFixed(2);
+            setLocal(formatted);
+            onChange(formatted);
+          }
+        }
+      }}
       className={`min-h-11 w-full rounded-md border bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand disabled:bg-content2 disabled:text-muted ${
         invalid ? "border-bad" : "border-line"
       }`}

@@ -137,7 +137,7 @@ export default function WarehouseDashboard() {
 
   return (
     <div>
-      <PageHeader eyebrow={pointLabel} title="Overview" />
+      <PageHeader eyebrow={pointLabel} title="Dashboard" />
 
       <FilterBar>
         <FilterSelect

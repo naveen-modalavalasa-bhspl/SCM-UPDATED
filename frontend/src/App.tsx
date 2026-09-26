@@ -106,6 +106,13 @@ const LogisticsVendorsPage = lazy(() => import("@/modules/logistics").then((m) =
 const MRConsolidationPage = lazy(() => import("@/modules/procurement/pages/MRConsolidationPage").then((m) => ({ default: m.MRConsolidationPage })));
 const MailPage = lazy(() => import("@/modules/admin/pages/MailPage").then((m) => ({ default: m.MailPage })));
 const MastersPage = lazy(() => import("@/modules/masters/pages/MastersPage").then((m) => ({ default: m.MastersPage })));
+// The same masters, split by the module that owns them. `/masters` stays whole and
+// unchanged; these are a second door on the same rows, each with its own page code so
+// RBAC can hand out (or withhold) one module's masters without touching another's.
+const InventoryMastersPage = lazy(() => import("@/modules/inventory/pages/InventoryMastersPage").then((m) => ({ default: m.InventoryMastersPage })));
+const ProcurementMastersPage = lazy(() => import("@/modules/procurement/pages/ProcurementMastersPage").then((m) => ({ default: m.ProcurementMastersPage })));
+const IndentMastersPage = lazy(() => import("@/modules/indents/pages/IndentMastersPage").then((m) => ({ default: m.IndentMastersPage })));
+const OrgMastersPage = lazy(() => import("@/modules/admin/pages/OrgMastersPage").then((m) => ({ default: m.OrgMastersPage })));
 const MaterialIssuePrintPage = lazy(() => import("@/modules/warehouse/pages/MaterialIssuePrintPage").then((m) => ({ default: m.MaterialIssuePrintPage })));
 const MaterialRequestDetailPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestDetailPage").then((m) => ({ default: m.MaterialRequestDetailPage })));
 const MaterialRequestFormPage = lazy(() => import("@/modules/inventory/pages/MaterialRequestFormPage").then((m) => ({ default: m.MaterialRequestFormPage })));
@@ -123,6 +130,7 @@ const POPrintPage = lazy(() => import("@/modules/procurement/pages/POPrintPage")
 const PicklistPrintPage = lazy(() => import("@/modules/warehouse/pages/PicklistPrintPage").then((m) => ({ default: m.PicklistPrintPage })));
 const PlatformLinksPage = lazy(() => import("@/modules/integrations").then((m) => ({ default: m.PlatformLinksPage })));
 const PoliciesPage = lazy(() => import("@/modules/admin/pages/PoliciesPage").then((m) => ({ default: m.PoliciesPage })));
+const ProcurementDemandPoolPage = lazy(() => import("@/modules/procurement/pages/ProcurementDemandPoolPage"));
 const ProcurementLedgerPage = lazy(() => import("@/modules/procurement/pages/ProcurementLedgerPage").then((m) => ({ default: m.ProcurementLedgerPage })));
 const ProcurementOverviewPage = lazy(() => import("@/modules/procurement/pages/ProcurementOverviewPage").then((m) => ({ default: m.ProcurementOverviewPage })));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage").then((m) => ({ default: m.ProfilePage })));
@@ -157,6 +165,8 @@ const StockBalanceView = lazy(() => import("@/modules/inventory/components/Stock
 const StockLedgerView = lazy(() => import("@/modules/inventory/components/StockLedgerView").then((m) => ({ default: m.StockLedgerView })));
 const StockMovementPrintPage = lazy(() => import("@/modules/warehouse/pages/StockMovementPrintPage").then((m) => ({ default: m.StockMovementPrintPage })));
 const StockReplenishmentView = lazy(() => import("@/modules/inventory/components/StockReplenishmentView").then((m) => ({ default: m.StockReplenishmentView })));
+const OutboundQualityInspectionForm = lazy(() => import("@/modules/warehouse/pages/OutboundQualityInspectionForm"));
+const MaterialIssueForm = lazy(() => import("@/modules/warehouse/pages/MaterialIssueForm"));
 const StockTransferView = lazy(() => import("@/modules/inventory/components/StockTransferView").then((m) => ({ default: m.StockTransferView })));
 const StockValuationView = lazy(() => import("@/modules/inventory/components/StockValuationView").then((m) => ({ default: m.StockValuationView })));
 const StockingPointsPage = lazy(() => import("@/modules/inventory/pages/StockingPointsPage").then((m) => ({ default: m.StockingPointsPage })));
@@ -387,6 +397,7 @@ function AppRoutes() {
         <Route path="indents/reports" element={<IndentReportsPage />} />
         <Route path="indents/notifications" element={<IndentNotificationsPage />} />
         <Route path="indents/new" element={<IndentFormPage />} />
+        <Route path="indents/masters" element={<IndentMastersPage />} />
         <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
         {/* A returned indent belongs to its requester, who is not an approver and
             cannot open /approvals at all — the ?correction= form there redirected
@@ -429,10 +440,12 @@ function AppRoutes() {
             documents it reads, so it is safe as a landing page for a
             module whose five registers are granted separately. */}
         <Route path="procurement/overview" element={<ProcurementOverviewPage />} />
+        <Route path="procurement/demand-pool" element={<ProcurementDemandPoolPage />} />
         <Route path="procurement/ledger" element={<ProcurementLedgerPage />} />
         {/* The supplier register — who we buy from, and the login each one answers
             an RFQ with. Inside the employee shell like every other procurement
             screen; /supplier/* is the vendors' own portal and stays outside it. */}
+        <Route path="procurement/masters" element={<ProcurementMastersPage />} />
         <Route path="procurement/suppliers" element={<SuppliersPage />} />
         <Route path="procurement/requisitions" element={<RequisitionListPage />} />
         <Route path="procurement/requisitions/new" element={<RequisitionFormPage />} />
@@ -557,10 +570,22 @@ function AppRoutes() {
           * behind the returned items. Gated by the endpoint on `return.decide`. */}
         <Route path="returns/:id/trail" element={<ReturnTrailPage />} />
         <Route path="inventory" element={<InventoryOverviewPage />} />
+        <Route path="inventory/masters" element={<InventoryMastersPage />} />
         <Route path="inventory/stock-balance" element={<StockBalanceView />} />
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
+        {/* An STO's material issue, worked inside Stock Transfer rather than the
+            warehouse rail (REQ_020). The same form; only its home path moves. */}
+        {/* The two forms' Back lands on their list path; the list IS a tab here. */}
+        <Route path="inventory/transfers/qc"
+               element={<Navigate to="/inventory/transfers?tab=qc" replace />} />
+        <Route path="inventory/transfers/issues"
+               element={<Navigate to="/inventory/transfers?tab=orders" replace />} />
+        <Route path="inventory/transfers/qc/:id"
+               element={<OutboundQualityInspectionForm basePath="/inventory/transfers/qc" />} />
+        <Route path="inventory/transfers/issues/:id"
+               element={<MaterialIssueForm basePath="/inventory/transfers/issues" />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         {/* The Fulfilment Desk: the Fulfilment Queue and Allocation Approvals as one
@@ -660,6 +685,7 @@ function AppRoutes() {
         <Route path="admin/integrations/activity/:id" element={<ActivityEventPage />} />
         <Route path="admin/integrations/webhooks/:source" element={<WebhookDetailPage />} />
         <Route path="admin/integrations/:code" element={<ApiClientDetailPage />} />
+        <Route path="admin/org-masters" element={<OrgMastersPage />} />
         <Route path="masters" element={<MastersPage />} />
         {/* /reports lands on the first ledger so the rail entry always has a screen. */}
         <Route path="reports" element={<Navigate to="/reports/indents" replace />} />

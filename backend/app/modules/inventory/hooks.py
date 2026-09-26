@@ -39,3 +39,22 @@ async def fire_mr_approved(db, mr, user) -> None:
             logger.exception(
                 "post-approval hook %s failed for material request %s",
                 getattr(hook, "__name__", hook), getattr(mr, "mr_no", None))
+
+
+#: Called once a Stock Transfer Order reaches APPROVED, after the approval is
+#: committed. The warehouse registers the handoff that drafts the material issue at
+#: the source point — inventory may not import it. Signature: `(db, sto, user)`.
+ON_STO_APPROVED: list[Callable[..., Awaitable[None]]] = []
+
+
+async def fire_sto_approved(db, sto, user) -> None:
+    """Same contract as `fire_mr_approved`: a failing consequence never fails the
+    signature that caused it."""
+    for hook in ON_STO_APPROVED:
+        try:
+            await hook(db, sto, user)
+        except Exception:  # noqa: BLE001 - a consequence may never fail its cause
+            await db.rollback()
+            logger.exception(
+                "post-approval hook %s failed for stock transfer %s",
+                getattr(hook, "__name__", hook), getattr(sto, "sto_no", None))

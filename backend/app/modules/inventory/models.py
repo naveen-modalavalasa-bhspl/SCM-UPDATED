@@ -313,6 +313,9 @@ class StockAdjustment(Base):
     approved_by_id = soft_fk()
     approved_by_name = Column(String(200), nullable=True)
     approved_at = Column(DateTime, nullable=True)
+    # Who the audit is waiting on, when a configured chain governs it. Written by this
+    # module after every engine call and by `doc_registry` on an admin's Move.
+    current_approver_name = Column(String(300), nullable=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
 
@@ -333,7 +336,14 @@ class StockAdjustmentItem(Base):
     batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
     project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
     direction = Column(String(3), nullable=False)   # StockDirection: IN | OUT
+    # The correction. On a counted line it is |physical - system| and `direction` is
+    # its sign; 0 records an item that was counted and matched.
     quantity = Column(Numeric(16, 3), nullable=False)
+    # A stock audit line: what the system held when the count was saved (read by the
+    # server, never taken from the client) and what was physically on the shelf.
+    # NULL on a direct adjustment, which states the correction and no count.
+    system_qty = Column(Numeric(16, 3), nullable=True)
+    physical_qty = Column(Numeric(16, 3), nullable=True)
     unit_cost = Column(Numeric(16, 2), nullable=True, default=0.00)
     remarks = Column(String(500), nullable=True)
 
@@ -342,12 +352,13 @@ class StockAdjustmentItem(Base):
 
 #: The two documents `inv_sto` carries. EXTENDED 2026-08-21.
 #:
-#: They share a header, lines, and a DRAFT -> PENDING_APPROVAL -> APPROVED ladder, which
+#: They share a header and lines, but their lifecycles diverge after approval, which
 #: is why an SMO lives here rather than in a table of its own. They do NOT share what
 #: approval MEANS, and that is the part to be careful with:
 #:
 #:   STO  moves stock warehouse -> warehouse, and only on RECEIPT.
-#:   SMO  moves stock bin -> bin inside ONE warehouse, at the moment it is approved.
+#:   SMO  moves stock bin -> bin inside ONE warehouse only after APPROVED -> INSPECTED
+#:        -> COMPLETED; approval itself never changes inventory.
 #:
 #: Two lifecycles on one table is exactly the mistake the warehouse Dispatch door was
 #: retired for, so the rule here is explicit: `doc_kind` is load-bearing, every reader
@@ -392,6 +403,15 @@ class StockTransferOrder(Base):
     dispatched_at = Column(DateTime, nullable=True)
     received_at = Column(DateTime, nullable=True)
     remarks = Column(Text, nullable=True)
+    # The Stock Transfer Request this order serves (an `ind_indents` row of type STR),
+    # NULL on an STO raised directly. Soft: indents sits after inventory in the chain.
+    str_id = Column(BigInteger, nullable=True, index=True)
+    str_no = Column(String(50), nullable=True)
+    # The material issue that physically executes this order at the source point. An
+    # STO never moves stock itself any more: the issue posts it out, the consignment
+    # carries it, and the receiving side's acknowledgement credits it in.
+    issue_id = Column(BigInteger, nullable=True, index=True)
+    issue_no = Column(String(50), nullable=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
 
@@ -545,3 +565,5 @@ class PositionLocationAccess(Base):
 doc_registry.register(DocType.MR.value, "inv_material_requests")
 doc_registry.register(DocType.ALLOCATION.value, "inv_allocations")
 doc_registry.register(DocType.OWN_STOCK_ALLOCATION.value, "inv_allocations")
+doc_registry.register(DocType.STOCK_MOVEMENT_ORDER.value, "inv_sto")
+doc_registry.register(DocType.STOCK_ADJUSTMENT.value, "inv_adjustments")

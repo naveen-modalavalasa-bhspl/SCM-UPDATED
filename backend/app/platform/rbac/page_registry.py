@@ -92,14 +92,14 @@ PAGES: list[PageDef] = [
     # makes it the module's front door — deliberate here, and safe, because it calls
     # no endpoint that did not already exist (/pending/summary, /reports/summary,
     # /allocation-cycles). The warning at the top of this list is about NEW endpoints.
-    PageDef("approval_overview", "/approvals/overview", "Overview",
+    PageDef("approval_overview", "/approvals/overview", "Dashboard",
             parent="approvals", module="approvals", icon="layout-dashboard",
             sort_order=20),
     # Returns — a module of its own, so the group row comes first and the screens
     # hang off it. sort_order 60 puts it after Warehouse and before Reports.
     PageDef("grp_returns", "/returns", "Returns", module="returns",
             icon="corner-up-left", sort_order=60),
-    PageDef("returns_overview", "/returns/dashboard", "Overview",
+    PageDef("returns_overview", "/returns/dashboard", "Dashboard",
             parent="grp_returns", module="returns", icon="layout-dashboard",
             sort_order=1),
     PageDef("returns_register", "/returns", "All Returns",
@@ -150,9 +150,12 @@ PAGES: list[PageDef] = [
     # counts (`requisition.view`, `consolidation.view`, `rfq.view`, `rfq.compare`,
     # `po.view`), so the page's own permission means only "may open the board" — a
     # login that holds one of the five sees one strip, not an error.
-    PageDef("pro_overview", "/procurement/overview", "Overview",
+    PageDef("pro_overview", "/procurement/overview", "Dashboard",
             parent="grp_purchasing", module="procurement", icon="layout-dashboard",
             sort_order=24),
+    PageDef("pro_demand_pool", "/procurement/demand-pool", "Demand Pool",
+            parent="grp_purchasing", module="procurement", icon="pie-chart",
+            sort_order=25),
     PageDef("pro_requisitions", "/procurement/requisitions", "Requisitions",
             parent="grp_purchasing", module="procurement", icon="file-text",
             sort_order=25),
@@ -227,7 +230,7 @@ PAGES: list[PageDef] = [
     # refresh leaves `required_permission` exactly as the row already carries it —
     # this is a rename and nothing else. sort_order matches the live row (55), because
     # sync_pages refreshes that field and a different number would move the screen.
-    PageDef("inv_transfers", "/inventory/transfers", "Transfer Records",
+    PageDef("inv_transfers", "/inventory/transfers", "Stock Transfer",
             parent="grp_inventory", module="inventory", icon="arrow-left-right",
             sort_order=55, always_on=True),
     # The Fulfilment Desk — the Fulfilment Queue and Allocation Approvals as ONE
@@ -245,6 +248,42 @@ PAGES: list[PageDef] = [
     PageDef("inv_fulfilment_desk", "/inventory/fulfilment", "Fulfilment Desk",
             parent="grp_inventory", module="inventory", icon="check-circle",
             sort_order=56),
+    # Stock Audit (2026-09-24): the physical count against system stock, and the
+    # correction that follows. The live row is parked (is_active = 0) and sync never
+    # flips that, so migration `a4c6e8f0b2d3` switches it back on.
+    PageDef("inv_adjustments", "/inventory/adjustments", "Stock Audit",
+            parent="grp_inventory", module="inventory", icon="sliders",
+            sort_order=60),
+
+    # ------------------------------------------------------------------ #
+    #  Masters, on the module that owns them
+    # ------------------------------------------------------------------ #
+    # `/masters` is NOT retired and is not listed here — it stays whole, and these are
+    # a second door on the same rows. What they add is RBAC reach: one page code per
+    # module, so a buyer can be given the vendor and HSN masters without also being
+    # handed the item catalogue, which one `page.masters.view` could never express.
+    #
+    # Every screen renders the masters module's own tab components with their own
+    # `<Can>` gating and calls the same `/api/masters/*` routes behind the same
+    # `master.*.manage` permissions, so nothing here widens what anybody may WRITE.
+    #
+    # All four sort LAST in their group. The left rail opens a module on its first
+    # child, and a master is never what somebody came to that module to do.
+    PageDef("inv_masters", "/inventory/masters", "Masters",
+            parent="grp_inventory", module="inventory", icon="database",
+            sort_order=65),
+    PageDef("pro_masters", "/procurement/masters", "Masters",
+            parent="grp_purchasing", module="procurement", icon="database",
+            sort_order=34),
+    PageDef("ind_masters", "/indents/masters", "Masters",
+            parent="grp_indents", module="indents", icon="database",
+            sort_order=17),
+    # Projects, facilities and departments — HCM mirrors, read-only (rule 10). Under
+    # Settings rather than a module, because filing them beside masters somebody can
+    # edit would imply these are editable too.
+    PageDef("admin_org_masters", "/admin/org-masters", "Organisation Masters",
+            parent="grp_settings", module="admin", icon="building-2",
+            sort_order=106),
 
     # ------------------------------------------------------------------ #
     #  Logistics — the outward transport leg
@@ -263,17 +302,17 @@ PAGES: list[PageDef] = [
     # same flow) the warehouse serves; these are separate rbac_pages rows pointing at
     # the same paths under /logistics. The warehouse rows keep their own codes, paths
     # and permissions and are not touched.
-    # NEW 2026-08-23. The module's front page, and its FIRST child, so /logistics opens
-    # on it. Every other module leads with an Overview; logistics redirected straight
-    # into Consignments, which asked the desk to start reading the queue before anything
-    # had told them the shape of the day.
+    # NEW 2026-08-23. The module's front page, and its FIRST child. It keeps its OWN
+    # url: `/logistics` is the module door and redirects to Shipments, where a
+    # logistics day is worked, so the Dashboard tab has to point at the Dashboard
+    # screen rather than follow that door.
     #
     # It reads `/api/transport/summary` and writes nothing, so it is guarded by the
     # transport code the Shipments register already needs — no new permission, and
     # `page.logistics_overview.view` inherits from `page.logistics_transport.view` (see
     # permissions.INHERITS_GRANTS_FROM) so the desk that works Shipments gets it without
     # anybody re-granting.
-    PageDef("logistics_overview", "/logistics/overview", "Overview",
+    PageDef("logistics_overview", "/logistics/overview", "Dashboard",
             parent="grp_logistics", module="logistics", icon="layout-dashboard",
             sort_order=0),
     PageDef("logistics_consignments", "/logistics/consignments", "Consignments",
@@ -359,6 +398,9 @@ PAGES: list[PageDef] = [
     PageDef("wh_qc_outward", "/warehouse/qc-outward", "Outward QC",
             parent="grp_warehouse", module="warehouse",
             icon="clipboard-check", sort_order=51),
+    PageDef("wh_demand_pool", "/warehouse/demand-pool", "Demand Pool",
+            parent="grp_warehouse", module="warehouse", icon="pie-chart",
+            sort_order=41),
 
     # ------------------------------------------------------------------ #
     #  Reports — ledgers that already existed with no way in
@@ -462,6 +504,11 @@ async def sync_permission_labels(db: AsyncSession) -> list[str]:
         spec = catalogue.get(row.code)
         if spec is None:
             continue  # not ours: left alone, same rule as an unknown page
+        if row.description != spec.description:
+            # Wording only — never a grant. The Job Profiles screen prints this, so a
+            # corrected sentence in the catalogue must reach every database.
+            row.description = spec.description
+            changed.append(f"{row.code}: relabelled")
         if (row.module, row.resource, row.action) == (
                 spec.module, spec.resource, spec.action):
             continue

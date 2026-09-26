@@ -23,12 +23,19 @@ const STATUSES = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
+/** `stockTransfer` splits Outward QC by who works it: `true` is the QC of stock
+ *  transfers (Inventory > Stock Transfer), `false` everything else (the warehouse's
+ *  own screen). `basePath` is where a row and New inspection open. */
 export default function QualityInspection({
   type = "INCOMING",
   title = "Quality inspection",
+  stockTransfer,
+  basePath,
 }: {
   type?: "INCOMING" | "OUTGOING";
   title?: string;
+  stockTransfer?: boolean;
+  basePath?: string;
 }) {
   const nav = useNavigate();
 
@@ -97,18 +104,21 @@ export default function QualityInspection({
   return (
     <DocumentList<Inspection>
       title={title}
-      queryKey={`wh-inspections-${type}`}
-      fetch={(p) => type === "OUTGOING" ? listOutboundInspections(p) as any : listInspections({ ...p, inspection_type: type })}
+      queryKey={`wh-inspections-${type}-${stockTransfer ?? "all"}`}
+      fetch={(p) => type === "OUTGOING"
+        ? listOutboundInspections(
+            stockTransfer === undefined ? p : { ...p, stock_transfer: stockTransfer } as any) as any
+        : listInspections({ ...p, inspection_type: type })}
       extraParams={{ inspection_type: type }}
       columns={columns}
       keyOf={(r) => r.id}
       searchIn={(r) => [r.inspection_no, r.grn_no, (r as any).issue_no, r.vendor_name, r.inspector_name]}
       searchPlaceholder="Search inspection, GRN or vendor…"
       statuses={STATUSES}
-      createTo="new"
+      createTo={basePath ? `${basePath}/new` : "new"}
       createLabel="New inspection"
       createPermission="grn.qc"
-      onRowClick={(r) => nav(String(r.id))}
+      onRowClick={(r) => nav(basePath ? `${basePath}/${r.id}` : String(r.id))}
       empty="No inspections match these filters."
       onDelete={(r) => type === "OUTGOING" ? deleteOutboundInspection(r.id) : deleteInspection(r.id)}
       canDelete={(r) => r.status === "DRAFT"}

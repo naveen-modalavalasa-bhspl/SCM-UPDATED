@@ -24,7 +24,7 @@ import {
   useAllRequestsUrlState,
 } from "../context/AllRequestsUrlState";
 import { formatIndentShortDate } from "../dateTime";
-import { INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+import { INDENT_LIST_TYPES, INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 
 interface Column<T> {
   key: string;
@@ -116,6 +116,9 @@ function IndentListContent({
     // Only when on: sending `false` would put a param in every query key for a
     // filter nobody asked for.
     region_unassigned: includeUnassignedRegion || undefined,
+    // Stock transfer requests are indents underneath, and are listed on Inventory >
+    // Stock Transfer instead.
+    indent_type: INDENT_LIST_TYPES,
     sort_by: sortBy,
     sort_dir: sortDir,
     page,
@@ -180,7 +183,7 @@ function IndentListContent({
     {
       key: "req",
       header: "Requested by",
-      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[16%]",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[15%]",
       hideOnNarrow: true,
       render: (row) => <span className="block truncate">{row.requested_by_name ?? "-"}</span>,
     },
@@ -224,6 +227,17 @@ function IndentListContent({
       className: "w-0 px-4 text-left align-middle lg:w-[10%]",
       hideOnNarrow: true,
       render: (row) => <span className="whitespace-nowrap text-muted">{formatIndentShortDate(row.created_at)}</span>,
+    },
+    {
+      key: "age",
+      header: "Age",
+      className: "w-0 px-4 text-left align-middle lg:w-[8%]",
+      hideOnNarrow: true,
+      render: (row) => (
+        <span className="whitespace-nowrap tabular-nums text-muted">
+          {row.age_days == null ? "-" : `${row.age_days} ${row.age_days === 1 ? "day" : "days"}`}
+        </span>
+      ),
     },
   ];
   const colByKey = Object.fromEntries(columns.map((column) => [column.key, column])) as Record<string, Column<IndentListRow>>;

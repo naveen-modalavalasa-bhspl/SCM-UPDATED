@@ -49,6 +49,8 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     // request stays at QUOTING while the award is in approval — so this lands on the
     // transport screen, which offers the decision off `awarded_at`, not off a status.
     case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?approval=1`;
+    case "STOCK_ADJUSTMENT": return `/inventory/adjustments?review=${document.doc_id}`;
+    case "STOCK_TRANSFER": return `/inventory/transfers?tab=orders&review=${document.doc_id}`;
     default: return "/approvals";
   }
 }
@@ -88,6 +90,8 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "STOCK_RETURN_LOGISTICS": return `/returns/${document.doc_id}`;
     case "TRANSPORT_REQUEST": return `/logistics/shipments/${document.doc_id}?decision=1`;
     case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?decision=1`;
+    case "STOCK_ADJUSTMENT": return `/inventory/adjustments?review=${document.doc_id}`;
+    case "STOCK_TRANSFER": return `/inventory/transfers?tab=orders&review=${document.doc_id}`;
     default: return "/approvals/decisions";
   }
 }

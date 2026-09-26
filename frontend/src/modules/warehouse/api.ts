@@ -26,6 +26,7 @@ import type {
   LocationOption,
   VolumeBudget,
   ItemLocationsOut,
+  StockReportScopes,
   ListParams,
   LocationOccupancy,
   Notification,
@@ -48,6 +49,7 @@ import type {
   PutawayUnitCode,
   PutawayCreate,
   Receipt,
+  ReceiptRouting,
   ReceiptWrite,
   SerialNumber,
   StockAvailability,
@@ -216,6 +218,15 @@ export const convertReceiptToGrn = (id: number) =>
 /** Freezes the receipt and raises the inspection tasks behind it. */
 export const submitReceipt = (id: number) => post<Receipt>(`${BASE}/receipts/${id}/submit`);
 
+/** Where each GRN line goes — a QC draft or straight to putaway. A forecast before
+ *  submit, the record after it. */
+export const getReceiptRouting = (id: number) =>
+  get<ReceiptRouting>(`${BASE}/receipts/${id}/routing`);
+
+/** Splits a GRN the retired GRN approval left at SUBMITTED with nothing raised. */
+export const routeParkedReceipt = (id: number) =>
+  post<Receipt>(`${BASE}/receipts/${id}/route`);
+
 /** Pass an arrived consignment on to the points below — the MDP leg of WH -> MDP -> LIP.
  *  Builds one DRAFT issue per indent; the storekeeper still reviews and submits. */
 export const forwardArrival = (id: number) =>
@@ -277,17 +288,42 @@ export const cancelInspection = (id: number, reason?: string) =>
 
 /* ----------------------------------------------------------- qc outward -- */
 
+/** Older inspections store per-unit objects while the editor consumes identifiers. */
+const serialStrings = (value: unknown): string[] => {
+  const values = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? Object.values(value as Record<string, unknown>).flatMap((entry) =>
+          Array.isArray(entry) ? entry : [entry])
+      : [];
+  return [...new Set(values.map((entry) => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object") return "";
+    const unit = entry as Record<string, unknown>;
+    return String(unit.serial_number ?? unit.serial_no ?? unit.asset_code
+      ?? unit.consumable_code ?? unit.imei_no ?? "");
+  }).filter(Boolean))];
+};
+
+const normaliseOutboundInspection = (row: OutboundInspection): OutboundInspection => ({
+  ...row,
+  items: row.items?.map((line) => ({
+    ...line,
+    serial_numbers: serialStrings((line as { serial_numbers?: unknown }).serial_numbers),
+  })),
+});
+
 export const listOutboundInspections = (params: ListParams = {}) =>
   get<Page<OutboundInspection>>(`${BASE}/outbound-inspections`, params);
 
 export const getOutboundInspection = (id: number) =>
-  get<OutboundInspection>(`${BASE}/outbound-inspections/${id}`);
+  get<OutboundInspection>(`${BASE}/outbound-inspections/${id}`).then(normaliseOutboundInspection);
 
 export const createOutboundInspection = (body: OutboundInspectionWrite) =>
-  post<OutboundInspection>(`${BASE}/outbound-inspections`, body);
+  post<OutboundInspection>(`${BASE}/outbound-inspections`, body).then(normaliseOutboundInspection);
 
 export const updateOutboundInspection = (id: number, body: OutboundInspectionWrite) =>
-  put<OutboundInspection>(`${BASE}/outbound-inspections/${id}`, body);
+  put<OutboundInspection>(`${BASE}/outbound-inspections/${id}`, body).then(normaliseOutboundInspection);
 
 export const completeOutboundInspection = (id: number) =>
   post<OutboundInspection>(`${BASE}/outbound-inspections/${id}/complete`);
@@ -358,6 +394,15 @@ export const getStockMovementOrder = (order_no: string) =>
 
 export const createStockMovementOrder = (body: StockMovementOrderWrite) =>
   post<StockMovementOrder>(`${BASE}/stock-movement-orders`, body);
+
+export const submitStockMovementOrder = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/submit`);
+
+export const completeStockMovementInspection = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/complete-inspection`);
+
+export const completeStockMovementOrder = (id: number) =>
+  post<StockMovementOrder>(`${BASE}/stock-movement-orders/${id}/complete`);
 
 /** Approve or reject a movement waiting on a signature. Only reachable when the
  *  project has an approval ladder configured for STOCK_MOVEMENT_ORDER — with none
@@ -680,6 +725,10 @@ export const listSerials = (
     // Scope the list to one issue line: units another document — or another line of
     // the same issue — is already holding drop out, the ones this line holds stay.
     issue_id?: number; issue_line_id?: number;
+    // No batch named means the UNBATCHED lot, not any batch in the bay.
+    unbatched?: boolean;
+    // Only units no document is holding — a stock movement's picker.
+    claim_free?: boolean;
   } = {},
 ) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
@@ -689,6 +738,58 @@ export const listBatches = (params: ListParams & { item_id?: number; expiring_da
 
 export const getItemLocations = ({ warehouse_id, item_id, location_id }: { warehouse_id: number; item_id?: number | null; location_id?: number | null }) =>
   get<ItemLocationsOut[]>(`${BASE}/stock-segregation/item-locations`, { warehouse_id, item_id, location_id });
+
+/* --------------------------------------- stock by location, as a download -- */
+
+/**
+ * What each of the two downloads would contain, BEFORE either is pulled.
+ *
+ * "The Floor 1 report" means two different files — the floor row itself, or the floor
+ * and every bay under it — and on a real building the first is usually empty. The
+ * counts are what make that visible, so they are fetched as soon as a location is
+ * picked rather than after somebody has opened a blank spreadsheet.
+ */
+export const stockReportScopes = (params: {
+  warehouse_id: number;
+  location_id?: number | null;
+  item_id?: number | null;
+}) => get<StockReportScopes>(`${BASE}/stock-segregation/report/scopes`, params);
+
+/** The file itself. Goes through the shared axios client so it carries the bearer
+ *  token — a plain <a href> would hit the endpoint unauthenticated and 401. */
+export const downloadStockReport = async (params: {
+  warehouse_id: number;
+  scope: "LOCATION" | "HIERARCHY";
+  location_id?: number | null;
+  item_id?: number | null;
+  format?: "xlsx" | "csv";
+}) => {
+  const response = await api.get<Blob>(`${BASE}/stock-segregation/report/export`, {
+    params: { format: "xlsx", ...params },
+    responseType: "blob",
+  });
+  // The server names the file — it knows the location, the scope and the timestamp,
+  // and a name invented here would drift from the header block inside the file.
+  const disposition = String(response.headers?.["content-disposition"] ?? "");
+  const named = /filename="?([^";]+)"?/.exec(disposition)?.[1];
+  return {
+    blob: response.data,
+    filename: named ?? `stock-report.${params.format ?? "xlsx"}`,
+  };
+};
+
+/** Hands a blob to the browser as a download. Kept here so no page has to know about
+ *  object URLs. */
+export const saveStockReport = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
 
 export interface ScanLine {
   item_code?: string | null;
@@ -826,6 +927,15 @@ export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options
  *  would then hide. */
 export const warehouseOptions = (_search?: string) =>
   get<WarehouseOption[]>(`${BASE}/options/warehouses`);
+
+/** Warehouses only — the LIP/MDP rungs of the distribution chain dropped.
+ *  For a field that names a WAREHOUSE (a load leaving the building, say) rather than
+ *  any stocking point: the two chain tiers hold real stock but are not the warehouse,
+ *  and `warehouse_type` is already on every row, so the line is drawn here rather
+ *  than in a screen. Same scoping as `warehouseOptions` — this login's points only. */
+export const warehouseTierOptions = async (search?: string) =>
+  (await warehouseOptions(search)).filter(
+    (w) => w.warehouse_type !== "LIP" && w.warehouse_type !== "MDP");
 
 /** Every active point in the network. ONLY for a destination field — you transfer
  *  or dispatch TO somewhere you do not hold, so scoping those would break transfers. */
@@ -1002,3 +1112,35 @@ export const deleteIssue = (id: number) => del(`${BASE}/issues/${id}`);
 export const deleteDispatch = (id: number) => del(`${BASE}/dispatches/${id}`);
 export const deletePurchaseReturn = (id: number) => del(`${BASE}/returns/${id}`);
 export const deleteStockMovement = (id: number) => del(`${BASE}/stock-movements/${id}`);
+
+
+// --------------------------------------------------------------------------- //
+//  Warehouse Demand Pool  (2026-09-25)
+// --------------------------------------------------------------------------- //
+
+import type { WDemandPoolResponse, WDemandPoolStage } from './types';
+
+/** Stage metadata served by the backend � never hardcoded in the screen. */
+export const warehouseDemandPoolApi = {
+  stages: (signal?: AbortSignal) =>
+    api.get<WDemandPoolStage[]>('/api/warehouse/demand-pool/stages', { signal })
+      .then((r) => r.data),
+
+  pool: (params: {
+    search?: string;
+    item_id?: number;
+    warehouse_id?: number;
+    project_id?: number;
+    stage?: string;
+    page?: number;
+    size?: number;
+  } = {}, signal?: AbortSignal) =>
+    api.get<WDemandPoolResponse>('/api/warehouse/demand-pool', { params, signal })
+      .then((r) => r.data),
+};
+
+export const warehouseDemandPoolKeys = {
+  stages: () => ['warehouse', 'demand-pool', 'stages'] as const,
+  pool: (params: Record<string, unknown> = {}) =>
+    ['warehouse', 'demand-pool', params] as const,
+};

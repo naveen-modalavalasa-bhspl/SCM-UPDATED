@@ -185,12 +185,23 @@ class DocType(str, Enum):
     # engine when the two points sit in different projects — a same-project transfer
     # is the holder's own call and never starts a workflow at all.
     STOCK_TRANSFER = "STOCK_TRANSFER"
+    # A Stock Transfer REQUEST (STR): one point asking another to send it stock. It is
+    # carried as an indent (`indents.IndentType.STR`) so the serve, issue, consignment
+    # and acknowledgement legs are the indent's own, and this value is only the LADDER
+    # it is approved on (engine context `ladder_doc_type`) — the instance itself stays
+    # doc type INDENT, so every inbox, deep link and approve permission still resolves.
+    STOCK_TRANSFER_REQUEST = "STOCK_TRANSFER_REQUEST"
     # Stock moving between BINS inside one warehouse. Its own doc type, not
     # STOCK_TRANSFER: a transfer crosses stocking points and is the receiving side's
     # business, while a movement never leaves the building and is the point owner's
     # own. Added 2026-08-21 — before it, a movement went through no ladder at all and
     # `stock.movement.approve` existed with nothing able to call it.
     STOCK_MOVEMENT_ORDER = "STOCK_MOVEMENT_ORDER"
+    # A stock audit: the physical count against what the system holds, and the
+    # correction that follows. Only put through the engine when a project configured a
+    # chain for it on Approval Flow; otherwise one holder of `stock.adjust.approve`
+    # signs (inventory.service.act_on_adjustment).
+    STOCK_ADJUSTMENT = "STOCK_ADJUSTMENT"
     # Material going back UP the chain: a LIP returning expired or damaged stock to
     # the MDP above it. Its own doc type, not STOCK_TRANSFER — a transfer is the
     # holder's own call and a return has to be sanctioned by the tier receiving it.
@@ -199,6 +210,10 @@ class DocType(str, Enum):
     # material and where it then goes, which is a different ladder from the one that
     # let the material leave — hence a second doc type rather than a second stage.
     STOCK_RETURN_RECEIPT = "STOCK_RETURN_RECEIPT"
+    # The return's LOGISTICS rung. RETIRED as a live rung on 2026-09-10 (nothing opens
+    # an instance for it any more — see platform/workflow/ladder.RETIRED_DOC_TYPES), but
+    # the value stays: a return that was already sitting on it still has to render, and
+    # the engine reads DOC_TYPE_LABEL for the stage name on those rows.
     STOCK_RETURN_LOGISTICS = "STOCK_RETURN_LOGISTICS"
     # Logistics. The warehouse has packed and asks for transport; this is the request
     # that says what is moving, how heavy it is and by which mode. Signed by Logistics
