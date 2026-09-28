@@ -4034,32 +4034,47 @@ async def quote_price_trail(db: AsyncSession, quotation_id: int,
                    "discount_amount": first.get("discount_amount", 0),
                    "grand_total": first.get("grand_total", 0)},
         "lines": first.get("items", []),
+        "buyer_requested_lines": first.get("items", []),
         "cr_no": None, "reason": None, "note": None,
     })
-    for version, cr in enumerate(crs, start=2):
+    for idx, cr in enumerate(crs):
+        version_num = idx + 2
+        if idx + 1 < len(crs):
+            accepted_snap = crs[idx + 1].snapshot_before
+        else:
+            accepted_snap = _quote_snapshot(quote)
+
+        buyer_req_lines = _cr_out_lines(cr)
+        buyer_sub = sum(
+            float(_d(l.get("proposed_quantity", 0)) * _d(l.get("proposed_rate", 0)) * (1 - _d(l.get("proposed_discount_percent", 0)) / 100))
+            for l in buyer_req_lines
+        )
+        buyer_tax = sum(
+            float(_d(l.get("proposed_quantity", 0)) * _d(l.get("proposed_rate", 0)) * (1 - _d(l.get("proposed_discount_percent", 0)) / 100) * (_d(l.get("tax_percent", 0)) / 100))
+            for l in buyer_req_lines
+        )
+        freight = float(_d((cr.snapshot_before or {}).get("freight_amount", 0)))
+        discount = float(_d((cr.snapshot_before or {}).get("discount_amount", 0)))
+        buyer_grand = buyer_sub + buyer_tax + freight - discount
+
         trail.append({
-            "version": version,
+            "version": version_num,
             "source": "CHANGE_REQUEST",
             "effective_at": cr.supplier_decided_at,
-            "changed_by": quote.vendor_name or f"Vendor {quote.vendor_id}",
-            "totals": {"sub_total": None, "tax_amount": None,
-                       "freight_amount": None, "discount_amount": None,
-                       "grand_total": None},
-            "lines": cr.proposed_lines,
+            "changed_by": cr.proposed_by_name or quote.vendor_name or f"Vendor {quote.vendor_id}",
+            "totals": {"sub_total": accepted_snap.get("sub_total", 0),
+                       "tax_amount": accepted_snap.get("tax_amount", 0),
+                       "freight_amount": accepted_snap.get("freight_amount", 0),
+                       "discount_amount": accepted_snap.get("discount_amount", 0),
+                       "grand_total": accepted_snap.get("grand_total", 0)},
+            "lines": accepted_snap.get("items", []),
+            "buyer_requested_lines": buyer_req_lines,
+            "buyer_requested_totals": {"sub_total": buyer_sub, "tax_amount": buyer_tax,
+                                       "freight_amount": freight, "discount_amount": discount,
+                                       "grand_total": buyer_grand},
             "cr_no": cr.cr_no, "reason": cr.reason,
             "note": cr.supplier_decision_note,
         })
-    if quote.status not in (QuotationStatus.SUBMITTED.value,
-                            QuotationStatus.REVISED.value):
-        return trail
-    trail[-1]["totals"] = {
-        "sub_total": float(_d(quote.sub_total)),
-        "tax_amount": float(_d(quote.tax_amount)),
-        "freight_amount": float(_d(quote.freight_amount)),
-        "discount_amount": float(_d(quote.discount_amount)),
-        "grand_total": float(_d(quote.grand_total)),
-    }
-    trail[-1]["lines"] = _quote_snapshot(quote)["items"]
     return trail
 
 
@@ -4742,6 +4757,18 @@ def _vendor_visible():
 async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
                            params: PageParams, search: str | None = None,
                            status: str | None = None) -> dict:
+    # Find all RFQs where this vendor has a quotation with an open change request awaiting supplier response
+    pending_cr_rfq_ids = set(
+        (await db.execute(
+            select(QuoteChangeRequest.rfq_id)
+            .join(Quotation, Quotation.id == QuoteChangeRequest.quotation_id)
+            .where(
+                Quotation.vendor_id == vendor_id,
+                QuoteChangeRequest.status == QuoteChangeStatus.AWAITING_SUPPLIER.value
+            )
+        )).scalars().all()
+    )
+
     stmt = (
         select(RFQ, RFQVendor.status)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
@@ -4757,9 +4784,10 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
                 RFQ.title.ilike(f"%{search}%")
             )
         )
-    # Narrowing only, and only within `_vendor_visible()` — a vendor asking for DRAFT
-    # gets an empty page, never an internal RFQ.
-    if status:
+    # Narrowing only: handle CHANGE_PROPOSED / AWAITING_SUPPLIER filter specifically
+    if status in ("CHANGE_PROPOSED", "CHANGE_REQUESTED", "AWAITING_SUPPLIER"):
+        stmt = stmt.where(RFQ.id.in_(pending_cr_rfq_ids or {0}))
+    elif status:
         stmt = stmt.where(RFQ.status == status, _vendor_visible())
     stmt = stmt.order_by(RFQ.created_at.desc())
     
@@ -4767,7 +4795,12 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
     result = await db.execute(stmt.offset(params.offset).limit(params.size))
     items = []
     for rfq, vendor_status in result.all():
-        rfq.vendor_status = vendor_status
+        if rfq.id in pending_cr_rfq_ids:
+            rfq.has_pending_change_request = True
+            rfq.vendor_status = "CHANGE_PROPOSED"
+        else:
+            rfq.has_pending_change_request = False
+            rfq.vendor_status = vendor_status
         items.append(rfq)
     return {"items": items, "total": total or 0, "page": params.page, "size": params.size}
 

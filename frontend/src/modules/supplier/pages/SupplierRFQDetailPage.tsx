@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { History } from "lucide-react";
+import { ChevronDown, History } from "lucide-react";
 import {
   Card, ConfirmModal, ErrorBanner, Field, Input, StatusPill, Textarea, useToast,
 } from "@/shared/components";
@@ -519,29 +519,34 @@ export function SupplierRFQDetailPage() {
 
       <Card className="mb-6 space-y-6 p-6 border-0 shadow-lg ring-1 ring-black/5 bg-white">
         {priceTrailVersions.length > 1 && (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-surface-2/60 p-2.5">
-            <div className="flex items-center gap-1.5">
-              <History className="h-4 w-4 text-brand" />
-              <span className="text-xs font-bold text-ink uppercase tracking-wider">Version History:</span>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-brand/20 bg-gradient-to-r from-brand/5 via-sky-50/50 to-indigo-50/40 p-3 shadow-sm">
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand/10 text-brand">
+                <History className="h-4 w-4" />
+              </div>
+              <div>
+                <span className="block text-xs font-bold uppercase tracking-wider text-ink">Version History</span>
+                <span className="text-[11px] text-muted">Select version snapshot to view</span>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-1">
-              {priceTrailVersions.map((v) => {
-                const isSelected = (selectedVersionNum === v.version) || (selectedVersionNum === null && v.version === latestVersionNum);
-                return (
-                  <button
-                    key={v.version}
-                    type="button"
-                    onClick={() => setSelectedVersionNum(v.version === latestVersionNum ? null : v.version)}
-                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition ${
-                      isSelected
-                        ? "bg-brand text-white shadow-sm"
-                        : "bg-white/80 text-muted hover:bg-white hover:text-ink border border-line"
-                    }`}
-                  >
-                    v{v.version} {v.version === 1 ? "(Original)" : v.cr_no ? `(${v.cr_no})` : ""}
-                  </button>
-                );
-              })}
+            <div className="relative">
+              <select
+                value={selectedVersionNum ?? latestVersionNum}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setSelectedVersionNum(val === latestVersionNum ? null : val);
+                }}
+                className="h-9 rounded-xl border border-brand/30 bg-white py-1 pl-3.5 pr-9 text-xs font-bold text-ink shadow-sm outline-none transition-all hover:border-brand focus:border-brand focus:ring-2 focus:ring-brand/20 cursor-pointer appearance-none"
+              >
+                {[...priceTrailVersions]
+                  .sort((a, b) => b.version - a.version)
+                  .map((v) => (
+                    <option key={v.version} value={v.version}>
+                      v{v.version} {v.version === latestVersionNum ? "(Latest - Current Quote)" : v.version === 1 ? "(Original Quote)" : v.cr_no ? `(${v.cr_no})` : ""}
+                    </option>
+                  ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             </div>
           </div>
         )}
@@ -549,7 +554,7 @@ export function SupplierRFQDetailPage() {
         {activeVersionObj && (
           <div className="rounded-xl border border-sky-300 bg-sky-50 p-4 text-sky-900 text-xs font-medium flex items-center justify-between gap-2">
             <div>
-              <span className="font-bold">Viewing Version {activeVersionObj.version} Snapshot ({activeVersionObj.source})</span> — Historical view only.
+              <span className="font-bold">Viewing Version {activeVersionObj.version} Supplier Accepted Snapshot</span> — Historical view only.
             </div>
             <button
               onClick={() => setSelectedVersionNum(null)}
@@ -927,7 +932,7 @@ export function SupplierRFQDetailPage() {
       </ConfirmModal>
 
       <div className="mt-8">
-        <QuotePriceTrail rfqId={rfqId} side="SUPPLIER" />
+        <QuotePriceTrail rfqId={rfqId} side="SUPPLIER" selectedVersion={selectedVersionNum} onSelectVersion={setSelectedVersionNum} />
       </div>
     </div>
   );

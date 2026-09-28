@@ -422,6 +422,8 @@ export interface RFQListRow {
   /** Freeze Prices (2026-09-26): the tender is closed to pricing. Suppliers can no
    *  longer quote or change prices; POs can be raised against its quotations. */
   is_price_frozen?: boolean;
+  /** True when the buyer has sent a change request on this supplier's quotation that is awaiting answer. */
+  has_pending_change_request?: boolean;
   created_at: string;
 }
 
@@ -635,6 +637,14 @@ export interface PriceTrailVersion {
     grand_total: number | null;
   };
   lines: Record<string, unknown>[];
+  buyer_requested_lines?: Record<string, unknown>[];
+  buyer_requested_totals?: {
+    sub_total: number | null;
+    tax_amount: number | null;
+    freight_amount: number | null;
+    discount_amount: number | null;
+    grand_total: number | null;
+  };
   cr_no?: string | null;
   reason?: string | null;
   note?: string | null;
