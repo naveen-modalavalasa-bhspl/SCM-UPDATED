@@ -58,3 +58,37 @@ async def fire_sto_approved(db, sto, user) -> None:
             logger.exception(
                 "post-approval hook %s failed for stock transfer %s",
                 getattr(hook, "__name__", hook), getattr(sto, "sto_no", None))
+
+
+#: Called for every stock movement INTO a warehouse that means goods arrived there —
+#: a GRN / receipt posting, a consignment credited at its destination (indent or issue
+#: acknowledged), or an internal transfer landing. Runs INSIDE the caller's
+#: transaction, right after the ledger row is flushed, so whatever a hook records is
+#: committed with the stock or not at all. Signature: `(db, movement, user)`, where
+#: `movement` is the `StockMovement` just written.
+#:
+#: Registered by `integrations.adapters.aims` (the AIMS outbox) — inventory may not
+#: import integrations (rule 5), so the direction is inverted like the hooks above.
+ON_STOCK_IN: list[Callable[..., Awaitable[None]]] = []
+
+#: The ledger `ref_type`s that mean "goods arrived at this warehouse".
+STOCK_IN_REF_TYPES = frozenset({"GRN", "RECEIPT", "DISPATCH", "TRANSFER", "STO"})
+
+
+async def fire_stock_in(db, movement, user) -> None:
+    """Run every registered stock-in hook, each in its own SAVEPOINT.
+
+    A hook that fails rolls back only its own savepoint and is logged: the stock
+    movement it observes is the business event, and an outside system's bookkeeping
+    must never refuse or unwind it. Nothing registered — the normal case in tests and
+    in any deployment without AIMS — and this is a no-op.
+    """
+    for hook in ON_STOCK_IN:
+        try:
+            async with db.begin_nested():
+                await hook(db, movement, user)
+        except Exception:  # noqa: BLE001 - an observer may never fail the movement
+            logger.exception(
+                "stock-in hook %s failed for ledger ref %s %s",
+                getattr(hook, "__name__", hook), getattr(movement, "ref_type", None),
+                getattr(movement, "ref_no", None))
