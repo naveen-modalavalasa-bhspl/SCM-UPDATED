@@ -178,6 +178,7 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      # reason the warehouse types are: the three-letter fallback gives
                      # "TRA" and "CON", neither of which is what anyone calls them.
                      "transport_request": "TR", "consolidation": "CONS",
+                     "consolidated_trip": "TRIP",
                      # FIXED 2026-08-21 — both of these fell through to the
                      # three-letter fallback, and `STOCK_MOVEMENT`[:3] is "STO", which
                      # is what everybody in this system reads as a Stock TRANSFER

@@ -76,6 +76,8 @@ const ConsolidationPage = lazy(() => import("@/modules/approvals").then((m) => (
 const DecisionQueuePage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.DecisionQueuePage })));
 const DispatchConfirmPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.DispatchConfirmPage })));
 const DispatchPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.DispatchPage })));
+const SmartLoadPlannerPage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.SmartLoadPlannerPage })));
+const TripConsolePage = lazy(() => import("@/modules/logistics").then((m) => ({ default: m.TripConsolePage })));
 const DispatchPrintPage = lazy(() => import("@/modules/warehouse/pages/DispatchPrintPage").then((m) => ({ default: m.DispatchPrintPage })));
 const FallbackLogPage = lazy(() => import("@/modules/admin/pages/FallbackLogPage").then((m) => ({ default: m.FallbackLogPage })));
 const ForgotPasswordPage = lazy(() => import("@/pages/PasswordResetPages").then((m) => ({ default: m.ForgotPasswordPage })));
@@ -204,6 +206,14 @@ function LegacyTransportRedirect() {
   const { pathname, search, hash } = useLocation();
   const tail = pathname.replace(/^\/logistics\/transport/, "");
   return <Navigate to={`/logistics/shipments${tail}${search}${hash}`} replace />;
+}
+
+/* /logistics/trips/<id> -> the trip console, which lives under the Smart Load Planner
+ * so the Logistics rail stays lit on it. Kept so a short link still lands. */
+function LegacyTripRedirect() {
+  const { pathname, search } = useLocation();
+  const tail = pathname.replace(/^\/logistics\/trips/, "");
+  return <Navigate to={`/logistics/load-planner/trips${tail}${search}`} replace />;
 }
 
 /* /inventory/allocation-approvals -> the Fulfilment Desk's Approvals tab.
@@ -488,6 +498,10 @@ function AppRoutes() {
             Consignments and enters the short barcode. */}
         <Route path="logistics/scan/*" element={<ScanViewScreen />} />
         <Route path="logistics/dispatch" element={<DispatchPage />} />
+        <Route path="logistics/load-planner" element={<SmartLoadPlannerPage />} />
+        {/* One multi-drop trip: its route, its stops, and who has signed at each. */}
+        <Route path="logistics/load-planner/trips/:id" element={<TripConsolePage />} />
+        <Route path="logistics/trips/:id" element={<LegacyTripRedirect />} />
         {/* The press itself: consignment, gate pass, mode, provider. Reached from the
          * queue and from a packed consignment — a logistics day never crosses into
          * the warehouse module to send something out. */}

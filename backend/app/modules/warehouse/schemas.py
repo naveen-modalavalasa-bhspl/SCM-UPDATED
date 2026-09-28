@@ -72,6 +72,11 @@ class WarehouseRead(_Read):
     office_name: str | None = None
     warehouse_type: str
     address: str | None = None
+    latitude: Decimal | None = None
+    longitude: Decimal | None = None
+    coordinate_source: str | None = None
+    coordinate_label: str | None = None
+    coordinate_confidence: Decimal | None = None
     incharge_id: int | None = None
     incharge_name: str | None = None
     is_bin_managed: bool
@@ -88,10 +93,135 @@ class WarehouseWrite(BaseModel):
     office_id: int | None = None
     warehouse_type: str = "MAIN"
     address: str | None = None
+    latitude: Decimal | None = Field(default=None, ge=-90, le=90)
+    longitude: Decimal | None = Field(default=None, ge=-180, le=180)
     incharge_id: int | None = None
     is_bin_managed: bool = False
     requires_inward: bool | None = None
     is_active: bool = True
+
+    @model_validator(mode="after")
+    def coordinates_are_a_pair(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Latitude and longitude must be entered together")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Smart Load Planner / consolidated (multi-drop) trips — see `trips.py`
+# ---------------------------------------------------------------------------
+
+#: The planning inputs a run may override. Every one optional: what is not sent comes
+#: from the site's policy (`logistics.trip_planner.*`).
+_POLICY_KEYS = {"capacity_kg", "capacity_cbm", "volume_fill_pct", "max_packages",
+                "max_stops", "max_detour_pct", "detour_floor_km", "cost_per_km",
+                "road_factor", "return_to_origin", "default_package_kg",
+                "default_package_cbm"}
+
+
+class PlannerPolicyIn(BaseModel):
+    capacity_kg: float | None = Field(default=None, gt=0, le=100000)
+    #: The cargo box in m³; 0 = not limited by volume.
+    capacity_cbm: float | None = Field(default=None, ge=0, le=500)
+    volume_fill_pct: float | None = Field(default=None, ge=10, le=100)
+    max_packages: int | None = Field(default=None, ge=0, le=100000)
+    max_stops: int | None = Field(default=None, ge=1, le=25)
+    max_detour_pct: float | None = Field(default=None, ge=0, le=300)
+    detour_floor_km: float | None = Field(default=None, ge=0, le=500)
+    cost_per_km: float | None = Field(default=None, ge=0, le=100000)
+    road_factor: float | None = Field(default=None, ge=1, le=3)
+    return_to_origin: bool | None = None
+    #: What an unweighed / unmeasured package is ASSUMED to be. 0 = no assumption.
+    default_package_kg: float | None = Field(default=None, ge=0, le=2000)
+    default_package_cbm: float | None = Field(default=None, ge=0, le=20)
+
+    def policy_overrides(self) -> dict:
+        return self.model_dump(exclude_none=True, include=_POLICY_KEYS)
+
+
+class VehicleProfileIn(BaseModel):
+    code: str = Field(min_length=1, max_length=30)
+    label: str = Field(min_length=1, max_length=100)
+    capacity_kg: float = Field(gt=0, le=100000)
+    capacity_cbm: float = Field(default=0, ge=0, le=500)
+    max_packages: int = Field(default=0, ge=0, le=100000)
+    cost_per_km: float = Field(default=0, ge=0, le=100000)
+
+
+class PlannerPolicySave(PlannerPolicyIn):
+    vehicle_profiles: Annotated[list[VehicleProfileIn], ConfigEntries] | None = None
+
+
+class TripRecommendIn(PlannerPolicyIn):
+    warehouse_id: int
+    departure_date: date | None = None
+
+
+class TripEvaluateIn(TripRecommendIn):
+    dispatch_ids: Annotated[list[int], BatchIds]
+    #: Destination warehouse ids in the order the desk wants them visited. Anything
+    #: it leaves out is appended in the optimised order.
+    stop_order: Annotated[list[int], BatchIds] | None = None
+
+    @field_validator("dispatch_ids")
+    @classmethod
+    def _unique(cls, value):
+        return list(dict.fromkeys(value))
+
+
+class TripCreateIn(TripEvaluateIn):
+    departure_date: date
+    policy_name: str | None = Field(default=None, max_length=100)
+    vehicle_profile: str | None = Field(default=None, max_length=100)
+    remarks: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("dispatch_ids")
+    @classmethod
+    def _at_least_two(cls, value):
+        value = list(dict.fromkeys(value))
+        if len(value) < 2:
+            raise ValueError("A trip combines at least two consignments — "
+                             "dispatch a single one from the Dispatch queue")
+        return value
+
+
+class TripStopDeliverIn(BaseModel):
+    received_by_name: str | None = Field(default=None, max_length=200)
+    remarks: str | None = Field(default=None, max_length=500)
+    delivered_at: datetime | None = None
+    pod_url: str | None = Field(default=None, max_length=500)
+
+    @field_validator("pod_url")
+    @classmethod
+    def _pod_is_a_link(cls, value):
+        from app.modules.logistics.schemas import http_link
+        return http_link(value)
+
+
+class PackageMeasureIn(BaseModel):
+    """One carton, weighed and measured on the load planner. A field left out is
+    left as it is."""
+    package_id: int
+    weight_kg: Decimal | None = Field(default=None, gt=0, le=100000)
+    length_cm: Decimal | None = Field(default=None, gt=0, le=5000)
+    width_cm: Decimal | None = Field(default=None, gt=0, le=5000)
+    height_cm: Decimal | None = Field(default=None, gt=0, le=5000)
+
+
+class ConsignmentMeasuresIn(BaseModel):
+    packages: Annotated[list[PackageMeasureIn], DocumentLines, Field(min_length=1)]
+
+
+class TripCancelIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class PointLocationIn(BaseModel):
+    """A stocking point pinned on the planner map. Bounded to India: a pin in the
+    Atlantic is a slipped click, and the planner would route a truck to it."""
+    latitude: float = Field(ge=6, le=37.5)
+    longitude: float = Field(ge=68, le=97.5)
+    label: str | None = Field(default=None, max_length=200)
 
 
 class BinRead(_Read):

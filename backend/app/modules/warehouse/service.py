@@ -477,7 +477,11 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
     if existing:
         raise ValidationError(f"Warehouse code {data.code} is already in use")
 
-    wh = Warehouse(**data.model_dump())
+    values = data.model_dump()
+    if data.latitude is not None:
+        values.update(coordinate_source="MANUAL", coordinate_label=data.name,
+                      coordinate_confidence=Decimal("1"))
+    wh = Warehouse(**values)
     db.add(wh)
     await db.flush()
     await write_audit(db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,
@@ -507,8 +511,20 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
             raise ValidationError(
                 "This warehouse has bins. Remove them before switching it to bulk storage.")
 
+    moved = (_d(wh.latitude) != _d(data.latitude) or _d(wh.longitude) != _d(data.longitude)
+             or (wh.latitude is None) != (data.latitude is None))
     for field, value in data.model_dump().items():
         setattr(wh, field, value)
+    # Only a coordinate somebody actually TYPED is a verified pin. The form sends the
+    # stored pair back on every save, and relabelling a gazetteer match as MANUAL
+    # because a name was corrected would promote a guess to the planner's highest
+    # trust without anyone having looked at the map.
+    if moved and data.latitude is not None:
+        wh.coordinate_source = "MANUAL"
+        wh.coordinate_label = data.name
+        wh.coordinate_confidence = Decimal("1")
+    elif data.latitude is None:
+        wh.coordinate_source = wh.coordinate_label = wh.coordinate_confidence = None
     await db.flush()
     await write_audit(db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,
                       action=AuditAction.UPDATE, actor=user,
@@ -11422,6 +11438,10 @@ async def _sign_transport_for_indent(db: AsyncSession, indent_id: int, user, *,
 
     await _raise_receipt_claim(db, legs, reported, remarks, user)
     await _close_signed_legs(db, legs, user)
+    # A consignment that travelled on a multi-drop trip: its stop, and — once every
+    # stop has signed — the trip's shipment, settle here in the same transaction.
+    from app.modules.warehouse import trips
+    await trips.sync_for_indent(db, indent_id, user, condition=reported, remarks=remarks)
     return [leg.tr_no for leg in legs]
 
 
@@ -13177,6 +13197,10 @@ async def _apply_dispatch_acknowledgement(db: AsyncSession, dispatch: m.Dispatch
             if await _is_final_delivery_leg(db, issue, dispatch):
                 await _close_indents_on_issue(db, issue, user)
 
+    # Whichever door the signature came through, a consignment on a multi-drop trip
+    # rolls its stop — and, at the last one, the trip's shipment — up with it.
+    from app.modules.warehouse import trips
+    await trips.sync_for_dispatches(db, [dispatch.id], user)
     return short
 
 
@@ -13187,6 +13211,21 @@ async def cancel_dispatch(db: AsyncSession, dispatch_id: int, reason: str | None
            {DispatchStatus.DRAFT.value, DispatchStatus.PENDING_APPROVAL.value,
             DispatchStatus.APPROVED.value, DispatchStatus.PACKED.value},
            "cancel", "dispatch")
+    # A consignment planned onto a trip is on that truck's manifest and its shipment's
+    # lines. Cancelling it underneath the trip would leave the carrier pricing a
+    # carton that is no longer coming; the trip is cancelled (and re-planned) first.
+    from app.modules.logistics.enums import ACTIVE_TRIP_STATUSES
+    from app.modules.logistics.models import ConsolidatedTrip, ConsolidatedTripConsignment
+    on_trip = await db.scalar(
+        select(ConsolidatedTrip.trip_no).join(
+            ConsolidatedTripConsignment,
+            ConsolidatedTripConsignment.trip_id == ConsolidatedTrip.id)
+        .where(ConsolidatedTripConsignment.dispatch_id == dispatch.id,
+               ConsolidatedTrip.status.in_(ACTIVE_TRIP_STATUSES)).limit(1))
+    if on_trip:
+        raise ValidationError(
+            f"{dispatch.dispatch_no} is planned on trip {on_trip}. Cancel that trip in "
+            "Smart Load Planner first — its other consignments go back to the queue.")
 
     before = {"status": dispatch.status}
     dispatch.status = DispatchStatus.CANCELLED.value
@@ -23156,6 +23195,12 @@ async def transport_released(db: AsyncSession, tr, user) -> None:
     if await _inbound_vehicle_released(db, tr, user):
         return
 
+    # A MULTI-DROP TRIP carries several consignments and names none of them in
+    # `dispatch_id`; the trip gates each one out through `_apply_gate_out` itself.
+    from app.modules.warehouse import trips
+    if await trips.trip_shipment_released(db, tr, user):
+        return
+
     # A PURCHASE RETURN'S OUTWARD LEG, on the other hand, DOES carry a consignment, so
     # this one records its rung and deliberately falls through rather than returning.
     # The gate-out below is the only place stock comes off the books, and short-circuiting
@@ -23998,3 +24043,9 @@ async def anywhere_in_reach(db: AsyncSession, request, user) -> bool:
     """For read-only lookups a transfer's screens need (tracking types, stock sources):
     they name no document, and what they return is already scoped to the login."""
     return True
+
+
+# Multi-drop trips register their own shipment hooks at import (`trips._register`).
+# Imported last: `trips` reaches back into this module for the gate-out and the
+# acknowledgement helpers, all of which are defined by this line.
+from app.modules.warehouse import trips as _trips  # noqa: E402,F401

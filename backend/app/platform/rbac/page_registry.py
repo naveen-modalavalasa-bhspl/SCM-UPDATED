@@ -319,6 +319,8 @@ PAGES: list[PageDef] = [
             parent="grp_logistics", module="logistics", icon="boxes", sort_order=1),
     PageDef("logistics_dispatch", "/logistics/dispatch", "Dispatch",
             parent="grp_logistics", module="logistics", icon="send", sort_order=2),
+    PageDef("logistics_load_planner", "/logistics/load-planner", "Smart Load Planner",
+            parent="grp_logistics", module="logistics", icon="map-pin", sort_order=3),
     # "Shipments", not "Transport Requests": the row is not a request for long. The
     # screen carries the leg from DRAFT through IN_TRANSIT, DELIVERED and CLOSED, and
     # lists the lane, the load, the LR/docket and the freight — a register of what is
@@ -327,13 +329,13 @@ PAGES: list[PageDef] = [
     # picks both up on the next start; the code stays `logistics_transport` so every
     # `page.logistics_transport.view` grant already issued keeps working.
     PageDef("logistics_transport", "/logistics/shipments", "Shipments",
-            parent="grp_logistics", module="logistics", icon="route", sort_order=3),
+            parent="grp_logistics", module="logistics", icon="route", sort_order=4),
     # Provider Selection is the RFQ desk: Dispatch asks several partners to price the
     # SAME consignment, and this is where those prices come back, sit side by side and
     # one of them is awarded. No screen of its own — a tender is not a document, it is
     # the question "who is taking this", and that question already had a page.
     PageDef("logistics_providers", "/logistics/providers", "Provider Selection",
-            parent="grp_logistics", module="logistics", icon="users", sort_order=4),
+            parent="grp_logistics", module="logistics", icon="users", sort_order=5),
     # What happened, to which shipment, in the order it happened — one register in
     # place of the three tabs that each drew a slice of it. Shipment Tracking answered
     # "where is it now", Exceptions answered "what went wrong", and neither said who
@@ -342,7 +344,7 @@ PAGES: list[PageDef] = [
     # derived from the documents (`transport.activity_ledger`), so it can only ever
     # show events that were actually recorded.
     PageDef("logistics_activity", "/logistics/activity", "Activity Ledger",
-            parent="grp_logistics", module="logistics", icon="history", sort_order=5),
+            parent="grp_logistics", module="logistics", icon="history", sort_order=6),
     # Shipment Tracking, Acknowledgements and Exceptions are NOT listed here any more,
     # and that is deliberate rather than an omission.
     #

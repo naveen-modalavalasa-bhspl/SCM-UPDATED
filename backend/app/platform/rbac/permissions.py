@@ -756,6 +756,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_overview", "logistics", "Logistics · Dashboard"),
     ("logistics_consignments", "logistics", "Logistics · Consignments"),
     ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
+    ("logistics_load_planner", "logistics", "Logistics · Smart Load Planner"),
     ("logistics_transport", "logistics", "Logistics · Shipments"),
     ("logistics_providers", "logistics", "Logistics · Provider Selection"),
     ("logistics_activity", "logistics", "Logistics · Activity Ledger"),
@@ -864,6 +865,7 @@ INHERITS_GRANTS_FROM.update({
     # would put a landing page on the rail that the whole logistics desk gets a
     # locked door from.
     page_view_code("logistics_overview"): page_view_code("logistics_transport"),
+    page_view_code("logistics_load_planner"): page_view_code("logistics_dispatch"),
     # Not a split but a late catalogue entry, which needs the same treatment: the
     # screen has been reachable on these two codes for months, and minting its page
     # permission fail-closed would silently retire a screen people work every day.

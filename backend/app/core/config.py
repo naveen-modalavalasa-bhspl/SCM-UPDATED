@@ -148,6 +148,21 @@ class Settings(BaseSettings):
     #: staff are not all on one domain. Never a literal in code (rule 13).
     PASSWORD_RESET_EMAIL_DOMAIN: str | None = None
 
+    # --- Road routing for the Smart Load Planner — OPTIONAL (rule 13) ---
+    #
+    # An OSRM server (`/table/v1/{profile}`) the planner asks for real road distances
+    # between stocking points. Unset means every distance is ESTIMATED — straight line
+    # times a road factor — and says so on screen, exactly as before. Self-host it for
+    # production (an OSRM built from the southern-zone OpenStreetMap extract): the
+    # public demo server forbids heavy use and receives every coordinate you send it.
+    # Answers are cached in `lgs_road_distances`, so each pair is asked for once.
+    ROUTING_OSRM_URL: str | None = None
+    ROUTING_PROFILE: str = "driving"
+    ROUTING_TIMEOUT_SECONDS: float = 8.0
+    #: How long a cached road distance is trusted before it is asked for again. Roads
+    #: change slowly; a bypass that opens is picked up within this window.
+    ROUTING_CACHE_DAYS: int = 90
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

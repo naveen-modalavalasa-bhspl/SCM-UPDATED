@@ -118,6 +118,11 @@ export interface Warehouse {
   office_name?: string | null;
   warehouse_type: string;
   address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  coordinate_source?: string | null;
+  coordinate_label?: string | null;
+  coordinate_confidence?: number | null;
   incharge_id?: number | null;
   incharge_name?: string | null;
   /** When false the warehouse stocks in bulk and every `bin_id` stays 0. */
@@ -136,6 +141,8 @@ export interface WarehouseWrite {
   office_id?: number | null;
   warehouse_type: string;
   address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   incharge_id?: number | null;
   is_bin_managed: boolean;
   requires_inward?: boolean | null;

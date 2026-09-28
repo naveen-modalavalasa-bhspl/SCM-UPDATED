@@ -28,6 +28,15 @@ class Warehouse(Base):
     office_name = Column(String(200), nullable=True)     # snapshot
     warehouse_type = Column(String(30), nullable=False, default="MAIN")
     address = Column(String(500), nullable=True)
+    # Verified map position used by the consolidated-trip planner.  Kept on the
+    # stocking point rather than on a trip: a route is recalculated many times, but
+    # the physical gate does not move.  Nullable keeps every existing warehouse and
+    # every existing transaction valid until an administrator verifies the point.
+    latitude = Column(Numeric(10, 7), nullable=True)
+    longitude = Column(Numeric(10, 7), nullable=True)
+    coordinate_source = Column(String(30), nullable=True)
+    coordinate_label = Column(String(200), nullable=True)
+    coordinate_confidence = Column(Numeric(5, 4), nullable=True)
     incharge_id = soft_fk()
     incharge_name = Column(String(200), nullable=True)   # snapshot
     # When false the warehouse stocks in bulk and stk_balance.bin_id stays 0.

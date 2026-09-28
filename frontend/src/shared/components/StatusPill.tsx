@@ -49,6 +49,11 @@ const TONE: Record<string, Outcome> = {
   CANCELLED: "bad",
   CLOSED: "neutral",
   IN_PROGRESS: "warn",
+  // Multi-drop trips (Smart Load Planner). Only the words new to trips; a shipment's
+  // own statuses keep whatever tone they already had.
+  PLANNED: "info",
+  PARTIALLY_DELIVERED: "warn",
+  COMPLETED: "ok",
 };
 
 /** The full-strength fill, for `variant="solid"`. Every one of these is L*45, so

@@ -316,6 +316,26 @@ export interface RaiserTracking {
   acknowledged_at?: string | null;
   ack_condition?: string | null;
   events: RaiserShipmentEvent[];
+  /* ---- Set only when the consignment rides a multi-drop trip: one truck, several
+   *      stops. `status` above is then THIS stop's, and the truck's is below. ---- */
+  trip_id?: number | null;
+  trip_no?: string | null;
+  trip_status?: string | null;
+  shipment_status?: string | null;
+  stop_id?: number | null;
+  stop_status?: string | null;
+  stop_sequence?: number | null;
+  stop_name?: string | null;
+  stop_address?: string | null;
+  total_stops?: number | null;
+  stops_delivered?: number | null;
+  /** Drops the truck still makes before this one. 0 on the road = "you are next". */
+  stops_before_yours?: number | null;
+  next_stop_name?: string | null;
+  stop_delivered_at?: string | null;
+  stop_received_by_name?: string | null;
+  from_warehouse_name?: string | null;
+  departure_date?: string | null;
 }
 
 export interface Acknowledgement {

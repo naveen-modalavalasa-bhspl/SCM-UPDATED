@@ -1846,6 +1846,17 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     if not photos:
         raise ValidationError(
             "Attach a photo of the goods you received before acknowledging")
+    # The CONSIGNMENT photo is required too (2026-09-28): the sealed load, the seal and
+    # the number plate are what a claim against the carrier is argued from, and item
+    # shots taken once the cartons are open cannot show them. A consignment-scoped
+    # (`C-...`) or unscoped photo counts; a package or item shot does not.
+    if not any(
+        (scope := ack_category_scope(row.doc_category)) == "" or scope.startswith("C-")
+        for row in photos
+    ):
+        raise ValidationError(
+            "Attach a photo of the consignment (the load, the seal, the number plate) "
+            "before acknowledging")
 
     by_id = {item.id: item for item in indent.items}
 

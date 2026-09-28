@@ -628,6 +628,141 @@ TR  DRAFT → PENDING_APPROVAL → QUOTING* → AWAITING_CARRIER* → READY
   and the "you won this shipment" panel keyed on AWAITING_CARRIER alone, so it drew for
   the loser too.
 
+### Multi-drop trips: one truck, many consignments, signed stop by stop (2026-09-27)
+
+Ten consignments packed at the central warehouse used to leave as ten dispatches. The
+**Smart Load Planner** (`/logistics/load-planner`, `warehouse/trips.py`) groups the
+ones that share a road onto one vehicle. **A trip is ONE ordinary shipment**
+(`lgs_transport_requests`, `source_type = TRIP`, `source_id` = the trip) that carries
+several consignments; `lgs_consolidated_trips` / `_stops` / `_consignments` add only
+what a single leg cannot say — which consignment comes off at which stop, and whether
+THAT site has signed. Mode, tender, award, carrier portal, gate pass, LR, freight and
+claims are the shipment's, unchanged: plan → the SAME Dispatch confirm screen
+(`?tr_id=`, where Plan trip lands) → the SAME Provider Selection and release press →
+per-stop delivery on the SHIPMENT page (`TripStopsPanel`, once it has left the gate) →
+each site signs its own consignment on its own Acknowledgements screen → the trip
+closes itself. The trip page (`/logistics/load-planner/trips/:id`) is a read-only
+status view — one sentence, the map, the stops — and every press on it hands over to
+that flow (2026-09-28).
+
+- **The recommendation is savings-first and explains itself.** Each round every far
+  consignment is tried as the anchor of a trip, and the one saving the most km is
+  committed. A stop joins only if it fits the vehicle, costs less than its own truck,
+  is a small detour NEXT TO THAT TRUCK (`_on_the_way` — per drop, or Guntur rides the
+  Visakhapatnam truck because 60 km is small next to a 400 km run), and keeps the whole
+  run inside the detour allowance. Every number is a policy value in
+  `logistics.trip_planner.*` (`sys_settings`), overridable per run; distances are
+  ESTIMATED road km (haversine × road factor) and labelled so.
+- **What fails silently if narrowed:** a consignment on an ACTIVE trip is refused a
+  dispatch of its own (`dispatch_consignment`) and a cancel (`cancel_dispatch`); a
+  trip's shipment is never signed for as a whole (`acknowledge_tr`); stop and trip
+  status are ROLLED UP from `out_dispatches.status` (`_roll_up`, `_reconcile`, run on
+  every read of the console and from both acknowledgement doors —
+  `_sign_transport_for_indent` and `_apply_dispatch_acknowledgement`), never set by
+  hand; `for_consignments` answers a trip consignment with the TRIP's shipment, which
+  is what keeps every "does this have transport" screen honest without knowing trips.
+- **Hooks, not imports** (rule 5): `ON_RELEASE` gates every consignment out through
+  `_apply_gate_out`; `BEFORE_RELEASE` holds the truck if any consignment is no longer
+  ready; `ON_DELIVER` settles stops still on the truck when the carrier reports the
+  whole run delivered; `ON_CANCEL` returns the consignments to the queue.
+- **The map** (`ApMap3D`, `apGeo.ts`) draws over its own projection — no tiles, no
+  WebGL, no third party. A 2D canvas paints the base map (`apMapCanvas.ts`: the state
+  as a slab with SRTM relief, the 26 districts of 2022, rivers and reservoirs, the sea
+  and the neighbouring states, the stocking points, decluttered place names); SVG above
+  it carries only what is clicked or animated (routes, stops, pins, the origin). The
+  base layers are `apMapData.ts`, GENERATED offline from open data (district GeoJSON,
+  geoBoundaries, OpenStreetMap, SRTM) and loaded lazily by `apTerrain.loadMapLayers`;
+  `apGeo.ts` keeps only the 2,635-vertex outline (Yanam cut out) because `insideAp`
+  runs on any screen. Two things fail SILENTLY if undone: while the camera moves the
+  canvas steps its quality DOWN only when a frame measures over ~12 ms (and back up
+  when frames are cheap), with one full frame once it settles — a fixed downscale blurred
+  every turn on machines that could draw it sharp (2026-09-28) — and every layer
+  is batched into one path per colour — per-feature fills were most of a frame.
+  A stocking point with no coordinates is matched once against
+  the offline GeoNames gazetteer; an ambiguous one is NEVER guessed and is pinned on
+  the map instead (`PUT /trip-planner/points/{id}/location`, `master.location.manage`).
+  Both central warehouses were unresolved on 2026-09-27 — nothing plans from an origin
+  that is not on the map.
+
+**Two doors onto one manifest: Suggested and Build my own** (2026-09-28). The
+planner's right panel is a switch. SUGGESTED (`PlannerSuggestions`) is one card per
+truck — route as place chips, one line of facts, one fill bar — plus a single
+collapsed "Not in a suggested trip" list. BUILD MY OWN (`RouteComposer`) is the route
+in driving order: origin, then each stop the desk adds, dragged into place with
+framer-motion `Reorder` (committed on drag END, so the server measures once per
+decision). Both edit the same `selection` + `stopOrder` through
+`components/plannerRoute.ts`, and a map beam is the same edit. What fails silently if
+undone: the builder sends its order IN FULL as `stop_order` — a partial order is
+topped up with the optimised one, so the server would measure a route nobody
+arranged. `evaluate` serves `next_stops` (`trips.next_stop_options`, one row per
+PLACE, measured from the LAST stop — appending is what a person building a route does,
+so `suggest_additions`' cheapest-insertion figure is the wrong number there) and
+`optimal_order` / `optimal_distance_km` / `order_is_optimal`, which the screen OFFERS
+and never applies: the desk may know the road is closed. Stops are read by
+`destination_place` (`trips.place_name`, the village `geocoding.locality_from_warehouse`
+already extracts — "Badangi", not "AP-104-MMU-Badangi-AP39UH4792 - LIP"); the full name
+and code stay beside it.
+
+**Road km, volume, carrier stops and the requester's view** (2026-09-27, later the
+same day; migration `f4c6e8a0b2d4`):
+
+- **Distances come from `logistics/routing.py`.** An OSRM server (`ROUTING_OSRM_URL`,
+  optional, `.env`) answers `/table` for every pair a plan needs; answers are cached in
+  `lgs_road_distances` (five-decimal coordinate keys, so a re-pinned point is a new
+  pair), written in a session of their OWN because `create_trip` holds row locks.
+  Missing pairs are estimated — straight line × a factor CALIBRATED from routed pairs
+  when there are 20+, the site's factor otherwise — and a per-process breaker stops a
+  dead service being waited on twice. Every plan and trip carries `distance_basis`
+  (ROAD / MIXED / ESTIMATE). Nothing here may fail a request; a `null` in the table is
+  left missing, never cached as 0 km. `_drops` returns the matrix and takes one back:
+  a second build in the same transaction reads the cache through a stale snapshot.
+- **Load is weight AND volume, each with its basis** (`trips.measure_consignment`):
+  WEIGHED/MEASURED (every package), ESTIMATED (items' packing ladders), ASSUMED
+  (packages × `default_package_kg/_cbm`), or none. **Only firm figures refuse a trip**
+  (`evaluate_trip` → `blockers`); estimates warn. The planner's own grouping uses the
+  whole figure, so it never proposes a truck its numbers say is over. The desk can
+  weigh and measure cartons from the planner (`PUT /trip-planner/consignments/{id}/
+  measurements`, `dispatch.create`), refused once the consignment is on a trip.
+- **The carrier reports stops one by one** (`POST /api/supplier/transport/{id}/stops/
+  {stop}/deliver`). Logistics cannot touch consignments, so it goes through
+  `hooks.STOP_DELIVERERS` → `trips.carrier_stop_delivered` → `_deliver_stop`, the same
+  core as the desk's press. `carrier_deliver` on a trip with more than one stop left is
+  REFUSED — one press for the whole run is the defect this replaced. Stops record
+  `delivered_via` (DESK/CARRIER), their own `pod_url` (http(s) only, validated in the
+  schema — it is rendered as a link) and a snapshotted gate contact.
+- **The requester sees their own stop** (`transport.trip_raiser_view`): the leg's
+  `status` is THEIR consignment's, not the truck's; `stops_before_yours`; other sites'
+  stop events are filtered out. `TripDeliveryCard` on the indent, the stepper caption
+  and the acknowledgement slip all read it (`indents/components/tripLeg.ts`). Trip legs
+  on the acknowledgement screen are keyed `trip-<trip>-<dispatch>` — one trip shipment
+  can carry two of an indent's consignments, and sharing `tr_id` would cross-file photos.
+- **The gazetteer respects the district** (`geocoding.py`, `GAZETTEER_VERSION`). HCM's
+  2022+ districts map onto GeoNames' mixed schemes (`DISTRICT_ACCEPTS`); a candidate
+  outside the office's district is never auto-accepted; transliterations are folded
+  (`phonetic_key`); the GeoNames POSTAL directory is a second source (a postcode
+  centroid is offered, never applied); same-named places >15 km apart are refused
+  unless one is clearly better attested. The old matcher ignored the district when
+  nothing matched inside it and placed some points 300–500 km off, so a version bump
+  RE-CHECKS earlier automatic matches too: moved when today's answer is confident,
+  kept if still plausible in-district, withdrawn otherwise. MANUAL pins are never
+  touched. Matching runs in a worker thread. Unresolved points get ranked candidates
+  to confirm with one press (`GET /trip-planner/points/{id}/candidates`).
+- **HCM's own GPS and mandal** (2026-09-28). HCM offices carry `latitude`/`longitude`,
+  `location` (village) and `mandal_name` in `raw` — read through
+  `hcm.mappers.office_geo`, never a new column. Order of trust for a stocking point:
+  MANUAL pin > **HCM** (`coordinate_source = "HCM"`, applied by
+  `inventory.locations.apply_hcm_coordinates` on every sync AND every map read; refused
+  outside AP, a lat/lon swap corrected, cleared back to name matching if HCM withdraws
+  it) > GEONAMES_LOCALITY. Only 1 of 983 offices had GPS on 2026-09-28 — asking HCM to
+  fill it is the real fix. The matcher searches HCM's village first and weighs the
+  mandal: the gazetteer records one for ~98% of AP places (ADM3), the postal
+  directory's "taluk" is often the division or district town, so a POSTAL mandal only
+  ever counts FOR a match, never against it. A mandal match crosses a district line
+  only within `BORDER_KM` of it (mandal names repeat across districts — Gudur is in
+  Kurnool and Tirupati). A near-spelling or an initials-stripped name whose GAZETTEER
+  mandal contradicts HCM's is refused (Angara is not Dangara). HCM's mandal field has
+  junk ("BACKUP"), treated as no mandal.
+
 **What the merge into `qa` changed** (2026-08-17), on top of the branch as delivered:
 
 - **One Alembic head again.** The logistics branch carried its own mergepoint

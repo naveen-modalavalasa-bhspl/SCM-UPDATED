@@ -23,6 +23,17 @@ ON_RELEASE: list[Callable[..., Awaitable[None]]] = []
 #: Signature: `(db, transport_request, user)`.
 ON_ACKNOWLEDGE: list[Callable[..., Awaitable[None]]] = []
 
+#: Called when the carrier's word "it arrived" lands on a shipment
+#: (`transport.deliver_tr`, which the carrier portal also goes through).
+#: Signature: `(db, transport_request, user)`. A multi-drop trip uses it to settle
+#: every stop still on the truck.
+ON_DELIVER: list[Callable[..., Awaitable[None]]] = []
+
+#: Called when a shipment is cancelled before it left (`transport.cancel_tr`).
+#: Signature: `(db, transport_request, user)`. A trip whose shipment is cancelled
+#: releases its consignments, or they would stay reserved on a trip nobody can run.
+ON_CANCEL: list[Callable[..., Awaitable[None]]] = []
+
 #: Asked BEFORE the load is released, while a release can still be refused.
 #: Signature: `(db, transport_request, user) -> str | None` — a reason it may not
 #: leave, or None.
@@ -36,6 +47,21 @@ ON_ACKNOWLEDGE: list[Callable[..., Awaitable[None]]] = []
 #: shipment still reading READY is news that it left days ago — news to be recorded,
 #: never a decision to veto.
 BEFORE_RELEASE: list[Callable[..., Awaitable["str | None"]]] = []
+
+
+#: Delivers ONE stop of a multi-drop trip on the carrier's word
+#: (`transport.carrier_deliver_stop`). Signature:
+#: `(db, transport_request, stop_id | None, data, actor_name) -> None`; it commits.
+#: The trip's consignments are the warehouse's, so the warehouse registers the only
+#: implementation (`warehouse.trips.carrier_stop_delivered`).
+STOP_DELIVERERS: list[Callable[..., Awaitable[None]]] = []
+
+
+async def deliver_stop(db, doc, stop_id, data, actor_name) -> None:
+    """Hand one stop's delivery to whoever owns the consignments on it."""
+    if not STOP_DELIVERERS:
+        raise RuntimeError("No trip stop handler is registered")
+    await STOP_DELIVERERS[0](db, doc, stop_id, data, actor_name)
 
 
 async def fire(hooks: list, db, doc, user) -> None:

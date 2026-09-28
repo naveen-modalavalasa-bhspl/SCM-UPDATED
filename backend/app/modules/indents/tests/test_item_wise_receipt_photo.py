@@ -122,7 +122,7 @@ async def test_one_photo_is_enough_however_large_the_quantity(stub):
     # Sixty cables are photographed ONCE. A rule that scaled with the quantity would
     # be satisfied by sixty pictures of the same bundle.
     indent = _indent(_item(1, "HDMI cable", approved="60"))
-    db = stub(indent, [_photo("I-1-A3F9C1")])
+    db = stub(indent, [_photo("C-DISPATCH-4"), _photo("I-1-A3F9C1")])
 
     await service.acknowledge_receipt(db, 7, {1: Decimal("60")}, SimpleNamespace(id=42))
 
@@ -134,7 +134,7 @@ async def test_a_photo_taken_in_another_carton_still_counts(stub):
     # The same item split across two packages is one item. Demanding a second shot
     # when the second carton is opened teaches a storekeeper that it is a formality.
     indent = _indent(_item(1, "HDMI cable"))
-    db = stub(indent, [_photo("I-1-FFFFFF")])
+    db = stub(indent, [_photo("C-DISPATCH-4"), _photo("I-1-FFFFFF")])
 
     await service.acknowledge_receipt(db, 7, {1: Decimal("4")}, SimpleNamespace(id=42))
 
@@ -146,7 +146,7 @@ async def test_a_line_nobody_is_confirming_needs_no_photo(stub):
     # Only what is being acknowledged today is proved. A line still with procurement
     # cannot be photographed and must not block the goods that did arrive.
     indent = _indent(_item(1, "HDMI cable"), _item(2, "Monitor"))
-    db = stub(indent, [_photo("I-1-A3F9C1")])
+    db = stub(indent, [_photo("C-DISPATCH-4"), _photo("I-1-A3F9C1")])
 
     await service.acknowledge_receipt(db, 7, {1: Decimal("4")}, SimpleNamespace(id=42))
 
@@ -163,5 +163,17 @@ async def test_a_receipt_with_no_photo_at_all_still_says_so_first(stub):
     db = stub(indent, [])
 
     with pytest.raises(ValidationError, match="Attach a photo"):
+        await service.acknowledge_receipt(
+            db, 7, {1: Decimal("4")}, SimpleNamespace(id=42))
+
+
+@pytest.mark.asyncio
+async def test_item_photos_without_a_consignment_photo_are_refused(stub):
+    # Every item photographed but not the load: the seal and the number plate are
+    # what a carrier claim is argued from, and a carton shot cannot show them.
+    indent = _indent(_item(1, "HDMI cable"))
+    db = stub(indent, [_photo("P-DISPATCH-4-PACKAGE-9"), _photo("I-1-A3F9C1")])
+
+    with pytest.raises(ValidationError, match="photo of the consignment"):
         await service.acknowledge_receipt(
             db, 7, {1: Decimal("4")}, SimpleNamespace(id=42))

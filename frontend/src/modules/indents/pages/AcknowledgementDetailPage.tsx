@@ -7,6 +7,7 @@ import {
   Lock, MapPin, Package, Phone, Plus, Receipt, RectangleHorizontal, Ruler, ScanBarcode,
   Send, Signature, Snowflake, Trash2, Truck, UserRound, Weight,
 } from "lucide-react";
+import { tripProgressText, tripStopLabel } from "../components/tripLeg";
 import {
   Button, Card, EmptyState, ErrorBanner, Input, PageHeader, SharedAttachmentViewer,
 } from "@/shared/components";
@@ -367,12 +368,12 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
    */
   const tasksFor = (target: Stop): StepTask[] => {
     if (target.kind === "gate") {
+      // REQUIRED (2026-09-28). The sealed load, the seal and the number plate are what
+      // a claim against the carrier is argued from, and a photo taken after the
+      // cartons are open cannot show them. The server refuses a receipt without one.
       return [{
         done: photosFor(target).length > 0,
-        // Recommended is said out loud because this one does not BLOCK: the rule that
-        // does is on the items, where a dispute actually lives.
-        label: "Photo of the delivery (recommended)",
-        optional: true,
+        label: "Photo of the consignment",
       }];
     }
     const counted = countedFor(target.pack);
@@ -438,9 +439,10 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
     : undefined;
 
   const packageStops = stops.filter((item) => item.kind === "package");
-  /** The packages still owing something. Acknowledge unlocks only when this is empty:
-   *  every package counted, each item in it photographed, every code matched. */
-  const unfinished = packageStops.filter((item) => stopState(item) !== "done");
+  /** The stops still owing something. Acknowledge unlocks only when this is empty:
+   *  every consignment photographed, every package counted, each item in it
+   *  photographed, every code matched. */
+  const unfinished = stops.filter((item) => stopState(item) !== "done");
   const ready = anythingToConfirm && entered && unfinished.length === 0;
   /** Why Acknowledge is unavailable, named rather than counted. A disabled button with
    *  nothing beside it is the single most common way a screen strands somebody who
@@ -615,6 +617,7 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
           )
           : []}
         pickMode="select"
+        displayValue={shortCode}
         noun={serialTarget ? TRACKING[serialTarget.tracking_type ?? ""]?.unit ?? "serial" : "serial"}
         // The picker names the KIND of identifier too, from the served catalogue:
         // inside the modal the list is a column of fifteen-character strings, and
@@ -710,7 +713,12 @@ function receiptConsignments(
     }];
   }
   return legs.map((leg, index) => ({
-    key: `leg-${leg.tr_id ?? index}`,
+    // A multi-drop trip's ONE shipment can carry two of this indent's consignments,
+    // so its legs are keyed by consignment too — sharing `tr_id` would file one
+    // consignment's photos under the other. Single-shipment legs keep the key their
+    // photos were filed under.
+    key: "trip_id" in leg && leg.trip_id && leg.dispatch_id
+      ? `trip-${leg.trip_id}-${leg.dispatch_id}` : `leg-${leg.tr_id ?? index}`,
     no: leg.consignment_no
       || (leg.dispatch_id ? dispatches.get(leg.dispatch_id) : "")
       || leg.tr_no
@@ -988,6 +996,22 @@ function attachmentScope(value?: string | null) {
 }
 
 /** Stable, and short enough for a `String(50)` column the base already eats into. */
+/**
+ * A unit code as the person at the delivery reads it: the tail after the last hyphen,
+ * leading zeros dropped — `304040-WATER-CAN-SUPREME-SUPREME-0001-1-00003601` is 3601.
+ * Every code on one line shares the long prefix, so it was the only part of each row
+ * the truncation left visible. Display only: search, selection and the save still
+ * use the full code, which stays on hover.
+ */
+function shortCode(code: string) {
+  const cut = code.lastIndexOf("-");
+  // No hyphen: a maker's own serial or IMEI, shown exactly as printed on the unit.
+  if (cut < 0) return code;
+  const tail = code.slice(cut + 1);
+  if (!tail) return code;
+  return tail.replace(/^0+(?=.)/, "");
+}
+
 function proofScope(prefix: "C" | "P", key: string) {
   const slug = key.toUpperCase().replace(/[^A-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   return `${prefix}-${slug}`.slice(0, 30);
@@ -1299,8 +1323,8 @@ function GateStop({
         // Named for what the pictures ARE, in the word the paperwork uses: they are
         // the consignment's photos, filed against the number on the slip above.
         title="Consignment photos"
-        note="The load, the seal, the number plate and anything damaged. They help if something is missing."
-        optional
+        note="The load, the seal, the number plate and anything damaged. At least one is needed before you can acknowledge."
+        required
         buttonLabel="Add photos"
         files={photos}
         onUpload={(file) => onUpload(file, PHOTO)}
@@ -1411,6 +1435,11 @@ function ConsignmentSlip({ no, isConsignment, leg, packages, loading, failed }: 
       value: carrier || "Company vehicle",
       note: [rich?.mode_label ?? leg?.mode, rich?.carriage_label]
         .filter(Boolean).join(" · "),
+    },
+    rich?.trip_no && {
+      key: "trip", icon: MapPin, label: "Shared truck",
+      value: tripStopLabel(rich),
+      note: `${rich.trip_no} · ${tripProgressText(rich)}`,
     },
     leg?.vehicle_number && {
       key: "vehicle", icon: RectangleHorizontal, label: "Vehicle",
@@ -2333,9 +2362,10 @@ function SerialPanel({
           {picked.map((code) => (
             <li
               key={code}
+              title={code}
               className="rounded-md border border-line bg-content1 px-2 py-0.5 font-mono text-[12px] font-semibold tracking-tight text-ink"
             >
-              {code}
+              {shortCode(code)}
             </li>
           ))}
         </ul>
@@ -2459,12 +2489,15 @@ function UploadButton({
  * caught); anything else keeps a file row.
  */
 function PhotoStrip({
-  title, note, optional = false, buttonLabel, buttonIcon, accept = "image/*", files,
-  onUpload, ...photoProps
+  title, note, optional = false, required = false, buttonLabel, buttonIcon,
+  accept = "image/*", files, onUpload, ...photoProps
 }: {
   title: string;
   note: string;
   optional?: boolean;
+  /** Owed before Acknowledge unlocks: a red star by the title, an amber button until
+   *  something is filed. */
+  required?: boolean;
   buttonLabel: string;
   buttonIcon?: typeof Camera;
   accept?: string;
@@ -2478,7 +2511,15 @@ function PhotoStrip({
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <SectionLabel>{title}</SectionLabel>
+            <SectionLabel>
+              {title}
+              {required && (
+                <>
+                  <span className="ml-0.5 text-sm leading-none text-danger" aria-hidden>*</span>
+                  <span className="sr-only"> (required)</span>
+                </>
+              )}
+            </SectionLabel>
             {optional && <span className="text-[11px] text-muted">Optional</span>}
             {files.length > 0 && (
               <span className="text-[11px] font-semibold text-ok">{files.length} added</span>
@@ -2488,6 +2529,7 @@ function PhotoStrip({
         </div>
         <UploadButton
           label={files.length > 0 ? "Add more" : buttonLabel}
+          strong={required && files.length === 0}
           icon={files.length > 0 ? Plus : buttonIcon}
           accept={accept}
           multiple

@@ -61,8 +61,13 @@ from app.modules.logistics.enums import (
     suggest_mode,
 )
 from app.modules.logistics import hooks
+from app.modules.logistics.enums import (
+    ACTIVE_TRIP_STATUSES, TRIP_STAMPED_EVENT_TYPES, TransportSource, TripStatus,
+    TripStopStatus,
+)
 from app.modules.logistics.models import (
-    MONEY, CarrierQuote, ShipmentEvent, TransportRequest, TransportRequestItem,
+    MONEY, CarrierQuote, ConsolidatedTrip, ConsolidatedTripConsignment,
+    ShipmentEvent, TransportRequest, TransportRequestItem,
 )
 from app.modules.logistics.schemas import TRListRow, TROut
 from app.platform.settings.service import get_setting, write_audit
@@ -585,7 +590,36 @@ async def for_consignments(db: AsyncSession, dispatch_ids: list[int]) -> list[di
             "lr_no": doc.lr_no or doc.docket_no,
             "driver_name": doc.driver_name,
             "vehicle_number": doc.vehicle_number,
+            "trip_id": None, "trip_no": None,
         })
+    # A consignment on a multi-drop trip is carried by the TRIP's shipment, which
+    # names no single `dispatch_id`. Answered off the trip's own links (logistics'
+    # tables), so every screen that asks "does this have transport" — the Dispatch
+    # queue, Consignments, the confirm screen's "already dispatched" guard — sees the
+    # truck it is actually on without learning what a trip is.
+    missing = [dispatch_id for dispatch_id in dispatch_ids if dispatch_id not in seen]
+    if missing:
+        carried = (await db.execute(
+            select(ConsolidatedTripConsignment.dispatch_id, ConsolidatedTrip,
+                   TransportRequest)
+            .join(ConsolidatedTrip,
+                  ConsolidatedTrip.id == ConsolidatedTripConsignment.trip_id)
+            .outerjoin(TransportRequest, TransportRequest.id == ConsolidatedTrip.tr_id)
+            .where(ConsolidatedTripConsignment.dispatch_id.in_(missing),
+                   ConsolidatedTrip.status != TripStatus.CANCELLED.value)
+            .order_by(ConsolidatedTrip.id.desc())
+        )).all()
+        for dispatch_id, trip, doc in carried:
+            if dispatch_id in seen or doc is None:
+                continue
+            seen[dispatch_id] = {
+                "dispatch_id": dispatch_id,
+                "tr_id": doc.id, "tr_no": doc.tr_no, "mode": doc.mode,
+                "carriage_mode": doc.carriage_mode, "status": doc.status,
+                "carrier_name": doc.carrier_name, "lr_no": doc.lr_no or doc.docket_no,
+                "driver_name": doc.driver_name, "vehicle_number": doc.vehicle_number,
+                "trip_id": trip.id, "trip_no": trip.trip_no,
+            }
     return list(seen.values())
 
 
@@ -689,7 +723,100 @@ async def for_indent(db: AsyncSession, indent_id: int, user) -> list[dict]:
         select(TransportRequest)
         .where(TransportRequest.indent_id == indent_id)
         .order_by(TransportRequest.id.desc()))
-    return [_raiser_view(doc) for doc in rows.scalars().all()]
+    views = [_raiser_view(doc) for doc in rows.scalars().all()]
+
+    # A multi-drop trip names no indent on its shipment — it carries several. The
+    # raiser is shown the truck their consignment is on, described from THEIR stop:
+    # their consignment number, where it comes off, and how many stops it is.
+    like = f"%{indent.indent_no}%" if indent.indent_no else None
+    trip_rows = (await db.execute(
+        select(ConsolidatedTripConsignment, ConsolidatedTrip, TransportRequest)
+        .join(ConsolidatedTrip,
+              ConsolidatedTrip.id == ConsolidatedTripConsignment.trip_id)
+        .join(TransportRequest, TransportRequest.id == ConsolidatedTrip.tr_id)
+        .where(ConsolidatedTrip.status != TripStatus.CANCELLED.value,
+               ConsolidatedTripConsignment.status != TripStopStatus.CANCELLED.value,
+               or_(ConsolidatedTripConsignment.indent_id == indent_id,
+                   *([ConsolidatedTripConsignment.indent_nos.like(like)] if like else [])))
+        .order_by(ConsolidatedTrip.id.desc())
+    )).all()
+    seen: set[int] = set()
+    for link, trip, doc in trip_rows:
+        # The LIKE narrows; this decides. "IND001" is a substring of "IND0012".
+        named = {no.strip() for no in (link.indent_nos or "").split(",") if no.strip()}
+        if link.indent_id != indent_id and indent.indent_no not in named:
+            continue
+        if link.id in seen:
+            continue
+        seen.add(link.id)
+        views.append(trip_raiser_view(_raiser_view(doc), link, trip))
+    return views
+
+
+#: What the raiser's card reads, from THEIR consignment's own state on the trip. The
+#: truck's status describes the whole run — a shipment still IN_TRANSIT to stop four
+#: is, for the site at stop two, already delivered and waiting for their signature.
+_STOP_TO_RAISER_STATUS = {
+    TripStopStatus.IN_TRANSIT.value: TransportStatus.IN_TRANSIT.value,
+    TripStopStatus.DELIVERED.value: TransportStatus.DELIVERED.value,
+    TripStopStatus.ACKNOWLEDGED.value: TransportStatus.ACKNOWLEDGED.value,
+}
+
+
+def trip_raiser_view(view: dict, link, trip) -> dict:
+    """A raiser's view of the trip leg carrying their consignment. Pure.
+
+    Told from their stop: where it comes off, how many drops the truck makes before
+    it, and whether it has reached them. The other stops' events are left out — the
+    site at stop two has no business reading who signed at stop three, and a timeline
+    full of other sites' deliveries reads as though theirs had happened.
+    """
+    stops = sorted(trip.stops, key=lambda row: row.sequence)
+    mine = next((row for row in stops if row.id == link.stop_id), None)
+    open_states = {TripStopStatus.PLANNED.value, TripStopStatus.IN_TRANSIT.value}
+    before = [row for row in stops if mine is not None and row.sequence < mine.sequence]
+    ahead = [row for row in before if row.status in open_states]
+    arrived = [row for row in stops
+               if row.status in (TripStopStatus.DELIVERED.value,
+                                 TripStopStatus.ACKNOWLEDGED.value)]
+    next_stop = next((row for row in stops if row.status in open_states), None)
+
+    status = _STOP_TO_RAISER_STATUS.get(link.status, view["status"])
+    my_name = mine.destination_name if mine else link.destination_name
+    events = [event for event in view["events"]
+              if event["event_type"] not in (ShipmentEventType.STOP_DELIVERED.value,
+                                             ShipmentEventType.STOP_ACKNOWLEDGED.value)
+              or event.get("location_name") == my_name]
+
+    view.update({
+        "status": status,
+        "shipment_status": view["status"],
+        "dispatch_id": link.dispatch_id,
+        "consignment_no": link.consignment_no,
+        "trip_id": trip.id, "trip_no": trip.trip_no,
+        "trip_status": trip.status,
+        "stop_id": link.stop_id,
+        "stop_status": link.status,
+        "stop_sequence": mine.sequence if mine else None,
+        "stop_name": my_name,
+        "stop_address": mine.delivery_address if mine else None,
+        "total_stops": trip.total_stops or len(stops),
+        "stops_delivered": len(arrived),
+        # Drops the truck still has to make BEFORE reaching this one. Zero while it
+        # is on the road means "you are next".
+        "stops_before_yours": len(ahead),
+        "next_stop_name": next_stop.destination_name if next_stop else None,
+        "stop_delivered_at": mine.delivered_at if mine else None,
+        "stop_received_by_name": mine.received_by_name if mine else None,
+        "stop_delivered_via": mine.delivered_via if mine else None,
+        "from_warehouse_name": trip.from_warehouse_name,
+        "departure_date": trip.departure_date,
+        "delivered_at": link.delivered_at or (mine.delivered_at if mine else None),
+        "acknowledged_at": link.acknowledged_at,
+        "ack_condition": link.ack_condition,
+        "events": events,
+    })
+    return view
 
 
 async def _own_indent_leg(db: AsyncSession, tr_id: int, user) -> TransportRequest:
@@ -1543,6 +1670,21 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     where it always did. Configure one on Approvals Config and it is honoured here too,
     rather than saving a row that quietly governs `submit_tr` and nothing else.
     """
+    # A consignment planned onto a multi-drop trip already HAS its shipment: the one
+    # the trip raised. A second one here would be a second truck for the same cartons.
+    if getattr(data, "dispatch_id", None):
+        planned_trip = await db.scalar(
+            select(ConsolidatedTrip.trip_no)
+            .join(ConsolidatedTripConsignment,
+                  ConsolidatedTripConsignment.trip_id == ConsolidatedTrip.id)
+            .where(ConsolidatedTripConsignment.dispatch_id == data.dispatch_id,
+                   ConsolidatedTrip.status.in_(ACTIVE_TRIP_STATUSES))
+            .limit(1))
+        if planned_trip:
+            raise ValidationError(
+                f"This consignment travels on trip {planned_trip}. Arrange that trip's "
+                "shipment instead — it carries every consignment on the route.")
+
     mode = (data.mode or "").upper()
     if mode not in MODE_RULES:
         raise ValidationError(
@@ -2172,6 +2314,8 @@ async def cancel_tr(db: AsyncSession, tr_id: int, user,
     if before == TransportStatus.PENDING_APPROVAL.value:
         await engine.abandon(db, DocType.TRANSPORT_REQUEST.value, doc.id, user, reason)
     doc.status = TransportStatus.CANCELLED.value
+    # A trip's consignments are released with it — see `hooks.ON_CANCEL`.
+    await hooks.fire(hooks.ON_CANCEL, db, doc, user)
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before}, after={"status": doc.status},
@@ -2947,6 +3091,9 @@ async def add_event(db: AsyncSession, tr_id: int, data, user) -> ShipmentEvent:
     if event_type in SIGNATURE_EVENT_TYPES:
         raise ValidationError(
             "Only the receiving site acknowledging the consignment records that")
+    if event_type in TRIP_STAMPED_EVENT_TYPES:
+        raise ValidationError(
+            "A trip stop is settled from the trip itself — mark the stop delivered there")
     if doc.status in TERMINAL_STATUSES:
         raise ValidationError(f"{doc.tr_no} is closed; no further events")
 
@@ -3030,6 +3177,11 @@ async def deliver_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReque
         recorded_by_name=getattr(user, "full_name", None),
     ))
 
+    # A multi-drop trip settles every stop still on the truck: the carrier saying the
+    # whole run is done is saying each of its drops is. Registered by the warehouse,
+    # which owns the consignments (rule 5).
+    await hooks.fire(hooks.ON_DELIVER, db, doc, user)
+
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
                       after={"status": doc.status},
@@ -3077,6 +3229,13 @@ async def acknowledge_tr(db: AsyncSession, tr_id: int, data, user) -> TransportR
     # acknowledged" — which is true of nothing and tells the site the wrong thing.
     if doc.acknowledged_at is not None:
         raise ValidationError(f"{doc.tr_no} has already been acknowledged")
+    # Nobody can sign for a multi-drop trip as a whole: four sites received four
+    # different consignments, and each of them signs for its own. The trip closes
+    # itself once they all have (`warehouse.trips`).
+    if (doc.source_type or "").upper() == TransportSource.TRIP.value:
+        raise ValidationError(
+            f"{doc.tr_no} is a multi-drop trip — each receiving site acknowledges its "
+            "own consignment, and the trip closes when every stop has signed")
     if doc.status not in AWAITING_ACK_STATUSES:
         raise ValidationError(
             f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} — only a "
@@ -3497,11 +3656,60 @@ def _carrier_view(doc: TransportRequest, carrier_id: int) -> TROut:
     return out
 
 
+async def _trip_of(db: AsyncSession, doc: TransportRequest) -> ConsolidatedTrip | None:
+    """The multi-drop trip this shipment carries, if it is one. Logistics' own table."""
+    if (doc.source_type or "").upper() != TransportSource.TRIP.value or not doc.source_id:
+        return None
+    return (await db.execute(
+        select(ConsolidatedTrip).where(ConsolidatedTrip.id == doc.source_id)
+        .execution_options(populate_existing=True))).scalar_one_or_none()
+
+
+def trip_brief(trip: ConsolidatedTrip) -> dict:
+    """A trip's stops as the carrier's driver needs them: in order, where, who to
+    ring, what comes off, and whether it has been put down yet. Pure."""
+    open_states = {TripStopStatus.PLANNED.value, TripStopStatus.IN_TRANSIT.value}
+    stops = sorted(trip.stops, key=lambda row: row.sequence)
+    next_stop = next((row for row in stops if row.status in open_states), None)
+    return {
+        "id": trip.id, "trip_no": trip.trip_no, "status": trip.status,
+        "total_stops": trip.total_stops or len(stops),
+        "stops_delivered": sum(1 for row in stops if row.status in (
+            TripStopStatus.DELIVERED.value, TripStopStatus.ACKNOWLEDGED.value)),
+        "next_stop_id": next_stop.id if next_stop else None,
+        "distance_basis": trip.distance_basis or "ESTIMATE",
+        "stops": [{
+            "id": row.id, "sequence": row.sequence,
+            "destination_name": row.destination_name,
+            "destination_code": row.destination_code,
+            "delivery_address": row.delivery_address,
+            "contact_person": row.contact_person, "contact_phone": row.contact_phone,
+            "latitude": row.latitude, "longitude": row.longitude,
+            "status": row.status,
+            "distance_from_previous_km": row.distance_from_previous_km,
+            "total_packages": row.total_packages, "total_weight_kg": row.total_weight_kg,
+            "delivered_at": row.delivered_at, "received_by_name": row.received_by_name,
+            "delivered_via": row.delivered_via, "pod_url": row.pod_url,
+            "consignments": [{"consignment_no": link.consignment_no,
+                              "packages": link.packages, "weight_kg": link.weight_kg,
+                              "status": link.status}
+                             for link in row.consignments],
+        } for row in stops],
+    }
+
+
 async def carrier_view_request(db: AsyncSession, carrier_id: int,
                                tr_id: int) -> TROut:
     doc = await carrier_get_request(db, carrier_id, tr_id)
     await _attach_package_quantities(db, doc)
-    return _carrier_view(doc, carrier_id)
+    out = _carrier_view(doc, carrier_id)
+    # Only the winner is shown where the truck calls: a losing bidder keeps the lane
+    # they priced, never the stops, the contacts or the progress of somebody else's run.
+    if doc.carrier_id == carrier_id:
+        trip = await _trip_of(db, doc)
+        if trip is not None:
+            out.trip = trip_brief(trip)
+    return out
 
 
 #: What a carrier must state before their price can be compared with anybody else's,
@@ -3639,4 +3847,39 @@ async def carrier_deliver(db: AsyncSession, carrier_id: int, tr_id: int,
     doc = await carrier_get_request(db, carrier_id, tr_id)
     if doc.carrier_id != carrier_id:
         raise ValidationError("This shipment was awarded to another carrier")
+    trip = await _trip_of(db, doc)
+    if trip is not None:
+        # One press for a whole multi-drop run is exactly how a stop still on the
+        # truck came to read delivered. With one stop left it IS that stop; with more
+        # the carrier is asked to report each one as the truck reaches it.
+        remaining = [row for row in trip.stops if row.status in (
+            TripStopStatus.PLANNED.value, TripStopStatus.IN_TRANSIT.value)]
+        if len(remaining) > 1:
+            raise ValidationError(
+                f"{doc.tr_no} is a multi-drop trip with {len(remaining)} stops still to "
+                "go — report each stop delivered as the truck reaches it")
+        return await carrier_deliver_stop(db, carrier_id, tr_id,
+                                          remaining[0].id if remaining else None, data)
     return _carrier_view(await deliver_tr(db, tr_id, data, user=None), carrier_id)
+
+
+async def carrier_deliver_stop(db: AsyncSession, carrier_id: int, tr_id: int,
+                               stop_id: int | None, data) -> TROut:
+    """The carrier reports ONE stop of their multi-drop run as delivered.
+
+    Their word, with their proof of delivery for THAT stop; the site at the stop still
+    signs for its own consignment. The last stop marks the shipment delivered. The
+    stop's consignments belong to the warehouse, which does the writing
+    (`hooks.deliver_stop`, rule 5).
+    """
+    doc = await carrier_get_request(db, carrier_id, tr_id)
+    if doc.carrier_id != carrier_id:
+        raise ValidationError("This shipment was awarded to another carrier")
+    if doc.status not in (TransportStatus.IN_TRANSIT.value, TransportStatus.READY.value):
+        raise ValidationError(f"{doc.tr_no} is {doc.status.lower().replace('_', ' ')} "
+                              "— a stop can be reported once the truck is on the road")
+    if await _trip_of(db, doc) is None:
+        raise ValidationError(f"{doc.tr_no} is not a multi-drop trip")
+    carrier_name = doc.carrier_name or "Carrier"
+    await hooks.deliver_stop(db, doc, stop_id, data, carrier_name)
+    return await carrier_view_request(db, carrier_id, tr_id)
