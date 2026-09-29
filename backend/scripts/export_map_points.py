@@ -10,10 +10,12 @@ Keyed by warehouse code (`LIP-<office_id>`, `MDP-<office_id>`, `WH-<office_id>`)
 which every database synced from the same HCM derives identically. HCM coordinates
 are left out — HCM supplies them to every database itself.
 
-    .venv/Scripts/python -m scripts.export_map_points
+    .venv/Scripts/python -m scripts.export_map_points          # refuses to drop points
+    .venv/Scripts/python -m scripts.export_map_points --force  # ...unless told to
 """
 import asyncio
 import json
+import sys
 
 from sqlalchemy import select
 
@@ -41,6 +43,15 @@ async def main() -> None:
         }
         for row in rows if row.coordinate_source != HCM_COORDINATE_SOURCE
     }
+    committed = geocoding.load_snapshot()
+    lost = sorted(set(committed) - set(points))
+    if lost and "--force" not in sys.argv:
+        # A checkout whose own database places fewer points must not shrink the file
+        # everybody else fills from — that is how 849 would silently become 819.
+        print(f"Refusing: {len(lost)} of the {len(committed)} committed points are not "
+              f"placed in this database (e.g. {', '.join(lost[:5])}).\n"
+              f"Run scripts.import_map_points --apply first, or pass --force.")
+        sys.exit(1)
     geocoding.SNAPSHOT_FILE.write_text(json.dumps(
         {"gazetteer_version": geocoding.GAZETTEER_VERSION, "points": points},
         indent=1, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
