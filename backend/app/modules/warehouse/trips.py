@@ -1268,6 +1268,32 @@ async def _match_points(db: AsyncSession, rows: list[Warehouse],
     return counts
 
 
+def _apply_snapshot(rows: list[Warehouse]) -> int:
+    """Place every unplaced point the committed snapshot knows (`map_points.json`).
+
+    Only a point with no coordinates is filled, and never over a MANUAL pin or HCM's
+    GPS, so a pin set on this database always wins over one set on another.
+    """
+    snapshot = geocoding.load_snapshot()
+    placed = 0
+    for row in rows:
+        if row.coordinate_source in ("MANUAL", HCM_COORDINATE_SOURCE):
+            continue
+        if row.latitude is not None and row.longitude is not None:
+            continue
+        point = snapshot.get(row.code)
+        if not point:
+            continue
+        row.latitude = Decimal(str(point["latitude"]))
+        row.longitude = Decimal(str(point["longitude"]))
+        row.coordinate_source = point.get("source") or "GEONAMES_LOCALITY"
+        row.coordinate_label = (point.get("label") or "")[:200] or None
+        confidence = point.get("confidence")
+        row.coordinate_confidence = Decimal(str(confidence)) if confidence is not None else None
+        placed += 1
+    return placed
+
+
 def _needs_matching(row: Warehouse, *, recheck: bool) -> bool:
     if row.coordinate_source in ("MANUAL", HCM_COORDINATE_SOURCE):
         return False
@@ -1300,6 +1326,9 @@ async def prepare_map_network(db: AsyncSession, user) -> dict:
         outcome = apply_hcm_coordinates(row, hints.get(row.office_id) or {})
         if outcome:
             from_hcm[outcome] += 1
+    # The committed snapshot next, so a fresh checkout draws the same map as the
+    # database it was exported from without waiting on its own gazetteer.
+    from_snapshot = _apply_snapshot(warehouses)
 
     seen_version = await get_setting(db, GAZETTEER_VERSION_SETTING)
     # The version is the whole master's, so only an unscoped reader (who sees every
@@ -1308,6 +1337,9 @@ async def prepare_map_network(db: AsyncSession, user) -> dict:
     recheck = allowed is None and str(seen_version or "") != str(geocoding.GAZETTEER_VERSION)
     todo = [row for row in warehouses if _needs_matching(row, recheck=recheck)]
     counts = await _match_points(db, todo, hints) if todo else {"mapped": 0}
+    # ...and again after: a re-check on this machine's HCM mirror or GeoNames files
+    # may withdraw a point the exporting database had confirmed.
+    from_snapshot += _apply_snapshot(warehouses)
     await db.commit()
     if recheck:
         await set_setting(db, GAZETTEER_VERSION_SETTING, geocoding.GAZETTEER_VERSION,
@@ -1318,6 +1350,7 @@ async def prepare_map_network(db: AsyncSession, user) -> dict:
         "points": [_point(row) for row in warehouses], "total": len(warehouses),
         "mapped": mapped, "unresolved": len(warehouses) - mapped,
         "newly_mapped": counts.get("mapped", 0),
+        "from_snapshot": from_snapshot,
         "rechecked": counts if recheck else None,
         "from_hcm": sum(1 for row in warehouses
                         if row.coordinate_source == HCM_COORDINATE_SOURCE),
@@ -1343,6 +1376,7 @@ async def rematch_points(db: AsyncSession, user) -> dict:
     hints = await _office_hints(db, rows)
     for row in rows:
         apply_hcm_coordinates(row, hints.get(row.office_id) or {})
+    _apply_snapshot(rows)
     rows = [row for row in rows if row.latitude is None or row.longitude is None]
     counts = await _match_points(db, rows, hints)
     await write_audit(db, entity="whs_warehouses", entity_id=0, entity_no="trip-planner",

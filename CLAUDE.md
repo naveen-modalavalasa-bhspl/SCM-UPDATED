@@ -683,7 +683,13 @@ that flow (2026-09-28).
   its filters and the backdrop blurs are most of an orbit's frame and timing drawMap
   alone never stepped a slow laptop down. It decides on smoothed figures over several
   frames (one GC pause used to flip it), and the level is learned once per session.
-  Orbit speed is per millisecond, never per frame. While moving, the coast light, the
+  Orbit speed is per millisecond, never per frame. An orbit or glide counts as
+  MOVING however slow its frames are, its slow gaps are measured rather than dropped,
+  and the settle timer waits for it to end — judged by the frame gap alone, one frame
+  over 180 ms was drawn as a still (full quality, every effect on) and the orbit
+  locked there (2026-09-29). A quality level draws LESS (coarser relief, then no
+  contours or scanlines, then no faint river halos or dashed sea rings) and never at a
+  lower canvas resolution: the 75%/half-resolution levels were the blur while turning. While moving, the coast light, the
   sweep, SVG glows and backdrop blurs are switched off (`inMotion`).
   A stocking point with no coordinates is matched once against
   the offline GeoNames gazetteer; an ambiguous one is NEVER guessed and is pinned on
@@ -754,6 +760,12 @@ same day; migration `f4c6e8a0b2d4`):
   kept if still plausible in-district, withdrawn otherwise. MANUAL pins are never
   touched. Matching runs in a worker thread. Unresolved points get ranked candidates
   to confirm with one press (`GET /trip-planner/points/{id}/candidates`).
+- **The settled map travels in git** (2026-09-29). Matching depends on each machine's
+  HCM mirror and GeoNames files, so two checkouts of one commit drew 849 and 819 points.
+  `warehouse/map_points.json` (written by `scripts.export_map_points`, keyed by the
+  derived `LIP-/MDP-/WH-<office_id>` code) fills every UNPLACED point on each map read,
+  before and after matching — never over a MANUAL pin or HCM GPS. Re-export after
+  pinning or confirming points, and commit the file.
 - **HCM's own GPS and mandal** (2026-09-28). HCM offices carry `latitude`/`longitude`,
   `location` (village) and `mandal_name` in `raw` — read through
   `hcm.mappers.office_geo`, never a new column. Order of trust for a stocking point:

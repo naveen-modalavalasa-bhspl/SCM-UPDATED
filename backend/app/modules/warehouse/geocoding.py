@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import json
 import math
 import os
 import re
@@ -75,6 +76,13 @@ _FUZZY_SHORTLIST = 60
 #: in Kurnool and another in Tirupati), so a mandal match alone never crosses a
 #: district line — it has to be a mandal match right at the line.
 BORDER_KM = 10.0
+
+#: The coordinates one database has already settled, committed to git so every other
+#: checkout starts from them (`scripts/export_map_points.py` writes it). Matching is
+#: only as good as the HCM mirror and the GeoNames files on that machine, so two
+#: developers on the same code could otherwise see different maps.
+SNAPSHOT_FILE = Path(__file__).resolve().with_name("map_points.json")
+_snapshot: dict[str, dict] | None = None
 
 _download_lock = asyncio.Lock()
 _load_lock = asyncio.Lock()
@@ -373,6 +381,17 @@ def accepted_districts(hint: str) -> set[str] | None:
 
 def _have(path: Path, min_size: int) -> bool:
     return path.exists() and path.stat().st_size > min_size
+
+
+def load_snapshot() -> dict[str, dict]:
+    """Committed coordinates by warehouse code; empty when the file is absent."""
+    global _snapshot
+    if _snapshot is None:
+        try:
+            _snapshot = json.loads(SNAPSHOT_FILE.read_text(encoding="utf-8")).get("points", {})
+        except FileNotFoundError:
+            _snapshot = {}
+    return _snapshot
 
 
 async def _download(client: httpx.AsyncClient, url: str, target: Path) -> None:

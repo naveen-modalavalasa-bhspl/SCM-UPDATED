@@ -473,3 +473,28 @@ def test_a_near_spelling_in_another_mandal_is_another_village(monkeypatch):
     monkeypatch.setattr(geocoding, "_scored", lambda query: [(0.92, 0)])
     assert geocoding._resolve_sync("AP-104-MMU-Angara-AP39TL1 - LIP", "WEST GODAVARI",
                                    locality="Angara", mandal="TANUKU") is None
+
+
+def test_the_committed_snapshot_places_only_unplaced_points(monkeypatch):
+    """A fresh checkout draws the exporter's map, and never over a pin of its own."""
+    snapshot = {code: {"latitude": 16.5, "longitude": 80.6, "source": "GEONAMES_LOCALITY",
+                       "label": "Vijayawada", "confidence": 0.95}
+                for code in ("LIP-1", "LIP-2", "LIP-3", "LIP-4")}
+    monkeypatch.setattr(trips.geocoding, "load_snapshot", lambda: snapshot)
+
+    def point(code, source=None, lat=None, lon=None):
+        return SimpleNamespace(code=code, coordinate_source=source, latitude=lat,
+                               longitude=lon, coordinate_label=None,
+                               coordinate_confidence=None)
+
+    unplaced = point("LIP-1", "GAZETTEER_UNRESOLVED")
+    pinned = point("LIP-2", "MANUAL", 15.0, 79.0)
+    placed = point("LIP-3", "GEONAMES_LOCALITY", 14.0, 78.0)
+    fresh = point("LIP-4")
+    unknown = point("LIP-9")
+
+    assert trips._apply_snapshot([unplaced, pinned, placed, fresh, unknown]) == 2
+    assert (float(unplaced.latitude), unplaced.coordinate_source) == (16.5, "GEONAMES_LOCALITY")
+    assert float(fresh.longitude) == 80.6
+    assert (pinned.latitude, placed.latitude) == (15.0, 14.0)
+    assert unknown.latitude is None

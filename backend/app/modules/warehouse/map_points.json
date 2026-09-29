@@ -1,0 +1,6797 @@
+{
+ "gazetteer_version": "2026-09-28.5",
+ "points": {
+  "LIP-14525": {
+   "confidence": 0.97,
+   "label": "Kd Peta, Visakhapatnam (post office)",
+   "latitude": 17.7804,
+   "longitude": 82.4771,
+   "name": "AP-104-MMU-Phc Kd Peta-AP39TL9077 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14527": {
+   "confidence": 0.9231,
+   "label": "Mākavarapālem",
+   "latitude": 17.61923,
+   "longitude": 82.72165,
+   "name": "AP-104-MMU-Phc Makavaripalem-AP39TL9086 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14528": {
+   "confidence": 0.98,
+   "label": "Godicherla, Anakapalli",
+   "latitude": 17.39115,
+   "longitude": 82.6211,
+   "name": "AP-104-MMU-Phc Godicherla-AP39TL9089 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14529": {
+   "confidence": 0.98,
+   "label": "Vemulapūdi, Anakapalli",
+   "latitude": 17.60872,
+   "longitude": 82.61384,
+   "name": "AP-104-MMU-Phc Vemulapudi-AP39UL4274 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14530": {
+   "confidence": 0.97,
+   "label": "Nathavaram, Visakhapatnam (post office)",
+   "latitude": 17.5315,
+   "longitude": 82.4993,
+   "name": "AP-104-MMU-Phc Nathavaram-AP39TL9091 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14531": {
+   "confidence": 0.98,
+   "label": "Mangavaram, Anakapalli",
+   "latitude": 17.3467,
+   "longitude": 82.58939,
+   "name": "AP-104-MMU-Phc Mangavaram-AP39TL9095 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14533": {
+   "confidence": 0.89,
+   "label": "Chīdigummala, Anakapalli",
+   "latitude": 17.68744,
+   "longitude": 82.57303,
+   "name": "AP-104-MMU-Phc Jeedigummala-AP39UL4256 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14534": {
+   "confidence": 0.98,
+   "label": "Mākavarapālem, Anakapalli",
+   "latitude": 17.61923,
+   "longitude": 82.72165,
+   "name": "AP-104-MMU-Phc Makavarapalem-AP39UL4260 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14535": {
+   "confidence": 0.98,
+   "label": "Nakkāpalle, Anakapalli",
+   "latitude": 17.40792,
+   "longitude": 82.71663,
+   "name": "AP-104-MMU-Phc Nakkapalle-AP39UL4262 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14536": {
+   "confidence": 0.97,
+   "label": "Srīramāpuram, Anakapalli",
+   "latitude": 17.63727,
+   "longitude": 82.98995,
+   "name": "AP-104-MMU-Phc Sreeramapuram-AP39UL4263 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14538": {
+   "confidence": 0.98,
+   "label": "Tāllapālem, Anakapalli",
+   "latitude": 17.63342,
+   "longitude": 82.89038,
+   "name": "AP-104-MMU-Phc Tallapalem-AP39TL9083 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14539": {
+   "confidence": 0.98,
+   "label": "Rāmbilli, Anakapalli",
+   "latitude": 17.46369,
+   "longitude": 82.93007,
+   "name": "AP-104-MMU-Phc Rambilli-AP39TL9098 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14541": {
+   "confidence": 0.97,
+   "label": "Atchutapuram, Visakhapatnam (post office)",
+   "latitude": 17.5218,
+   "longitude": 82.9482,
+   "name": "AP-104-MMU-Phc Atchutapuram-AP39TL9067 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14543": {
+   "confidence": 0.9233,
+   "label": "Paravāda, Anakapalli",
+   "latitude": 17.62828,
+   "longitude": 83.07925,
+   "name": "AP-104-MMU-Phc Parvada-AP39TL9094 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14544": {
+   "confidence": 0.9,
+   "label": "Gullepalle",
+   "latitude": 17.85243,
+   "longitude": 83.01815,
+   "name": "AP-104-MMU-Phc Bullepalle-AP39TL9103 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14545": {
+   "confidence": 0.97,
+   "label": "Dimili, Visakhapatnam (post office)",
+   "latitude": 17.4999,
+   "longitude": 82.9199,
+   "name": "AP-104-MMU-Phc Dimili-AP39TL9105 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14546": {
+   "confidence": 0.98,
+   "label": "Kasimkota, Visakhapatnam (post office)",
+   "latitude": 17.6655,
+   "longitude": 82.9662,
+   "name": "AP-104-MMU-Phc Kasimkota-AP39UL4251 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14547": {
+   "confidence": 0.99,
+   "label": "Haripālem, Anakapalli",
+   "latitude": 17.61113,
+   "longitude": 82.97859,
+   "name": "AP-104-MMU-Phc Haripalem-AP39UL4252 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14549": {
+   "confidence": 0.98,
+   "label": "Munagapāka, Anakapalli",
+   "latitude": 17.63718,
+   "longitude": 82.99425,
+   "name": "AP-104-MMU-Phc Munagapaka-AP39UL4261 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14550": {
+   "confidence": 0.97,
+   "label": "Thummapala, Visakhapatnam (post office)",
+   "latitude": 17.8543,
+   "longitude": 83.0121,
+   "name": "AP-104-MMU-Phc Thummapala-AP39UL4264 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14551": {
+   "confidence": 0.99,
+   "label": "Sabbavaram, Anakapalli",
+   "latitude": 17.79202,
+   "longitude": 83.12691,
+   "name": "AP-104-MMU-Phc Sabbavaram-AP39UL4268 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14553": {
+   "confidence": 0.99,
+   "label": "Devarāpalle, Anakapalli",
+   "latitude": 17.98872,
+   "longitude": 82.97992,
+   "name": "AP-104-MMU-Phc Devarapalle-AP39TL9073 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14554": {
+   "confidence": 0.96,
+   "label": "Buchchayyapeta, Anakapalli",
+   "latitude": 17.78822,
+   "longitude": 82.99318,
+   "name": "AP-104-MMU-Phc Butchayyapeta-AP39TL9069 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14555": {
+   "confidence": 0.97,
+   "label": "Cheedikada, Visakhapatnam (post office)",
+   "latitude": 17.9135,
+   "longitude": 82.7734,
+   "name": "AP-104-MMU-Phc Cheedikada-AP39TL9070 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14557": {
+   "confidence": 0.97,
+   "label": "Kottakota, Anakapalli",
+   "latitude": 17.75133,
+   "longitude": 82.70039,
+   "name": "AP-104-MMU-Phc Kotha Kota-AP39UL4273 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14558": {
+   "confidence": 0.95,
+   "label": "Butchampeta, Visakhapatnam (post office)",
+   "latitude": 17.7384,
+   "longitude": 82.5892,
+   "name": "AP-104-MMU-Phc Buchampeta-AP39TL9101 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14560": {
+   "confidence": 0.98,
+   "label": "Vaddadi, Visakhapatnam (post office)",
+   "latitude": 17.8474,
+   "longitude": 82.8729,
+   "name": "AP-104-MMU-Phc Vaddadi-AP39UL4253 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14561": {
+   "confidence": 0.98,
+   "label": "Vechalam, Anakapalli",
+   "latitude": 17.89842,
+   "longitude": 82.97511,
+   "name": "AP-104-MMU-Phc Vechalam-AP39UL4254 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14562": {
+   "confidence": 0.95,
+   "label": "Pālem, Anakapalli",
+   "latitude": 18.01808,
+   "longitude": 82.9797,
+   "name": "AP-104-MMU-Phc Lv Palem-AP39UL4258 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14563": {
+   "confidence": 0.97,
+   "label": "Ravikamatham, Visakhapatnam (post office)",
+   "latitude": 17.7603,
+   "longitude": 82.8072,
+   "name": "AP-104-MMU-Phc Ravikamatham-AP39UL4265 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14564": {
+   "confidence": 0.97,
+   "label": "Kj Puram, Visakhapatnam (post office)",
+   "latitude": 17.9135,
+   "longitude": 82.7734,
+   "name": "AP-104-MMU-Phc Kj Puram-AP39UL4269 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14567": {
+   "confidence": 0.97,
+   "label": "Atmakur, Ananthapur (post office)",
+   "latitude": 14.5536,
+   "longitude": 77.8917,
+   "name": "AP-104-MMU-Phc-atmakur-AP39TL9492 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14569": {
+   "confidence": 0.98,
+   "label": "Gārladinne, Anantapur",
+   "latitude": 14.82409,
+   "longitude": 77.59852,
+   "name": "AP-104-MMU-Phc-garladinne-AP39TL9504 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14571": {
+   "confidence": 0.97,
+   "label": "Putlur, Ananthapur (post office)",
+   "latitude": 14.4811,
+   "longitude": 77.5768,
+   "name": "AP-104-MMU-Phc-putlur-AP39TL9530 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14572": {
+   "confidence": 0.98,
+   "label": "Rāptādu, Anantapur",
+   "latitude": 14.61845,
+   "longitude": 77.60465,
+   "name": "AP-104-MMU-Phc-raptadu-AP39TL9533 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14573": {
+   "confidence": 0.97,
+   "label": "Tarimela, Anantapur",
+   "latitude": 14.91464,
+   "longitude": 77.69083,
+   "name": "AP-104-MMU-Phc-tarimella-AP39TL9538 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14574": {
+   "confidence": 0.97,
+   "label": "Vidapanakal, Ananthapur (post office)",
+   "latitude": 14.9819,
+   "longitude": 77.6801,
+   "name": "AP-104-MMU-Phc-vidapanakal-AP39TL9546 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14575": {
+   "confidence": 0.98,
+   "label": "Kurugunta, Anantapur",
+   "latitude": 14.6781,
+   "longitude": 77.51695,
+   "name": "AP-104-MMU-Phc-kurugunta-AP39UH4793 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14578": {
+   "confidence": 0.97,
+   "label": "Pedda Kowkuntla, Ananthapur (post office)",
+   "latitude": 14.8527,
+   "longitude": 77.1836,
+   "name": "AP-104-MMU-Phc-pedda Kowkuntla-AP39UL4504 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14579": {
+   "confidence": 0.98,
+   "label": "Kambadūru, Anantapur",
+   "latitude": 14.34531,
+   "longitude": 77.22978,
+   "name": "AP-104-MMU-Phc-kambadur-AP39UL4506 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14580": {
+   "confidence": 0.98,
+   "label": "Gooty, Anantapur",
+   "latitude": 15.11836,
+   "longitude": 77.63776,
+   "name": "AP-104-MMU-Phc-gooty-AP39TL9505 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14581": {
+   "confidence": 0.9333,
+   "label": "Nārapala, Anantapur",
+   "latitude": 14.71087,
+   "longitude": 77.80835,
+   "name": "AP-104-MMU-Phc-narpala-AP39TL9523 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14583": {
+   "confidence": 0.96,
+   "label": "Peddapappūru, Anantapur",
+   "latitude": 14.92874,
+   "longitude": 77.86227,
+   "name": "AP-104-MMU-Phc-peddapappur-AP39TL9527 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14584": {
+   "confidence": 0.8789,
+   "label": "Krishtipādu, Anantapur",
+   "latitude": 15.06406,
+   "longitude": 77.77845,
+   "name": "AP-104-MMU-Phc-kristapadu-AP39TL9528 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14585": {
+   "confidence": 0.97,
+   "label": "Chukkalur, Ananthapur (post office)",
+   "latitude": 14.9639,
+   "longitude": 78.0021,
+   "name": "AP-104-MMU-Phc-chukkalur-AP39TL9541 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14586": {
+   "confidence": 0.98,
+   "label": "Yādiki, Anantapur",
+   "latitude": 15.04941,
+   "longitude": 77.87306,
+   "name": "AP-104-MMU-Phc-yadiki-AP39TL9547 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14587": {
+   "confidence": 0.98,
+   "label": "Ellanūru, Anantapur",
+   "latitude": 14.69783,
+   "longitude": 78.07516,
+   "name": "AP-104-MMU-Phc-yellanur-AP39TL9548 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14588": {
+   "confidence": 0.98,
+   "label": "Nāgasamudram, Anantapur",
+   "latitude": 15.05556,
+   "longitude": 77.50039,
+   "name": "AP-104-MMU-Phc-nagasamudram-AP39TL9651 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14589": {
+   "confidence": 0.98,
+   "label": "Tadpatri, Anantapur",
+   "latitude": 14.90832,
+   "longitude": 78.01031,
+   "name": "AP-104-MMU-Tadpatri Dh-AP39UL4503 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14590": {
+   "confidence": 0.99,
+   "label": "Beluguppa, Anantapur",
+   "latitude": 14.71463,
+   "longitude": 77.13632,
+   "name": "AP-104-MMU-Phc-beluguppa-AP39UL4541 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14591": {
+   "confidence": 0.98,
+   "label": "Brahmasamudram, Anantapur",
+   "latitude": 14.53798,
+   "longitude": 76.94751,
+   "name": "AP-104-MMU-Phc-brahmasamudram-AP39TL9496 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14593": {
+   "confidence": 0.98,
+   "label": "Kundurpi, Anantapur",
+   "latitude": 14.29181,
+   "longitude": 77.03456,
+   "name": "AP-104-MMU-Phc-kundurpi-AP39TL9516 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14594": {
+   "confidence": 0.98,
+   "label": "Āvuladatla, Anantapur",
+   "latitude": 14.69661,
+   "longitude": 76.98553,
+   "name": "AP-104-MMU-Phc-avuladatla-AP39TL9534 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14595": {
+   "confidence": 0.96,
+   "label": "Settūru, Anantapur",
+   "latitude": 14.44801,
+   "longitude": 76.98224,
+   "name": "AP-104-MMU-Phc-settur-AP39TL9537 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14596": {
+   "confidence": 0.97,
+   "label": "Raketla, Ananthapur (post office)",
+   "latitude": 14.8527,
+   "longitude": 77.1836,
+   "name": "AP-104-MMU-Phc-raketla-AP39TL9544 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14597": {
+   "confidence": 0.98,
+   "label": "Wajrakarūr, Anantapur",
+   "latitude": 15.02719,
+   "longitude": 77.38657,
+   "name": "AP-104-MMU-Phc-vajrakarur-AP39TL9545 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14598": {
+   "confidence": 0.97,
+   "label": "Yerraguntla, Ananthapur (post office)",
+   "latitude": 14.4811,
+   "longitude": 77.5768,
+   "name": "AP-104-MMU-Phc-yerraguntla-AP39UL4505 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14599": {
+   "confidence": 0.99,
+   "label": "Beluguppa, Anantapur",
+   "latitude": 14.71463,
+   "longitude": 77.13632,
+   "name": "AP-104-MMU-Phc-beluguppa-AP39TL9494 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14600": {
+   "confidence": 0.98,
+   "label": "Kambadūru, Anantapur",
+   "latitude": 14.34531,
+   "longitude": 77.22978,
+   "name": "AP-104-MMU-Phc-kambadur-AP39TL9511 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14601": {
+   "confidence": 0.97,
+   "label": "Bommanahal, Ananthapur (post office)",
+   "latitude": 14.9459,
+   "longitude": 77.1561,
+   "name": "AP-104-MMU-Phc-bommanahal-AP39TL9495 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14602": {
+   "confidence": 0.96,
+   "label": "Gummaghatta, Anantapur",
+   "latitude": 14.56536,
+   "longitude": 76.86519,
+   "name": "AP-104-MMU-Phc-gummagatta-AP39TL9508 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14603": {
+   "confidence": 0.97,
+   "label": "Muddinayanipalli, Ananthapur (post office)",
+   "latitude": 14.4804,
+   "longitude": 77.5232,
+   "name": "AP-104-MMU-Phc-muddinayanipalli-AP39TL9510 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14604": {
+   "confidence": 0.97,
+   "label": "Kanekal, Ananthapur (post office)",
+   "latitude": 14.9459,
+   "longitude": 77.1561,
+   "name": "AP-104-MMU-Phc-kanekal-AP39TL9513 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14606": {
+   "confidence": 0.98,
+   "label": "Gurramkonda, Annamayya",
+   "latitude": 13.78135,
+   "longitude": 78.58917,
+   "name": "AP-104-MMU-Phc-gurramkonda-AP39TL9436 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14607": {
+   "confidence": 0.95,
+   "label": "Errakotapalle, Chittoor (post office)",
+   "latitude": 13.4673,
+   "longitude": 79.0143,
+   "name": "AP-104-MMU-Phc-errakotapalli-AP39TL9439 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14608": {
+   "confidence": 0.98,
+   "label": "Garnimitta, Annamayya",
+   "latitude": 13.82,
+   "longitude": 78.89592,
+   "name": "AP-104-MMU-Phc-garnimitta-AP39TL9441 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14609": {
+   "confidence": 0.96,
+   "label": "Peddamandyam, Annamayya",
+   "latitude": 13.92847,
+   "longitude": 78.53526,
+   "name": "AP-104-MMU-Phc-pedhamandyam-AP39TL9455 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14610": {
+   "confidence": 0.97,
+   "label": "Regallu, Chittoor (post office)",
+   "latitude": 13.3166,
+   "longitude": 78.6184,
+   "name": "AP-104-MMU-Phc-regallu-AP39TL9459 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14611": {
+   "confidence": 0.9474,
+   "label": "Yandlapalle, Annamayya",
+   "latitude": 14.17348,
+   "longitude": 78.69931,
+   "name": "AP-104-MMU-Phc-yandapalli-AP39TL9549 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14612": {
+   "confidence": 0.98,
+   "label": "Chinnamandem, Annamayya",
+   "latitude": 13.94178,
+   "longitude": 78.67901,
+   "name": "AP-104-MMU-Phc- Chinnamandem-AP39TL9557 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14613": {
+   "confidence": 0.97,
+   "label": "Galiveedu, Cuddapah (post office)",
+   "latitude": 14.4599,
+   "longitude": 78.7836,
+   "name": "AP-104-MMU-Phc- Galiveedu-AP39TL9560 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14614": {
+   "confidence": 0.97,
+   "label": "Devālampalle, Annamayya",
+   "latitude": 13.50379,
+   "longitude": 78.42489,
+   "name": "AP-104-MMU-Phc- Devalampalli-AP39TL9568 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14615": {
+   "confidence": 0.96,
+   "label": "Ramapuram, Annamayya",
+   "latitude": 14.1916,
+   "longitude": 78.75909,
+   "name": "AP-104-MMU-Phc- Ramapuram-AP39TL9584 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14616": {
+   "confidence": 0.97,
+   "label": "Sambepalli, Cuddapah (post office)",
+   "latitude": 14.4599,
+   "longitude": 78.7836,
+   "name": "AP-104-MMU-Phc-sambepalli-AP39TL9586 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14617": {
+   "confidence": 0.95,
+   "label": "Cherukuvaripalle, Chittoor (post office)",
+   "latitude": 13.5806,
+   "longitude": 79.0229,
+   "name": "AP-104-MMU-Phc-cherukuvaripalli-AP39TL9471 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14618": {
+   "confidence": 0.98,
+   "label": "Somala, Chittoor",
+   "latitude": 13.47476,
+   "longitude": 78.81007,
+   "name": "AP-104-MMU-Phc-somala-AP39TL9472 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14619": {
+   "confidence": 0.9312,
+   "label": "Kottakota, Annamayya",
+   "latitude": 13.6573,
+   "longitude": 78.26253,
+   "name": "AP-104-MMU-Phc-b.kothakota-AP39TL9424 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14620": {
+   "confidence": 0.97,
+   "label": "Medikurthi, Chittoor (post office)",
+   "latitude": 13.9542,
+   "longitude": 78.3968,
+   "name": "AP-104-MMU-Phc-medikurthi-AP39TL9440 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14621": {
+   "confidence": 0.98,
+   "label": "Kurabalakota, Annamayya",
+   "latitude": 13.65227,
+   "longitude": 78.48184,
+   "name": "AP-104-MMU-Phc-kurabalakota-AP39TL9444 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14622": {
+   "confidence": 0.8667,
+   "label": "Mulakalacheruvu",
+   "latitude": 13.80132,
+   "longitude": 78.26257,
+   "name": "AP-104-MMU-Phc-molakalchearuvu-AP39TL9445 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14623": {
+   "confidence": 0.96,
+   "label": "Nimmanapalle, Annamayya",
+   "latitude": 13.56981,
+   "longitude": 78.66898,
+   "name": "AP-104-MMU-Phc-nimmanapalli-AP39TL9449 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14624": {
+   "confidence": 0.96,
+   "label": "Peddatippasamudram, Annamayya",
+   "latitude": 13.71295,
+   "longitude": 78.20755,
+   "name": "AP-104-MMU-Pch-pedhathippasamudram-AP39TL9456 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14625": {
+   "confidence": 0.98,
+   "label": "Rāmasamudram, Annamayya",
+   "latitude": 13.36664,
+   "longitude": 78.42438,
+   "name": "AP-104-MMU-Phc-ramasamudram-AP39TL9466 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14626": {
+   "confidence": 0.96,
+   "label": "Kosuvāripalle, Annamayya",
+   "latitude": 13.74891,
+   "longitude": 78.43628,
+   "name": "AP-104-MMU-Phc- Kosuvaripalli-AP39TL9475 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14627": {
+   "confidence": 0.95,
+   "label": "Chintaparthi, Chittoor (post office)",
+   "latitude": 14.7017,
+   "longitude": 78.9992,
+   "name": "AP-104-MMU-Phc-chinthaparthy-AP39TL9480 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14628": {
+   "confidence": 0.95,
+   "label": "Chinnatippasamudram, Chittoor (post office)",
+   "latitude": 13.4458,
+   "longitude": 78.6515,
+   "name": "AP-104-MMU-Phc-chinnathippasamudram-AP39UH4980 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14629": {
+   "confidence": 0.95,
+   "label": "Bommancheruvu, Chittoor",
+   "latitude": 13.16014,
+   "longitude": 78.99959,
+   "name": "AP-104-MMU-Phc- Bommanacheruvu-AP39UL4544 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14630": {
+   "confidence": 0.95,
+   "label": "Chowdepalle, Chittoor (post office)",
+   "latitude": 13.4421,
+   "longitude": 78.6933,
+   "name": "AP-104-MMU-Phc-chowdepalli-AP39TL9431 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14632": {
+   "confidence": 0.98,
+   "label": "Punganūru, Chittoor",
+   "latitude": 13.36672,
+   "longitude": 78.57186,
+   "name": "AP-104-MMU-Phc- Punganur Colocated-AP39UL4452 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14633": {
+   "confidence": 0.98,
+   "label": "Rayachoti, Annamayya",
+   "latitude": 14.05723,
+   "longitude": 78.75056,
+   "name": "AP-104-MMU-Rayachoti - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14634": {
+   "confidence": 0.96,
+   "label": "Madanapalle, Annamayya",
+   "latitude": 13.5503,
+   "longitude": 78.50288,
+   "name": "AP-104-MMU-Madanapalli - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14637": {
+   "confidence": 0.97,
+   "label": "G Madugula, Visakhapatnam (post office)",
+   "latitude": 18.0789,
+   "longitude": 82.4405,
+   "name": "AP-104-MMU-G. Madugula-AP39TL9036 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14638": {
+   "confidence": 0.99,
+   "label": "Pāderu, Alluri Sitharama Raju",
+   "latitude": 18.07776,
+   "longitude": 82.66037,
+   "name": "AP-104-MMU-Paderu-AP39TL9064 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14639": {
+   "confidence": 0.99,
+   "label": "Chintapalle, Alluri Sitharama Raju",
+   "latitude": 17.87117,
+   "longitude": 82.35108,
+   "name": "AP-104-MMU-Chintapalle-AP39TL9071 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14641": {
+   "confidence": 0.99,
+   "label": "Chintapalle, Alluri Sitharama Raju",
+   "latitude": 17.87117,
+   "longitude": 82.35108,
+   "name": "AP-104-MMU-Chintapalle-AP39TL9076 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14642": {
+   "confidence": 0.98,
+   "label": "Koyyūru, Alluri Sitharama Raju",
+   "latitude": 17.6606,
+   "longitude": 82.20981,
+   "name": "AP-104-MMU-Koyyuru-AP39TL9078 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14643": {
+   "confidence": 0.99,
+   "label": "Chintapalle, Alluri Sitharama Raju",
+   "latitude": 17.87117,
+   "longitude": 82.35108,
+   "name": "AP-104-MMU-Chintapalle-AP39TL9080 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14644": {
+   "confidence": 0.98,
+   "label": "Koyyūru, Alluri Sitharama Raju",
+   "latitude": 17.6606,
+   "longitude": 82.20981,
+   "name": "AP-104-MMU-Koyyuru-AP39TL9085 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14645": {
+   "confidence": 0.99,
+   "label": "Pāderu, Alluri Sitharama Raju",
+   "latitude": 18.07776,
+   "longitude": 82.66037,
+   "name": "AP-104-MMU-Paderu-AP39TL9092 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14646": {
+   "confidence": 0.97,
+   "label": "Araku Valley, Alluri Sitharama Raju",
+   "latitude": 18.32775,
+   "longitude": 82.87759,
+   "name": "AP-104-MMU-Arakuvalley-AP39TL9046 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14647": {
+   "confidence": 0.96,
+   "label": "Ananthagiri, Visakhapatnam (post office)",
+   "latitude": 18.2236,
+   "longitude": 82.9875,
+   "name": "AP-104-MMU-Ananthagiri-AP39TL9065 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14648": {
+   "confidence": 0.97,
+   "label": "Araku Valley, Alluri Sitharama Raju",
+   "latitude": 18.32775,
+   "longitude": 82.87759,
+   "name": "AP-104-MMU-Arakuvalley-AP39TL9066 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14649": {
+   "confidence": 0.96,
+   "label": "Ananthagiri, Visakhapatnam (post office)",
+   "latitude": 18.2236,
+   "longitude": 82.9875,
+   "name": "AP-104-MMU-Ananthagiri-AP39TL9068 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14650": {
+   "confidence": 0.97,
+   "label": "Dumbriguda, Visakhapatnam (post office)",
+   "latitude": 18.3099,
+   "longitude": 82.8237,
+   "name": "AP-104-MMU-Dumbriguda-AP39TL9074 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14651": {
+   "confidence": 0.9233,
+   "label": "Peddabayalu, Alluri Sitharama Raju",
+   "latitude": 18.13418,
+   "longitude": 82.46122,
+   "name": "AP-104-MMU-Pedabayulu-AP39TL9079 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14652": {
+   "confidence": 0.98,
+   "label": "Hukumpeta, Alluri Sitharama Raju",
+   "latitude": 18.13361,
+   "longitude": 82.68397,
+   "name": "AP-104-MMU-Hukumpeta-AP39TL9081 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14653": {
+   "confidence": 0.98,
+   "label": "Munchingput, Alluri Sitharama Raju",
+   "latitude": 18.14213,
+   "longitude": 82.68676,
+   "name": "AP-104-MMU-Munchingput-AP39TL9088 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14654": {
+   "confidence": 0.97,
+   "label": "Dumbriguda, Visakhapatnam (post office)",
+   "latitude": 18.3099,
+   "longitude": 82.8237,
+   "name": "AP-104-MMU-Dumbriguda-AP39TL9093 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14655": {
+   "confidence": 0.9233,
+   "label": "Peddabayalu, Alluri Sitharama Raju",
+   "latitude": 18.13418,
+   "longitude": 82.46122,
+   "name": "AP-104-MMU-Pedabayulu-AP39TL9096 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14656": {
+   "confidence": 0.98,
+   "label": "Hukumpeta, Alluri Sitharama Raju",
+   "latitude": 18.13361,
+   "longitude": 82.68397,
+   "name": "AP-104-MMU-Hukumpeta-AP39TL9097 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14660": {
+   "confidence": 0.98,
+   "label": "Chinna Ganjām, Bapatla",
+   "latitude": 15.69192,
+   "longitude": 80.24117,
+   "name": "AP-104-MMU-Phc Chinaganjam-AP39TL9329 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14661": {
+   "confidence": 0.89,
+   "label": "Īpurupālem, Bapatla",
+   "latitude": 15.84891,
+   "longitude": 80.38656,
+   "name": "AP-104-MMU-Phc Epurupalem-AP39TL9330 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14662": {
+   "confidence": 0.98,
+   "label": "Inkollu, Bapatla",
+   "latitude": 15.82778,
+   "longitude": 80.19208,
+   "name": "AP-104-MMU-Phc Inkollu-AP39TL9339 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14663": {
+   "confidence": 0.875,
+   "label": "Kāranchedu, Bapatla",
+   "latitude": 15.88426,
+   "longitude": 80.31632,
+   "name": "AP-104-MMU-Phc Karamchedu-AP39TL9343 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14664": {
+   "confidence": 0.96,
+   "label": "Dronadula, Bapatla",
+   "latitude": 15.91338,
+   "longitude": 80.14147,
+   "name": "AP-104-MMU-Phc Dronadhula-AP39TL9354 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14665": {
+   "confidence": 0.98,
+   "label": "Cherukūru, Bapatla",
+   "latitude": 15.99448,
+   "longitude": 80.37869,
+   "name": "AP-104-MMU-Phc Cherukuru-AP39TL9359 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14666": {
+   "confidence": 0.98,
+   "label": "Vetapālem, Bapatla",
+   "latitude": 15.78502,
+   "longitude": 80.30663,
+   "name": "AP-104-MMU-Phc Vetapalem-AP39TL9374 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14667": {
+   "confidence": 0.88,
+   "label": "Yeddanapudi, Prakasam (post office)",
+   "latitude": 15.8431,
+   "longitude": 79.9137,
+   "name": "AP-104-MMU-Phc Yaddanapudi-AP39TL9376 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14668": {
+   "confidence": 0.94,
+   "label": "Pandillapalle, Prakasam",
+   "latitude": 15.15935,
+   "longitude": 79.22569,
+   "name": "AP-104-MMU-Phc Pandillapalli-AP39UL4398 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14669": {
+   "confidence": 0.99,
+   "label": "Daggupādu, Bapatla",
+   "latitude": 15.87434,
+   "longitude": 80.2108,
+   "name": "AP-104-MMU-Phc Daggupadu-AP39UL4401 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14670": {
+   "confidence": 0.98,
+   "label": "Karlapālem, Bapatla",
+   "latitude": 15.9375,
+   "longitude": 80.54931,
+   "name": "AP-104-MMU-Phc Karlapalem-AP39UL4405 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14671": {
+   "confidence": 0.95,
+   "label": "Amartaluru, Guntur (post office)",
+   "latitude": 17.3781,
+   "longitude": 82.5476,
+   "name": "AP-104-MMU-Phc Amarthaluru-AP39TL9271 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14672": {
+   "confidence": 0.98,
+   "label": "Appikatla, Bapatla",
+   "latitude": 15.97483,
+   "longitude": 80.50991,
+   "name": "AP-104-MMU-Phc Appikatla-AP39TL9272 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14673": {
+   "confidence": 0.96,
+   "label": "Bhattiprolu, Bapatla",
+   "latitude": 16.1026,
+   "longitude": 80.78074,
+   "name": "AP-104-MMU-Phc Battiprolu-AP39TL9274 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14675": {
+   "confidence": 0.98,
+   "label": "Karlapālem, Bapatla",
+   "latitude": 15.9375,
+   "longitude": 80.54931,
+   "name": "AP-104-MMU-Phc Karlapalem-AP39TL9288 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14676": {
+   "confidence": 0.98,
+   "label": "Kollūru, Bapatla",
+   "latitude": 16.18336,
+   "longitude": 80.7966,
+   "name": "AP-104-MMU-Phc Kolluru-AP39TL9290 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14678": {
+   "confidence": 0.97,
+   "label": "Kuchinapudi, Guntur (post office)",
+   "latitude": 15.9435,
+   "longitude": 80.7397,
+   "name": "AP-104-MMU-Phc Kuchinapudi-AP39TL9300 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14680": {
+   "confidence": 0.96,
+   "label": "Tsunduru, Bapatla",
+   "latitude": 16.15731,
+   "longitude": 80.58076,
+   "name": "AP-104-MMU-Phc Tsundur-AP39TL9319 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14681": {
+   "confidence": 0.98,
+   "label": "Peravali, Bapatla",
+   "latitude": 16.13899,
+   "longitude": 80.71741,
+   "name": "AP-104-MMU-Phc Peravali-AP39TL9322 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14682": {
+   "confidence": 0.97,
+   "label": "Chinna Matlapūdi, Bapatla",
+   "latitude": 15.96888,
+   "longitude": 80.67821,
+   "name": "AP-104-MMU-Phc Chinnamatlapudi-AP39UL4397 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14684": {
+   "confidence": 0.89,
+   "label": "Īpurupālem, Bapatla",
+   "latitude": 15.84891,
+   "longitude": 80.38656,
+   "name": "AP-104-MMU-Phc Epurupalem-AP39UL4454 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14686": {
+   "confidence": 0.93,
+   "label": "Thumabakuppam, Chittoor (post office)",
+   "latitude": 13.7403,
+   "longitude": 79.5039,
+   "name": "AP-104-MMU-Thumbakuppam Phc-AP39TL9426 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14687": {
+   "confidence": 0.98,
+   "label": "Gangāvaram, Chittoor",
+   "latitude": 13.21612,
+   "longitude": 78.73793,
+   "name": "AP-104-MMU-Gangavaram Phc-AP39TL9433 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14688": {
+   "confidence": 0.97,
+   "label": "Peddapanjāni, Chittoor",
+   "latitude": 13.29808,
+   "longitude": 78.6839,
+   "name": "AP-104-MMU-Pedhapanjani Phc-AP39TL9454 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14689": {
+   "confidence": 0.95,
+   "label": "Madireddipalle, Chittoor (post office)",
+   "latitude": 13.4673,
+   "longitude": 79.0143,
+   "name": "AP-104-MMU-Madhireddypalli Phc-AP39TL9485 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14690": {
+   "confidence": 0.87,
+   "label": "Bangārupālem, Chittoor",
+   "latitude": 13.19043,
+   "longitude": 78.91283,
+   "name": "AP-104-MMU-Bangarupalyam Colocated Phc-AP39UL4436 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14691": {
+   "confidence": 0.98,
+   "label": "Pattikonda, Chittoor",
+   "latitude": 13.18322,
+   "longitude": 78.63918,
+   "name": "AP-104-MMU-Pathikonda Phc-AP39UL4438 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14692": {
+   "confidence": 0.99,
+   "label": "Rāyalapeta, Chittoor",
+   "latitude": 13.32986,
+   "longitude": 78.72509,
+   "name": "AP-104-MMU-Rayalapeta Phc-AP39UL4451 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14693": {
+   "confidence": 0.96,
+   "label": "Baireddipalle, Chittoor",
+   "latitude": 13.09262,
+   "longitude": 78.61196,
+   "name": "AP-104-MMU-Baireddypalli Phc-AP39TL9425 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14694": {
+   "confidence": 0.96,
+   "label": "Kolamāsanapalle, Chittoor",
+   "latitude": 13.14935,
+   "longitude": 78.68428,
+   "name": "AP-104-MMU-Kolamasanapalli Phc-AP39TL9452 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14695": {
+   "confidence": 0.97,
+   "label": "Theertham, Chittoor (post office)",
+   "latitude": 13.1724,
+   "longitude": 78.5887,
+   "name": "AP-104-MMU-Theertham Phc-AP39UL4435 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14697": {
+   "confidence": 0.9412,
+   "label": "Uddikottūru, Chittoor",
+   "latitude": 12.89212,
+   "longitude": 78.36335,
+   "name": "AP-104-MMU-Gudikothuru Phc-AP39UL4212 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14698": {
+   "confidence": 0.98,
+   "label": "Rāmakuppam, Chittoor",
+   "latitude": 12.90013,
+   "longitude": 78.4857,
+   "name": "AP-104-MMU-Ramakuppam Phc-AP39UL4314 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14699": {
+   "confidence": 0.98,
+   "label": "Santhipuram, Chittoor",
+   "latitude": 12.87267,
+   "longitude": 78.40437,
+   "name": "AP-104-MMU-Santhipuram Phc-AP39UL4322 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14700": {
+   "confidence": 0.95,
+   "label": "Rallabudugur, Chittoor (post office)",
+   "latitude": 13.0159,
+   "longitude": 78.5002,
+   "name": "AP-104-MMU-Rallabudhuguru Phc-AP39UL4351 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14701": {
+   "confidence": 0.9,
+   "label": "Paipālaiyam",
+   "latitude": 12.68362,
+   "longitude": 78.35415,
+   "name": "AP-104-MMU-Paipalyam Phc-AP39UL4369 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14702": {
+   "confidence": 0.94,
+   "label": "Kothapalli, Chittoor",
+   "latitude": 13.69296,
+   "longitude": 79.00784,
+   "name": "AP-104-MMU-N Kothapalli Phc-AP39UL4374 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14703": {
+   "confidence": 0.95,
+   "label": "Gudupalle, Chittoor (post office)",
+   "latitude": 13.8733,
+   "longitude": 78.2939,
+   "name": "AP-104-MMU-Gudupalli Phc-AP39UL4403 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14704": {
+   "confidence": 0.99,
+   "label": "Vijilāpuram, Chittoor",
+   "latitude": 12.83425,
+   "longitude": 78.46369,
+   "name": "AP-104-MMU-Vijalapuram Phc-AP39UL4423 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14705": {
+   "confidence": 0.8689,
+   "label": "Kota, Tirupati",
+   "latitude": 14.04028,
+   "longitude": 80.04879,
+   "name": "AP-104-MMU-V.kota Colocated Phc-AP39UL4461 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14706": {
+   "confidence": 0.95,
+   "label": "Peta, Chittoor",
+   "latitude": 13.34938,
+   "longitude": 79.08214,
+   "name": "AP-104-MMU-Nr Peta Phc-AP39TL9430 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14707": {
+   "confidence": 0.94,
+   "label": "Nellore, Nellore",
+   "latitude": 14.44992,
+   "longitude": 79.98697,
+   "name": "AP-104-MMU-Gd Nellore Phc-AP39TL9432 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14708": {
+   "confidence": 0.98,
+   "label": "Gudipāla, Chittoor",
+   "latitude": 13.08788,
+   "longitude": 79.1145,
+   "name": "AP-104-MMU-Gudipala Phc-AP39TL9435 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14709": {
+   "confidence": 0.96,
+   "label": "Tavanampalli, Chittoor",
+   "latitude": 13.26393,
+   "longitude": 79.01071,
+   "name": "AP-104-MMU-Thavanampalli Phc-AP39TL9476 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14710": {
+   "confidence": 0.96,
+   "label": "Yadamari, Chittoor",
+   "latitude": 13.1592,
+   "longitude": 79.03985,
+   "name": "AP-104-MMU-Yadhamari Phc-AP39UL4386 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14712": {
+   "confidence": 0.99,
+   "label": "Irala, Chittoor",
+   "latitude": 13.38652,
+   "longitude": 78.96784,
+   "name": "AP-104-MMU-Irala Phc-AP39TL9437 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14713": {
+   "confidence": 0.98,
+   "label": "Pulicherla, Chittoor",
+   "latitude": 13.60309,
+   "longitude": 79.04664,
+   "name": "AP-104-MMU-Pulicherla Phc-AP39TL9460 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14714": {
+   "confidence": 0.98,
+   "label": "Kānipākam, Chittoor",
+   "latitude": 13.27713,
+   "longitude": 79.03654,
+   "name": "AP-104-MMU-Kanipakam Phc-AP39UL4442 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14715": {
+   "confidence": 0.88,
+   "label": "Kathirapalle, Chittoor (post office)",
+   "latitude": 13.3475,
+   "longitude": 79.359,
+   "name": "AP-104-MMU-Katherapalli Phc-AP39TL9442 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14716": {
+   "confidence": 0.97,
+   "label": "Bugga Agraharam, Chittoor (post office)",
+   "latitude": 13.3256,
+   "longitude": 79.5989,
+   "name": "AP-104-MMU-Bugga Agraharam Phc-AP39TL9447 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14717": {
+   "confidence": 0.98,
+   "label": "Nindra, Chittoor",
+   "latitude": 13.36055,
+   "longitude": 79.70057,
+   "name": "AP-104-MMU-Nindra Phc-AP39TL9450 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14718": {
+   "confidence": 0.98,
+   "label": "Pālasamudram, Chittoor",
+   "latitude": 13.20913,
+   "longitude": 79.3988,
+   "name": "AP-104-MMU-Palasamudram Phc-AP39TL9453 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14719": {
+   "confidence": 0.97,
+   "label": "Gangadhara Nellore, Chittoor",
+   "latitude": 13.23308,
+   "longitude": 79.18156,
+   "name": "AP-104-MMU-Gd Nellore Phc-AP39TL9457 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14720": {
+   "confidence": 0.98,
+   "label": "Puthalapattu, Chittoor",
+   "latitude": 13.38393,
+   "longitude": 79.08208,
+   "name": "AP-104-MMU-Puthalapattu Phc-AP39TL9462 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14721": {
+   "confidence": 0.99,
+   "label": "Rompicherla, Chittoor",
+   "latitude": 13.67073,
+   "longitude": 79.04644,
+   "name": "AP-104-MMU-Rompicherla Phc-AP39TL9468 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14723": {
+   "confidence": 0.96,
+   "label": "Pachikapallam, Chittoor",
+   "latitude": 13.44125,
+   "longitude": 79.36341,
+   "name": "AP-104-MMU-Pachikapalam Phc-AP39TL9482 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14724": {
+   "confidence": 0.97,
+   "label": "Vijayapuram, Chittoor (post office)",
+   "latitude": 13.232,
+   "longitude": 79.767,
+   "name": "AP-104-MMU-Vijayapuram Phc-AP39TL9484 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14725": {
+   "confidence": 0.99,
+   "label": "Chittoor, Chittoor",
+   "latitude": 13.21055,
+   "longitude": 79.0956,
+   "name": "AP-104-MMU-Buffer Chittoor-AP39UL4462 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14726": {
+   "confidence": 0.97,
+   "label": "Palamaner, Chittoor (post office)",
+   "latitude": 13.2,
+   "longitude": 78.7472,
+   "name": "AP-104-MMU-Buffer Palamaner - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14727": {
+   "confidence": 0.98,
+   "label": "Nagari, Chittoor",
+   "latitude": 13.32139,
+   "longitude": 79.58557,
+   "name": "AP-104-MMU-Buffer Nagari - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14728": {
+   "confidence": 0.98,
+   "label": "Kuppam, Chittoor",
+   "latitude": 12.74931,
+   "longitude": 78.34189,
+   "name": "AP-104-MMU-Buffer Kuppam - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14732": {
+   "confidence": 0.95,
+   "label": "Choppella, East Godavari (post office)",
+   "latitude": 17.1767,
+   "longitude": 81.6925,
+   "name": "AP-104-MMU-Chopella-AP39TL9112 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14733": {
+   "confidence": 0.97,
+   "label": "Godilanka, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Godilanka-AP39TL9113 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14734": {
+   "confidence": 0.99,
+   "label": "Bandarulanka, Konaseema",
+   "latitude": 16.58282,
+   "longitude": 81.96167,
+   "name": "AP-104-MMU-Bandarulanka-AP39TL9114 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14735": {
+   "confidence": 0.98,
+   "label": "Ambajipeta, Konaseema",
+   "latitude": 16.59457,
+   "longitude": 81.90642,
+   "name": "AP-104-MMU-Ambajipeta-AP39TL9115 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14736": {
+   "confidence": 0.98,
+   "label": "Atreyapuram, Konaseema",
+   "latitude": 16.834,
+   "longitude": 81.79325,
+   "name": "AP-104-MMU-Atreyapuram-AP39TL9117 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14737": {
+   "confidence": 0.9174,
+   "label": "Vemavaram, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-G Vemavaram-AP39TL9125 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14739": {
+   "confidence": 0.98,
+   "label": "Katrenikona, Konaseema",
+   "latitude": 16.58255,
+   "longitude": 82.15284,
+   "name": "AP-104-MMU-Katrenikona-AP39TL9133 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14743": {
+   "confidence": 0.97,
+   "label": "Kothalanka, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Kothalanka-AP39TL9142 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14744": {
+   "confidence": 0.9374,
+   "label": "Gannavaram, Konaseema",
+   "latitude": 16.6,
+   "longitude": 81.9,
+   "name": "AP-104-MMU-Co-located Phc P.gannavaram-AP39TL9144 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14745": {
+   "confidence": 0.97,
+   "label": "Draksharamam, East Godavari (post office)",
+   "latitude": 17.0696,
+   "longitude": 82.2028,
+   "name": "AP-104-MMU-Draksharamam-AP39TL9152 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14747": {
+   "confidence": 0.99,
+   "label": "Rāzole, Konaseema",
+   "latitude": 16.47608,
+   "longitude": 81.83912,
+   "name": "AP-104-MMU-Razole Co-located-AP39TL9157 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14748": {
+   "confidence": 0.97,
+   "label": "Sakhinetipalli, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Sakhinetipalli-AP39TL9159 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14749": {
+   "confidence": 0.97,
+   "label": "Bheemanapalli, East Godavari (post office)",
+   "latitude": 16.5533,
+   "longitude": 82.0975,
+   "name": "AP-104-MMU-Bheemanapalli-AP39TL9166 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14750": {
+   "confidence": 0.9031,
+   "label": "Veeravallipelem, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Veeravallipalem-AP39UL4275 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14751": {
+   "confidence": 0.97,
+   "label": "Kesanakurru, East Godavari (post office)",
+   "latitude": 16.6589,
+   "longitude": 82.1875,
+   "name": "AP-104-MMU-Kesanakurru-AP39UL4313 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14752": {
+   "confidence": 0.97,
+   "label": "Peruru, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Peruru-AP39UL4316 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14753": {
+   "confidence": 0.97,
+   "label": "Lutukurru, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Lutukurru-AP39UL4317 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14754": {
+   "confidence": 0.97,
+   "label": "Nagullanka, East Godavari (post office)",
+   "latitude": 17.1734,
+   "longitude": 81.9669,
+   "name": "AP-104-MMU-Nagullanka-AP39UL4318 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14755": {
+   "confidence": 0.99,
+   "label": "Rāzole, Konaseema",
+   "latitude": 16.47608,
+   "longitude": 81.83912,
+   "name": "AP-104-MMU-Razole Colocated-AP39UL4319 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14756": {
+   "confidence": 0.97,
+   "label": "Kesanapalli, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Kesanapalli-AP39UL4320 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14758": {
+   "confidence": 0.97,
+   "label": "Pedapalla, East Godavari (post office)",
+   "latitude": 17.293,
+   "longitude": 82.2794,
+   "name": "AP-104-MMU-Pedapalla-AP39UL4324 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14760": {
+   "confidence": 0.97,
+   "label": "Avidi, East Godavari (post office)",
+   "latitude": 17.096,
+   "longitude": 81.8809,
+   "name": "AP-104-MMU-Avidi-AP39UL4327 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14763": {
+   "confidence": 0.9374,
+   "label": "Atreyapuram, Konaseema",
+   "latitude": 16.834,
+   "longitude": 81.79325,
+   "name": "AP-104-MMU-Atrayapuram-AP39TL9443 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14765": {
+   "confidence": 0.98,
+   "label": "Dwārapūdi, Konaseema",
+   "latitude": 16.95,
+   "longitude": 81.93333,
+   "name": "AP-104-MMU-Phc Dwarapudi-AP39TL9108 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14766": {
+   "confidence": 0.97,
+   "label": "Kutukuluru, East Godavari (post office)",
+   "latitude": 17.1881,
+   "longitude": 82.0802,
+   "name": "AP-104-MMU-Kutukuluru-AP39TL9116 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14770": {
+   "confidence": 0.9,
+   "label": "Kondukuduru",
+   "latitude": 16.66077,
+   "longitude": 82.07637,
+   "name": "AP-104-MMU-Konkuduru-AP39TL9154 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14771": {
+   "confidence": 0.96,
+   "label": "Rayavaram, Konaseema",
+   "latitude": 16.90193,
+   "longitude": 82.0041,
+   "name": "AP-104-MMU-Rayavaram-AP39TL9156 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14772": {
+   "confidence": 0.96,
+   "label": "Kadiyam, East Godāvari",
+   "latitude": 16.91667,
+   "longitude": 81.83333,
+   "name": "AP-104-MMU-Kadiam-AP39UL4280 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14773": {
+   "confidence": 0.9091,
+   "label": "Dowleswaram, East Godāvari",
+   "latitude": 16.94761,
+   "longitude": 81.77987,
+   "name": "AP-104-MMU-Dowelswaram-AP39UL4282 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14774": {
+   "confidence": 0.97,
+   "label": "Kadiyapulanka, East Godavari (post office)",
+   "latitude": 16.9167,
+   "longitude": 81.8333,
+   "name": "AP-104-MMU-Kadiyapulanka-AP39UL4286 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14775": {
+   "confidence": 0.9091,
+   "label": "Dowleswaram, East Godāvari",
+   "latitude": 16.94761,
+   "longitude": 81.77987,
+   "name": "AP-104-MMU-Dowelswaram-AP39UL4287 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14776": {
+   "confidence": 0.9274,
+   "label": "Kesavaram, East Godavari (post office)",
+   "latitude": 17.5283,
+   "longitude": 82.307,
+   "name": "AP-104-MMU-D Kesavaram-AP39UL4325 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14777": {
+   "confidence": 0.98,
+   "label": "Nallajerla, East Godāvari",
+   "latitude": 16.94752,
+   "longitude": 81.40601,
+   "name": "AP-104-MMU-Nallajerla-AP39TL9128 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14778": {
+   "confidence": 0.98,
+   "label": "Velivennu, East Godāvari",
+   "latitude": 16.84363,
+   "longitude": 81.68798,
+   "name": "AP-104-MMU-Velivennu-AP39TL9135 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14779": {
+   "confidence": 0.98,
+   "label": "Chāgallu, East Godāvari",
+   "latitude": 16.99282,
+   "longitude": 81.6649,
+   "name": "AP-104-MMU-Chagallu-AP39TL9178 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14781": {
+   "confidence": 0.95,
+   "label": "Anndevarapeta, East Godāvari",
+   "latitude": 17.09373,
+   "longitude": 81.57992,
+   "name": "AP-104-MMU-Annadevarapeta-AP39TL9186 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14782": {
+   "confidence": 0.95,
+   "label": "Samisragudem, West Godavari (post office)",
+   "latitude": 16.9231,
+   "longitude": 81.709,
+   "name": "AP-104-MMU-Samisragudem-AP39TL9192 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14783": {
+   "confidence": 0.99,
+   "label": "Nallajerla, East Godāvari",
+   "latitude": 16.94752,
+   "longitude": 81.40601,
+   "name": "AP-104-MMU-Nallajerla-AP39TL9197 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14784": {
+   "confidence": 0.98,
+   "label": "Tādimalla, East Godāvari",
+   "latitude": 16.9337,
+   "longitude": 81.60064,
+   "name": "AP-104-MMU-Tadimalla-AP39TL9198 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14785": {
+   "confidence": 0.99,
+   "label": "Peravali, East Godāvari",
+   "latitude": 16.75143,
+   "longitude": 81.74003,
+   "name": "AP-104-MMU-Peravali-AP39TL9207 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14786": {
+   "confidence": 0.98,
+   "label": "Tallapudi, East Godāvari",
+   "latitude": 17.12452,
+   "longitude": 81.66243,
+   "name": "AP-104-MMU-Tallapudi-AP39TL9212 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14787": {
+   "confidence": 0.99,
+   "label": "Undrājavaram, East Godāvari",
+   "latitude": 16.7891,
+   "longitude": 81.69814,
+   "name": "AP-104-MMU-Undrajavaram-AP39TL9214 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14788": {
+   "confidence": 0.95,
+   "label": "Dommeru, West Godavari (post office)",
+   "latitude": 17.021,
+   "longitude": 81.6176,
+   "name": "AP-104-MMU-Dommeru-AP39UL4277 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14789": {
+   "confidence": 0.95,
+   "label": "Dommeru, West Godavari (post office)",
+   "latitude": 17.021,
+   "longitude": 81.6176,
+   "name": "AP-104-MMU-Dommeru-AP39UL4278 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14790": {
+   "confidence": 0.99,
+   "label": "Korukonda",
+   "latitude": 17.16987,
+   "longitude": 81.82456,
+   "name": "AP-104-MMU-Korukonda-AP39TL9123 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14791": {
+   "confidence": 0.97,
+   "label": "G Kothapalli, East Godavari (post office)",
+   "latitude": 17.3238,
+   "longitude": 82.3444,
+   "name": "AP-104-MMU-G. Kothapalli-AP39TL9150 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14792": {
+   "confidence": 0.98,
+   "label": "Seethanagaram, East Godāvari",
+   "latitude": 17.1767,
+   "longitude": 81.6925,
+   "name": "AP-104-MMU-Seethanagaram-AP39TL9161 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14793": {
+   "confidence": 0.99,
+   "label": "Korukonda",
+   "latitude": 17.16987,
+   "longitude": 81.82456,
+   "name": "AP-104-MMU-Korukonda-AP39UL4281 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14794": {
+   "confidence": 0.97,
+   "label": "Rangampeta, East Godavari (post office)",
+   "latitude": 17.1693,
+   "longitude": 82.0395,
+   "name": "AP-104-MMU-Rangampeta-AP39UL4283 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14795": {
+   "confidence": 0.98,
+   "label": "Rājānagaram, East Godāvari",
+   "latitude": 17.08333,
+   "longitude": 81.9,
+   "name": "AP-104-MMU-Rajanagaram-AP39UL4285 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14796": {
+   "confidence": 0.99,
+   "label": "Katheru, East Godāvari",
+   "latitude": 17.03795,
+   "longitude": 81.77597,
+   "name": "AP-104-MMU-Katheru-AP39UL4290 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14797": {
+   "confidence": 0.99,
+   "label": "Korukonda",
+   "latitude": 17.16987,
+   "longitude": 81.82456,
+   "name": "AP-104-MMU-Korukonda-AP39UL4291 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14798": {
+   "confidence": 0.98,
+   "label": "Palacherla, East Godāvari",
+   "latitude": 17.0752,
+   "longitude": 81.83913,
+   "name": "AP-104-MMU-Palacherla-AP39UL4292 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14799": {
+   "confidence": 0.98,
+   "label": "Rājānagaram, East Godāvari",
+   "latitude": 17.08333,
+   "longitude": 81.9,
+   "name": "AP-104-MMU-Rajanagaram-AP39UL4293 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14800": {
+   "confidence": 0.97,
+   "label": "Singampalli, East Godavari (post office)",
+   "latitude": 16.9773,
+   "longitude": 82.0461,
+   "name": "AP-104-MMU-Singampalli-AP39UL4294 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14804": {
+   "confidence": 0.97,
+   "label": "Devapudi, Krishna (post office)",
+   "latitude": 16.5686,
+   "longitude": 81.0455,
+   "name": "AP-104-MMU-Devapudi Aam Phc-AP39TL9221 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14806": {
+   "confidence": 0.8889,
+   "label": "Korukollu",
+   "latitude": 16.5,
+   "longitude": 81.25,
+   "name": "AP-104-MMU-Korukallu Phc-AP39TL9236 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14807": {
+   "confidence": 0.98,
+   "label": "Mandavalli, Eluru",
+   "latitude": 16.51118,
+   "longitude": 81.15568,
+   "name": "AP-104-MMU-Mandavalli Phc-AP39TL9242 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14808": {
+   "confidence": 0.98,
+   "label": "Gundugolanu, Eluru",
+   "latitude": 16.78055,
+   "longitude": 81.23085,
+   "name": "AP-104-MMU-Gundugolanu Phc-AP39TL9175 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14809": {
+   "confidence": 0.89,
+   "label": "Bayyanagūdem, Eluru",
+   "latitude": 17.125,
+   "longitude": 81.36284,
+   "name": "AP-104-MMU-Bayanagudem Phc-AP39TL9180 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14810": {
+   "confidence": 0.98,
+   "label": "Chātaparru, Eluru",
+   "latitude": 16.69873,
+   "longitude": 81.13962,
+   "name": "AP-104-MMU-Chataparru Phc-AP39TL9184 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14811": {
+   "confidence": 0.97,
+   "label": "Pedda Nindrakolanu, Eluru",
+   "latitude": 16.73423,
+   "longitude": 81.39414,
+   "name": "AP-104-MMU-Pedanindrakolanu Phc-AP39TL9199 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14812": {
+   "confidence": 0.99,
+   "label": "Chebrolu, Eluru",
+   "latitude": 16.82227,
+   "longitude": 81.39733,
+   "name": "AP-104-MMU-Chebrolu Phc-AP39TL9215 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14813": {
+   "confidence": 0.98,
+   "label": "Dwāraka Tirumala, Eluru",
+   "latitude": 16.95427,
+   "longitude": 81.25585,
+   "name": "AP-104-MMU-Dwaraka Tirumala Phc-AP39TL9182 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14814": {
+   "confidence": 0.97,
+   "label": "Jeelugumilli, West Godavari (post office)",
+   "latitude": 17.1159,
+   "longitude": 81.1317,
+   "name": "AP-104-MMU-Jeelugumilli Phc-AP39TL9189 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14815": {
+   "confidence": 0.98,
+   "label": "Kāmavarapukota, Eluru",
+   "latitude": 17.00981,
+   "longitude": 81.19246,
+   "name": "AP-104-MMU-Kamavarapukota Phc-AP39TL9191 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14816": {
+   "confidence": 0.97,
+   "label": "Kukunoor, West Godavari (post office)",
+   "latitude": 16.8663,
+   "longitude": 81.3395,
+   "name": "AP-104-MMU-Kukunoor Phc-AP39TL9194 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14817": {
+   "confidence": 0.97,
+   "label": "Koida, West Godavari (post office)",
+   "latitude": 16.8663,
+   "longitude": 81.3395,
+   "name": "AP-104-MMU-Koida Phc-AP39TL9217 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14818": {
+   "confidence": 0.94,
+   "label": "Gudivākalanka, Eluru",
+   "latitude": 16.63595,
+   "longitude": 81.21263,
+   "name": "AP-104-MMU-Gudiwaklanka Phc-AP39TL9469 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14819": {
+   "confidence": 0.97,
+   "label": "Kolletikota, Krishna (post office)",
+   "latitude": 16.768,
+   "longitude": 81.4382,
+   "name": "AP-104-MMU-Kolletikota Phc-AP39UL4331 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14820": {
+   "confidence": 0.94,
+   "label": "Seetanapalli, Krishna (post office)",
+   "latitude": 16.768,
+   "longitude": 81.4382,
+   "name": "AP-104-MMU-Sithannapalli Phc-AP39UL4332 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14821": {
+   "confidence": 0.97,
+   "label": "Pedapadu, West Godavari (post office)",
+   "latitude": 16.5839,
+   "longitude": 81.0381,
+   "name": "AP-104-MMU-Pedapadu Phc-AP39UL4336 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14823": {
+   "confidence": 0.98,
+   "label": "Kāgupādu, Eluru",
+   "latitude": 16.80152,
+   "longitude": 81.44624,
+   "name": "AP-104-MMU-Kagupadu Phc-AP39UL4342 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14824": {
+   "confidence": 0.97,
+   "label": "Ch.Pothepalli, West Godavari (post office)",
+   "latitude": 17.0692,
+   "longitude": 81.2466,
+   "name": "AP-104-MMU-Ch Pothepalli Phc-AP39UL4346 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14825": {
+   "confidence": 0.97,
+   "label": "Edara, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Edara Phc-AP39TL9219 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14826": {
+   "confidence": 0.97,
+   "label": "Chatrai, Krishna (post office)",
+   "latitude": 16.9932,
+   "longitude": 80.8214,
+   "name": "AP-104-MMU-Chatrai Phc-AP39TL9225 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14827": {
+   "confidence": 0.98,
+   "label": "Rāghavapuram, Eluru",
+   "latitude": 17.10874,
+   "longitude": 80.90918,
+   "name": "AP-104-MMU-Raghavapuram Phc-AP39TL9246 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14828": {
+   "confidence": 0.98,
+   "label": "Digavalli, Eluru",
+   "latitude": 16.85975,
+   "longitude": 80.86334,
+   "name": "AP-104-MMU-Digavalli Phc-AP39TL9251 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14830": {
+   "confidence": 0.99,
+   "label": "Lakkavaram, Eluru",
+   "latitude": 17.06282,
+   "longitude": 81.29188,
+   "name": "AP-104-MMU-Lakkavaram Phc-AP39TL9188 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14831": {
+   "confidence": 0.92,
+   "label": "Koyyalagūdem, Eluru",
+   "latitude": 17.12879,
+   "longitude": 81.42815,
+   "name": "AP-104-MMU-Koyalagudem Phc-AP39TL9193 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14832": {
+   "confidence": 0.97,
+   "label": "Lnd Peta, West Godavari (post office)",
+   "latitude": 16.8946,
+   "longitude": 81.4023,
+   "name": "AP-104-MMU-Lnd Peta Phc-AP39TL9209 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14833": {
+   "confidence": 0.93,
+   "label": "T.Narasapuram, West Godavari (post office)",
+   "latitude": 17.1003,
+   "longitude": 81.1173,
+   "name": "AP-104-MMU-T Narsapuram Phc-AP39TL9210 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14834": {
+   "confidence": 0.95,
+   "label": "Yerraguntapally, West Godavari (post office)",
+   "latitude": 17.0498,
+   "longitude": 81.1574,
+   "name": "AP-104-MMU-Yerraguntapalli Phc-AP39TL9179 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14835": {
+   "confidence": 0.98,
+   "label": "Lingapālem, Eluru",
+   "latitude": 16.94768,
+   "longitude": 81.00012,
+   "name": "AP-104-MMU-Lingapalem Phc-AP39TL9195 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14837": {
+   "confidence": 0.97,
+   "label": "Sagguru, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Sagguru Phc-AP39TL9203 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14838": {
+   "confidence": 0.99,
+   "label": "Vatlūru, Eluru",
+   "latitude": 16.70088,
+   "longitude": 81.05252,
+   "name": "AP-104-MMU-Vatluru Phc-AP39UL4330 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14839": {
+   "confidence": 0.9233,
+   "label": "Vijayarāyi, Eluru",
+   "latitude": 16.80941,
+   "longitude": 81.0384,
+   "name": "AP-104-MMU-Vijairai Phc-AP39UL4339 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14840": {
+   "confidence": 0.9067,
+   "label": "Dharmājigūdem, Eluru",
+   "latitude": 16.89449,
+   "longitude": 80.99625,
+   "name": "AP-104-MMU-Dharamjigudem Phc-AP39UL4341 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14841": {
+   "confidence": 0.96,
+   "label": "Musunūru, Eluru",
+   "latitude": 16.82748,
+   "longitude": 80.93413,
+   "name": "AP-104-MMU-Musunur Phc-AP39UL4348 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14842": {
+   "confidence": 0.96,
+   "label": "Gopannapālem, Eluru",
+   "latitude": 16.77126,
+   "longitude": 81.11652,
+   "name": "AP-104-MMU-Gopanapalem Phc-AP39UL4349 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14843": {
+   "confidence": 0.99,
+   "label": "Gollapalle, Eluru",
+   "latitude": 16.72626,
+   "longitude": 80.90729,
+   "name": "AP-104-MMU-Gollapalli Phc-AP39TL9434 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14844": {
+   "confidence": 0.97,
+   "label": "Pedavegi, West Godavari (post office)",
+   "latitude": 16.8863,
+   "longitude": 81.1083,
+   "name": "AP-104-MMU-Pedavegi Phc-AP39UL4352 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14845": {
+   "confidence": 0.95,
+   "label": "Chitturu, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Chittoor Dst Back Up-AP39UL4453 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14849": {
+   "confidence": 0.98,
+   "label": "Nudurupādu, Guntūr",
+   "latitude": 16.28,
+   "longitude": 80.21046,
+   "name": "AP-104-MMU-Phc Nudurupadu-AP39TL9273 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14850": {
+   "confidence": 0.98,
+   "label": "Mannava, Guntūr",
+   "latitude": 16.10173,
+   "longitude": 80.49877,
+   "name": "AP-104-MMU-Phc Mannava-AP39TL9276 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14852": {
+   "confidence": 0.97,
+   "label": "Prattipādu, Guntūr",
+   "latitude": 16.18196,
+   "longitude": 80.33444,
+   "name": "AP-104-MMU-Chc Prathipadu-AP39TL9286 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14853": {
+   "confidence": 0.97,
+   "label": "Medikonduru, Guntur (post office)",
+   "latitude": 16.3422,
+   "longitude": 80.2367,
+   "name": "AP-104-MMU-Phc Medikonduru-AP39TL9294 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14854": {
+   "confidence": 0.99,
+   "label": "Pedda Nandipādu, Guntūr",
+   "latitude": 16.07052,
+   "longitude": 80.33115,
+   "name": "AP-104-MMU-Phc Pedda Nandipadu-AP39TL9304 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14855": {
+   "confidence": 0.98,
+   "label": "Gottipādu, Guntūr",
+   "latitude": 16.1644,
+   "longitude": 80.2978,
+   "name": "AP-104-MMU-Phc Gottipadu-AP39TL9305 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14856": {
+   "confidence": 0.99,
+   "label": "Chebrolu, Guntūr",
+   "latitude": 16.19715,
+   "longitude": 80.5256,
+   "name": "AP-104-MMU-Phc Chebrolu-AP39TL9308 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14857": {
+   "confidence": 0.9131,
+   "label": "Kākumānu, Guntūr",
+   "latitude": 16.05421,
+   "longitude": 80.39809,
+   "name": "AP-104-MMU-Phc Kaumanu-AP39TL9309 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14858": {
+   "confidence": 0.99,
+   "label": "Vatticherukūru, Guntūr",
+   "latitude": 16.1813,
+   "longitude": 80.44755,
+   "name": "AP-104-MMU-Phc Vatticherukuru-AP39TL9320 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14860": {
+   "confidence": 0.9031,
+   "label": "Munnangi, Guntur (post office)",
+   "latitude": 16.2865,
+   "longitude": 80.739,
+   "name": "AP-104-MMU-Phc Munnagi-AP39TL9289 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14861": {
+   "confidence": 0.98,
+   "label": "Duggirāla, Guntūr",
+   "latitude": 16.3287,
+   "longitude": 80.62931,
+   "name": "AP-104-MMU-Phc Duggirala-AP39TL9302 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14862": {
+   "confidence": 0.98,
+   "label": "Kolakalūru, Guntūr",
+   "latitude": 16.30608,
+   "longitude": 80.6181,
+   "name": "AP-104-MMU-Phc Kolakaluru-AP39TL9315 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14863": {
+   "confidence": 0.9031,
+   "label": "Ponnekallu, Guntur (post office)",
+   "latitude": 16.2988,
+   "longitude": 80.0915,
+   "name": "AP-104-MMU-Phc Ponnekllu-AP39TL9316 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14864": {
+   "confidence": 0.95,
+   "label": "Sangamjagarlamudi, Guntur (post office)",
+   "latitude": 16.2703,
+   "longitude": 80.5875,
+   "name": "AP-104-MMU-Phc Sangam Jagarlamudi-AP39TL9317 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14865": {
+   "confidence": 0.95,
+   "label": "Tulluru, Guntur (post office)",
+   "latitude": 16.5016,
+   "longitude": 80.3929,
+   "name": "AP-104-MMU-Phc Thullur-AP39TL9318 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14866": {
+   "confidence": 0.99,
+   "label": "Tādepalle, Guntūr",
+   "latitude": 16.48458,
+   "longitude": 80.60678,
+   "name": "AP-104-MMU-Phc Tadepalli-AP39UL4387 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14867": {
+   "confidence": 0.97,
+   "label": "Pedakakani, Guntur (post office)",
+   "latitude": 16.4327,
+   "longitude": 80.6598,
+   "name": "AP-104-MMU-Phc Pedakakani-AP39UL4391 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14869": {
+   "confidence": 0.95,
+   "label": "Sangamjagarlamudi, Guntur (post office)",
+   "latitude": 16.2703,
+   "longitude": 80.5875,
+   "name": "AP-104-MMU-Phc Sangam Jagarlamudi-AP39UL4392 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14871": {
+   "confidence": 0.98,
+   "label": "Vetlapālem, Kakinada",
+   "latitude": 17.02489,
+   "longitude": 82.13391,
+   "name": "AP-104-MMU-Vetlapalem-phc-AP39TL9109 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14872": {
+   "confidence": 0.97,
+   "label": "Gandepalli, East Godavari (post office)",
+   "latitude": 17.3931,
+   "longitude": 82.2271,
+   "name": "AP-104-MMU-Gandepalli-phc-AP39TL9121 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14873": {
+   "confidence": 0.97,
+   "label": "Chebrolu, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Chebrolu-phc-AP39TL9124 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14874": {
+   "confidence": 0.98,
+   "label": "Sūrampālem, Kakinada",
+   "latitude": 17.10698,
+   "longitude": 82.06644,
+   "name": "AP-104-MMU-Surampalem-phc-AP39TL9126 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14876": {
+   "confidence": 0.97,
+   "label": "Panduru, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Panduru-phc-AP39TL9130 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14877": {
+   "confidence": 0.98,
+   "label": "Karapa, Kakinada",
+   "latitude": 16.9,
+   "longitude": 82.16667,
+   "name": "AP-104-MMU-Karapa-phc-AP39TL9132 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14878": {
+   "confidence": 0.96,
+   "label": "Geddanapalli, East Godavari (post office)",
+   "latitude": 17.2266,
+   "longitude": 82.0761,
+   "name": "AP-104-MMU-Geddanapalli-phc-AP39TL9134 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14879": {
+   "confidence": 0.98,
+   "label": "Kotanandūru, Kakinada",
+   "latitude": 17.48235,
+   "longitude": 82.48915,
+   "name": "AP-104-MMU-Kotananduru-phc-AP39TL9136 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14880": {
+   "confidence": 0.97,
+   "label": "Peddada, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Peddada-phc-AP39TL9145 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14881": {
+   "confidence": 0.98,
+   "label": "Kāndrakota, Kakinada",
+   "latitude": 17.14504,
+   "longitude": 82.1308,
+   "name": "AP-104-MMU-Kandrakota-phc-AP39TL9146 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14882": {
+   "confidence": 0.99,
+   "label": "Māllam, Kakinada",
+   "latitude": 17.11053,
+   "longitude": 82.18508,
+   "name": "AP-104-MMU-Mallam-phc-AP39TL9147 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14883": {
+   "confidence": 0.97,
+   "label": "Rachapalli, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Rachapalli-phc-AP39TL9148 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14884": {
+   "confidence": 0.9091,
+   "label": "Kothām, Kakinada",
+   "latitude": 17.46886,
+   "longitude": 82.4598,
+   "name": "AP-104-MMU-P.kottam-phc-AP39TL9158 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14885": {
+   "confidence": 0.95,
+   "label": "Pedamallapuram, East Godavari (post office)",
+   "latitude": 17.3238,
+   "longitude": 82.3444,
+   "name": "AP-104-MMU-Peddamallapuram-phc-AP39TL9160 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14887": {
+   "confidence": 0.97,
+   "label": "Ravikampadu, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Ravikampadu -phc-AP39TL9163 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14888": {
+   "confidence": 0.9474,
+   "label": "Sūravaram, Kakinada",
+   "latitude": 17.42327,
+   "longitude": 82.50025,
+   "name": "AP-104-MMU-N.suravaram-phc-AP39TL9164 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14890": {
+   "confidence": 0.97,
+   "label": "J Annavaram, East Godavari (post office)",
+   "latitude": 17.331,
+   "longitude": 82.1377,
+   "name": "AP-104-MMU-J Annavaram-phc-AP39TL9169 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14891": {
+   "confidence": 0.97,
+   "label": "Gollapalem, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Gollapalem-phc-AP39UL4297 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14892": {
+   "confidence": 0.99,
+   "label": "Thallarevu, Kakinada",
+   "latitude": 16.78197,
+   "longitude": 82.23102,
+   "name": "AP-104-MMU-Thallarevu-phc-AP39UL4298 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14893": {
+   "confidence": 0.97,
+   "label": "Panduru, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Panduru-phc-AP39UL4300 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14894": {
+   "confidence": 0.97,
+   "label": "Turangi, East Godavari (post office)",
+   "latitude": 17.3229,
+   "longitude": 82.4308,
+   "name": "AP-104-MMU-Turangi-phc-AP39UL4301 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14895": {
+   "confidence": 0.98,
+   "label": "Virava, Kakinada",
+   "latitude": 17.13536,
+   "longitude": 82.18691,
+   "name": "AP-104-MMU-Virava-phc-AP39UL4302 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14896": {
+   "confidence": 0.98,
+   "label": "Pulimeru, Kakinada",
+   "latitude": 17.12599,
+   "longitude": 82.16146,
+   "name": "AP-104-MMU-Pulimeru-phc-AP39UL4303 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14897": {
+   "confidence": 0.98,
+   "label": "Kirlampūdi, Kakinada",
+   "latitude": 17.19888,
+   "longitude": 82.18238,
+   "name": "AP-104-MMU-Kirlampudi-phc-AP39UL4304 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14898": {
+   "confidence": 0.95,
+   "label": "U.Kothapalle, Kurnool (post office)",
+   "latitude": 15.3388,
+   "longitude": 78.3007,
+   "name": "AP-104-MMU-U Kothapalli -phc-AP39UL4305 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14899": {
+   "confidence": 0.98,
+   "label": "Kottūru, Kakinada",
+   "latitude": 17.31371,
+   "longitude": 82.45944,
+   "name": "AP-104-MMU-Tetagunta -phc-AP39UL4306 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14900": {
+   "confidence": 0.97,
+   "label": "Sampara, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Sampara -phc-AP39UL4307 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14901": {
+   "confidence": 0.98,
+   "label": "Rājapūdi, Kakinada",
+   "latitude": 17.21304,
+   "longitude": 82.01018,
+   "name": "AP-104-MMU-Rajapudi-phc-AP39UL4308 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14902": {
+   "confidence": 0.99,
+   "label": "Peddipālem, Kakinada",
+   "latitude": 17.31391,
+   "longitude": 82.21512,
+   "name": "AP-104-MMU-Peddipalem-phc-AP39UL4309 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14903": {
+   "confidence": 0.97,
+   "label": "A V Nagaram, East Godavari (post office)",
+   "latitude": 17.0182,
+   "longitude": 81.8707,
+   "name": "AP-104-MMU-A.v. Nagaram -phc-AP39UL4310 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14904": {
+   "confidence": 0.98,
+   "label": "Sankhavaram, Kakinada",
+   "latitude": 17.31369,
+   "longitude": 82.36401,
+   "name": "AP-104-MMU-Sankhavaram -phc-AP39UL4311 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14905": {
+   "confidence": 0.98,
+   "label": "Velangi, East Godavari (post office)",
+   "latitude": 17.4154,
+   "longitude": 82.2787,
+   "name": "AP-104-MMU-Velangi -phc-AP39UL4312 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14907": {
+   "confidence": 0.97,
+   "label": "Kruttivennu, Krishna",
+   "latitude": 16.37724,
+   "longitude": 81.36728,
+   "name": "AP-104-MMU-Kruthivennu Phc-AP39TL9240 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14908": {
+   "confidence": 0.97,
+   "label": "Chinnapuram, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Chinnapuram Phc-AP39TL9239 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14909": {
+   "confidence": 0.98,
+   "label": "Bantumilli, Krishna",
+   "latitude": 16.37199,
+   "longitude": 81.272,
+   "name": "AP-104-MMU-Bantumilli Phc-AP39TL9248 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14910": {
+   "confidence": 0.98,
+   "label": "Pedana, Krishna",
+   "latitude": 16.25582,
+   "longitude": 81.14378,
+   "name": "AP-104-MMU-Pedana Phc-AP39TL9254 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14912": {
+   "confidence": 0.95,
+   "label": "Tallapalem, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Thallapalem Phc-AP39UL4250 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14913": {
+   "confidence": 0.95,
+   "label": "Tallapalem, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Thallapalem Phc-AP39UL4376 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14915": {
+   "confidence": 0.98,
+   "label": "Bapulapadu, Krishna",
+   "latitude": 16.63411,
+   "longitude": 80.9615,
+   "name": "AP-104-MMU-Bapulapadu Phc-AP39TL9222 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14917": {
+   "confidence": 0.98,
+   "label": "Srikākulam, Krishna",
+   "latitude": 16.19645,
+   "longitude": 80.84671,
+   "name": "AP-104-MMU-Srikakulam Phc-AP39TL9229 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14918": {
+   "confidence": 0.97,
+   "label": "Moturu, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Moturu Phc-AP39TL9230 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14919": {
+   "confidence": 0.98,
+   "label": "Mallavolu, Krishna",
+   "latitude": 16.17044,
+   "longitude": 81.04962,
+   "name": "AP-104-MMU-Mallavolu Phc-AP39TL9232 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14920": {
+   "confidence": 0.98,
+   "label": "Koduru, Krishna",
+   "latitude": 16.00885,
+   "longitude": 81.03366,
+   "name": "AP-104-MMU-Koduru Phc-AP39TL9464 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14921": {
+   "confidence": 0.98,
+   "label": "Mopidevi, Krishna",
+   "latitude": 16.0653,
+   "longitude": 80.92762,
+   "name": "AP-104-MMU-Mopidevi Phc-AP39TL9243 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14922": {
+   "confidence": 0.98,
+   "label": "Movva, Krishna",
+   "latitude": 16.22619,
+   "longitude": 80.91548,
+   "name": "AP-104-MMU-Movva Phc-AP39TL9244 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14923": {
+   "confidence": 0.98,
+   "label": "Nāgāyalanka, Krishna",
+   "latitude": 15.94847,
+   "longitude": 80.9164,
+   "name": "AP-104-MMU-Nagayalanka Phc-AP39TL9245 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14924": {
+   "confidence": 0.98,
+   "label": "Rudrapāka, Krishna",
+   "latitude": 16.50935,
+   "longitude": 81.09927,
+   "name": "AP-104-MMU-Rudrapaka Phc-AP39TL9250 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14925": {
+   "confidence": 0.9067,
+   "label": "Pedda Pārupūdi, Krishna",
+   "latitude": 16.42559,
+   "longitude": 80.95503,
+   "name": "AP-104-MMU-Pedaparapudi Phc-AP39TL9255 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14926": {
+   "confidence": 0.97,
+   "label": "Veeravalli, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Veeravalli Phc-AP39UL4375 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14927": {
+   "confidence": 0.9412,
+   "label": "Mustabāda, Krishna",
+   "latitude": 16.55446,
+   "longitude": 80.72544,
+   "name": "AP-104-MMU-Mustabad Phc-AP39TL9228 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14928": {
+   "confidence": 0.98,
+   "label": "Gudlavalleru, Krishna",
+   "latitude": 16.35,
+   "longitude": 81.05,
+   "name": "AP-104-MMU-Gudlavalleru Phc-AP39TL9231 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14929": {
+   "confidence": 0.99,
+   "label": "Uppulūru, Krishna",
+   "latitude": 16.48451,
+   "longitude": 80.77644,
+   "name": "AP-104-MMU-Uppuluru Phc-AP39TL9238 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14930": {
+   "confidence": 0.98,
+   "label": "Kānumūru, Krishna",
+   "latitude": 16.33987,
+   "longitude": 80.9019,
+   "name": "AP-104-MMU-Kanumuru Phc-AP39TL9252 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14931": {
+   "confidence": 0.95,
+   "label": "Virankilock, Krishna (post office)",
+   "latitude": 16.268,
+   "longitude": 80.8685,
+   "name": "AP-104-MMU-Veerankilock Phc-AP39TL9253 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14932": {
+   "confidence": 0.98,
+   "label": "Thotlavalluru, Krishna",
+   "latitude": 16.34507,
+   "longitude": 80.78243,
+   "name": "AP-104-MMU-Thotlavalluru Phc-AP39TL9259 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14933": {
+   "confidence": 0.97,
+   "label": "Indupalli, Krishna (post office)",
+   "latitude": 16.4568,
+   "longitude": 80.88,
+   "name": "AP-104-MMU-Indupalli Phc-AP39TL9261 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14934": {
+   "confidence": 0.98,
+   "label": "Penamalūru, Krishna",
+   "latitude": 16.46361,
+   "longitude": 80.71798,
+   "name": "AP-104-MMU-Penamaluru Phc-AP39TL9264 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14935": {
+   "confidence": 0.97,
+   "label": "Chinaogirala, Krishna (post office)",
+   "latitude": 16.4056,
+   "longitude": 80.8243,
+   "name": "AP-104-MMU-Chinaogirala Phc-AP39TL9266 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14937": {
+   "confidence": 0.98,
+   "label": "Poranki, Krishna",
+   "latitude": 16.47771,
+   "longitude": 80.70755,
+   "name": "AP-104-MMU-Poranki Phc-AP39UL4373 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14938": {
+   "confidence": 0.98,
+   "label": "Kankipādu, Krishna",
+   "latitude": 16.4353,
+   "longitude": 80.76715,
+   "name": "AP-104-MMU-Phc Kankipadu-AP39TL9477 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14939": {
+   "confidence": 0.95,
+   "label": "Tallapalem, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Thallapalem Phc-AP39UL4372 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14941": {
+   "confidence": 0.97,
+   "label": "Peddathumbalam, Kurnool (post office)",
+   "latitude": 15.628,
+   "longitude": 77.2935,
+   "name": "AP-104-MMU-Peddathumbalam - Phc-AP39TL9600 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14942": {
+   "confidence": 0.98,
+   "label": "Āspari, Kurnool",
+   "latitude": 15.47615,
+   "longitude": 77.38746,
+   "name": "AP-104-MMU-Aspari Phc-AP39TL9603 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14943": {
+   "confidence": 0.98,
+   "label": "Hālaharvi, Kurnool",
+   "latitude": 15.82535,
+   "longitude": 77.44563,
+   "name": "AP-104-MMU-Halaharvi Phc-AP39TL9618 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14945": {
+   "confidence": 0.98,
+   "label": "Kosigi, Kurnool",
+   "latitude": 15.8551,
+   "longitude": 77.24463,
+   "name": "AP-104-MMU-Kosigi Phc-AP39TL9625 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14947": {
+   "confidence": 0.97,
+   "label": "Kalludevakuntla, Kurnool (post office)",
+   "latitude": 15.8863,
+   "longitude": 77.4416,
+   "name": "AP-104-MMU-Kalludevakuntla Phc-AP39TL9632 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14948": {
+   "confidence": 0.98,
+   "label": "Nandavaram, Kurnool",
+   "latitude": 15.85328,
+   "longitude": 77.48478,
+   "name": "AP-104-MMU-Nandavaram Phc-AP39TL9634 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14950": {
+   "confidence": 0.97,
+   "label": "Kalludevakuntla, Kurnool (post office)",
+   "latitude": 15.8863,
+   "longitude": 77.4416,
+   "name": "AP-104-MMU-Kalludevakuntla Phc-AP39UL4480 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14951": {
+   "confidence": 0.9374,
+   "label": "Hālaharvi, Kurnool",
+   "latitude": 15.82535,
+   "longitude": 77.44563,
+   "name": "AP-104-MMU-Phc Halaharvi N-AP39UL4481 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14952": {
+   "confidence": 0.97,
+   "label": "Badinehal, Kurnool (post office)",
+   "latitude": 15.7671,
+   "longitude": 77.2608,
+   "name": "AP-104-MMU-Badinehal Phc-AP39UL4482 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14954": {
+   "confidence": 0.96,
+   "label": "Kandukūru, Kurnool",
+   "latitude": 15.93999,
+   "longitude": 77.17099,
+   "name": "AP-104-MMU-Phc Kandukur-AP39UL4493 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14955": {
+   "confidence": 0.98,
+   "label": "Ulindakonda, Kurnool",
+   "latitude": 15.64509,
+   "longitude": 77.97152,
+   "name": "AP-104-MMU-Ulindakonda - Phc-AP39TL9267 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14956": {
+   "confidence": 0.89,
+   "label": "Molagavalli, Kurnool",
+   "latitude": 15.35721,
+   "longitude": 77.33098,
+   "name": "AP-104-MMU-Mulagavalli - Phc-AP39TL9602 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14957": {
+   "confidence": 0.97,
+   "label": "Chippagiri, Kurnool (post office)",
+   "latitude": 15.5336,
+   "longitude": 78.0061,
+   "name": "AP-104-MMU-Chippagiri Phc-AP39TL9610 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14958": {
+   "confidence": 0.98,
+   "label": "Devanakonda, Kurnool",
+   "latitude": 15.53791,
+   "longitude": 77.55034,
+   "name": "AP-104-MMU-Devanakonda Phc-AP39TL9611 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14959": {
+   "confidence": 0.98,
+   "label": "Krishnāgiri, Kurnool",
+   "latitude": 15.55583,
+   "longitude": 77.82993,
+   "name": "AP-104-MMU-Krishnagiri Phc-AP39TL9628 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14960": {
+   "confidence": 0.98,
+   "label": "Maddikera, Kurnool",
+   "latitude": 15.24958,
+   "longitude": 77.41592,
+   "name": "AP-104-MMU-Maddikera Phc-AP39TL9630 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14961": {
+   "confidence": 0.95,
+   "label": "Putchakayalamada, Kurnool (post office)",
+   "latitude": 15.4032,
+   "longitude": 77.5291,
+   "name": "AP-104-MMU-Puchakayalamada - Phc-AP39TL9642 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14962": {
+   "confidence": 0.98,
+   "label": "Tuggali, Kurnool",
+   "latitude": 15.31379,
+   "longitude": 77.54503,
+   "name": "AP-104-MMU-Tuggali Phc-AP39TL9649 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14963": {
+   "confidence": 0.98,
+   "label": "Devanakonda, Kurnool",
+   "latitude": 15.53791,
+   "longitude": 77.55034,
+   "name": "AP-104-MMU-Devanakonda Phc-AP39UL4475 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14964": {
+   "confidence": 0.96,
+   "label": "Veldurti, Kurnool",
+   "latitude": 15.54993,
+   "longitude": 77.93112,
+   "name": "AP-104-MMU-Veldurthy- Phc-AP39UL4484 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14965": {
+   "confidence": 0.9212,
+   "label": "Kammarchedu, Kurnool (post office)",
+   "latitude": 15.628,
+   "longitude": 77.2935,
+   "name": "AP-104-MMU-Kammarichedu Phc-AP39UL4487 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14966": {
+   "confidence": 0.98,
+   "label": "Pattikonda, Kurnool",
+   "latitude": 15.39501,
+   "longitude": 77.5043,
+   "name": "AP-104-MMU-Pattikonda- Phc-AP39UL4491 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14968": {
+   "confidence": 0.95,
+   "label": "Daivamdinne, Kurnool (post office)",
+   "latitude": 15.6915,
+   "longitude": 77.7505,
+   "name": "AP-104-MMU-Phc Daivam Dinne-AP39TL9268 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14969": {
+   "confidence": 0.8731,
+   "label": "Belagal, Kurnool",
+   "latitude": 15.81825,
+   "longitude": 77.67019,
+   "name": "AP-104-MMU-C. Belgal Phc-AP39TL9608 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14970": {
+   "confidence": 0.98,
+   "label": "Gonegandla, Kurnool",
+   "latitude": 15.71371,
+   "longitude": 77.59546,
+   "name": "AP-104-MMU-Gonegandla Phc-AP39TL9615 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14972": {
+   "confidence": 0.96,
+   "label": "Kallūru, Kurnool",
+   "latitude": 15.81624,
+   "longitude": 78.02892,
+   "name": "AP-104-MMU-Kallur Phc-AP39TL9621 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14973": {
+   "confidence": 0.98,
+   "label": "Laddagiri, Kurnool",
+   "latitude": 15.63195,
+   "longitude": 77.89168,
+   "name": "AP-104-MMU-Phc Laddagiri-AP39TL9622 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14974": {
+   "confidence": 0.97,
+   "label": "Gargeyapuram, Kurnool (post office)",
+   "latitude": 15.7169,
+   "longitude": 78.1401,
+   "name": "AP-104-MMU-Gargeyapuram - Phc-AP39TL9629 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14976": {
+   "confidence": 0.97,
+   "label": "E.Thandrapadu, Kurnool (post office)",
+   "latitude": 15.8594,
+   "longitude": 78.0011,
+   "name": "AP-104-MMU-E Thandrapadu - Phc-AP39UL4472 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14977": {
+   "confidence": 0.99,
+   "label": "Gūdūru, Kurnool",
+   "latitude": 15.77506,
+   "longitude": 77.80656,
+   "name": "AP-104-MMU-Gudur Phc-AP39UL4473 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14978": {
+   "confidence": 0.98,
+   "label": "Gonegandla, Kurnool",
+   "latitude": 15.71371,
+   "longitude": 77.59546,
+   "name": "AP-104-MMU-Gonegandla Phc-AP39UL4476 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14979": {
+   "confidence": 0.96,
+   "label": "Hussainpuram",
+   "latitude": 15.23589,
+   "longitude": 77.82563,
+   "name": "AP-104-MMU-Hussainapuram - Phc-AP39UL4483 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14980": {
+   "confidence": 0.96,
+   "label": "Emmiganūr, Kurnool",
+   "latitude": 15.77203,
+   "longitude": 77.48345,
+   "name": "AP-104-MMU-Yemiganur- Phc-AP39UL4490 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14981": {
+   "confidence": 0.97,
+   "label": "Gargeyapuram, Kurnool (post office)",
+   "latitude": 15.7169,
+   "longitude": 78.1401,
+   "name": "AP-104-MMU-Gargeyapuram - Phc-AP39UL4494 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14982": {
+   "confidence": 0.99,
+   "label": "Kurnool, Kurnool",
+   "latitude": 15.82887,
+   "longitude": 78.03602,
+   "name": "AP-104-MMU-Kurnool - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14983": {
+   "confidence": 0.99,
+   "label": "Adoni, Kurnool",
+   "latitude": 15.62788,
+   "longitude": 77.27495,
+   "name": "AP-104-MMU-Adoni - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14984": {
+   "confidence": 0.98,
+   "label": "Pattikonda, Kurnool",
+   "latitude": 15.39501,
+   "longitude": 77.5043,
+   "name": "AP-104-MMU-Pattikonda - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14986": {
+   "confidence": 0.95,
+   "label": "Besthavari  Peta, Prakasam (post office)",
+   "latitude": 15.3714,
+   "longitude": 79.1321,
+   "name": "AP-104-MMU-Phc Bestavaripeta-AP39TL9327 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14987": {
+   "confidence": 0.99,
+   "label": "Chandrasekharāpuram, Prakasam",
+   "latitude": 15.18089,
+   "longitude": 79.27948,
+   "name": "AP-104-MMU-Phc Chandrasekharapuram-AP39TL9331 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14988": {
+   "confidence": 0.97,
+   "label": "Hanumanthunipadu, Prakasam (post office)",
+   "latitude": 15.4312,
+   "longitude": 79.3792,
+   "name": "AP-104-MMU-Phc Hanumanthunipadu-AP39TL9338 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14989": {
+   "confidence": 0.98,
+   "label": "Kanigiri, Prakasam",
+   "latitude": 15.40555,
+   "longitude": 79.50694,
+   "name": "AP-104-MMU-Chc Kanigiri-AP39TL9342 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14990": {
+   "confidence": 0.97,
+   "label": "Konakanamitla, Prakasam (post office)",
+   "latitude": 15.5983,
+   "longitude": 79.4658,
+   "name": "AP-104-MMU-Phc Konakanamitla-AP39TL9344 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14991": {
+   "confidence": 0.98,
+   "label": "Pāmūru, Prakasam",
+   "latitude": 15.09633,
+   "longitude": 79.41174,
+   "name": "AP-104-MMU-Chcpamur-AP39TL9358 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14993": {
+   "confidence": 0.99,
+   "label": "Podili, Prakasam",
+   "latitude": 15.60639,
+   "longitude": 79.61489,
+   "name": "AP-104-MMU-Chc Podili-AP39TL9362 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14994": {
+   "confidence": 0.98,
+   "label": "Tarlupādu, Prakasam",
+   "latitude": 15.65708,
+   "longitude": 79.22379,
+   "name": "AP-104-MMU-Phc Tarlupadu-AP39TL9371 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14995": {
+   "confidence": 0.98,
+   "label": "Veligandla, Prakasam",
+   "latitude": 15.34171,
+   "longitude": 79.34455,
+   "name": "AP-104-MMU-Phc Veligandla-AP39TL9373 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14996": {
+   "confidence": 0.98,
+   "label": "Kanigiri, Prakasam",
+   "latitude": 15.40555,
+   "longitude": 79.50694,
+   "name": "AP-104-MMU-Chc Kanigiri-AP39UL4408 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14997": {
+   "confidence": 0.99,
+   "label": "Podili, Prakasam",
+   "latitude": 15.60639,
+   "longitude": 79.61489,
+   "name": "AP-104-MMU-Chc Podili-AP39UL4416 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14998": {
+   "confidence": 0.97,
+   "label": "Ardhaveedu, Prakasam (post office)",
+   "latitude": 15.6878,
+   "longitude": 78.9405,
+   "name": "AP-104-MMU-Phc Ardhaveedu-AP39TL9325 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-14999": {
+   "confidence": 0.99,
+   "label": "Cumbum, Prakasam",
+   "latitude": 15.58171,
+   "longitude": 79.11059,
+   "name": "AP-104-MMU-Chc Cumbum-AP39TL9332 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15000": {
+   "confidence": 0.9333,
+   "label": "Doranāla, Prakasam",
+   "latitude": 15.90751,
+   "longitude": 79.09582,
+   "name": "AP-104-MMU-Chc Dornala-AP39TL9335 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15001": {
+   "confidence": 0.98,
+   "label": "Giddalūr, Prakasam",
+   "latitude": 15.37439,
+   "longitude": 78.92609,
+   "name": "AP-104-MMU-Ah Giddalur-AP39TL9336 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15002": {
+   "confidence": 0.99,
+   "label": "Komarolu, Prakasam",
+   "latitude": 15.26667,
+   "longitude": 79.0,
+   "name": "AP-104-MMU-Phc Komarolu-AP39TL9345 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15003": {
+   "confidence": 0.99,
+   "label": "Mārkāpur, Prakasam",
+   "latitude": 15.73534,
+   "longitude": 79.26848,
+   "name": "AP-104-MMU-Ah Markapur-AP39TL9352 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15005": {
+   "confidence": 0.99,
+   "label": "Pullalacheruvu, Prakasam",
+   "latitude": 16.15853,
+   "longitude": 79.4312,
+   "name": "AP-104-MMU-Phc Pullalacheruvu-AP39TL9364 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15006": {
+   "confidence": 0.88,
+   "label": "Anumalaveedu, Prakasam (post office)",
+   "latitude": 15.4567,
+   "longitude": 78.99,
+   "name": "AP-104-MMU-Phc Anumulaveedu-AP39TL9365 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15007": {
+   "confidence": 0.94,
+   "label": "Erragondapālem, Prakasam",
+   "latitude": 16.03972,
+   "longitude": 79.30428,
+   "name": "AP-104-MMU-Ah Yerragondapalem-AP39TL9377 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15008": {
+   "confidence": 0.96,
+   "label": "Tripurāntakam, Prakasam",
+   "latitude": 15.99962,
+   "longitude": 79.45674,
+   "name": "AP-104-MMU-Phc Tripuranthakam-AP39TL9379 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15009": {
+   "confidence": 0.96,
+   "label": "Tripurāntakam, Prakasam",
+   "latitude": 15.99962,
+   "longitude": 79.45674,
+   "name": "AP-104-MMU-Phc Tripuranthakam-AP39UL4407 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15010": {
+   "confidence": 0.99,
+   "label": "Mārkāpur, Prakasam",
+   "latitude": 15.73534,
+   "longitude": 79.26848,
+   "name": "AP-104-MMU-Ah Markapur-AP39UL4414 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15012": {
+   "confidence": 0.99,
+   "label": "Velugodu, Nandyal",
+   "latitude": 15.71932,
+   "longitude": 78.57296,
+   "name": "AP-104-MMU-Tphc Velugodu-AP39TL9106 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15014": {
+   "confidence": 0.94,
+   "label": "Bandi Ātmakūru, Nandyal",
+   "latitude": 15.58136,
+   "longitude": 78.52336,
+   "name": "AP-104-MMU-Phc Bandi Athmakur-AP39TL9606 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15015": {
+   "confidence": 0.98,
+   "label": "Gadivemula, Nandyal",
+   "latitude": 15.67916,
+   "longitude": 78.42193,
+   "name": "AP-104-MMU-Phc Gadivemula-AP39TL9614 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15017": {
+   "confidence": 0.96,
+   "label": "Kottapalle, Nandyal",
+   "latitude": 15.94785,
+   "longitude": 78.54598,
+   "name": "AP-104-MMU-Phc Kothapally-AP39TL9626 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15018": {
+   "confidence": 0.98,
+   "label": "Talamudipi, Nandyal",
+   "latitude": 15.69412,
+   "longitude": 78.38011,
+   "name": "AP-104-MMU-Phc Talamudipi-AP39TL9633 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15019": {
+   "confidence": 0.97,
+   "label": "Brahmanakotkur, Kurnool (post office)",
+   "latitude": 15.6486,
+   "longitude": 78.7634,
+   "name": "AP-104-MMU-Phc Brahmanakotkur-AP39TL9635 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15020": {
+   "confidence": 0.99,
+   "label": "Pagidyāla, Nandyal",
+   "latitude": 15.93648,
+   "longitude": 78.34238,
+   "name": "AP-104-MMU-Phc Pagidyala-AP39TL9639 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15021": {
+   "confidence": 0.98,
+   "label": "Pamulapadu, Nandyal",
+   "latitude": 15.83936,
+   "longitude": 78.48968,
+   "name": "AP-104-MMU-Phc Pamulapadu-AP39TL9640 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15022": {
+   "confidence": 0.98,
+   "label": "Srīsailain, Nandyal",
+   "latitude": 16.07217,
+   "longitude": 78.86816,
+   "name": "AP-104-MMU-Phc Srisailam-AP39TL9604 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15023": {
+   "confidence": 0.9231,
+   "label": "Palkūr, Nandyal",
+   "latitude": 15.41437,
+   "longitude": 78.25073,
+   "name": "AP-104-MMU-Phc Palakur-AP39TL9605 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15024": {
+   "confidence": 0.94,
+   "label": "Rangāpuram, Nandyal",
+   "latitude": 15.40923,
+   "longitude": 78.07459,
+   "name": "AP-104-MMU-Pch Rs Rangapuram-AP39TL9607 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15026": {
+   "confidence": 0.97,
+   "label": "Tangatur, Kurnool (post office)",
+   "latitude": 15.5336,
+   "longitude": 78.0061,
+   "name": "AP-104-MMU-Phc Tangatur-AP39TL9613 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15027": {
+   "confidence": 0.98,
+   "label": "Kolimigundla, Nandyal",
+   "latitude": 15.07601,
+   "longitude": 78.1073,
+   "name": "AP-104-MMU-Phc Kolimigundla-AP39TL9624 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15028": {
+   "confidence": 0.98,
+   "label": "Uppalapādu, Nandyal",
+   "latitude": 15.17039,
+   "longitude": 78.044,
+   "name": "AP-104-MMU-Phc Uppalapadu-AP39TL9638 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15030": {
+   "confidence": 0.98,
+   "label": "Sanjemula, Nandyal",
+   "latitude": 15.14741,
+   "longitude": 78.29926,
+   "name": "AP-104-MMU-Phc Sanjamala-AP39TL9646 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15031": {
+   "confidence": 0.99,
+   "label": "Chinna Malkāpuram, Nandyal",
+   "latitude": 15.37134,
+   "longitude": 77.97567,
+   "name": "AP-104-MMU-Phc Chinna Malkapuram-AP39UL4463 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15032": {
+   "confidence": 0.98,
+   "label": "Jaladurgam, Nandyal",
+   "latitude": 15.28403,
+   "longitude": 77.90011,
+   "name": "AP-104-MMU-Phc Jaladurgam-AP39UL4465 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15033": {
+   "confidence": 0.97,
+   "label": "Bethamcherla, Kurnool (post office)",
+   "latitude": 15.4996,
+   "longitude": 78.0972,
+   "name": "AP-104-MMU-Phc Bethamcherla-AP39UL4467 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15034": {
+   "confidence": 0.98,
+   "label": "Pedda Ahobilam, Nandyal",
+   "latitude": 15.12449,
+   "longitude": 78.73502,
+   "name": "AP-104-MMU-Phc Ahobilam-AP39TL9601 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15035": {
+   "confidence": 0.98,
+   "label": "Chāgalamarri, Nandyal",
+   "latitude": 14.96409,
+   "longitude": 78.59034,
+   "name": "AP-104-MMU-Phc Chagalamarri-AP39TL9609 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15036": {
+   "confidence": 0.98,
+   "label": "Gospādu, Nandyal",
+   "latitude": 15.35629,
+   "longitude": 78.41776,
+   "name": "AP-104-MMU-Phc Gospadu-AP39TL9616 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15037": {
+   "confidence": 0.97,
+   "label": "Revanur, Kurnool (post office)",
+   "latitude": 15.1945,
+   "longitude": 78.5278,
+   "name": "AP-104-MMU-Revanur - Phc-AP39TL9623 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15038": {
+   "confidence": 0.95,
+   "label": "Gajulapalle, Kurnool (post office)",
+   "latitude": 15.5336,
+   "longitude": 78.0061,
+   "name": "AP-104-MMU-Phc Gajulapalli-AP39TL9631 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15039": {
+   "confidence": 0.98,
+   "label": "Chapirevula, Nandyal",
+   "latitude": 15.45417,
+   "longitude": 78.43479,
+   "name": "AP-104-MMU-Phc Chapirevula-AP39UL4471 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15041": {
+   "confidence": 0.98,
+   "label": "Rudravaram, Nandyal",
+   "latitude": 15.24257,
+   "longitude": 78.60432,
+   "name": "AP-104-MMU-Phc Rudravaram-AP39TL9645 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15042": {
+   "confidence": 0.9131,
+   "label": "Sirvel, Nandyal",
+   "latitude": 15.32102,
+   "longitude": 78.53439,
+   "name": "AP-104-MMU-Phc Sirivel-AP39TL9647 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15043": {
+   "confidence": 0.97,
+   "label": "Uyyalawada, Kurnool (post office)",
+   "latitude": 15.1018,
+   "longitude": 78.3816,
+   "name": "AP-104-MMU-Phc Uyyalawada-AP39TL9650 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15044": {
+   "confidence": 0.98,
+   "label": "Chapirevula, Nandyal",
+   "latitude": 15.45417,
+   "longitude": 78.43479,
+   "name": "AP-104-MMU-Phc Chapirevula-AP39UL4470 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15045": {
+   "confidence": 0.98,
+   "label": "Chapirevula, Nandyal",
+   "latitude": 15.45417,
+   "longitude": 78.43479,
+   "name": "AP-104-MMU-Phc Chapirevula-AP39TL9636 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15046": {
+   "confidence": 0.99,
+   "label": "Nandyāl, Nandyal",
+   "latitude": 15.47799,
+   "longitude": 78.4836,
+   "name": "AP-104-MMU-Nandyal - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15047": {
+   "confidence": 0.98,
+   "label": "Dhone, Nandyal",
+   "latitude": 15.3952,
+   "longitude": 77.8715,
+   "name": "AP-104-MMU-Dhone - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15048": {
+   "confidence": 0.99,
+   "label": "Ātmakūr, Nellore",
+   "latitude": 14.61586,
+   "longitude": 79.62613,
+   "name": "AP-104-MMU-Athmakur - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15050": {
+   "confidence": 0.97,
+   "label": "A.Konduru, Krishna (post office)",
+   "latitude": 16.7779,
+   "longitude": 80.5811,
+   "name": "AP-104-MMU-A Konduru-AP39TL9218 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15051": {
+   "confidence": 0.98,
+   "label": "Gampalagūdem, Ntr",
+   "latitude": 17.01915,
+   "longitude": 80.46189,
+   "name": "AP-104-MMU-Gampalagudem-AP39TL9227 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15052": {
+   "confidence": 0.98,
+   "label": "Chandrāla, Ntr",
+   "latitude": 16.76246,
+   "longitude": 80.70345,
+   "name": "AP-104-MMU-Chandrala-AP39TL9247 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15053": {
+   "confidence": 0.97,
+   "label": "Vutukuru, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Vutukuru-AP39TL9256 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15054": {
+   "confidence": 0.96,
+   "label": "Reddigūdem, Ntr",
+   "latitude": 16.86835,
+   "longitude": 80.73673,
+   "name": "AP-104-MMU-Reddygudem-AP39TL9258 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15055": {
+   "confidence": 0.96,
+   "label": "Chowtapalli, Krishna",
+   "latitude": 16.41529,
+   "longitude": 81.04434,
+   "name": "AP-104-MMU-Chowtapally-AP39TL9260 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15056": {
+   "confidence": 0.97,
+   "label": "Telladevarapalli, Krishna (post office)",
+   "latitude": 16.9335,
+   "longitude": 80.7572,
+   "name": "AP-104-MMU-Telladevarapalli-AP39TL9265 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15057": {
+   "confidence": 0.98,
+   "label": "Velagaleru, Ntr",
+   "latitude": 16.64644,
+   "longitude": 80.61249,
+   "name": "AP-104-MMU-Velagaleru-AP39UL4381 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15058": {
+   "confidence": 0.98,
+   "label": "Velagaleru, Ntr",
+   "latitude": 16.64644,
+   "longitude": 80.61249,
+   "name": "AP-104-MMU-Velagaleru-AP39UL4382 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15059": {
+   "confidence": 0.98,
+   "label": "Kondapalle, Ntr",
+   "latitude": 16.61989,
+   "longitude": 80.54244,
+   "name": "AP-104-MMU-Kondapalli-AP39UL4384 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15060": {
+   "confidence": 0.99,
+   "label": "Ibrāhīmpatnam, Ntr",
+   "latitude": 16.58303,
+   "longitude": 80.51432,
+   "name": "AP-104-MMU-Ibrahimpatnam-AP39UL4385 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15061": {
+   "confidence": 0.97,
+   "label": "Chandarlapadu, Krishna (post office)",
+   "latitude": 16.6735,
+   "longitude": 80.2056,
+   "name": "AP-104-MMU-Chandarlapadu-AP39TL9224 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15062": {
+   "confidence": 0.97,
+   "label": "Lingalapadu, Krishna (post office)",
+   "latitude": 16.5627,
+   "longitude": 80.8006,
+   "name": "AP-104-MMU-Lingalapadu-AP39TL9226 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15065": {
+   "confidence": 0.99,
+   "label": "Kanchikacherla, Ntr",
+   "latitude": 16.68296,
+   "longitude": 80.39174,
+   "name": "AP-104-MMU-Kanchikacherla-AP39TL9237 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15066": {
+   "confidence": 0.98,
+   "label": "Gollamūdi, Ntr",
+   "latitude": 16.78276,
+   "longitude": 80.35348,
+   "name": "AP-104-MMU-Gollamudi-AP39TL9249 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15067": {
+   "confidence": 0.98,
+   "label": "Penuganchiprolu, Ntr",
+   "latitude": 16.90324,
+   "longitude": 80.24625,
+   "name": "AP-104-MMU-Penuganchiprolu-AP39TL9257 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15068": {
+   "confidence": 0.98,
+   "label": "Vatsavai, Ntr",
+   "latitude": 16.98043,
+   "longitude": 80.2441,
+   "name": "AP-104-MMU-Vatsavai-AP39TL9262 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15069": {
+   "confidence": 0.95,
+   "label": "Veerullapadu, Krishna (post office)",
+   "latitude": 16.6278,
+   "longitude": 80.7312,
+   "name": "AP-104-MMU-Veerulapadu-AP39TL9263 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15070": {
+   "confidence": 0.99,
+   "label": "Ibrāhīmpatnam, Ntr",
+   "latitude": 16.58303,
+   "longitude": 80.51432,
+   "name": "AP-104-MMU-Ibrahimpatnam-AP39UL4378 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15071": {
+   "confidence": 0.97,
+   "label": "G Konduru, Krishna (post office)",
+   "latitude": 16.7142,
+   "longitude": 80.5606,
+   "name": "AP-104-MMU-G Konduru-AP39UL4380 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15073": {
+   "confidence": 0.97,
+   "label": "Vellatur, Guntur (post office)",
+   "latitude": 16.2988,
+   "longitude": 80.0915,
+   "name": "AP-104-MMU-Phc Vellatur-AP39TL9275 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15074": {
+   "confidence": 0.97,
+   "label": "Kotcherla, Guntur (post office)",
+   "latitude": 15.9781,
+   "longitude": 79.705,
+   "name": "AP-104-MMU-Phc Kotcherla-AP39TL9285 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15075": {
+   "confidence": 0.8789,
+   "label": "Kārempūdi, Palnadu",
+   "latitude": 16.42901,
+   "longitude": 79.72063,
+   "name": "AP-104-MMU-Phc Karampudi-AP39TL9287 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15077": {
+   "confidence": 0.98,
+   "label": "Nekarikallu, Palnadu",
+   "latitude": 16.37167,
+   "longitude": 79.94235,
+   "name": "AP-104-MMU-Phc Nekarikallu-AP39TL9299 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15078": {
+   "confidence": 0.97,
+   "label": "Nuzendla, Guntur (post office)",
+   "latitude": 15.9409,
+   "longitude": 79.7607,
+   "name": "AP-104-MMU-Phc Nuzendla-AP39TL9301 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15080": {
+   "confidence": 0.94,
+   "label": "Savalyapuram, Palnadu",
+   "latitude": 16.10335,
+   "longitude": 79.81516,
+   "name": "AP-104-MMU-Phc Savalyapram-AP39TL9314 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15081": {
+   "confidence": 0.98,
+   "label": "Enugupālem, Palnadu",
+   "latitude": 16.02423,
+   "longitude": 79.82511,
+   "name": "AP-104-MMU-Phc Enugupalem-AP39TL9323 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15082": {
+   "confidence": 0.96,
+   "label": "Pamidipādu, Palnadu",
+   "latitude": 15.93606,
+   "longitude": 79.7022,
+   "name": "AP-104-MMU-Phc Pamidipadu-AP39UL4395 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15083": {
+   "confidence": 0.99,
+   "label": "Rompicherla, Chittoor",
+   "latitude": 13.67073,
+   "longitude": 79.04644,
+   "name": "AP-104-MMU-Phc Rompicherla-AP39UL4396 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15084": {
+   "confidence": 0.97,
+   "label": "Dāchepalle, Palnadu",
+   "latitude": 16.59491,
+   "longitude": 79.73642,
+   "name": "AP-104-MMU-Phc Dachepalli-AP39TL9279 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15085": {
+   "confidence": 0.98,
+   "label": "Durgi, Palnadu",
+   "latitude": 16.42593,
+   "longitude": 79.54041,
+   "name": "AP-104-MMU-Phc Durgi-AP39TL9281 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15086": {
+   "confidence": 0.97,
+   "label": "Madugula, Guntur (post office)",
+   "latitude": 16.2988,
+   "longitude": 80.0915,
+   "name": "AP-104-MMU-Phc Madugula-AP39TL9284 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15087": {
+   "confidence": 0.97,
+   "label": "Machavaram, Guntur (post office)",
+   "latitude": 16.2988,
+   "longitude": 80.0915,
+   "name": "AP-104-MMU-Phc Machavaram-AP39TL9292 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15088": {
+   "confidence": 0.99,
+   "label": "Mācherla, Palnadu",
+   "latitude": 16.47635,
+   "longitude": 79.43533,
+   "name": "AP-104-MMU-Tphc Macherla-AP39TL9293 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15089": {
+   "confidence": 0.98,
+   "label": "Pidugurālla, Palnadu",
+   "latitude": 16.47926,
+   "longitude": 79.88632,
+   "name": "AP-104-MMU-Phc Piduguralla-AP39TL9306 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15090": {
+   "confidence": 0.98,
+   "label": "Rājupālem, Ysr District",
+   "latitude": 14.87542,
+   "longitude": 78.57626,
+   "name": "AP-104-MMU-Phc Rajupalem-AP39TL9310 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15091": {
+   "confidence": 0.98,
+   "label": "Rentachintala, Palnadu",
+   "latitude": 16.55236,
+   "longitude": 79.55325,
+   "name": "AP-104-MMU-Phc Rentachintala-AP39TL9311 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15092": {
+   "confidence": 0.96,
+   "label": "Uppalapādu, Kurnool",
+   "latitude": 15.63559,
+   "longitude": 78.11466,
+   "name": "AP-104-MMU-Phc Uppalapadu-AP39TL9321 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15093": {
+   "confidence": 0.93,
+   "label": "Chandrajupalem, Guntur (post office)",
+   "latitude": 16.5667,
+   "longitude": 79.9914,
+   "name": "AP-104-MMU-Phc Chandu Rajupalem-AP39UH5429 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15094": {
+   "confidence": 0.99,
+   "label": "Achampet, Palnadu",
+   "latitude": 16.62876,
+   "longitude": 80.12055,
+   "name": "AP-104-MMU-Phc Achampet-AP39TL9269 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15097": {
+   "confidence": 0.98,
+   "label": "Edlapādu, Palnadu",
+   "latitude": 16.16885,
+   "longitude": 80.22585,
+   "name": "AP-104-MMU-Phc Edlapadu-AP39TL9282 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15098": {
+   "confidence": 0.98,
+   "label": "Krosūru, Palnadu",
+   "latitude": 16.54286,
+   "longitude": 80.1384,
+   "name": "AP-104-MMU-Phc Krosuru-AP39TL9291 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15099": {
+   "confidence": 0.98,
+   "label": "Muppālla, Palnadu",
+   "latitude": 16.3198,
+   "longitude": 80.09272,
+   "name": "AP-104-MMU-Phc Muppalla-AP39TL9295 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15100": {
+   "confidence": 0.98,
+   "label": "Nādendla, Palnadu",
+   "latitude": 16.17563,
+   "longitude": 80.18644,
+   "name": "AP-104-MMU-Phc Nadendla-AP39TL9296 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15106": {
+   "confidence": 0.97,
+   "label": "Bhamini, Srikakulam (post office)",
+   "latitude": 18.8802,
+   "longitude": 83.8423,
+   "name": "AP-104-MMU-Bhamini-AP39TK8652 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15107": {
+   "confidence": 0.98,
+   "label": "Pālkonda, Parvathipuram Manyam",
+   "latitude": 18.60374,
+   "longitude": 83.75568,
+   "name": "AP-104-MMU-Palakonda-AP39TL9013 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15109": {
+   "confidence": 0.98,
+   "label": "Vīraghattam, Parvathipuram Manyam",
+   "latitude": 18.68644,
+   "longitude": 83.60919,
+   "name": "AP-104-MMU-Veeraghattam-AP39TL9030 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15110": {
+   "confidence": 0.97,
+   "label": "Jiyyammavalasa, Parvathipuram Manyam",
+   "latitude": 18.79013,
+   "longitude": 83.60131,
+   "name": "AP-104-MMU-Jiyyamavalasa-AP39TL9041 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15111": {
+   "confidence": 0.99,
+   "label": "Jiyyammavalasa, Parvathipuram Manyam",
+   "latitude": 18.79013,
+   "longitude": 83.60131,
+   "name": "AP-104-MMU-Jiyyammavalasa-AP39TL9044 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15112": {
+   "confidence": 0.98,
+   "label": "Kurupām, Parvathipuram Manyam",
+   "latitude": 18.86626,
+   "longitude": 83.55195,
+   "name": "AP-104-MMU-Kurupam-AP39TL9047 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15113": {
+   "confidence": 0.99,
+   "label": "Gummalaxmipuram, Parvathipuram Manyam",
+   "latitude": 18.97675,
+   "longitude": 83.66044,
+   "name": "AP-104-MMU-Gummalaxmipuram-AP39UH3967 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15114": {
+   "confidence": 0.96,
+   "label": "Seethampeta, Vizianagaram (post office)",
+   "latitude": 18.4673,
+   "longitude": 83.3793,
+   "name": "AP-104-MMU-Seethampeta-AP39UH3968 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15115": {
+   "confidence": 0.94,
+   "label": "Gummalaxmipuram, Parvathipuram Manyam",
+   "latitude": 18.97675,
+   "longitude": 83.66044,
+   "name": "AP-104-MMU-Gummalaximipuram-AP39UL4214 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15116": {
+   "confidence": 0.99,
+   "label": "Jiyyammavalasa, Parvathipuram Manyam",
+   "latitude": 18.79013,
+   "longitude": 83.60131,
+   "name": "AP-104-MMU-Jiyyammavalasa-AP39UL4215 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15117": {
+   "confidence": 0.98,
+   "label": "Pālkonda, Parvathipuram Manyam",
+   "latitude": 18.60374,
+   "longitude": 83.75568,
+   "name": "AP-104-MMU-Palakonda-AP39UL4218 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15118": {
+   "confidence": 0.96,
+   "label": "Seethampeta, Vizianagaram (post office)",
+   "latitude": 18.4673,
+   "longitude": 83.3793,
+   "name": "AP-104-MMU-Seethampeta-AP39UL4220 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15119": {
+   "confidence": 0.96,
+   "label": "Vīraghattam, Parvathipuram Manyam",
+   "latitude": 18.68644,
+   "longitude": 83.60919,
+   "name": "AP-104-MMU-Veeraghatham-AP39UL4222 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15121": {
+   "confidence": 0.96,
+   "label": "Garugubilli, Parvathipuram Manyam",
+   "latitude": 18.71188,
+   "longitude": 83.49161,
+   "name": "AP-104-MMU-Garugubilli-AP39TL9040 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15122": {
+   "confidence": 0.98,
+   "label": "Komarāda, Parvathipuram Manyam",
+   "latitude": 18.89756,
+   "longitude": 83.4633,
+   "name": "AP-104-MMU-Komarada-AP39TL9045 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15123": {
+   "confidence": 0.98,
+   "label": "Makkuva, Parvathipuram Manyam",
+   "latitude": 18.66177,
+   "longitude": 83.26723,
+   "name": "AP-104-MMU-Makkuva-AP39TL9049 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15124": {
+   "confidence": 0.98,
+   "label": "Pāchipenta, Parvathipuram Manyam",
+   "latitude": 18.47962,
+   "longitude": 83.11332,
+   "name": "AP-104-MMU-Pachipenta-AP39TL9053 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15125": {
+   "confidence": 0.96,
+   "label": "Pārvatipuram, Parvathipuram Manyam",
+   "latitude": 18.78392,
+   "longitude": 83.42569,
+   "name": "AP-104-MMU-Parvatipuram-AP39TL9054 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15126": {
+   "confidence": 0.98,
+   "label": "Sālūr, Parvathipuram Manyam",
+   "latitude": 18.51716,
+   "longitude": 83.20548,
+   "name": "AP-104-MMU-Salur-AP39TL9057 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15127": {
+   "confidence": 0.97,
+   "label": "Seethanagaram, Vizianagaram (post office)",
+   "latitude": 18.4673,
+   "longitude": 83.3793,
+   "name": "AP-104-MMU-Seethanagaram-AP39TL9058 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15128": {
+   "confidence": 0.98,
+   "label": "Balijipeta, Parvathipuram Manyam",
+   "latitude": 18.61338,
+   "longitude": 83.52831,
+   "name": "AP-104-MMU-Balijipeta-AP39TL9107 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15129": {
+   "confidence": 0.9312,
+   "label": "Komarāda, Parvathipuram Manyam",
+   "latitude": 18.89756,
+   "longitude": 83.4633,
+   "name": "AP-104-MMU-Komarada-2-AP39UH3970 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15130": {
+   "confidence": 0.8991,
+   "label": "Sālūr, Parvathipuram Manyam",
+   "latitude": 18.51716,
+   "longitude": 83.20548,
+   "name": "AP-104-MMU-Salur2-AP39UH3971 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15131": {
+   "confidence": 0.98,
+   "label": "Balijipeta, Parvathipuram Manyam",
+   "latitude": 18.61338,
+   "longitude": 83.52831,
+   "name": "AP-104-MMU-Balijipeta-AP39UL4213 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15132": {
+   "confidence": 0.98,
+   "label": "Makkuva, Parvathipuram Manyam",
+   "latitude": 18.66177,
+   "longitude": 83.26723,
+   "name": "AP-104-MMU-Makkuva-AP39UL4216 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15133": {
+   "confidence": 0.98,
+   "label": "Pāchipenta, Parvathipuram Manyam",
+   "latitude": 18.47962,
+   "longitude": 83.11332,
+   "name": "AP-104-MMU-Pachipenta-AP39UL4217 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15134": {
+   "confidence": 0.94,
+   "label": "Pārvatipuram, Parvathipuram Manyam",
+   "latitude": 18.78392,
+   "longitude": 83.42569,
+   "name": "AP-104-MMU-Parvathipuram-AP39UL4219 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15135": {
+   "confidence": 0.94,
+   "label": "Seethanagaram, East Godāvari",
+   "latitude": 17.1767,
+   "longitude": 81.6925,
+   "name": "AP-104-MMU-Seetanagaram-AP39UL4221 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15137": {
+   "confidence": 0.97,
+   "label": "Yellavaram, East Godavari (post office)",
+   "latitude": 17.4813,
+   "longitude": 82.0099,
+   "name": "AP-104-MMU-Phc Yellavaram-AP39TL9110 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15139": {
+   "confidence": 0.9067,
+   "label": "Indukūrupeta, Alluri Sitharama Raju",
+   "latitude": 17.26271,
+   "longitude": 81.78297,
+   "name": "AP-104-MMU-Phc Indukuripeta-AP39TL9120 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15140": {
+   "confidence": 0.98,
+   "label": "Gangāvaram, Chittoor",
+   "latitude": 13.21612,
+   "longitude": 78.73793,
+   "name": "AP-104-MMU-Phc Gangavaram-AP39TL9122 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15141": {
+   "confidence": 0.96,
+   "label": "Kunavaram, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Phc Kunavaram-AP39TL9138 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15142": {
+   "confidence": 0.98,
+   "label": "Māredumilli, Alluri Sitharama Raju",
+   "latitude": 17.59704,
+   "longitude": 81.71455,
+   "name": "AP-104-MMU-Phc Maredumilli-AP39TL9141 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15143": {
+   "confidence": 0.97,
+   "label": "Nellipaka, East Godavari (post office)",
+   "latitude": 17.1885,
+   "longitude": 82.0118,
+   "name": "AP-104-MMU-Phc Nellipaka-AP39TL9143 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15144": {
+   "confidence": 0.98,
+   "label": "Rājavommangi, Alluri Sitharama Raju",
+   "latitude": 17.5459,
+   "longitude": 82.23383,
+   "name": "AP-104-MMU-Phc Rajavommangi-AP39TL9151 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15145": {
+   "confidence": 0.99,
+   "label": "Pedda Geddāda, Alluri Sitharama Raju",
+   "latitude": 17.45963,
+   "longitude": 81.73388,
+   "name": "AP-104-MMU-Phc Pedda Geddada-AP39TL9153 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15147": {
+   "confidence": 0.97,
+   "label": "Gurthedu, East Godavari (post office)",
+   "latitude": 17.6294,
+   "longitude": 82.0511,
+   "name": "AP-104-MMU-Phc Gurthedu-AP39TL9168 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15148": {
+   "confidence": 0.93,
+   "label": "Chavitidibbalu, East Godavari (post office)",
+   "latitude": 17.6294,
+   "longitude": 82.0511,
+   "name": "AP-104-MMU-Phc Chaviti Dibbala-AP39TL9100 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15149": {
+   "confidence": 0.9067,
+   "label": "Indukūrupeta, Alluri Sitharama Raju",
+   "latitude": 17.26271,
+   "longitude": 81.78297,
+   "name": "AP-104-MMU-Phc Indukuripeta-AP39TL9090 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15151": {
+   "confidence": 0.98,
+   "label": "Bandlamūdi, Prakasam",
+   "latitude": 15.60647,
+   "longitude": 79.89796,
+   "name": "AP-104-MMU-Phc Bandlamudi-AP39TL9328 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15152": {
+   "confidence": 0.97,
+   "label": "Kothapatnam, Nellore (post office)",
+   "latitude": 14.7755,
+   "longitude": 80.0637,
+   "name": "AP-104-MMU-Phc Kothapatnam-AP39TL9348 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15153": {
+   "confidence": 0.98,
+   "label": "Maddipādu, Prakasam",
+   "latitude": 15.62234,
+   "longitude": 80.02386,
+   "name": "AP-104-MMU-Phc Maddipadu-AP39TL9351 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15154": {
+   "confidence": 0.97,
+   "label": "N.G.Padu, Prakasam (post office)",
+   "latitude": 15.6213,
+   "longitude": 79.5158,
+   "name": "AP-104-MMU-Phc N.g.padu-AP39TL9356 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15155": {
+   "confidence": 0.98,
+   "label": "Karavadi, Prakasam",
+   "latitude": 15.54623,
+   "longitude": 80.11448,
+   "name": "AP-104-MMU-Phc Karavadi-AP39TL9357 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15157": {
+   "confidence": 0.98,
+   "label": "Tangutūru, Prakasam",
+   "latitude": 15.33921,
+   "longitude": 80.04006,
+   "name": "AP-104-MMU-Phc Tangutur-AP39TL9370 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15158": {
+   "confidence": 0.98,
+   "label": "Maddipādu, Prakasam",
+   "latitude": 15.62234,
+   "longitude": 80.02386,
+   "name": "AP-104-MMU-Phc Maddipadu-AP39UL4410 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15159": {
+   "confidence": 0.98,
+   "label": "Tangutūru, Prakasam",
+   "latitude": 15.33921,
+   "longitude": 80.04006,
+   "name": "AP-104-MMU-Phc Tangutur-AP39UL4411 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15160": {
+   "confidence": 0.98,
+   "label": "Vemulapādu, Prakasam",
+   "latitude": 15.5321,
+   "longitude": 79.34019,
+   "name": "AP-104-MMU-Phc Vemulapadu-AP39UL4412 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15161": {
+   "confidence": 0.98,
+   "label": "Karavadi, Prakasam",
+   "latitude": 15.54623,
+   "longitude": 80.11448,
+   "name": "AP-104-MMU-Phc Karavadi-AP39UL4413 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15162": {
+   "confidence": 0.97,
+   "label": "N.G.Padu, Prakasam (post office)",
+   "latitude": 15.6213,
+   "longitude": 79.5158,
+   "name": "AP-104-MMU-Phc N.g.padu-AP39UL4417 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15163": {
+   "confidence": 0.98,
+   "label": "Chandalūru, Prakasam",
+   "latitude": 15.80259,
+   "longitude": 79.59978,
+   "name": "AP-104-MMU-Phc Chandalur-AP39TL9333 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15164": {
+   "confidence": 0.98,
+   "label": "Donakonda, Prakasam",
+   "latitude": 15.8603,
+   "longitude": 79.53364,
+   "name": "AP-104-MMU-Phc Donakonda-AP39TL9334 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15165": {
+   "confidence": 0.98,
+   "label": "Kurichedu, Prakasam",
+   "latitude": 15.90325,
+   "longitude": 79.57689,
+   "name": "AP-104-MMU-Phc Kurichedu-AP39TL9349 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15166": {
+   "confidence": 0.95,
+   "label": "Mundlamur, Prakasam (post office)",
+   "latitude": 15.5159,
+   "longitude": 79.7526,
+   "name": "AP-104-MMU-Phc Mundlamuru-AP39TL9355 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15167": {
+   "confidence": 0.96,
+   "label": "Tāllūru, Prakasam",
+   "latitude": 15.73985,
+   "longitude": 79.88196,
+   "name": "AP-104-MMU-Phc Thallur-AP39TL9369 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15168": {
+   "confidence": 0.98,
+   "label": "Chandalūru, Prakasam",
+   "latitude": 15.80259,
+   "longitude": 79.59978,
+   "name": "AP-104-MMU-Phc Chandalur-AP39UL4409 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15169": {
+   "confidence": 0.97,
+   "label": "Modepalli, Prakasam (post office)",
+   "latitude": 15.7362,
+   "longitude": 79.7588,
+   "name": "AP-104-MMU-Phc Modepalli-AP39TL9324 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15170": {
+   "confidence": 0.9,
+   "label": "Guntupalle",
+   "latitude": 15.14958,
+   "longitude": 79.51976,
+   "name": "AP-104-MMU-Phc Guntupalli-AP39TL9326 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15172": {
+   "confidence": 0.96,
+   "label": "Korisapādu, Bapatla",
+   "latitude": 15.7537,
+   "longitude": 80.0423,
+   "name": "AP-104-MMU-Phc Korisapadu-AP39TL9347 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15173": {
+   "confidence": 0.94,
+   "label": "Santamāgulūru, Bapatla",
+   "latitude": 16.11832,
+   "longitude": 79.95682,
+   "name": "AP-104-MMU-Phc Santhamaguluru-AP39TL9366 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15174": {
+   "confidence": 0.96,
+   "label": "Kopperapādu, Bapatla",
+   "latitude": 15.9364,
+   "longitude": 79.95795,
+   "name": "AP-104-MMU-Phc Kopperapadu-AP39UL4402 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15175": {
+   "confidence": 0.97,
+   "label": "Medarametla, Bapatla",
+   "latitude": 15.72475,
+   "longitude": 80.01966,
+   "name": "AP-104-MMU-Phc Medarametla-AP39UL4404 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15176": {
+   "confidence": 0.95,
+   "label": "Petlur, Prakasam (post office)",
+   "latitude": 15.6213,
+   "longitude": 79.5158,
+   "name": "AP-104-MMU-Phc Petluru-AP39TL9346 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15177": {
+   "confidence": 0.98,
+   "label": "Marripūdi, Prakasam",
+   "latitude": 15.51353,
+   "longitude": 79.65318,
+   "name": "AP-104-MMU-Phc Marripudi-AP39TL9353 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15178": {
+   "confidence": 0.99,
+   "label": "Ponnalūru, Prakasam",
+   "latitude": 15.2725,
+   "longitude": 79.79921,
+   "name": "AP-104-MMU-Phc Ponnaluru-AP39TL9363 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15179": {
+   "confidence": 0.99,
+   "label": "Singarāyakonda, Prakasam",
+   "latitude": 15.23046,
+   "longitude": 80.02794,
+   "name": "AP-104-MMU-Phc Singarayakonda-AP39TL9367 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15180": {
+   "confidence": 0.97,
+   "label": "Jarugumalli, Prakasam (post office)",
+   "latitude": 15.6213,
+   "longitude": 79.5158,
+   "name": "AP-104-MMU-Phc Jarugumalli-AP39TL9378 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15181": {
+   "confidence": 0.97,
+   "label": "Gudlūru, Nellore",
+   "latitude": 15.07252,
+   "longitude": 79.90127,
+   "name": "AP-104-MMU-Phc Gudlur-AP39TL9337 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15182": {
+   "confidence": 0.96,
+   "label": "Machavaram, Prakasam",
+   "latitude": 15.36892,
+   "longitude": 79.48412,
+   "name": "AP-104-MMU-Phc-machavaram-AP39TL9341 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15183": {
+   "confidence": 0.97,
+   "label": "Lingasamudram, Nellore",
+   "latitude": 15.08719,
+   "longitude": 79.72252,
+   "name": "AP-104-MMU-Phc-lingasamudram-AP39TL9350 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15184": {
+   "confidence": 0.96,
+   "label": "Karedu, Nellore",
+   "latitude": 15.18739,
+   "longitude": 80.05903,
+   "name": "AP-104-MMU-Phc-karedu-AP39TL9372 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15185": {
+   "confidence": 0.97,
+   "label": "Valletivāripālem, Prakasam",
+   "latitude": 15.55054,
+   "longitude": 80.08792,
+   "name": "AP-104-MMU-Phc-valetivaripalem-AP39TL9375 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15186": {
+   "confidence": 0.9091,
+   "label": "Chākicherla",
+   "latitude": 15.11266,
+   "longitude": 80.03659,
+   "name": "AP-104-MMU-Phc-chakicharla-AP39UL4420 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15188": {
+   "confidence": 0.99,
+   "label": "Kovūrupalli, Nellore",
+   "latitude": 14.7772,
+   "longitude": 79.99993,
+   "name": "AP-104-MMU-Phc Kovurupalli-AP39TL9384 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15189": {
+   "confidence": 0.95,
+   "label": "Jonnavada, Nellore (post office)",
+   "latitude": 14.5423,
+   "longitude": 79.8845,
+   "name": "AP-104-MMU-Phc Jonnawada-AP39TL9399 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15190": {
+   "confidence": 0.97,
+   "label": "Dagadarthi, Nellore (post office)",
+   "latitude": 14.7027,
+   "longitude": 79.8628,
+   "name": "AP-104-MMU-Phc Dagadarthi-AP39TL9389 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15191": {
+   "confidence": 0.97,
+   "label": "Jaladanki, Nellore (post office)",
+   "latitude": 14.9502,
+   "longitude": 79.5818,
+   "name": "AP-104-MMU-Phc Jaladanki-AP39TL9395 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15192": {
+   "confidence": 0.98,
+   "label": "Kaligiri, Nellore",
+   "latitude": 14.82844,
+   "longitude": 79.69073,
+   "name": "AP-104-MMU-Phc Kaligiri-AP39TL9396 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15193": {
+   "confidence": 0.99,
+   "label": "Kodavalūru, Nellore",
+   "latitude": 14.56689,
+   "longitude": 80.00341,
+   "name": "AP-104-MMU-Phc Kodavalur-AP39UL4425 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15194": {
+   "confidence": 0.98,
+   "label": "Kondāpuram, Ysr District",
+   "latitude": 14.77582,
+   "longitude": 78.19488,
+   "name": "AP-104-MMU-Phc Kondapuram-AP39TL9385 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15195": {
+   "confidence": 0.97,
+   "label": "Inamadugu, Nellore (post office)",
+   "latitude": 14.3495,
+   "longitude": 79.85,
+   "name": "AP-104-MMU-Phc Inamadugu-AP39TL9406 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15196": {
+   "confidence": 0.97,
+   "label": "Vidavalur, Nellore (post office)",
+   "latitude": 14.5722,
+   "longitude": 80.0653,
+   "name": "AP-104-MMU-Phc Vidavalur-AP39TL9422 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15197": {
+   "confidence": 0.8991,
+   "label": "Chākalakonda, Nellore",
+   "latitude": 14.95756,
+   "longitude": 79.5169,
+   "name": "AP-104-MMU-Phc Chakalikonda-AP39TL9423 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15198": {
+   "confidence": 0.99,
+   "label": "Sarvayapālem, Nellore",
+   "latitude": 14.93749,
+   "longitude": 80.01556,
+   "name": "AP-104-MMU-Phc Sarvayapalem-AP39UH4790 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15199": {
+   "confidence": 0.98,
+   "label": "Iskapalli, Nellore",
+   "latitude": 14.73631,
+   "longitude": 80.09812,
+   "name": "AP-104-MMU-Phc Iskapalli-AP39UH4791 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15200": {
+   "confidence": 0.97,
+   "label": "Inamadugu, Nellore (post office)",
+   "latitude": 14.3495,
+   "longitude": 79.85,
+   "name": "AP-104-MMU-Phc Inamadugu-AP39UL4421 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15201": {
+   "confidence": 0.9231,
+   "label": "Maipādu, Nellore",
+   "latitude": 14.50726,
+   "longitude": 80.16448,
+   "name": "AP-104-MMU-Phc Mahipadu-AP39TL9410 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15202": {
+   "confidence": 0.98,
+   "label": "Manubolu, Nellore",
+   "latitude": 14.19949,
+   "longitude": 79.87268,
+   "name": "AP-104-MMU-Phc Manubolu-AP39TL9402 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15203": {
+   "confidence": 0.97,
+   "label": "Muthukur, Nellore (post office)",
+   "latitude": 14.2946,
+   "longitude": 80.0937,
+   "name": "AP-104-MMU-Phc Muthukur-AP39TL9419 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15204": {
+   "confidence": 0.98,
+   "label": "Allipuram, Nellore",
+   "latitude": 14.45717,
+   "longitude": 80.03901,
+   "name": "AP-104-MMU-Phc Allipuram-AP39TL9401 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15205": {
+   "confidence": 0.97,
+   "label": "Vepinapi, Nellore (post office)",
+   "latitude": 14.2357,
+   "longitude": 79.5799,
+   "name": "AP-104-MMU-Phc Vepinapi-AP39TL9394 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15206": {
+   "confidence": 0.97,
+   "label": "Sydapuram, Nellore (post office)",
+   "latitude": 14.1804,
+   "longitude": 79.6335,
+   "name": "AP-104-MMU-Phc Sydapuram-AP39TL9414 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15207": {
+   "confidence": 0.98,
+   "label": "Vārigonda, Nellore",
+   "latitude": 14.38545,
+   "longitude": 80.05811,
+   "name": "AP-104-MMU-Phc Varigonda-AP39TL9416 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15208": {
+   "confidence": 0.97,
+   "label": "Kasumur, Nellore (post office)",
+   "latitude": 14.3632,
+   "longitude": 79.884,
+   "name": "AP-104-MMU-Phc Kasumur-AP39TL9420 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15209": {
+   "confidence": 0.8891,
+   "label": "Jagdevipeta, Nellore (post office)",
+   "latitude": 14.4922,
+   "longitude": 80.0763,
+   "name": "AP-104-MMU-Phc Jagadev Peta-AP39UL4422 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15210": {
+   "confidence": 0.98,
+   "label": "Iskapālem, Nellore",
+   "latitude": 14.2836,
+   "longitude": 80.00219,
+   "name": "AP-104-MMU-Phc Iskapalem-AP39UL4418 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15211": {
+   "confidence": 0.9233,
+   "label": "Griddalūru, Nellore",
+   "latitude": 14.2645,
+   "longitude": 79.77539,
+   "name": "AP-104-MMU-Phc Giddalur-AP39TL9398 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15212": {
+   "confidence": 0.96,
+   "label": "Uppalapādu, Nellore",
+   "latitude": 14.62138,
+   "longitude": 79.91918,
+   "name": "AP-104-MMU-Phc Uppalapadu-AP39TL9387 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15214": {
+   "confidence": 0.96,
+   "label": "Chittedu, Tirupati",
+   "latitude": 14.05954,
+   "longitude": 79.9842,
+   "name": "AP-104-MMU-Phc Chittedu-AP39TL9400 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15216": {
+   "confidence": 0.95,
+   "label": "Peta, Srīkākulam",
+   "latitude": 18.55424,
+   "longitude": 83.82541,
+   "name": "AP-104-MMU-Phc A.s.peta-AP39TL9381 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15217": {
+   "confidence": 0.9212,
+   "label": "Mahimalur, Nellore (post office)",
+   "latitude": 14.4268,
+   "longitude": 79.7344,
+   "name": "AP-104-MMU-Phc Mahimlur-AP39TL9382 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15218": {
+   "confidence": 0.875,
+   "label": "Chejerla",
+   "latitude": 14.51882,
+   "longitude": 79.56677,
+   "name": "AP-104-MMU-Phc Chejarla-AP39TL9386 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15219": {
+   "confidence": 0.96,
+   "label": "Duttalūru, Nellore",
+   "latitude": 14.8504,
+   "longitude": 79.40441,
+   "name": "AP-104-MMU-Phc Duttalur-AP39TL9392 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15220": {
+   "confidence": 0.98,
+   "label": "Kaluvāya, Nellore",
+   "latitude": 14.5117,
+   "longitude": 79.41013,
+   "name": "AP-104-MMU-Phc Kaluvoya-AP39TL9397 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15223": {
+   "confidence": 0.98,
+   "label": "Sangam, Nellore",
+   "latitude": 14.58508,
+   "longitude": 79.7462,
+   "name": "AP-104-MMU-Phc Sangam-AP39TL9411 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15225": {
+   "confidence": 0.98,
+   "label": "Gandipalem, Nellore",
+   "latitude": 14.99872,
+   "longitude": 79.3085,
+   "name": "AP-104-MMU-Phc Gandipalem-AP39TL9417 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15226": {
+   "confidence": 0.96,
+   "label": "Varikuntapadu, Nellore (post office)",
+   "latitude": 15.0461,
+   "longitude": 79.4312,
+   "name": "AP-104-MMU-Phc Varikuntapadu-AP39TL9404 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15229": {
+   "confidence": 0.94,
+   "label": "Bathalapalli, Ananthapur (post office)",
+   "latitude": 14.5453,
+   "longitude": 77.8198,
+   "name": "AP-104-MMU-Bathala Palli -phc-AP39TL9493 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15230": {
+   "confidence": 0.98,
+   "label": "Bukkapatnam, Sri Sathya Sai",
+   "latitude": 14.19947,
+   "longitude": 77.80123,
+   "name": "AP-104-MMU-Bukkapatnam -phc-AP39TL9497 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15232": {
+   "confidence": 0.88,
+   "label": "Darsimala, Ananthapur (post office)",
+   "latitude": 14.46,
+   "longitude": 77.9602,
+   "name": "AP-104-MMU-Darsinamala -phc-AP39TL9502 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15233": {
+   "confidence": 0.97,
+   "label": "Kanaganapalli, Ananthapur (post office)",
+   "latitude": 14.4586,
+   "longitude": 77.5227,
+   "name": "AP-104-MMU-Kanaganapalli -phc-AP39TL9512 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15234": {
+   "confidence": 0.97,
+   "label": "Kothacheruvu, Ananthapur (post office)",
+   "latitude": 14.2051,
+   "longitude": 78.004,
+   "name": "AP-104-MMU-Kothacheruvu-AP39TL9514 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15235": {
+   "confidence": 0.9067,
+   "label": "Malakavemula, Sri Sathya Sai",
+   "latitude": 14.25304,
+   "longitude": 78.05737,
+   "name": "AP-104-MMU-Molakavemula-phc-AP39TL9519 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15236": {
+   "confidence": 0.98,
+   "label": "Guttūru, Sri Sathya Sai",
+   "latitude": 14.19015,
+   "longitude": 77.63403,
+   "name": "AP-104-MMU-Guttur -phc-AP39TL9529 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15237": {
+   "confidence": 0.97,
+   "label": "Enumulavaripalli, Ananthapur (post office)",
+   "latitude": 14.2668,
+   "longitude": 78.2141,
+   "name": "AP-104-MMU-Phc Enumulavaripalli-AP39TL9531 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15238": {
+   "confidence": 0.98,
+   "label": "Rāmagiri, Sri Sathya Sai",
+   "latitude": 14.3055,
+   "longitude": 77.497,
+   "name": "AP-104-MMU-Hc Ramagiri-AP39TL9532 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15239": {
+   "confidence": 0.98,
+   "label": "Tādimarri, Sri Sathya Sai",
+   "latitude": 14.56222,
+   "longitude": 77.85895,
+   "name": "AP-104-MMU-Tadimarri -phc-AP39TL9540 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15240": {
+   "confidence": 0.98,
+   "label": "Mudigubba, Sri Sathya Sai",
+   "latitude": 14.34575,
+   "longitude": 77.9919,
+   "name": "AP-104-MMU-Mudigubba -phc-AP39UL4498 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15241": {
+   "confidence": 0.99,
+   "label": "Agali, Sri Sathya Sai",
+   "latitude": 13.78448,
+   "longitude": 77.05424,
+   "name": "AP-104-MMU-Agali -phc-AP39TL9489 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15242": {
+   "confidence": 0.98,
+   "label": "Amarāpuuram, Sri Sathya Sai",
+   "latitude": 14.13012,
+   "longitude": 76.9776,
+   "name": "AP-104-MMU-Amarapuram -phc-AP39TL9491 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15243": {
+   "confidence": 0.97,
+   "label": "Chilamathur, Ananthapur (post office)",
+   "latitude": 13.7686,
+   "longitude": 77.6812,
+   "name": "AP-104-MMU-Chilamathur -phc-AP39TL9499 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15244": {
+   "confidence": 0.99,
+   "label": "Gudibanda, Sri Sathya Sai",
+   "latitude": 13.97532,
+   "longitude": 77.10458,
+   "name": "AP-104-MMU-Gudibanda -phc-AP39TL9507 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15245": {
+   "confidence": 0.94,
+   "label": "Basavanahalli, Sri Sathya Sai",
+   "latitude": 14.02399,
+   "longitude": 77.06047,
+   "name": "AP-104-MMU-K Basavanahalli -phc-AP39TL9509 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15246": {
+   "confidence": 0.98,
+   "label": "Lepākshi, Sri Sathya Sai",
+   "latitude": 13.80306,
+   "longitude": 77.60863,
+   "name": "AP-104-MMU-Lepakshi -phc-AP39TL9517 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15248": {
+   "confidence": 0.98,
+   "label": "Parigi, Sri Sathya Sai",
+   "latitude": 13.89255,
+   "longitude": 77.45965,
+   "name": "AP-104-MMU-Parigi -phc-AP39TL9526 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15249": {
+   "confidence": 0.98,
+   "label": "Roddam, Sri Sathya Sai",
+   "latitude": 14.094,
+   "longitude": 77.42787,
+   "name": "AP-104-MMU-Roddam -phc-AP39TL9535 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15250": {
+   "confidence": 0.98,
+   "label": "Rolla, Sri Sathya Sai",
+   "latitude": 13.84152,
+   "longitude": 77.10095,
+   "name": "AP-104-MMU-Phc Rolla-AP39TL9536 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15251": {
+   "confidence": 0.92,
+   "label": "Somandepalle, Sri Sathya Sai",
+   "latitude": 14.00774,
+   "longitude": 77.60846,
+   "name": "AP-104-MMU-Somandne Palli -phc-AP39TL9539 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15252": {
+   "confidence": 0.97,
+   "label": "Kallumarri, Ananthapur (post office)",
+   "latitude": 14.3442,
+   "longitude": 77.7418,
+   "name": "AP-104-MMU-Kallumarri -phc-AP39UL4495 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15253": {
+   "confidence": 0.98,
+   "label": "Patnam, Sri Sathya Sai",
+   "latitude": 14.23453,
+   "longitude": 78.09523,
+   "name": "AP-104-MMU-Patnam -phc-AP39TL9488 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15254": {
+   "confidence": 0.97,
+   "label": "Amadagur, Ananthapur (post office)",
+   "latitude": 13.9366,
+   "longitude": 78.0425,
+   "name": "AP-104-MMU-Amadagur -phc-AP39TL9490 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15255": {
+   "confidence": 0.98,
+   "label": "Gāndlapenta, Sri Sathya Sai",
+   "latitude": 14.09618,
+   "longitude": 78.27235,
+   "name": "AP-104-MMU-Gandlapenta -phc-AP39TL9503 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15256": {
+   "confidence": 0.98,
+   "label": "Gorantla, Sri Sathya Sai",
+   "latitude": 13.98411,
+   "longitude": 77.77224,
+   "name": "AP-104-MMU-Phc Gorantla-AP39TL9506 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15258": {
+   "confidence": 0.98,
+   "label": "Nallacheruvu, Sri Sathya Sai",
+   "latitude": 13.98644,
+   "longitude": 78.18699,
+   "name": "AP-104-MMU-Nallacheruvu -phc-AP39TL9521 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15259": {
+   "confidence": 0.96,
+   "label": "Reddipalli, Ananthapur (post office)",
+   "latitude": 14.4811,
+   "longitude": 77.5768,
+   "name": "AP-104-MMU-Reddipalli -phc-AP39TL9522 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15260": {
+   "confidence": 0.95,
+   "label": "Obula Devara Cheruvu, Ananthapur (post office)",
+   "latitude": 14.4811,
+   "longitude": 77.5768,
+   "name": "AP-104-MMU-Obuladevara Cheruvu -phc-AP39TL9524 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15261": {
+   "confidence": 0.98,
+   "label": "Talupula, Sri Sathya Sai",
+   "latitude": 14.24148,
+   "longitude": 78.25848,
+   "name": "AP-104-MMU-Talupula -phc-AP39TL9542 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15262": {
+   "confidence": 0.98,
+   "label": "Kokkanti, Sri Sathya Sai",
+   "latitude": 13.94027,
+   "longitude": 78.27858,
+   "name": "AP-104-MMU-Kokkanti -phc-AP39TL9543 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15263": {
+   "confidence": 0.98,
+   "label": "Kondāpuram, Sri Sathya Sai",
+   "latitude": 13.95972,
+   "longitude": 77.83648,
+   "name": "AP-104-MMU-Kondapuram-phc-AP39UL4497 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15264": {
+   "confidence": 0.99,
+   "label": "Dharmavaram, Sri Sathya Sai",
+   "latitude": 14.41435,
+   "longitude": 77.72035,
+   "name": "AP-104-MMU-Dharmavaram - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15265": {
+   "confidence": 0.98,
+   "label": "Kadiri, Sri Sathya Sai",
+   "latitude": 14.11168,
+   "longitude": 78.15982,
+   "name": "AP-104-MMU-Kadiri - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15266": {
+   "confidence": 0.99,
+   "label": "Hindupur, Sri Sathya Sai",
+   "latitude": 13.82807,
+   "longitude": 77.49143,
+   "name": "AP-104-MMU-Hindupur - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15268": {
+   "confidence": 0.9231,
+   "label": "Amudālavalasa, Srīkākulam",
+   "latitude": 18.41025,
+   "longitude": 83.90295,
+   "name": "AP-104-MMU-Amadalavalasa-AP39UH4403 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15269": {
+   "confidence": 0.9231,
+   "label": "Amudālavalasa, Srīkākulam",
+   "latitude": 18.41025,
+   "longitude": 83.90295,
+   "name": "AP-104-MMU-Amadalavalasa-AP39UL4188 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15270": {
+   "confidence": 0.98,
+   "label": "Būrja, Srīkākulam",
+   "latitude": 18.53148,
+   "longitude": 83.79945,
+   "name": "AP-104-MMU-Burja-AP39TK8653 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15271": {
+   "confidence": 0.98,
+   "label": "Gāra, Srīkākulam",
+   "latitude": 18.32261,
+   "longitude": 84.0687,
+   "name": "AP-104-MMU-Gara-AP39TK8656 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15272": {
+   "confidence": 0.98,
+   "label": "Gāra, Srīkākulam",
+   "latitude": 18.32261,
+   "longitude": 84.0687,
+   "name": "AP-104-MMU-Gara-AP39UL4195 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15273": {
+   "confidence": 0.98,
+   "label": "Hiramandalam, Srīkākulam",
+   "latitude": 18.67085,
+   "longitude": 83.95054,
+   "name": "AP-104-MMU-Hiramandalam-AP39TK8657 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15274": {
+   "confidence": 0.98,
+   "label": "Hiramandalam, Srīkākulam",
+   "latitude": 18.67085,
+   "longitude": 83.95054,
+   "name": "AP-104-MMU-Hiramandalam-AP39UL4208 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15275": {
+   "confidence": 0.98,
+   "label": "Kottūru, Srīkākulam",
+   "latitude": 18.77917,
+   "longitude": 83.88357,
+   "name": "AP-104-MMU-Kotturu-AP39TL9005 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15276": {
+   "confidence": 0.98,
+   "label": "Kottūru, Srīkākulam",
+   "latitude": 18.77917,
+   "longitude": 83.88357,
+   "name": "AP-104-MMU-Kotturu-AP39UL4207 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15277": {
+   "confidence": 0.97,
+   "label": "L.N.Peta, Srikakulam (post office)",
+   "latitude": 18.4853,
+   "longitude": 83.7275,
+   "name": "AP-104-MMU-L. N. Peta-AP39TL9006 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15278": {
+   "confidence": 0.98,
+   "label": "Narasannapeta, Srīkākulam",
+   "latitude": 18.41428,
+   "longitude": 84.04463,
+   "name": "AP-104-MMU-Narasannapeta-AP39TL9012 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15279": {
+   "confidence": 0.98,
+   "label": "Narasannapeta, Srīkākulam",
+   "latitude": 18.41428,
+   "longitude": 84.04463,
+   "name": "AP-104-MMU-Narasannapeta-AP39UL4194 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15280": {
+   "confidence": 0.97,
+   "label": "Sarubujjili, Srikakulam (post office)",
+   "latitude": 18.4853,
+   "longitude": 83.7275,
+   "name": "AP-104-MMU-Sarubujjili-AP39TL9024 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15281": {
+   "confidence": 0.99,
+   "label": "Ichchāpuram, Srīkākulam",
+   "latitude": 19.11393,
+   "longitude": 84.68721,
+   "name": "AP-104-MMU-Ichapuram-AP39TK8658 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15282": {
+   "confidence": 0.98,
+   "label": "Kanchili, Srīkākulam",
+   "latitude": 18.98041,
+   "longitude": 84.58232,
+   "name": "AP-104-MMU-Kanchili-AP39TL9002 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15283": {
+   "confidence": 0.98,
+   "label": "Kanchili, Srīkākulam",
+   "latitude": 18.98041,
+   "longitude": 84.58232,
+   "name": "AP-104-MMU-Kanchili-AP39UL4204 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15286": {
+   "confidence": 0.98,
+   "label": "Mandasa, Srīkākulam",
+   "latitude": 18.8683,
+   "longitude": 84.46296,
+   "name": "AP-104-MMU-Mandasa-AP39TL9008 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15287": {
+   "confidence": 0.98,
+   "label": "Mandasa, Srīkākulam",
+   "latitude": 18.8683,
+   "longitude": 84.46296,
+   "name": "AP-104-MMU-Mandasa-AP39UL4203 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15288": {
+   "confidence": 0.97,
+   "label": "Meliaputti, Srikakulam (post office)",
+   "latitude": 18.5809,
+   "longitude": 83.7944,
+   "name": "AP-104-MMU-Meliaputti-AP39TL9010 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15289": {
+   "confidence": 0.98,
+   "label": "Nandigām, Srīkākulam",
+   "latitude": 18.65418,
+   "longitude": 84.30469,
+   "name": "AP-104-MMU-Nandigam-AP39TL9011 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15290": {
+   "confidence": 0.97,
+   "label": "Meliaputti, Srikakulam (post office)",
+   "latitude": 18.5809,
+   "longitude": 83.7944,
+   "name": "AP-104-MMU-Meliaputti-AP39UL4201 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15291": {
+   "confidence": 0.98,
+   "label": "Palāsa, Srīkākulam",
+   "latitude": 18.77257,
+   "longitude": 84.41012,
+   "name": "AP-104-MMU-Palasa-AP39TL9014 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15292": {
+   "confidence": 0.98,
+   "label": "Sompeta, Srīkākulam",
+   "latitude": 18.94419,
+   "longitude": 84.58449,
+   "name": "AP-104-MMU-Sompeta-AP39TL9026 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15293": {
+   "confidence": 0.99,
+   "label": "Vajrapukothuru, Srīkākulam",
+   "latitude": 18.69387,
+   "longitude": 84.44103,
+   "name": "AP-104-MMU-Vajrapukothuru-AP39TL9028 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15294": {
+   "confidence": 0.98,
+   "label": "Palāsa, Srīkākulam",
+   "latitude": 18.77257,
+   "longitude": 84.41012,
+   "name": "AP-104-MMU-Palasa-AP39UL4202 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15295": {
+   "confidence": 0.98,
+   "label": "Jalumūru, Srīkākulam",
+   "latitude": 18.5112,
+   "longitude": 84.03866,
+   "name": "AP-104-MMU-Jalumuru-AP39TL9001 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15296": {
+   "confidence": 0.98,
+   "label": "Kotabommāli, Srīkākulam",
+   "latitude": 18.52016,
+   "longitude": 84.16251,
+   "name": "AP-104-MMU-Kotabommali-AP39TL9004 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15297": {
+   "confidence": 0.98,
+   "label": "Kotabommāli, Srīkākulam",
+   "latitude": 18.52016,
+   "longitude": 84.16251,
+   "name": "AP-104-MMU-Kotabommali-AP39UL4198 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15298": {
+   "confidence": 0.97,
+   "label": "Pātapatnam, Srīkākulam",
+   "latitude": 18.74888,
+   "longitude": 84.08891,
+   "name": "AP-104-MMU-Pathapatnam-AP39TL9015 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15299": {
+   "confidence": 0.97,
+   "label": "Pātapatnam, Srīkākulam",
+   "latitude": 18.74888,
+   "longitude": 84.08891,
+   "name": "AP-104-MMU-Pathapatnam-AP39UL4206 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15300": {
+   "confidence": 0.98,
+   "label": "Polāki, Srīkākulam",
+   "latitude": 18.37215,
+   "longitude": 84.10272,
+   "name": "AP-104-MMU-Polaki-AP39TL9016 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15301": {
+   "confidence": 0.98,
+   "label": "Polāki, Srīkākulam",
+   "latitude": 18.37215,
+   "longitude": 84.10272,
+   "name": "AP-104-MMU-Polaki-AP39UL4196 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15302": {
+   "confidence": 0.98,
+   "label": "Santhabommali, Srīkākulam",
+   "latitude": 18.53553,
+   "longitude": 84.20742,
+   "name": "AP-104-MMU-Santhabommali-AP39TL9021 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15303": {
+   "confidence": 0.97,
+   "label": "Saravakota, Srikakulam (post office)",
+   "latitude": 18.6022,
+   "longitude": 83.9724,
+   "name": "AP-104-MMU-Saravakota-AP39TL9023 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15304": {
+   "confidence": 0.97,
+   "label": "Saravakota, Srikakulam (post office)",
+   "latitude": 18.6022,
+   "longitude": 83.9724,
+   "name": "AP-104-MMU-Saravakota-AP39UL4197 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15305": {
+   "confidence": 0.98,
+   "label": "Tekkali, Srīkākulam",
+   "latitude": 18.6057,
+   "longitude": 84.23546,
+   "name": "AP-104-MMU-Tekkali-AP39TL9027 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15306": {
+   "confidence": 0.98,
+   "label": "Tekkali, Srīkākulam",
+   "latitude": 18.6057,
+   "longitude": 84.23546,
+   "name": "AP-104-MMU-Tekkali-AP39UL4200 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15308": {
+   "confidence": 0.97,
+   "label": "Echcherla, Srīkākulam",
+   "latitude": 18.27838,
+   "longitude": 83.81899,
+   "name": "AP-104-MMU-Etcherla-AP39TK8654 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15309": {
+   "confidence": 0.97,
+   "label": "Echcherla, Srīkākulam",
+   "latitude": 18.27838,
+   "longitude": 83.81899,
+   "name": "AP-104-MMU-Etcherla-AP39UL4190 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15310": {
+   "confidence": 0.9033,
+   "label": "Sigadam, Srīkākulam",
+   "latitude": 18.37869,
+   "longitude": 83.68175,
+   "name": "AP-104-MMU-G Sigadam-AP39TK8655 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15311": {
+   "confidence": 0.99,
+   "label": "Ganguvarisigadam, Srīkākulam",
+   "latitude": 18.37984,
+   "longitude": 83.68916,
+   "name": "AP-104-MMU-Ganguvarisigadam-AP39UL4193 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15312": {
+   "confidence": 0.98,
+   "label": "Lāveru, Srīkākulam",
+   "latitude": 18.23854,
+   "longitude": 83.69305,
+   "name": "AP-104-MMU-Laveru-AP39TL9007 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15313": {
+   "confidence": 0.98,
+   "label": "Lāveru, Srīkākulam",
+   "latitude": 18.23854,
+   "longitude": 83.69305,
+   "name": "AP-104-MMU-Laveru-AP39UL4192 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15314": {
+   "confidence": 0.98,
+   "label": "Pondūru, Srīkākulam",
+   "latitude": 18.34957,
+   "longitude": 83.75649,
+   "name": "AP-104-MMU-Ponduru-AP39TL9017 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15315": {
+   "confidence": 0.98,
+   "label": "Pondūru, Srīkākulam",
+   "latitude": 18.34957,
+   "longitude": 83.75649,
+   "name": "AP-104-MMU-Ponduru-AP39UL4191 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15316": {
+   "confidence": 0.99,
+   "label": "Ranastalam, Srīkākulam",
+   "latitude": 18.18472,
+   "longitude": 83.69094,
+   "name": "AP-104-MMU-Ranastalam-AP39UL4189 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15317": {
+   "confidence": 0.99,
+   "label": "Ranastalam, Srīkākulam",
+   "latitude": 18.18472,
+   "longitude": 83.69094,
+   "name": "AP-104-MMU-Ranastalam-AP39TL9020 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15318": {
+   "confidence": 0.99,
+   "label": "Srikakulam, Srīkākulam",
+   "latitude": 18.2989,
+   "longitude": 83.89751,
+   "name": "AP-104-MMU-Srikakulam-AP39UL4187 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15319": {
+   "confidence": 0.99,
+   "label": "Srikakulam, Srīkākulam",
+   "latitude": 18.2989,
+   "longitude": 83.89751,
+   "name": "AP-104-MMU-Srikakulam-AP39UH4402 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15321": {
+   "confidence": 0.98,
+   "label": "Bālayapalli, Nellore",
+   "latitude": 14.99122,
+   "longitude": 79.20549,
+   "name": "AP-104-MMU-Phc Balayapalli-AP39TL9383 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15322": {
+   "confidence": 0.99,
+   "label": "Chittamuru, Tirupati",
+   "latitude": 13.95522,
+   "longitude": 80.06901,
+   "name": "AP-104-MMU-Phc Chittamuru-AP39TL9388 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15323": {
+   "confidence": 0.98,
+   "label": "Dakkili, Tirupati",
+   "latitude": 14.10317,
+   "longitude": 79.55269,
+   "name": "AP-104-MMU-Phc Dakkili-AP39TL9390 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15325": {
+   "confidence": 0.99,
+   "label": "Gottiprolu, Tirupati",
+   "latitude": 13.94666,
+   "longitude": 79.98427,
+   "name": "AP-104-MMU-Phc Gottiprolu-AP39TL9405 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15327": {
+   "confidence": 0.97,
+   "label": "Pellakur, Nellore (post office)",
+   "latitude": 14.4268,
+   "longitude": 79.7344,
+   "name": "AP-104-MMU-Phc Pellakur-AP39TL9408 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15328": {
+   "confidence": 0.97,
+   "label": "Pernadu, Nellore (post office)",
+   "latitude": 13.641,
+   "longitude": 80.1301,
+   "name": "AP-104-MMU-Phc Pernadu-AP39TL9413 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15329": {
+   "confidence": 0.98,
+   "label": "Ramapuram, Nellore (post office)",
+   "latitude": 14.3201,
+   "longitude": 79.6747,
+   "name": "AP-104-MMU-Phc Ramapuram-AP39TL9415 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15330": {
+   "confidence": 0.99,
+   "label": "Bālireddipālem, Tirupati",
+   "latitude": 14.02712,
+   "longitude": 80.09268,
+   "name": "AP-104-MMU-Phc Balireddipalem-AP39TL9418 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15331": {
+   "confidence": 0.98,
+   "label": "Bangārupet, Tirupati",
+   "latitude": 13.96929,
+   "longitude": 79.5994,
+   "name": "AP-104-MMU-Phc Bangarupeta-AP39TL9421 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15332": {
+   "confidence": 0.9312,
+   "label": "Bhākarapet, Tirupati",
+   "latitude": 13.65364,
+   "longitude": 79.1574,
+   "name": "AP-104-MMU-Phc Bakrapet-AP39TL9429 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15333": {
+   "confidence": 0.99,
+   "label": "Damalcheruvu, Tirupati",
+   "latitude": 13.47593,
+   "longitude": 79.05218,
+   "name": "AP-104-MMU-Phc Damalcheruvu-AP39TL9451 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15334": {
+   "confidence": 0.97,
+   "label": "Paramesvaramangalam, Tirupati",
+   "latitude": 13.39871,
+   "longitude": 79.5646,
+   "name": "AP-104-MMU-Phc Parameshwara Mangalam-AP39TL9463 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15337": {
+   "confidence": 0.98,
+   "label": "Yerrāvāripāllem, Tirupati",
+   "latitude": 13.70517,
+   "longitude": 79.13313,
+   "name": "AP-104-MMU-Phc Yerravaripalem-AP39TL9487 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15338": {
+   "confidence": 0.99,
+   "label": "Chandragiri, Tirupati",
+   "latitude": 13.58872,
+   "longitude": 79.31625,
+   "name": "AP-104-MMU-Chc Chandragiri-AP39UL4426 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15340": {
+   "confidence": 0.96,
+   "label": "Mangalam, Tirupati",
+   "latitude": 13.65754,
+   "longitude": 79.46258,
+   "name": "AP-104-MMU-Phc Mangalam-AP39UL4430 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15341": {
+   "confidence": 0.99,
+   "label": "Chandragiri, Tirupati",
+   "latitude": 13.58872,
+   "longitude": 79.31625,
+   "name": "AP-104-MMU-Phc Chandragiri-AP39UL4431 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15342": {
+   "confidence": 0.98,
+   "label": "Renigunta, Tirupati",
+   "latitude": 13.65143,
+   "longitude": 79.51256,
+   "name": "AP-104-MMU-Phc Renigunta-AP39TL9467 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15343": {
+   "confidence": 0.98,
+   "label": "Erpedu, Tirupati",
+   "latitude": 13.6923,
+   "longitude": 79.59372,
+   "name": "AP-104-MMU-Phc Yerpedu-AP39TL9486 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15346": {
+   "confidence": 0.8966,
+   "label": "Chukkāvāripalli",
+   "latitude": 13.47842,
+   "longitude": 79.03754,
+   "name": "AP-104-MMU-Phc Mukkavaripalli-AP39TL9574 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15349": {
+   "confidence": 0.98,
+   "label": "Renigunta, Tirupati",
+   "latitude": 13.65143,
+   "longitude": 79.51256,
+   "name": "AP-104-MMU-Phc Renigunta-AP39UL4427 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15350": {
+   "confidence": 0.97,
+   "label": "Papanaidupet, Chittoor (post office)",
+   "latitude": 13.623,
+   "longitude": 79.587,
+   "name": "AP-104-MMU-Phc Papanaidupet-AP39UL4432 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15351": {
+   "confidence": 0.96,
+   "label": "Settigunta, Annamayya",
+   "latitude": 13.85398,
+   "longitude": 79.39776,
+   "name": "AP-104-MMU-Phc Settigunta-AP39UL4543 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15353": {
+   "confidence": 0.99,
+   "label": "Chinnapāndūr, Tirupati",
+   "latitude": 13.54498,
+   "longitude": 79.94251,
+   "name": "AP-104-MMU-Phc Chinnapandur-AP39TL9428 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15355": {
+   "confidence": 0.99,
+   "label": "Nagalapuram, Tirupati",
+   "latitude": 13.38836,
+   "longitude": 79.79623,
+   "name": "AP-104-MMU-Phc Nagalapuram-AP39TL9446 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15356": {
+   "confidence": 0.99,
+   "label": "Nārāyanavanam, Tirupati",
+   "latitude": 13.42565,
+   "longitude": 79.58881,
+   "name": "AP-104-MMU-Phc Narayanavanam-AP39TL9448 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15358": {
+   "confidence": 0.97,
+   "label": "Dasukuppam, Chittoor (post office)",
+   "latitude": 13.4793,
+   "longitude": 79.935,
+   "name": "AP-104-MMU-Phc Dasukuppam-AP39TL9470 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15359": {
+   "confidence": 0.98,
+   "label": "Kāsaram, Tirupati",
+   "latitude": 13.87845,
+   "longitude": 79.69725,
+   "name": "AP-104-MMU-Phc Kasaram-AP39TL9473 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15360": {
+   "confidence": 0.97,
+   "label": "Empedu, Chittoor (post office)",
+   "latitude": 13.8359,
+   "longitude": 79.5531,
+   "name": "AP-104-MMU-Phc Empedu-AP39TL9478 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15361": {
+   "confidence": 0.96,
+   "label": "Varadayyapālaiyam, Tirupati",
+   "latitude": 13.59858,
+   "longitude": 79.93276,
+   "name": "AP-104-MMU-Phc Varadaiah Palem-AP39TL9481 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15362": {
+   "confidence": 0.96,
+   "label": "Tottambedu, Tirupati",
+   "latitude": 13.74288,
+   "longitude": 79.72487,
+   "name": "AP-104-MMU-Phc Thottambedu-AP39UL4434 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15363": {
+   "confidence": 0.9231,
+   "label": "Dainedu, Tirupati",
+   "latitude": 13.85349,
+   "longitude": 79.73091,
+   "name": "AP-104-MMU-Phc Dhaminedu-AP39UL4450 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15365": {
+   "confidence": 0.93,
+   "label": "Tallavalasa, Visakhapatnam (post office)",
+   "latitude": 17.8909,
+   "longitude": 82.6924,
+   "name": "AP-104-MMU-Phc R Tallavalasa-AP39UH3960 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15366": {
+   "confidence": 0.97,
+   "label": "Revidi, Visakhapatnam (post office)",
+   "latitude": 17.8909,
+   "longitude": 82.6924,
+   "name": "AP-104-MMU-Phc Revidi-AP39UH3961 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15367": {
+   "confidence": 0.97,
+   "label": "Sontyam, Visakhapatnam (post office)",
+   "latitude": 17.8909,
+   "longitude": 82.6924,
+   "name": "AP-104-MMU-Phc Sontyam-AP39UH3962 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15368": {
+   "confidence": 0.97,
+   "label": "Anandapuram, Visakhapatnam (post office)",
+   "latitude": 17.6429,
+   "longitude": 82.8294,
+   "name": "AP-104-MMU-Phc Anandapuram-AP39UH3963 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15369": {
+   "confidence": 0.98,
+   "label": "Madhurawada, Visākhapatnam",
+   "latitude": 17.82254,
+   "longitude": 83.36391,
+   "name": "AP-104-MMU-Phc Madhurawada-AP39UH3964 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15370": {
+   "confidence": 0.98,
+   "label": "Gajuwaka, Visākhapatnam",
+   "latitude": 17.7,
+   "longitude": 83.21667,
+   "name": "AP-104-MMU-Phc Gajuwaka-AP39UH3965 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15373": {
+   "confidence": 0.99,
+   "label": "Bobbili, Vizianagaram District",
+   "latitude": 18.57366,
+   "longitude": 83.35925,
+   "name": "AP-104-MMU-Bobbili-AP39TL9032 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15374": {
+   "confidence": 0.95,
+   "label": "Datti Rajeru, Vizianagaram (post office)",
+   "latitude": 18.446,
+   "longitude": 83.4121,
+   "name": "AP-104-MMU-Dattirajeru-AP39TL9035 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15375": {
+   "confidence": 0.97,
+   "label": "Gajapathinagaram, Vizianagaram (post office)",
+   "latitude": 18.2823,
+   "longitude": 83.3492,
+   "name": "AP-104-MMU-Gajapathinagaram-AP39TL9037 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15376": {
+   "confidence": 0.98,
+   "label": "Mentāda, Vizianagaram District",
+   "latitude": 18.31014,
+   "longitude": 83.2612,
+   "name": "AP-104-MMU-Mentada-AP39TL9050 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15377": {
+   "confidence": 0.98,
+   "label": "Merakamudidām, Vizianagaram District",
+   "latitude": 18.41184,
+   "longitude": 83.46168,
+   "name": "AP-104-MMU-Merakamudidam-AP39TL9051 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15378": {
+   "confidence": 0.98,
+   "label": "Rāmabhadrapuram, Vizianagaram District",
+   "latitude": 18.49682,
+   "longitude": 83.27849,
+   "name": "AP-104-MMU-Ramabhadrapuram-AP39TL9056 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15379": {
+   "confidence": 0.98,
+   "label": "Badangi, Vizianagaram District",
+   "latitude": 18.49462,
+   "longitude": 83.3666,
+   "name": "AP-104-MMU-Badangi-AP39TL9062 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15380": {
+   "confidence": 0.98,
+   "label": "Badangi, Vizianagaram District",
+   "latitude": 18.49462,
+   "longitude": 83.3666,
+   "name": "AP-104-MMU-Badangi-AP39UL4226 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15381": {
+   "confidence": 0.99,
+   "label": "Bobbili, Vizianagaram District",
+   "latitude": 18.57366,
+   "longitude": 83.35925,
+   "name": "AP-104-MMU-Bobbili-AP39UL4228 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15382": {
+   "confidence": 0.95,
+   "label": "Datti Rajeru, Vizianagaram (post office)",
+   "latitude": 18.446,
+   "longitude": 83.4121,
+   "name": "AP-104-MMU-Dattirajeru-AP39UL4229 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15383": {
+   "confidence": 0.97,
+   "label": "Gajapathinagaram, Vizianagaram (post office)",
+   "latitude": 18.2823,
+   "longitude": 83.3492,
+   "name": "AP-104-MMU-Gajapathinagaram-AP39UL4231 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15384": {
+   "confidence": 0.98,
+   "label": "Merakamudidām, Vizianagaram District",
+   "latitude": 18.41184,
+   "longitude": 83.46168,
+   "name": "AP-104-MMU-Merakamudidam-AP39UL4237 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15385": {
+   "confidence": 0.98,
+   "label": "Vangara, Vizianagaram District",
+   "latitude": 18.61784,
+   "longitude": 83.60891,
+   "name": "AP-104-MMU-Vangara-AP39UL4245 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15386": {
+   "confidence": 0.98,
+   "label": "Bondapalle, Vizianagaram District",
+   "latitude": 18.24225,
+   "longitude": 83.34877,
+   "name": "AP-104-MMU-Bondapalle-AP39TL9033 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15387": {
+   "confidence": 0.98,
+   "label": "Gantyāda, Vizianagaram District",
+   "latitude": 18.14362,
+   "longitude": 83.29281,
+   "name": "AP-104-MMU-Gantyada-AP39TL9038 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15388": {
+   "confidence": 0.98,
+   "label": "Jāmi, Vizianagaram District",
+   "latitude": 18.05252,
+   "longitude": 83.2621,
+   "name": "AP-104-MMU-Jami-AP39TL9043 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15389": {
+   "confidence": 0.96,
+   "label": "Kottavalasa, Vizianagaram District",
+   "latitude": 17.89044,
+   "longitude": 83.1907,
+   "name": "AP-104-MMU-Kothavalasa-AP39UL4270 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15390": {
+   "confidence": 0.99,
+   "label": "Lakkavarapukota, Vizianagaram District",
+   "latitude": 18.0239,
+   "longitude": 83.15679,
+   "name": "AP-104-MMU-Lakkavarapukota-AP39TL9048 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15391": {
+   "confidence": 0.99,
+   "label": "Srungavarapukota, Vizianagaram District",
+   "latitude": 18.11084,
+   "longitude": 83.13996,
+   "name": "AP-104-MMU-Srungavarapukota-AP39TL9059 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15392": {
+   "confidence": 0.98,
+   "label": "Vepāda, Vizianagaram District",
+   "latitude": 18.00845,
+   "longitude": 83.08536,
+   "name": "AP-104-MMU-Vepada-AP39TL9061 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15393": {
+   "confidence": 0.98,
+   "label": "Bondapalle, Vizianagaram District",
+   "latitude": 18.24225,
+   "longitude": 83.34877,
+   "name": "AP-104-MMU-Bondapalle-AP39UL4232 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15394": {
+   "confidence": 0.98,
+   "label": "Jāmi, Vizianagaram District",
+   "latitude": 18.05252,
+   "longitude": 83.2621,
+   "name": "AP-104-MMU-Jami-AP39UL4235 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15395": {
+   "confidence": 0.96,
+   "label": "Kottavalasa, Vizianagaram District",
+   "latitude": 17.89044,
+   "longitude": 83.1907,
+   "name": "AP-104-MMU-Kothavalasa-AP39UL4236 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15396": {
+   "confidence": 0.99,
+   "label": "Srungavarapukota, Vizianagaram District",
+   "latitude": 18.11084,
+   "longitude": 83.13996,
+   "name": "AP-104-MMU-Srungavarapukota-AP39UL4243 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15397": {
+   "confidence": 0.98,
+   "label": "Vepāda, Vizianagaram District",
+   "latitude": 18.00845,
+   "longitude": 83.08536,
+   "name": "AP-104-MMU-Vepada-AP39UL4246 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15398": {
+   "confidence": 0.98,
+   "label": "Gurla, Vizianagaram District",
+   "latitude": 18.21177,
+   "longitude": 83.46578,
+   "name": "AP-104-MMU-Gurla-AP39UL4234 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15400": {
+   "confidence": 0.98,
+   "label": "Rāzām, Vizianagaram District",
+   "latitude": 18.44909,
+   "longitude": 83.65957,
+   "name": "AP-104-MMU-Rajam-AP39TL9019 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15401": {
+   "confidence": 0.95,
+   "label": "Santhakaviti, Srikakulam (post office)",
+   "latitude": 18.4547,
+   "longitude": 83.7375,
+   "name": "AP-104-MMU-Santhakaviti-AP39TL9022 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15402": {
+   "confidence": 0.98,
+   "label": "Vangara, Vizianagaram District",
+   "latitude": 18.61784,
+   "longitude": 83.60891,
+   "name": "AP-104-MMU-Vangara-AP39TL9029 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15403": {
+   "confidence": 0.99,
+   "label": "Garividi",
+   "latitude": 18.28266,
+   "longitude": 83.53247,
+   "name": "AP-104-MMU-Garividi-AP39TL9039 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15404": {
+   "confidence": 0.98,
+   "label": "Terlām, Vizianagaram District",
+   "latitude": 18.48465,
+   "longitude": 83.50407,
+   "name": "AP-104-MMU-Therlam-AP39TL9060 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15405": {
+   "confidence": 0.99,
+   "label": "Garividi",
+   "latitude": 18.28266,
+   "longitude": 83.53247,
+   "name": "AP-104-MMU-Garividi-AP39UL4233 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15407": {
+   "confidence": 0.95,
+   "label": "Santhakaviti, Srikakulam (post office)",
+   "latitude": 18.4547,
+   "longitude": 83.7375,
+   "name": "AP-104-MMU-Santhakaviti-AP39UL4241 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15408": {
+   "confidence": 0.98,
+   "label": "Terlām, Vizianagaram District",
+   "latitude": 18.48465,
+   "longitude": 83.50407,
+   "name": "AP-104-MMU-Therlam-AP39UL4244 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15409": {
+   "confidence": 0.98,
+   "label": "Bhogāpuram, Vizianagaram District",
+   "latitude": 18.03246,
+   "longitude": 83.49795,
+   "name": "AP-104-MMU-Bhogapuram-AP39UL4272 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15410": {
+   "confidence": 0.87,
+   "label": "Chīpurupalle, Vizianagaram District",
+   "latitude": 18.31142,
+   "longitude": 83.56846,
+   "name": "AP-104-MMU-Cheepuripalli-AP39TL9034 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15411": {
+   "confidence": 0.98,
+   "label": "Denkāda, Vizianagaram District",
+   "latitude": 18.0742,
+   "longitude": 83.47677,
+   "name": "AP-104-MMU-Denkada-AP39UL4271 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15412": {
+   "confidence": 0.98,
+   "label": "Gurla, Vizianagaram District",
+   "latitude": 18.21177,
+   "longitude": 83.46578,
+   "name": "AP-104-MMU-Gurla-AP39TL9042 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15413": {
+   "confidence": 0.98,
+   "label": "Nellimarla, Vizianagaram District",
+   "latitude": 18.15619,
+   "longitude": 83.44727,
+   "name": "AP-104-MMU-Nellimarla-AP39TL9052 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15414": {
+   "confidence": 0.98,
+   "label": "Pūsapātirega, Vizianagaram District",
+   "latitude": 18.09209,
+   "longitude": 83.55125,
+   "name": "AP-104-MMU-Pusapatirega-AP39TL9055 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15415": {
+   "confidence": 0.98,
+   "label": "Badangi, Vizianagaram District",
+   "latitude": 18.49462,
+   "longitude": 83.3666,
+   "name": "AP-104-MMU-Badangi-AP39UH4792 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15416": {
+   "confidence": 0.98,
+   "label": "Bhogāpuram, Vizianagaram District",
+   "latitude": 18.03246,
+   "longitude": 83.49795,
+   "name": "AP-104-MMU-Bhogapuram-AP39UL4227 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15417": {
+   "confidence": 0.98,
+   "label": "Denkāda, Vizianagaram District",
+   "latitude": 18.0742,
+   "longitude": 83.47677,
+   "name": "AP-104-MMU-Denkada-AP39UL4230 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15418": {
+   "confidence": 0.98,
+   "label": "Pūsapātirega, Vizianagaram District",
+   "latitude": 18.09209,
+   "longitude": 83.55125,
+   "name": "AP-104-MMU-Pusapatirega-AP39UL4238 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15423": {
+   "confidence": 0.97,
+   "label": "Gollavanitippa, West Godavari (post office)",
+   "latitude": 16.461,
+   "longitude": 81.5194,
+   "name": "AP-104-MMU-Gollavanitippa-AP39TL9176 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15424": {
+   "confidence": 0.96,
+   "label": "Elamanchili, Anakapalli",
+   "latitude": 17.54907,
+   "longitude": 82.85749,
+   "name": "AP-104-MMU-Yelamanchili-AP39TL9183 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15425": {
+   "confidence": 0.98,
+   "label": "Kālla, West Godāvari",
+   "latitude": 16.53706,
+   "longitude": 81.40994,
+   "name": "AP-104-MMU-Kalla-AP39TL9190 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15426": {
+   "confidence": 0.96,
+   "label": "Mogalturru, West Godāvari",
+   "latitude": 16.41233,
+   "longitude": 81.60773,
+   "name": "AP-104-MMU-Mogalthuru-AP39TL9196 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15427": {
+   "confidence": 0.98,
+   "label": "Palakoderu, West Godāvari",
+   "latitude": 16.58573,
+   "longitude": 81.54784,
+   "name": "AP-104-MMU-Palakoderu-AP39TL9200 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15428": {
+   "confidence": 0.93,
+   "label": "Lankalakoderu, West Godavari (post office)",
+   "latitude": 16.7374,
+   "longitude": 81.5704,
+   "name": "AP-104-MMU-Lanakalakoderu-AP39TL9201 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15429": {
+   "confidence": 0.95,
+   "label": "Sidhantam, West Godavari (post office)",
+   "latitude": 16.8946,
+   "longitude": 81.4023,
+   "name": "AP-104-MMU-Siddantham-AP39TL9205 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15430": {
+   "confidence": 0.98,
+   "label": "Poduru, West Godāvari",
+   "latitude": 16.58907,
+   "longitude": 81.76114,
+   "name": "AP-104-MMU-Poduru-AP39TL9208 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15431": {
+   "confidence": 0.99,
+   "label": "Veeravasaram, West Godāvari",
+   "latitude": 16.53667,
+   "longitude": 81.6283,
+   "name": "AP-104-MMU-Veeravasaram-AP39TL9216 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15432": {
+   "confidence": 0.95,
+   "label": "Sidhantam, West Godavari (post office)",
+   "latitude": 16.8946,
+   "longitude": 81.4023,
+   "name": "AP-104-MMU-Siddantham-AP39UL4358 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15433": {
+   "confidence": 0.93,
+   "label": "Lankalakoderu, West Godavari (post office)",
+   "latitude": 16.7374,
+   "longitude": 81.5704,
+   "name": "AP-104-MMU-Lanakalakoderu-AP39UL4362 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15434": {
+   "confidence": 0.98,
+   "label": "Kālla, West Godāvari",
+   "latitude": 16.53706,
+   "longitude": 81.40994,
+   "name": "AP-104-MMU-Kalla-AP39UL4363 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15435": {
+   "confidence": 0.96,
+   "label": "Mogalturru, West Godāvari",
+   "latitude": 16.41233,
+   "longitude": 81.60773,
+   "name": "AP-104-MMU-Mogalthuru-AP39UL4364 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15437": {
+   "confidence": 0.96,
+   "label": "Elamanchili, Anakapalli",
+   "latitude": 17.54907,
+   "longitude": 82.85749,
+   "name": "AP-104-MMU-Yelamanchili-AP39UL4366 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15438": {
+   "confidence": 0.97,
+   "label": "Gollavanitippa, West Godavari (post office)",
+   "latitude": 16.461,
+   "longitude": 81.5194,
+   "name": "AP-104-MMU-Gollavanitippa-AP39UL4367 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15439": {
+   "confidence": 0.97,
+   "label": "Gollavanitippa, West Godavari (post office)",
+   "latitude": 16.461,
+   "longitude": 81.5194,
+   "name": "AP-104-MMU-Phc Gollavanitippa-AP39UL4368 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15440": {
+   "confidence": 0.9231,
+   "label": "Dangāra, West Godāvari",
+   "latitude": 16.86534,
+   "longitude": 81.58424,
+   "name": "AP-104-MMU-Angara-AP39TL9171 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15441": {
+   "confidence": 0.9274,
+   "label": "Kesavaram, West Godavari (post office)",
+   "latitude": 16.8946,
+   "longitude": 81.4023,
+   "name": "AP-104-MMU-D Kesavaram-AP39TL9173 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15442": {
+   "confidence": 0.98,
+   "label": "Attili, West Godāvari",
+   "latitude": 16.7,
+   "longitude": 81.6,
+   "name": "AP-104-MMU-Attili-AP39TL9174 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15443": {
+   "confidence": 0.98,
+   "label": "Iragavaram, West Godāvari",
+   "latitude": 16.69036,
+   "longitude": 81.70704,
+   "name": "AP-104-MMU-Iragavaram-AP39TL9187 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15445": {
+   "confidence": 0.98,
+   "label": "Penumantra, West Godāvari",
+   "latitude": 16.64342,
+   "longitude": 81.65164,
+   "name": "AP-104-MMU-Penumantra-AP39TL9206 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15446": {
+   "confidence": 0.97,
+   "label": "Venkata Rāmannagūdem, West Godāvari",
+   "latitude": 16.87794,
+   "longitude": 81.47066,
+   "name": "AP-104-MMU-Venkataramannagudem-AP39TL9211 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15447": {
+   "confidence": 0.98,
+   "label": "Undi, West Godāvari",
+   "latitude": 16.58542,
+   "longitude": 81.46211,
+   "name": "AP-104-MMU-Undi-AP39TL9213 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15448": {
+   "confidence": 0.96,
+   "label": "Ganapavaram, Eluru",
+   "latitude": 16.70007,
+   "longitude": 81.46297,
+   "name": "AP-104-MMU-Ganapavaram-AP39TL9185 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15449": {
+   "confidence": 0.96,
+   "label": "Ganapavaram, Eluru",
+   "latitude": 16.70007,
+   "longitude": 81.46297,
+   "name": "AP-104-MMU-Ganapavaram-AP39UL4350 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15450": {
+   "confidence": 0.97,
+   "label": "Venkata Rāmannagūdem, West Godāvari",
+   "latitude": 16.87794,
+   "longitude": 81.47066,
+   "name": "AP-104-MMU-Venkataramannagudem-AP39UL4354 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15452": {
+   "confidence": 0.98,
+   "label": "Attili, West Godāvari",
+   "latitude": 16.7,
+   "longitude": 81.6,
+   "name": "AP-104-MMU-Attili-AP39UL4357 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15453": {
+   "confidence": 0.98,
+   "label": "Iragavaram, West Godāvari",
+   "latitude": 16.69036,
+   "longitude": 81.70704,
+   "name": "AP-104-MMU-Iragavaram-AP39UL4360 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15454": {
+   "confidence": 0.98,
+   "label": "Undi, West Godāvari",
+   "latitude": 16.58542,
+   "longitude": 81.46211,
+   "name": "AP-104-MMU-Undi-AP39UL4361 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15455": {
+   "confidence": 0.97,
+   "label": "Gollavanitippa, West Godavari (post office)",
+   "latitude": 16.461,
+   "longitude": 81.5194,
+   "name": "AP-104-MMU-Phc Gollavanitippa-AP39UL4440 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15457": {
+   "confidence": 0.97,
+   "label": "Surabhi, Cuddapah (post office)",
+   "latitude": 14.0376,
+   "longitude": 78.7218,
+   "name": "AP-104-MMU-Phc Surabhi-AP39TL9554 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15458": {
+   "confidence": 0.98,
+   "label": "Kondāpuram, Ysr District",
+   "latitude": 14.77582,
+   "longitude": 78.19488,
+   "name": "AP-104-MMU-Phc Kondapuram-AP39TL9567 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15459": {
+   "confidence": 0.99,
+   "label": "Lingāla, Ysr District",
+   "latitude": 14.4992,
+   "longitude": 78.11468,
+   "name": "AP-104-MMU-Phc Lingala-AP39TL9569 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15460": {
+   "confidence": 0.98,
+   "label": "Pendlimarri, Ysr District",
+   "latitude": 14.44495,
+   "longitude": 78.63992,
+   "name": "AP-104-MMU-Phc Pendlimarri-AP39TL9577 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15461": {
+   "confidence": 0.9086,
+   "label": "Nallapureddypalle, Cuddapah (post office)",
+   "latitude": 14.428,
+   "longitude": 78.1944,
+   "name": "AP-104-MMU-Phc Mallapu Reddipalli-AP39TL9580 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15462": {
+   "confidence": 0.98,
+   "label": "Simhādripuram, Ysr District",
+   "latitude": 14.62991,
+   "longitude": 78.12797,
+   "name": "AP-104-MMU-Phc Simhadripuram-AP39TL9588 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15463": {
+   "confidence": 0.96,
+   "label": "Tāllaproddatūru, Ysr District",
+   "latitude": 14.83994,
+   "longitude": 78.14657,
+   "name": "AP-104-MMU-Phc Thalla Proddatur-AP39TL9590 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15464": {
+   "confidence": 0.96,
+   "label": "Tāllapalle, Ysr District",
+   "latitude": 14.37233,
+   "longitude": 78.3886,
+   "name": "AP-104-MMU-Phc Thallapalli-AP39TL9594 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15465": {
+   "confidence": 0.98,
+   "label": "Vemula, Ysr District",
+   "latitude": 14.36942,
+   "longitude": 78.32156,
+   "name": "AP-104-MMU-Phc Vemula-AP39TL9595 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15466": {
+   "confidence": 0.96,
+   "label": "Tāllapalle, Ysr District",
+   "latitude": 14.37233,
+   "longitude": 78.3886,
+   "name": "AP-104-MMU-Phc Thallapalli-AP39UL4834 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15468": {
+   "confidence": 0.97,
+   "label": "Duvvūru, Ysr District",
+   "latitude": 14.84147,
+   "longitude": 78.65307,
+   "name": "AP-104-MMU-Phc Duvvur-AP39TL9559 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15469": {
+   "confidence": 0.98,
+   "label": "Moragudi, Ysr District",
+   "latitude": 14.86259,
+   "longitude": 78.37878,
+   "name": "AP-104-MMU-Phc Moragudi-AP39TL9562 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15471": {
+   "confidence": 0.98,
+   "label": "Muddanūru, Ysr District",
+   "latitude": 14.68718,
+   "longitude": 78.39309,
+   "name": "AP-104-MMU-Phc Muddanur-AP39TL9570 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15472": {
+   "confidence": 0.9474,
+   "label": "Mailavaram, Ysr District",
+   "latitude": 14.84811,
+   "longitude": 78.34082,
+   "name": "AP-104-MMU-Phc Mylavaram-AP39TL9572 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15473": {
+   "confidence": 0.99,
+   "label": "Peddamudiyam, Ysr District",
+   "latitude": 15.01154,
+   "longitude": 78.45144,
+   "name": "AP-104-MMU-Phc Peddamudiyam-AP39TL9575 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15474": {
+   "confidence": 0.97,
+   "label": "Kamanur, Cuddapah (post office)",
+   "latitude": 14.8607,
+   "longitude": 78.6542,
+   "name": "AP-104-MMU-Phc Kamanur-AP39TL9579 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15475": {
+   "confidence": 0.98,
+   "label": "Rājupālem, Ysr District",
+   "latitude": 14.87542,
+   "longitude": 78.57626,
+   "name": "AP-104-MMU-Phc Rajupalem-AP39TL9583 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15477": {
+   "confidence": 0.99,
+   "label": "Erraguntla, Ysr District",
+   "latitude": 14.63853,
+   "longitude": 78.53974,
+   "name": "AP-104-MMU-Phc Yerraguntla-AP39TL9597 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15478": {
+   "confidence": 0.99,
+   "label": "Chennūr, Ysr District",
+   "latitude": 14.5644,
+   "longitude": 78.80165,
+   "name": "AP-104-MMU-Phc Chennur-AP39TL9556 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15479": {
+   "confidence": 0.97,
+   "label": "Akkāyapalle, Ysr District",
+   "latitude": 14.47485,
+   "longitude": 78.81673,
+   "name": "AP-104-MMU-Uphc Akkayapalli-AP39TL9563 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15480": {
+   "confidence": 0.99,
+   "label": "Khājipeta, Ysr District",
+   "latitude": 14.65091,
+   "longitude": 78.77021,
+   "name": "AP-104-MMU-Phc Khajipeta-AP39TL9565 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15481": {
+   "confidence": 0.96,
+   "label": "Nandalūr, Annamayya",
+   "latitude": 14.26747,
+   "longitude": 79.11884,
+   "name": "AP-104-MMU-Nandalur-AP39TL9573 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15482": {
+   "confidence": 0.96,
+   "label": "Ākepādu, Annamayya",
+   "latitude": 14.20956,
+   "longitude": 79.0817,
+   "name": "AP-104-MMU-Phc Akepadu-AP39TL9582 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15483": {
+   "confidence": 0.95,
+   "label": "T. Sundupalli, Cuddapah (post office)",
+   "latitude": 14.4599,
+   "longitude": 78.7836,
+   "name": "AP-104-MMU-Phc T Sundupalle-AP39TL9589 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15484": {
+   "confidence": 0.97,
+   "label": "Vallūru, Ysr District",
+   "latitude": 14.55916,
+   "longitude": 78.72164,
+   "name": "AP-104-MMU-Phc Vallur-AP39TL9591 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15485": {
+   "confidence": 0.96,
+   "label": "Vīrapalle, Annamayya",
+   "latitude": 14.15802,
+   "longitude": 78.85761,
+   "name": "AP-104-MMU-Phc Veeraballi-AP39TL9592 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15486": {
+   "confidence": 0.98,
+   "label": "Vontimitta, Ysr District",
+   "latitude": 14.39575,
+   "longitude": 79.02673,
+   "name": "AP-104-MMU-Phc Vontimitta-AP39TL9596 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15488": {
+   "confidence": 0.8991,
+   "label": "Kodūru, Nellore",
+   "latitude": 14.41305,
+   "longitude": 80.14505,
+   "name": "AP-104-MMU-Phc B.kodur-AP39TL9551 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15491": {
+   "confidence": 0.98,
+   "label": "Chapadu, Ysr District",
+   "latitude": 14.73105,
+   "longitude": 78.65726,
+   "name": "AP-104-MMU-Phc Chapadu-AP39TL9555 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15492": {
+   "confidence": 0.8789,
+   "label": "Alūr, Kurnool",
+   "latitude": 15.39259,
+   "longitude": 77.22753,
+   "name": "AP-104-MMU-Phc Atlur-AP39TL9561 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15493": {
+   "confidence": 0.9212,
+   "label": "Onipenta, Cuddapah (post office)",
+   "latitude": 14.7906,
+   "longitude": 78.7805,
+   "name": "AP-104-MMU-Phc Vonipenta-AP39TL9571 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15494": {
+   "confidence": 0.9,
+   "label": "Tekūrupeta, Ysr District",
+   "latitude": 15.00124,
+   "longitude": 79.03494,
+   "name": "AP-104-MMU-Phc Tekuripeta-AP39TL9578 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15495": {
+   "confidence": 0.98,
+   "label": "Narasāpuram, Ysr District",
+   "latitude": 15.05192,
+   "longitude": 78.93223,
+   "name": "AP-104-MMU-Phc Narasapuram-AP39TL9585 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15496": {
+   "confidence": 0.97,
+   "label": "P. Kothapalli, Cuddapah (post office)",
+   "latitude": 14.4599,
+   "longitude": 78.7836,
+   "name": "AP-104-MMU-Phc P Kothapalli-AP39TL9587 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15497": {
+   "confidence": 0.98,
+   "label": "Kalasapādu, Ysr District",
+   "latitude": 15.10768,
+   "longitude": 78.94149,
+   "name": "AP-104-MMU-Phc Kalasapadu-AP39TL9599 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15498": {
+   "confidence": 0.9,
+   "label": "Tekūrupeta, Ysr District",
+   "latitude": 15.00124,
+   "longitude": 79.03494,
+   "name": "AP-104-MMU-Phc Tekuripeta-AP39UL4835 - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15500": {
+   "confidence": 0.95,
+   "label": "Pulivendla, Ysr District",
+   "latitude": 14.42139,
+   "longitude": 78.22502,
+   "name": "AP-104-MMU-Pulivendula - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15501": {
+   "confidence": 0.98,
+   "label": "Badvel, Ysr District",
+   "latitude": 14.7451,
+   "longitude": 79.06288,
+   "name": "AP-104-MMU-Badvel - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "LIP-15502": {
+   "confidence": 0.97,
+   "label": "Proddatūr, Ysr District",
+   "latitude": 14.7502,
+   "longitude": 78.54813,
+   "name": "AP-104-MMU-Proddutur - LIP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14523": {
+   "confidence": 0.99,
+   "label": "Vizianagaram, Vizianagaram District",
+   "latitude": 18.11692,
+   "longitude": 83.41148,
+   "name": "104 - REGIONAL OFFICE - Vizianagaram - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14524": {
+   "confidence": 0.99,
+   "label": "Anakapalle, Anakapalli",
+   "latitude": 17.69134,
+   "longitude": 83.00395,
+   "name": "104 - BRANCH OFFICE - Anakapalli - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14566": {
+   "confidence": 0.99,
+   "label": "Anantapur, Anantapur",
+   "latitude": 14.67784,
+   "longitude": 77.60813,
+   "name": "104 - BRANCH OFFICE - Anantapur - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14605": {
+   "confidence": 0.96,
+   "label": "Madanapalle, Annamayya",
+   "latitude": 13.5503,
+   "longitude": 78.50288,
+   "name": "104 - BRANCH OFFICE - Madanapalli - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14635": {
+   "confidence": 0.99,
+   "label": "Pāderu, Alluri Sitharama Raju",
+   "latitude": 18.07776,
+   "longitude": 82.66037,
+   "name": "104 - BRANCH OFFICE - Paderu - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14657": {
+   "confidence": 0.99,
+   "label": "Ongole, Prakasam",
+   "latitude": 15.50357,
+   "longitude": 80.04454,
+   "name": "104 - REGIONAL OFFICE - Ongole - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14658": {
+   "confidence": 0.99,
+   "label": "Bāpatla, Bapatla",
+   "latitude": 15.90422,
+   "longitude": 80.46743,
+   "name": "104 - BRANCH OFFICE - Bapatla - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14685": {
+   "confidence": 0.99,
+   "label": "Chittoor, Chittoor",
+   "latitude": 13.21055,
+   "longitude": 79.0956,
+   "name": "104 - BRANCH OFFICE - Chittoor - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14729": {
+   "confidence": 0.99,
+   "label": "Vijayawada, Ntr",
+   "latitude": 16.50745,
+   "longitude": 80.6466,
+   "name": "104 - REGIONAL OFFICE - Vijayawada - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14730": {
+   "confidence": 0.99,
+   "label": "Amalāpuram, Konaseema",
+   "latitude": 16.57868,
+   "longitude": 82.00609,
+   "name": "104 - BRANCH OFFICE - Amalapuram - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14764": {
+   "confidence": 0.99,
+   "label": "Rajamahendravaram, East Godāvari",
+   "latitude": 17.00517,
+   "longitude": 81.77784,
+   "name": "104 - BRANCH OFFICE - Rajamahendravaram - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14803": {
+   "confidence": 0.99,
+   "label": "Eluru, Eluru",
+   "latitude": 16.71311,
+   "longitude": 81.10437,
+   "name": "104 - BRANCH OFFICE - Eluru - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14848": {
+   "confidence": 0.99,
+   "label": "Guntur, Guntūr",
+   "latitude": 16.29974,
+   "longitude": 80.45729,
+   "name": "104 - BRANCH OFFICE - Guntur - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14870": {
+   "confidence": 0.96,
+   "label": "Kākināda, Kakinada",
+   "latitude": 16.96036,
+   "longitude": 82.23809,
+   "name": "104 - BRANCH OFFICE - Kakinada - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14906": {
+   "confidence": 0.99,
+   "label": "Machilīpatnam, Krishna",
+   "latitude": 16.18747,
+   "longitude": 81.13888,
+   "name": "104 - BRANCH OFFICE - Machilipatnam - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14940": {
+   "confidence": 0.99,
+   "label": "Kurnool, Kurnool",
+   "latitude": 15.82887,
+   "longitude": 78.03602,
+   "name": "104 - BRANCH OFFICE - Kurnool - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-14985": {
+   "confidence": 0.99,
+   "label": "Mārkāpur, Prakasam",
+   "latitude": 15.73534,
+   "longitude": 79.26848,
+   "name": "104 - BRANCH OFFICE - Markapur - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15011": {
+   "confidence": 0.99,
+   "label": "Nandyāl, Nandyal",
+   "latitude": 15.47799,
+   "longitude": 78.4836,
+   "name": "104 - BRANCH OFFICE - Nandyal - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15049": {
+   "confidence": 0.99,
+   "label": "Vijayawada, Ntr",
+   "latitude": 16.50745,
+   "longitude": 80.6466,
+   "name": "104 - BRANCH OFFICE - Vijayawada - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15072": {
+   "confidence": 0.9167,
+   "label": "Narasaraopet, Palnadu",
+   "latitude": 16.23488,
+   "longitude": 80.04927,
+   "name": "104 - BRANCH OFFICE - Narsaraopeta - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15136": {
+   "confidence": 0.98,
+   "label": "Rampachodavaram, Alluri Sitharama Raju",
+   "latitude": 17.44088,
+   "longitude": 81.77558,
+   "name": "104 - BRANCH OFFICE - Rampachodavaram - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15150": {
+   "confidence": 0.99,
+   "label": "Ongole, Prakasam",
+   "latitude": 15.50357,
+   "longitude": 80.04454,
+   "name": "104 - BRANCH OFFICE - Ongole - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15187": {
+   "confidence": 0.98,
+   "label": "Nellore, Nellore",
+   "latitude": 14.44992,
+   "longitude": 79.98697,
+   "name": "104 - BRANCH OFFICE - Nellore - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15228": {
+   "confidence": 0.99,
+   "label": "Hindupur, Sri Sathya Sai",
+   "latitude": 13.82807,
+   "longitude": 77.49143,
+   "name": "104 - BRANCH OFFICE - Hindupur - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15267": {
+   "confidence": 0.99,
+   "label": "Srikakulam, Srīkākulam",
+   "latitude": 18.2989,
+   "longitude": 83.89751,
+   "name": "104 - BRANCH OFFICE - Srikakulam - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15364": {
+   "confidence": 0.98,
+   "label": "Rasapūdipalem, Visākhapatnam",
+   "latitude": 17.73308,
+   "longitude": 83.31622,
+   "name": "104 - BRANCH OFFICE - Visakhapatnam - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15372": {
+   "confidence": 0.99,
+   "label": "Vizianagaram, Vizianagaram District",
+   "latitude": 18.11692,
+   "longitude": 83.41148,
+   "name": "104 - BRANCH OFFICE - Vizianagaram - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "MDP-15420": {
+   "confidence": 0.99,
+   "label": "Bhimavaram, West Godāvari",
+   "latitude": 16.54078,
+   "longitude": 81.52322,
+   "name": "104 - BRANCH OFFICE - Bhimavaram - MDP",
+   "source": "GEONAMES_LOCALITY"
+  },
+  "WH-1549": {
+   "confidence": 1.0,
+   "label": "Central Warehouse-1 gate",
+   "latitude": 16.5057752,
+   "longitude": 80.7017168,
+   "name": "CENTRAL WAREHOUSE-1 - MAIN",
+   "source": "MANUAL"
+  }
+ }
+}
