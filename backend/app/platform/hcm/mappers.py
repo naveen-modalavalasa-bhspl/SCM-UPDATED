@@ -57,6 +57,40 @@ def office_sac(raw: Any) -> str | None:
     return value if value and value.lower() != "null" else None
 
 
+def _decimal_degrees(value: Any) -> float | None:
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) else None
+
+
+def office_geo(raw: Any) -> dict:
+    """Where HCM says an office is, read from `hcm_offices.raw` like `office_sac`.
+
+    `latitude`/`longitude` are HCM's own GPS fields (a string such as
+    "16.674200000", or empty); `location` is the village the office is at and
+    `mandal_name` its mandal. Numbers are parsed here and nothing else is judged —
+    whether a point is plausible is the reader's call (`inventory.locations`).
+    Every key is always present, None when HCM holds nothing.
+    """
+    if not isinstance(raw, dict):
+        return {"latitude": None, "longitude": None, "location": None, "mandal": None,
+                "district": None}
+
+    def text(key: str) -> str | None:
+        value = str(raw.get(key) or "").strip()
+        return value if value and value.lower() != "null" else None
+
+    return {
+        "latitude": _decimal_degrees(raw.get("latitude")),
+        "longitude": _decimal_degrees(raw.get("longitude")),
+        "location": text("location"),
+        "mandal": text("mandal_name"),
+        "district": text("district_name"),
+    }
+
+
 def primary_position_of(row: dict) -> dict:
     """The entry in `positions_details` the employee actually sits on.
 

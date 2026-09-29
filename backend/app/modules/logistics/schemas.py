@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS,
 )
@@ -316,6 +316,10 @@ class ActivityRow(BaseModel):
 
 class TROut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    #: A multi-drop trip's stops, when this shipment carries one (`source_type TRIP`).
+    #: Filled by the carrier portal (`transport._trip_brief`) — that is where a stop
+    #: is delivered from; the desk follows the same stops on the trip console.
+    trip: dict | None = None
     id: int
     tr_no: str
     tr_date: date | None = None
@@ -602,11 +606,28 @@ class ResolveIn(BaseModel):
     resolution: str = Field(min_length=1)
 
 
+def http_link(value: str | None) -> str | None:
+    """A proof-of-delivery link is rendered back as a link on staff screens, and the
+    carrier portal is reached from outside the company: plain http(s) or nothing,
+    never `javascript:` or `data:`."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if not value.lower().startswith(("http://", "https://")) or any(c.isspace() for c in value):
+        raise ValueError("The proof-of-delivery link must be an http:// or https:// address")
+    return value
+
+
 class DeliverIn(BaseModel):
     delivered_at: datetime | None = None
-    delivered_to_name: str | None = None
-    pod_url: str | None = None
-    remarks: str | None = None
+    delivered_to_name: str | None = Field(default=None, max_length=200)
+    pod_url: str | None = Field(default=None, max_length=500)
+    remarks: str | None = Field(default=None, max_length=500)
+
+    @field_validator("pod_url")
+    @classmethod
+    def _pod_is_a_link(cls, value):
+        return http_link(value)
 
 
 class ConsignmentLink(BaseModel):
@@ -619,6 +640,10 @@ class ConsignmentLink(BaseModel):
     tr_id: int
     tr_no: str
     mode: str
+    #: Set when the leg is a multi-drop trip's shipment: the consignment is one of
+    #: several on that truck, and the trip is where its own stop is followed.
+    trip_id: int | None = None
+    trip_no: str | None = None
     #: Read back onto the dispatch screen beside the arrangement, so the desk that
     #: raised the leg sees the way it is actually going — including a carriage the
     #: WINNING carrier changed when they acknowledged it.

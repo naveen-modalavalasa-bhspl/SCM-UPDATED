@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
-  AlertTriangle, ArrowLeft, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
-  Camera, Check, CheckCircle2, Circle, ExternalLink, Eye, FileText, Lock, MapPin,
-  Package, Phone, RectangleHorizontal, Ruler, ScanBarcode, Signature, Snowflake,
-  Trash2, Truck, UserRound, Weight,
+  AlertTriangle, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
+  Camera, Check, CheckCircle2, ChevronDown, Circle, ExternalLink, Eye, FileText, Hash,
+  Lock, MapPin, Package, Phone, Plus, Receipt, RectangleHorizontal, Ruler, ScanBarcode,
+  Send, Signature, Snowflake, Trash2, Truck, UserRound, Weight,
 } from "lucide-react";
+import { tripProgressText, tripStopLabel } from "../components/tripLeg";
 import {
-  Button, Card, EmptyState, ErrorBanner, Input, PageHeader,
+  Button, Card, EmptyState, ErrorBanner, Input, PageHeader, SharedAttachmentViewer,
 } from "@/shared/components";
-import { SharedAttachmentViewer } from "@/shared/components/SharedAttachmentViewer";
+import { alerts } from "@/modules/alerts";
 import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
 import { TrackingBadge, useTrackingMeta } from "@/modules/warehouse/components/TrackingBadge";
 import type { TrackingType } from "@/modules/warehouse/types";
@@ -21,35 +22,38 @@ import type {
   RaiserTracking, ReceiptAttachment, ShipmentTrack,
 } from "../types";
 import {
-  BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, lineStage, onOrder, qty, receivable,
+  BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, dayStamp, lineStage, neededBy, onOrder, qty,
+  receivable, shortDate,
 } from "../components/acknowledgementParts";
 
 /**
  * One indent's delivery, walked the way the delivery itself happens.
  *
- * REDESIGNED 2026-09-19. The screen used to put the whole receipt on one page — a
- * consignment list, a package list inside it, a manifest inside that, and one proof
- * dock above the lot. Three nested selections were on screen at once and none of them
- * said what to do next, so the two things a person actually does at a delivery — look
- * at the load before opening it, then open each package and count what is in it —
- * were somewhere inside a layout rather than being the shape of the screen.
+ * It is a JOURNEY: the handover, then one stop per package. One stop is
+ * on screen at a time and the rail above says where you are, so the page asks exactly
+ * one question at each point. Nothing is locked — every stop on the rail is a button,
+ * because a delivery is not a wizard and somebody re-checking package two is not doing
+ * anything wrong.
  *
- * It is a JOURNEY now: the handover, then one stop per package, then sign off. One
- * stop is on screen at a time and the rail above says where you are, so the page asks
- * exactly one question at each point. Nothing is locked — every stop on the rail is a
- * button, because a delivery is not a wizard and somebody re-checking package two is
- * not doing anything wrong.
+ * **Every stop keeps its OWN photos.** The proof of a sealed load and the proof of what
+ * was inside a particular carton are different evidence. The package rides on
+ * `doc_category` as a scope (`RECEIPT_PHOTO::P-<key>`, `service.ack_category_base` in
+ * the backend) because `sys_attachments` has no column for it and adding one is a
+ * platform change for a fact only this screen has. The BILL is the delivery's, not a
+ * carton's, so it is added once, on the first consignment, and every bill already
+ * filed — at whichever stop — is listed there.
  *
- * **Every stop keeps its OWN photo and bill.** The proof of a sealed load and the
- * proof of what was inside a particular carton are different evidence, and they used
- * to land in one pile: both packages read "1 photo" when one of them had been
- * photographed, and a dispute over carton two was answered with a picture of carton
- * one. The package rides on `doc_category` as a scope (`RECEIPT_PHOTO::P-<key>`,
- * `service.ack_category_base` in the backend) because `sys_attachments` has no column
- * for it and adding one is a platform change for a fact only this screen has.
+ * The receipt action itself is unchanged and still single: one Acknowledge press in
+ * the footer, over everything counted at every stop, and it unlocks only once every
+ * package is finished — each item counted, photographed IN THAT PACKAGE, and its
+ * codes matched in that package. There is no sign-off stop and no Back/Next: the rail
+ * and the package rows are the navigation.
  *
- * The receipt action itself is unchanged and still single: one press, at the end,
- * over everything counted at every stop.
+ * THE LOOK (2026-09-26). One sheet per step, one card shape, and four colours that each
+ * mean one thing: the brand for what you press, green for done, amber for "you must",
+ * grey for "not yet" or "optional". The previous pass drew packing tape, fake barcode
+ * bars, viewfinder corners and three accent colours of its own; each was decoration
+ * the eye had to learn to skip before it reached the number it came for.
  */
 export default function AcknowledgementDetailPage() {
   const params = useParams();
@@ -72,9 +76,21 @@ export default function AcknowledgementDetailPage() {
 
   if (acknowledgements.isLoading) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-4" aria-busy="true">
         <PageHeader title="Acknowledgement" back={back} />
-        <Card className="p-6 text-sm text-muted">Loading...</Card>
+        {/* The shape of the page that is coming, so nothing jumps when it lands. */}
+        <div className="animate-pulse space-y-4">
+          <div className="rounded-3xl bg-content1 px-5 py-5 sm:px-7">
+            <div className="h-3 w-28 rounded bg-content3" />
+            <div className="mt-3 h-4 w-48 rounded bg-content3" />
+            <div className="mt-6 flex gap-8">
+              {[0, 1, 2, 3].map((key) => (
+                <div key={key} className="h-7 w-7 rounded-full bg-content3" />
+              ))}
+            </div>
+          </div>
+          <div className="h-72 rounded-3xl bg-content1" />
+        </div>
       </div>
     );
   }
@@ -108,18 +124,18 @@ export default function AcknowledgementDetailPage() {
  * The journey: one stop per thing a person physically does.
  * ------------------------------------------------------------------------ */
 
-type StopKind = "gate" | "package" | "review";
+type StopKind = "gate" | "package";
 
 interface Stop {
   key: string;
   kind: StopKind;
-  /** What the rail calls it — the consignment number, the package number, "Sign off". */
+  /** What the rail calls it — the consignment number, the package number. */
   label: string;
   /** The same stop in the words of somebody who has never used the system: "The
-   *  delivery", "Package 1 of 2", "Finish". The code is what the DOCUMENT is called;
+   *  consignment", "Package 1 of 2", "Finish". The code is what the DOCUMENT is called;
    *  a person standing at a pallet needs to be told which of four things he is on. */
   plain: string;
-  /** Which pile of proof is this stop's own. "" is the whole receipt (the sign-off). */
+  /** Which pile of proof is this stop's own. */
   scope: string;
   consignment?: ReceiptConsignment;
   pack?: ReceiptPackage;
@@ -140,8 +156,7 @@ function journeyStops(consignments: ReceiptConsignment[]): Stop[] {
       // "The consignment" and not "the delivery": what is being photographed here is
       // the consignment the warehouse despatched, the document whose number is
       // printed on the paperwork in the driver's hand, and the photos are filed
-      // against it. A generic word for it left the storekeeper matching a picture to
-      // nothing in particular.
+      // against it.
       plain: consignments.length > 1 ? `Consignment ${index + 1}` : "The consignment",
       scope: proofScope("C", consignment.key),
       consignment,
@@ -163,18 +178,29 @@ function journeyStops(consignments: ReceiptConsignment[]): Stop[] {
       });
     });
   });
-  stops.push({
-    key: "review", kind: "review", label: "Sign off", plain: "Finish", scope: "",
-  });
+  // No sign-off stop (2026-09-26). It repeated what the packages had already said and
+  // made the one press that matters the last of five; the footer's Acknowledge button
+  // unlocks the moment every package is finished instead.
   return stops;
 }
 
 /** One thing that has to be true before a stop is finished, and whether it is. */
 interface StepTask {
   done: boolean;
-  /** An instruction, not a noun: "Photograph this package", never "Photo". */
+  /** Short and plain: "Count all 3 items", "Photo of each item (1 of 3)". */
   label: string;
+  /** Good to have, never required to sign — drawn grey rather than amber, so the
+   *  one colour that means "you must" is spent only on what you must. */
+  optional?: boolean;
 }
+
+/**
+ * Where a stop stands. `optional` is its own state because a step with nothing
+ * REQUIRED on it is not unfinished: the consignment photo is recommended, and a rail
+ * that kept that step amber forever told everybody who skipped it that they had left
+ * something undone. It is drawn as a hollow ring instead — not done, not owed.
+ */
+type StopState = "done" | "optional" | "todo";
 
 function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
   row: Acknowledgement;
@@ -184,7 +210,13 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
 }) {
   const [received, setReceived] = useState<Record<string, string>>(() =>
     initialReceivedByReceiptLine(row.lines));
-  const [stopKey, setStopKey] = useState("");
+  // The open stop lives in the URL, not in state (2026-09-26). Held in state, opening
+  // a package added no history entry, so the browser's Back from inside a package
+  // skipped every stop and left the acknowledgement altogether. `?stop=` gives each
+  // stop its own entry: Back from a package lands on the consignment it came out of,
+  // and a reload or a shared link reopens the same carton.
+  const [params, setParams] = useSearchParams();
+  const stopKey = params.get("stop") ?? "";
   const [serialTarget, setSerialTarget] = useState<ReceiptPackageLine | null>(null);
   const [pickedSerials, setPickedSerials] = useState<Record<string, string[]>>({});
   const [viewing, setViewing] = useState<
@@ -225,15 +257,37 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
       await commitConfirmedIndentReceipt(qc, accountScope, updated);
       qc.invalidateQueries({ queryKey: ["indent-acknowledgements"] });
       qc.invalidateQueries({ queryKey: ["indent-fulfilment"] });
+      // Said out loud. The press used to drop the person back on the list with
+      // nothing to say it had worked, which is how a receipt gets signed twice.
+      void alerts.success("issue.acknowledged", { number: row.indent_no });
       onDone();
     },
   });
 
   const allAttachments = attachments.data ?? [];
-  // The server's own rule for "is there proof": any photo of this delivery, whichever
-  // stop it was taken at. Read through `attachmentBase`, so a package photo counts.
-  const anyPhoto = allAttachments.some(
-    (file) => attachmentBase(file.doc_category) === PHOTO);
+  /**
+   * Every filed item photo, indexed by its full scope — `I-<line>-<package hash>` —
+   * so a photo belongs to ONE item in ONE package.
+   *
+   * Per package, not per line (2026-09-26). The same item split over two cartons of
+   * five is two things to check: photographing it while the first carton was open
+   * used to tick the second carton off too, before anybody had opened it. The server
+   * still counts by line (`ack_category_item`), so this is the stricter of the two
+   * and the save can never refuse what the screen let through.
+   */
+  const photosByScope = useMemo(() => {
+    const index = new Map<string, ReceiptAttachment[]>();
+    allAttachments.forEach((file) => {
+      if (attachmentBase(file.doc_category) !== PHOTO) return;
+      const scope = attachmentScope(file.doc_category);
+      if (scopeItemId(scope) === null) return;
+      index.set(scope, [...(index.get(scope) ?? []), file]);
+    });
+    return index;
+  }, [allAttachments]);
+  const photosOf = (line: ReceiptPackageLine, packKey: string) =>
+    photosByScope.get(itemProofScope(line.indent_item_id, packKey)) ?? [];
+  const bills = allAttachments.filter((file) => attachmentBase(file.doc_category) === BILL);
   const anythingToConfirm = row.lines.some((line) => receivable(line) > 0);
   const waiting = row.lines.reduce((sum, line) => sum + receivable(line), 0);
   const nothingSentYet = row.lines.every((line) => line.dispatched_quantity <= 0);
@@ -242,11 +296,9 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
     return {
       quantity: payload.reduce((sum, line) => sum + line.received_quantity, 0),
       lines: payload.length,
-      byLine: new Map(payload.map((line) => [line.indent_item_id, line.received_quantity])),
     };
   }, [row.lines, received]);
   const entered = receivingSummary.quantity > 0;
-  const ready = entered && anyPhoto;
 
   const consignments = useMemo(
     () => receiptConsignments(row, tracking.data),
@@ -257,138 +309,195 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
   const stop = stops[activeIndex];
 
   /** This stop's own proof, and — on the first handover only — anything filed before
-   *  the scope existed, so nothing an earlier receipt attached disappears from view. */
+   *  the scope existed (or against the indent itself, before a consignment could be
+   *  named), so nothing an earlier receipt attached disappears from view. */
   const proofFor = (target: Stop) => allAttachments.filter((file) => {
-    if (target.kind === "review") return true;
     const scope = attachmentScope(file.doc_category);
-    return scope === target.scope || (Boolean(target.legacyProof) && scope === "");
+    return scope === target.scope
+      || (Boolean(target.legacyProof) && (scope === "" || scope === LEGACY_DIRECT_SCOPE));
   });
+  /** The PHOTOS of a stop. The bills are listed once, on the first consignment. */
+  const photosFor = (target: Stop) => proofFor(target).filter(
+    (file) => attachmentBase(file.doc_category) === PHOTO);
+
+  /** Where one item in one package stands: counted, photographed in THIS package,
+   *  and — for coded goods — every unit's code matched in THIS package. A line
+   *  counted at zero owes nothing else: there is nothing there to photograph. */
+  const lineProgress = (line: ReceiptPackageLine, packKey: string) => {
+    const value = received[line.receipt_key] ?? "";
+    const counted = value.trim() !== "";
+    const count = receivedNumber(value);
+    const photographed = count <= 0 || photosOf(line, packKey).length > 0;
+    const serials = line.serial_numbers?.filter(Boolean) ?? [];
+    const needSerials = requiredSerialCount(line, value);
+    const matched = serialPickForQuantity(
+      serials, pickedSerials[line.receipt_key], needSerials).length;
+    return {
+      counted,
+      count,
+      photographed,
+      coded: serials.length > 0,
+      serialsDone: matched >= needSerials,
+    };
+  };
 
   const countedFor = (pack?: ReceiptPackage) => {
     const lines = (pack?.lines ?? []).filter(
       (line) => Number(line.package_quantity ?? receivable(line)) > 0);
-    const done = lines.filter(
-      (line) => receivedNumber(received[line.receipt_key]) > 0).length;
-    return { total: lines.length, done };
+    const progress = lines.map((line) => lineProgress(line, pack?.key ?? ""));
+    const present = progress.filter((item) => item.count > 0);
+    const coded = present.filter((item) => item.coded);
+    return {
+      total: lines.length,
+      done: progress.filter((item) => item.counted).length,
+      // Counted over the ITEMS in the carton rather than over the photos filed
+      // against it: two shots of one cable and none of the other is not "2 of 2".
+      toPhotograph: present.length,
+      photographed: present.filter((item) => item.photographed).length,
+      coded: coded.length,
+      matched: coded.filter((item) => item.serialsDone).length,
+    };
   };
 
   /**
    * What this stop still needs, in the words of the person standing at the delivery.
    *
-   * These rules used to live only inside `stopDone`, so a grey circle on the rail was
-   * the entire explanation: it said a step was unfinished and never WHICH of the two
-   * things had not been done, and the only way to find out was to open the step and
-   * guess. One list answers both questions now -- the strip on the card renders it and
-   * `stopDone` is simply "every task ticked" -- so the tick and the to-do list cannot
-   * drift apart the way two copies of a rule always eventually do.
+   * One list answers both "is it done" and "what is left": the checklist on the sheet
+   * renders it and `stopState` reads it, so the tick and the to-do list cannot drift
+   * apart the way two copies of a rule always eventually do.
    */
   const tasksFor = (target: Stop): StepTask[] => {
-    const files = proofFor(target);
-    const hasPhoto = files.some((file) => attachmentBase(file.doc_category) === PHOTO);
     if (target.kind === "gate") {
+      // REQUIRED (2026-09-28). The sealed load, the seal and the number plate are what
+      // a claim against the carrier is argued from, and a photo taken after the
+      // cartons are open cannot show them. The server refuses a receipt without one.
       return [{
-        done: hasPhoto,
-        label: "Photograph the consignment as it was received",
+        done: photosFor(target).length > 0,
+        label: "Photo of the consignment",
       }];
     }
-    if (target.kind === "package") {
-      const counted = countedFor(target.pack);
-      // Nothing receivable in this package: it is finished by having nothing to do,
-      // and asking for a photo of it would block a delivery over an empty carton.
-      if (counted.total === 0) {
-        return [{ done: true, label: "Nothing in this package is waiting on you" }];
-      }
-      return [
-        {
-          done: counted.done === counted.total,
-          label: counted.total === 1
-            ? "Enter how many arrived"
-            : `Enter how many arrived, for all ${counted.total} items`,
-        },
-        { done: hasPhoto, label: "Photograph this package" },
-      ];
+    const counted = countedFor(target.pack);
+    // Nothing receivable in this package: it is finished by having nothing to do,
+    // and asking for a photo of it would block a delivery over an empty carton.
+    if (counted.total === 0) {
+      return [{ done: true, label: "Nothing to do in this package" }];
     }
-    return [
-      { done: entered, label: "Count at least one item" },
-      { done: anyPhoto, label: "Attach at least one photo" },
-    ];
+    const tasks: StepTask[] = [{
+      done: counted.done === counted.total,
+      label: counted.total === 1 ? "Count the item" : `Count all ${counted.total} items`,
+    }];
+    if (counted.toPhotograph > 0) {
+      tasks.push({
+        // ITEM-WISE, and the count is in the label: "Photo of each item" on a
+        // carton of eleven says a photo is missing and never how many.
+        done: counted.photographed === counted.toPhotograph,
+        label: counted.toPhotograph === 1
+          ? "Photo of the item"
+          : `Photo of each item (${counted.photographed} of ${counted.toPhotograph})`,
+      });
+    }
+    if (counted.coded > 0) {
+      tasks.push({
+        done: counted.matched === counted.coded,
+        label: counted.coded === 1
+          ? "Match the serial numbers"
+          : `Match serial numbers (${counted.matched} of ${counted.coded})`,
+      });
+    }
+    return tasks;
   };
 
-  const stopDone = (target: Stop): boolean =>
-    tasksFor(target).every((task) => task.done);
+  /**
+   * Read off the live counts and the filed attachments, never remembered: delete the
+   * only photo and the tick goes, take another and it comes back. Only REQUIRED tasks
+   * decide green; a step whose every task is optional is `optional` until it is done.
+   */
+  const stopState = (target: Stop): StopState => {
+    const tasks = tasksFor(target);
+    const required = tasks.filter((task) => !task.optional);
+    if (required.length === 0) return tasks.every((task) => task.done) ? "done" : "optional";
+    return required.every((task) => task.done) ? "done" : "todo";
+  };
 
   const uploadFile = (scope: string) => (file: File, base: string) =>
     upload.mutate({ file, category: scopedCategory(base, scope) });
 
-  const go = (index: number) =>
-    setStopKey(stops[Math.min(Math.max(index, 0), stops.length - 1)].key);
+  const go = (index: number) => {
+    const key = stops[Math.min(Math.max(index, 0), stops.length - 1)].key;
+    if (key === stop.key) return;   // re-pressing the open stop is not a step to go back over
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set("stop", key);
+      return next;
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  /** Inside a package, the header goes back to the consignment it came out of — one
+   *  level up — never straight out to the list with the delivery half checked. */
+  const parentStop = stop.kind === "package"
+    ? stops.find((item) => item.kind === "gate" && item.consignment?.key === stop.consignment?.key)
+    : undefined;
 
-  const stopFiles = proofFor(stop);
   const packageStops = stops.filter((item) => item.kind === "package");
-  const nextStop = stops[activeIndex + 1];
-  /** Why the sign-off is unavailable, in the order the person has to fix it. A
-   *  disabled button with nothing beside it is the single most common way a screen
-   *  strands somebody who does not already know the rule. */
+  /** The stops still owing something. Acknowledge unlocks only when this is empty:
+   *  every consignment photographed, every package counted, each item in it
+   *  photographed, every code matched. */
+  const unfinished = stops.filter((item) => stopState(item) !== "done");
+  const ready = anythingToConfirm && entered && unfinished.length === 0;
+  /** Why Acknowledge is unavailable, named rather than counted. A disabled button with
+   *  nothing beside it is the single most common way a screen strands somebody who
+   *  does not already know the rule; "1 package left" on a load of six sends them
+   *  through every carton to find out which. */
   const blocker = !anythingToConfirm || ready
     ? null
-    : !entered
-      ? "Enter how many arrived before you can acknowledge"
-      : "Attach at least one photo before you can acknowledge";
+    : unfinished.length > 0
+      ? `Still to finish: ${sentenceList(unfinished.slice(0, 3).map((item) => {
+        const owed = tasksFor(item).filter((task) => !task.done && !task.optional);
+        return `${item.plain} (${owed.map((task) => shortTask(task.label)).join(", ")})`;
+      }))}${unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ""}`
+      : "Count at least one item first";
+
+  const sharedPhotoProps = {
+    indentId: row.indent_id,
+    uploadPending: upload.isPending,
+    removePending: remove.isPending,
+    onView: (files: ReceiptAttachment[], index: number) => setViewing({ files, index }),
+    onDelete: (id: number) => remove.mutate(id),
+  };
 
   return (
     <div className="space-y-4">
       <PageHeader
         title={row.indent_no}
-        back={{ to: "/indents/acknowledgements", label: "Back to Acknowledgements" }}
+        back={parentStop
+          ? { to: `?stop=${encodeURIComponent(parentStop.key)}`, label: `Back to ${parentStop.plain.toLowerCase()}` }
+          : { to: "/indents/acknowledgements", label: "Back to Acknowledgements" }}
       />
 
       <ErrorBanner error={confirm.error ?? upload.error ?? remove.error} />
 
-      {/* The one strip of chrome on the page: who this is for, and where you are.
-          A progress bar under a step rail was the same fact drawn twice. */}
-      <div className="rounded-3xl bg-content1 px-5 py-4 shadow-[0_1px_3px_rgba(16,24,40,0.04)] sm:px-7">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
-            Receiving
-            {row.project_name && (
-              <span className="ml-2 normal-case tracking-normal">{row.project_name}</span>
-            )}
-          </span>
-          <span className="text-[11px] tabular-nums text-muted">
-            Step {activeIndex + 1} of {stops.length}
-          </span>
-        </div>
-        <p className="mt-1.5 text-sm leading-relaxed text-body">
-          {anythingToConfirm
-            ? `${qty(waiting)} still to be received. Nothing is recorded until you sign at the last step.`
-            : nothingSentYet
-              ? "Nothing has been sent to you yet, so there is nothing to count."
-              : "Everything sent to you has already been acknowledged."}
-        </p>
-
+      <ReceiptHeader
+        row={row}
+        waiting={waiting}
+        anythingToConfirm={anythingToConfirm}
+        nothingSentYet={nothingSentYet}
+      >
         <JourneyRail
           stops={stops}
           activeIndex={activeIndex}
-          isDone={stopDone}
+          stateOf={stopState}
           onJump={go}
         />
-      </div>
+      </ReceiptHeader>
 
       {stop.kind === "gate" && (
         <GateStop
           stop={stop}
-          stepNo={activeIndex + 1}
-          stepTotal={stops.length}
-          indentId={row.indent_id}
           tasks={tasksFor(stop)}
-          files={stopFiles}
+          photos={photosFor(stop)}
           loading={tracking.isLoading}
           failed={Boolean(tracking.error)}
-          uploadPending={upload.isPending}
-          removePending={remove.isPending}
           onUpload={uploadFile(stop.scope)}
-          onView={(files, index) => setViewing({ files, index })}
-          onDelete={(id) => remove.mutate(id)}
           onOpenPackage={(pack) => {
             const target = stops.findIndex(
               (item) => item.kind === "package" && item.pack?.key === pack.key);
@@ -400,95 +509,85 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
             const target = stops.find(
               (item) => item.kind === "package" && item.pack?.key === pack.key);
             const counted = countedFor(pack);
-            const files = target ? proofFor(target) : [];
             return {
-              done: target ? stopDone(target) : false,
+              done: target ? stopState(target) === "done" : false,
               countedDone: counted.done,
               countedTotal: counted.total,
-              photos: files.filter(
-                (file) => attachmentBase(file.doc_category) === PHOTO).length,
+              // ITEMS photographed, not photos filed, so it is the same kind of number
+              // as the count beside it.
+              photographed: counted.photographed,
+              toPhotograph: counted.toPhotograph,
             };
           }}
+          // The bill is the delivery's, not a carton's: offered once, on the first
+          // consignment, now that there is no sign-off stop to carry it.
+          bills={stop.legacyProof ? bills : null}
+          onUploadBill={uploadFile("")}
+          inProcess={stop.legacyProof
+            ? row.lines.filter((line) =>
+              receivable(line) <= 0
+              && Number(line.approved_quantity ?? 0) > Number(line.received_quantity ?? 0))
+            : []}
+          {...sharedPhotoProps}
         />
       )}
 
       {stop.kind === "package" && stop.pack && (
         <PackageStop
           pack={stop.pack}
-          stepNo={activeIndex + 1}
-          stepTotal={stops.length}
-          indentId={row.indent_id}
           tasks={tasksFor(stop)}
           position={packageStops.findIndex((item) => item.key === stop.key) + 1}
           total={packageStops.length}
-          files={stopFiles}
+          photos={photosFor(stop)}
           received={received}
-          counted={countedFor(stop.pack)}
           pickedSerials={pickedSerials}
-          uploadPending={upload.isPending}
-          removePending={remove.isPending}
+          photosOf={(line) => photosOf(line, stop.pack?.key ?? "")}
           onUpload={uploadFile(stop.scope)}
-          onView={(files, index) => setViewing({ files, index })}
-          onDelete={(id) => remove.mutate(id)}
+          // The item's own shot, filed against the LINE and the carton it was taken
+          // in. `uploadFile` files against the stop; this one files against the row.
+          onUploadItem={(line, file) => upload.mutate({
+            file,
+            category: scopedCategory(
+              PHOTO, itemProofScope(line.indent_item_id, stop.pack?.key ?? "")),
+          })}
           onChange={(key, value) =>
             setReceived((current) => ({ ...current, [key]: value }))}
           onPickSerials={setSerialTarget}
+          {...sharedPhotoProps}
         />
       )}
 
-      {stop.kind === "review" && (
-        <ReviewStop
-          row={row}
-          stepNo={activeIndex + 1}
-          stepTotal={stops.length}
-          tasks={tasksFor(stop)}
-          stops={stops}
-          proofFor={proofFor}
-          isDone={stopDone}
-          onJump={(target) => go(stops.findIndex((item) => item.key === target.key))}
-          summary={receivingSummary}
-          anythingToConfirm={anythingToConfirm}
-          nothingSentYet={nothingSentYet}
-        />
-      )}
-
-      {/* One line of words, two buttons. The chips that used to live here said the
-          same thing the step sheet says, one screen higher. */}
-      <div className="sticky bottom-0 z-10 border-t border-line bg-content1/95 px-4 py-3 backdrop-blur">
+      {/* One line of words, one button. No Back/Next: the rail and the package rows
+          move between steps, and the only press this bar exists for is Acknowledge,
+          which unlocks once every package is finished. The line wraps rather than
+          truncating: on a phone the named unfinished package is the part that was
+          being cut off. */}
+      <div className="sticky bottom-0 z-10 -mx-1 rounded-t-2xl border-t border-line bg-content1/95 px-4 py-3 backdrop-blur">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <p className={`min-w-0 flex-1 truncate text-xs ${blocker ? "text-warn" : "text-muted"}`}>
-            {anythingToConfirm
-              ? blocker
-                ?? `${qty(receivingSummary.quantity)} ready across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}`
-              : "No receipt action is pending."}
+          <p className={`flex min-w-0 flex-1 items-start gap-1.5 text-xs leading-snug ${
+            blocker ? "text-warn" : ready ? "font-semibold text-ok" : "text-muted"
+          }`}>
+            {blocker
+              ? <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
+              : ready && <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />}
+            <span className="line-clamp-2">
+              {anythingToConfirm
+                ? blocker
+                  ?? `Ready to acknowledge: ${qty(receivingSummary.quantity)} across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}`
+                : "Nothing to acknowledge."}
+            </span>
           </p>
-          <div className="flex shrink-0 items-center justify-end gap-2">
-            <Button
-              variant="subtle"
-              onClick={() => (activeIndex === 0 ? onDone() : go(activeIndex - 1))}
-            >
-              <ArrowLeft className="h-4 w-4" />
-              {activeIndex === 0 ? "Close" : "Back"}
-            </Button>
-            {stop.kind === "review" ? (
-              anythingToConfirm && (
-                <Button
-                  onClick={() => confirm.mutate()}
-                  disabled={!ready || confirm.isPending}
-                >
-                  <CheckCircle2 className="h-4 w-4" />
-                  {confirm.isPending ? "Confirming..." : "Acknowledge receipt"}
-                </Button>
-              )
-            ) : (
-              /* The button names where it goes. "Next" on its own is the reason
-                 somebody presses it four times to find out what is at the end. */
-              <Button onClick={() => go(activeIndex + 1)}>
-                {nextStop ? `Next: ${nextStop.plain}` : "Next"}
-                <ArrowRight className="h-4 w-4" />
+          {anythingToConfirm && (
+            <div className="flex shrink-0 items-center justify-end">
+              <Button
+                onClick={() => confirm.mutate()}
+                disabled={!ready || confirm.isPending}
+              >
+                <Signature className="h-4 w-4" />
+                {confirm.isPending ? "Saving..." : "Acknowledge"}
               </Button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -518,6 +617,7 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
           )
           : []}
         pickMode="select"
+        displayValue={shortCode}
         noun={serialTarget ? TRACKING[serialTarget.tracking_type ?? ""]?.unit ?? "serial" : "serial"}
         // The picker names the KIND of identifier too, from the served catalogue:
         // inside the modal the list is a column of fifteen-character strings, and
@@ -565,7 +665,25 @@ interface ReceiptConsignment {
   key: string;
   no: string;
   leg?: ReceiptLeg;
+  /** True when `no` is a real consignment (DSP) number rather than the indent's own,
+   *  the last resort for a delivery nothing was ever despatched under. */
+  isConsignment: boolean;
   packages: ReceiptPackage[];
+}
+
+/** The key the one no-shipment consignment used before it was named by its DSP
+ *  number. Photos filed under it are still shown on the first consignment. */
+const LEGACY_DIRECT_SCOPE = proofScope("C", "direct");
+
+/** Every consignment the packing lists name, in the order they first appear. */
+function packedDispatches(lines: AcknowledgementLine[]) {
+  const seen = new Map<number, string>();
+  lines.forEach((line) => (line.package_quantities ?? []).forEach((part) => {
+    if (part.dispatch_id && !seen.has(part.dispatch_id)) {
+      seen.set(part.dispatch_id, (part.dispatch_no ?? "").trim());
+    }
+  }));
+  return seen;
 }
 
 function receiptConsignments(
@@ -573,17 +691,40 @@ function receiptConsignments(
   liveTracking?: RaiserTracking[],
 ): ReceiptConsignment[] {
   const legs: ReceiptLeg[] = (liveTracking?.length ? liveTracking : row.shipments) ?? [];
+  const dispatches = packedDispatches(row.lines);
   if (legs.length === 0) {
+    // No carrier was booked — a load the warehouse gated out itself. It still left
+    // under a consignment, and the DSP number is the one on the paper in the driver's
+    // hand, so the stop is named after it. The indent number is only the last resort,
+    // for a delivery nothing was ever packed against.
+    if (dispatches.size > 0) {
+      return [...dispatches].map(([dispatchId, dispatchNo], index) => ({
+        key: `dispatch-${dispatchId}`,
+        no: dispatchNo || `Consignment ${index + 1}`,
+        isConsignment: true,
+        packages: receiptPackages(row.lines, dispatchId, true),
+      }));
+    }
     return [{
       key: "direct",
       no: row.indent_no,
+      isConsignment: false,
       packages: receiptPackages(row.lines),
     }];
   }
   return legs.map((leg, index) => ({
-    key: `leg-${leg.tr_id ?? index}`,
-    no: leg.consignment_no || leg.tr_no || `Consignment ${index + 1}`,
+    // A multi-drop trip's ONE shipment can carry two of this indent's consignments,
+    // so its legs are keyed by consignment too — sharing `tr_id` would file one
+    // consignment's photos under the other. Single-shipment legs keep the key their
+    // photos were filed under.
+    key: "trip_id" in leg && leg.trip_id && leg.dispatch_id
+      ? `trip-${leg.trip_id}-${leg.dispatch_id}` : `leg-${leg.tr_id ?? index}`,
+    no: leg.consignment_no
+      || (leg.dispatch_id ? dispatches.get(leg.dispatch_id) : "")
+      || leg.tr_no
+      || `Consignment ${index + 1}`,
     leg,
+    isConsignment: true,
     packages: receiptPackages(row.lines, leg.dispatch_id ?? null),
   }));
 }
@@ -591,13 +732,17 @@ function receiptConsignments(
 function receiptPackages(
   lines: AcknowledgementLine[],
   dispatchId?: number | null,
+  /** Only this consignment's packages, never the whole delivery's as a fallback: the
+   *  consignments were derived FROM the packing lists, so a line with nothing in this
+   *  one belongs to another and must not be listed twice. */
+  strict = false,
 ): ReceiptPackage[] {
   const arrived = lines.filter((line) => receivable(line) > 0);
   const visible = arrived.length > 0 ? arrived : lines;
   const byPackage = new Map<string, ReceiptPackage>();
 
   visible.forEach((line) => {
-    const parts = packagePartsForLine(line, dispatchId);
+    const parts = packagePartsForLine(line, dispatchId, strict);
     let serialOffset = 0;
     parts.forEach((part) => {
       const key = packageKey(part);
@@ -621,7 +766,7 @@ function receiptPackages(
     });
   });
 
-  if (byPackage.size > 0) return [...byPackage.values()];
+  if (byPackage.size > 0 || strict) return [...byPackage.values()];
 
   const quantity = visible.reduce(
     (sum, line) => sum + (receivable(line) || Number(line.dispatched_quantity ?? 0)),
@@ -642,13 +787,14 @@ function receiptPackages(
 function packagePartsForLine(
   line: AcknowledgementLine,
   dispatchId?: number | null,
+  strict = false,
 ): AcknowledgementPackageQuantity[] {
   const all = (line.package_quantities ?? [])
     .filter((part) => Number(part.quantity ?? 0) > 0);
   const scoped = dispatchId
     ? all.filter((part) => part.dispatch_id === dispatchId)
     : all;
-  const parts = scoped.length > 0 ? scoped : all;
+  const parts = scoped.length > 0 || strict ? scoped : all;
   if (parts.length === 0) return [];
 
   const target = receivable(line) > 0
@@ -831,7 +977,7 @@ function isFullTracking(leg?: ReceiptLeg): leg is RaiserTracking {
  * else, so the package a photo was taken of rides on the category behind a separator
  * the backend knows (`indents.service.ACK_SCOPE_SEP`). Both sides read the base with
  * their own helper and neither compares the whole string, so an unscoped row — every
- * receipt photo filed before today — stays a photo.
+ * receipt photo filed before the scopes — stays a photo.
  * ------------------------------------------------------------------------ */
 
 const SCOPE_SEP = "::";
@@ -850,25 +996,75 @@ function attachmentScope(value?: string | null) {
 }
 
 /** Stable, and short enough for a `String(50)` column the base already eats into. */
+/**
+ * A unit code as the person at the delivery reads it: the tail after the last hyphen,
+ * leading zeros dropped — `304040-WATER-CAN-SUPREME-SUPREME-0001-1-00003601` is 3601.
+ * Every code on one line shares the long prefix, so it was the only part of each row
+ * the truncation left visible. Display only: search, selection and the save still
+ * use the full code, which stays on hover.
+ */
+function shortCode(code: string) {
+  const cut = code.lastIndexOf("-");
+  // No hyphen: a maker's own serial or IMEI, shown exactly as printed on the unit.
+  if (cut < 0) return code;
+  const tail = code.slice(cut + 1);
+  if (!tail) return code;
+  return tail.replace(/^0+(?=.)/, "");
+}
+
 function proofScope(prefix: "C" | "P", key: string) {
   const slug = key.toUpperCase().replace(/[^A-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   return `${prefix}-${slug}`.slice(0, 30);
 }
 
 /* ---------------------------------------------------------------------------
- * The look.
+ * A photo of one ITEM.
  *
- * Flat. One white sheet per step on the page's warm ground, hairlines instead of
- * boxes, and a large ghosted numeral where a heading would normally sit -- the page
- * reads as a numbered job card rather than a stack of framed panels.
+ * A picture of the sealed pallet proves a delivery happened. It proves nothing about
+ * what was in it, and every dispute three weeks later is about a particular line —
+ * the wrong model of handset, one crushed box of four. So each item being confirmed
+ * carries its own shot, and the scope names the indent LINE.
  *
- * The previous pass nested four borders deep (card > header > strip > panel > item
- * card > fact box), and each frame cost contrast that the CONTENT then had to win
- * back with a colour. Taking the frames away leaves the numbers as the loudest thing
- * on the screen, which is what somebody standing at a pallet is looking for.
+ * ONE photo per item, never one per unit. Sixty cables are photographed once;
+ * a rule that asked for sixty is a rule satisfied with sixty pictures of one bundle.
+ *
+ * The item id comes FIRST and the package second (`I-<line>-<package>`), because the
+ * server counts by line and the screen files by carton. `indents.service`'s
+ * `ack_category_item` reads the same shape, and matches on the id alone — so an item
+ * split across two packages, photographed while the first was open, is not demanded
+ * again when the second is opened.
  * ------------------------------------------------------------------------ */
 
-/** A quiet heading for a run of rows. The only structure below a step's headline. */
+/** The scope for one line's own photo, taken while `packKey`'s carton was open. */
+function itemProofScope(indentItemId: number, packKey: string) {
+  // Hashed, not sliced. The package key is `dispatch-4-package-9` today and a
+  // vendor's own package_no string when the warehouse never numbered one; a slice
+  // lets two long ones collide, which files one carton's proof against another.
+  // The scope must also stay inside `ACK_SCOPE_MAX` (30) on the server.
+  return `I-${indentItemId}-${shortHash(packKey)}`;
+}
+
+/** Which line a filed photo is OF, or null for a shot of the load or a carton. */
+function scopeItemId(scope: string): number | null {
+  const match = /^I-(\d+)(?:-|$)/.exec(scope);
+  return match ? Number(match[1]) : null;
+}
+
+/** Six hex characters, deterministic, from any key. FNV-1a — no dependency, and the
+ *  only property needed is that two different cartons do not land on one string. */
+function shortHash(value: string) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).toUpperCase().padStart(8, "0").slice(0, 6);
+}
+
+/* ---------------------------------------------------------------------------
+ * The frame: who this is for, where you are, and one sheet per step.
+ * ------------------------------------------------------------------------ */
+
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
@@ -883,41 +1079,101 @@ function sentenceList(parts: string[]) {
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
-const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
+/** A task's label cut to the one word the footer has room for: "count", "photo",
+ *  "serial numbers". Read off the same labels `tasksFor` writes, never a second list. */
+function shortTask(label: string) {
+  if (label.startsWith("Count")) return "count";
+  if (label.startsWith("Photo")) return "photo";
+  if (label.startsWith("Match")) return "serial numbers";
+  return label.toLowerCase();
+}
+
+/**
+ * The one strip of chrome on the page: whose delivery this is, how much of it is
+ * waiting on you, and — as its children — the rail that says where you are.
+ *
+ * The step count used to be written three times (a "Step 2 of 5" caption, the rail,
+ * and a numbered disc on the sheet) and the job three more (a Count → Photo → Sign
+ * strip, the sheet's checklist, the footer). The rail says the first and the sheet
+ * says the second; this says only what nothing else on the page does.
+ */
+function ReceiptHeader({ row, waiting, anythingToConfirm, nothingSentYet, children }: {
+  row: Acknowledgement;
+  waiting: number;
+  anythingToConfirm: boolean;
+  nothingSentYet: boolean;
+  children: ReactNode;
+}) {
+  const due = neededBy(row);
+  return (
+    <section className="rounded-3xl bg-content1 px-5 py-4 shadow-[0_1px_3px_rgba(16,24,40,0.04)] sm:px-7">
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
+        <div className="min-w-0">
+          <SectionLabel>Receiving</SectionLabel>
+          <div className="mt-1 truncate text-sm font-semibold text-ink">
+            {row.project_name ?? "Your indent"}
+          </div>
+          {due && (
+            <div className={`mt-0.5 inline-flex items-center gap-1 text-xs ${
+              due.overdue ? "font-semibold text-bad" : "text-muted"
+            }`}>
+              <CalendarClock className="h-3.5 w-3.5" aria-hidden />
+              {due.text}
+            </div>
+          )}
+        </div>
+        <div className="text-right">
+          {anythingToConfirm ? (
+            <>
+              <div className="font-display text-3xl font-bold leading-none tabular-nums text-ink">
+                {qty(waiting)}
+              </div>
+              <div className="mt-1 text-xs text-muted">waiting for you to confirm</div>
+            </>
+          ) : (
+            <div className="text-sm text-body">
+              {nothingSentYet
+                ? "Nothing has been sent to you yet."
+                : "Everything sent to you is already received."}
+            </div>
+          )}
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
 
 /**
  * Where you are in the delivery, and every other place you could be.
  *
- * Dots on a line. It was 44px rounded squares carrying an icon, a corner badge, a
- * name, a document code and a "you are here" pill -- five things per node, six nodes,
- * before the actual work started. A step rail answers one question: which of how many
- * is this. The numeral answers it; the name under it says which; green says done.
- *
- * The colours are the product's OWN rail tokens (`--color-step-*`, index.css), the
- * same three every other stepper in the system uses. The live dot was `bg-brand`,
- * which is not a colour at all here: every solid brand fill wears the four-stop
- * Bavya sweep, so a 26px disc rendered as a slice of gradient that changed hue
- * across its own diameter and matched nothing else on the page.
+ * Dots on a line: the numeral says which of how many, the name under it says which,
+ * green says done. A step with only optional work is a DASHED ring, so skipping the
+ * consignment photo does not read as unfinished business. The colours are the
+ * product's own rail tokens (`--color-step-*`), the same three every other stepper in
+ * the system uses — never the solid brand fill, which draws the brand sweep.
  */
-function JourneyRail({ stops, activeIndex, isDone, onJump }: {
+function JourneyRail({ stops, activeIndex, stateOf, onJump }: {
   stops: Stop[];
   activeIndex: number;
-  isDone: (stop: Stop) => boolean;
+  stateOf: (stop: Stop) => StopState;
   onJump: (index: number) => void;
 }) {
   return (
-    <div className="-mx-1 mt-4 overflow-x-auto pb-0.5">
+    <div className="-mx-1 mt-4 overflow-x-auto border-t border-line pt-3">
       <ol className="flex min-w-max items-start">
         {stops.map((stop, index) => {
-          const done = isDone(stop);
+          const state = stateOf(stop);
           const active = index === activeIndex;
+          const done = state === "done";
+          const optional = state === "optional";
           return (
             <li key={stop.key} className="flex items-start">
               {index > 0 && (
                 <span
                   aria-hidden
-                  className={`mt-[21px] h-px w-7 shrink-0 sm:w-12 ${
-                    isDone(stops[index - 1]) ? "bg-step-done-rail" : "bg-line"
+                  className={`mt-[21px] h-0.5 w-6 shrink-0 rounded-full sm:w-12 ${
+                    stateOf(stops[index - 1]) === "done" ? "bg-step-done-rail" : "bg-line"
                   }`}
                 />
               )}
@@ -925,23 +1181,31 @@ function JourneyRail({ stops, activeIndex, isDone, onJump }: {
                 type="button"
                 onClick={() => onJump(index)}
                 aria-current={active ? "step" : undefined}
+                aria-label={`${stop.plain}${done ? ", finished" : optional ? ", optional" : ""}`}
                 title={stop.label}
-                className="flex w-[80px] shrink-0 flex-col items-center gap-2 px-1 py-2 text-center sm:w-[104px]"
+                className="group flex w-[76px] shrink-0 flex-col items-center gap-1.5 rounded-xl px-1 py-2 text-center transition hover:bg-content2/60 sm:w-[100px]"
               >
-                <span className={`flex h-[26px] w-[26px] items-center justify-center rounded-full text-[11px] font-semibold tabular-nums transition ${
+                {/* Finished wins the colour, the current step keeps its ring: "where am
+                    I" and "is it done" are both answered by the one disc. */}
+                <span className={`grid h-[26px] w-[26px] place-items-center rounded-full text-[11px] font-semibold tabular-nums transition ${
                   done
-                    ? "bg-step-done text-white"
+                    ? `bg-step-done text-white ${active ? "ring-4 ring-step-done/25" : ""}`
                     : active
                       ? "bg-step-live text-white ring-4 ring-step-live/20"
-                      : "bg-content2 text-muted"
+                      : optional
+                        ? "border-2 border-dashed border-line bg-content1 text-muted"
+                        : "bg-content2 text-muted"
                 }`}>
                   {done ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : index + 1}
                 </span>
                 <span className={`line-clamp-2 text-[11px] leading-tight ${
-                  active ? "font-semibold text-ink" : "text-muted"
+                  active ? "font-semibold text-ink" : done ? "text-body" : "text-muted"
                 }`}>
                   {stop.plain}
                 </span>
+                {optional && !active && (
+                  <span className="-mt-1 text-[10px] text-muted">Optional</span>
+                )}
               </button>
             </li>
           );
@@ -952,175 +1216,132 @@ function JourneyRail({ stops, activeIndex, isDone, onJump }: {
 }
 
 /**
- * One step, as a sheet.
- *
- * The step number used to be set as a 48px ghosted numeral in a 25%-opacity brand
- * pink. It was the largest thing on the page and the palest, which is the one
- * combination that reads as a printing fault rather than as decoration -- and it
- * spent the page's only warm hue on a fact (“this is step one”) the rail above had
- * already answered. It is a small filled disc in the product's own step colour now,
- * the same disc the rail and every other stepper in the system use, sitting on one
- * line with the step count and what this step is about.
- *
- * Under it, in order, exactly three things -- what to do, what this refers to, and
- * what is still missing. The last of those is a sentence, because "Still to do:
- * photograph this package" is read in one pass and two amber chips are not.
+ * One step, as a sheet: what this step is, what to do, and the checklist of what it
+ * needs — one chip per task, green the moment it is true, amber while it is owed, grey
+ * when it is only recommended. Then the work.
  */
-function StepSheet({
-  stepNo, stepTotal, kicker, headline, note, code, meta, tasks, children,
-}: {
-  stepNo: number;
-  stepTotal: number;
-  /** What this step is about, in two or three words: "Consignment received". */
+function StepSheet({ kicker, headline, note, tasks, children }: {
+  /** Which step this is, in two or three words: "At the gate", "Package 1 of 3". */
   kicker: string;
   headline: string;
   note: string;
-  /** The document this step is about. Omitted where the step draws the document
-   *  itself underneath — the gate stop puts the consignment number on a slip at the
-   *  size it is printed, and an 11px copy of it in the header is the same fact
-   *  twice, the smaller one first. */
-  code?: string;
-  meta?: string;
   tasks: StepTask[];
   children: ReactNode;
 }) {
-  const left = tasks.filter((task) => !task.done);
   return (
     <section className="rounded-3xl bg-content1 px-5 py-6 shadow-[0_1px_3px_rgba(16,24,40,0.04)] sm:px-7">
       <header>
-        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-step-live text-[12px] font-bold tabular-nums text-white">
-            {stepNo}
-          </span>
-          <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-500">
-            {kicker}
-          </span>
-          <span className="text-[11px] tabular-nums text-muted">
-            Step {stepNo} of {stepTotal}
-          </span>
+        <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-step-live">
+          {kicker}
         </div>
-        <h2 className="mt-3 font-display text-xl font-bold leading-tight text-ink sm:text-2xl">
+        <h2 className="mt-1.5 font-display text-xl font-bold leading-tight text-ink sm:text-2xl">
           {headline}
         </h2>
         <p className="mt-1.5 max-w-prose text-sm leading-relaxed text-muted">{note}</p>
-        {(code || meta) && (
-          <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
-            {code && (
-              <span className="rounded-md bg-content2 px-1.5 py-0.5 font-mono text-body">
-                {code}
-              </span>
-            )}
-            {code && meta && <span aria-hidden>&middot;</span>}
-            {meta && <span>{meta}</span>}
-          </p>
-        )}
-        <p className={`mt-4 flex items-start gap-2 text-sm font-medium ${
-          left.length > 0 ? "text-warn" : "text-ok"
-        }`}>
-          {left.length > 0
-            ? <Circle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-            : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />}
-          <span>
-            {left.length > 0
-              ? `Still to do: ${sentenceList(left.map((task) => lowerFirst(task.label)))}`
-              : "Nothing left to do here"}
-          </span>
-        </p>
+        <ul className="mt-4 flex flex-wrap gap-2" aria-label="This step needs">
+          {tasks.map((task) => (
+            <li
+              key={task.label}
+              className={`inline-flex min-h-8 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
+                task.done
+                  ? "bg-ok-bg text-ok"
+                  : task.optional ? "bg-content2 text-muted" : "bg-warn-bg text-warn"
+              }`}
+            >
+              {task.done
+                ? <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+                : <Circle className="h-4 w-4 shrink-0" aria-hidden />}
+              <span>{task.label}</span>
+              <span className="sr-only">{task.done ? "(done)" : "(not done yet)"}</span>
+            </li>
+          ))}
+        </ul>
       </header>
-      <div className="mt-7 space-y-7">{children}</div>
+      <div className="mt-6 space-y-6">{children}</div>
     </section>
   );
 }
 
+/** What every photo strip on the page is handed, whichever pile it is showing. */
+interface PhotoProps {
+  indentId: number;
+  uploadPending: boolean;
+  removePending: boolean;
+  onView: (files: ReceiptAttachment[], index: number) => void;
+  onDelete: (attachmentId: number) => void;
+}
+
 /* ---------------------------------------------------------------------------
- * Stop 1..n-1 -- the handover, then one package at a time.
+ * Stop 1: the load at the gate, before anything is opened.
  * ------------------------------------------------------------------------ */
 
 /**
- * The first stop: a load is at the gate and nothing has been opened yet.
- *
- * It read "Consignment photos" over two grey dropzones, with the consignment number
- * as an 11px chip in the header and everything about the vehicle -- carrier, driver,
- * docket, when it left, when it was due -- as muted grey at the very bottom under
- * "How it travelled". That is the wrong way round for the two minutes this step
- * covers. Somebody is standing in front of a truck with a delivery note in their
- * hand: the first thing they do is match the paper to the load, and the second is
- * photograph it before a single box moves.
- *
- * So the SLIP is first (the number at the size it is printed on the paperwork, and
- * who brought it -- including the driver's phone number, which was served on this row
- * all along and drawn nowhere), then the camera, then the packages, then the trail of
- * how it got here. The camera has not moved down the page in any way that matters:
- * the slip is four lines and a strip of facts, where the tracking card it replaces
- * was the tallest thing on the step.
+ * Somebody is standing in front of a truck with a delivery note in their hand: the
+ * first thing they do is match the paper to the load, the second is photograph it
+ * before a single box moves, the third is find the cartons. So: the slip, the camera,
+ * the packages — and the trail of how it got here folded away underneath, open on its
+ * own only when something went wrong on the road.
  */
 function GateStop({
-  stop, stepNo, stepTotal, indentId, tasks, files, loading, failed, uploadPending,
-  removePending, onUpload, onView, onDelete, onOpenPackage, packageLabel,
-  packageProgress,
+  stop, tasks, photos, loading, failed, onUpload, onOpenPackage, packageLabel,
+  packageProgress, bills, onUploadBill, inProcess, ...photoProps
 }: {
   stop: Stop;
-  stepNo: number;
-  stepTotal: number;
-  indentId: number;
   tasks: StepTask[];
-  files: ReceiptAttachment[];
+  photos: ReceiptAttachment[];
   loading: boolean;
   failed: boolean;
-  uploadPending: boolean;
-  removePending: boolean;
   onUpload: (file: File, base: string) => void;
-  onView: (files: ReceiptAttachment[], index: number) => void;
-  onDelete: (attachmentId: number) => void;
   onOpenPackage: (pack: ReceiptPackage) => void;
   packageLabel: (pack: ReceiptPackage) => string;
   packageProgress: (pack: ReceiptPackage) => PackageProgress;
-}) {
+  /** The delivery's bills, or null on every consignment but the first. */
+  bills: ReceiptAttachment[] | null;
+  onUploadBill: (file: File, base: string) => void;
+  /** Approved lines not in this delivery at all — context, never work. */
+  inProcess: AcknowledgementLine[];
+} & PhotoProps) {
   const leg = stop.consignment?.leg;
   const packages = stop.consignment?.packages ?? [];
   return (
     <StepSheet
-      stepNo={stepNo}
-      stepTotal={stepTotal}
       kicker="At the gate"
-      headline="Check the load before anything is opened"
-      note="Walk round it once. A broken seal, a crushed corner, a wet carton, a pallet that has shifted — photograph whatever you find, and photograph the load as it stands before the first box comes off. These pictures are the only record of how it turned up."
+      headline="Check the delivery before you open it"
+      note="Match the number below with the paper the driver gives you. Walk around the load and photograph anything broken, wet or crushed."
       tasks={tasks}
     >
-      {/* What is in front of the person, and who brought it: the one thing to check
-          against the paper in the driver's hand before anything else happens. */}
       <ConsignmentSlip
         no={stop.consignment?.no ?? "Consignment"}
+        isConsignment={stop.consignment?.isConsignment ?? false}
         leg={leg}
         packages={packages}
         loading={loading}
         failed={failed}
       />
 
-      {/* The whole reason this step exists, so it is the first thing after the slip
-          -- not a panel below a tracking card the person did not ask for. */}
-      <ProofPanel
-        title="Photograph it as it arrived"
-        note="Filed against the consignment above. Each package gets its own photos at the steps after this one."
-        shots={GATE_SHOTS}
-        indentId={indentId}
-        files={files}
-        uploadPending={uploadPending}
-        removePending={removePending}
-        onUpload={onUpload}
-        onView={onView}
-        onDelete={onDelete}
+      <PhotoStrip
+        // Named for what the pictures ARE, in the word the paperwork uses: they are
+        // the consignment's photos, filed against the number on the slip above.
+        title="Consignment photos"
+        note="The load, the seal, the number plate and anything damaged. At least one is needed before you can acknowledge."
+        required
+        buttonLabel="Add photos"
+        files={photos}
+        onUpload={(file) => onUpload(file, PHOTO)}
+        {...photoProps}
       />
 
       {packages.length > 0 && (
         <section>
-          <SectionLabel>Packages in this consignment</SectionLabel>
-          <p className="mt-1 text-xs text-muted">
-            One step each, in any order. Nothing is locked.
-          </p>
-          <ul className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <SectionLabel>
+              {packages.length === 1 ? "The package" : `Packages (${packages.length})`}
+            </SectionLabel>
+            <span className="text-[11px] text-muted">Open them in any order</span>
+          </div>
+          <ul className="mt-2.5 space-y-2">
             {packages.map((pack) => (
-              <PackageCard
+              <PackageRow
                 key={pack.key}
                 pack={pack}
                 label={packageLabel(pack)}
@@ -1132,38 +1353,45 @@ function GateStop({
         </section>
       )}
 
+      {bills && (
+        <PhotoStrip
+          title="Bill or delivery challan"
+          note="If the vendor's bill or a challan came with the goods, add it here. A photo or a PDF."
+          optional
+          buttonLabel="Add the bill"
+          buttonIcon={Receipt}
+          accept="image/*,application/pdf"
+          files={bills}
+          onUpload={(file) => onUploadBill(file, BILL)}
+          {...photoProps}
+        />
+      )}
+
       {leg && <ArrivalTrail leg={leg} loading={loading} failed={failed} />}
+
+      {inProcess.length > 0 && <InProcessPanel lines={inProcess} />}
     </StepSheet>
   );
 }
 
-/* ---------------------------------------------------------------------------
- * The load, and how it got here.
- * ------------------------------------------------------------------------ */
-
 /**
  * The consignment, drawn as the slip that came with it.
  *
- * Everything on it was already being served and almost none of it was being shown.
- * The number was an 11px chip; the carrier, the vehicle, the docket and the dates
- * were one grey sentence at the bottom of the step; and `driver_phone` and
- * `handed_over_by_name` were on the row and drawn NOWHERE -- which is the one thing
- * somebody at a gate actually needs when a load is two cartons short and the truck is
- * still outside. The driver's number is a `tel:` link now, at a size a thumb can hit
- * while holding a clipboard.
+ * The number at the size it is printed on the paperwork, because it is the one string
+ * on this screen matched character by character against a piece of paper. Under it the
+ * facts, and under those the two things on the card that are ACTIONS rather than facts
+ * — ring the driver, open the carrier's tracking page — as real buttons at thumb size,
+ * because a load two cartons short is chased while the truck is still outside.
  *
- * A fact with nothing behind it is not drawn, on the same rule the package card
- * keeps: a hand-over has no carrier and no docket, and four empty cells would say the
- * paperwork is missing rather than that there never was any.
- *
- * The tape across the top is the card's own state -- green once the carrier has
- * marked it delivered, blue while it is still their responsibility, grey before it
- * leaves -- read off the DATES on the row rather than off the status word, so this
- * module never keeps a second private vocabulary for logistics' statuses. The status
- * itself is printed exactly as it was served.
+ * The coloured edge is the card's state — green once the carrier has marked it
+ * delivered, brand crimson while it is still their responsibility, grey before it
+ * leaves — read off the DATES on the row rather than off the status word, so this
+ * module never keeps a second private vocabulary for logistics' statuses. There is no
+ * status pill; the edge is enough. A fact with nothing behind it is not drawn.
  */
-function ConsignmentSlip({ no, leg, packages, loading, failed }: {
+function ConsignmentSlip({ no, isConsignment, leg, packages, loading, failed }: {
   no: string;
+  isConsignment: boolean;
   leg?: ReceiptLeg;
   packages: ReceiptPackage[];
   loading: boolean;
@@ -1171,12 +1399,9 @@ function ConsignmentSlip({ no, leg, packages, loading, failed }: {
 }) {
   const landed = leg?.delivered_at ?? leg?.acknowledged_at ?? null;
   const moving = Boolean(leg?.dispatched_at);
-  const stripe = landed
+  const edge = landed
     ? "var(--color-step-done)"
-    : moving ? "var(--color-step-live)" : "var(--color-step-off)";
-  const pill = landed
-    ? "bg-ok-bg text-ok"
-    : moving ? "bg-info-bg text-info" : "bg-content2 text-muted";
+    : moving ? "var(--color-brand)" : "var(--color-step-off)";
 
   const packed = packages.some((pack) => Boolean(pack.detail));
   const itemCount = new Set(
@@ -1191,14 +1416,14 @@ function ConsignmentSlip({ no, leg, packages, loading, failed }: {
       : "Not packed into cartons",
     itemCount > 0 ? `${itemCount} item${itemCount === 1 ? "" : "s"}` : "",
     weight,
-  ].filter(Boolean).join(" \u00b7 ");
+  ].filter(Boolean).join(" · ");
 
   const handle = leg?.lr_no ?? leg?.docket_no ?? null;
   // How it travels in words, and who signed it out, exist only on the LIVE tracking
   // payload -- the copy carried on the acknowledgement row itself is the smaller
-  // shape. Read through the narrowing so a leg served either way still draws, minus
-  // whatever that shape does not carry.
+  // shape. Read through the narrowing so a leg served either way still draws.
   const rich = leg && isFullTracking(leg) ? leg : undefined;
+  const dispatchNo = (rich?.gate_pass_no ?? "").trim();
   const carrier = (leg?.carrier_name ?? "").trim();
   const own = !carrier && Boolean(leg?.vehicle_number || leg?.driver_name);
   const due = dueNote(leg);
@@ -1209,7 +1434,12 @@ function ConsignmentSlip({ no, leg, packages, loading, failed }: {
       label: carrier ? "Carrier" : "Brought by",
       value: carrier || "Company vehicle",
       note: [rich?.mode_label ?? leg?.mode, rich?.carriage_label]
-        .filter(Boolean).join(" \u00b7 "),
+        .filter(Boolean).join(" · "),
+    },
+    rich?.trip_no && {
+      key: "trip", icon: MapPin, label: "Shared truck",
+      value: tripStopLabel(rich),
+      note: `${rich.trip_no} · ${tripProgressText(rich)}`,
     },
     leg?.vehicle_number && {
       key: "vehicle", icon: RectangleHorizontal, label: "Vehicle",
@@ -1217,25 +1447,17 @@ function ConsignmentSlip({ no, leg, packages, loading, failed }: {
     },
     leg?.driver_name && {
       key: "driver", icon: UserRound, label: "Driver", value: leg.driver_name,
-      link: leg.driver_phone
-        ? {
-          href: `tel:${leg.driver_phone.replace(/\s+/g, "")}`,
-          label: leg.driver_phone, icon: Phone,
-        }
-        : undefined,
+      note: leg.driver_phone ?? undefined,
     },
     handle && {
-      key: "docket", icon: FileText, label: "Docket", value: handle, mono: true,
-      link: leg?.tracking_url
-        ? { href: leg.tracking_url, label: "Track", icon: ExternalLink, external: true }
-        : undefined,
+      key: "docket", icon: FileText, label: "Tracking no.", value: handle, mono: true,
     },
     leg?.dispatched_at && {
-      key: "sent", icon: CalendarClock, label: "Left the warehouse",
+      key: "sent", icon: CalendarClock, label: "Sent on",
       value: shortDate(leg.dispatched_at),
     },
     leg?.expected_delivery && {
-      key: "due", icon: CalendarClock, label: "Due here",
+      key: "due", icon: CalendarClock, label: "Expected on",
       value: shortDate(leg.expected_delivery),
       note: due?.text, noteTone: due?.tone,
     },
@@ -1245,59 +1467,96 @@ function ConsignmentSlip({ no, leg, packages, loading, failed }: {
     },
   ].filter(Boolean) as SlipFactRow[];
 
+  const phone = leg?.driver_phone?.replace(/\s+/g, "");
+  const trackUrl = leg?.tracking_url;
+
   const footnote = loading
-    ? "Checking with logistics for the carrier and the docket..."
+    ? "Loading the carrier details..."
     : failed
-      ? "Tracking is temporarily unavailable. You can still count and acknowledge."
+      ? "Carrier details could not be loaded. You can still count and acknowledge."
       : leg
         ? ""
-        // No leg at all: `receiptConsignments` then names the stop after the INDENT,
-        // because there is no consignment number to name it after. Say so, rather
-        // than letting an indent number sit under a heading reading "consignment".
-        : "No logistics shipment was raised for this delivery, so there is no carrier"
-          + " or docket to show. You can still count it and sign.";
+        // No leg at all: the stop is named after the consignment the packing list
+        // names, or after the INDENT when nothing was packed. Say there is no carrier.
+        : "No carrier was booked for this delivery. You can still count and acknowledge.";
 
   return (
     <section
-      aria-label={leg ? `Consignment ${no}` : `Delivery for indent ${no}`}
-      className="overflow-hidden rounded-2xl border border-line bg-content1"
+      aria-label={isConsignment ? `Consignment ${no}` : `Delivery for indent ${no}`}
+      /* The consignment wears the brand crimson (its tile the brand sweep), the package
+         the brand's warm orange: the two things being checked at this delivery each wear
+         one, so a glance says which card is the load and which is the carton. No status
+         pill — the left edge still carries the STATE. */
+      className="overflow-hidden rounded-2xl border-2 border-l-4 border-brand/25 bg-brand/5 shadow-[0_10px_28px_-20px_var(--color-brand)]"
+      style={{ borderLeftColor: edge }}
     >
-      {/* Freight tape. The one piece of decoration on the card, and it carries the
-          state, the same way the packing tape on a package card does. */}
-      <span
-        aria-hidden
-        className="block h-2 w-full bg-content2"
-        style={{
-          backgroundImage:
-            `repeating-linear-gradient(45deg, ${stripe} 0 9px, transparent 9px 18px)`,
-        }}
-      />
-
-      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 pb-3.5 pt-3.5">
-        <div className="min-w-0">
-          <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">
-            {leg ? "Consignment note" : "Indent"}
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 py-3.5">
+        <div className="flex min-w-0 items-center gap-3.5">
+          <span
+            aria-hidden
+            className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-brand text-white shadow-[0_8px_18px_-8px_var(--color-brand)]"
+          >
+            <Truck className="h-6 w-6" strokeWidth={1.8} />
+          </span>
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-brand">
+              {leg ? "Consignment note" : isConsignment ? "Consignment" : "Indent"}
+            </div>
+            <div className="mt-0.5 break-all font-mono text-lg font-bold leading-tight tracking-tight text-ink sm:text-xl">
+              {no}
+            </div>
+            {summary && <div className="mt-1 text-xs text-muted">{summary}</div>}
+            {/* The DISPATCH's own number (the gate pass, DSP), paired under the
+                consignment's (CON): the consignment is what was packed, the dispatch is
+                what sent it — and the paper in the driver's hand carries both. */}
+            {dispatchNo && (
+              <div className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-lg border border-dashed border-brand/35 bg-content1/80 py-1 pl-1.5 pr-2.5">
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-brand/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-brand">
+                  <Send className="h-3 w-3" aria-hidden />
+                  Dispatch
+                </span>
+                <span title={dispatchNo} className="truncate font-mono text-xs font-semibold text-ink">
+                  {dispatchNo}
+                </span>
+              </div>
+            )}
           </div>
-          {/* At the size it is printed on the paperwork. It is the one string on this
-              screen matched character by character against a piece of paper. */}
-          <div className="mt-0.5 break-all font-mono text-lg font-bold leading-tight tracking-tight text-ink sm:text-xl">
-            {no}
-          </div>
-          {summary && <div className="mt-1 text-xs text-muted">{summary}</div>}
         </div>
-        <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold ${pill}`}>
-          {leg ? humanise(leg.status) : "No shipment"}
-        </span>
       </div>
 
       {facts.length > 0 && (
-        <dl className="grid grid-cols-2 gap-px border-t border-line bg-line sm:[grid-template-columns:repeat(auto-fit,minmax(168px,1fr))]">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t border-brand/15 bg-content1/70 px-4 py-3.5 sm:grid-cols-3">
           {facts.map(({ key, ...fact }) => <SlipFact key={key} {...fact} />)}
         </dl>
       )}
 
+      {(phone || trackUrl) && (
+        <div className="flex flex-wrap gap-2 border-t border-brand/15 bg-content1/70 px-4 py-3">
+          {phone && (
+            <a
+              href={`tel:${phone}`}
+              className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-line bg-content1 px-3.5 text-xs font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
+            >
+              <Phone className="h-4 w-4" aria-hidden />
+              Call the driver
+            </a>
+          )}
+          {trackUrl && (
+            <a
+              href={trackUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-line bg-content1 px-3.5 text-xs font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
+            >
+              <ExternalLink className="h-4 w-4" aria-hidden />
+              Track the shipment
+            </a>
+          )}
+        </div>
+      )}
+
       {footnote && (
-        <p className={`border-t border-line px-4 py-2.5 text-xs ${
+        <p className={`border-t border-brand/15 bg-content1/70 px-4 py-2.5 text-xs ${
           failed ? "text-warn" : "text-muted"
         }`}>
           {footnote}
@@ -1315,44 +1574,26 @@ interface SlipFactRow {
   mono?: boolean;
   note?: string;
   noteTone?: string;
-  /** A number to ring or a carrier page to open -- the two things on this card that
-   *  are an action rather than a fact, at a size a thumb can hit. */
-  link?: { href: string; label: string; icon: typeof Phone; external?: boolean };
 }
 
-function SlipFact({
-  icon: Icon, label, value, mono, note, noteTone, link,
-}: Omit<SlipFactRow, "key">) {
-  const LinkIcon = link?.icon;
+function SlipFact({ icon: Icon, label, value, mono, note, noteTone }: Omit<SlipFactRow, "key">) {
   return (
-    <div className="bg-content1 px-3 py-2.5">
+    <div className="min-w-0">
       <dt className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">
-        <Icon className="h-3 w-3" aria-hidden />
+        <Icon className="h-3 w-3 text-brand" aria-hidden />
         {label}
       </dt>
-      <dd className="mt-1">
+      <dd className="mt-0.5">
         <span
           title={value}
-          className={`block truncate text-sm font-semibold text-ink ${
-            mono ? "font-mono text-[13px]" : ""
-          }`}
+          className={`block truncate text-sm font-semibold text-ink ${mono ? "font-mono text-[13px]" : ""}`}
         >
           {value}
         </span>
         {note && (
-          <span className={`mt-0.5 block truncate text-[11px] ${noteTone ?? "text-muted"}`}>
+          <span className={`block truncate text-[11px] ${noteTone ?? "text-muted"}`}>
             {note}
           </span>
-        )}
-        {link && LinkIcon && (
-          <a
-            href={link.href}
-            {...(link.external ? { target: "_blank", rel: "noreferrer noopener" } : {})}
-            className="mt-1.5 inline-flex min-h-[44px] items-center gap-1.5 rounded-lg border border-line bg-content2/60 px-3 text-[12px] font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
-          >
-            <LinkIcon className="h-3.5 w-3.5" aria-hidden />
-            {link.label}
-          </a>
         )}
       </dd>
     </div>
@@ -1370,18 +1611,13 @@ interface TrailMark {
 }
 
 /**
- * How it got here, in order.
+ * How it got here, in order — folded to one line by default.
  *
- * The step used to show the carrier's details and the single LATEST event. The
- * details are on the slip above now, so what is left is the part that was missing:
- * the whole trail, oldest first, ending where the person is standing. An exception
- * keeps its own colour, because "held at Hyderabad hub, seal replaced" is the one
- * line on this screen that explains a load turning up two days late and two cartons
- * short -- and it is the line a claim is written from.
- *
- * Nothing is composed here that the shipment does not carry: every mark is a date on
- * the row or an event off `lgs_shipment_events`, and a leg with neither draws nothing
- * at all rather than an empty timeline suggesting the trail was lost.
+ * The trail is the answer to "why is this late / short", which is a question most
+ * deliveries never raise, so it no longer costs every delivery the tallest block on
+ * the step. It opens ON ITS OWN when the road had an exception, because "held at
+ * Hyderabad hub, seal replaced" is the line a claim is written from and must not be
+ * behind a press. Nothing is composed here that the shipment does not carry.
  */
 function ArrivalTrail({ leg, loading, failed }: {
   leg: ReceiptLeg;
@@ -1405,193 +1641,113 @@ function ArrivalTrail({ leg, loading, failed }: {
       }));
   }
   if (leg.delivered_at) {
-    marks.push({
-      key: "delivered", at: leg.delivered_at,
-      title: "Marked delivered by the carrier",
-    });
+    marks.push({ key: "delivered", at: leg.delivered_at, title: "Delivered" });
   }
+  const trouble = marks.some((mark) => mark.bad);
+  const [open, setOpen] = useState(trouble);
   if (marks.length === 0 || loading || failed) return null;
+  const latest = marks[marks.length - 1];
 
   return (
-    <section>
-      <SectionLabel>How it got here</SectionLabel>
-      <ol className="mt-3">
-        {marks.map((mark, index) => {
-          const last = index === marks.length - 1;
-          return (
-            <li key={mark.key} className="relative flex gap-3 pb-4 last:pb-0">
-              {!last && (
+    <section className="rounded-2xl border border-line">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        className="flex min-h-12 w-full items-center gap-3 px-4 py-2.5 text-left"
+      >
+        <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${
+          trouble ? "bg-bad-bg text-bad" : "bg-content2 text-ink-500"
+        }`}>
+          {trouble ? <AlertTriangle className="h-4 w-4" aria-hidden /> : <MapPin className="h-4 w-4" aria-hidden />}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-ink">
+            How it got here
+            <span className="ml-1.5 text-xs font-normal text-muted">
+              {marks.length} update{marks.length === 1 ? "" : "s"}
+            </span>
+          </span>
+          <span className={`block truncate text-[11px] ${trouble ? "text-bad" : "text-muted"}`}>
+            {trouble ? "Something went wrong on the way. " : "Latest: "}
+            {latest.title} · {stamp(latest.at)}
+          </span>
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-muted transition ${open ? "rotate-180" : ""}`} aria-hidden />
+      </button>
+
+      {open && (
+        <ol className="border-t border-line px-4 py-3.5">
+          {marks.map((mark, index) => {
+            const last = index === marks.length - 1;
+            return (
+              <li key={mark.key} className="relative flex gap-3 pb-4 last:pb-0">
+                {!last && (
+                  <span aria-hidden className="absolute bottom-0 left-[6px] top-4 w-px bg-line" />
+                )}
                 <span
                   aria-hidden
-                  className="absolute bottom-0 left-[6px] top-4 w-px bg-line"
+                  className={`mt-1 h-3.5 w-3.5 shrink-0 rounded-full border-2 ${
+                    mark.bad
+                      ? "border-bad bg-bad"
+                      : last
+                        ? "border-step-done bg-step-done"
+                        : "border-step-done-rail bg-content1"
+                  }`}
                 />
-              )}
-              <span
-                aria-hidden
-                className={`mt-1 h-3.5 w-3.5 shrink-0 rounded-full border-2 ${
-                  mark.bad
-                    ? "border-bad bg-bad"
-                    : last
-                      ? "border-step-done bg-step-done"
-                      : "border-step-done-rail bg-content1"
-                }`}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-baseline gap-x-2">
-                  <span className={`text-sm font-semibold ${mark.bad ? "text-bad" : "text-ink"}`}>
-                    {mark.title}
-                  </span>
-                  <span className="text-[11px] tabular-nums text-muted">
-                    {stamp(mark.at)}
-                  </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className={`text-sm font-semibold ${mark.bad ? "text-bad" : "text-ink"}`}>
+                      {mark.title}
+                    </span>
+                    <span className="text-[11px] tabular-nums text-muted">{stamp(mark.at)}</span>
+                  </div>
+                  {(mark.where || mark.detail) && (
+                    <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted">
+                      {mark.where && (
+                        <span className="inline-flex items-center gap-1">
+                          <MapPin className="h-3 w-3 shrink-0" aria-hidden />
+                          {mark.where}
+                        </span>
+                      )}
+                      {mark.where && mark.detail && <span aria-hidden>&middot;</span>}
+                      {mark.detail && <span>{mark.detail}</span>}
+                    </p>
+                  )}
                 </div>
-                {(mark.where || mark.detail) && (
-                  <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted">
-                    {mark.where && (
-                      <span className="inline-flex items-center gap-1">
-                        <MapPin className="h-3 w-3 shrink-0" aria-hidden />
-                        {mark.where}
-                      </span>
-                    )}
-                    {mark.where && mark.detail && <span aria-hidden>&middot;</span>}
-                    {mark.detail && <span>{mark.detail}</span>}
-                  </p>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ol>
+              </li>
+            );
+          })}
+        </ol>
+      )}
     </section>
   );
 }
 
 /* ---------------------------------------------------------------------------
- * The four pictures a freight claim is settled with.
+ * The named shots the gate USED to ask for.
  *
- * "Take a photo" on its own gets one picture of a pallet from three feet away, which
- * proves that something was delivered and nothing whatever about what condition it
- * arrived in or who brought it. Named shots get the load as it stood, the seal, the
- * plate that ties the load to the truck, and the damage itself.
- *
- * NOTHING here blocks. The sign-off asks for one photo of the delivery, exactly as it
- * always did; this list only says which ones are worth having.
+ * The gate once drew four tiles -- the load, the seal, the plate, the damage -- and
+ * each wrote its name into the photo's FILE NAME on the way up. The labels stay,
+ * read-only, because photos already filed under them still carry the name, and the
+ * gallery captions them by it. Do not reword one: that orphans the caption on every
+ * photo already filed under the old words.
  * ------------------------------------------------------------------------ */
 
-interface GateShot {
-  key: string;
-  /** Written into the FILE NAME on the way up and read back off it, so keep it short,
-   *  ASCII and stable: rewording one orphans the tick on every photo already filed
-   *  under the old words. They stay photos and stay on screen, drawn by their own
-   *  name -- nothing is lost, but the tile forgets them. */
-  label: string;
-  hint: string;
-  icon: typeof Camera;
-}
-
-const GATE_SHOTS: GateShot[] = [
-  {
-    key: "LOAD", label: "The load as it stands", icon: Boxes,
-    hint: "Sealed and unopened, before the first box comes off",
-  },
-  {
-    key: "SEAL", label: "The seal or lock", icon: Lock,
-    hint: "Intact or broken \u2014 photograph it either way",
-  },
-  {
-    key: "PLATE", label: "The number plate", icon: RectangleHorizontal,
-    hint: "Ties this load to the vehicle that brought it",
-  },
-  {
-    key: "DAMAGE", label: "Anything damaged", icon: AlertTriangle,
-    hint: "A crushed corner, a wet carton, torn wrap. Skip it if there is none",
-  },
+const GATE_SHOTS: { key: string; label: string; icon: typeof Camera }[] = [
+  { key: "LOAD", label: "The load as it stands", icon: Boxes },
+  { key: "SEAL", label: "The seal or lock", icon: Lock },
+  { key: "PLATE", label: "The number plate", icon: RectangleHorizontal },
+  { key: "DAMAGE", label: "Anything damaged", icon: AlertTriangle },
 ];
 
 const SHOT_SEP = " - ";
 
-/**
- * `IMG_4821.jpg` -> `The seal or lock - IMG_4821.jpg`.
- *
- * The shot rides on the file name because `sys_attachments` has ONE category column
- * and this screen has already spent it on which package a photo belongs to -- a
- * column for a fact only this screen has is a platform change (rule 4). The extension
- * is left exactly as it was (the server whitelists on the extension AND on the file's
- * own leading bytes) and the whole name is capped well under the column's 300.
- */
-function renameForShot(file: File, shot: GateShot) {
-  const dot = file.name.lastIndexOf(".");
-  const stem = dot > 0 ? file.name.slice(0, dot) : file.name;
-  const ext = dot > 0 ? file.name.slice(dot) : "";
-  const named = `${shot.label}${SHOT_SEP}${stem}`.slice(0, 200) + ext;
-  return new File([file], named, { type: file.type });
-}
-
-/** Which shot a filed photo was taken for, or nothing. Every photo filed before today,
- *  and every one added at a package step, reads as nothing and is drawn by its own
- *  file name exactly as it was. */
+/** Which named shot a filed photo was taken for, or nothing. */
 function shotOf(fileName?: string | null) {
   const name = (fileName ?? "").toLowerCase();
   return GATE_SHOTS.find(
     (shot) => name.startsWith(`${shot.label.toLowerCase()}${SHOT_SEP}`));
-}
-
-/**
- * One named shot, as a tile that opens the camera.
- *
- * The tick is REAL state, not something the browser remembers: it is "a photo filed
- * under this name exists on this delivery", read back off the stored file name. The
- * same fact makes the gallery underneath say what each picture is OF, where
- * `IMG_20260919_101422.jpg` said nothing and had to be opened to find out.
- */
-function ShotTile({ shot, count, onUpload }: {
-  shot: GateShot;
-  count: number;
-  onUpload: (file: File, base: string) => void;
-}) {
-  const Icon = shot.icon;
-  const done = count > 0;
-  return (
-    <li>
-      <label className={`flex h-full min-h-[116px] cursor-pointer flex-col gap-1.5 rounded-2xl border px-3 py-3 transition ${
-        done
-          ? "border-ok/45 bg-ok-bg/40 hover:border-ok"
-          : "border-dashed border-line bg-content2/40 hover:border-ink-500/40 hover:bg-content2"
-      }`}>
-        <span className="flex items-center justify-between gap-2">
-          <span className={`grid h-8 w-8 place-items-center rounded-lg ${
-            done ? "bg-ok/12 text-ok" : "bg-content1 text-ink-500"
-          }`}>
-            <Icon className="h-4 w-4" aria-hidden />
-          </span>
-          {done ? (
-            <span className="inline-flex items-center gap-0.5 rounded-full bg-ok px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-white">
-              <Check className="h-3 w-3" strokeWidth={3} aria-hidden />
-              {count}
-            </span>
-          ) : (
-            <Camera className="h-4 w-4 text-muted" aria-hidden />
-          )}
-        </span>
-        <span className="text-[13px] font-semibold leading-tight text-body">
-          {shot.label}
-        </span>
-        <span className={`text-[11px] leading-snug ${done ? "text-ok" : "text-muted"}`}>
-          {done ? `${count} photo${count === 1 ? "" : "s"} \u00b7 add another` : shot.hint}
-        </span>
-        <input
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) onUpload(renameForShot(file, shot), PHOTO);
-            event.target.value = "";
-          }}
-        />
-      </label>
-    </li>
-  );
 }
 
 /* ---------------------------------------------------------------------------
@@ -1613,22 +1769,6 @@ function consignmentWeight(packages: ReceiptPackage[]) {
 const humanise = (value: string) =>
   value.replace(/_/g, " ").toLowerCase().replace(/^./, (first) => first.toUpperCase());
 
-/** Local midnight of a date or a timestamp, so `2026-09-18` never lands on the 17th
- *  west of Greenwich. NaN for anything unparseable, and every caller checks. */
-function dayStamp(value?: string | null) {
-  const parts = (value ?? "").slice(0, 10).split("-").map(Number);
-  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return NaN;
-  return new Date(parts[0], parts[1] - 1, parts[2]).getTime();
-}
-
-function shortDate(value?: string | null) {
-  const stamped = dayStamp(value);
-  if (!Number.isFinite(stamped)) return (value ?? "").slice(0, 10);
-  return new Date(stamped).toLocaleDateString(undefined, {
-    day: "numeric", month: "short",
-  });
-}
-
 function stamp(value: string) {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return value;
@@ -1638,12 +1778,10 @@ function stamp(value: string) {
 }
 
 /**
- * Early, late, or still to come.
- *
- * A promised date on its own is a date; "3 days overdue" is the reason somebody is
- * being asked about it. Measured against the day the carrier marked it delivered
- * where there is one and against today where there is not -- so a load still on the
- * road reads as overdue, and the same load once delivered reads as how late it was.
+ * Early, late, or still to come — measured against the day the carrier marked it
+ * delivered where there is one and against today where there is not, so a load still
+ * on the road reads as overdue, and the same load once delivered reads as how late it
+ * was.
  */
 function dueNote(leg?: ReceiptLeg) {
   const due = dayStamp(leg?.expected_delivery);
@@ -1664,216 +1802,98 @@ function dueNote(leg?: ReceiptLeg) {
   return { text: `In ${plural(-days)}`, tone: "text-muted" };
 }
 
-function PackageStop({
-  pack, stepNo, stepTotal, indentId, tasks, position, total, files, received, counted,
-  pickedSerials, uploadPending, removePending, onUpload, onView, onDelete, onChange,
-  onPickSerials,
-}: {
-  pack: ReceiptPackage;
-  stepNo: number;
-  stepTotal: number;
-  indentId: number;
-  tasks: StepTask[];
-  position: number;
-  total: number;
-  files: ReceiptAttachment[];
-  received: Record<string, string>;
-  counted: { total: number; done: number };
-  pickedSerials: Record<string, string[]>;
-  uploadPending: boolean;
-  removePending: boolean;
-  onUpload: (file: File, base: string) => void;
-  onView: (files: ReceiptAttachment[], index: number) => void;
-  onDelete: (attachmentId: number) => void;
-  onChange: (receiptKey: string, value: string) => void;
-  onPickSerials: (line: ReceiptPackageLine) => void;
-}) {
-  return (
-    <StepSheet
-      stepNo={stepNo}
-      stepTotal={stepTotal}
-      kicker={`Package ${position} of ${total}`}
-      headline="Open it and count what is inside"
-      note="Count the units yourself. Enter what is actually in the package, even if it is fewer than the paperwork says."
-      code={pack.no}
-      meta={`${counted.done} of ${counted.total} counted`}
-      tasks={tasks}
-    >
-      {/* The carton, before its contents: what to pick up and open. */}
-      <PackageIdentityCard pack={pack} position={position} total={total} />
-
-      <section>
-        <SectionLabel>
-          {pack.lines.length === 1 ? "What is in it" : `What is in it (${pack.lines.length} items)`}
-        </SectionLabel>
-        <ul className="mt-1 divide-y divide-line">
-          {pack.lines.map((line) => (
-            <PackageLineRow
-              key={line.receipt_key}
-              line={line}
-              value={received[line.receipt_key] ?? ""}
-              onChange={(value) => onChange(line.receipt_key, value)}
-              selectedSerials={pickedSerials[line.receipt_key] ?? []}
-              onPickSerials={() => onPickSerials(line)}
-            />
-          ))}
-        </ul>
-      </section>
-
-      <ProofPanel
-        title={`Photos of ${pack.no}`}
-        note="Kept against this package alone, so a question about this one is answered with this one's picture."
-        indentId={indentId}
-        files={files}
-        uploadPending={uploadPending}
-        removePending={removePending}
-        onUpload={onUpload}
-        onView={onView}
-        onDelete={onDelete}
-      />
-    </StepSheet>
-  );
-}
-
 /** How far one package has got, read off the same rules its own stop is judged by:
  *  never a second copy of them. */
 interface PackageProgress {
   done: boolean;
   countedDone: number;
   countedTotal: number;
-  photos: number;
+  /** How many ITEMS in this carton have a picture of themselves — not how many
+   *  photos are filed. */
+  photographed: number;
+  /** How many need one: the items counted above zero. */
+  toPhotograph: number;
 }
 
 /**
- * One package in the consignment, drawn as the parcel it is.
+ * One package in the consignment, as one row you press to open it.
  *
- * It was a text row -- a dot, a name, a code and "1 item, 10" -- repeated down a
- * divided list. On a screen whose whole job is "go and find this box on the floor
- * and open it", every package looked exactly like every other package, and the two
- * things that tell them apart on the floor (what kind of container, what is printed
- * on the label) were the smallest text in the row.
- *
- * So the card is a parcel: a strip of packing tape across the lid, a shipping label
- * with the package number set at the size it is printed at, the barcode under it,
- * and the state of the work as a footer. Each of those is a real value off
- * `out_dispatch_packages`, not decoration -- the barcode is drawn only where the
- * warehouse actually recorded one, because a made-up barcode is a scannable-looking
- * thing that does not scan.
- *
- * The state is the SAME three facts the step itself is judged on (counted, then
- * photographed), read through `packageProgress` off the one set of rules, so a card
- * saying "ready" and a rail dot saying "not yet" cannot happen.
+ * Name, the number printed on the carton, what kind of container it is — the three
+ * things that tell two cartons apart on the floor — then the work left on it as two
+ * fractions (counted, photographed), the same two the package's own step asks for.
  */
-function PackageCard({ pack, label, progress, onOpen }: {
+function PackageRow({ pack, label, progress, onOpen }: {
   pack: ReceiptPackage;
   label: string;
   progress: PackageProgress;
   onOpen: () => void;
 }) {
-  const { done, countedDone, countedTotal, photos } = progress;
-  const started = countedDone > 0 || photos > 0;
+  const { done, countedDone, countedTotal, photographed, toPhotograph } = progress;
+  const nothing = countedTotal === 0;
   const weight = packageWeight(pack);
   const size = packageSize(pack);
-  const barcode = (pack.detail?.barcode ?? "").trim();
-  const state = done
-    ? { tone: "text-ok", chip: "bg-ok text-white", word: "Done" }
-    : started
-      ? { tone: "text-warn", chip: "bg-warn-bg text-warn", word: "In progress" }
-      : { tone: "text-muted", chip: "bg-content2 text-muted", word: "Not opened" };
+  const facts = [
+    packageKindLabel(pack),
+    weight,
+    size,
+    `${pack.lines.length} item${pack.lines.length === 1 ? "" : "s"}, ${qty(pack.quantity)}`,
+  ].filter(Boolean).join(" · ");
 
   return (
     <li>
+      {/* Drawn as the carton's own TAG (2026-09-26): an orange label stub carrying the
+          number printed on the box, torn off along a perforation from the work left
+          on it. The brand's warm orange is the package's colour everywhere on this
+          screen, as crimson is the consignment's, so the row reads as "a carton" before a word of it is read. */}
       <button
         type="button"
         onClick={onOpen}
-        className={`group flex h-full w-full flex-col overflow-hidden rounded-2xl border text-left transition hover:-translate-y-0.5 hover:shadow-[0_6px_16px_rgba(16,24,40,0.08)] ${
-          done ? "border-ok/40 bg-ok-bg/25" : "border-line bg-content1"
+        className={`group relative flex min-h-[4.75rem] w-full overflow-hidden rounded-2xl border-2 text-left transition hover:-translate-y-0.5 hover:shadow-[0_12px_26px_-18px_var(--color-signal)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+          done ? "border-ok/40 bg-ok-bg/20" : "border-signal/25 bg-content1 hover:border-signal/60"
         }`}
       >
-        {/* The tape across the lid. Decoration, and the only piece on the card that
-            is: it is what makes a list of these read as parcels at a glance rather
-            than as another table. Kept to a 6px strip in the card's own state
-            colour so it carries the status too. */}
-        <span
-          aria-hidden
-          className={`h-1.5 w-full ${done ? "bg-step-done" : started ? "bg-warn" : "bg-line"}`}
-        />
-
-        <span className="flex flex-1 flex-col gap-3 p-3.5">
-          <span className="flex items-start gap-3">
-            <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl border ${
-              done
-                ? "border-ok/30 bg-ok/10 text-ok"
-                : "border-line bg-content2 text-ink-500"
-            }`}>
-              <Package className="h-6 w-6" strokeWidth={1.5} aria-hidden />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-semibold text-ink group-hover:text-brand">
-                {label}
-              </span>
-              <span className="mt-0.5 block truncate text-[11px] text-muted">
-                {packageKindLabel(pack)}
-                {weight && ` · ${weight}`}
-                {size && ` · ${size}`}
-              </span>
-            </span>
-            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${state.chip}`}>
-              {done ? <Check className="h-3 w-3" strokeWidth={3} aria-hidden /> : state.word}
-            </span>
+        <span className={`flex w-[5.5rem] shrink-0 flex-col items-center justify-center gap-1.5 border-r-2 border-dashed px-2 py-3 sm:w-24 ${
+          done ? "border-ok/30 bg-ok-bg/40" : "border-signal/30 bg-signal/8"
+        }`}>
+          <span className={`grid h-9 w-9 place-items-center rounded-xl text-white shadow-[0_6px_14px_-8px_var(--color-signal)] ${
+            done ? "bg-ok" : "bg-signal"
+          }`}>
+            {done
+              ? <Check className="h-5 w-5" strokeWidth={3} aria-hidden />
+              : <Package className="h-5 w-5" strokeWidth={1.8} aria-hidden />}
           </span>
+          <span
+            title={pack.no}
+            className={`max-w-full truncate font-mono text-[11px] font-bold tracking-tight ${done ? "text-ok" : "text-brand"}`}
+          >
+            {pack.no}
+          </span>
+        </span>
 
-          {/* The shipping label, at label size. The number printed on the carton is
-              the one thing the person can match against what is in front of them,
-              and it was 11px grey under the row title. */}
-          <span className="block rounded-xl border border-dashed border-line bg-content2/50 px-3 py-2">
-            <span className="flex items-baseline justify-between gap-2">
-              <span className="truncate font-mono text-[15px] font-bold tracking-tight text-ink">
-                {pack.no}
-              </span>
-              <span className="shrink-0 text-[11px] font-semibold tabular-nums text-body">
-                {pack.lines.length} item{pack.lines.length === 1 ? "" : "s"} &middot; {qty(pack.quantity)}
-              </span>
-            </span>
-            {barcode && (
-              <>
-                <span
-                  aria-hidden
-                  className="mt-1.5 block h-5 w-full rounded-[2px] opacity-80 [background-image:repeating-linear-gradient(90deg,var(--color-ink)_0_2px,transparent_2px_5px,var(--color-ink)_5px_6px,transparent_6px_10px,var(--color-ink)_10px_13px,transparent_13px_15px,var(--color-ink)_15px_16px,transparent_16px_21px)]"
-                />
-                <span className="mt-1 block truncate font-mono text-[10px] tracking-wide text-muted">
-                  {barcode}
-                </span>
-              </>
+        <span className="flex min-w-0 flex-1 flex-col justify-center gap-2 px-3.5 py-3 sm:px-4">
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="text-sm font-semibold text-ink group-hover:text-brand">{label}</span>
+            {pack.detail?.is_fragile && (
+              <Handling icon={AlertTriangle} tone="bg-warn-bg text-warn" label="Fragile" />
+            )}
+            {pack.detail?.is_temp_controlled && (
+              <Handling icon={Snowflake} tone="bg-info-bg text-info" label="Keep cold" />
             )}
           </span>
-
-          {(pack.detail?.is_fragile || pack.detail?.is_temp_controlled) && (
-            <span className="flex flex-wrap gap-1.5">
-              {pack.detail?.is_fragile && (
-                <Handling icon={AlertTriangle} tone="bg-warn-bg text-warn" label="Fragile" />
-              )}
-              {pack.detail?.is_temp_controlled && (
-                <Handling icon={Snowflake} tone="bg-info-bg text-info" label="Keep cold" />
+          <span className="truncate text-[11px] text-muted" title={facts}>{facts}</span>
+          {!nothing && (
+            <span className="flex flex-wrap gap-x-5 gap-y-2">
+              <PackageMeter icon={Hash} label="Counted" done={countedDone} of={countedTotal} />
+              {toPhotograph > 0 && (
+                <PackageMeter icon={Camera} label="Photographed" done={photographed} of={toPhotograph} />
               )}
             </span>
           )}
+        </span>
 
-          {/* What is left to do on this one, in the same two steps the package stop
-              asks for -- count, then photograph. */}
-          <span className="mt-auto flex items-center gap-2 border-t border-line pt-2.5 text-xs">
-            <span className={`min-w-0 flex-1 truncate font-medium ${state.tone}`}>
-              {done
-                ? "Counted and photographed"
-                : countedTotal === 0
-                  ? "Nothing here is waiting on you"
-                  : `${countedDone} of ${countedTotal} counted · ${
-                    photos > 0 ? `${photos} photo${photos === 1 ? "" : "s"}` : "no photo yet"}`}
-            </span>
-            <span className="inline-flex shrink-0 items-center gap-1 font-semibold text-brand">
-              {started || done ? "Open" : "Open and count"}
-              <ArrowRight className="h-3.5 w-3.5" aria-hidden />
-            </span>
+        <span className="flex shrink-0 items-center pr-3 sm:pr-4">
+          <span className="grid h-9 w-9 place-items-center rounded-full bg-content2 text-muted transition group-hover:bg-signal group-hover:text-white">
+            <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" aria-hidden />
           </span>
         </span>
       </button>
@@ -1881,104 +1901,32 @@ function PackageCard({ pack, label, progress, onOpen }: {
   );
 }
 
-/**
- * The carton, drawn as the thing standing in front of you.
- *
- * A package used to be named by its number and nothing else, which identifies it only
- * if the printed label happens to be facing the person reading the screen -- two
- * identical cartons off one pallet were told apart by walking round them. Everything
- * here already exists on `out_dispatch_packages` and is now served beside the line
- * quantities: the container type, the weight, the three sides, the handling rules and
- * who sealed it, plus what the manifest says is inside.
- *
- * A fact with nothing behind it is NOT drawn. An unweighed package is not a package
- * weighing zero, and a grid of "0 kg / 0 x 0 x 0 cm" would have the screen state
- * measurements that were never taken.
- */
-function PackageIdentityCard({ pack, position, total }: {
-  pack: ReceiptPackage;
-  position: number;
-  total: number;
+/** One of the two things a carton owes, as a fraction over a thin bar. */
+function PackageMeter({ icon: Icon, label, done, of }: {
+  icon: typeof Hash;
+  label: string;
+  done: number;
+  of: number;
 }) {
-  const weight = packageWeight(pack);
-  const size = packageSize(pack);
-  const sealed = packedBy(pack);
-  const barcode = (pack.detail?.barcode ?? "").trim();
-  const facts = [
-    {
-      key: "contains",
-      icon: Package,
-      label: "Manifest says",
-      value: `${pack.lines.length} item${pack.lines.length === 1 ? "" : "s"}, ${qty(pack.quantity)}`,
-    },
-    weight && { key: "weight", icon: Weight, label: "Weight", value: weight },
-    size && { key: "size", icon: Ruler, label: "Size", value: size },
-    barcode && { key: "barcode", icon: Barcode, label: "Barcode", value: barcode, mono: true },
-  ].filter(Boolean) as { key: string; icon: typeof Package; label: string; value: string; mono?: boolean }[];
-
+  const complete = of > 0 && done >= of;
+  const pct = of > 0 ? Math.min(100, Math.round((done / of) * 100)) : 0;
+  const text = complete ? "text-ok" : done > 0 ? "text-warn" : "text-muted";
   return (
-    <section
-      aria-label={`Package ${pack.no}`}
-      className="overflow-hidden rounded-2xl border border-line bg-content2/35"
-    >
-      <div className="flex items-start gap-4 px-4 py-4">
-        {/* A box, drawn as a box. The one place on this screen an illustration
-            earns its space: it is what the person is looking for on the floor. */}
-        <span
-          aria-hidden
-          className="grid h-14 w-14 shrink-0 place-items-center rounded-xl border border-line bg-content1 text-ink-500 shadow-[0_1px_2px_rgba(16,24,40,0.05)]"
-        >
-          <Package className="h-7 w-7" strokeWidth={1.5} />
+    <span className="flex min-w-[7.5rem] flex-1 basis-28 flex-col gap-1 sm:max-w-[11rem]">
+      <span className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="inline-flex items-center gap-1 text-muted">
+          <Icon className="h-3 w-3" aria-hidden />
+          {label}
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="font-mono text-base font-semibold tracking-tight text-ink">
-              {pack.no}
-            </span>
-            <span className="text-sm text-muted">{packageKindLabel(pack)}</span>
-          </div>
-          <div className="mt-0.5 text-xs text-muted">
-            Package {position} of {total}
-            {pack.detail?.dispatch_no && (
-              <> &middot; sent on <span className="font-mono">{pack.detail.dispatch_no}</span></>
-            )}
-            {sealed && <> &middot; packed by {sealed}</>}
-          </div>
-          {/* Handling first, and only when it applies: a chip that shows on every
-              package teaches the eye to skip the one that matters. */}
-          {(pack.detail?.is_fragile || pack.detail?.is_temp_controlled) && (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {pack.detail?.is_fragile && (
-                <Handling icon={AlertTriangle} tone="bg-warn-bg text-warn" label="Fragile - open carefully" />
-              )}
-              {pack.detail?.is_temp_controlled && (
-                <Handling icon={Snowflake} tone="bg-info-bg text-info" label="Temperature controlled" />
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Hairline-separated cells rather than four bordered tiles: the same four
-          facts, without four more frames on a page that already has enough. */}
-      {/* auto-fit rather than a fixed four: most packages in the live data carry a
-          type, a barcode and nothing else — a four-column grid with two cells in it
-          leaves half a card of hairline for facts that were never recorded. */}
-      <dl className="grid grid-cols-2 gap-px border-t border-line bg-line sm:[grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
-        {facts.map((fact) => (
-          <div key={fact.key} className="bg-content1 px-3 py-2.5">
-            <dt className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">
-              <fact.icon className="h-3 w-3" aria-hidden />
-              {fact.label}
-            </dt>
-            <dd className={`mt-1 truncate text-sm font-semibold text-ink ${fact.mono ? "font-mono text-[13px]" : ""}`}
-              title={fact.value}>
-              {fact.value}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </section>
+        <span className={`font-semibold tabular-nums ${text}`}>{done}/{of}</span>
+      </span>
+      <span className="h-1.5 overflow-hidden rounded-full bg-content2" aria-hidden>
+        <span
+          className={`block h-full rounded-full transition-[width] ${complete ? "bg-ok" : "bg-warn"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+    </span>
   );
 }
 
@@ -1988,30 +1936,192 @@ function Handling({ icon: Icon, tone, label }: {
   label: string;
 }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ${tone}`}>
-      <Icon className="h-3.5 w-3.5" aria-hidden />
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${tone}`}>
+      <Icon className="h-3 w-3" aria-hidden />
       {label}
     </span>
   );
 }
 
+/* ---------------------------------------------------------------------------
+ * Stops 2..n-1: one package at a time.
+ * ------------------------------------------------------------------------ */
+
+function PackageStop({
+  pack, tasks, position, total, photos, received, pickedSerials, photosOf,
+  onUpload, onUploadItem, onChange, onPickSerials, ...photoProps
+}: {
+  pack: ReceiptPackage;
+  tasks: StepTask[];
+  position: number;
+  total: number;
+  photos: ReceiptAttachment[];
+  received: Record<string, string>;
+  pickedSerials: Record<string, string[]>;
+  /** This item's own photos, taken while THIS package was open. */
+  photosOf: (line: ReceiptPackageLine) => ReceiptAttachment[];
+  onUpload: (file: File, base: string) => void;
+  onUploadItem: (line: ReceiptPackageLine, file: File) => void;
+  onChange: (receiptKey: string, value: string) => void;
+  onPickSerials: (line: ReceiptPackageLine) => void;
+} & PhotoProps) {
+  return (
+    <StepSheet
+      kicker={total > 1 ? `Package ${position} of ${total}` : "The package"}
+      headline="Open it, count, and photograph each item"
+      note="Enter what you really find, even if it is less than the paper says. One photo per item is enough."
+      tasks={tasks}
+    >
+      <PackageIdentityCard pack={pack} />
+
+      <section>
+        <SectionLabel>
+          {pack.lines.length === 1 ? "Item inside" : `Items inside (${pack.lines.length})`}
+        </SectionLabel>
+        <ul className="mt-2.5 space-y-3">
+          {pack.lines.map((line) => (
+            <PackageLineRow
+              key={line.receipt_key}
+              line={line}
+              value={received[line.receipt_key] ?? ""}
+              onChange={(value) => onChange(line.receipt_key, value)}
+              selectedSerials={pickedSerials[line.receipt_key] ?? []}
+              onPickSerials={() => onPickSerials(line)}
+              photos={photosOf(line)}
+              onUploadPhoto={(file) => onUploadItem(line, file)}
+              {...photoProps}
+            />
+          ))}
+        </ul>
+      </section>
+
+      <PhotoStrip
+        title="Photos of the box"
+        note="The outside, the seal or the label. Useful if the box arrived damaged."
+        optional
+        buttonLabel="Add photos"
+        files={photos}
+        onUpload={(file) => onUpload(file, PHOTO)}
+        {...photoProps}
+      />
+    </StepSheet>
+  );
+}
+
 /**
- * One item in one package: what was sent in THIS package, and what you actually count.
- *
- * A row, not a card. Name and code on the left, the count on the right, and the three
- * reference figures as one quiet line underneath -- they were three bordered boxes,
- * which gave the numbers you cannot change the same weight as the one you can.
- *
- * The stepper stays: often a phone, often one hand, and 44px of button beats a
- * keyboard at a pallet. The box is still there for 37 of something.
+ * The carton, described so it can be checked against the thing standing in front of
+ * you: the number printed on its label at the size it is printed, the container type,
+ * the measurements the warehouse took, who sealed it — and, set apart on the right,
+ * the one number the rest of the step counts up to: what should be inside. A fact
+ * with nothing behind it is NOT drawn; the barcode is printed as its text, because a
+ * drawing of bars is a scannable-looking thing that does not scan.
  */
-function PackageLineRow({ line, value, onChange, selectedSerials, onPickSerials }: {
+function PackageIdentityCard({ pack }: { pack: ReceiptPackage }) {
+  const weight = packageWeight(pack);
+  const size = packageSize(pack);
+  const sealed = packedBy(pack);
+  const barcode = (pack.detail?.barcode ?? "").trim();
+  const itemCount = pack.lines.length;
+  const facts = [
+    weight && { key: "weight", icon: Weight, value: weight },
+    size && { key: "size", icon: Ruler, value: size },
+    barcode && { key: "barcode", icon: Barcode, value: barcode, mono: true },
+    sealed && { key: "sealed", icon: UserRound, value: `Packed by ${sealed}` },
+    pack.detail?.dispatch_no && {
+      key: "dispatch", icon: Truck, value: pack.detail.dispatch_no, mono: true,
+    },
+  ].filter(Boolean) as { key: string; icon: typeof Package; value: string; mono?: boolean }[];
+
+  return (
+    <section
+      aria-label={`Package ${pack.no}`}
+      /* The package's own colour (brand orange) beside the consignment's crimson — see
+         ConsignmentSlip — so the load and the carton are never mistaken for each
+         other at a glance. */
+      className="flex flex-wrap items-center gap-4 rounded-2xl border-2 border-signal/30 bg-signal/5 p-4 shadow-[0_10px_28px_-20px_var(--color-signal)]"
+    >
+      <span
+        aria-hidden
+        className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-signal text-white shadow-[0_8px_18px_-8px_var(--color-signal)]"
+      >
+        <Package className="h-6 w-6" strokeWidth={1.8} />
+      </span>
+
+      <div className="min-w-0 flex-1 basis-56">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-brand">
+          Package label
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+          <span className="break-all font-mono text-xl font-bold leading-tight tracking-tight text-ink">
+            {pack.no}
+          </span>
+          <span className="rounded-full bg-signal/12 px-2.5 py-0.5 text-[11px] font-bold text-brand">
+            {packageKindLabel(pack)}
+          </span>
+        </div>
+        {facts.length > 0 && (
+          <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+            {facts.map((fact) => (
+              <li key={fact.key} className="inline-flex min-w-0 items-center gap-1.5">
+                <fact.icon className="h-3.5 w-3.5 shrink-0 text-brand" aria-hidden />
+                <span className={`truncate ${fact.mono ? "font-mono text-body" : ""}`} title={fact.value}>
+                  {fact.value}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* Handling only when it applies: a chip on every package teaches the eye to
+            skip the one that matters. */}
+        {(pack.detail?.is_fragile || pack.detail?.is_temp_controlled) && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {pack.detail?.is_fragile && (
+              <Handling icon={AlertTriangle} tone="bg-warn-bg text-warn" label="Fragile - open carefully" />
+            )}
+            {pack.detail?.is_temp_controlled && (
+              <Handling icon={Snowflake} tone="bg-info-bg text-info" label="Temperature controlled" />
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="shrink-0 rounded-2xl border-2 border-dashed border-signal/35 bg-content1 px-4 py-2.5 text-center">
+        <div className="font-display text-3xl font-bold leading-none tabular-nums text-brand">
+          {qty(pack.quantity)}
+        </div>
+        <div className="mt-1 text-[11px] font-medium text-muted">
+          should be inside
+          <span className="block text-[10px]">
+            {itemCount} item{itemCount === 1 ? "" : "s"}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * One item in one package, as one card: what it is and what was sent on the left, the
+ * count on the right, the verdict on the count under both — then its proof as a quiet
+ * footer: the photo it needs, and (for coded goods) the codes to check.
+ *
+ * The card goes green when the item has been counted, photographed and (for coded
+ * goods) matched in THIS package — what Acknowledge waits for — so a carton of
+ * eleven can be scanned for the one that is not.
+ */
+function PackageLineRow({
+  line, value, onChange, selectedSerials, onPickSerials, photos, onUploadPhoto,
+  ...photoProps
+}: {
   line: ReceiptPackageLine;
   value: string;
   onChange: (value: string) => void;
   selectedSerials: string[];
   onPickSerials: () => void;
-}) {
+  /** This line's own pictures, taken in this package. */
+  photos: ReceiptAttachment[];
+  onUploadPhoto: (file: File) => void;
+} & PhotoProps) {
   const max = Number(line.package_quantity ?? receivable(line));
   const serials = line.serial_numbers?.filter(Boolean) ?? [];
   const requiredSerials = requiredSerialCount(line, value);
@@ -2023,18 +2133,30 @@ function PackageLineRow({ line, value, onChange, selectedSerials, onPickSerials 
   const current = receivedNumber(value);
   const short = max > 0 && current < max;
   const label = line.item_name ?? line.item_code ?? "item";
+  const finished = max > 0 && current > 0 && photos.length > 0
+    && (serials.length === 0 || serialComplete);
 
   return (
-    <li className="py-5 first:pt-4">
+    <li className={`rounded-2xl border bg-content1 p-4 transition-colors ${
+      finished ? "border-ok/45" : "border-line"
+    }`}>
       <div className="flex flex-wrap items-start justify-between gap-x-5 gap-y-3">
-        <div className="min-w-0 flex-1">
-          <div className="text-[15px] font-semibold leading-snug text-ink">
-            {line.item_name ?? line.item_code}
+        <div className="min-w-0 flex-1 basis-48">
+          <div className="flex items-start gap-2">
+            {finished && <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-ok" aria-hidden />}
+            <div className="min-w-0">
+              <div className="text-[15px] font-semibold leading-snug text-ink">
+                {line.item_name ?? line.item_code}
+              </div>
+              <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+            </div>
           </div>
-          <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
-          <div className="mt-2 text-xs text-muted">
-            <b className="font-semibold tabular-nums text-body">{qty(max)}</b> sent in this
-            package &middot; {qty(line.approved_quantity)} approved &middot; {qty(line.received_quantity)} received so far
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
+            <span>Sent <b className="font-semibold tabular-nums text-body">{qty(max)}</b></span>
+            <span>Approved <b className="font-semibold tabular-nums text-body">{qty(line.approved_quantity)}</b></span>
+            {Number(line.received_quantity ?? 0) > 0 && (
+              <span>Received before <b className="font-semibold tabular-nums text-body">{qty(line.received_quantity)}</b></span>
+            )}
           </div>
         </div>
         {max > 0 ? (
@@ -2058,51 +2180,131 @@ function PackageLineRow({ line, value, onChange, selectedSerials, onPickSerials 
             : <Circle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />}
           <span>
             {current <= 0
-              ? "Not counted yet."
+              ? "Not counted yet"
               : short
-                ? `Confirming ${qty(current)} of ${qty(max)}. The other ${qty(max - current)} can still arrive later.`
-                : `All ${qty(max)} counted.`}
+                ? `${qty(max - current)} missing. They can still come later.`
+                : `All ${qty(max)} here`}
           </span>
         </p>
       )}
 
-      {serials.length > 0 && (
-        <SerialPanel
-          heading={(tracking ?? TRACKING.SERIAL).heading}
-          unit={unit}
-          trackingType={(line.tracking_type ?? "SERIAL") as TrackingType}
-          sent={serials.length}
-          required={requiredSerials}
-          picked={displayedSerials}
-          complete={serialComplete}
-          counted={current > 0}
-          onPick={onPickSerials}
-        />
+      {(max > 0 || serials.length > 0) && (
+        <div className="mt-3.5 space-y-2.5 border-t border-line pt-3.5">
+          {max > 0 && (
+            <ItemProofStrip
+              label={label}
+              photos={photos}
+              onUpload={onUploadPhoto}
+              {...photoProps}
+            />
+          )}
+          {serials.length > 0 && (
+            <SerialPanel
+              heading={(tracking ?? TRACKING.SERIAL).heading}
+              unit={unit}
+              trackingType={(line.tracking_type ?? "SERIAL") as TrackingType}
+              sent={serials.length}
+              required={requiredSerials}
+              picked={displayedSerials}
+              complete={serialComplete}
+              counted={current > 0}
+              onPick={onPickSerials}
+            />
+          )}
+        </div>
       )}
     </li>
   );
 }
 
 /**
+ * The picture of THIS item, as it came out of the carton — the one thing on the row
+ * that is required rather than merely useful, because every dispute is about whether
+ * the thing inside was the right thing and what state it was in.
+ *
+ * **One photo is enough, and the quantity is irrelevant to that.** Sixty cables are
+ * photographed once. More than one is allowed and never asked for: the second shot is
+ * the damaged corner.
+ *
+ * A strip, not a panel: a line of state, one press, and the shots at thumbnail size.
+ * Amber until it has a picture and green once it does — the same two colours the
+ * count above it uses, for the same reason. The press carries `capture`, which opens
+ * the rear camera on a phone; a laptop ignores it and opens the file picker.
+ */
+function ItemProofStrip({ label, photos, onUpload, ...photoProps }: {
+  label: string;
+  photos: ReceiptAttachment[];
+  onUpload: (file: File) => void;
+} & PhotoProps) {
+  const has = photos.length > 0;
+  return (
+    <div>
+      <div className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl px-3 py-2 ${
+        has ? "bg-ok-bg/50" : "bg-warn-bg/60"
+      }`}>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${
+            has ? "bg-ok text-white" : "bg-content1 text-warn"
+          }`}>
+            {has
+              ? <Check className="h-4 w-4" strokeWidth={3} aria-hidden />
+              : <Camera className="h-4 w-4" aria-hidden />}
+          </span>
+          <div className="min-w-0">
+            <div className={`text-sm font-semibold ${has ? "text-ok" : "text-warn"}`}>
+              {has
+                ? `Photo added${photos.length > 1 ? ` (${photos.length})` : ""}`
+                : "Photo needed"}
+              <span className="sr-only"> (required)</span>
+            </div>
+            <p className="text-[11px] leading-snug text-muted">
+              {has
+                ? "Add more if something is damaged."
+                : "One photo is enough, however many there are."}
+            </p>
+          </div>
+        </div>
+        <UploadButton
+          label={has ? "Add another" : "Take a photo"}
+          ariaLabel={`Photograph ${label}`}
+          strong={!has}
+          accept="image/*"
+          capture
+          pending={photoProps.uploadPending}
+          onFiles={(files) => files[0] && onUpload(files[0])}
+        />
+      </div>
+
+      {has && (
+        <ul className="mt-2 grid grid-cols-4 gap-2 sm:grid-cols-6 lg:grid-cols-8">
+          {photos.map((file) => (
+            <PhotoThumb
+              key={file.id}
+              indentId={photoProps.indentId}
+              file={file}
+              compact
+              busy={photoProps.removePending}
+              onView={() => photoProps.onView(photos, photos.indexOf(file))}
+              onDelete={() => photoProps.onDelete(file.id)}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
  * Which physical units this line is being confirmed against.
  *
- * It was one 44px strip with a counter on the right -- the quietest thing on a row
- * that also carried a stepper, a status sentence and three reference figures -- for
- * the one fact on the page that names individual pieces of equipment. A serial
- * confirmed against the wrong handset is not a quantity that can be corrected later:
- * the asset register now says a different device is standing in this office.
- *
- * So it is a panel, and it says four things the strip could not: WHICH kind of
- * identifier is being asked for (the served `TrackingBadge` -- a serial, an IMEI, an
- * asset tag and a lot code are fifteen characters of upper case apiece and the item
- * is the only thing that knows which was printed on the goods), how far through the
- * match is, WHICH codes have been ticked so far, and what to press. The ticked codes
- * are on screen rather than behind the modal, because the check somebody actually
+ * A serial confirmed against the wrong handset is not a quantity that can be corrected
+ * later, so the panel says WHICH kind of identifier is being asked for (the served
+ * `TrackingBadge` — a serial, an IMEI, an asset tag and a lot code are fifteen
+ * characters of upper case apiece), how far through the match is, and which codes have
+ * been ticked, on screen rather than behind the modal: the check somebody actually
  * performs is reading a number off a box and finding it in a list.
  *
- * Three states, and only one of them is a problem: nothing counted yet is neutral
- * (the quantity has to be entered before there is anything to match), part-matched is
- * amber, matched is green.
+ * Nothing counted yet is neutral, part-matched is amber, matched is green.
  */
 function SerialPanel({
   heading, unit, trackingType, sent, required, picked, complete, counted, onPick,
@@ -2120,20 +2322,12 @@ function SerialPanel({
   onPick: () => void;
 }) {
   const meta = useTrackingMeta();
-  const tone = complete
-    ? "border-ok/35 bg-ok-bg/40"
-    : counted
-      ? "border-warn/35 bg-warn-bg/40"
-      : "border-line bg-content2/40";
-  // A bar that is 0% wide at the start of the job is a bar that says nothing; it
-  // only appears once there is something to be part-way through.
-  const progress = required > 0 ? Math.round((picked.length / required) * 100) : 0;
-
+  const tone = complete ? "bg-ok-bg/50" : counted ? "bg-warn-bg/50" : "bg-content2/60";
   return (
-    <div className={`mt-3.5 rounded-2xl border px-3.5 py-3 ${tone}`}>
-      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-        <div className="flex min-w-0 items-start gap-2.5">
-          <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg ${
+    <div className={`rounded-xl px-3 py-2.5 ${tone}`}>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg ${
             complete ? "bg-ok text-white" : "bg-content1 text-ink-500"
           }`}>
             {complete
@@ -2144,66 +2338,44 @@ function SerialPanel({
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="text-sm font-semibold text-ink">{heading}</span>
               <TrackingBadge type={trackingType} meta={meta(trackingType)} size="sm" />
+              <span className={`text-xs font-bold tabular-nums ${
+                complete ? "text-ok" : counted ? "text-warn" : "text-muted"
+              }`}>
+                {picked.length}/{required} matched
+              </span>
             </div>
-            <p className="mt-0.5 text-xs text-muted">
+            <p className="text-[11px] leading-snug text-muted">
               {required > 0
-                ? `Match the ${unit} printed on each unit against the ${sent} sent in this package.`
-                : `Enter how many arrived first, then match the ${unit} on each unit.`}
+                ? `Check the ${unit} printed on each one (${sent} sent).`
+                : `Count first, then check the ${unit} on each one.`}
             </p>
           </div>
         </div>
-        <div className="shrink-0 text-right">
-          <div className={`font-display text-xl font-bold tabular-nums leading-none ${
-            complete ? "text-ok" : counted ? "text-warn" : "text-muted"
-          }`}>
-            {picked.length}<span className="text-sm font-semibold text-muted">/{required}</span>
-          </div>
-          <div className="mt-0.5 text-[11px] text-muted">matched</div>
-        </div>
+        <Button variant={complete ? "subtle" : "soft"} onClick={onPick} disabled={required <= 0}>
+          <ScanBarcode className="h-4 w-4" />
+          {picked.length > 0 ? "Change" : `Check ${unit}s`}
+        </Button>
       </div>
 
-      {required > 0 && (
-        <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-content1">
-          <div
-            className={`h-full rounded-full transition-[width] ${complete ? "bg-ok" : "bg-warn"}`}
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-      )}
-
-      {/* The codes themselves. Wrapped chips, monospace, at a size a number can be
-          read back off a label at -- a count alone never let anybody check one. */}
       {picked.length > 0 && (
-        <ul className="mt-2.5 flex flex-wrap gap-1.5">
+        <ul className="mt-2 flex flex-wrap gap-1.5">
           {picked.map((code) => (
             <li
               key={code}
-              className="rounded-md border border-line bg-content1 px-2 py-1 font-mono text-[12px] font-semibold tracking-tight text-ink"
+              title={code}
+              className="rounded-md border border-line bg-content1 px-2 py-0.5 font-mono text-[12px] font-semibold tracking-tight text-ink"
             >
-              {code}
+              {shortCode(code)}
             </li>
           ))}
         </ul>
       )}
-
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-        <span className={`text-xs font-medium ${complete ? "text-ok" : counted ? "text-warn" : "text-muted"}`}>
-          {required <= 0
-            ? "Nothing to match yet"
-            : complete
-              ? `All ${required} ${required === 1 ? unit : `${unit}s`} matched`
-              : `${required - picked.length} still to match`}
-        </span>
-        <Button variant={complete ? "subtle" : "soft"} onClick={onPick} disabled={required <= 0}>
-          <ScanBarcode className="h-4 w-4" />
-          {picked.length > 0 ? "Change selection" : `Match the ${unit}s`}
-          <ArrowRight className="h-4 w-4" />
-        </Button>
-      </div>
     </div>
   );
 }
 
+/** Often a phone, often one hand: 44px of button beats a keyboard at a pallet, and
+ *  the box is still there for 37 of something. */
 function QuantityStepper({ value, max, onChange, label }: {
   value: string;
   max: number;
@@ -2249,7 +2421,8 @@ function QuantityStepper({ value, max, onChange, label }: {
       <button
         type="button"
         onClick={() => onChange(String(max))}
-        className="mt-1.5 block w-full text-center text-[11px] font-semibold text-brand hover:underline"
+        disabled={current === max}
+        className="mt-1 block min-h-8 w-full text-center text-[11px] font-semibold text-brand hover:underline disabled:text-muted disabled:no-underline"
       >
         All {qty(max)} arrived
       </button>
@@ -2258,273 +2431,123 @@ function QuantityStepper({ value, max, onChange, label }: {
 }
 
 /* ---------------------------------------------------------------------------
- * The last stop.
- * ------------------------------------------------------------------------ */
-
-function ReviewStop({
-  row, stepNo, stepTotal, tasks, stops, proofFor, isDone, onJump, summary,
-  anythingToConfirm, nothingSentYet,
-}: {
-  row: Acknowledgement;
-  stepNo: number;
-  stepTotal: number;
-  tasks: StepTask[];
-  stops: Stop[];
-  proofFor: (stop: Stop) => ReceiptAttachment[];
-  isDone: (stop: Stop) => boolean;
-  onJump: (stop: Stop) => void;
-  summary: { quantity: number; lines: number; byLine: Map<number, number> };
-  anythingToConfirm: boolean;
-  nothingSentYet: boolean;
-}) {
-  const slip = row.lines.filter((line) => (summary.byLine.get(line.indent_item_id) ?? 0) > 0);
-  const inProcess = row.lines.filter((line) =>
-    receivable(line) <= 0
-    && Number(line.approved_quantity ?? 0) > Number(line.received_quantity ?? 0));
-  const evidence = stops.filter((stop) => stop.kind !== "review");
-
-  return (
-    <StepSheet
-      stepNo={stepNo}
-      stepTotal={stepTotal}
-      kicker="Sign off"
-      headline="Sign for what you received"
-      note="One press records everything counted at the steps behind you. Anything not on this list stays open and can still arrive."
-      code={row.indent_no}
-      meta={`${summary.lines} item${summary.lines === 1 ? "" : "s"}`}
-      tasks={tasks}
-    >
-      {/* The slip: exactly what the press will record, the way a till receipt reads. */}
-      <section>
-        <SectionLabel>You are signing for</SectionLabel>
-        {slip.length === 0 ? (
-          <p className="mt-3 text-sm text-muted">
-            {anythingToConfirm
-              ? "Nothing counted yet. Go back into a package and enter how many arrived."
-              : nothingSentYet
-                ? "Nothing has been dispatched to you yet."
-                : "Everything sent to you has already been acknowledged."}
-          </p>
-        ) : (
-          <>
-            <ul className="mt-2 divide-y divide-line">
-              {slip.map((line) => (
-                <li key={line.indent_item_id} className="flex items-baseline gap-3 py-2.5">
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-ink">
-                      {line.item_name ?? line.item_code}
-                    </span>
-                    <span className="block truncate font-mono text-[11px] text-muted">
-                      {line.item_code}
-                    </span>
-                  </span>
-                  <span className="shrink-0 font-mono text-sm font-semibold tabular-nums text-ink">
-                    {qty(summary.byLine.get(line.indent_item_id) ?? 0)}
-                    <span className="ml-1 text-[11px] font-normal text-muted">
-                      {line.uom_code ?? ""}
-                    </span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <div className="mt-3 flex items-baseline justify-between border-t border-line pt-3">
-              <span className="text-sm font-semibold text-body">Total</span>
-              <span className="font-display text-2xl font-bold tabular-nums text-ink">
-                {qty(summary.quantity)}
-              </span>
-            </div>
-          </>
-        )}
-      </section>
-
-      <section>
-        <SectionLabel>Consignment and package photos</SectionLabel>
-        <p className="mt-1 text-xs text-muted">
-          At least one is needed to sign. Press a step to go back and add it.
-        </p>
-        <ul className="mt-2 divide-y divide-line">
-          {evidence.map((stop) => {
-            const files = proofFor(stop);
-            const photos = files.filter(
-              (file) => attachmentBase(file.doc_category) === PHOTO).length;
-            const bills = files.filter(
-              (file) => attachmentBase(file.doc_category) === BILL).length;
-            const done = isDone(stop);
-            return (
-              <li key={stop.key}>
-                <button
-                  type="button"
-                  onClick={() => onJump(stop)}
-                  className="group flex min-h-[52px] w-full items-center gap-3 py-2.5 text-left"
-                >
-                  <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${
-                    done ? "bg-ok text-white" : "bg-warn-bg text-warn"
-                  }`}>
-                    {done
-                      ? <Check className="h-3.5 w-3.5" strokeWidth={3} />
-                      : <Camera className="h-3 w-3" />}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-ink group-hover:text-brand">
-                      {stop.plain}
-                    </span>
-                    <span className="block truncate font-mono text-[11px] text-muted">
-                      {stop.label}
-                    </span>
-                  </span>
-                  <span className={`shrink-0 text-xs ${photos === 0 ? "text-warn" : "text-muted"}`}>
-                    {photos === 0 ? "No photo" : `${photos} photo${photos === 1 ? "" : "s"}`}
-                    {bills > 0 ? `, ${bills} bill${bills === 1 ? "" : "s"}` : ""}
-                  </span>
-                  <ArrowRight className="h-4 w-4 shrink-0 text-muted group-hover:text-brand" />
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-
-      {inProcess.length > 0 && <InProcessPanel lines={inProcess} />}
-    </StepSheet>
-  );
-}
-
-/* ---------------------------------------------------------------------------
  * Proof, and the small parts.
  * ------------------------------------------------------------------------ */
 
 /**
- * One stop's photos and bill.
- *
- * The same component at every stop, over a DIFFERENT pile: the consignment's own, and
- * then one per package. It shows only what belongs here, which is the whole point --
- * "1 photo" against a package now means that package was photographed.
- *
- * Two dropzones, one required and one not, and the captions say which. They were
- * identical grey chips reading "0 photo" and "0 bill" though only one of the two
- * stands between the storekeeper and the sign-off.
- *
- * Given `shots`, the photo half becomes that list of NAMED pictures instead of one
- * blank "Take a photo" -- the gate asks for four, a package asks for none and keeps
- * the plain tile. Either way the gallery, the bill and the delete rule below are the
- * one implementation, so the two kinds of stop cannot drift on how a filed photo is
- * drawn or taken back.
+ * The press that adds a file: a `<label>` around a hidden input, so a thumb anywhere
+ * on it opens the camera or the picker. `strong` is the one that is owed (amber, the
+ * colour of "you must"); the rest are quiet, because an optional photo shouting for
+ * attention is how the required one gets missed.
  */
-function ProofPanel({
-  title, note, indentId, files, uploadPending, removePending, onUpload, onView,
-  onDelete, shots,
+function UploadButton({
+  label, ariaLabel, strong = false, accept, multiple = false, capture = false,
+  pending, icon: Icon = Camera, onFiles,
+}: {
+  label: string;
+  ariaLabel?: string;
+  strong?: boolean;
+  accept: string;
+  multiple?: boolean;
+  /** Open the rear camera on a phone. */
+  capture?: boolean;
+  pending: boolean;
+  icon?: typeof Camera;
+  onFiles: (files: File[]) => void;
+}) {
+  return (
+    <label className={`inline-flex h-11 shrink-0 cursor-pointer items-center gap-2 rounded-xl px-3.5 text-xs font-semibold transition focus-within:ring-2 focus-within:ring-brand/40 ${
+      strong
+        ? "bg-warn text-white hover:brightness-95"
+        : "border border-line bg-content1 text-body hover:border-brand hover:text-brand"
+    } ${pending ? "pointer-events-none opacity-60" : ""}`}>
+      {pending ? <Circle className="h-4 w-4 animate-pulse" aria-hidden /> : <Icon className="h-4 w-4" aria-hidden />}
+      {pending ? "Uploading…" : label}
+      <input
+        type="file"
+        accept={accept}
+        multiple={multiple}
+        {...(capture ? { capture: "environment" as const } : {})}
+        className="sr-only"
+        aria-label={ariaLabel ?? label}
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          event.target.value = "";
+          if (files.length) onFiles(files);
+        }}
+      />
+    </label>
+  );
+}
+
+/**
+ * One pile of proof — a stop's photos, or the delivery's bills — as a heading, one
+ * press, and what has been filed. The same component everywhere a file is added other
+ * than an item's own shot, so the consignment, the box and the bill cannot drift on
+ * how a filed file is drawn or taken back. Images are drawn as the pictures (a
+ * filename makes the person open each one to see whether the damaged corner was
+ * caught); anything else keeps a file row.
+ */
+function PhotoStrip({
+  title, note, optional = false, required = false, buttonLabel, buttonIcon,
+  accept = "image/*", files, onUpload, ...photoProps
 }: {
   title: string;
   note: string;
-  /** Whose files these are — the thumbnails fetch their bytes off this indent's own
-   *  gated route, never a URL of their own (the same rule the shared viewer keeps). */
-  indentId: number;
+  optional?: boolean;
+  /** Owed before Acknowledge unlocks: a red star by the title, an amber button until
+   *  something is filed. */
+  required?: boolean;
+  buttonLabel: string;
+  buttonIcon?: typeof Camera;
+  accept?: string;
   files: ReceiptAttachment[];
-  uploadPending: boolean;
-  removePending: boolean;
-  onUpload: (file: File, base: string) => void;
-  onView: (files: ReceiptAttachment[], index: number) => void;
-  onDelete: (attachmentId: number) => void;
-  /** The named pictures worth having at this stop. Guidance, never a gate: the
-   *  sign-off asks for one photo of the delivery and nothing here changes that. */
-  shots?: GateShot[];
-}) {
-  const photos = files.filter((file) => attachmentBase(file.doc_category) === PHOTO);
-  const bills = files.filter((file) => attachmentBase(file.doc_category) === BILL);
-  // Split for DRAWING, which is a different question from what a file is FOR: a bill
-  // photographed on a phone is a bill and is also a picture, and hiding it in a file
-  // row because of its category would be the screen ignoring what it can see.
+  onUpload: (file: File) => void;
+} & PhotoProps) {
   const images = files.filter(isImage);
   const documents = files.filter((file) => !isImage(file));
-  // How many photos are filed under each named shot, off the stored file name --
-  // so the tick survives a reload, a second device and somebody else's session.
-  const taken = new Map<string, number>();
-  photos.forEach((file) => {
-    const shot = shotOf(file.file_name);
-    if (shot) taken.set(shot.key, (taken.get(shot.key) ?? 0) + 1);
-  });
-  const shotsDone = (shots ?? []).filter((shot) => taken.has(shot.key)).length;
-
-  const billTile = (
-    <UploadTile
-      icon={<FileText className="h-5 w-5" />}
-      label="Add the bill"
-      caption={bills.length > 0 ? `${bills.length} attached` : "Optional"}
-      done={bills.length > 0}
-      accept="image/*,application/pdf"
-      category={BILL}
-      onUpload={onUpload}
-    />
-  );
-
   return (
     <section>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <SectionLabel>{title}</SectionLabel>
-        {uploadPending && <span className="text-[11px] text-muted">Uploading...</span>}
-      </div>
-      <p className="mt-1 max-w-prose text-xs text-muted">{note}</p>
-
-      {shots ? (
-        <>
-          <ul className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-            {shots.map((shot) => (
-              <ShotTile
-                key={shot.key}
-                shot={shot}
-                count={taken.get(shot.key) ?? 0}
-                onUpload={onUpload}
-              />
-            ))}
-          </ul>
-          {/* Two different facts, and only the first of them is a rule: one photo
-              lets you sign, and the rest are what an argument with a carrier is
-              settled with three weeks later. */}
-          <p className="mt-2.5 text-[11px] leading-relaxed">
-            <span className={`font-semibold ${photos.length > 0 ? "text-ok" : "text-warn"}`}>
-              {photos.length > 0
-                ? `${photos.length} photo${photos.length === 1 ? "" : "s"} filed`
-                : "No photo yet — one is needed before you can sign"}
-            </span>
-            <span className="text-muted">
-              {` · ${shotsDone} of ${shots.length} suggested shots taken. Any one photo`}
-              {" lets you sign; the others are what a claim is settled with."}
-            </span>
-          </p>
-          <div className="mt-3 sm:max-w-[340px]">{billTile}</div>
-        </>
-      ) : (
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <UploadTile
-            icon={<Camera className="h-5 w-5" />}
-            label={photos.length > 0 ? "Add another photo" : "Take a photo"}
-            caption={photos.length > 0
-              ? `${photos.length} attached`
-              : "Needed before you can sign"}
-            done={photos.length > 0}
-            accept="image/*"
-            category={PHOTO}
-            onUpload={onUpload}
-          />
-          {billTile}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <SectionLabel>
+              {title}
+              {required && (
+                <>
+                  <span className="ml-0.5 text-sm leading-none text-danger" aria-hidden>*</span>
+                  <span className="sr-only"> (required)</span>
+                </>
+              )}
+            </SectionLabel>
+            {optional && <span className="text-[11px] text-muted">Optional</span>}
+            {files.length > 0 && (
+              <span className="text-[11px] font-semibold text-ok">{files.length} added</span>
+            )}
+          </div>
+          <p className="mt-0.5 max-w-prose text-xs text-muted">{note}</p>
         </div>
-      )}
+        <UploadButton
+          label={files.length > 0 ? "Add more" : buttonLabel}
+          strong={required && files.length === 0}
+          icon={files.length > 0 ? Plus : buttonIcon}
+          accept={accept}
+          multiple
+          pending={photoProps.uploadPending}
+          onFiles={(picked) => picked.forEach(onUpload)}
+        />
+      </div>
 
-      {/* What was actually photographed, as pictures. A receipt screen that lists
-          "IMG_20260919_101422.jpg" makes the person open each file to find out
-          whether the damaged corner was caught -- the one check the photo exists
-          for. Anything that is not an image (a PDF bill, most often) keeps the file
-          row underneath, because there is nothing to show. */}
       {images.length > 0 && (
-        <ul className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        <ul className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
           {images.map((file) => (
             <PhotoThumb
               key={file.id}
-              indentId={indentId}
+              indentId={photoProps.indentId}
               file={file}
-              busy={removePending}
-              onView={() => onView(files, files.indexOf(file))}
-              onDelete={() => onDelete(file.id)}
+              busy={photoProps.removePending}
+              onView={() => photoProps.onView(files, files.indexOf(file))}
+              onDelete={() => photoProps.onDelete(file.id)}
             />
           ))}
         </ul>
@@ -2536,9 +2559,9 @@ function ProofPanel({
             <AttachmentTile
               key={file.id}
               attachment={file}
-              busy={removePending}
-              onView={() => onView(files, files.indexOf(file))}
-              onDelete={() => onDelete(file.id)}
+              busy={photoProps.removePending}
+              onView={() => photoProps.onView(files, files.indexOf(file))}
+              onDelete={() => photoProps.onDelete(file.id)}
             />
           ))}
         </ul>
@@ -2551,29 +2574,17 @@ function ProofPanel({
 const isImage = (file: ReceiptAttachment) =>
   (file.mime_type ?? "").toLowerCase().startsWith("image/");
 
-/**
- * One filed photo, as the photo.
- *
- * The bytes come down the same gated route the viewer uses -- the files are not
- * public URLs and there is no thumbnail service -- so the tile fetches its own blob
- * once and hands back the object URL when it goes away. One request per photo on a
- * step, and a step carries a handful; the alternative is a filename, which is what
- * this replaces.
- */
-function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
-  indentId: number;
-  file: ReceiptAttachment;
-  onView: () => void;
-  onDelete: () => void;
-  busy: boolean;
-}) {
+/** One filed attachment's bytes as an object URL, fetched down the indent's own
+ *  gated route — the files are not public URLs and there is no thumbnail service.
+ *  Shared by the tile and by the slip thumbnail, so there is one place that knows. */
+function useReceiptImage(indentId: number, fileId: number) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let dropped = false;
     let made = "";
-    indentApi.downloadReceiptAttachment(indentId, file.id)
+    indentApi.downloadReceiptAttachment(indentId, fileId)
       .then((blob) => {
         if (dropped) return;
         made = URL.createObjectURL(blob);
@@ -2584,8 +2595,26 @@ function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
       dropped = true;
       if (made) URL.revokeObjectURL(made);
     };
-  }, [indentId, file.id]);
+  }, [indentId, fileId]);
 
+  return { url, failed };
+}
+
+/**
+ * One filed photo, as the photo. `compact` drops the caption — on an item's own
+ * strip every shot is of that item, and a caption on a 64px tile covers the picture.
+ * The delete press is always visible on a phone: it only appeared on hover, and a
+ * phone has no hover, so a wrong shot could not be taken back where it was taken.
+ */
+function PhotoThumb({ indentId, file, onView, onDelete, busy, compact = false }: {
+  indentId: number;
+  file: ReceiptAttachment;
+  onView: () => void;
+  onDelete: () => void;
+  busy: boolean;
+  compact?: boolean;
+}) {
+  const { url, failed } = useReceiptImage(indentId, file.id);
   const isBill = attachmentBase(file.doc_category) === BILL;
   // What it is a picture OF, where the shot was named on the way up. A file name is
   // what the phone called it, which is the one thing nobody needs to read back.
@@ -2595,86 +2624,42 @@ function PhotoThumb({ indentId, file, onView, onDelete, busy }: {
       <button
         type="button"
         onClick={onView}
-        className="block aspect-[4/3] w-full"
+        className={`block w-full ${compact ? "aspect-square" : "aspect-[4/3]"}`}
         title={file.file_name}
       >
         {url ? (
           <img src={url} alt={file.file_name} className="h-full w-full object-cover" />
         ) : (
-          <span className="grid h-full w-full place-items-center text-[11px] text-muted">
-            {failed ? "Preview unavailable" : "Loading..."}
+          <span className="grid h-full w-full place-items-center text-[10px] text-muted">
+            {failed ? "No preview" : <span className="h-full w-full animate-pulse bg-content3" />}
           </span>
         )}
       </button>
-      {/* The caption sits ON the picture: a row under it would put the tile's height
-          at the mercy of a filename, and the grid would stop being a grid. */}
-      <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-5 text-[10px] font-medium text-white">
-        {isBill
-          ? <FileText className="h-3 w-3 shrink-0" aria-hidden />
-          : shot
-            ? <shot.icon className="h-3 w-3 shrink-0" aria-hidden />
-            : <Camera className="h-3 w-3 shrink-0" aria-hidden />}
-        <span className="truncate">{shot?.label ?? file.file_name}</span>
-      </span>
+      {!compact && (
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-5 text-[10px] font-medium text-white">
+          {isBill
+            ? <FileText className="h-3 w-3 shrink-0" aria-hidden />
+            : shot
+              ? <shot.icon className="h-3 w-3 shrink-0" aria-hidden />
+              : <Camera className="h-3 w-3 shrink-0" aria-hidden />}
+          <span className="truncate">{shot?.label ?? file.file_name}</span>
+        </span>
+      )}
       <button
         type="button"
         onClick={onDelete}
         disabled={busy}
         aria-label={`Remove ${file.file_name}`}
-        className="absolute right-1.5 top-1.5 grid h-8 w-8 place-items-center rounded-full bg-content1/90 text-muted opacity-0 transition hover:text-bad focus:opacity-100 disabled:opacity-50 group-hover:opacity-100"
+        className="absolute right-1 top-1 grid h-7 w-7 place-items-center rounded-full bg-content1/90 text-muted shadow-sm transition hover:text-bad focus:opacity-100 disabled:opacity-50 sm:opacity-0 sm:group-hover:opacity-100"
       >
-        <Trash2 className="h-4 w-4" />
+        <Trash2 className="h-3.5 w-3.5" />
       </button>
     </li>
   );
 }
 
-function UploadTile({ icon, label, caption, done, accept, category, onUpload }: {
-  icon: ReactNode;
-  label: string;
-  caption: string;
-  done: boolean;
-  accept: string;
-  category: string;
-  onUpload: (file: File, category: string) => void;
-}) {
-  return (
-    /* A dropzone, at the size of a button rather than a billboard. It was a 92px
-       centred tile with a crimson icon in it, twice, side by side -- the loudest
-       colour on the page spent on the two things that are not yet evidence, above
-       the pictures that are. Left-aligned, half the height, and the icon carries the
-       tile's own state instead of the brand. */
-    <label className={`flex min-h-[64px] cursor-pointer items-center gap-3 rounded-xl border border-dashed px-3.5 py-3 text-left transition ${
-      done
-        ? "border-ok/40 bg-ok-bg/40 hover:border-ok"
-        : "border-line bg-content2/40 hover:border-ink-500/40 hover:bg-content2"
-    }`}>
-      <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
-        done ? "bg-ok/12 text-ok" : "bg-content1 text-ink-500"
-      }`}>
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-semibold text-body">{label}</span>
-        <span className={`block truncate text-[11px] ${done ? "text-ok" : "text-muted"}`}>
-          {caption}
-        </span>
-      </span>
-      <input
-        type="file"
-        accept={accept}
-        className="hidden"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onUpload(file, category);
-          event.target.value = "";
-        }}
-      />
-    </label>
-  );
-}
-
-/** A filed photo or bill: open it, or take it back off the receipt. */
+/** A filed file that is not a picture — a PDF bill, most often: open it, or take it
+ *  back off the receipt. */
 function AttachmentTile({ attachment, onView, onDelete, busy }: {
   attachment: ReceiptAttachment;
   onView: () => void;
@@ -2715,34 +2700,50 @@ function AttachmentTile({ attachment, onView, onDelete, busy }: {
   );
 }
 
+/**
+ * The approved items that are not in this delivery, folded to one line: there is
+ * nothing to do about them here, and on the handover they are context, not work. Open,
+ * each reads the way it does on the list screen — the stage it has got to and the
+ * quantity that proves it (`lineStage` / `STAGE` / `STAGE_HINT`), so the two screens
+ * cannot word or colour the same state differently.
+ */
 function InProcessPanel({ lines }: { lines: AcknowledgementLine[] }) {
+  const [open, setOpen] = useState(false);
   return (
-    <section>
-      <SectionLabel>Still in process</SectionLabel>
-      <p className="mt-1 text-xs text-muted">
-        {lines.length} approved item{lines.length === 1 ? " is" : "s are"} not in this
-        delivery yet. Nothing here needs anything from you.
-      </p>
-      <ul className="mt-2 divide-y divide-line">
-        {lines.map((line) => (
-          <InProcessLine key={line.indent_item_id} line={line} />
-        ))}
-      </ul>
+    <section className="rounded-2xl border border-line">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        className="flex min-h-12 w-full items-center gap-3 px-4 py-2.5 text-left"
+      >
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-content2 text-ink-500">
+          <Truck className="h-4 w-4" aria-hidden />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-ink">
+            Coming later
+            <span className="ml-1.5 text-xs font-normal text-muted">
+              {lines.length} item{lines.length === 1 ? "" : "s"}
+            </span>
+          </span>
+          <span className="block truncate text-[11px] text-muted">
+            Not in this delivery. Nothing to do for {lines.length === 1 ? "it" : "them"} now.
+          </span>
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-muted transition ${open ? "rotate-180" : ""}`} aria-hidden />
+      </button>
+      {open && (
+        <ul className="divide-y divide-line border-t border-line px-4">
+          {lines.map((line) => (
+            <InProcessLine key={line.indent_item_id} line={line} />
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
 
-/**
- * One approved item that is not in the opened package.
- *
- * It reads the same way a line that DID arrive reads -- the stage it has got to and
- * the quantity that proves it -- because "with procurement" on its own answers where
- * the goods are and not how much of the line is there. A line served in rounds is the
- * common case: two of ten off the shelf, eight being bought in, and the eight showed
- * here as a sentence with no number against it. `lineStage` / `STAGE` / `STAGE_HINT`
- * are the list screen's own vocabulary (`acknowledgementParts`), so the two screens
- * cannot word or colour the same state differently.
- */
 function InProcessLine({ line }: { line: AcknowledgementLine }) {
   const stage = lineStage(line);
   const { label, tone, icon: StageIcon, caption } = STAGE[stage];
@@ -2769,13 +2770,10 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
           <StageIcon className="h-3.5 w-3.5" aria-hidden />
           {stage === "on_order" && ordered > 0 ? `${label} ${qty(ordered)}` : label}
         </span>
-        {/* The server's sentence, so the screen and the documents behind it cannot
-            word the same state differently. */}
-        <div className="mt-1 text-xs font-medium text-body">
-          {line.pending_with || caption}
-        </div>
-        <div className="mt-0.5 text-[11px] text-muted">
-          {STAGE_HINT[stage] ?? "No receipt quantity is open for this item yet."}
+        {/* ONE sentence under the pill: the server's where it has one, the list
+            screen's hint where it does not. */}
+        <div className="mt-1 text-xs text-muted">
+          {line.pending_with || STAGE_HINT[stage] || caption}
         </div>
       </div>
     </li>

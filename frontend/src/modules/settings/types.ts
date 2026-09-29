@@ -71,3 +71,100 @@ export interface CodeFormatToken {
   token: string;
   description: string;
 }
+
+export interface MonthlyIndentCycle {
+  is_enabled: boolean;
+  approval_flow_enabled: boolean;
+  /** Which month the window OPENS in, counted from the current month. Only read by
+   *  the server when `anchor_month` is empty (a row saved before it existed). */
+  cycle_month_offset: number;
+  /** YYYY-MM-01 of a month a cycle opens in. Cycles open there and every
+   *  `period_months` either side of it. Always served. */
+  anchor_month?: string | null;
+  /** Only people a submission rule names may raise a monthly indent. */
+  restrict_to_rules: boolean;
+  start_day: number;
+  /** How many months after the opening month it CLOSES in — 0 is the same month. */
+  end_month_offset: number;
+  end_day: number;
+  /** Which month the indents are FOR, counted from the opening month. Names the
+   *  cycle; moves no date. */
+  serves_month_offset: number;
+  timezone: string;
+  scheduler_enabled: boolean;
+  scheduler_interval_minutes: number;
+  cycle_start?: string;
+  cycle_end?: string;
+  cycle_key?: string;
+  serves_start?: string;
+  serves_month?: string;
+  /** How many months apart consecutive cycles open. Served; read-only. */
+  period_months?: number;
+}
+
+export type MonthlyIndentCondition = "NOT_SUBMITTED" | "PENDING_APPROVAL" | "NOT_RESPONDED";
+export type MonthlyIndentTargetType = "HCM_ROLE" | "POSITION" | "EMPLOYEE";
+export type MonthlyIndentEscalationTargetType = "REPORTING_MANAGER" | "HCM_ROLE" | "EMPLOYEE";
+
+export interface MonthlyIndentRule {
+  id: number;
+  name: string;
+  is_active: boolean;
+  trigger_day: number;
+  trigger_time: string;
+  target_type: MonthlyIndentTargetType;
+  target_ref_id: number;
+  target_name?: string | null;
+  condition: MonthlyIndentCondition;
+  message_template: string;
+  escalation_enabled: boolean;
+  escalation_day?: number | null;
+  escalation_time?: string | null;
+  escalation_target_type?: MonthlyIndentEscalationTargetType | null;
+  escalation_target_ref_id?: number | null;
+  escalation_target_name?: string | null;
+  escalation_message_template?: string | null;
+  /** Follow up this many days after the reminder instead of on a fixed day. */
+  escalation_after_days?: number | null;
+  /** How many rungs of the reporting line are told, one step apart. */
+  escalation_levels?: number;
+}
+
+export interface MonthlyIndentSubmissionRule {
+  id: number;
+  name: string;
+  is_active: boolean;
+  target_type: MonthlyIndentTargetType;
+  target_ref_id: number;
+  target_name?: string | null;
+  max_submissions: number;
+  deadline_day: number;
+  allow_after_deadline: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface MonthlyIndentLog {
+  id: number;
+  rule_id: number;
+  cycle_key: string;
+  /** PRIMARY, ESCALATION (level 1) or ESCALATION_L<n> for a later rung. */
+  kind: string;
+  target_employee_id: number;
+  target_employee_name?: string | null;
+  recipient_employee_id: number;
+  recipient_employee_name?: string | null;
+  status: "SENT" | "SKIPPED";
+  reason?: string | null;
+  title?: string | null;
+  message?: string | null;
+  sent_at: string;
+}
+
+export interface MonthlyIndentSettings {
+  cycle: MonthlyIndentCycle;
+  rules: MonthlyIndentRule[];
+  submission_rules: MonthlyIndentSubmissionRule[];
+  logs: MonthlyIndentLog[];
+  next_run?: string | null;
+}

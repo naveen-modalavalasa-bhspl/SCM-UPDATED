@@ -8,6 +8,7 @@ Nothing here is stored on a document. A movement's kind is a function of its two
 endpoints, so it is computed on the way in and can never disagree with them.
 """
 import logging
+from decimal import Decimal
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from app.platform.hcm.models import (
     HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
 )
 from app.platform.hcm import sync as hcm_sync
+from app.platform.hcm.mappers import office_geo
 from app.core.exceptions import ValidationError
 from app.shared.enums import DocType, WarehouseType
 from app.shared.models.warehouse import Warehouse, WarehouseLocation
@@ -934,6 +936,80 @@ def floor_key(section_name: str | None) -> str | None:
     return key or None
 
 
+#: Andhra Pradesh, with a margin for the border. HCM's GPS fields are typed by hand,
+#: and a point outside this box is a typo — a dropped digit, a 0,0 — never a PHC.
+AP_BOUNDS = (12.4, 19.95, 76.6, 84.9)   # lat min, lat max, lon min, lon max
+
+#: `whs_warehouses.coordinate_source` for a point HCM's own GPS fields gave. Trusted
+#: above any gazetteer match and below a pin set by hand on the planner map.
+HCM_COORDINATE_SOURCE = "HCM"
+
+
+def _inside_ap(lat: float, lon: float) -> bool:
+    return AP_BOUNDS[0] <= lat <= AP_BOUNDS[1] and AP_BOUNDS[2] <= lon <= AP_BOUNDS[3]
+
+
+def hcm_point(geo: dict) -> tuple[float, float] | None:
+    """HCM's latitude/longitude for an office, if they describe a place in AP.
+
+    Swapped fields are put right: AP's latitudes (12–20) and longitudes (76–85) cannot
+    overlap, so a pair that only fits the other way round is unambiguous.
+    """
+    lat, lon = geo.get("latitude"), geo.get("longitude")
+    if lat is None or lon is None:
+        return None
+    if _inside_ap(lat, lon):
+        return (lat, lon)
+    if _inside_ap(lon, lat):
+        return (lon, lat)
+    return None
+
+
+def apply_hcm_coordinates(warehouse: Warehouse, geo: dict) -> str | None:
+    """Put HCM's GPS onto the stocking point. Returns SET, CLEARED or None.
+
+    A MANUAL pin is never overwritten: somebody stood at the gate, or looked. When HCM
+    stops sending coordinates for a point that carried them, they are cleared and the
+    point goes back to being matched by name — keeping HCM's old figure with nothing
+    behind it would present a withdrawn reading as a current one.
+    """
+    if warehouse.coordinate_source == "MANUAL":
+        return None
+    point = hcm_point(geo)
+    if point is not None:
+        lat, lon = (Decimal(str(round(value, 7))) for value in point)
+        if (warehouse.coordinate_source == HCM_COORDINATE_SOURCE
+                and warehouse.latitude == lat and warehouse.longitude == lon):
+            return None
+        warehouse.latitude, warehouse.longitude = lat, lon
+        warehouse.coordinate_source = HCM_COORDINATE_SOURCE
+        warehouse.coordinate_label = "GPS from HCM"
+        warehouse.coordinate_confidence = Decimal("1")
+        return "SET"
+    if warehouse.coordinate_source == HCM_COORDINATE_SOURCE:
+        warehouse.latitude = warehouse.longitude = None
+        warehouse.coordinate_source = warehouse.coordinate_label = None
+        warehouse.coordinate_confidence = None
+        return "CLEARED"
+    return None
+
+
+async def office_geo_for(db: AsyncSession, office_ids) -> dict[int, dict]:
+    """`mappers.office_geo` for many offices, with the district HCM gives each."""
+    ids = {int(i) for i in office_ids if i}
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(HcmOffice.id, HcmOffice.raw, HcmOffice.city).where(HcmOffice.id.in_(ids))
+    )).all()
+    out = {}
+    for office_id, raw, city in rows:
+        geo = office_geo(raw)
+        geo["district"] = geo.get("district") or city
+        out[office_id] = geo
+    return out
+
+
 async def rebuild_stocking_points(db: AsyncSession) -> dict:
     """One warehouse per stocking-point office, and the position links that reach it.
 
@@ -996,6 +1072,16 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
             warehouse.name, warehouse.office_name = f"{name} - {kind}", name
             warehouse.warehouse_type, warehouse.is_active = kind, True
         warehouses[office_id] = warehouse
+
+    # HCM's own GPS, where it has any, is the most exact position a stocking point
+    # can have short of a pin set by hand — applied on every sync, so a coordinate
+    # filled in HCM reaches the planner without anybody touching the map.
+    geo = await office_geo_for(db, warehouses)
+    gps = {"SET": 0, "CLEARED": 0}
+    for office_id, warehouse in warehouses.items():
+        outcome = apply_hcm_coordinates(warehouse, geo.get(office_id) or {})
+        if outcome:
+            gps[outcome] += 1
     await db.flush()
 
     floors = await _rebuild_floors(db, positions, warehouses, kinds)
@@ -1022,7 +1108,8 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
     await db.commit()
 
     result = {"warehouses": len(warehouses), "links": links,
-              "removed": len(removed), "floors": len(floors)}
+              "removed": len(removed), "floors": len(floors),
+              "gps_set": gps["SET"], "gps_cleared": gps["CLEARED"]}
     logger.info("stocking points rebuilt: %s", result)
     return result
 

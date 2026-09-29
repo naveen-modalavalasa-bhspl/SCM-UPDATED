@@ -45,9 +45,10 @@ async def pending_summary(db: AsyncSession = Depends(get_db),
 @router.get("/my-decisions")
 async def my_decisions(params: PageParams = Depends(), db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user), search: str = "",
-                       decision: str = ""):
+                       decision: str = "", doc_type: str = ""):
     return await service.decisions_page(
         db, user, params.page, params.size, search=search, decision=decision,
+        doc_type=doc_type,
     )
 
 
@@ -83,6 +84,35 @@ async def allocation_cycles(db: AsyncSession = Depends(get_db),
 async def reports(db: AsyncSession = Depends(get_db),
                   user=Depends(get_current_user)):
     return await service.report_summary(db, user)
+
+
+# Rule 6, on the two endpoints that serve an approval TRAIL. Each is gated on the
+# screen it exists for, which is the honest mapping — there is no "may read a trail"
+# code short of the auditor's, and the real work is done row by row inside: the
+# service refuses a document this login was never part of, and `_ledger_visibility`
+# then decides how far down it they may read. The gate is the outer door; it is not
+# the security.
+@router.get("/decision-ledger/{doc_type}/{doc_id}")
+async def decision_ledger(doc_type: str, doc_id: int,
+                          action_id: int | None = Query(None),
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(
+                              perms.page_view_code("approval_decisions")))):
+    return await service.decision_ledger(db, doc_type, doc_id, user, action_id)
+
+
+# The same trail, read as a MONTH rather than as a document. A monthly indent is
+# signed a whole cycle at a time (`approve_consolidation`), so the decision the
+# approver actually took is spread across N `wf_actions` rows and no single ledger
+# page can state it. Same gate as the ledger above, and the same row-by-row scoping
+# inside: the service refuses an anchor this login was never part of, then counts
+# only the members of the cycle it may read.
+@router.get("/cycle-ledger/{doc_type}/{doc_id}")
+async def cycle_ledger(doc_type: str, doc_id: int,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(
+                           perms.page_view_code("approval_decisions")))):
+    return await service.cycle_ledger(db, doc_type, doc_id, user)
 
 
 @router.get("/history/{doc_type}/{doc_id}")

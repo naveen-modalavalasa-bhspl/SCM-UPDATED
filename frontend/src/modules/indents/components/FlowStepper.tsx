@@ -5,6 +5,7 @@ import {
   INDENT_PROCUREMENT_STATUSES, INDENT_STATUS,
 } from "../constants";
 import type { IndentJourney, IndentJourneyStage, RaiserTracking } from "../types";
+import { tripProgressText } from "./tripLeg";
 
 type StepState =
   | "completed" | "current" | "pending" | "rejected" | "returned" | "cancelled"
@@ -296,13 +297,18 @@ function applyShipmentProgress(
     Boolean(leg.acknowledged_at) || SIGNED_SHIPMENT_STATUSES.has(statuses[index])
   ));
   const location = shipmentLocation(shipments);
+  // A consignment on a shared truck is told from its own stop, not the truck's.
+  const onTrip = shipments.find((leg) => leg.trip_no
+    && !ARRIVED_SHIPMENT_STATUSES.has(String(leg.status ?? "").toUpperCase()));
 
   next[deliveryIndex] = {
     ...next[deliveryIndex],
     state: allArrived ? "completed" : "current",
     caption: allArrived
       ? `${shipments.length} shipment${shipments.length === 1 ? "" : "s"} arrived`
-      : location ? `In transit · ${location}` : "Being handled by logistics",
+      : onTrip
+        ? `Shared truck · stop ${onTrip.stop_sequence ?? "?"} of ${onTrip.total_stops ?? "?"}`
+        : location ? `In transit · ${location}` : "Being handled by logistics",
   };
   next[receiptIndex] = {
     ...next[receiptIndex],
@@ -324,6 +330,8 @@ function shipmentStageMessage(shipments: RaiserTracking[] | undefined) {
   if (arrived > 0) {
     return `${arrived} delivery${arrived === 1 ? " is" : "ies are"} waiting for your signature`;
   }
+  const trip = unsigned.find((leg) => leg.trip_no);
+  if (trip) return tripProgressText(trip);
   const location = shipmentLocation(unsigned);
   return location ? `Your material is in transit at ${location}` : "Your material is with logistics";
 }

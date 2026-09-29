@@ -1,12 +1,8 @@
 import {
-  Boxes, Camera, CheckCircle2, Circle, Clock, ExternalLink, FileText, PackageCheck,
-  ShoppingCart, Trash2, Truck,
+  Boxes, CheckCircle2, Clock, PackageCheck, ShoppingCart, Truck,
 } from "lucide-react";
-import { Input } from "@/shared/components";
 import { INDENT_STATUS } from "../constants";
-import type {
-  Acknowledgement, AcknowledgementLine, RaiserTracking, ReceiptAttachment,
-} from "../types";
+import type { Acknowledgement, AcknowledgementLine } from "../types";
 
 /**
  * The pieces both acknowledgement screens are built from.
@@ -64,33 +60,51 @@ export function lineStage(line: AcknowledgementLine): LineStage {
  * `caption` is only a fallback: the server derives the sentence (`pending_with`) and
  * it is the one that shows, so the wording cannot drift between the screen and the
  * documents behind it. These are here for a line an older backend served without one.
+ *
+ * `bar` is the same stage as a SOLID fill, for the stage bar. It never uses the solid
+ * brand fill, which carries the brand sweep as a background image and would draw a
+ * slice of gradient inside a 6px band.
  */
 export const STAGE: Record<LineStage, {
   label: string;
   tone: string;
+  bar: string;
   icon: typeof Truck;
   caption: string;
 }> = {
   received: {
-    label: "Received", tone: "bg-ok-bg text-ok", icon: CheckCircle2, caption: "",
+    label: "Received", tone: "bg-ok-bg text-ok", bar: "bg-ok",
+    icon: CheckCircle2, caption: "",
   },
   arrived: {
     // Label is the quantity — this is the one stage with something to press.
-    label: "", tone: "bg-brand-050 text-brand", icon: PackageCheck,
-    caption: "On the way to you",
+    label: "", tone: "bg-brand-050 text-brand", bar: "bg-step-live",
+    icon: PackageCheck, caption: "On the way to you",
   },
   packed: {
-    label: "Packed to send", tone: "bg-info-bg text-info", icon: Boxes,
-    caption: "Issued, waiting to be dispatched",
+    label: "Packed to send", tone: "bg-info-bg text-info", bar: "bg-info/55",
+    icon: Boxes, caption: "Issued, waiting to be dispatched",
   },
   on_order: {
-    label: "On order", tone: "bg-warn-bg text-warn", icon: ShoppingCart,
-    caption: "With procurement",
+    label: "On order", tone: "bg-warn-bg text-warn", bar: "bg-warn/60",
+    icon: ShoppingCart, caption: "With procurement",
   },
   waiting: {
-    label: "Not dispatched", tone: "bg-neutral-bg text-neutral", icon: Clock,
-    caption: "In the warehouse, not yet issued",
+    label: "Not dispatched", tone: "bg-neutral-bg text-neutral", bar: "bg-content3",
+    icon: Clock, caption: "In the warehouse, not yet issued",
   },
+};
+
+/** The order the bar is drawn in: furthest along first, so it fills left to right. */
+const STAGE_ORDER: LineStage[] = ["received", "arrived", "packed", "on_order", "waiting"];
+
+/** What each stage is called in the bar's legend and tooltip. */
+const STAGE_WORD: Record<LineStage, string> = {
+  received: "received",
+  arrived: "ready to confirm",
+  packed: "packed",
+  on_order: "on order",
+  waiting: "not dispatched",
 };
 
 /**
@@ -145,287 +159,104 @@ export function summarise(row: Acknowledgement) {
   return commonest ?? `${open} item${open === 1 ? "" : "s"} outstanding`;
 }
 
-export function AttachmentRow({ attachment, onDelete, busy }: {
-  attachment: ReceiptAttachment;
-  onDelete: () => void;
-  busy: boolean;
-}) {
-  const isBill = attachment.doc_category === BILL;
-  return (
-    <li className="flex items-center gap-2.5 rounded-xl border border-line bg-content1 px-3 py-2 text-sm">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ok-bg text-ok">
-        {isBill ? <FileText className="h-4 w-4" /> : <Camera className="h-4 w-4" />}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-ink">{attachment.file_name}</span>
-      <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted">
-        {isBill ? "Bill" : "Photo"}
-      </span>
-      <button
-        type="button"
-        onClick={onDelete}
-        disabled={busy}
-        aria-label={`Remove ${attachment.file_name}`}
-        className="shrink-0 rounded-lg p-1.5 text-muted transition hover:bg-bad-bg hover:text-bad disabled:opacity-50"
-      >
-        <Trash2 className="h-4 w-4" />
-      </button>
-    </li>
-  );
-}
-
-/**
- * One item of the indent: how far it has got, and the box to say what turned up.
- *
- * A card rather than a table row — the table needed 520px and slid sideways on a phone,
- * which is exactly where someone standing at the delivery confirms it.
- */
-export function LineCard({ line, value, onChange }: {
-  line: AcknowledgementLine;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const max = receivable(line);
-  const approved = Number(line.approved_quantity ?? 0);
-  const settled = outstanding(line) === 0;
-  const ordered = onOrder(line);
-  const stage = lineStage(line);
-  const { tone, icon: StageIcon, caption } = STAGE[stage];
-  const serials = line.serial_numbers?.filter(Boolean) ?? [];
-  // What the labels on the goods actually say, SERVED — a serial, an IMEI, an asset
-  // tag and a consumable lot code are fifteen characters of upper case apiece, and
-  // only the item knows which one the person holding the box is being asked to read.
-  const tracking = TRACKING[line.tracking_type ?? ""]
-    ?? (line.is_serial_tracked ? TRACKING.SERIAL : null);
-  // Nothing has been issued against this line, so there is nothing that could have
-  // been recorded. Saying "Not recorded" there reads as a defect in the dispatch.
-  const trackable = Boolean(tracking) && Number(line.issued_quantity ?? 0) > 0;
-  const showSerials = serials.length > 0 || trackable;
-  // The one stage with something to press names its quantity instead of itself.
-  const label = stage === "arrived" ? `${qty(max)} to acknowledge` : STAGE[stage].label;
-  // Approved is the whole bar; each band is the stage that far along, so the bar and
-  // the numbers under it are the same facts read two ways.
-  const share = (amount: number) =>
-    (approved > 0 ? Math.min(100, Math.max(0, (Number(amount ?? 0) / approved) * 100)) : 0);
-  const width = (amount: number) => `${share(amount)}%`;
-
-  return (
-    <li className="rounded-xl border border-line bg-content1 p-3 sm:p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="font-semibold text-ink">{line.item_name ?? line.item_code}</div>
-          <div className="font-mono text-[11px] text-muted">{line.item_code}</div>
-        </div>
-        <span
-          className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${tone}`}
-        >
-          <StageIcon className="h-3.5 w-3.5" aria-hidden />
-          {label}
-        </span>
-      </div>
-
-      <div className="relative mt-3 h-1.5 overflow-hidden rounded-full bg-content3">
-        {/* On order is not progress — it is a promise from procurement — so it wears
-            its own colour and starts where the physical bands END, rather than being
-            drawn over them. Overlapping the two showed a line that was fully
-            accounted for (5 sent, 15 being bought) as three quarters of a bar. */}
-        <div className="absolute inset-y-0 bg-warn/40"
-             style={{ left: width(line.issued_quantity),
-                      width: `${Math.min(share(ordered), 100 - share(line.issued_quantity))}%` }} />
-        <div className="absolute inset-y-0 left-0 bg-brand/20"
-             style={{ width: width(line.issued_quantity) }} />
-        <div className="absolute inset-y-0 left-0 bg-brand/45"
-             style={{ width: width(line.dispatched_quantity) }} />
-        <div className="absolute inset-y-0 left-0 bg-ok"
-             style={{ width: width(line.received_quantity) }} />
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
-        <span>Approved <b className="font-semibold tabular-nums text-ink">
-          {qty(line.approved_quantity)}</b></span>
-        {/* Shown only when there is one: a column of zeroes on every other line is
-            noise, and "On order 20" is the whole answer to "where is my stuff" on
-            the one line that has it. */}
-        {ordered > 0 && (
-          <span>On order <b className="font-semibold tabular-nums text-warn">
-            {qty(ordered)}</b></span>
-        )}
-        <span>Sent <b className="font-semibold tabular-nums text-ink">
-          {qty(line.dispatched_quantity)}</b></span>
-        <span>Received <b className="font-semibold tabular-nums text-ink">
-          {qty(line.received_quantity)}</b></span>
-      </div>
-
-      {!settled && (
-        <div className="mt-1.5 text-[11px] text-muted">
-          {/* The server's sentence, so the screen and the documents behind it cannot
-              word the same state differently. */}
-          <span className="font-medium text-body">{line.pending_with || caption}</span>
-          {STAGE_HINT[stage] && (
-            <span className="mt-0.5 block">{STAGE_HINT[stage]}</span>
-          )}
-        </div>
-      )}
-
-      {showSerials && (
-        <div className="mt-3 rounded-lg border border-line bg-content2/70 px-3 py-2">
-          <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
-            <span className="font-semibold text-body">
-              {(tracking ?? TRACKING.SERIAL).heading}
-            </span>
-            <span className="tabular-nums text-muted">
-              {serials.length > 0 ? serials.length : "Not recorded"}
-            </span>
-          </div>
-          {serials.length > 0 ? (
-            <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto pr-1">
-              {serials.map((serial) => (
-                <span
-                  key={serial}
-                  className="rounded-md border border-line bg-content1 px-2 py-1 font-mono text-[11px] text-ink"
-                >
-                  {serial}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <div className="text-[11px] text-muted">
-              {`No ${(tracking ?? TRACKING.SERIAL).unit}s were recorded against what `
-                + "was sent to you."}
-            </div>
-          )}
-        </div>
-      )}
-
-      {max > 0 && (
-        <div className="mt-3 flex items-center gap-2 rounded-lg bg-content2 p-2">
-          <span className="pl-1 text-sm font-medium text-body">Arrived now</span>
-          {/* Fixed-width wrapper, not a class on the Input: `className` only reaches
-              HeroUI's inputWrapper, so the field itself stays 100% wide. */}
-          <div className="ml-auto w-24">
-            <Input
-              type="number"
-              min={0}
-              max={max}
-              step="any"
-              aria-label={`Received now for ${line.item_name ?? line.item_code}`}
-              value={value}
-              onChange={(event) => onChange(event.target.value)}
-            />
-          </div>
-          <button
-            type="button"
-            onClick={() => onChange(String(max))}
-            className="h-11 shrink-0 rounded-lg border border-line bg-content1 px-3 text-xs font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
-          >
-            All {qty(max)}
-          </button>
-        </div>
-      )}
-    </li>
-  );
-}
-
 /** The handle a requester actually chases a parcel with, whichever the mode issued. */
 export const trackingHandle = (leg: { lr_no?: string | null; docket_no?: string | null }) =>
   leg.lr_no ?? leg.docket_no ?? null;
 
+/* ---------------------------------------------------------------------------
+ * Dates, read the same way on both screens.
+ * ------------------------------------------------------------------------ */
+
+/** Local midnight of a date or a timestamp, so `2026-09-18` never lands on the 17th
+ *  west of Greenwich. NaN for anything unparseable, and every caller checks. */
+export function dayStamp(value?: string | null) {
+  const parts = (value ?? "").slice(0, 10).split("-").map(Number);
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return NaN;
+  return new Date(parts[0], parts[1] - 1, parts[2]).getTime();
+}
+
+export function shortDate(value?: string | null) {
+  const stamped = dayStamp(value);
+  if (!Number.isFinite(stamped)) return (value ?? "").slice(0, 10);
+  return new Date(stamped).toLocaleDateString(undefined, {
+    day: "numeric", month: "short",
+  });
+}
+
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
 /**
- * How this delivery is travelling — the answer to "where is my stuff".
- *
- * Logistics knows the courier, the docket and the carrier's tracking page; the person
- * waiting on the goods held none of it, and had no screen they were permitted to read
- * it on. It rides on this row instead: told once, on the same card as the button that
- * says it arrived.
+ * "Needed by 12 Sep", or "3 days overdue" once that day has gone and something is
+ * still owed. A needed-by date that has passed is the one date on the row that asks
+ * somebody to chase, so it is the one that is allowed to be red — and only while the
+ * indent is still owed something: a fulfilled indent is never overdue.
  */
-export function ShipmentCard({ leg }: { leg: RaiserTracking }) {
-  const handle = trackingHandle(leg);
-  // An outside company is carrying it — a courier or a third-party truck. That is
-  // exactly when "how is it coming" stops being obvious to the person waiting for it,
-  // and it is read off the carrier rather than off a list of mode names, because this
-  // module may not import logistics' mode tables (rule 5). A hand-over and a company
-  // vehicle have no carrier, and their answer to "where is it" is the driver below.
-  const outside = Boolean(leg.carrier_name);
+export function neededBy(row: Acknowledgement): { text: string; overdue: boolean } | null {
+  const due = dayStamp(row.required_date);
+  if (!Number.isFinite(due)) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const days = Math.round((today - due) / 86_400_000);
+  const owed = row.lines.some((line) => outstanding(line) > 0);
+  if (owed && days > 0) {
+    return { text: `${plural(days, "day")} overdue · needed ${shortDate(row.required_date)}`, overdue: true };
+  }
+  if (owed && days === 0) return { text: "Needed today", overdue: true };
+  return { text: `Needed by ${shortDate(row.required_date)}`, overdue: false };
+}
 
-  const who = leg.carrier_name
-    || [leg.vehicle_number, leg.driver_name].filter(Boolean).join(" · ");
-  const landed = leg.acknowledged_at ?? leg.delivered_at;
-  const latest = [...(leg.events ?? [])].sort(
-    (left, right) => Date.parse(right.event_at) - Date.parse(left.event_at),
-  )[0];
+/**
+ * Where every item of one indent has got to, as one bar.
+ *
+ * One band per STAGE, as wide as the share of the indent's items at that stage —
+ * counted in ITEMS, never in quantities: ten cables and one server are not eleven of
+ * anything, and a bar summing them would say the server is a rounding error. The
+ * legend under it is the same numbers in words, so the bar is never the only place
+ * the answer is written.
+ */
+export function StageBar({ lines, legend = false }: {
+  lines: AcknowledgementLine[];
+  legend?: boolean;
+}) {
+  const counts = STAGE_ORDER
+    .map((stage) => ({ stage, count: lines.filter((line) => lineStage(line) === stage).length }))
+    .filter((entry) => entry.count > 0);
+  const total = lines.length;
+  if (total === 0) return null;
+  const words = counts.map(({ stage, count }) => `${count} ${STAGE_WORD[stage]}`).join(", ");
   return (
-    <li className="rounded-xl border border-line bg-content1 p-3">
-      <div className="flex items-start gap-2.5">
-        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-050 text-brand">
-          <Truck className="h-4 w-4" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2">
-            <span className="font-mono text-xs font-semibold text-ink">{leg.tr_no}</span>
-            <span className="text-[11px] uppercase tracking-wide text-muted">
-              {leg.status.replace(/_/g, " ").toLowerCase()}
-            </span>
-          </div>
-          <div className="text-sm text-body">{who || "Hand delivery"}</div>
-          {outside && (
-            <div className="mt-1 flex flex-wrap items-center gap-1.5">
-              <span className="rounded-full bg-content2 px-2 py-0.5 text-[11px] font-medium text-body">
-                {leg.carriage_label ?? "Road"}
-              </span>
-              <span className="rounded-full bg-brand-050 px-2 py-0.5 text-[11px] font-medium text-brand">
-                {leg.mode_label ?? leg.mode}
-              </span>
-            </div>
-          )}
-          {handle && (
-            <div className="mt-0.5 text-xs text-muted">
-              Docket <span className="font-mono text-ink">{handle}</span>
-            </div>
-          )}
-          <div className="mt-0.5 text-[11px] text-muted">
-            {landed
-              ? `Arrived ${landed.slice(0, 10)}`
-              : leg.dispatched_at
-                ? `Sent ${leg.dispatched_at.slice(0, 10)}${
-                  leg.expected_delivery ? ` · due ${leg.expected_delivery}` : ""}`
-                : "Not yet sent"}
-          </div>
-          {latest && (
-            <div className={`mt-2 rounded-lg px-2.5 py-2 text-xs ${
-              latest.is_exception ? "bg-bad-bg text-bad" : "bg-content2 text-body"
-            }`}>
-              <span className="font-semibold capitalize">
-                {latest.event_type.replace(/_/g, " ").toLowerCase()}
-              </span>
-              {latest.location_name ? ` · ${latest.location_name}` : ""}
-              {latest.description && (
-                <span className="mt-0.5 block text-[11px] text-muted">{latest.description}</span>
-              )}
-            </div>
-          )}
-        </div>
-        {leg.tracking_url && (
-          <a
-            href={leg.tracking_url}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="inline-flex h-11 shrink-0 items-center gap-1 rounded-lg border border-line px-3 text-xs font-semibold text-brand transition hover:border-brand hover:bg-brand-050"
-          >
-            Track <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        )}
+    <div className="min-w-0">
+      <div
+        role="img"
+        aria-label={`${plural(total, "item")}: ${words}`}
+        className="flex h-1.5 w-full gap-0.5 overflow-hidden rounded-full"
+      >
+        {counts.map(({ stage, count }) => (
+          <span
+            key={stage}
+            title={`${count} ${STAGE_WORD[stage]}`}
+            className={`h-full first:rounded-l-full last:rounded-r-full ${STAGE[stage].bar}`}
+            style={{ width: `${(count / total) * 100}%` }}
+          />
+        ))}
       </div>
-
-    </li>
+      {legend && (
+        <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted">
+          {counts.map(({ stage, count }) => (
+            <li key={stage} className="inline-flex items-center gap-1.5">
+              <span aria-hidden className={`h-2 w-2 rounded-full ${STAGE[stage].bar}`} />
+              <span><b className="font-semibold tabular-nums text-body">{count}</b> {STAGE_WORD[stage]}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
-/** One line of the "before you acknowledge" list — ticked green the moment it is satisfied. */
-export function Requirement({ met, label }: { met: boolean; label: string }) {
-  return (
-    <li className={`flex items-center gap-2 text-xs ${met ? "text-ok" : "text-muted"}`}>
-      {met ? <CheckCircle2 className="h-4 w-4 shrink-0" />
-        : <Circle className="h-4 w-4 shrink-0" />}
-      <span>{label}</span>
-    </li>
-  );
+/** "3 of 5 items received" — the bar's headline, in items like the bar itself. */
+export function itemsReceived(row: Acknowledgement) {
+  const total = row.lines.length;
+  const done = row.lines.filter((line) => outstanding(line) === 0).length;
+  return `${done} of ${plural(total, "item")} received`;
 }

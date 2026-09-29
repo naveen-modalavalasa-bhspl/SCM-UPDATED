@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Archive, CheckCircle2, Clock, Gavel, Hourglass, PenLine, PencilLine, Send, Truck,
+  Archive, CheckCircle2, Clock, Gavel, Hourglass, PenLine, PencilLine, Route, Send, Truck,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -15,6 +15,7 @@ import {
   load, modeLabel, modeTint, money, nextMove, TR_STATUSES,
 } from "../components/modeCopy";
 import type { TransportSummary, TRListRow } from "../transportTypes";
+import { legDestination } from "../components/manifestView";
 import { TONE_MINT } from "@/shared/components/tones";
 
 const SIZE = 20;
@@ -37,6 +38,7 @@ const DIRECTIONS = [
   { value: "CONSIGNMENT", label: "Out — consignments" },
   { value: "ISSUE", label: "Out — issues" },
   { value: "RETURN", label: "Returns from the field" },
+  { value: "TRIP", label: "Out — multi-drop trips" },
 ];
 
 /** The board across the top: one tile per queue, and pressing it filters the list.
@@ -127,10 +129,17 @@ export function TransportRequestsPage() {
       render: (r) => (
         <div className="min-w-0">
           <div className="font-mono text-xs font-semibold text-ink">{r.tr_no}</div>
-          <div className="text-[11px] text-muted">
-            {r.consignment_no
-              ?? (r.indent_no ? `Indent ${r.indent_no}` : fmtDate(r.tr_date))}
-          </div>
+          {(r.source_type ?? "").toUpperCase() === "TRIP" ? (
+            <div className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-brand-050 px-2 py-0.5 text-[10px] font-semibold text-brand"
+              title={r.source_no ?? undefined}>
+              <Route className="h-3 w-3" aria-hidden /> Multi-drop · {r.total_items} drops
+            </div>
+          ) : (
+            <div className="text-[11px] text-muted">
+              {r.consignment_no
+                ?? (r.indent_no ? `Indent ${r.indent_no}` : fmtDate(r.tr_date))}
+            </div>
+          )}
         </div>
       ),
     },
@@ -161,7 +170,10 @@ export function TransportRequestsPage() {
       hideOnNarrow: true,
       render: (r) => (
         <div className="min-w-0 text-sm">
-          <div className="truncate text-body">{r.to_location_name ?? "—"}</div>
+          {/* A trip's destination is only its LAST stop; say the run instead. */}
+          <div className="truncate text-body" title={r.to_location_name ?? undefined}>
+            {legDestination(r)}
+          </div>
           <div className="truncate text-[11px] text-muted">
             from {r.from_warehouse_name ?? "—"}
           </div>

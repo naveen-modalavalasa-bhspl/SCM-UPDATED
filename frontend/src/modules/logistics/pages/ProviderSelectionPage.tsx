@@ -12,6 +12,8 @@ import { CarrierComparison } from "../components/CarrierComparison";
 import { load, modeLabel, modeTint, money } from "../components/modeCopy";
 import type { ProviderBoardRow } from "../transportTypes";
 import { ManifestTable } from "../components/ManifestTable";
+import { isTripLeg, legDestination } from "../components/manifestView";
+import { TripRouteStrip } from "../components/TripStops";
 
 const SIZE = 20;
 
@@ -137,9 +139,11 @@ export function ProviderSelectionPage() {
       render: (r) => (
         <div className="min-w-0">
           <div className="font-mono text-xs font-semibold text-ink">{r.tr_no}</div>
-          <div className="truncate text-[11px] text-muted">
-            {r.consignment_no ? `${r.consignment_no} · ` : ""}
-            {r.to_location_name ?? "—"}
+          <div className="truncate text-[11px] text-muted" title={r.to_location_name ?? undefined}>
+            {isTripLeg(r) ? (
+              <span className="mr-1 rounded-full bg-brand-050 px-1.5 py-px text-[10px] font-semibold text-brand">Multi-drop</span>
+            ) : r.consignment_no ? `${r.consignment_no} · ` : ""}
+            {legDestination(r)}
           </div>
         </div>
       ),
@@ -286,7 +290,7 @@ export function ProviderSelectionPage() {
                 <span className="font-mono text-xs font-semibold text-ink">{r.tr_no}</span>
                 <StatusPill status={r.status} />
               </div>
-              <div className="text-sm text-body">{r.to_location_name ?? "—"}</div>
+              <div className="text-sm text-body">{legDestination(r)}</div>
               <div className="text-xs text-muted">
                 {modeLabel(r.mode)} · {r.total_packages} pkg ·{" "}
                 {r.invited_count > 0
@@ -389,11 +393,15 @@ function ProviderSheet({ trId, autoInvite = false, onBack }: {
           )}
         </div>
 
+        {/* One truck, every drop: the price is for the whole run. */}
+        {isTripLeg(doc) && (
+          <TripRouteStrip className="mb-4" items={doc.items} from={doc.from_warehouse_name} />
+        )}
         <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
           <div>
-            <dt className="text-xs text-muted">Consignment</dt>
+            <dt className="text-xs text-muted">{isTripLeg(doc) ? "Multi-drop trip" : "Consignment"}</dt>
             <dd className="mt-1 font-mono text-xs text-body">
-              {doc.consignment_no ?? "—"}
+              {(isTripLeg(doc) ? doc.source_no : doc.consignment_no) ?? "—"}
             </dd>
           </div>
           <div>
@@ -402,7 +410,7 @@ function ProviderSheet({ trId, autoInvite = false, onBack }: {
           </div>
           <div>
             <dt className="text-xs text-muted">Going to</dt>
-            <dd className="mt-1 truncate text-body">{doc.to_location_name ?? "—"}</dd>
+            <dd className="mt-1 truncate text-body" title={doc.to_location_name ?? undefined}>{legDestination(doc)}</dd>
           </div>
           <div>
             <dt className="text-xs text-muted">Needed by</dt>
@@ -415,7 +423,7 @@ function ProviderSheet({ trId, autoInvite = false, onBack }: {
             </dd>
           </div>
           <div>
-            <dt className="text-xs text-muted">Lines</dt>
+            <dt className="text-xs text-muted">{isTripLeg(doc) ? "Drops" : "Lines"}</dt>
             <dd className="mt-1 text-body">{doc.total_items}</dd>
           </div>
           <div>

@@ -4,7 +4,9 @@ Every function here is three to five lines: resolve the guard, call the service,
 return what it gave back. There is no `if` in this file — a branch here is business
 logic that has escaped `service.py`, where it can be tested without a request.
 
-Every endpoint is guarded by `Depends(require_permission(...))`. The codes come from
+Every employee endpoint is guarded by `Depends(require_permission(...))`. The signed
+public-label capability is the one deliberate exception: possession of its unguessable
+HMAC is the permission, its response is read-only, and it is rate limited. The codes come from
 `enums.py`, which mirrors `platform/rbac/permissions.py`; the ones marked NEW there do
 not exist yet, so those endpoints will 403 for everyone until the lead adds them and
 the seed is re-run. That is the correct failure mode — an ungranted permission closes
@@ -13,11 +15,12 @@ the door rather than leaving it open.
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core import throttle
 from app.core.dependencies import get_current_vendor, require_permission, require_permission_or
 from app.core.pagination import Page, PageParams
 # The acknowledgement rows are an indents-module shape: this endpoint only supplies the
@@ -29,9 +32,11 @@ from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
 from app.modules.warehouse import stock_report
+from app.modules.warehouse import trips
 from app.platform.rbac.permissions import (
     INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
+    ADMIN_SETTINGS_MANAGE, TRANSPORT_CREATE, TRANSPORT_TRACK, TRANSPORT_VIEW,
 )
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
@@ -746,6 +751,112 @@ async def cancel_issue(issue_id: int, body: s.ReasonIn, db: AsyncSession = Depen
 # Dispatch
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Smart Load Planner and multi-drop trips (`trips.py`). Reads are transport.view;
+# planning a trip is transport.create; the road is transport.track — the same codes
+# the single-consignment shipment already runs on.
+# ---------------------------------------------------------------------------
+
+@router.post("/trip-planner/map-network", response_model=dict)
+async def trip_map_network(db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.prepare_map_network(db, user)
+
+
+@router.get("/trip-planner/policy", response_model=dict)
+async def trip_planner_policy(db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.planner_policy(db)
+
+
+@router.put("/trip-planner/policy", response_model=dict)
+async def save_trip_planner_policy(data: s.PlannerPolicySave,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(ADMIN_SETTINGS_MANAGE))):
+    return await trips.save_planner_policy(db, data, user)
+
+
+@router.put("/trip-planner/points/{warehouse_id}/location", response_model=dict)
+async def pin_trip_point(warehouse_id: int, data: s.PointLocationIn,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    return await trips.set_point_location(db, warehouse_id, data, user)
+
+
+@router.get("/trip-planner/points/{warehouse_id}/candidates", response_model=dict)
+async def trip_point_candidates(warehouse_id: int, q: str | None = None,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    return await trips.point_candidates(db, warehouse_id, user, q)
+
+
+@router.post("/trip-planner/points/rematch", response_model=dict)
+async def trip_points_rematch(db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    return await trips.rematch_points(db, user)
+
+
+@router.get("/trip-planner/consignments/{dispatch_id}/packages", response_model=dict)
+async def trip_consignment_packages(dispatch_id: int, db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.consignment_packages(db, dispatch_id, user)
+
+
+@router.put("/trip-planner/consignments/{dispatch_id}/measurements", response_model=dict)
+async def trip_consignment_measurements(dispatch_id: int, data: s.ConsignmentMeasuresIn,
+                                        db: AsyncSession = Depends(get_db),
+                                        user=Depends(require_permission(DISPATCH_CREATE))):
+    return await trips.record_measurements(db, dispatch_id, data, user)
+
+
+@router.post("/trip-planner/recommendations", response_model=dict)
+async def trip_recommendations(data: s.TripRecommendIn, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.recommendations(db, user, data)
+
+
+@router.post("/trip-planner/evaluate", response_model=dict)
+async def trip_evaluate(data: s.TripEvaluateIn, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.evaluate(db, user, data)
+
+
+@router.get("/consolidated-trips", response_model=dict)
+async def list_consolidated_trips(
+        params: PageParams = Depends(), status: str | None = None,
+        warehouse_id: int | None = None, search: str | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.list_trips(db, user, params, status=status,
+                                  warehouse_id=warehouse_id, search=search)
+
+
+@router.post("/consolidated-trips", response_model=dict, status_code=201)
+async def create_consolidated_trip(data: s.TripCreateIn, db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(TRANSPORT_CREATE))):
+    return await trips.create_trip(db, data, user)
+
+
+@router.get("/consolidated-trips/{trip_id}", response_model=dict)
+async def get_consolidated_trip(trip_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(TRANSPORT_VIEW))):
+    return await trips.get_trip(db, trip_id, user)
+
+
+@router.post("/consolidated-trips/{trip_id}/stops/{stop_id}/deliver", response_model=dict)
+async def deliver_consolidated_stop(trip_id: int, stop_id: int, data: s.TripStopDeliverIn,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(TRANSPORT_TRACK))):
+    return await trips.mark_stop_delivered(db, trip_id, stop_id, data, user)
+
+
+@router.post("/consolidated-trips/{trip_id}/cancel", response_model=dict)
+async def cancel_consolidated_trip(trip_id: int, data: s.TripCancelIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission(TRANSPORT_CREATE))):
+    return await trips.cancel_trip(db, trip_id, data.reason, user)
+
+
 @router.get("/consignments", response_model=Page[s.DispatchRead])
 async def list_consignments(params: PageParams = Depends(), status: str | None = None,
                             warehouse_id: int | None = None, search: str | None = None,
@@ -1242,6 +1353,17 @@ async def scan(code: str, db: AsyncSession = Depends(get_db),
     return await service.scan(db, code)
 
 
+@router.get("/public-label/{token}", response_model=s.ScanResult)
+async def public_label(token: str, request: Request,
+                       db: AsyncSession = Depends(get_db)):
+    """Read-only current details for the holder of a signed physical label."""
+    await throttle.guard(
+        request, "warehouse-public-label", 120,
+        message="Too many labels were scanned from this device. Wait a minute and try again.",
+    )
+    return await service.public_label_scan(db, token)
+
+
 # ---------------------------------------------------------------------------
 # Acknowledgements owed by a requester
 # ---------------------------------------------------------------------------
@@ -1499,9 +1621,13 @@ async def picking_issue_source(picking_id: int = Query(...),
 
 
 @router.get("/options/issues", response_model=list[s.Option])
-async def issue_options(search: str | None = None, db: AsyncSession = Depends(get_db),
+async def issue_options(search: str | None = None,
+                        warehouse_id: int | None = None,
+                        destination_warehouse_id: int | None = None,
+                        db: AsyncSession = Depends(get_db),
                         _=Depends(require_permission(DISPATCH_CREATE))):
-    return await service.issue_options(db, search)
+    return await service.issue_options(db, search, warehouse_id=warehouse_id,
+                                       destination_warehouse_id=destination_warehouse_id)
 
 
 @router.get("/options/inspectable-issues", response_model=list[s.Option])
@@ -1523,6 +1649,21 @@ async def issue_dispatch_source(issue_id: int = Query(...),
                                 db: AsyncSession = Depends(get_db),
                                 _=Depends(require_permission(DISPATCH_CREATE))):
     return await service.issue_dispatch_source(db, issue_id)
+
+
+@router.get("/options/issue-dispatch-sources", response_model=s.IssueDispatchSource)
+async def issue_dispatch_sources(issue_ids: str = Query(...),
+                                 db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.issue_dispatch_sources(db, issue_ids)
+
+
+@router.get("/options/consignment-recommendations",
+            response_model=list[s.ConsignmentRecommendation])
+async def consignment_recommendations(limit: int = Query(8, ge=1, le=20),
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission(DISPATCH_CREATE))):
+    return await service.consignment_recommendations(db, user, limit=limit)
 
 
 @router.get("/options/employees", response_model=list[s.Option])

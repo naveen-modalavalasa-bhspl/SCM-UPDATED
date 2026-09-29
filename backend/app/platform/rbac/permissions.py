@@ -24,6 +24,7 @@ INDENT_DELETE = "indent.delete"
 INDENT_SUBMIT = "indent.submit"
 INDENT_APPROVE = "indent.approve"
 INDENT_REJECT = "indent.reject"
+APPROVAL_TRAIL_VIEW_ALL = "approval.trail.view_all"
 # Confirming the goods physically arrived. Held by requesters, not approvers — the
 # service also checks the actor raised the indent, because this is the one step nobody
 # else can perform on their behalf.
@@ -209,6 +210,7 @@ ADMIN_SETTINGS_MANAGE = "admin.settings.manage"
 # decides what every future unit is labelled with, so it is granted deliberately
 # rather than riding along with "can edit the company address".
 ADMIN_CODE_FORMATS_MANAGE = "admin.code_formats.manage"
+MONTHLY_INDENT_MANAGE = "monthly_indent.manage"
 
 # --- Procurement: requisitions, RFQs, quotations ---
 # The buying chain, split by decision rather than by screen. Raising a requisition is
@@ -318,6 +320,8 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(INDENT_SUBMIT, "indents", "indent", "submit", "Submit indents for approval"),
     Perm(INDENT_APPROVE, "indents", "indent", "approve", "Approve indents"),
     Perm(INDENT_REJECT, "indents", "indent", "reject", "Reject indents"),
+    Perm(APPROVAL_TRAIL_VIEW_ALL, "approvals", "approval_trail", "view_all",
+         "Read every stage of an approval trail"),
     Perm(INDENT_ACKNOWLEDGE, "indents", "indent", "acknowledge",
          "Acknowledge receipt of indent goods"),
     Perm(INDENT_VIEW_FULFILMENT, "indents", "indent", "view_fulfilment",
@@ -480,6 +484,8 @@ ALL_PERMISSIONS: list[Perm] = [
          "Manage system settings"),
     Perm(ADMIN_CODE_FORMATS_MANAGE, "admin", "code_formats", "manage",
          "Set the asset & consumable code formula"),
+    Perm(MONTHLY_INDENT_MANAGE, "admin", "monthly_indent", "manage",
+         "Configure the monthly indent cycle, its reminders and who may submit"),
     Perm(REQUISITION_VIEW, "procurement", "requisition", "view",
          "View purchase requisitions"),
     Perm(REQUISITION_CREATE, "procurement", "requisition", "create",
@@ -577,6 +583,7 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
+    MONTHLY_INDENT_MANAGE: ADMIN_SETTINGS_MANAGE,
     # Everyone who could raise a transfer yesterday can request one today.
     STOCK_TRANSFER_REQUEST: STOCK_TRANSFER,
     # The lists were read under `stock.view`; whoever read them keeps them.
@@ -734,6 +741,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_overview", "logistics", "Logistics · Dashboard"),
     ("logistics_consignments", "logistics", "Logistics · Consignments"),
     ("logistics_dispatch", "logistics", "Logistics · Dispatch"),
+    ("logistics_load_planner", "logistics", "Logistics · Smart Load Planner"),
     ("logistics_transport", "logistics", "Logistics · Shipments"),
     ("logistics_providers", "logistics", "Logistics · Provider Selection"),
     ("logistics_activity", "logistics", "Logistics · Activity Ledger"),
@@ -781,6 +789,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     # profile therefore took the ability to configure approvals away with it, and vice
     # versa. Its own code separates "may open this screen" from "may change a chain".
     ("admin_approval_flow", "admin", "Settings · Approval Flow"),
+    ("admin_monthly_indent", "admin", "Settings · Monthly Indent"),
     ("admin_rules", "admin", "Settings · Rules Engine"),
     ("admin_numbering", "admin", "Settings · Document Numbering"),
     ("admin_notifications", "admin", "Settings · Notifications"),
@@ -841,6 +850,7 @@ INHERITS_GRANTS_FROM.update({
     # would put a landing page on the rail that the whole logistics desk gets a
     # locked door from.
     page_view_code("logistics_overview"): page_view_code("logistics_transport"),
+    page_view_code("logistics_load_planner"): page_view_code("logistics_dispatch"),
     # Not a split but a late catalogue entry, which needs the same treatment: the
     # screen has been reachable on these two codes for months, and minting its page
     # permission fail-closed would silently retire a screen people work every day.
@@ -852,6 +862,7 @@ INHERITS_GRANTS_FROM.update({
     # used to gate it — everybody who can open the screen today still can, and from
     # now on the screen and the action can be granted apart.
     page_view_code("admin_approval_flow"): ADMIN_WORKFLOW_MANAGE,
+    page_view_code("admin_monthly_indent"): ADMIN_SETTINGS_MANAGE,
     page_view_code("approval_consolidation"): INDENT_APPROVE,
     # The Overview reads nothing the inbox does not already show this person — it is
     # the same approval-scoped queries, summarised — so anybody who can open the inbox

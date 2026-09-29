@@ -12,6 +12,7 @@ import { PageHeader, Button, Can, Card, ErrorBanner, useToast } from "@/shared/c
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { FlowStepper } from "../components/FlowStepper";
+import { TripDeliveryCard } from "../components/TripDeliveryCard";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import { activityLedgerReturnUrlFromState } from "../context/ActivityLedgerUrlState";
 import { allRequestsReturnUrlFromState } from "../context/AllRequestsUrlState";
@@ -378,6 +379,8 @@ export function IndentDetailPage() {
           </CardBody>
         </Card>
       </button>
+
+      {isRaiser && <TripDeliveryCard indentId={indent.id} shipments={shipments} />}
 
       <div className="grid gap-5 lg:grid-cols-3">
         <Card className="lg:col-span-2">

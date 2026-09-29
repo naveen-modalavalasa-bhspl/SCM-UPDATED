@@ -1,5 +1,5 @@
 import { useId, useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { Alert } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
@@ -29,6 +29,7 @@ const CHAIN = ["Indent", "PO", "GRN", "Stock", "Issue"];
 export function LoginPage() {
   const { login } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
   const [username, setUsername] = useState("HR-EMP-");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +44,13 @@ export function LoginPage() {
     setError(null);
     try {
       await login(username, password);
-      nav("/");
+      const requested = new URLSearchParams(location.search).get("next");
+      // Only return to an internal app route. This keeps a crafted login link from
+      // becoming an open redirect while allowing a scanned label to survive sign-in.
+      const next = requested?.startsWith("/") && !requested.startsWith("//")
+        ? requested
+        : "/";
+      nav(next, { replace: true });
     } catch (err) {
       setError((err as Error).message);
     } finally {

@@ -110,6 +110,8 @@ export interface DocumentListProps<T> {
   onCreate?: () => void;
   createLabel?: string;
   createPermission?: string;
+  /** Optional page-level action shown beside New, such as opening a scanner. */
+  headerActions?: ReactNode;
   empty?: string;
   /** Rendered between the filter bar and the list, e.g. a bulk action strip. */
   children?: ReactNode;
@@ -158,6 +160,7 @@ export function DocumentList<T>({
   onCreate,
   createLabel = "New",
   createPermission,
+  headerActions,
   empty = "Nothing here yet.",
   children,
   warehouseFilter = true,
@@ -386,13 +389,21 @@ export function DocumentList<T>({
       <Plus className="h-4 w-4" /> {createLabel}
     </Button>
   );
+  const createAction = createPermission && create
+    ? <Can do={createPermission}>{create}</Can>
+    : create;
 
   return (
     <div>
       <PageHeader
         eyebrow={heading}
         title={title}
-        actions={createPermission && create ? <Can do={createPermission}>{create}</Can> : create}
+        actions={(headerActions || createAction) ? (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {headerActions}
+            {createAction}
+          </div>
+        ) : undefined}
       />
 
       {/* The shared KPI strip (2026-08-23). One definition across Indents, Approvals,

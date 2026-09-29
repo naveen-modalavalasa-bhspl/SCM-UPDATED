@@ -21,6 +21,8 @@ from app.modules.logistics.enums import (
     DEFAULT_CARRIAGE,
     QuoteStatus,
     TransportStatus,
+    TripStatus,
+    TripStopStatus,
 )
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 
@@ -296,6 +298,201 @@ class TransportRequest(Base):
 
 Index("ix_lgs_tr_status_date", TransportRequest.status,
       TransportRequest.tr_date.desc())
+
+
+# ---------------------------------------------------------------------------
+# Consolidated trips -- one physical vehicle carrying many consignments.
+#
+# The trip is the ROUTE: which stops, in which order, which consignment comes off at
+# which one. Everything a shipment already knows how to do -- the mode, the tender,
+# the award, the carrier's own yes, the gate, the LR, the freight -- belongs to the
+# ONE transport request the trip raises (`tr_id`, `source_type = TRIP`). So a
+# multi-drop run is priced once, awarded once and released once, through exactly the
+# screens a single consignment uses, and nothing here re-implements any of it.
+#
+# What the trip adds is what a single-consignment leg cannot say: where along the
+# road each consignment is delivered, and whether ITS site has signed. Each receiving
+# site still signs for its own consignment on its own Acknowledgements screen; the
+# trip closes itself once every one of them has.
+# ---------------------------------------------------------------------------
+
+class ConsolidatedTrip(Base):
+    __tablename__ = "lgs_consolidated_trips"
+
+    id = pk()
+    trip_no = Column(String(50), unique=True, nullable=False)
+    status = Column(String(30), nullable=False, index=True,
+                    default=TripStatus.PLANNED.value)
+    departure_date = Column(Date, nullable=False)
+    from_warehouse_id = Column(BigInteger, index=True, nullable=False)
+    from_warehouse_name = Column(String(200), nullable=True)
+    origin_latitude = Column(Numeric(10, 7), nullable=False)
+    origin_longitude = Column(Numeric(10, 7), nullable=False)
+    #: The shipment that carries this trip. Soft id plus a snapshot of its number,
+    #: the same way the shipment points back at `source_id`.
+    tr_id = Column(BigInteger, index=True, nullable=True)
+    tr_no = Column(String(50), nullable=True)
+
+    policy_name = Column(String(100), nullable=False, default="Balanced")
+    route_version = Column(Integer, nullable=False, default=1)
+    total_consignments = Column(Integer, nullable=False, default=0)
+    total_stops = Column(Integer, nullable=False, default=0)
+    total_packages = Column(Integer, nullable=False, default=0)
+    total_weight_kg = Column(QTY, nullable=False, default=0)
+    vehicle_profile = Column(String(100), nullable=True)
+    vehicle_capacity_kg = Column(QTY, nullable=True)
+    #: Whether the planned kilometres include the empty run back to the origin.
+    returns_to_origin = Column(Boolean, nullable=False, default=True)
+    road_factor = Column(Numeric(6, 3), nullable=True)
+    cost_per_km = Column(MONEY, nullable=True)
+    estimated_distance_km = Column(Numeric(12, 2), nullable=False, default=0)
+    separate_distance_km = Column(Numeric(12, 2), nullable=False, default=0)
+    estimated_saving_km = Column(Numeric(12, 2), nullable=False, default=0)
+    estimated_saving_amount = Column(MONEY, nullable=False, default=0)
+    #: What the kilometres above were measured with: ROAD (every leg routed), MIXED
+    #: (some legs routed, the rest estimated) or ESTIMATE (straight line x factor).
+    #: Kept beside the numbers so a plan costed on estimates is never read later as a
+    #: routed one.
+    distance_basis = Column(String(20), nullable=True)
+    #: The cargo box the plan was checked against, in cubic metres. NULL: not limited
+    #: by volume, which is what every trip planned before this was.
+    vehicle_capacity_cbm = Column(Numeric(10, 3), nullable=True)
+    total_volume_cbm = Column(Numeric(12, 4), nullable=True)
+
+    vehicle_number = Column(String(50), nullable=True)
+    driver_name = Column(String(200), nullable=True)
+    driver_phone = Column(String(30), nullable=True)
+    gate_pass_no = Column(String(50), nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+    remarks = Column(Text, nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    stops = relationship(
+        "ConsolidatedTripStop", back_populates="trip",
+        cascade="all, delete-orphan", lazy="selectin",
+        order_by="ConsolidatedTripStop.sequence",
+    )
+    consignments = relationship(
+        "ConsolidatedTripConsignment", back_populates="trip",
+        cascade="all, delete-orphan", lazy="selectin",
+        order_by="ConsolidatedTripConsignment.id",
+    )
+
+
+Index("ix_lgs_trip_origin_status", ConsolidatedTrip.from_warehouse_id,
+      ConsolidatedTrip.status)
+
+
+class ConsolidatedTripStop(Base):
+    __tablename__ = "lgs_consolidated_trip_stops"
+
+    id = pk()
+    trip_id = Column(ForeignKey("lgs_consolidated_trips.id", ondelete="CASCADE"),
+                     index=True, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    destination_warehouse_id = Column(BigInteger, index=True, nullable=False)
+    destination_code = Column(String(50), nullable=True)
+    destination_name = Column(String(200), nullable=False)
+    delivery_address = Column(String(500), nullable=True)
+    #: Who to ring at the gate, snapshotted from the consignment at planning. The
+    #: driver reads the trip through the carrier portal, which may not read the
+    #: warehouse's consignment (rule 5).
+    contact_person = Column(String(200), nullable=True)
+    contact_phone = Column(String(20), nullable=True)
+    latitude = Column(Numeric(10, 7), nullable=False)
+    longitude = Column(Numeric(10, 7), nullable=False)
+    status = Column(String(30), nullable=False, default=TripStopStatus.PLANNED.value)
+    distance_from_previous_km = Column(Numeric(12, 2), nullable=False, default=0)
+    total_consignments = Column(Integer, nullable=False, default=0)
+    total_packages = Column(Integer, nullable=False, default=0)
+    total_weight_kg = Column(QTY, nullable=False, default=0)
+    arrived_at = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    delivered_by_name = Column(String(200), nullable=True)
+    received_by_name = Column(String(200), nullable=True)
+    #: Who said this stop was reached: DESK (the logistics desk) or CARRIER (the
+    #: carrier's portal, stop by stop). Evidence for a dispute about who put it down.
+    delivered_via = Column(String(20), nullable=True)
+    #: The carrier's proof of delivery for THIS stop — a signed copy at stop two is
+    #: not proof of anything at stop three.
+    pod_url = Column(String(500), nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+
+    trip = relationship("ConsolidatedTrip", back_populates="stops")
+    consignments = relationship(
+        "ConsolidatedTripConsignment", back_populates="stop", lazy="selectin")
+
+
+class ConsolidatedTripConsignment(Base):
+    __tablename__ = "lgs_consolidated_trip_consignments"
+
+    id = pk()
+    trip_id = Column(ForeignKey("lgs_consolidated_trips.id", ondelete="CASCADE"),
+                     index=True, nullable=False)
+    stop_id = Column(ForeignKey("lgs_consolidated_trip_stops.id", ondelete="CASCADE"),
+                     index=True, nullable=False)
+    #: The warehouse consignment (`out_dispatches`) and its UNIQUE number, snapshotted:
+    #: the number is what the driver, the gate and the receiving site all read.
+    dispatch_id = Column(BigInteger, index=True, nullable=False)
+    consignment_no = Column(String(50), nullable=False)
+    destination_warehouse_id = Column(BigInteger, nullable=True)
+    destination_name = Column(String(200), nullable=False)
+    #: The indent behind it, so the requester's "where is my material" can find the
+    #: trip without logistics reading the warehouse's tables (rule 5). A consignment
+    #: carrying several issues can serve several indents; the others are listed.
+    indent_id = Column(BigInteger, index=True, nullable=True)
+    indent_no = Column(String(50), nullable=True)
+    indent_nos = Column(String(500), nullable=True)
+    packages = Column(Integer, nullable=False, default=0)
+    weight_kg = Column(QTY, nullable=False, default=0)
+    status = Column(String(30), nullable=False, default=TripStopStatus.PLANNED.value)
+    delivered_at = Column(DateTime, nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by_name = Column(String(200), nullable=True)
+    ack_condition = Column(String(20), nullable=True)
+
+    trip = relationship("ConsolidatedTrip", back_populates="consignments")
+    stop = relationship("ConsolidatedTripStop", back_populates="consignments")
+
+
+Index("ix_lgs_trip_consignment_active", ConsolidatedTripConsignment.dispatch_id,
+      ConsolidatedTripConsignment.status)
+
+
+class RoadDistance(Base):
+    """`lgs_road_distances` — one routed road distance between two map points.
+
+    A CACHE of what the routing service answered (`logistics/routing.py`), keyed on
+    the two coordinates rounded to five places (about a metre), so a stocking point
+    re-pinned elsewhere is simply a new pair and the old answer can never be served
+    for it. Directional: the road from A to B is not always the road from B to A.
+
+    Nothing reads this as the truth about a road it has not been asked about — a pair
+    missing here is ESTIMATED, and labelled so, never guessed from a neighbour.
+    """
+    __tablename__ = "lgs_road_distances"
+
+    id = pk()
+    #: "lat,lon>lat,lon" at five decimals. Unique: one answer per direction.
+    pair_key = Column(String(64), nullable=False, unique=True)
+    from_lat = Column(Numeric(10, 5), nullable=False)
+    from_lon = Column(Numeric(10, 5), nullable=False)
+    to_lat = Column(Numeric(10, 5), nullable=False)
+    to_lon = Column(Numeric(10, 5), nullable=False)
+    distance_km = Column(Numeric(12, 3), nullable=False)
+    duration_min = Column(Numeric(12, 2), nullable=True)
+    #: Which service and profile answered, e.g. "OSRM:driving".
+    source = Column(String(40), nullable=False)
+    fetched_at = Column(DateTime, nullable=False)
+
+
+Index("ix_lgs_road_distances_from", RoadDistance.from_lat, RoadDistance.from_lon)
+Index("ix_lgs_road_distances_to", RoadDistance.to_lat, RoadDistance.to_lon)
 
 
 class TransportRequestItem(Base):

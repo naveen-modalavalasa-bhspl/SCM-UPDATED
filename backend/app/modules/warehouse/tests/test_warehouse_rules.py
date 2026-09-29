@@ -33,6 +33,22 @@ from app.modules.warehouse.models import (
 def test_decimal_coercion_survives_the_junk_mysql_sends():
     # DECIMAL columns arrive as strings over the wire; a bad one must not 500.
     assert service._d("12.500") == Decimal("12.500")
+
+
+def test_public_label_tokens_are_stable_scoped_and_tamper_evident():
+    dispatch_token = service.public_label_token("d", 42)
+    package_token = service.public_label_token("p", 42)
+
+    assert dispatch_token == service.public_label_token("d", 42)
+    assert service.parse_public_label_token(dispatch_token) == ("d", 42)
+    assert service.parse_public_label_token(package_token) == ("p", 42)
+    assert dispatch_token != package_token
+    assert service.parse_public_label_token(dispatch_token.replace("d42.", "d43.")) is None
+    assert service.parse_public_label_token(f"{dispatch_token[:-1]}x") is None
+    assert service.parse_public_label_token("not-a-label") is None
+
+    with pytest.raises(ValueError):
+        service.public_label_token("d", 0)
     assert service._d(None) == Decimal("0")
     assert service._d("not a number") == Decimal("0")
 

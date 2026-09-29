@@ -127,6 +127,7 @@ class UserRole(str, Enum):
 
 class DocType(str, Enum):
     INDENT = "INDENT"
+    MONTHLY_INDENT = "MONTHLY_INDENT"
     ALLOCATION = "ALLOCATION"   # inventory's decision on how much stock to give
     # The same decision, made by the person who HOLDS the stock rather than by the
     # inventory desk: an OE serving an indent out of his own MDP or a LIP under him.

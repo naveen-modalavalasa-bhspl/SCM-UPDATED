@@ -13,7 +13,7 @@ import {
 } from "@/shared/components";
 import { fmtDate, fmtRelative, fmtTime } from "@/shared/datetime";
 import { approvalsApi } from "../api";
-import { approvalDecisionDocumentPath } from "../documentRoutes";
+import { approvalDecisionDocumentPath, approvalDecisionLedgerPath } from "../documentRoutes";
 import type { ApprovalDecisionExclusion, ApprovalDecisionRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
 import { TONE_BLUE } from "@/shared/components/tones";
@@ -336,9 +336,13 @@ export function MyDecisionsPage() {
   // the dropped line as a zero with nothing to say who zeroed it. Every other row is
   // unchanged — straight to the document, as before.
   const [detail, setDetail] = useState<ApprovalDecisionRow | null>(null);
-  const openDocument = (row: ApprovalDecisionRow) => nav(approvalDecisionDocumentPath(row));
+  const openDocument = (row: ApprovalDecisionRow) => nav(
+    row.doc_type === "INDENT"
+      ? approvalDecisionLedgerPath(row)
+      : approvalDecisionDocumentPath(row),
+  );
   const openDecision = (row: ApprovalDecisionRow) => {
-    if (exclusionsOf(row).length > 0) setDetail(row);
+    if (row.doc_type !== "INDENT" && exclusionsOf(row).length > 0) setDetail(row);
     else openDocument(row);
   };
   const filtered = Boolean(decision || search.trim());
@@ -370,7 +374,7 @@ export function MyDecisionsPage() {
       key: "action", header: "", className: "w-[150px] text-right align-middle",
       render: (row) => (
         <Button variant="ghost" onClick={() => openDecision(row)}>
-          {exclusionsOf(row).length > 0 ? "View excluded" : "View details"}
+          {row.doc_type === "INDENT" ? "View decision" : exclusionsOf(row).length > 0 ? "View excluded" : "View details"}
           <ChevronRight className="h-4 w-4" />
         </Button>
       ),
@@ -501,7 +505,7 @@ export function MyDecisionsPage() {
               <StatusPill status={row.workflow_status} />
             </div>
             <Button variant="soft" onClick={() => openDecision(row)}>
-              {excluded.length > 0 ? "View excluded" : "View details"}
+              {row.doc_type === "INDENT" ? "View decision" : excluded.length > 0 ? "View excluded" : "View details"}
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>

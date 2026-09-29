@@ -51,7 +51,7 @@ export interface DispatchPolicy {
 
 /** What the leg is carrying, which is also WHICH WAY it runs. RETURN is the same
  *  document run backwards — field to warehouse (doc E7). */
-export type TransportSource = "CONSIGNMENT" | "ISSUE" | "RETURN";
+export type TransportSource = "CONSIGNMENT" | "ISSUE" | "RETURN" | "TRIP";
 
 /** Served by `GET /api/transport/suggest-mode`. Null when the consignment carried no
  *  distance and no weight — advice off no evidence reads as an answer, so the backend
@@ -145,6 +145,10 @@ export interface ConsignmentLink {
    *  acknowledge the award, never typed by the desk. */
   driver_name?: string | null;
   vehicle_number?: string | null;
+  /** Set when the consignment rides a multi-drop trip: `tr_*` is the TRIP's shipment,
+   *  and the trip is where its own stop is followed. */
+  trip_id?: number | null;
+  trip_no?: string | null;
 }
 
 /** A packed consignment as the warehouse serves it (`/api/warehouse/consignments`).
@@ -224,6 +228,509 @@ export interface ConsignmentDetail extends Consignment {
   packages: ConsignmentPackage[];
 }
 
+// --------------------------------------------------------------------------- //
+//  Smart Load Planner and multi-drop trips (`/api/warehouse/trip-planner/*`,
+//  `/api/warehouse/consolidated-trips`). One vehicle, several consignments, several
+//  stops — carried by ONE shipment, signed for stop by stop.
+// --------------------------------------------------------------------------- //
+
+/** How sure the planner is of a consignment's weight / size. WEIGHED and MEASURED
+ *  are firm (every package); ESTIMATED is from the items' packing ladders; ASSUMED is
+ *  packages x the site's typical carton; null is nothing known. */
+export type LoadBasis = "WEIGHED" | "MEASURED" | "ESTIMATED" | "ASSUMED" | null;
+
+/** ROAD: every leg routed. MIXED: some routed, some estimated. ESTIMATE: none. */
+export type DistanceBasis = "ROAD" | "MIXED" | "ESTIMATE";
+
+export interface RoutingInfo {
+  routing_configured: boolean;
+  service?: string | null;
+  service_error?: string | null;
+  routed_pairs: number;
+  estimate_factor: number;
+  estimate_factor_source: "SITE" | "CALIBRATED";
+  calibrated_pairs: number;
+  /** The sentence the screen prints about where its kilometres came from. */
+  text: string;
+}
+
+export interface PlannerPolicy {
+  capacity_kg: number;
+  /** The cargo box, m³. 0 = not limited by volume. */
+  capacity_cbm: number;
+  /** How much of the box a load can really fill. */
+  volume_fill_pct: number;
+  usable_cbm?: number;
+  /** What an unweighed / unmeasured package is assumed to be. 0 = no assumption. */
+  default_package_kg: number;
+  default_package_cbm: number;
+  /** 0 = the vehicle is limited by weight alone. */
+  max_packages: number;
+  max_stops: number;
+  /** How much longer than the straight run a stop may make the trip. */
+  max_detour_pct: number;
+  detour_floor_km: number;
+  cost_per_km: number;
+  road_factor: number;
+  return_to_origin: boolean;
+  distance_basis?: string;
+  road_factor_used?: number;
+  routing?: RoutingInfo;
+}
+
+export interface VehicleProfile {
+  code: string;
+  label: string;
+  capacity_kg: number;
+  capacity_cbm: number;
+  max_packages: number;
+  cost_per_km: number;
+}
+
+export interface PlannerPolicyResponse {
+  policy: PlannerPolicy;
+  vehicle_profiles: VehicleProfile[];
+  configured: string[];
+  routing?: { configured: boolean };
+}
+
+/** One place a stocking point might be, from the offline gazetteer. */
+export interface PointCandidate {
+  name: string;
+  district?: string | null;
+  latitude: number;
+  longitude: number;
+  score: number;
+  /** In the district HCM puts the office in. */
+  in_district: boolean;
+  /** The mandal the source records it in, and whether that is HCM's mandal. */
+  mandal?: string | null;
+  in_mandal?: boolean;
+  source: "GEONAMES" | "POSTAL";
+  accuracy: number;
+  /** False for a postcode centroid: the right area, not the village. */
+  precise: boolean;
+  label: string;
+}
+
+export interface PointCandidates {
+  point: TripMapPoint;
+  query: string;
+  district?: string | null;
+  /** HCM's mandal for the office. */
+  mandal?: string | null;
+  candidates: PointCandidate[];
+}
+
+export interface ConsignmentMeasures {
+  weight_kg: number;
+  weight_basis: LoadBasis;
+  volume_cbm: number;
+  volume_basis: LoadBasis;
+  packages: number;
+  packages_weighed: number;
+  packages_measured: number;
+}
+
+export interface ConsignmentPackages {
+  dispatch_id: number;
+  consignment_no: string;
+  status: string;
+  packages: {
+    id: number; package_no: string; package_type?: string | null;
+    weight_kg?: number | string | null; length_cm?: number | string | null;
+    width_cm?: number | string | null; height_cm?: number | string | null;
+  }[];
+  measures: ConsignmentMeasures;
+}
+
+export interface TripMapPoint {
+  id: number;
+  code: string;
+  name: string;
+  warehouse_type?: string | null;
+  latitude?: number | string | null;
+  longitude?: number | string | null;
+  /** MANUAL (pinned / typed), HCM (GPS from HCM), GEONAMES_LOCALITY (matched by
+   *  name), GAZETTEER_UNRESOLVED. */
+  coordinate_source?: string | null;
+  coordinate_label?: string | null;
+  coordinate_confidence?: number | string | null;
+}
+
+export interface TripMapNetwork {
+  points: TripMapPoint[];
+  total: number;
+  mapped: number;
+  unresolved: number;
+  newly_mapped: number;
+  /** Set on the read that re-checked the master after the matcher improved. */
+  rechecked?: { tried: number; mapped: number; moved: number; kept: number;
+    withdrawn: number; unresolved: number } | null;
+  source: string;
+}
+
+/** One ready consignment as the planner sees it — its UNIQUE number and where it
+ *  comes off the truck. */
+export interface PlanConsignment {
+  dispatch_id: number;
+  consignment_no: string;
+  destination_warehouse_id: number;
+  destination_code?: string | null;
+  destination_name: string;
+  /** What a person reads the stop by — "Badangi", not the operational label. */
+  destination_place?: string;
+  destination_type?: string | null;
+  delivery_address?: string | null;
+  latitude: number;
+  longitude: number;
+  packages: number;
+  weight_kg: number;
+  weight_known: boolean;
+  weight_basis: LoadBasis;
+  volume_cbm: number;
+  volume_known: boolean;
+  volume_basis: LoadBasis;
+  packages_weighed: number;
+  packages_measured: number;
+  expected_delivery?: string | null;
+  indent_no?: string | null;
+  project_name?: string | null;
+  direct_km: number;
+}
+
+export interface PlanStop {
+  sequence: number;
+  destination_warehouse_id: number;
+  destination_code?: string | null;
+  destination_name: string;
+  /** What a person reads the stop by — "Badangi", not the operational label. */
+  destination_place?: string;
+  destination_type?: string | null;
+  delivery_address?: string | null;
+  latitude: number;
+  longitude: number;
+  distance_from_previous_km: number;
+  distance_basis?: DistanceBasis;
+  cumulative_km: number;
+  adds_km: number;
+  /** Why this stop is on this truck, in a sentence. */
+  reason: string;
+  consignments: PlanConsignment[];
+  total_packages: number;
+  total_weight_kg: number;
+  total_volume_cbm?: number;
+}
+
+export interface PlannedTrip {
+  key?: string;
+  /** Named for the farthest drop — the run everything else rides along on. */
+  label?: string;
+  kind: "MULTI_DROP" | "SAME_STOP";
+  stops: PlanStop[];
+  consignments: PlanConsignment[];
+  total_consignments: number;
+  total_packages: number;
+  total_weight_kg: number;
+  firm_weight_kg?: number;
+  total_volume_cbm?: number;
+  firm_volume_cbm?: number;
+  weight_bases?: Record<string, number>;
+  volume_bases?: Record<string, number>;
+  capacity_utilisation_pct: number;
+  volume_utilisation_pct?: number | null;
+  package_utilisation_pct?: number | null;
+  estimated_distance_km: number;
+  /** The shortest order for the same stops, and its length — beside the one driven. */
+  optimal_order?: number[];
+  optimal_distance_km?: number;
+  order_is_optimal?: boolean;
+  distance_basis?: DistanceBasis;
+  return_km: number;
+  separate_distance_km: number;
+  estimated_saving_km: number;
+  estimated_cost: number;
+  separate_cost: number;
+  estimated_saving_amount: number;
+  saving_pct: number;
+  vehicles_saved: number;
+  /** What REFUSES the trip — only ever firm figures or counts. Also in `warnings`. */
+  blockers?: string[];
+  warnings: string[];
+}
+
+export interface PlanOrigin {
+  id: number;
+  code: string;
+  name: string;
+  place?: string;
+  warehouse_type?: string | null;
+  latitude: number;
+  longitude: number;
+}
+
+export interface PlanExcluded {
+  dispatch_id: number;
+  consignment_no: string;
+  destination_warehouse_id?: number | null;
+  destination_name?: string | null;
+  destination_place?: string | null;
+  reason: string;
+  can_pin: boolean;
+}
+
+export interface PlanSingle extends PlanConsignment {
+  reason: string;
+}
+
+export interface TripRecommendations {
+  origin: PlanOrigin;
+  policy: PlannerPolicy;
+  candidates: PlanConsignment[];
+  excluded: PlanExcluded[];
+  trips: PlannedTrip[];
+  singles: PlanSingle[];
+  totals: {
+    consignments: number;
+    vehicles_before: number;
+    vehicles_after: number;
+    separate_distance_km: number;
+    planned_distance_km: number;
+    saving_km: number;
+    saving_amount: number;
+    saving_pct: number;
+  };
+}
+
+export interface TripAddition extends PlanConsignment {
+  adds_km: number;
+  saves_km: number;
+  saves_amount: number;
+  fits: boolean;
+  blocked_reason?: string | null;
+  on_the_way: boolean;
+}
+
+/** One place the truck could call at NEXT, measured from the route's last stop —
+ *  what the hand-built route offers under "Add a stop". */
+export interface NextStopOption {
+  destination_warehouse_id: number;
+  destination_place: string;
+  destination_name: string;
+  destination_code?: string | null;
+  destination_type?: string | null;
+  latitude: number;
+  longitude: number;
+  dispatch_ids: number[];
+  consignment_nos: string[];
+  packages: number;
+  weight_kg: number;
+  /** The last stop it is measured from; null = from the origin. */
+  from_place?: string | null;
+  from_last_km: number;
+  distance_basis?: DistanceBasis | null;
+  adds_km: number;
+  /** Against ONE truck sent to that place on its own. Negative = costs more. */
+  saves_km: number;
+  saves_amount: number;
+  already_a_stop: boolean;
+  fits: boolean;
+  blocked_reason?: string | null;
+}
+
+export interface TripEvaluation extends PlannedTrip {
+  unavailable: number[];
+  additions: TripAddition[];
+  next_stops?: NextStopOption[];
+  origin: PlanOrigin;
+  policy: PlannerPolicy;
+}
+
+export type PolicyOverrides = Partial<Omit<PlannerPolicy, "distance_basis">>;
+
+export interface TripConsignment {
+  id: number;
+  dispatch_id: number;
+  consignment_no: string;
+  destination_warehouse_id?: number | null;
+  destination_name: string;
+  indent_id?: number | null;
+  indent_no?: string | null;
+  indent_nos?: string | null;
+  packages: number;
+  weight_kg: number | string;
+  /** PLANNED / IN_TRANSIT / DELIVERED / ACKNOWLEDGED / CANCELLED. */
+  status: string;
+  /** The consignment's OWN document status on the warehouse side. */
+  consignment_status?: string | null;
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  delivered_at?: string | null;
+  acknowledged_at?: string | null;
+  acknowledged_by_name?: string | null;
+  ack_condition?: string | null;
+}
+
+export interface TripStop {
+  id: number;
+  sequence: number;
+  destination_warehouse_id: number;
+  destination_code?: string | null;
+  destination_name: string;
+  delivery_address?: string | null;
+  latitude: number | string;
+  longitude: number | string;
+  status: string;
+  distance_from_previous_km: number | string;
+  total_consignments: number;
+  total_packages: number;
+  total_weight_kg: number | string;
+  delivered_at?: string | null;
+  delivered_by_name?: string | null;
+  received_by_name?: string | null;
+  /** DESK or CARRIER — who reported the stop reached. */
+  delivered_via?: string | null;
+  pod_url?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  acknowledged_at?: string | null;
+  consignments: TripConsignment[];
+}
+
+export interface TripShipmentEvent {
+  id: number;
+  event_type: string;
+  event_at: string;
+  location_name?: string | null;
+  description?: string | null;
+  is_exception: boolean;
+  resolved_at?: string | null;
+  recorded_by_name?: string | null;
+}
+
+export interface TripShipment {
+  id: number;
+  tr_no: string;
+  status: string;
+  mode: string;
+  carriage_mode?: string | null;
+  carrier_name?: string | null;
+  freight_amount?: number | string | null;
+  lr_no?: string | null;
+  docket_no?: string | null;
+  gate_pass_no?: string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  tracking_url?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  acknowledged_at?: string | null;
+  quotes_received: number;
+  quotes_invited: number;
+  open_claims: number;
+  events: TripShipmentEvent[];
+}
+
+export interface TripNextAction {
+  code: "ARRANGE" | "PROVIDER" | "RELEASE" | "DELIVER" | "AWAIT_ACK" | "NONE";
+  label: string;
+  hint?: string | null;
+  stop_id?: number | null;
+}
+
+export interface ConsolidatedTrip {
+  id: number;
+  trip_no: string;
+  status: string;
+  departure_date: string;
+  from_warehouse_id: number;
+  from_warehouse_name?: string | null;
+  origin_latitude: number | string;
+  origin_longitude: number | string;
+  tr_id?: number | null;
+  tr_no?: string | null;
+  policy_name: string;
+  vehicle_profile?: string | null;
+  vehicle_capacity_kg?: number | string | null;
+  returns_to_origin: boolean;
+  road_factor?: number | string | null;
+  cost_per_km?: number | string | null;
+  total_consignments: number;
+  total_stops: number;
+  total_packages: number;
+  total_weight_kg: number | string;
+  estimated_distance_km: number | string;
+  separate_distance_km: number | string;
+  estimated_saving_km: number | string;
+  estimated_saving_amount: number | string;
+  distance_basis?: DistanceBasis;
+  vehicle_capacity_cbm?: number | string | null;
+  total_volume_cbm?: number | string | null;
+  vehicle_number?: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  gate_pass_no?: string | null;
+  dispatched_at?: string | null;
+  completed_at?: string | null;
+  cancelled_at?: string | null;
+  remarks?: string | null;
+  created_by_name?: string | null;
+  created_at?: string | null;
+  stops_delivered: number;
+  stops_acknowledged: number;
+  consignments_acknowledged: number;
+  stops: TripStop[];
+  shipment?: TripShipment | null;
+  next_action: TripNextAction;
+  /** List rows only. */
+  shipment_status?: string | null;
+  carrier_name?: string | null;
+  mode?: string | null;
+}
+
+/** A multi-drop run as the WINNING carrier's portal shows it (`transport.trip_brief`). */
+export interface CarrierTripStop {
+  id: number;
+  sequence: number;
+  destination_name: string;
+  destination_code?: string | null;
+  delivery_address?: string | null;
+  contact_person?: string | null;
+  contact_phone?: string | null;
+  latitude: number | string;
+  longitude: number | string;
+  status: string;
+  distance_from_previous_km: number | string;
+  total_packages: number;
+  total_weight_kg: number | string;
+  delivered_at?: string | null;
+  received_by_name?: string | null;
+  delivered_via?: string | null;
+  pod_url?: string | null;
+  consignments: { consignment_no: string; packages: number; weight_kg: number | string;
+    status: string }[];
+}
+
+export interface CarrierTrip {
+  id: number;
+  trip_no: string;
+  status: string;
+  total_stops: number;
+  stops_delivered: number;
+  next_stop_id?: number | null;
+  distance_basis?: DistanceBasis;
+  stops: CarrierTripStop[];
+}
+
+export interface TripPage {
+  items: ConsolidatedTrip[];
+  total: number;
+  page: number;
+  size: number;
+}
+
 export interface TRItem {
   id: number;
   line_no: number;
@@ -290,6 +797,9 @@ export interface ShipmentEvent {
 export interface TransportRequest {
   id: number;
   tr_no: string;
+  /** The stops of the multi-drop run this shipment carries — served to the winning
+   *  carrier's portal, where each stop is reported delivered. */
+  trip?: CarrierTrip | null;
   tr_date?: string | null;
   mode: TransportMode;
   carriage_mode?: CarriageMode | null;

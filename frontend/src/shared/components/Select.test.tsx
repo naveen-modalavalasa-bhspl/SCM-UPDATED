@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 // fireEvent, not user-event: the latter is not a dependency of this project.
 import { fireEvent, render, screen } from "@testing-library/react";
-import { Select } from "./ui";
+import { Field, Select } from "./ui";
 
 const options = [
   { value: 1, label: "PCS — Pieces" },
@@ -127,5 +127,21 @@ describe("Select — `searchable` overrides the count", () => {
   it("keeps a long list a plain dropdown when a screen asks for it", () => {
     render(<Select value="" options={many} onChange={vi.fn()} searchable={false} />);
     expect(screen.queryByRole("combobox")).toBeNull();
+  });
+});
+
+describe("Select inside a Field", () => {
+  it("is not reopened by a click on the label", () => {
+    // A <label> forwards a click on its text to the Autocomplete's input, which
+    // HeroUI opens on click — dismissing the dropdown by clicking beside it used to
+    // reopen it straight away.
+    render(
+      <Field label="Stop at this level" hint="Leave blank">
+        <Select value={3} options={many} onChange={vi.fn()} />
+      </Field>,
+    );
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.click(screen.getByText("Leave blank"));
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 });

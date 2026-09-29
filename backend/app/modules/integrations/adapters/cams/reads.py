@@ -23,7 +23,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping
 
-from sqlalchemy import Select, and_, func, literal, or_, select
+from sqlalchemy import Select, and_, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
@@ -33,7 +33,7 @@ from app.modules.integrations.enums import MAX_EXT_PAGE_SIZE
 from app.modules.inventory.models import NO_BATCH, PositionLocation, Stock
 from app.modules.warehouse.enums import WarehouseDocType
 from app.modules.warehouse.models import (
-    Batch, Dispatch, MaterialIssue, MaterialIssueLine, SerialNumber,
+    Batch, Dispatch, DispatchSource, MaterialIssue, MaterialIssueLine, SerialNumber,
 )
 from app.platform.hcm.models import (
     HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
@@ -520,12 +520,20 @@ def _latest_dispatch():
     "and it went there". Grouped to MAX(id) rather than LEFT JOINed directly, or an
     issue with two consignments would come back as two rows and break the paging count.
     """
-    newest = (
-        select(Dispatch.ref_id.label("issue_id"),
-               func.max(Dispatch.id).label("dispatch_id"))
+    # Both ways a consignment names its issue: `ref_id` for one, `out_dispatch_sources`
+    # for a consignment carrying several (whose `ref_id` is empty).
+    carried = union_all(
+        select(Dispatch.ref_id.label("issue_id"), Dispatch.id.label("dispatch_id"))
         .where(Dispatch.ref_type == WarehouseDocType.WH_ISSUE.value,
-               Dispatch.ref_id.isnot(None))
-        .group_by(Dispatch.ref_id)
+               Dispatch.ref_id.isnot(None)),
+        select(DispatchSource.issue_id.label("issue_id"),
+               DispatchSource.dispatch_id.label("dispatch_id"))
+        .where(DispatchSource.issue_id.isnot(None)),
+    ).subquery()
+    newest = (
+        select(carried.c.issue_id.label("issue_id"),
+               func.max(carried.c.dispatch_id).label("dispatch_id"))
+        .group_by(carried.c.issue_id)
         .subquery()
     )
     return (

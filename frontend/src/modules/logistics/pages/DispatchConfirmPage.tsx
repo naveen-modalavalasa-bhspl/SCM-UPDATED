@@ -33,6 +33,8 @@ import type {
   CarriageMode, CarriageRule, Consignment, DispatchInput, ModeRule,
   TransportMode, TransportRequest,
 } from "../transportTypes";
+import { TripRouteStrip } from "../components/TripStops";
+import { legDestination } from "../components/manifestView";
 
 const BLANK = {
   vehicle_number: "", driver_name: "",
@@ -702,6 +704,10 @@ export function DispatchConfirmPage() {
     refetchOnWindowFocus: true,
   });
 
+  /** A multi-drop trip arrives through the same door as a return: its ONE shipment
+   *  was drafted by the Smart Load Planner, and this screen only arranges it. */
+  const isTrip = isLeg && (leg?.source_type ?? "").toUpperCase() === "TRIP";
+
   const carriageRule: CarriageRule | undefined = useMemo(
     () => carriages?.find((row) => row.value === carriage), [carriages, carriage],
   );
@@ -750,7 +756,8 @@ export function DispatchConfirmPage() {
     if (isLeg) {
       return leg ? {
         no: leg.source_no ?? leg.tr_no,
-        to: leg.to_location_name ?? "—",
+        // A trip goes to several places; its last stop is not "where it is going".
+        to: legDestination(leg),
         from: leg.from_warehouse_name ?? "—",
         packages: leg.total_packages,
         weight_kg: leg.total_weight_kg,
@@ -1094,7 +1101,9 @@ export function DispatchConfirmPage() {
             ...headerFromConsignment(detail),
             ...arrangement,
             lines: linesFromConsignment(detail),
-            gate_pass_no: gatePass.trim() || `GP/${detail.dispatch_no}`,
+            // Only when the desk typed one: left blank, the server issues the
+            // dispatch its own number off the DSP series.
+            ...(gatePass.trim() ? { gate_pass_no: gatePass.trim() } : {}),
             // A settled mode leaves on this press. Everything the release checks is
             // on this form, so sending it to READY and asking for a second "it has
             // left" only delayed the moment the receiving site can sign for it — and
@@ -1337,8 +1346,10 @@ export function DispatchConfirmPage() {
           <fieldset disabled={lockedAfterFinalDispatch} className="contents">
           <Step
             n={1}
-            title={isLeg ? "Which return leg" : "Which consignment"}
-            subtitle={isLeg
+            title={isTrip ? "Which trip" : isLeg ? "Which return leg" : "Which consignment"}
+            subtitle={isTrip
+              ? "One vehicle for every consignment on the route — drafted by the Smart Load Planner."
+              : isLeg
               ? "Drafted when the return was released to logistics."
               : "Packed consignments only."}
           >
@@ -1348,14 +1359,14 @@ export function DispatchConfirmPage() {
                    there is nothing to choose between — a dropdown here would invite
                    one return's transport to be arranged against another's. */
                 <Field
-                  label="Return leg"
+                  label={isTrip ? "Multi-drop trip" : "Return leg"}
                   hint={leg ? `${leg.tr_no} · ${humanStatus(leg.status)}` : undefined}
                 >
                   <Input
                     value={subject
                       ? `${subject.no} — ${subject.to} · ${load(subject.packages, subject.weight_kg)}`
                       : legError
-                        ? "Could not load this return leg"
+                        ? `Could not load this ${isTrip ? "trip" : "return leg"}`
                         : "Loading..."}
                     disabled
                   />
@@ -1374,10 +1385,15 @@ export function DispatchConfirmPage() {
                 />
               </Field>
               )}
-              <Field label="Gate pass no" hint="Optional.">
+              <Field label="Gate pass no" hint="Leave blank to issue the next dispatch number (DSP).">
                 <Input value={gatePass} onChange={(e) => setGatePass(e.target.value)} />
               </Field>
             </div>
+            {/* Every drop on the truck, in one line: the desk choosing a mode and a
+                provider is choosing them for all of these at once. */}
+            {isTrip && (
+              <TripRouteStrip className="mt-4" items={leg?.items} from={leg?.from_warehouse_name} />
+            )}
 
           </Step>
 
@@ -1880,7 +1896,7 @@ export function DispatchConfirmPage() {
                     <CheckCircle2 className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
                     <span>
                       {showGatePass
-                        ? `${outcome.tr_no} carries this ${isLeg ? "return" : "consignment"}.`
+                        ? `${outcome.tr_no} carries this ${isTrip ? "trip" : isLeg ? "return" : "consignment"}.`
                         : `${outcome.tr_no} is ready — generate the gate pass.`}
                     </span>
                   </p>

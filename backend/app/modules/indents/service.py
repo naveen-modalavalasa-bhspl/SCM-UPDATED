@@ -383,6 +383,12 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
     vehicle_id, vehicle_number = await _resolve_vehicle(
         db, getattr(data, "vehicle_id", None))
 
+    indent_date = utcnow().date()
+    if indent_type == IndentType.MONTHLY.value:
+        from app.platform.monthly_indent import service as monthly_indent_service
+        await monthly_indent_service.assert_can_submit_monthly(db, user)
+        indent_date = await monthly_indent_service.local_today(db)
+
     context = await _requester_context(db, user)
     total_qty = sum(line.quantity for line in data.items)
     indent = Indent(
@@ -392,7 +398,7 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
             db, "str" if indent_type == IndentType.STR.value else "indent",
             project=context["project_name"]),
         indent_type=indent_type,
-        indent_date=utcnow().date(),
+        indent_date=indent_date,
         required_date=data.required_date,
         vehicle_id=vehicle_id,
         vehicle_number=vehicle_number,
@@ -1544,6 +1550,10 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
     if indent.status != IndentStatus.DRAFT.value:
         raise ValidationError(f"Cannot submit an indent in {indent.status} status")
 
+    if indent.indent_type == IndentType.MONTHLY.value:
+        from app.platform.monthly_indent import service as monthly_indent_service
+        await monthly_indent_service.assert_can_submit_monthly(db, user, indent=indent)
+
     _seed_approval_quantities(indent)
     # A monthly indent joins its cycle document HERE, not when it is approved. It used
     # to join on approval, which left the approver's Consolidation screen with no
@@ -1552,6 +1562,12 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
     # `CON/2026-27/00001`. One document, named once, from submit onwards.
     await _join_consolidation(db, indent, user)
     workflow_context = _workflow_context_for_indent(indent)
+    if indent.indent_type == IndentType.MONTHLY.value:
+        from app.platform.monthly_indent import service as monthly_indent_service
+        if await monthly_indent_service.custom_approval_flow_enabled(db):
+            workflow_context[engine.LADDER_DOC_TYPE_KEY] = (
+                monthly_indent_service.MONTHLY_INDENT_LADDER_DOC_TYPE
+            )
     await engine.start(
         db, doc_type=DocType.INDENT.value, doc_id=indent.id,
         context=workflow_context,
@@ -1643,6 +1659,15 @@ def ack_category_scope(value: str | None) -> str:
     return parts[1] if len(parts) == 2 else ""
 
 
+_ACK_ITEM_SCOPE = re.compile(r"^I-(\d+)(?:-|$)")
+
+
+def ack_category_item(value: str | None) -> int | None:
+    """Return the indent line named by an item photo scope."""
+    match = _ACK_ITEM_SCOPE.match(ack_category_scope(value))
+    return int(match.group(1)) if match else None
+
+
 def owed_quantity(item) -> Decimal:
     """What the requester is entitled to on this line.
 
@@ -1687,6 +1712,9 @@ async def add_receipt_attachment(db: AsyncSession, indent_id: int, upload, *,
         # than trimmed: a silently shortened scope files the proof against a package
         # nobody can find again.
         raise ValidationError("That is not a package this delivery was sent in")
+    line_id = ack_category_item(doc_category)
+    if line_id is not None and line_id not in {item.id for item in indent.items}:
+        raise ValidationError("That is not an item on this indent")
     return await attachments.add_attachment(
         db, entity_type=ACK_ENTITY_TYPE, entity_id=indent.id,
         upload=upload, doc_category=doc_category, user=user)
@@ -1794,8 +1822,31 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     if not photos:
         raise ValidationError(
             "Attach a photo of the goods you received before acknowledging")
+    # The CONSIGNMENT photo is required too (2026-09-28): the sealed load, the seal and
+    # the number plate are what a claim against the carrier is argued from, and item
+    # shots taken once the cartons are open cannot show them. A consignment-scoped
+    # (`C-...`) or unscoped photo counts; a package or item shot does not.
+    if not any(
+        (scope := ack_category_scope(row.doc_category)) == "" or scope.startswith("C-")
+        for row in photos
+    ):
+        raise ValidationError(
+            "Attach a photo of the consignment (the load, the seal, the number plate) "
+            "before acknowledging")
 
     by_id = {item.id: item for item in indent.items}
+    photographed = {ack_category_item(row.doc_category) for row in photos}
+    unproven = [
+        by_id[line_id] for line_id in lines
+        if line_id in by_id and line_id not in photographed
+    ]
+    if unproven:
+        named = ", ".join(item.item_name or item.item_code or f"line {item.id}"
+                          for item in unproven[:4])
+        more = len(unproven) - 4
+        raise ValidationError(
+            "Take a photo of each item you are confirming. Still without one: "
+            f"{named}{f' and {more} more' if more > 0 else ''}.")
     before = {str(i.id): float(_d(i.received_quantity)) for i in indent.items}
     for line_id, quantity in lines.items():
         item = by_id.get(line_id)
@@ -2726,7 +2777,7 @@ async def _resolve_journey_document_graph(
     returned frozen sets make duplicate paths harmless and keep later queries stable.
     """
     from app.modules.warehouse.models import (
-        Dispatch, DispatchItem, MaterialIssue, MaterialIssueLine, Picking,
+        Dispatch, DispatchItem, DispatchSource, MaterialIssue, MaterialIssueLine, Picking,
     )
 
     indent_items = tuple((await db.execute(
@@ -2813,6 +2864,12 @@ async def _resolve_journey_document_graph(
         dispatch_conditions.append(and_(
             func.upper(Dispatch.ref_type).in_(("ISSUE", "WH_ISSUE")),
             Dispatch.ref_id.in_(material_issue_ids),
+        ))
+        # A consignment carrying several issues names them in `out_dispatch_sources`
+        # and leaves `ref_id` empty.
+        dispatch_conditions.append(Dispatch.id.in_(
+            select(DispatchSource.dispatch_id)
+            .where(DispatchSource.issue_id.in_(material_issue_ids))
         ))
     if issue_nos:
         dispatch_conditions.append(Dispatch.ref_no.in_(issue_nos))

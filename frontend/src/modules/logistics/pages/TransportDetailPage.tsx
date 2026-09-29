@@ -21,6 +21,7 @@ import {
 import type { CustodyValue, PersonKind } from "../components/HandoverCustody";
 import { ShipmentTimeline } from "../components/ShipmentTimeline";
 import { ManifestTable } from "../components/ManifestTable";
+import { TripRouteStrip, TripStopsPanel } from "../components/TripStops";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT, TONE_YELLOW } from "@/shared/components/tones";
 
 /**
@@ -87,7 +88,8 @@ export function TransportDetailPage() {
       docket_no: doc.docket_no || "",
       tracking_url: doc.tracking_url || "",
       eway_bill_no: doc.eway_bill_no || "",
-      gate_pass_no: doc.gate_pass_no || `GP/${reference}`,
+      // Blank, not a made-up GP/ number: the release issues the dispatch its own.
+      gate_pass_no: doc.gate_pass_no || "",
     });
     // What the booking recorded, brought forward so the desk edits an answer rather
     // than retyping one. Which id was filled is itself which kind of person it was.
@@ -188,6 +190,8 @@ export function TransportDetailPage() {
   // the tender. This is the state the Confirm award press exists for, and nothing
   // reaches the carrier's portal while the shipment is in it.
   const awardPending = doc.status === "QUOTING" && Boolean(doc.awarded_at);
+  const isTrip = (doc.source_type ?? "").toUpperCase() === "TRIP";
+  const tripDeparted = ["IN_TRANSIT", "DELIVERED", "ACKNOWLEDGED", "CLOSED"].includes(doc.status);
   const trackingHandleMissing = !isHandover
     && ["COURIER", "THIRD_PARTY"].includes(doc.mode)
     && !(tracking.lr_no.trim() || tracking.docket_no.trim()
@@ -224,7 +228,17 @@ export function TransportDetailPage() {
               </Button>
             )}
 
-            {doc.status === "DRAFT" && (
+            {/* A multi-drop trip's shipment is arranged on the Dispatch screen, like a
+                return leg — its lines are the trip's manifest, not something to edit
+                here — and its stops are followed right here, below. */}
+            {isTrip && doc.status === "DRAFT" && (
+              <Can do="transport.create">
+                <Button onClick={() => nav(`/logistics/dispatch/new?tr_id=${doc.id}`)}>
+                  Arrange transport
+                </Button>
+              </Can>
+            )}
+            {!isTrip && doc.status === "DRAFT" && (
               <Can do="transport.create">
                 <Button variant="ghost" onClick={() => nav(`/logistics/shipments/${doc.id}/edit`)}>
                   Edit
@@ -308,6 +322,12 @@ export function TransportDetailPage() {
         ?? share.error
         ?? carrierDeclined.error ?? approveAward.error
         ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
+
+      {/* A trip is this same shipment with several drops: the route in one line, and
+          once the truck leaves, each stop marked delivered from here. */}
+      {isTrip && !tripDeparted && (
+        <TripRouteStrip className="mb-4" items={doc.items} from={doc.from_warehouse_name} />
+      )}
 
       <FlowStepper
         mode={doc.mode}
@@ -605,11 +625,18 @@ export function TransportDetailPage() {
           {/* What travels. One panel, shared with the provider desk and with the
             * carrier's own job sheet — a short delivery is argued over the same
             * document from both sides, so it cannot be a different table on each. */}
-          <ManifestTable
-            className="mt-4"
-            items={doc.items}
-            status={doc.status}
-          />
+          {/* A trip on the road is followed by where each drop is, not by what was
+              loaded — so the stops (and the press that marks one reached) take the
+              manifest's place once the truck has left the gate. */}
+          {isTrip && tripDeparted && doc.source_id ? (
+            <TripStopsPanel className="mt-4" tripId={doc.source_id} />
+          ) : (
+            <ManifestTable
+              className="mt-4"
+              items={doc.items}
+              status={doc.status}
+            />
+          )}
         </Card>
 
         <div className="space-y-4">
