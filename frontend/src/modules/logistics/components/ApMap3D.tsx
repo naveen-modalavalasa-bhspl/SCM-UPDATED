@@ -12,6 +12,7 @@ import {
 import {
   DEFAULT_TOGGLES, NODE_COLORS, drawMap, groundZ, lineZ, slabKm, type LayerToggles,
 } from "./apMapCanvas";
+import { initialQuality, levelRatio, sampleFrame, type QualityState } from "./mapQuality";
 
 /**
  * The Smart Load Planner's 3D map of Andhra Pradesh.
@@ -107,6 +108,13 @@ const LAYER_ROWS: { key: keyof LayerToggles; label: string; hint: string }[] = [
   { key: "points", label: "Stocking points", hint: "Every point on the masters" },
 ];
 const TOGGLES_KEY = "scm.apmap.layers";
+/** Orbit speed, per millisecond rather than per frame: a dropped frame is then a small
+ *  jump at the same speed, not a stall, and a 144 Hz screen turns no faster than 60. */
+const ORBIT_DEG_PER_MS = 0.0048;
+/** What this machine can draw while moving, learned once per session: it is the
+ *  machine that is slow, not the screen, so a map opened again starts where the last
+ *  one finished learning. */
+let learnedQuality: QualityState = initialQuality();
 
 type CamState = Omit<Camera, "width" | "height">;
 
@@ -173,6 +181,8 @@ export function ApMap3D({
   // It opens low and turned away, then flies in to the state on the first framing.
   const [cam, setCam] = useState<CamState>({ yaw: -62, pitch: 16, zoom: 0.42, panX: 0, panY: -140 });
   const [orbit, setOrbit] = useState(false);
+  const orbitRef = useRef(false);
+  orbitRef.current = orbit;
   const [hover, setHover] = useState<{ x: number; y: number; text: string; sub?: string; color?: string; extra?: string } | null>(null);
   const [cursor, setCursor] = useState<{ lat: number; lon: number; district: District | null; elev: number | null } | null>(null);
   const [layers, setLayers] = useState<MapLayers | null>(null);
@@ -355,8 +365,11 @@ export function ApMap3D({
   useEffect(() => {
     if (!orbit) return;
     let frameId = 0;
-    const spin = () => {
-      setCam((current) => ({ ...current, yaw: current.yaw + 0.08 }));
+    let last = 0;
+    const spin = (now: number) => {
+      const dt = last ? Math.min(50, now - last) : 1000 / 60;
+      last = now;
+      setCam((current) => ({ ...current, yaw: current.yaw + ORBIT_DEG_PER_MS * dt }));
       frameId = requestAnimationFrame(spin);
     };
     frameId = requestAnimationFrame(spin);
@@ -475,20 +488,21 @@ export function ApMap3D({
     }
     return boxes;
   }, [originP, origin, originLabel, drawnRoutes, width, height, title, subtitle]);
-  // While the camera is moving, quality is ADAPTIVE (2026-09-28). It used to drop to
-  // 60% resolution and a coarse terrain grid on every machine, so a turn went blurry
-  // even on a PC that could draw every frame sharp. Now a move starts at full quality
-  // and steps down only when a frame actually costs too much to hold ~60 fps (a
-  // machine rasterising canvas in software), and steps back up when there is time to
-  // spare. Once still for a moment there is always one full-quality frame.
+  // While the camera is moving, quality is ADAPTIVE (2026-09-28, reworked 2026-09-29).
+  // A move starts at whatever this machine has learned it can hold, steps down only
+  // when frames measurably cost too much, and back up when there is time to spare
+  // (`mapQuality.ts` says how, and why timing drawMap alone missed an orbit's lag).
+  // Once still for a moment there is always one full-quality frame.
   const lastMove = useRef(0);
+  const lastDraw = useRef(0);
   const prevCam = useRef(cam);
   const settleTimer = useRef<number | null>(null);
   const [settled, setSettled] = useState(0);
-  // 0 = sharp and full detail; each step gives up a little. Kept across moves, so a
-  // slow machine does not have to re-learn it on every drag.
-  const quality = useRef(0);
-  const fastFrames = useRef(0);
+  // Effects nobody can see on a map in motion — the running coast light, the sweep,
+  // SVG glow filters, backdrop blurs over a canvas that changed — each cost a full
+  // re-rasterise per frame, and none of it is inside drawMap. They sit out the move.
+  const [inMotion, setInMotion] = useState(false);
+  const inMotionRef = useRef(false);
   useEffect(() => () => { if (settleTimer.current) window.clearTimeout(settleTimer.current); }, []);
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
@@ -499,8 +513,8 @@ export function ApMap3D({
     prevCam.current = cam;
     const moving = moved && now - lastMove.current < 180;
     if (moved) lastMove.current = now;
-    const level = moving ? quality.current : 0;
-    const ratio = level >= 3 ? Math.max(0.6, dpr * 0.5) : level === 2 ? Math.max(0.75, dpr * 0.75) : dpr;
+    const level = moving ? learnedQuality.level : 0;
+    const ratio = levelRatio(level, dpr);
     const w = Math.round(width * ratio);
     const h = Math.round(height * ratio);
     if (canvas.width !== w) canvas.width = w;
@@ -508,22 +522,25 @@ export function ApMap3D({
     const started = performance.now();
     drawMap(ctx, { cam: camera, dpr: ratio, layers, show, relief, nodes: projectedNodes, reserved, moving: level >= 1 });
     if (moving) {
-      // A frame is ~16 ms at 60 fps, and the SVG and the browser need part of it.
-      const cost = performance.now() - started;
-      if (cost > 12 && quality.current < 3) { quality.current += 1; fastFrames.current = 0; }
-      else if (cost < 5 && quality.current > 0 && (fastFrames.current += 1) >= 20) {
-        quality.current -= 1; fastFrames.current = 0;
-      }
-    }
-    if (moving) {
+      // Frame to frame is the whole frame's cost, but only while requestAnimationFrame
+      // sets the pace; a drag's pace is the hand's.
+      const paced = orbitRef.current || tween.current != null;
+      const gap = now - lastDraw.current;
+      learnedQuality = sampleFrame(learnedQuality, performance.now() - started, paced && gap < 100 ? gap : null);
+      if (!inMotionRef.current) { inMotionRef.current = true; setInMotion(true); }
       if (settleTimer.current) window.clearTimeout(settleTimer.current);
-      settleTimer.current = window.setTimeout(() => setSettled((n) => n + 1), 140);
+      settleTimer.current = window.setTimeout(() => {
+        inMotionRef.current = false;
+        setInMotion(false);
+        setSettled((n) => n + 1);
+      }, 140);
     }
+    lastDraw.current = now;
   }, [cam, camera, dpr, layers, show, relief, projectedNodes, width, height, reserved, settled]);
 
   // The coast as one path, for the light running along it.
   const coastPath = useMemo(() => {
-    if (!layers || reduced) return "";
+    if (!layers || reduced || inMotion) return "";
     const parts: string[] = [];
     for (const line of layers.coast) {
       const pts: string[] = [];
@@ -534,11 +551,11 @@ export function ApMap3D({
       parts.push(`M${pts.join("L")}`);
     }
     return parts.join("");
-  }, [layers, camera, relief, reduced, slab]);
+  }, [layers, camera, relief, reduced, slab, inMotion]);
 
   const hoverDistrict = cursor?.district ?? null;
   const districtPath = useMemo(() => {
-    if (!hoverDistrict || !layers) return "";
+    if (!hoverDistrict || !layers || inMotion) return "";
     return hoverDistrict.world.map((ring) => {
       const pts: string[] = [];
       for (let i = 0; i < ring.x.length; i += 1) {
@@ -547,7 +564,7 @@ export function ApMap3D({
       }
       return `M${pts.join("L")}Z`;
     }).join("");
-  }, [hoverDistrict, layers, camera, relief, slab]);
+  }, [hoverDistrict, layers, camera, relief, slab, inMotion]);
 
   // ------------------------------------------------------------------ input
   const groundAt = (sx: number, sy: number) => {
@@ -714,9 +731,10 @@ export function ApMap3D({
   ];
   const scale = niceScale(cam.zoom, 96);
   const sweepR = originP ? 260 * cam.zoom * originP.ground.scale : 0;
+  const glow = inMotion ? undefined : "url(#ap3d-glow)";
 
   return (
-    <div ref={box} tabIndex={0} onKeyDown={onKeyDown}
+    <div ref={box} tabIndex={0} onKeyDown={onKeyDown} data-moving={inMotion || undefined}
       aria-label="Interactive map of Andhra Pradesh. Arrow keys pan, plus and minus zoom, Q and E turn, N faces north."
       className={`ap3d outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60 ${full
         ? "fixed inset-0 z-[70] w-screen overflow-hidden"
@@ -727,7 +745,7 @@ export function ApMap3D({
 
       {/* The scan from the origin belongs to the overview; over a route it competes
           with the one line the screen is about. */}
-      {originP && sweepR > 20 && !reduced && !routes.some((route) => route.emphasis === "active") && (
+      {originP && sweepR > 20 && !reduced && !inMotion && !routes.some((route) => route.emphasis === "active") && (
         <div aria-hidden className="pointer-events-none absolute"
           style={{ left: originP.ground.x, top: originP.ground.y, width: sweepR * 2, height: sweepR * 2,
             transform: `translate(-50%, -50%) scaleY(${Math.max(0.12, Math.cos((cam.pitch * Math.PI) / 180)).toFixed(3)})` }}>
@@ -790,7 +808,7 @@ export function ApMap3D({
               ) : (
                 <g key={i}>
                   {active && <polyline points={leg.pts} fill="none" stroke={colors[0]}
-                    strokeOpacity="0.28" strokeWidth="9" strokeLinecap="round" filter="url(#ap3d-glow)" />}
+                    strokeOpacity="0.28" strokeWidth="9" strokeLinecap="round" filter={glow} />}
                   <polyline points={leg.pts} fill="none"
                     stroke={active ? `url(#ap3d-route-${route.key})` : colors[0]}
                     strokeOpacity={active ? 1 : 0.4} strokeWidth={active ? 3.2 : 1.6}
@@ -836,7 +854,7 @@ export function ApMap3D({
               )}
               <ellipse cx={base.x} cy={base.y} rx="4.5" ry={4.5 * flat} fill={color} opacity={dim ? 0.25 : 0.55} />
               <polygon points={beam} fill={`url(#ap3d-beam-${tone})`} opacity={dim ? 0.45 : 1} />
-              {!dim && <circle cx={head.x} cy={head.y} r={r + 8} fill={color} opacity="0.3" filter="url(#ap3d-glow)" />}
+              {!dim && <circle cx={head.x} cy={head.y} r={r + 8} fill={color} opacity="0.3" filter={glow} />}
               {!dim && (
                 <circle cx={head.x} cy={head.y} r={r + 3} fill="none" stroke={color} strokeWidth="1.5"
                   className="ap3d-beacon" />
@@ -878,7 +896,7 @@ export function ApMap3D({
               <animate attributeName="opacity" values="0.9;0;0.9" dur="2.6s" repeatCount="indefinite" />
             </circle>
             <circle cx={originP.head.x} cy={originP.head.y} r="7" fill="#fbbf24" stroke="#fff"
-              strokeWidth="2" filter="url(#ap3d-glow)" />
+              strokeWidth="2" filter={glow} />
             {originLabel && (
               <text x={originLabel.x} y={originP.head.y - 6} textAnchor={originLabel.anchor} fontSize="11.5" fontWeight="700"
                 fill="#fde68a" stroke="#04101f" strokeWidth="3" paintOrder="stroke">
@@ -1064,6 +1082,7 @@ export function ApMap3D({
 @keyframes ap3d-sweep{to{transform:rotate(360deg)}}
 .ap3d-beacon{animation:ap3d-beacon 2.2s ease-out infinite;transform-box:fill-box;transform-origin:center}
 @keyframes ap3d-beacon{0%{opacity:.95;transform:scale(.6)}100%{opacity:0;transform:scale(2.6)}}
+.ap3d[data-moving] .backdrop-blur,.ap3d[data-moving] .backdrop-blur-md{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
 @media (prefers-reduced-motion: reduce){.ap3d-flow,.ap3d-coast,.ap3d-ping,.ap3d-sweep,.ap3d-beacon{animation:none}}
 `}</style>
     </div>

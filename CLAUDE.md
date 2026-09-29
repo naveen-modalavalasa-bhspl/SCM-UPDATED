@@ -674,10 +674,17 @@ that flow (2026-09-28).
   geoBoundaries, OpenStreetMap, SRTM) and loaded lazily by `apTerrain.loadMapLayers`;
   `apGeo.ts` keeps only the 2,635-vertex outline (Yanam cut out) because `insideAp`
   runs on any screen. Two things fail SILENTLY if undone: while the camera moves the
-  canvas steps its quality DOWN only when a frame measures over ~12 ms (and back up
-  when frames are cheap), with one full frame once it settles — a fixed downscale blurred
+  canvas steps its quality DOWN only when frames measurably cost too much (and back up
+  when they are cheap), with one full frame once it settles — a fixed downscale blurred
   every turn on machines that could draw it sharp (2026-09-28) — and every layer
   is batched into one path per colour — per-feature fills were most of a frame.
+  The quality rule is `mapQuality.ts` (2026-09-29): during an ORBIT or a glide it reads
+  the frame-to-frame interval, not only `drawMap`'s own time, because the SVG layer,
+  its filters and the backdrop blurs are most of an orbit's frame and timing drawMap
+  alone never stepped a slow laptop down. It decides on smoothed figures over several
+  frames (one GC pause used to flip it), and the level is learned once per session.
+  Orbit speed is per millisecond, never per frame. While moving, the coast light, the
+  sweep, SVG glows and backdrop blurs are switched off (`inMotion`).
   A stocking point with no coordinates is matched once against
   the offline GeoNames gazetteer; an ambiguous one is NEVER guessed and is pinned on
   the map instead (`PUT /trip-planner/points/{id}/location`, `master.location.manage`).

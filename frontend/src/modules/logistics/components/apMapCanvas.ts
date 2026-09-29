@@ -447,6 +447,11 @@ export function drawMap(ctx: CanvasRenderingContext2D, input: DrawInput) {
 /** The relief as a mesh of hillshaded quads, painted far to near so ridges overlap
  *  what is behind them. Only cells on screen are drawn. */
 let terrainCanvas: HTMLCanvasElement | null = null;
+/** Screen positions of the grid, reused frame to frame: two fresh 16k-float arrays a
+ *  frame were garbage an orbit produced sixty times a second, and the collector's
+ *  pauses were the hitches. Every index read in a frame is written in that frame. */
+let screenX = new Float32Array(0);
+let screenY = new Float32Array(0);
 
 function drawTerrain(main: CanvasRenderingContext2D, P: Project, layers: MapLayers, cam: Camera, dpr: number,
   z: (e: number) => number, moving = false) {
@@ -474,8 +479,12 @@ function drawTerrain(main: CanvasRenderingContext2D, P: Project, layers: MapLaye
   // Level of detail, while the camera moves: every second or third grid line, a quarter
   // or a ninth of the cells. A still frame always has every cell.
   const k = moving ? (cellPx < 9 ? 3 : cellPx < 24 ? 2 : 1) : 1;
-  const sx = new Float32Array(rows * cols);
-  const sy = new Float32Array(rows * cols);
+  if (screenX.length < rows * cols) {
+    screenX = new Float32Array(rows * cols);
+    screenY = new Float32Array(rows * cols);
+  }
+  const sx = screenX;
+  const sy = screenY;
   for (let r = 0; r < rows; r += 1) {
     if (r % k && r !== rows - 1) continue;
     for (let c = 0; c < cols; c += 1) {
