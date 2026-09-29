@@ -2,9 +2,13 @@
  * How much of the base map ApMap3D gives up while the camera moves, learned from how
  * long frames actually take on this machine.
  *
- * Level 0 is sharp and full detail; 1 coarsens the terrain grid; 2 drops the canvas to
- * 75% resolution; 3 to half — the old "blurred while it turns" frame. A still map is
- * always drawn at level 0, whatever was learned.
+ * Level 0 is full detail; 1 coarsens the terrain grid; 2 also leaves out the contour
+ * lines and the scanline texture; 3 coarsens the terrain one step further and drops the
+ * faint halos under rivers and the dashed sea rings. Every level is drawn at the full
+ * screen resolution: dropping the canvas to 75% or half and stretching it back up is
+ * what made the map blur while it turned, and nobody asked for a sharp still map at
+ * the price of a smeared moving one (2026-09-29). A still map is always drawn at
+ * level 0, whatever was learned.
  *
  * Two measurements, because either alone misses the lag:
  *  - `cost`, the time `drawMap` took. It is all of a drag's frame that we control.
@@ -90,11 +94,4 @@ export function sampleFrame(state: QualityState, cost: number, interval: number 
     s.fast = 0;
   }
   return s;
-}
-
-/** The canvas resolution a level draws at. */
-export function levelRatio(level: number, dpr: number): number {
-  if (level >= 3) return Math.max(0.6, dpr * 0.5);
-  if (level === 2) return Math.max(0.75, dpr * 0.75);
-  return dpr;
 }

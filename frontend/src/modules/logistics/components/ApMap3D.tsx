@@ -12,7 +12,7 @@ import {
 import {
   DEFAULT_TOGGLES, NODE_COLORS, drawMap, groundZ, lineZ, slabKm, type LayerToggles,
 } from "./apMapCanvas";
-import { initialQuality, levelRatio, sampleFrame, type QualityState } from "./mapQuality";
+import { initialQuality, sampleFrame, type QualityState } from "./mapQuality";
 
 /**
  * The Smart Load Planner's 3D map of Andhra Pradesh.
@@ -367,7 +367,10 @@ export function ApMap3D({
     let frameId = 0;
     let last = 0;
     const spin = (now: number) => {
-      const dt = last ? Math.min(50, now - last) : 1000 / 60;
+      // Capped so a stall does not jump the view, but high enough that a slow machine
+      // still turns at about the intended speed — at 50 ms, 3 fps turned a quarter as
+      // fast and read as frozen.
+      const dt = last ? Math.min(120, now - last) : 1000 / 60;
       last = now;
       setCam((current) => ({ ...current, yaw: current.yaw + ORBIT_DEG_PER_MS * dt }));
       frameId = requestAnimationFrame(spin);
@@ -495,6 +498,8 @@ export function ApMap3D({
   // Once still for a moment there is always one full-quality frame.
   const lastMove = useRef(0);
   const lastDraw = useRef(0);
+  /** Was the last frame drawn part of an orbit or a glide? */
+  const pacedDraw = useRef(false);
   const prevCam = useRef(cam);
   const settleTimer = useRef<number | null>(null);
   const [settled, setSettled] = useState(0);
@@ -511,30 +516,48 @@ export function ApMap3D({
     const now = performance.now();
     const moved = prevCam.current !== cam;
     prevCam.current = cam;
-    const moving = moved && now - lastMove.current < 180;
+    // An orbit or a glide is moving however long its frames take. Judged by the gap
+    // alone, one frame over 180 ms read as "still", was drawn at full quality with
+    // every effect on, took longer still, and the orbit never got out (2026-09-29).
+    const paced = orbitRef.current || tween.current != null;
+    const moving = moved && (paced || now - lastMove.current < 180);
     if (moved) lastMove.current = now;
     const level = moving ? learnedQuality.level : 0;
-    const ratio = levelRatio(level, dpr);
+    // Always the full resolution: a level draws LESS, never blurrier (mapQuality.ts).
+    const ratio = dpr;
     const w = Math.round(width * ratio);
     const h = Math.round(height * ratio);
     if (canvas.width !== w) canvas.width = w;
     if (canvas.height !== h) canvas.height = h;
     const started = performance.now();
-    drawMap(ctx, { cam: camera, dpr: ratio, layers, show, relief, nodes: projectedNodes, reserved, moving: level >= 1 });
+    drawMap(ctx, { cam: camera, dpr: ratio, layers, show, relief, nodes: projectedNodes, reserved, moving: level >= 1, level });
     if (moving) {
       // Frame to frame is the whole frame's cost, but only while requestAnimationFrame
-      // sets the pace; a drag's pace is the hand's.
-      const paced = orbitRef.current || tween.current != null;
+      // sets the pace; a drag's pace is the hand's. Only a gap from one paced frame to
+      // the next is a frame: the first after a pause measures the pause. A SLOW gap is
+      // kept (sampleFrame caps it) — dropping gaps over 100 ms hid exactly the frames
+      // that needed the quality to step down.
       const gap = now - lastDraw.current;
-      learnedQuality = sampleFrame(learnedQuality, performance.now() - started, paced && gap < 100 ? gap : null);
+      learnedQuality = sampleFrame(learnedQuality, performance.now() - started,
+        paced && pacedDraw.current ? gap : null);
       if (!inMotionRef.current) { inMotionRef.current = true; setInMotion(true); }
       if (settleTimer.current) window.clearTimeout(settleTimer.current);
-      settleTimer.current = window.setTimeout(() => {
+      const settle = () => {
+        // A slow frame mid-orbit is not the map settling: settling there drew a full
+        // frame with every effect back on between two orbit frames. It waits instead,
+        // and settles once the orbit or glide has ended.
+        if (orbitRef.current || tween.current != null) {
+          settleTimer.current = window.setTimeout(settle, 140);
+          return;
+        }
+        settleTimer.current = null;
         inMotionRef.current = false;
         setInMotion(false);
         setSettled((n) => n + 1);
-      }, 140);
+      };
+      settleTimer.current = window.setTimeout(settle, 140);
     }
+    pacedDraw.current = moving && paced;
     lastDraw.current = now;
   }, [cam, camera, dpr, layers, show, relief, projectedNodes, width, height, reserved, settled]);
 

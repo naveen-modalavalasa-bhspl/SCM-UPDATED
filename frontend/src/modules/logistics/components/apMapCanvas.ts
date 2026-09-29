@@ -69,6 +69,10 @@ export interface DrawInput {
   reserved?: [number, number, number, number][];
   /** The camera is mid-move: draw the relief coarser, it is redrawn in full once still. */
   moving?: boolean;
+  /** The learned quality level while moving (`mapQuality.ts`): 2 and up leave out the
+   *  contours and the scanlines, 3 also coarsens the relief a step and drops the faint
+   *  river halos and dashed sea rings. Never a lower resolution. */
+  level?: number;
 }
 
 type Project = (wx: number, wy: number, wz: number) => Projected;
@@ -167,6 +171,7 @@ function strokeLines(ctx: CanvasRenderingContext2D, P: Project, lines: WorldLine
 
 export function drawMap(ctx: CanvasRenderingContext2D, input: DrawInput) {
   const { cam, dpr, layers, show } = input;
+  const level = input.moving ? input.level ?? 1 : 0;
   const { width: W, height: H } = cam;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -204,6 +209,7 @@ export function drawMap(ctx: CanvasRenderingContext2D, input: DrawInput) {
   if (layers) {
     // Offset rings in the Bay of Bengal, fading out to sea.
     layers.seaRings.forEach((ring, index) => {
+      if (level >= 3 && index >= 2) return;
       ctx.strokeStyle = `rgba(56, 189, 248, ${[0.26, 0.17, 0.11, 0.075, 0.05][index] ?? 0.04})`;
       ctx.lineWidth = index === 0 ? 1.2 : 1;
       ctx.setLineDash(index >= 2 ? [2, 7] : []);
@@ -317,8 +323,8 @@ export function drawMap(ctx: CanvasRenderingContext2D, input: DrawInput) {
   ctx.fillRect(minX - 2, minY - 2, maxX - minX + 4, maxY - minY + 4);
 
   if (layers) {
-    drawTerrain(ctx, P, layers, cam, dpr, zTop, input.moving);
-    if (input.relief > 0.04) {
+    drawTerrain(ctx, P, layers, cam, dpr, zTop, input.moving, level >= 3);
+    if (input.relief > 0.04 && level < 2) {
       layers.contours.forEach((level, index) => {
         ctx.strokeStyle = `rgba(175, 230, 255, ${((0.16 + index * 0.05) * Math.min(1, input.relief * 1.5)).toFixed(3)})`;
         ctx.lineWidth = 0.8;
@@ -338,7 +344,7 @@ export function drawMap(ctx: CanvasRenderingContext2D, input: DrawInput) {
       for (const pass of [0, 1]) {
         for (const river of layers.rivers) {
           const major = river.rank <= 2;
-          if (!pass && !major) continue; // Only the great rivers carry a halo.
+          if (!pass && (!major || level >= 3)) continue; // Only the great rivers carry a halo.
           const w = (river.rank === 1 ? 2 : major ? 1.35 : 0.75) * wz;
           ctx.strokeStyle = pass ? (major ? "rgba(140, 220, 255, 0.92)" : "rgba(125, 211, 252, 0.55)") : "rgba(56, 189, 248, 0.18)";
           ctx.lineWidth = pass ? w : w + 4;
@@ -348,7 +354,7 @@ export function drawMap(ctx: CanvasRenderingContext2D, input: DrawInput) {
     }
     // Hologram scanlines across the face of the state — fixed to the screen, so the
     // ground moves under them as it turns.
-    const scan = scanPattern(ctx);
+    const scan = level < 2 ? scanPattern(ctx) : null;
     if (scan) {
       ctx.fillStyle = scan;
       ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
@@ -454,7 +460,7 @@ let screenX = new Float32Array(0);
 let screenY = new Float32Array(0);
 
 function drawTerrain(main: CanvasRenderingContext2D, P: Project, layers: MapLayers, cam: Camera, dpr: number,
-  z: (e: number) => number, moving = false) {
+  z: (e: number) => number, moving = false, coarser = false) {
   // Painted small on a layer of its own and laid down scaled up, smoothed. Each cell is
   // one flat colour, and six-kilometre facets show as a staircase once the camera is
   // close; drawing at 1/F of the resolution and letting the upscale interpolate softens
@@ -478,7 +484,7 @@ function drawTerrain(main: CanvasRenderingContext2D, P: Project, layers: MapLaye
   const { rows, cols, valid, wx, wy, elev, cellColor, palette, vertexColor } = t;
   // Level of detail, while the camera moves: every second or third grid line, a quarter
   // or a ninth of the cells. A still frame always has every cell.
-  const k = moving ? (cellPx < 9 ? 3 : cellPx < 24 ? 2 : 1) : 1;
+  const k = moving ? (cellPx < 9 ? 3 : cellPx < 24 ? 2 : 1) + (coarser ? 1 : 0) : 1;
   if (screenX.length < rows * cols) {
     screenX = new Float32Array(rows * cols);
     screenY = new Float32Array(rows * cols);
@@ -716,12 +722,16 @@ function drawLabels(ctx: CanvasRenderingContext2D, P: Project, layers: MapLayers
       : [[p.x - w / 2, p.y]];
     const boxAt = ([sx, sy]: [number, number]): [number, number, number, number] =>
       [sx - 3, sy - lh / 2 - 1, sx + w + 3, sy + lh / 2 + 1];
+    // The dot is checked as well as the name: a dot painted over a label already drawn
+    // eats its letters (Bapatla town's dot turned the district's B into a P).
+    const mr = label.marker ? (label.marker.ring ? label.marker.r + 2.4 : label.marker.r) + 1 : 0;
+    const markerBox: [number, number, number, number] | null = label.marker
+      ? [p.x - mr, p.y - mr, p.x + mr, p.y + mr] : null;
+    if (markerBox && !label.force && !free(markerBox)) continue;
     const spot = spots.find((s) => free(boxAt(s))) ?? (label.force ? spots[0] : null);
     if (!spot) continue;
     const [tx, ty] = spot;
     const box = boxAt(spot);
-    const markerBox: [number, number, number, number] | null = label.marker
-      ? [p.x - label.marker.r - 1, p.y - label.marker.r - 1, p.x + label.marker.r + 1, p.y + label.marker.r + 1] : null;
     taken.push(box);
     if (markerBox) taken.push(markerBox);
     if (label.marker) {

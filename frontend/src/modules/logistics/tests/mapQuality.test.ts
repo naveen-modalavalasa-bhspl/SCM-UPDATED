@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_LEVEL, initialQuality, levelRatio, sampleFrame, type QualityState } from "../components/mapQuality";
+import { MAX_LEVEL, initialQuality, sampleFrame, type QualityState } from "../components/mapQuality";
 
 const run = (state: QualityState, frames: number, cost: number, interval: number | null) => {
   let s = state;
@@ -45,13 +45,5 @@ describe("the map's quality while moving", () => {
     expect(s.patience).toBe(2);
     expect(run(s, 45, 2, 15).level).toBe(1);
     expect(run(s, 90, 2, 15).level).toBe(0);
-  });
-
-  it("draws the coarser levels at a lower resolution", () => {
-    expect(levelRatio(0, 2)).toBe(2);
-    expect(levelRatio(1, 2)).toBe(2);
-    expect(levelRatio(2, 2)).toBe(1.5);
-    expect(levelRatio(3, 2)).toBe(1);
-    expect(levelRatio(3, 1)).toBe(0.6);
   });
 });
