@@ -279,6 +279,7 @@ class InspectionItem(Base):
     rejection_reason = synonym("defect_type")
     remarks = Column(String(500), nullable=True)
     serial_numbers = Column(JSON, nullable=True)
+    imei_numbers = Column(JSON, nullable=True)
 
     inspection = relationship("Inspection", back_populates="items")
 

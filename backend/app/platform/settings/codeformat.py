@@ -48,7 +48,7 @@ DEFAULT_SERIAL_FORMAT = "{item_code}-{new_flag}-{seq:8}"
 # Every token a format may use, and what it means on screen. The screen renders this
 # table, so a token added here is documented for the user by construction.
 TOKENS: dict[str, str] = {
-    "item_code": "Item code, e.g. ELCCBL01-GEN-SMS-MFR-0001",
+    "item_code": "Item code, e.g. ELCCBL01-GEN-0001",
     "item_name": "Item name",
     "general_name": "General name from the item master",
     "category": "Item category name",
@@ -362,7 +362,7 @@ def preview(template: str, *, is_asset: bool = True) -> str:
     """What the format produces for a made-up unit. Rendered by the SAME code the
     putaway uses, so the screen cannot promise a shape the dock will not produce."""
     class _SampleItem:
-        code = "ELCCBL01-GEN-SMS-MFR-0001"
+        code = "ELCCBL01-GEN-0001"
         name = "Sample item"
         general_name = "CABLE"
         category_name = "Electricals"

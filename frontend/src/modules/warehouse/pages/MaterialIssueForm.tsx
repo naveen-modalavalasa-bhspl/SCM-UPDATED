@@ -19,7 +19,7 @@ import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import {
   acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
-  employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  employeeOptions, getEmployeeDestination, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
@@ -213,6 +213,19 @@ function BreakdownGroup({
   );
 }
 
+const parseCodes = (arr: any): string[] | null => {
+  if (!arr) return null;
+  if (!Array.isArray(arr)) {
+    if (arr.accepted && Array.isArray(arr.accepted)) {
+      return parseCodes(arr.accepted);
+    }
+    return null;
+  }
+  if (arr.length === 0) return [];
+  if (typeof arr[0] === "string") return arr;
+  return arr.map((u: any) => u?.serial_number || u?.imei_no || u?.asset_code || u?.consumable_code || u?.serial_no || u?.code).filter(Boolean);
+};
+
 /** `basePath` re-homes the screen: Inventory > Stock Transfer mounts this same form at
  *  `/inventory/transfers/issues` so an STO's issue is worked without leaving it. */
 export default function MaterialIssueForm({ direction = "OUT", basePath }: {
@@ -345,7 +358,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // Stated in the currency the item is validated on — the serial for a
         // serialized item, the IMEI for a handset, the asset/consumable code
         // otherwise. The backend resolves any of the three back to the same unit.
-        serial_numbers: l.unit_keys ?? l.serial_numbers ?? [],
+        serial_numbers: parseCodes(l.unit_keys ?? l.serial_numbers) ?? [],
       })),
     });
   }, [doc]);
@@ -737,6 +750,22 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     },
   });
 
+  const pullEmployee = useMutation({
+    mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
+    onSuccess: (source) => {
+      // Issued-to wins over the indent for where the goods are headed — the same
+      // precedence `_issue_destination` applies on a saved issue — so picking the
+      // person fills Destination / SAC from their office. The vehicle follows only
+      // when the office name carries one; an indent-set number is kept otherwise.
+      setDestination(source.destination_office_name ?? "");
+      setDestinationSac(source.destination_office_sac ?? null);
+      if (source.issued_to_name) setIssuedToName(source.issued_to_name);
+      if (source.vehicle_number) {
+        setForm((current) => ({ ...current, vehicle_number: source.vehicle_number ?? current.vehicle_number }));
+      }
+    },
+  });
+
   const pullOriginal = useMutation({
     mutationFn: (issueId: number) => getIssue(issueId),
     onSuccess: (source) => {
@@ -758,7 +787,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               requested_qty: open,
               issued_qty: open,
               rate: line.rate,
-              serial_numbers: line.serial_numbers ?? [],
+              serial_numbers: parseCodes(line.serial_numbers) ?? [],
             };
           })
           .filter((line) => line.requested_qty > 0),
@@ -1022,7 +1051,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         }
       />
 
-      <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pickingSource.error} />
+      <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pullEmployee.error ?? pickingSource.error} />
 
       {/* What the split actually handed out. Shown here rather than as a toast: the
           shortfall is the half that matters and it must not scroll away — a quantity
@@ -1166,21 +1195,24 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       ? [{ id: form.issued_to_id, name: issuedToName ?? String(form.issued_to_id) }]
                       : []}
                     onChange={(v, option) => {
-                      set("issued_to_id", v === "" ? null : v);
+                      const personId = v === "" ? null : v;
+                      set("issued_to_id", personId);
                       setIssuedToName(option?.name ?? null);
+                      if (personId) pullEmployee.mutate(personId);
+                      else if (!form.indent_id) { setDestination(""); setDestinationSac(null); }
                     }} placeholder="Person" />
           </Field>
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}
                    onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
           </Field>
-          <Field label="Destination" hint="Office of the issued-to employee from the selected indent.">
+          <Field label="Destination" hint="Office of the issued-to employee — from the indent when one is picked, else from the person.">
             <Input value={destination || "—"} disabled />
           </Field>
           {/* Read-only like Destination above it, and filled from the same answer: the
               SAC belongs to the office receiving the goods, so it follows the indent
-              rather than being chosen. */}
-          <Field label="Service area code (SAC)" hint="Of the destination office, from the selected indent.">
+              when one is picked and the issued-to person otherwise. */}
+          <Field label="Service area code (SAC)" hint="Of the destination office — from the indent when one is picked, else from the person.">
             <Input
               value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
               disabled

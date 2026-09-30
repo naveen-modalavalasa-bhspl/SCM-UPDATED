@@ -67,33 +67,35 @@ async def require_unique(db: AsyncSession, model: type, column: str, value: str,
 # --------------------------------------------------------------------------- #
 #  Items
 # --------------------------------------------------------------------------- #
-def build_item_prefix(category_path: str, general_code: str, brand_code: str,
-                      manufacturer_code: str) -> str:
-    """The part of an item code that identity decides: 101010-PARACET-DOLO-DOLO."""
+def build_item_prefix(category_path: str, general_code: str) -> str:
+    """The part of an item code that identity decides: 101010-PARACET.
+
+    Brand and manufacturer are deliberately NOT in the code. One general name
+    is sold by several brands, and each of those is a separate item row — they
+    share every part of the code below and differ only in the serial, so the
+    shelf reads one family of items instead of one code per brand.
+    """
     if not re.fullmatch(r"\d{6}", category_path or ""):
         raise ValidationError("Select a Level 3 category with a six-digit category path")
-    parts = [general_code, brand_code, manufacturer_code]
-    if any(not re.fullmatch(
-        r"[A-Z0-9]+(?:-[A-Z0-9]+)*", (part or "").strip().upper())
-           for part in parts):
+    part = (general_code or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", part):
         raise ValidationError(
-            "General name, brand and manufacturer codes may contain letters, "
-            "numbers and internal hyphens only"
+            "General name codes may contain letters, numbers and internal hyphens only"
         )
-    return "-".join([category_path, *(part.strip().upper() for part in parts)])
+    return f"{category_path}-{part}"
 
 
-def build_item_code(category_path: str, general_code: str, brand_code: str,
-                    manufacturer_code: str, serial: int) -> str:
+def build_item_code(category_path: str, general_code: str, serial: int) -> str:
     """The full item code: identity, then a four-digit serial.
 
-    The serial is what lets one brand and manufacturer carry several items — Dolo
-    650 and Dolo 500 share every other part of the code and differ only here.
+    The serial is what lets one category and general name carry several items —
+    Dolo 650 and Dolo 500 share every other part of the code and differ only
+    here, as do two brands of the same general name.
     """
     if not 1 <= serial <= 9999:
         raise ValidationError(
-            "This brand and manufacturer already have 9999 items in this category")
-    code = f"{build_item_prefix(category_path, general_code, brand_code, manufacturer_code)}-{serial:04d}"
+            "This category and general name already have 9999 items")
+    code = f"{build_item_prefix(category_path, general_code)}-{serial:04d}"
     if len(code) > 50:
         raise ValidationError("Generated item code exceeds 50 characters")
     return code
@@ -110,6 +112,20 @@ async def next_item_serial(db: AsyncSession, prefix: str) -> int:
     """
     rows = (await db.execute(
         select(Item.serial_no).where(Item.code.like(f"{prefix}-%")).with_for_update()
+    )).scalars().all()
+    return max([r for r in rows if r] or [0]) + 1
+
+
+async def peek_item_serial(db: AsyncSession, prefix: str) -> int:
+    """What `next_item_serial` would hand out, without taking the lock.
+
+    For the item form's code preview only: the save re-reads under lock, so two
+    people creating into the same prefix still serialize there. A preview taken
+    a moment ago may be off by one by the time it is saved — the saved code is
+    the authority, and the preview says so beside itself.
+    """
+    rows = (await db.execute(
+        select(Item.serial_no).where(Item.code.like(f"{prefix}-%"))
     )).scalars().all()
     return max([r for r in rows if r] or [0]) + 1
 
@@ -273,13 +289,13 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         setattr(item, key, value)
     # The code is assigned once and never regenerated. Re-deriving it on every edit
     # would renumber an item that already has stock, ledger rows and documents
-    # pointing at the code it was created with.
+    # pointing at the code it was created with. Items created before the brand and
+    # manufacturer left the code keep their longer shape for the same reason.
     if item.code is None:
-        prefix = build_item_prefix(category.path, general.code, brand.code,
-                                   manufacturer.code)
+        prefix = build_item_prefix(category.path, general.code)
         item.serial_no = await next_item_serial(db, prefix)
-        item.code = build_item_code(category.path, general.code, brand.code,
-                                    manufacturer.code, item.serial_no)
+        item.code = build_item_code(category.path, general.code,
+                                    item.serial_no)
     item.uom_code = uom.code
     item.hsn_code = hsn.code
     item.category_name = category.name

@@ -156,7 +156,7 @@ class Item(Base):
     # Assets are not consumed on issue. The asset or consumable code itself is
     # generated during putaway in the warehouse module, never here.
     is_asset = Column(Boolean, nullable=False, default=False)
-    # The 4-digit tail of `code`, counted per L1L2L3-GEN-BRAND-MFR prefix. Stored so
+    # The 4-digit tail of `code`, counted per L1L2L3-GEN prefix. Stored so
     # the serial can be read without re-parsing the code string.
     serial_no = Column(Integer, nullable=True)
     description = Column(Text, nullable=True)

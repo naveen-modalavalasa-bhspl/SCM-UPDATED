@@ -256,6 +256,15 @@ export const mastersApi = {
     api.get<{ generate_unit_code: boolean }>(`/api/items/${itemId}/unit-code-tracking`)
       .then((r) => r.data.generate_unit_code),
 
+  /** The code a new item is about to get. Lock-free peek for the form's
+   *  preview — the save re-derives the serial under lock, so this can be off
+   *  by one if two people save into the same prefix together. */
+  nextItemCode: (categoryId: number, generalNameId: number) =>
+    api.get<{ prefix: string; next_serial: number; preview: string }>(
+      "/api/items/next-code",
+      { params: { category_id: categoryId, general_name_id: generalNameId } },
+    ).then((r) => r.data),
+
   /** Read-only lookup of rbac_user_groups, so the item-group screen can name the
    *  group it is tagging to. Groups are created and edited in the RBAC module;
    *  reaching into that module's client would couple the two, so this is a plain

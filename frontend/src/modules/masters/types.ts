@@ -1,6 +1,6 @@
 export interface MasterItem {
   id: number;
-  /** L1L2L3-GEN-BRAND-MFR-0001. Assigned once at create, never regenerated. */
+  /** L1L2L3-GEN-0001. Assigned once at create, never regenerated. */
   code: string;
   serial_no?: number | null;
   name: string;

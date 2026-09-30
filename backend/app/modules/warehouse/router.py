@@ -1672,6 +1672,13 @@ async def employee_options(search: str | None = None, db: AsyncSession = Depends
     return await service.employee_options(db, search)
 
 
+@router.get("/options/employee-destination", response_model=s.EmployeeDestination)
+async def employee_destination(employee_id: int = Query(...),
+                               db: AsyncSession = Depends(get_db),
+                               _=Depends(require_permission(STOCK_VIEW))):
+    return await service.employee_destination(db, employee_id)
+
+
 @router.get("/options/projects", response_model=list[s.Option])
 async def project_options(search: str | None = None, db: AsyncSession = Depends(get_db),
                           _=Depends(require_permission(STOCK_VIEW))):

@@ -55,35 +55,32 @@ def test_ownership_department_options_deduplicate_names_deterministically():
     ]
 
 
-def test_generated_item_code_contains_all_identity_parts():
-    assert build_item_code("101010", "slide", "lab", "acme", 1) == \
-        "101010-SLIDE-LAB-ACME-0001"
+def test_generated_item_code_contains_category_and_general_name():
+    assert build_item_code("101010", "slide", 1) == "101010-SLIDE-0001"
 
 
 def test_generated_item_code_accepts_hyphenated_master_codes():
-    assert build_item_code("161010", "GN-003", "DOLO650", "RAMESHLABS", 1) == \
-        "161010-GN-003-DOLO650-RAMESHLABS-0001"
+    assert build_item_code("161010", "GN-003", 1) == "161010-GN-003-0001"
 
 
 @pytest.mark.parametrize("code", ["-GN003", "GN003-", "GN--003", "GN 003", "GN_003"])
 def test_generated_item_code_rejects_malformed_master_codes(code):
     with pytest.raises(ValidationError, match="internal hyphens"):
-        build_item_code("161010", code, "DOLO650", "RAMESHLABS", 1)
+        build_item_code("161010", code, 1)
 
 
 def test_generated_item_code_rejects_an_incomplete_category_path():
     with pytest.raises(ValidationError, match="six-digit"):
-        build_item_code("1010", "SLIDE", "LAB", "ACME", 1)
+        build_item_code("1010", "SLIDE", 1)
 
 
 def test_generated_item_code_pads_the_serial_to_four_digits():
-    assert build_item_code("101010", "PARACET", "DOLO", "DOLO", 42) == \
-        "101010-PARACET-DOLO-DOLO-0042"
+    assert build_item_code("101010", "PARACET", 42) == "101010-PARACET-0042"
 
 
 def test_a_prefix_runs_out_after_9999_items():
     with pytest.raises(ValidationError, match="9999"):
-        build_item_code("101010", "SLIDE", "LAB", "ACME", 10000)
+        build_item_code("101010", "SLIDE", 10000)
 
 
 async def item_payload(client, admin, *, name="Bolt"):
@@ -135,7 +132,7 @@ async def test_identity_masters_accept_internal_hyphens(client, admin):
     assert manufacturer.status_code == 200, manufacturer.text
 
 
-async def test_item_code_uses_category_general_brand_and_manufacturer(db):
+async def test_item_code_uses_category_and_general_name(db):
     category = ItemCategory(
         code="MIC", name="Microscopy", level=3, segment_code="10",
         path="101010", is_active=True,
@@ -160,7 +157,7 @@ async def test_item_code_uses_category_general_brand_and_manufacturer(db):
         manufacturer_id=manufacturer.id, item_class_id=item_class.id,
         uom_id=uom.id, hsn_id=hsn.id,
     ))
-    assert item.code == "101010-SLIDE-LAB-ACME-0001"
+    assert item.code == "101010-SLIDE-0001"
     assert item.serial_no == 1
     assert item.manufacturer_name == "Acme Medical"
     assert item.brand_name == "Lab Brand"
@@ -195,7 +192,7 @@ async def test_create_item_snapshots_uom_and_category(client, admin):
     # Snapshots let the item list render without joining two masters.
     assert body["uom_code"] == "PCS"
     assert body["category_name"] == "Level 3"
-    assert body["code"] == "000000-GEN-BR-MFR-0001"
+    assert body["code"] == "000000-GEN-0001"
 
 
 async def test_item_ownership_snapshots_active_hcm_department_and_filters(

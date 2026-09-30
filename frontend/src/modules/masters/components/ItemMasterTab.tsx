@@ -88,19 +88,18 @@ export function brandsForGeneralName(
   return brands.filter((row) => ids.has(row.id));
 }
 
-/** What the code will look like. The four-digit serial is allocated by the server
+/** What the code will look like. Brand and manufacturer stay off it: one general
+ *  name is sold by several brands, each a separate item row sharing this prefix
+ *  and differing only in the serial. The serial is allocated by the server
  *  at save, so a new item shows #### rather than a number that might be taken. */
 export function itemCodePreview(
   categoryPath?: string | null,
   generalCode?: string | null,
-  brandCode?: string | null,
-  manufacturerCode?: string | null,
   serial?: number | null,
 ) {
-  if (![categoryPath, generalCode, brandCode, manufacturerCode].every(Boolean)) return "";
+  if (![categoryPath, generalCode].every(Boolean)) return "";
   const tail = serial ? String(serial).padStart(4, "0") : "####";
-  return [categoryPath, generalCode, brandCode, manufacturerCode]
-    .join("-").toUpperCase() + `-${tail}`;
+  return [categoryPath, generalCode].join("-").toUpperCase() + `-${tail}`;
 }
 
 /** Where one tag's answer is stored in `mst_item_specs.specifications`.
@@ -265,14 +264,20 @@ export function ItemMasterTab() {
   const chosenCategory = cats.find((row) => row.id === Number(form.category_id));
   const chosenGeneral = general.data?.find((row) => row.id === Number(form.general_name_id));
   const brandRows = brandsForGeneralName(brands.data ?? [], chosenGeneral);
-  const chosenBrand = brands.data?.find((row) => row.id === Number(form.brand_id));
-  const chosenManufacturer = manufacturerRows.find(
-    (row) => row.id === Number(form.manufacturer_id),
-  );
-  const preview = itemCodePreview(
-    chosenCategory?.path, chosenGeneral?.code, chosenBrand?.code,
-    chosenManufacturer?.code, editing?.serial_no,
-  );
+  // The serial a new item is about to get, read live: the save mints it under
+  // lock, so the form asks what it would be rather than guessing. `####` only
+  // shows while that answer is in flight or when the pair is not picked yet.
+  const nextCode = useQuery({
+    queryKey: ["masters", "items", "next-code", form.category_id, form.general_name_id],
+    queryFn: () => mastersApi.nextItemCode(
+      Number(form.category_id), Number(form.general_name_id)),
+    enabled: editing === null && Boolean(form.category_id) && Boolean(form.general_name_id),
+    staleTime: 10_000,
+  });
+  const preview = editing
+    ? itemCodePreview(chosenCategory?.path, chosenGeneral?.code, editing.serial_no)
+    : (nextCode.data?.preview
+      ?? itemCodePreview(chosenCategory?.path, chosenGeneral?.code));
 
   const tags = categoryTags.data ?? [];
   const attributeTags = tags.filter((t) => t.tag_type === "ATTRIBUTE" && t.is_active);
@@ -338,6 +343,7 @@ export function ItemMasterTab() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["masters", "items"] });
+      qc.invalidateQueries({ queryKey: ["masters", "items", "next-code"] });
       qc.invalidateQueries({ queryKey: ["masters", "hsn-codes", "all"] });
       setDraftComponents([]);
       setEditing(undefined);
@@ -384,7 +390,7 @@ export function ItemMasterTab() {
     : !form.general_name_id ? "General name is required"
     : !form.brand_id ? "Brand is required"
     : !form.manufacturer_id ? "Manufacturer is required"
-    : !preview ? "Complete the category, general name, brand and manufacturer"
+    : !preview ? "Complete the category and general name"
     : !form.name.trim() ? "Give the item a name"
     : !form.uom_id ? "Pick a primary unit on the Units tab"
     : !form.owner_department_id ? "Pick an ownership department"
@@ -498,7 +504,9 @@ export function ItemMasterTab() {
                   if (!v) setDraftComponents([]);
                 }} /> Has Components / Kit</label>
               <Field label="Generated Item Code"
-                     hint={editing ? "Fixed at creation — never renumbered" : "The 4-digit serial is assigned on save"}>
+                     hint={editing ? "Fixed at creation — never renumbered"
+                       : nextCode.isPending ? "Fetching the next serial…"
+                       : "Live next serial — confirmed on save"}>
                 <Input value={preview} disabled /></Field>
               <Field label="Item Name"><Input value={form.name}
                 onChange={(e) => set("name", e.target.value)} /></Field>
