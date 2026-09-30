@@ -25,7 +25,10 @@ from app.platform.hcm.models import (
 )
 from app.platform.rbac.models import Permission, Role, RolePermission, UserRole
 from app.platform.settings.models import UserCredential
-from app.platform.workflow.models import Action, Instance, Pending, Stage, Workflow
+from app.platform.workflow import ladder
+from app.platform.workflow.models import (
+    Action, Instance, Pending, Stage, StageCondition, Workflow,
+)
 from app.shared.enums import ApproverType
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom
@@ -693,6 +696,62 @@ async def test_submit_then_dept_head_approves(db):
     # state for an indent that has cleared its chain.
     assert result.status == IndentStatus.AWAITING_ALLOCATION.value
     assert result.approved_at is not None
+
+
+async def test_submit_with_no_approval_goes_directly_to_fulfilment_desk(db):
+    requester, _approver, it1, _ = await _world(db)
+    configured = (await db.execute(
+        select(Workflow).where(Workflow.doc_type == "INDENT")
+    )).scalars().all()
+    for workflow in configured:
+        workflow.is_active = False
+
+    workflow = Workflow(
+        code="CUSTOM-GLOBAL-INDENT-NO-APPROVAL",
+        name="Indent approval",
+        doc_type="INDENT",
+        is_active=True,
+    )
+    db.add(workflow)
+    await db.flush()
+    marker = Stage(
+        workflow_id=workflow.id,
+        sequence=1,
+        name="No approval required",
+        approver_type=ApproverType.POSITION.value,
+        position_id=None,
+        is_enabled=False,
+        approval_mode="ANY_ONE",
+    )
+    db.add(marker)
+    await db.flush()
+    db.add(StageCondition(
+        stage_id=marker.id,
+        field_name=ladder.POLICY_FIELD,
+        operator="EQ",
+        field_value=ladder.POLICY_NONE,
+        logic="AND",
+    ))
+    await db.commit()
+
+    indent = await service.create_indent(db, _create_data(it1.id), requester)
+    submitted = await service.submit_indent(db, indent.id, requester)
+
+    assert submitted.status == IndentStatus.AWAITING_ALLOCATION.value
+    assert submitted.approved_at is not None
+    assert submitted.current_approver_name is None
+    assert not (await db.execute(
+        select(Pending).where(
+            Pending.doc_type == "INDENT",
+            Pending.doc_id == indent.id,
+        )
+    )).scalars().all()
+
+    queue = await service.list_indents(
+        db, PageParams(page=1, size=20), user=requester,
+        has_remainder=True, to_serve=True,
+    )
+    assert indent.id in {row.id for row in queue["items"]}
 
 
 async def test_self_approval_is_rejected(db):
