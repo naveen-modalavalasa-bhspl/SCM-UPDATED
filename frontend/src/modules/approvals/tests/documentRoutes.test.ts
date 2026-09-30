@@ -7,9 +7,9 @@ describe("approval document routes", () => {
       .toBe("/approvals?reviewIndent=42");
   });
 
-  it("opens completed indents through their permanent document detail", () => {
+  it("opens completed indents through the approval decision ledger", () => {
     expect(approvalDecisionDocumentPath({ doc_type: "INDENT", doc_id: 42 }))
-      .toBe("/indents/42?decision=1");
+      .toBe("/approvals/decisions/INDENT/42");
   });
 
   it("marks completed allocations as read-only decision views", () => {

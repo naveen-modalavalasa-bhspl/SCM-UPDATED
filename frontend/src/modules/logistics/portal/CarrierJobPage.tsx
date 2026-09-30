@@ -9,6 +9,8 @@ import { fmtDate, fmtDateTime } from "@/shared/datetime";
 import { carrierPortalApi } from "../api";
 import { load, money } from "../components/modeCopy";
 import { ManifestTable } from "../components/ManifestTable";
+import { safeHref } from "../components/tripLoad";
+import { CarrierTripStops } from "./CarrierTripStops";
 
 const SCANS = [
   { value: "", label: "No scan, just save the numbers" },
@@ -129,7 +131,7 @@ export function CarrierJobPage() {
   const deliver = useAction({
     run: () => carrierPortalApi.deliver(jobId, {
       delivered_to_name: pod.delivered_to_name || null,
-      pod_url: pod.pod_url || null,
+      pod_url: pod.pod_url.trim() || null,
       remarks: pod.remarks || null,
     }),
     success: "Reported delivered", invalidates,
@@ -155,6 +157,8 @@ export function CarrierJobPage() {
   // the only reason this job is on the "quote for it" list a second time.
   const askedAgain = myQuote && myQuote.status === "INVITED"
     && myQuote.remarks && myQuote.freight_amount != null ? myQuote : null;
+  // A multi-drop run is delivered stop by stop, never in one press.
+  const trip = !lost ? job.trip ?? null : null;
 
   return (
     <div className="space-y-4">
@@ -424,7 +428,12 @@ export function CarrierJobPage() {
         </Card>
       )}
 
-      {!lost && job.status === "IN_TRANSIT" && (
+      {trip && (
+        <CarrierTripStops jobId={job.id} trip={trip} invalidates={invalidates}
+          canReport={["READY", "IN_TRANSIT"].includes(job.status)} />
+      )}
+
+      {!lost && !trip && job.status === "IN_TRANSIT" && (
         <Card className="space-y-3 p-5">
           <div className="flex items-center gap-2">
             <PackageCheck className="h-4 w-4 text-brand" />
@@ -452,13 +461,17 @@ export function CarrierJobPage() {
               </Field>
             </div>
           </div>
-          <Button onClick={() => deliver.mutate()} disabled={deliver.isPending}>
+          {pod.pod_url.trim() && !safeHref(pod.pod_url) && (
+            <p className="text-xs text-bad">The POD link has to start with http:// or https://</p>
+          )}
+          <Button onClick={() => deliver.mutate()}
+            disabled={deliver.isPending || (!!pod.pod_url.trim() && !safeHref(pod.pod_url))}>
             {deliver.isPending ? "Sending…" : "Delivered"}
           </Button>
         </Card>
       )}
 
-      {!lost && ["DELIVERED", "ACKNOWLEDGED"].includes(job.status) && (
+      {!lost && !trip && ["DELIVERED", "ACKNOWLEDGED"].includes(job.status) && (
         <Card className="p-5">
           <p className="text-sm text-body">
             Delivered {fmtDateTime(job.delivered_at)}

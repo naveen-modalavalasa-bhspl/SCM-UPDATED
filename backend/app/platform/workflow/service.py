@@ -579,6 +579,7 @@ def _validate_doc_type(doc_type: str) -> None:
 # branch below rather than being given a permission that implies they are actionable.
 RETURN_PERMISSION_BY_DOC_TYPE: dict[str, str] = {
     DocType.INDENT.value: perms.INDENT_APPROVE,
+    DocType.MONTHLY_INDENT.value: perms.INDENT_APPROVE,
     DocType.ALLOCATION.value: perms.ALLOCATION_APPROVE,
     DocType.OWN_STOCK_ALLOCATION.value: perms.ALLOCATION_APPROVE,
     # The issue family shares `issue.issue`: the same people move stock out of a

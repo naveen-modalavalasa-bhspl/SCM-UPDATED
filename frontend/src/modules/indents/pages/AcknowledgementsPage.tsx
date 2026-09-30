@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { CheckCircle2, ListFilter } from "lucide-react";
+import { CheckCircle2, ListFilter, Truck } from "lucide-react";
 import {
   Button, Can, Card, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
   type Column,
@@ -87,6 +87,11 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
       header: "Raised By",
       hideOnNarrow: true,
       render: (row) => <span className="text-sm text-muted">{row.project_name ?? "—"}</span>,
+    },
+    {
+      key: "consignment",
+      header: "Consignment",
+      render: (row) => <ConsignmentNos row={row} />,
     },
     {
       key: "items",
@@ -218,6 +223,7 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
               </div>
               <IndentSummaryStatusBadge status={displayStatus(row)} />
             </div>
+            <ConsignmentNos row={row} />
             <div className="text-sm text-muted">{summarise(row)}</div>
             <div className="text-[11px] text-muted">
               {row.lines.length} item{row.lines.length === 1 ? "" : "s"}
@@ -233,6 +239,34 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
           </div>
         )}
       />
+    </div>
+  );
+}
+
+/**
+ * The consignment note number(s) the goods travelled under — the number printed on the
+ * paper the driver hands over, so the requester can match the row to the load at the
+ * gate. Read off the package split already on each line; an indent served in rounds
+ * can arrive under more than one, and all of them are in the tooltip.
+ */
+function ConsignmentNos({ row }: { row: Acknowledgement }) {
+  const nos = [...new Set(
+    row.lines.flatMap((line) => (line.package_quantities ?? [])
+      .map((part) => part.dispatch_no)
+      .filter((no): no is string => Boolean(no))),
+  )];
+  if (nos.length === 0) {
+    return <span className="text-[11px] text-muted">Not sent yet</span>;
+  }
+  return (
+    <div className="inline-flex min-w-0 items-center gap-1.5" title={nos.join("\n")}>
+      <Truck className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
+      <span className="truncate font-mono text-xs font-semibold text-ink">{nos[0]}</span>
+      {nos.length > 1 && (
+        <span className="shrink-0 rounded-full bg-content2 px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+          +{nos.length - 1}
+        </span>
+      )}
     </div>
   );
 }

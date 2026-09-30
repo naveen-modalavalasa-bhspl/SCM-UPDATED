@@ -1,5 +1,8 @@
 """sys_settings key-value helpers, the HCM sync schedule, and the audit log."""
 import json
+from datetime import date, time
+from decimal import Decimal
+from enum import Enum
 
 from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -200,6 +203,37 @@ async def set_hcm_schedule(db: AsyncSession, enabled: bool, interval_minutes: in
 # --------------------------------------------------------------------------- #
 #  Audit log
 # --------------------------------------------------------------------------- #
+def audit_safe(value):
+    """Coerce a value into something `json.dumps` can write.
+
+    `sys_audit_log.changed_fields` is a JSON column, so anything a caller puts in a
+    before/after dict is serialised by the driver — and a `date`, a `time` or a
+    `Decimal` raises TypeError there, which fails the whole INSERT and therefore the
+    caller's own write. A storekeeper saving a monthly-indent reminder got "something
+    went wrong on our side" because the reminder's `trigger_time` is a `datetime.time`.
+
+    Coercing HERE rather than in each caller is the point: every module hand-coercing
+    its own snapshot is how the one that forgot went unnoticed until the save 500'd.
+    Values that are already JSON-native pass through untouched, so no existing caller
+    changes shape. Dates/times become ISO strings and Decimals become floats, matching
+    what `indents` had already been doing by hand.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Enum):
+        return audit_safe(value.value)
+    if isinstance(value, Decimal):
+        return float(value)
+    # datetime is a subclass of date, so one branch covers date/datetime/time.
+    if isinstance(value, (date, time)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): audit_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [audit_safe(v) for v in value]
+    return str(value)
+
+
 def diff_fields(before: dict | None, after: dict | None) -> dict | None:
     """{"field": {"from": old, "to": new}} for the fields that actually differ.
 
@@ -224,7 +258,7 @@ async def write_audit(db: AsyncSession, *, entity: str, action: AuditAction,
                       ip_address: str | None = None) -> None:
     """Append one audit row. Never commits — it joins the caller's transaction, so an
     action that rolls back cannot leave a log entry claiming it happened."""
-    changed = diff_fields(before, after)
+    changed = diff_fields(audit_safe(before), audit_safe(after))
     if action == AuditAction.UPDATE and changed is None:
         return   # a PUT that changed nothing is not an event worth recording
     client = get_client_info()

@@ -578,6 +578,13 @@ async def carrier_deliver_job(tr_id: int, body: DeliverIn = DeliverIn(),
     return await service.carrier_deliver(db, account.vendor_id, tr_id, body)
 
 
+@carrier_router.post("/transport/{tr_id}/stops/{stop_id}/deliver", response_model=TROut)
+async def carrier_deliver_stop(tr_id: int, stop_id: int, body: DeliverIn = DeliverIn(),
+                               db: AsyncSession = Depends(get_db),
+                               account=Depends(get_current_vendor)):
+    return await service.carrier_deliver_stop(db, account.vendor_id, tr_id, stop_id, body)
+
+
 # ---- The logistics vendor register ----
 #
 # Under Settings, not Logistics: it mints an identity outside the company, which is an

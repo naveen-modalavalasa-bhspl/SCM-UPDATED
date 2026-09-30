@@ -1,5 +1,6 @@
 """FastAPI entrypoint. One error shape, CORS, /health, module routers, and the
 HCM periodic-sync scheduler (started from the stored schedule)."""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
     from app.platform.hcm import scheduler
     from app.platform.settings.service import get_hcm_schedule
     from app.platform.workflow import scheduler as approval_scheduler
+    from app.platform.monthly_indent import scheduler as monthly_indent_scheduler
     from app.core.database import SessionLocal
 
     # ONE process in the deployment runs the schedulers (2026-09-03).
@@ -64,6 +66,22 @@ async def lifespan(app: FastAPI):
             approval_scheduler.configure(config["enabled"], config["interval_minutes"])
         except Exception as exc:
             log.warning("Approval reminder scheduler not configured at startup: %s", exc)
+
+        monthly_indent_scheduler.start()
+        try:
+            from app.platform.monthly_indent import service as monthly_indent_service
+            async with SessionLocal() as db:
+                cycle = await monthly_indent_service.get_cycle_settings(db)
+            monthly_indent_scheduler.configure(
+                cycle.scheduler_enabled, cycle.scheduler_interval_minutes)
+        except Exception as exc:
+            log.warning("Monthly indent scheduler not configured at startup: %s", exc)
+
+        # AIMS push: resend failed/pending events every few minutes. A no-op while the
+        # push is switched off. Here, not per worker, or each worker would resend.
+        from app.modules.integrations.adapters.aims import outbox as aims_outbox
+
+        aims_resend = asyncio.create_task(aims_outbox.resend_loop())
     else:
         log.info("RUN_SCHEDULERS is off — this process serves requests only")
 
@@ -92,6 +110,8 @@ async def lifespan(app: FastAPI):
     if settings.RUN_SCHEDULERS:
         scheduler.shutdown()
         approval_scheduler.shutdown()
+        monthly_indent_scheduler.shutdown()
+        aims_resend.cancel()
     from app.core import cache
 
     await cache.close()
@@ -230,6 +250,7 @@ def _include_routers() -> None:
         "app.platform.notifications.router",
         "app.platform.rbac.router",
         "app.platform.workflow.router",
+        "app.platform.monthly_indent.router",
         "app.platform.rules.router",
         "app.platform.admin.router",
         "app.modules.home.router",

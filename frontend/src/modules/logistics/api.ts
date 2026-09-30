@@ -8,7 +8,9 @@ import type {
   LogisticsVendor, LogisticsVendorInput, LogisticsVendorSummary, ModeRule,
   ModeSuggestion,
   PartnerType, ProviderBoardRow, RaiserTracking, ReceiptEvidence, ShipmentEvent, TransportRequest,
-  TransportSummary, TRInput, TRListRow,
+  TransportSummary, TRInput, TRListRow, ConsolidatedTrip, PlannerPolicyResponse,
+  PolicyOverrides, TripEvaluation, TripMapNetwork, TripMapPoint, TripPage,
+  TripRecommendations, VehicleProfile, PointCandidates, ConsignmentPackages,
 } from "./transportTypes";
 
 export const grnApi = {
@@ -317,6 +319,64 @@ export const consignmentApi = {
     api.get<ConsignmentDetail>(`/api/warehouse/consignments/${id}`).then((r) => r.data),
 };
 
+/** The Smart Load Planner and the multi-drop trips it plans. Served by the warehouse
+ *  module, which owns the consignments a trip carries (rule 5). */
+export const tripApi = {
+  /** Every stocking point in scope, located — matched once against the offline
+   *  gazetteer the first time it is asked for. */
+  network: () => api.post<TripMapNetwork>(
+    "/api/warehouse/trip-planner/map-network").then((r) => r.data),
+  policy: () => api.get<PlannerPolicyResponse>(
+    "/api/warehouse/trip-planner/policy").then((r) => r.data),
+  savePolicy: (data: PolicyOverrides & { vehicle_profiles?: VehicleProfile[] }) =>
+    api.put<PlannerPolicyResponse>("/api/warehouse/trip-planner/policy", data).then((r) => r.data),
+  pin: (warehouseId: number, data: { latitude: number; longitude: number; label?: string | null }) =>
+    api.put<TripMapPoint>(`/api/warehouse/trip-planner/points/${warehouseId}/location`, data)
+      .then((r) => r.data),
+  /** Where an unmapped stocking point might be — gazetteer places to confirm with one
+   *  press. `q` searches a different spelling. */
+  candidates: (warehouseId: number, q?: string) =>
+    api.get<PointCandidates>(`/api/warehouse/trip-planner/points/${warehouseId}/candidates`,
+      { params: q ? { q } : {} }).then((r) => r.data),
+  /** Try the gazetteer again on every point still not on the map. */
+  rematch: () => api.post<{ tried: number; mapped: number; still_unresolved: number }>(
+    "/api/warehouse/trip-planner/points/rematch").then((r) => r.data),
+  packages: (dispatchId: number) => api.get<ConsignmentPackages>(
+    `/api/warehouse/trip-planner/consignments/${dispatchId}/packages`).then((r) => r.data),
+  /** Weigh and measure a packed consignment's cartons from the planner. */
+  measure: (dispatchId: number, packages: {
+    package_id: number; weight_kg?: number | null; length_cm?: number | null;
+    width_cm?: number | null; height_cm?: number | null;
+  }[]) => api.put<ConsignmentPackages>(
+    `/api/warehouse/trip-planner/consignments/${dispatchId}/measurements`, { packages })
+    .then((r) => r.data),
+  recommend: (data: PolicyOverrides & { warehouse_id: number; departure_date?: string | null }) =>
+    api.post<TripRecommendations>("/api/warehouse/trip-planner/recommendations", data)
+      .then((r) => r.data),
+  evaluate: (data: PolicyOverrides & {
+    warehouse_id: number; dispatch_ids: number[]; stop_order?: number[] | null;
+    departure_date?: string | null;
+  }) => api.post<TripEvaluation>("/api/warehouse/trip-planner/evaluate", data).then((r) => r.data),
+  create: (data: PolicyOverrides & {
+    warehouse_id: number; dispatch_ids: number[]; stop_order?: number[] | null;
+    departure_date: string; policy_name?: string | null; vehicle_profile?: string | null;
+    remarks?: string | null;
+  }) => api.post<ConsolidatedTrip>("/api/warehouse/consolidated-trips", data).then((r) => r.data),
+  list: (params: { page?: number; size?: number; status?: string; warehouse_id?: number;
+    search?: string } = {}) =>
+    api.get<TripPage>("/api/warehouse/consolidated-trips", { params }).then((r) => r.data),
+  get: (id: number) => api.get<ConsolidatedTrip>(
+    `/api/warehouse/consolidated-trips/${id}`).then((r) => r.data),
+  deliverStop: (tripId: number, stopId: number,
+    data: { received_by_name?: string | null; remarks?: string | null;
+      pod_url?: string | null } = {}) =>
+    api.post<ConsolidatedTrip>(
+      `/api/warehouse/consolidated-trips/${tripId}/stops/${stopId}/deliver`, data)
+      .then((r) => r.data),
+  cancel: (id: number, reason: string) => api.post<ConsolidatedTrip>(
+    `/api/warehouse/consolidated-trips/${id}/cancel`, { reason }).then((r) => r.data),
+};
+
 // --------------------------------------------------------------------------- //
 //  The carrier portal
 // --------------------------------------------------------------------------- //
@@ -379,6 +439,14 @@ export const carrierPortalApi = {
     remarks?: string | null;
   }) =>
     api.post<TransportRequest>(`${PORTAL}/transport/${id}/deliver`, data)
+      .then((r) => r.data),
+  /** One stop of a multi-drop run reached and put down — the carrier's word and proof
+   *  for THAT stop; the site there still signs for its own consignment. */
+  deliverStop: (id: number, stopId: number, data: {
+    delivered_to_name?: string | null; pod_url?: string | null;
+    remarks?: string | null;
+  }) =>
+    api.post<TransportRequest>(`${PORTAL}/transport/${id}/stops/${stopId}/deliver`, data)
       .then((r) => r.data),
 };
 

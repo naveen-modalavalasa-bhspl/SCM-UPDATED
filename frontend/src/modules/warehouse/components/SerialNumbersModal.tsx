@@ -84,6 +84,7 @@ export function SerialNumbersModal({
   pickMode = "reject",
   noun = "serial",
   paging = null,
+  displayValue,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -157,7 +158,12 @@ export function SerialNumbersModal({
      *  a unit the current page does not carry. Returns the value to select, or null. */
     onResolve?: (value: string) => Promise<string | null>;
   } | null;
+  /** How a code is DRAWN in the list — never what is searched, selected or saved.
+   *  The acknowledgement screen passes the short tail of a long generated code; the
+   *  full code stays on hover. Absent = drawn as it is. */
+  displayValue?: (value: string) => string;
 }) {
+  const show = (value: string) => displayValue?.(value) ?? value;
   const [serials, setSerials] = useState<string[]>([]);
   // "a serial" but "an IMEI": the article follows the sound, not the spelling.
   const article = /^[aeiou]/i.test(noun) ? "an" : "a";
@@ -543,7 +549,7 @@ export function SerialNumbersModal({
                         <div className="flex-1 px-3 py-2 truncate">
                           <span className="flex items-center gap-2">
                             <TrackingBadge type={unit?.type ?? trackingType} meta={trackingMeta} size="sm" />
-                            <span className="font-mono text-sm font-semibold text-ink">{value}</span>
+                            <span className="font-mono text-sm font-semibold text-ink" title={value}>{show(value)}</span>
                           </span>
                         </div>
                         <div className="w-24 px-3 py-2 font-mono text-xs text-body truncate">{unit?.batchNo || "—"}</div>
@@ -589,7 +595,7 @@ export function SerialNumbersModal({
                         />
                         <span className="w-6 shrink-0 text-[11px] text-muted tabular">{index + 1}</span>
                         <span className="min-w-0 flex flex-col justify-center">
-                          <span className="block truncate font-mono text-sm text-ink">{s}</span>
+                          <span className="block truncate font-mono text-sm text-ink" title={s}>{show(s)}</span>
                           {(imeiBySerial?.[s] || metaByValue?.[s]) && (
                             <span className="block truncate font-mono text-[11px] text-muted">
                               {[

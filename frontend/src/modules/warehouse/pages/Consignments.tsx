@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
-import { FileText } from "lucide-react";
-import { type Column } from "@/shared/components";
+import { FileText, ScanLine } from "lucide-react";
+import { Button, type Column } from "@/shared/components";
 import { ConsignmentStatusPill, statusTone } from "../components/ConsignmentStatusPill";
 import { DocumentList } from "../components/DocumentList";
 import { listConsignments, deleteDispatch, DRAFT_DELETE_PERMISSION } from "../api";
@@ -154,6 +154,11 @@ export default function Consignments() {
         createTo="new"
         createLabel="New consignment"
         createPermission="dispatch.create"
+        headerActions={(
+          <Button variant="ghost" onClick={() => nav("/logistics/scan")}>
+            <ScanLine className="h-4 w-4" /> Scan label
+          </Button>
+        )}
         onRowClick={(row) => nav(String(row.id))}
         empty="No consignments match these filters."
         onDelete={(row) => deleteDispatch(row.id)}

@@ -13,6 +13,7 @@ for _mod in (
     "app.platform.hcm.models",
     "app.platform.rbac.models",
     "app.platform.workflow.models",
+    "app.platform.monthly_indent.models",
     "app.platform.rules.models",
     "app.platform.settings.models",
     "app.modules.indents.models",

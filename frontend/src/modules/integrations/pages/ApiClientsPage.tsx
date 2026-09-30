@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Activity, Columns3, MonitorSmartphone, Plug, Plus, Radio, Server, ShieldCheck,
+  Activity, Boxes, Columns3, MonitorSmartphone, Plug, Plus, Radio, Server, ShieldCheck,
   Stethoscope,
 } from "lucide-react";
 import {
@@ -12,6 +12,7 @@ import {
 import { fmtDateTime, fmtRelative } from "@/shared/datetime";
 import { integrationsApi } from "../api";
 import { ActivityLog } from "../components/ActivityLog";
+import { AimsPanel } from "../components/AimsPanel";
 import { CamsPanel } from "../components/CamsPanel";
 import { ClientFormModal } from "../components/ClientFormModal";
 import { FlowExplainer } from "../components/Explain";
@@ -37,6 +38,7 @@ const TABS = [
   { key: "clients", label: "Applications", icon: Plug },
   { key: "webhooks", label: "Webhooks", icon: Radio },
   { key: "cams", label: "B-CAMS", icon: Stethoscope },
+  { key: "aims", label: "AIMS", icon: Boxes },
   { key: "activity", label: "Activity log", icon: Activity },
 ];
 
@@ -231,6 +233,8 @@ export default function ApiClientsPage() {
 
       {tab === "activity" ? (
         <ActivityLog />
+      ) : tab === "aims" ? (
+        <AimsPanel />
       ) : tab === "cams" ? (
         <>
           {/* The same diagram as the webhook tab's, pointing the same way, with the

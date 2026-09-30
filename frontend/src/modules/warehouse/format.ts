@@ -44,6 +44,20 @@ export const fmtQty = (value?: number | string | null) => {
                           { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 
+/** The public package label needs the readable serial, not the full generated unit
+ * code. For `ITEM-0001-1-00003601` this returns `3601`. Only a final numeric segment
+ * is compacted: manufacturer serials without a hyphen and non-numeric suffixes are
+ * preserved exactly, so formatting cannot silently change an external identifier. */
+export const fmtSerialSuffix = (value?: string | null) => {
+  const serial = value?.trim();
+  if (!serial) return null;
+  const separator = serial.lastIndexOf("-");
+  if (separator < 0 || separator === serial.length - 1) return serial;
+  const suffix = serial.slice(separator + 1);
+  if (!/^\d+$/.test(suffix)) return suffix;
+  return suffix.replace(/^0+(?=\d)/, "");
+};
+
 /** A rate, at the two decimals money is written in.
  *
  *  `whs` rate columns are `NUMERIC(16, 4)` and Pydantic serialises a Decimal at the

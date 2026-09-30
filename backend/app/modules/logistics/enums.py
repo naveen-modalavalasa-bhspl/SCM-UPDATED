@@ -139,6 +139,10 @@ class TransportSource(str, Enum):
     #: Coming BACK: the field is sending material to a warehouse (E7). The return
     #: DECISION is the returns module's; this is only the trip it needs to travel.
     RETURN = "RETURN"
+    #: ONE vehicle carrying SEVERAL consignments to several stocking points in one run
+    #: (`lgs_consolidated_trips`). `source_id` is the trip; the consignments are its
+    #: links, never `dispatch_id`, because one column cannot name several documents.
+    TRIP = "TRIP"
 
 
 #: Sources whose leg runs field -> warehouse rather than warehouse -> field. Read
@@ -231,6 +235,20 @@ class ShipmentEventType(str, Enum):
     DAMAGED = "DAMAGED"
     MISSING = "MISSING"
     DELAYED = "DELAYED"
+    # One stop of a multi-drop trip. The trip's own DELIVERED is written once, at the
+    # LAST stop — a shipment that reads delivered while two stops are still on the
+    # truck is the exact confusion a multi-drop register exists to avoid. Both are
+    # stamped by the trip (`warehouse.trips`), never typed in as a scan.
+    STOP_DELIVERED = "STOP_DELIVERED"
+    STOP_ACKNOWLEDGED = "STOP_ACKNOWLEDGED"
+
+
+#: Written by the trip itself as its stops settle. A scan cannot move a consignment
+#: off the truck, so `add_event` refuses these the way it refuses a signature.
+TRIP_STAMPED_EVENT_TYPES = frozenset({
+    ShipmentEventType.STOP_DELIVERED.value,
+    ShipmentEventType.STOP_ACKNOWLEDGED.value,
+})
 
 
 #: Stamped by the acknowledgement, never posted as a scan. A carrier can no more
@@ -620,6 +638,8 @@ class LogisticsActivityType(str, Enum):
     DELAYED = "DELAYED"
     CLAIM_SETTLED = "CLAIM_SETTLED"
     TRACKING_SHARED = "TRACKING_SHARED"
+    STOP_DELIVERED = "STOP_DELIVERED"
+    STOP_ACKNOWLEDGED = "STOP_ACKNOWLEDGED"
 
 
 #: What each event is called on screen, and what the shipment READ AS once it
@@ -657,6 +677,9 @@ ACTIVITY_META: dict[str, tuple[str, str]] = {
     LogisticsActivityType.CLAIM_SETTLED.value: ("Claim settled", "CLAIM_SETTLED"),
     LogisticsActivityType.TRACKING_SHARED.value: (
         "Tracking shared with the field", "IN_TRANSIT"),
+    LogisticsActivityType.STOP_DELIVERED.value: ("Delivered at a trip stop", "IN_TRANSIT"),
+    LogisticsActivityType.STOP_ACKNOWLEDGED.value: (
+        "Signed for at a trip stop", "IN_TRANSIT"),
 }
 
 
@@ -683,3 +706,51 @@ def activity_catalogue() -> list[dict]:
          "is_exception": kind.value in EXCEPTION_EVENT_TYPES}
         for kind in LogisticsActivityType
     ]
+
+
+# --------------------------------------------------------------------------- #
+#  Consolidated trips — one vehicle, several consignments, several stops
+# --------------------------------------------------------------------------- #
+
+class TripStatus(str, Enum):
+    """`lgs_consolidated_trips.status`.
+
+    The trip is the ROUTE; the money, the carrier and the gate belong to the one
+    transport request it raised (`tr_id`), which runs the ordinary shipment flow.
+    So a trip's status only ever says where the truck is along its stops — whether
+    the job is still out for a price is read off the shipment, never duplicated.
+    """
+    #: Consignments reserved, shipment drafted; not yet left the gate.
+    PLANNED = "PLANNED"
+    #: Left the gate; no stop reached yet.
+    IN_TRANSIT = "IN_TRANSIT"
+    #: At least one stop reached, at least one still on the truck.
+    PARTIALLY_DELIVERED = "PARTIALLY_DELIVERED"
+    #: Every stop reached. Sites still signing.
+    DELIVERED = "DELIVERED"
+    #: Every consignment signed for by its own receiving site.
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+#: A trip still holding its consignments. A consignment on one of these may not be
+#: planned onto another trip nor dispatched on its own.
+ACTIVE_TRIP_STATUSES = frozenset({
+    TripStatus.PLANNED.value, TripStatus.IN_TRANSIT.value,
+    TripStatus.PARTIALLY_DELIVERED.value, TripStatus.DELIVERED.value,
+})
+
+#: A trip whose truck has left the gate. Cancelling is refused from here on.
+DEPARTED_TRIP_STATUSES = frozenset({
+    TripStatus.IN_TRANSIT.value, TripStatus.PARTIALLY_DELIVERED.value,
+    TripStatus.DELIVERED.value, TripStatus.COMPLETED.value,
+})
+
+
+class TripStopStatus(str, Enum):
+    """One stop, and — with the same values — one consignment on the trip."""
+    PLANNED = "PLANNED"
+    IN_TRANSIT = "IN_TRANSIT"
+    DELIVERED = "DELIVERED"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
+    CANCELLED = "CANCELLED"

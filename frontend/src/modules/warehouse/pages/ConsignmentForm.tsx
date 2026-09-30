@@ -5,17 +5,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
-import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Download, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, Warehouse } from "lucide-react";
-import { Button, Can, ErrorBanner, Field, Input, Select, StatusPill } from "@/shared/components";
-import { MetaCard, MetaRow } from "../components/DocumentMeta";
+import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Download, Layers, Lock, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock } from "lucide-react";
+import { Button, Can, ErrorBanner, Field, Input, Select } from "@/shared/components";
+import { ConsignmentIdentityCard, type ConsignmentIssue } from "../components/ConsignmentIdentityCard";
 import { PrintPortal } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
+import { MultiIssuePanel, type IssueRoute, type SelectedIssue } from "../components/MultiIssuePanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
 import {
   carrierOptions,
   createConsignment,
   getConsignment,
   getIssueDispatchSource,
+  getIssueDispatchSources,
   issueOptions,
   updateConsignment,
   allWarehouseOptions,
@@ -77,8 +79,8 @@ const newPackage = (count: number): PackageDraft => ({
   items: [],
 });
 
-const lineKey = (line: Pick<IssueDispatchSourceItem, "item_id" | "batch_id">) =>
-  `${line.item_id}:${line.batch_id ?? 0}`;
+const lineKey = (line: Pick<IssueDispatchSourceItem, "issue_id" | "item_id" | "batch_id">) =>
+  `${line.issue_id ?? 0}:${line.item_id}:${line.batch_id ?? 0}`;
 
 const itemLabel = (line: IssueDispatchSourceItem) =>
   `${line.item_code ?? line.item_id}${line.batch_no ? ` / ${line.batch_no}` : ""}`;
@@ -133,6 +135,7 @@ const addressWithoutVehicle = (name?: string | null) => {
 
 type ScanCardSpec = {
   code: string;
+  publicToken: string;
   title: string;
   subtitle?: string;
   accent: "consignment" | "package";
@@ -144,6 +147,13 @@ type ScanCardSpec = {
 /** How many content lines fit on a label before it stops being one card. */
 const LABEL_LINES = 6;
 
+/** A deployment normally uses its current public origin. Developers printing from
+ * localhost can set this to the PC's LAN URL, e.g. http://192.168.1.20:5173. */
+const publicAppOrigin = () => (
+  (import.meta.env.VITE_PUBLIC_APP_URL as string | undefined)?.trim().replace(/\/+$/, "")
+  || window.location.origin
+);
+
 /** The QR matrix and the barcode encoding, and NOTHING that changes while packing.
  *
  *  qrcode.react recomputes the error-correction matrix and react-barcode re-runs
@@ -152,18 +162,18 @@ const LABEL_LINES = 6;
  *  on the consignment re-encoding itself on every quantity keystroke and every button
  *  press, which is what made the screen feel stuck. Both codes depend on one string,
  *  so they are memoised on it and a packing edit costs nothing here. */
-const ScanQr = memo(function ScanQr({ code }: { code: string }) {
-  return (
-    <div className="flex justify-center rounded-lg border border-line bg-white p-3">
-      <QRCodeSVG value={code} size={108} level="M" />
-    </div>
-  );
+const ScanQr = memo(function ScanQr({
+  value, size = 108, level = "M",
+}: {
+  value: string;
+  size?: number;
+  level?: "L" | "M" | "Q" | "H";
+}) {
+  return <QRCodeSVG value={value} size={size} level={level} />;
 });
 const ScanBarcode = memo(function ScanBarcode({ code }: { code: string }) {
   return (
-    // Scaled to fit, never clipped: a long package code used to lose its tail
-    // ("…WHI0026|PKG-0") behind overflow-hidden, on screen and on paper alike.
-    <div className="[&_svg]:h-auto [&_svg]:max-w-full">
+    <div className="overflow-hidden">
       <Barcode value={code} height={54} width={1.35} fontSize={12} margin={0} displayValue />
     </div>
   );
@@ -172,26 +182,20 @@ const ScanBarcode = memo(function ScanBarcode({ code }: { code: string }) {
 /** One card's identity — which label a per-card download prints. */
 const scanKey = (card: ScanCardSpec) => `${card.accent}-${card.code}`;
 
-/** A4 sheet rules for the printed labels: one label per row at full printable width,
- *  so neither code is squeezed, and a label never splits across two pages. */
-const SCAN_PRINT_CSS = `
-  @media print {
-    @page { size: A4 portrait; margin: 10mm; }
-    #wh-consignment-scan-labels { padding: 0 !important; gap: 8mm !important; }
-    #wh-consignment-scan-labels .scan-card { box-shadow: none !important; }
-    #wh-consignment-scan-labels .scan-card-body {
-      grid-template-columns: 40mm minmax(0, 1fr) !important;
-    }
-    #wh-consignment-scan-labels svg { max-width: 100%; height: auto; }
-  }
-`;
-
 function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () => void }) {
   const accent = spec.accent === "consignment"
     ? "border-brand/40 bg-brand-050/30"
     : "border-line bg-content1";
+  const appOrigin = publicAppOrigin();
+  const onlineUrl = `${appOrigin}/c/${spec.publicToken}`;
+  let onlineIsLocal = false;
+  try {
+    onlineIsLocal = ["localhost", "127.0.0.1", "::1"].includes(new URL(appOrigin).hostname);
+  } catch {
+    onlineIsLocal = true;
+  }
   return (
-    <div className={`scan-card rounded-lg border ${accent} p-4 shadow-sm`}>
+    <div className={`rounded-lg border ${accent} p-4 shadow-sm`}>
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -222,12 +226,16 @@ function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () =>
         </div>
       </div>
 
-      <div className="scan-card-body grid grid-cols-1 gap-4 sm:grid-cols-[128px_1fr]">
-        {/* Both codes carry the bare document number, as they always did. A QR holding
-            a URL sent every phone through the login screen before it could show
-            anything; the number is what the yard actually reads out loud. What the
-            code means is answered by the Scan screen, reached from inside the app. */}
-        <ScanQr code={spec.code} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-[128px_1fr]">
+        {/* One short signed URL: easy to scan, current at open time, and incapable of
+            granting access to any application route. */}
+        <div className="flex flex-col items-center rounded-lg border border-line bg-white p-2 text-center">
+          <div className="mb-1 text-[9px] font-bold uppercase tracking-wide text-brand">Scan · View details</div>
+          <ScanQr value={onlineUrl} size={108} level="M" />
+          <div className="mt-1 text-[9px] leading-tight text-muted">
+            {onlineIsLocal ? "Open this app by its LAN address before printing" : "Current read-only details"}
+          </div>
+        </div>
         <div className="min-w-0 rounded-lg border border-line bg-white p-3">
           <ScanBarcode code={spec.code} />
           <dl className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -301,13 +309,9 @@ function ConsignmentSection({
 function ConsignmentJourney({
   title,
   actions,
-  origin,
-  destination,
 }: {
   title: string;
   actions: ReactNode;
-  origin: string;
-  destination: string;
 }) {
   return (
     <div className="mb-5 overflow-hidden rounded-2xl border border-line bg-content1 shadow-sm">
@@ -320,25 +324,6 @@ function ConsignmentJourney({
           <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted">Organise goods from the material issue into packages, then move them to their destination.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">{actions}</div>
-      </div>
-
-      {/* Hairline dividers instead of nested cards: the route is one band of the
-          same header, not boxes floating on a gradient. */}
-      <div className="grid gap-px border-t border-line bg-line sm:grid-cols-2">
-        <div className="flex min-w-0 items-center gap-3 bg-content1 px-5 py-3.5 sm:px-6">
-          <Warehouse className="h-4 w-4 shrink-0 text-muted" />
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">From warehouse</div>
-            <div className="truncate text-sm font-semibold text-ink">{origin || "—"}</div>
-          </div>
-        </div>
-        <div className="flex min-w-0 items-center gap-3 bg-content1 px-5 py-3.5 sm:px-6">
-          <MapPin className="h-4 w-4 shrink-0 text-brand" />
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">Destination</div>
-            <div className="truncate text-sm font-semibold text-ink">{destination || "—"}</div>
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -367,6 +352,7 @@ export default function ConsignmentForm() {
 
   const [form, setForm] = useState<ConsignmentWrite>({
     issue_id: 0,
+    issue_ids: [],
     dispatch_type: "PROJECT",
     dispatch_date: today(),
     to_warehouse_id: null,
@@ -388,6 +374,7 @@ export default function ConsignmentForm() {
     remarks: "",
     packages: [],
   });
+  const [sourceMode, setSourceMode] = useState<"single" | "multiple">("single");
   const [source, setSource] = useState<IssueDispatchSource | null>(null);
   const [packages, setPackages] = useState<PackageDraft[]>([newPackage(0)]);
   const [serialTarget, setSerialTarget] = useState<SerialTarget>(null);
@@ -400,8 +387,10 @@ export default function ConsignmentForm() {
 
   useEffect(() => {
     if (!doc) return;
+    const docIssueIds = (doc.sources ?? []).map((row) => row.issue_id).filter((value): value is number => !!value);
     setForm({
-      issue_id: doc.ref_id ?? 0,
+      issue_id: doc.ref_id ?? docIssueIds[0] ?? 0,
+      issue_ids: docIssueIds,
       dispatch_type: doc.dispatch_type,
       dispatch_date: doc.dispatch_date,
       to_warehouse_id: doc.to_warehouse_id ?? null,
@@ -423,6 +412,7 @@ export default function ConsignmentForm() {
       remarks: doc.remarks ?? "",
       packages: [],
     });
+    setSourceMode((doc.sources?.length ?? 0) > 1 || doc.ref_type === "MULTI_ISSUE" ? "multiple" : "single");
     const grouped = (doc.packages ?? []).map((pkg) => {
       const byPackageLine = new Map<string, ConsignmentPackageItemWrite>();
       (doc.items ?? [])
@@ -432,6 +422,10 @@ export default function ConsignmentForm() {
           const existing = byPackageLine.get(key);
           byPackageLine.set(key, {
             ...(existing ?? {}),
+            issue_id: line.issue_id ?? doc.ref_id ?? null,
+            issue_no: line.issue_no ?? doc.ref_no ?? null,
+            mr_id: line.mr_id ?? null,
+            mr_no: line.mr_no ?? null,
             indent_id: line.indent_id,
             item_id: line.item_id,
             item_code: line.item_code,
@@ -472,7 +466,12 @@ export default function ConsignmentForm() {
       const key = lineKey(line);
       const existing = byLine.get(key);
       byLine.set(key, {
+        issue_id: line.issue_id ?? doc.ref_id ?? null,
+        issue_no: line.issue_no ?? doc.ref_no ?? null,
+        mr_id: line.mr_id ?? null,
+        mr_no: line.mr_no ?? null,
         indent_id: line.indent_id,
+        indent_no: line.indent_no ?? null,
         item_id: line.item_id,
         item_code: line.item_code,
         item_name: line.item_name,
@@ -496,14 +495,18 @@ export default function ConsignmentForm() {
       });
     });
     setSource({
-      issue_id: doc.ref_id ?? 0,
+      issue_id: doc.ref_id ?? docIssueIds[0] ?? 0,
+      issue_ids: docIssueIds,
       issue_no: doc.ref_no ?? "",
+      issue_nos: (doc.sources ?? []).map((row) => row.issue_no).filter((value): value is string => !!value),
       warehouse_id: doc.warehouse_id,
       project_id: doc.project_id,
       destination_office_id: doc.destination_office_id ?? null,
       destination_office_name: doc.destination_office_name ?? doc.delivery_address ?? null,
       destination_office_sac: doc.destination_office_sac ?? null,
       vehicle_number: doc.vehicle_number ?? null,
+      destination_warehouse_id: doc.to_warehouse_id ?? null,
+      destination_warehouse_name: doc.to_warehouse_name ?? null,
       items: Array.from(byLine.values()),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -529,12 +532,33 @@ export default function ConsignmentForm() {
     },
   });
 
+  /** Several material issues at once. The choice is COMMITTED only when the server accepts it:
+   *  a rejected addition (another LIP, already packed elsewhere) leaves the list, the
+   *  packages and the destination exactly as they were, and the banner says why. The
+   *  destination is always the new set's own — never one left over from an earlier
+   *  pick, which is how a lot for one LIP could be saved addressed to another. */
+  const loadIssues = useMutation({
+    mutationFn: (issueIds: number[]) => getIssueDispatchSources(issueIds),
+    onSuccess: (result) => {
+      setSource(result);
+      setPackages([newPackage(0)]);
+      setForm((current) => ({
+        ...current,
+        issue_id: result.issue_ids?.[0] ?? result.issue_id,
+        issue_ids: result.issue_ids ?? [result.issue_id],
+        project_id: result.project_id ?? current.project_id,
+        to_warehouse_id: result.destination_warehouse_id ?? null,
+        delivery_address: addressWithoutVehicle(result.destination_office_name),
+      }));
+    },
+  });
+
   const payload = (): ConsignmentWrite => ({
     ...form,
     packages: packages.map(({ key: _key, locked: _locked, ...pkg }, index) => ({
       ...pkg,
       package_no: pkg.package_no || `PKG-${String(index + 1).padStart(2, "0")}`,
-      barcode: pkg.barcode || `${source?.issue_no ?? "CONS"}|${pkg.package_no || `P${index + 1}`}`,
+      barcode: pkg.barcode || `${source?.issue_nos?.[0] ?? source?.issue_no ?? "CONS"}|${pkg.package_no || `P${index + 1}`}`,
       items: pkg.items
         .map((line) => ({
           ...line,
@@ -550,6 +574,13 @@ export default function ConsignmentForm() {
       qc.invalidateQueries({ queryKey: ["wh-consignments"] });
       qc.invalidateQueries({ queryKey: ["wh-dispatches"] });
       qc.invalidateQueries({ queryKey: ["wh-consignment", String(saved.id)] });
+      // The issues just packed must leave every picker and suggestion at once, not
+      // after the five-minute lookup cache runs out.
+      qc.invalidateQueries({ queryKey: ["consignment-recommendations"] });
+      qc.invalidateQueries({
+        predicate: (query) => query.queryKey[0] === "wh-lookup"
+          && String(query.queryKey[1] ?? "").startsWith("posted-issues"),
+      });
       if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
@@ -589,17 +620,101 @@ export default function ConsignmentForm() {
     [qc, originId],
   );
 
+  /** What the multiple-issue list shows: one row per issue, read off the packing source
+   *  the server accepted — so the list and the lines below can never disagree. */
+  const selectedIssues: SelectedIssue[] = useMemo(() => {
+    const ids = source?.issue_ids ?? [];
+    return ids.map((issueId, index) => {
+      const lines = (source?.items ?? []).filter((line) => line.issue_id === issueId);
+      return {
+        issue_id: issueId,
+        issue_no: source?.issue_nos?.[index]
+          ?? (doc?.sources ?? []).find((row) => row.issue_id === issueId)?.issue_no
+          ?? `Issue ${issueId}`,
+        indent_nos: Array.from(new Set(lines.map((line) => line.indent_no).filter((no): no is string => !!no))),
+        lines: lines.length,
+        qty: lines.reduce((sum, line) => sum + num(line.quantity), 0),
+      };
+    });
+  }, [source, doc]);
+  /** The issues on the saved consignment, one entry per issue: a source row is per
+   *  issue-and-request, so an issue feeding two requests arrives as two rows. */
+  const consignmentIssues: ConsignmentIssue[] = useMemo(() => {
+    if (!doc) return [];
+    const byNo = new Map<string, ConsignmentIssue>();
+    for (const row of doc.sources ?? []) {
+      const no = row.issue_no ?? row.source_no;
+      if (!no) continue;
+      const entry = byNo.get(no) ?? { issue_no: no, indent_nos: [], qty: 0 };
+      entry.qty += num(row.quantity);
+      if (row.indent_no && !entry.indent_nos.includes(row.indent_no)) entry.indent_nos.push(row.indent_no);
+      byNo.set(no, entry);
+    }
+    if (byNo.size === 0 && doc.ref_no) {
+      return [{ issue_no: doc.ref_no, indent_nos: [], qty: num(doc.total_qty) }];
+    }
+    return [...byNo.values()];
+  }, [doc]);
+  const issueRoute: IssueRoute | null = source?.warehouse_id
+    ? {
+      warehouseId: source.warehouse_id,
+      warehouseName: originName,
+      destinationId: source.destination_warehouse_id ?? null,
+      destinationName: source.destination_warehouse_name ?? null,
+    }
+    : null;
+
   /** The three lookup handlers, stable for the same reason the loader above is: a new
    *  arrow on every render is a changed prop, and a changed prop is a memoised
    *  dropdown re-rendering for a package edit that has nothing to do with it. */
   const pickIssue = useCallback((value: number | "") => {
     const issueId = value === "" ? 0 : value;
-    setForm((current) => ({ ...current, issue_id: issueId }));
+    // The destination and address belong to the issue: a new issue brings its own,
+    // rather than inheriting the last one's.
+    setForm((current) => ({
+      ...current, issue_id: issueId, issue_ids: issueId ? [issueId] : [],
+      to_warehouse_id: null, delivery_address: "",
+    }));
     setSource(null);
     setPackages([newPackage(0)]);
     if (issueId) loadIssue.mutate(issueId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadIssue.mutate]);
+  /** Empty the consignment's source entirely — issues, lines, packages, route. */
+  const clearSource = useCallback(() => {
+    setSource(null);
+    setPackages([newPackage(0)]);
+    setForm((current) => ({
+      ...current, issue_id: 0, issue_ids: [], to_warehouse_id: null, delivery_address: "",
+    }));
+  }, []);
+  /** The issues currently accepted by the server — the base every change starts from. */
+  const acceptedIds = source?.issue_ids ?? [];
+  const applyIssues = useCallback((issueIds: number[]) => {
+    const nextIds = Array.from(new Set(issueIds));
+    if (nextIds.length === 0) clearSource();
+    else loadIssues.mutate(nextIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearSource, loadIssues.mutate]);
+  const addIssue = useCallback(
+    (issueId: number) => applyIssues([...acceptedIds, issueId]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [applyIssues, acceptedIds.join(",")],
+  );
+  const removeIssue = useCallback(
+    (issueId: number) => applyIssues(acceptedIds.filter((value) => value !== issueId)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [applyIssues, acceptedIds.join(",")],
+  );
+  /** Single issue by default; multiple issues is a deliberate switch, and either way
+   *  starts from a clean form so nothing chosen under one carries into the other. */
+  const switchMode = (mode: "single" | "multiple") => {
+    if (mode === sourceMode) return;
+    loadIssue.reset();
+    loadIssues.reset();
+    clearSource();
+    setSourceMode(mode);
+  };
   const pickDestination = useCallback((value: number | "") =>
     setForm((f) => ({ ...f, to_warehouse_id: value === "" ? null : value })), []);
   const pickCarrier = useCallback((value: number | "") =>
@@ -678,7 +793,7 @@ export default function ConsignmentForm() {
 
   const formIssues = useMemo(() => {
     const issues: string[] = [];
-    if (!form.issue_id) issues.push("Select a material issue.");
+    if (!form.issue_id) issues.push(sourceMode === "multiple" ? "Add at least one material issue." : "Select a material issue.");
     if (!form.expected_delivery) issues.push("Enter expected delivery.");
     packages.forEach((pkg, index) => {
       packageErrors(pkg, index).forEach((message) => issues.push(`${pkg.package_no || `Package ${index + 1}`}: ${message}`));
@@ -693,7 +808,7 @@ export default function ConsignmentForm() {
     selectedSerials.duplicates.forEach((serial) => issues.push(`${serial} is selected in more than one package.`));
     return Array.from(new Set(issues));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allocation, form.expected_delivery, form.issue_id, lineProgress, packages, selectedSerials]);
+  }, [allocation, form.expected_delivery, form.issue_id, lineProgress, packages, selectedSerials, sourceMode]);
 
   const totals = {
     packages: packages.length,
@@ -748,6 +863,10 @@ export default function ConsignmentForm() {
         const key = lineKey(sourceLine);
         const existing = pkg.items.find((line) => lineKey(line) === key);
         const nextLine = {
+          issue_id: sourceLine.issue_id,
+          issue_no: sourceLine.issue_no,
+          mr_id: sourceLine.mr_id,
+          mr_no: sourceLine.mr_no,
           indent_id: sourceLine.indent_id,
           item_id: sourceLine.item_id,
           item_code: sourceLine.item_code,
@@ -801,13 +920,14 @@ export default function ConsignmentForm() {
   // Which label the next print run carries: null = every card on the sheet.
   const [printOnly, setPrintOnly] = useState<string | null>(null);
   /** Print one label, or all of them. The browser's dialog is the download — "Save as
-   *  PDF" names the file after the label, because the page title is the code for the
-   *  duration of the print run. */
+   *  PDF" names the file after the label, because the page title is the label's code
+   *  for the duration of the print run. flushSync so the sheet is narrowed to that one
+   *  card BEFORE the dialog snapshots the page. */
   const printLabels = (card: ScanCardSpec | null) => {
     const title = document.title;
     flushSync(() => setPrintOnly(card ? scanKey(card) : null));
-    document.title = card ? `Label ${card.code}` : `Labels ${doc?.dispatch_no ?? ""}`.trim();
-    document.title = document.title.replace(/[\/|:*?"<>]/g, "-");
+    document.title = (card ? `Label ${card.code}` : `Labels ${doc?.dispatch_no ?? ""}`)
+      .trim().replace(/[\/|:*?"<>]/g, "-");
     try {
       window.print();
     } finally {
@@ -816,9 +936,11 @@ export default function ConsignmentForm() {
     }
   };
 
-  const scanCards: ScanCardSpec[] = useMemo(() => (doc ? [
-    {
+  const scanCards: ScanCardSpec[] = useMemo(() => {
+    if (!doc?.public_scan_token) return [];
+    return [{
       code: doc.dispatch_no,
+      publicToken: doc.public_scan_token,
       title: `Consignment ${doc.dispatch_no}`,
       subtitle: doc.ref_no ? `Material issue ${doc.ref_no}` : "Consignment",
       accent: "consignment",
@@ -837,8 +959,13 @@ export default function ConsignmentForm() {
         qty: fmtQty(pkg.items.reduce((sum, line) => sum + packageQty(line), 0)),
       })),
     },
-    ...packages.map((pkg, index) => ({
+    ...packages.flatMap((pkg, index): ScanCardSpec[] => {
+      const publicToken = (doc.packages ?? [])
+        .find((saved) => String(saved.id) === pkg.key)?.public_scan_token;
+      if (!publicToken) return [];
+      return [{
       code: pkg.barcode || `${doc.dispatch_no}|${pkg.package_no || `P${index + 1}`}`,
+      publicToken,
       title: pkg.package_no || `Package ${index + 1}`,
       subtitle: `Consignment ${doc.dispatch_no}`,
       accent: "package" as const,
@@ -862,8 +989,10 @@ export default function ConsignmentForm() {
           name: line.item_name ?? "",
           qty: `${fmtQty(line.quantity)} ${line.uom_code ?? ""}`.trim(),
         })),
-    })),
-  ] : []), [doc, packages, destination]);
+    }];
+    }),
+  ];
+  }, [doc, packages, destination]);
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading...</div>;
 
@@ -871,13 +1000,25 @@ export default function ConsignmentForm() {
     <div>
       <ConsignmentJourney
         title={editing ? `Consignment ${doc?.dispatch_no ?? ""}` : "New consignment"}
-        origin={originName}
-        destination={destination || form.delivery_address || ""}
         actions={
           <>
             <Button variant="ghost" onClick={() => nav(listPath)}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
+            {/* Single issue is the default. Multiple issues is one deliberate press, up
+                here where it is seen before anything is picked. */}
+            {!editing && (
+              <Can do="dispatch.create">
+                <Button
+                  variant={sourceMode === "multiple" ? "soft" : "subtle"}
+                  onClick={() => switchMode(sourceMode === "multiple" ? "single" : "multiple")}
+                  disabled={loadIssue.isPending || loadIssues.isPending}
+                >
+                  <Layers className="h-4 w-4" />
+                  {sourceMode === "multiple" ? "Back to single issue" : "Multiple material issues"}
+                </Button>
+              </Can>
+            )}
             {/* APPROVED as well as PACKED. Nothing on THIS screen releases a
                 consignment any more, but `transport_release_blocked` still submits
                 one to its DISPATCH ladder on the dispatch press, and the warehouse's
@@ -908,7 +1049,35 @@ export default function ConsignmentForm() {
         }
       />
 
-      <ErrorBanner error={save.error ?? loadIssue.error} />
+      <ErrorBanner error={save.error ?? loadIssue.error ?? loadIssues.error} />
+
+      {/* What this consignment IS comes first — the number, the route, the load —
+          and what it carries follows. */}
+      {doc && (
+        <ConsignmentIdentityCard
+          dispatchNo={doc.dispatch_no}
+          status={doc.status}
+          from={originName}
+          to={destination}
+          sac={destinationSac}
+          issues={consignmentIssues}
+          packages={doc.total_packages}
+          quantity={num(doc.total_qty)}
+        />
+      )}
+
+      {sourceMode === "multiple" && (
+        <MultiIssuePanel
+          selected={selectedIssues}
+          route={issueRoute}
+          busy={loadIssues.isPending}
+          readOnly={editing || locked}
+          onUseSuggestion={applyIssues}
+          onAdd={addIssue}
+          onRemove={removeIssue}
+          onClear={clearSource}
+        />
+      )}
 
       {/* The issue came out of the point that raised the indent, so there is no
           journey to record. Saying nothing left a blank destination on screen, a
@@ -927,36 +1096,31 @@ export default function ConsignmentForm() {
         </div>
       )}
 
-      {doc && (
-        <MetaCard title="Consignment identity">
-          <MetaRow
-            label="Consignment no"
-            value={<span className="font-mono text-sm font-bold text-brand">{doc.dispatch_no}</span>}
-          />
-          <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
-          <MetaRow label="Material issue" value={<span className="font-mono">{doc.ref_no ?? "—"}</span>} />
-          <MetaRow label="Destination" value={destination || "—"} />
-          <MetaRow label="Service area code (SAC)" value={destinationSac || "—"} />
-          <MetaRow label="Packages" value={doc.total_packages} />
-          <MetaRow label="Quantity" value={fmtQty(doc.total_qty)} />
-        </MetaCard>
-      )}
-
       <ConsignmentSection
         title={inLogistics ? "Consignment Details" : "Material issue"}
         icon={ClipboardCheck}
         hint="Set the consignment route and delivery information before packing."
       >
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-4">
-          <Field label="Against material issue">
-            <Lookup
-              name="posted-issues"
-              load={issueOptions}
-              value={form.issue_id || ""}
-              isDisabled={locked || editing}
-              onChange={pickIssue}
-              placeholder="Select material issue"
-            />
+          <Field label={sourceMode === "multiple" ? "Material issues in this consignment" : "Against material issue"}>
+            {sourceMode === "multiple" ? (
+              // Chosen in the multiple-issue panel above; this only states the count.
+              <Input
+                value={selectedIssues.length
+                  ? `${selectedIssues.length} material issue${selectedIssues.length === 1 ? "" : "s"} selected`
+                  : "Add material issues above"}
+                disabled
+              />
+            ) : (
+              <Lookup
+                name="posted-issues"
+                load={issueOptions}
+                value={form.issue_id || ""}
+                isDisabled={locked || editing}
+                onChange={pickIssue}
+                placeholder="Select material issue"
+              />
+            )}
           </Field>
           <Field label="Type">
             <Select value={form.dispatch_type} onChange={(value) => setForm((f) => ({ ...f, dispatch_type: value }))}
@@ -1089,7 +1253,9 @@ export default function ConsignmentForm() {
         )}
         {!source && !doc ? (
           <div className="rounded-xl border border-dashed border-line px-4 py-12 text-center text-sm text-muted">
-            Select a material issue to load issue lines.
+            {sourceMode === "multiple"
+              ? "Add material issues above to load their issued items."
+              : "Select a material issue to load issue lines."}
           </div>
         ) : (
           <div className="space-y-5">
@@ -1249,7 +1415,7 @@ export default function ConsignmentForm() {
                   </Field>
                   <Field label="Barcode">
                     <Input value={pkg.barcode ?? ""} disabled
-                           placeholder={`${source?.issue_no ?? "CONS"}|${pkg.package_no ?? `P${packageIndex + 1}`} (auto)`} />
+                           placeholder={`${source?.issue_nos?.[0] ?? source?.issue_no ?? "CONS"}|${pkg.package_no ?? `P${packageIndex + 1}`} (auto)`} />
                   </Field>
                   {!inLogistics && (
                     <div className="flex items-end pb-2.5 text-xs text-muted">
@@ -1435,8 +1601,7 @@ export default function ConsignmentForm() {
             {/* The printed sheet is its own copy of the cards, portalled to <body>.
                 Printing the on-screen node put it inside a clipping card and the paper
                 came out blank; see PrintPortal. */}
-            <PrintPortal id="wh-consignment-scan-labels" columns={1}>
-              <style>{SCAN_PRINT_CSS}</style>
+            <PrintPortal id="wh-consignment-scan-labels">
               {scanCards
                 .filter((card) => printOnly === null || scanKey(card) === printOnly)
                 .map((card) => (
@@ -1445,8 +1610,7 @@ export default function ConsignmentForm() {
             </PrintPortal>
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {scanCards.map((card) => (
-                <ScanCard key={scanKey(card)} spec={card}
-                          onDownload={() => printLabels(card)} />
+                <ScanCard key={scanKey(card)} spec={card} onDownload={() => printLabels(card)} />
               ))}
             </div>
           </ConsignmentSection>

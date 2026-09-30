@@ -1,0 +1,176 @@
+"""Wire shapes for Monthly Indent settings."""
+from datetime import date, datetime, time
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class MonthlyIndentCycle(BaseModel):
+    is_enabled: bool = True
+    approval_flow_enabled: bool = False
+    cycle_month_offset: int = Field(default=0, ge=0, le=12)
+    start_day: int = Field(default=1, ge=1, le=31)
+    end_month_offset: int = Field(default=0, ge=0, le=12)
+    end_day: int = Field(default=31, ge=1, le=31)
+    serves_month_offset: int = Field(default=0, ge=0, le=12)
+    #: A month a cycle opens in (any day of it; the 1st is what is stored). Cycles
+    #: then open every `period` months either side of it. Empty means "this month
+    #: plus `cycle_month_offset`", which is what a row saved before the column meant.
+    anchor_month: date | None = None
+    #: Only somebody a submission rule names may raise a monthly indent.
+    restrict_to_rules: bool = False
+    timezone: str = "Asia/Kolkata"
+    scheduler_enabled: bool = True
+    scheduler_interval_minutes: int = Field(default=30, ge=5, le=1440)
+
+    @field_validator("anchor_month")
+    @classmethod
+    def _first_of_month(cls, value: date | None) -> date | None:
+        return value.replace(day=1) if value else None
+
+
+class MonthlyIndentCycleOut(MonthlyIndentCycle):
+    cycle_start: date
+    cycle_end: date
+    cycle_key: str
+    #: The first of the month the cycle is FOR, and that month written out. Served
+    #: rather than composed on screen, because it is what `{{month}}` renders into
+    #: every reminder and the two must not be able to disagree.
+    serves_start: date
+    serves_month: str
+    #: How many months apart consecutive cycles open. 1 for any window that fits in
+    #: a month (26th to the 5th included); longer windows repeat less often, because
+    #: a two-month window opening every month would overlap the next one.
+    period_months: int = 1
+
+
+class MonthlyIndentRuleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    is_active: bool = True
+    trigger_day: int = Field(ge=1, le=31)
+    trigger_time: time
+    target_type: str
+    target_ref_id: int
+    condition: str
+    message_template: str = Field(min_length=1)
+    escalation_enabled: bool = False
+    escalation_day: int | None = Field(default=None, ge=1, le=31)
+    escalation_time: time | None = None
+    escalation_target_type: str | None = None
+    escalation_target_ref_id: int | None = None
+    escalation_message_template: str | None = None
+    #: Measure the follow-up from the reminder ("1" = the next day) instead of
+    #: pinning it to a day of the month. Wins over `escalation_day` when set.
+    escalation_after_days: int | None = Field(default=None, ge=1, le=31)
+    #: How many rungs up the reporting line to walk, one per step.
+    escalation_levels: int = Field(default=1, ge=1, le=5)
+
+    @field_validator("target_type")
+    @classmethod
+    def _target_type(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"HCM_ROLE", "POSITION", "EMPLOYEE"}:
+            raise ValueError("target_type must be HCM_ROLE, POSITION, or EMPLOYEE")
+        return value
+
+    @field_validator("condition")
+    @classmethod
+    def _condition(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"NOT_SUBMITTED", "PENDING_APPROVAL", "NOT_RESPONDED"}:
+            raise ValueError("condition must be NOT_SUBMITTED, PENDING_APPROVAL, or NOT_RESPONDED")
+        return value
+
+    @field_validator("escalation_target_type")
+    @classmethod
+    def _escalation_target_type(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        value = value.upper()
+        if value not in {"REPORTING_MANAGER", "HCM_ROLE", "EMPLOYEE"}:
+            raise ValueError(
+                "escalation_target_type must be REPORTING_MANAGER, HCM_ROLE, or EMPLOYEE")
+        return value
+
+
+class MonthlyIndentRuleOut(MonthlyIndentRuleIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    target_name: str | None = None
+    escalation_target_name: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MonthlyIndentSubmissionRuleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    is_active: bool = True
+    target_type: str
+    target_ref_id: int
+    max_submissions: int = Field(default=1, ge=1, le=50)
+    deadline_day: int = Field(default=31, ge=1, le=31)
+    allow_after_deadline: bool = False
+
+    @field_validator("target_type")
+    @classmethod
+    def _target_type(cls, value: str) -> str:
+        value = value.upper()
+        if value not in {"HCM_ROLE", "POSITION", "EMPLOYEE"}:
+            raise ValueError("target_type must be HCM_ROLE, POSITION, or EMPLOYEE")
+        return value
+
+
+class MonthlyIndentSubmissionRuleOut(MonthlyIndentSubmissionRuleIn):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    target_name: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MonthlyIndentLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    rule_id: int
+    cycle_key: str
+    kind: str
+    target_employee_id: int
+    target_employee_name: str | None = None
+    recipient_employee_id: int
+    recipient_employee_name: str | None = None
+    status: str
+    reason: str | None = None
+    title: str | None = None
+    message: str | None = None
+    sent_at: datetime
+
+
+class MonthlyIndentPreviewIn(BaseModel):
+    template: str
+    employee_name: str = "A Store Keeper"
+    role: str = "Store Keeper"
+    month: str = "September 2026"
+    cycle_start: str = "2026-09-01"
+    cycle_end: str = "2026-09-30"
+    pending_since: str = "2026-09-21 10:00"
+    approval_level: str = "OE Review"
+
+
+class MonthlyIndentPreviewOut(BaseModel):
+    message: str
+
+
+class MonthlyIndentSettingsOut(BaseModel):
+    cycle: MonthlyIndentCycleOut
+    rules: list[MonthlyIndentRuleOut]
+    submission_rules: list[MonthlyIndentSubmissionRuleOut] = Field(default_factory=list)
+    logs: list[MonthlyIndentLogOut] = Field(default_factory=list)
+    next_run: str | None = None
+
+
+class MonthlyIndentRunOut(BaseModel):
+    checked: int
+    sent: int
+    skipped: int

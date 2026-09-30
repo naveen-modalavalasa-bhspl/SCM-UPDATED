@@ -36,6 +36,8 @@ const EMPTY: WarehouseWrite = {
   office_id: null,
   warehouse_type: "MAIN",
   address: "",
+  latitude: null,
+  longitude: null,
   incharge_id: null,
   is_bin_managed: false,
   requires_inward: null,
@@ -75,6 +77,8 @@ export default function WarehouseForm() {
         office_id: existing.office_id ?? null,
         warehouse_type: existing.warehouse_type,
         address: existing.address ?? "",
+        latitude: existing.latitude ?? null,
+        longitude: existing.longitude ?? null,
         incharge_id: existing.incharge_id ?? null,
         is_bin_managed: existing.is_bin_managed,
         requires_inward: existing.requires_inward ?? null,
@@ -177,6 +181,24 @@ export default function WarehouseForm() {
               />
             </Field>
           </div>
+          <Field label="Latitude" hint="Verified gate coordinate used by Smart Load Planner.">
+            <Input
+              type="number"
+              step="0.0000001"
+              value={form.latitude ?? ""}
+              onChange={(e) => set("latitude", e.target.value === "" ? null : Number(e.target.value))}
+              placeholder="16.5062"
+            />
+          </Field>
+          <Field label="Longitude" hint="Enter both coordinates, or leave both blank.">
+            <Input
+              type="number"
+              step="0.0000001"
+              value={form.longitude ?? ""}
+              onChange={(e) => set("longitude", e.target.value === "" ? null : Number(e.target.value))}
+              placeholder="80.6480"
+            />
+          </Field>
         </div>
       </Section>
 

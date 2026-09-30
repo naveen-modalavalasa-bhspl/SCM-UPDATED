@@ -21,6 +21,10 @@ const TONE: Record<string, Tone> = {
   CANCELLED: "danger",
   CLOSED: "default",
   IN_PROGRESS: "warning",
+  // Multi-drop trips (Smart Load Planner).
+  PLANNED: "primary",
+  PARTIALLY_DELIVERED: "warning",
+  COMPLETED: "success",
 };
 
 /**

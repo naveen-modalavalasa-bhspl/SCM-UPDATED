@@ -19,7 +19,7 @@ from app.platform.settings.models import AuditLog
 from app.platform.settings.service import write_audit
 from app.platform.notifications import service as notification_service
 from app.platform.workflow import engine, service as workflow_service
-from app.platform.hcm.models import HcmPosition
+from app.platform.hcm.models import HcmEmployee, HcmPosition
 from app.platform.workflow.models import Action, Instance, Pending
 from app.shared.enums import AuditAction, DocType, InstanceStatus
 from app.shared.time import now as ist_now, today as ist_today
@@ -266,7 +266,8 @@ DECISION_VALUES = {
 
 def _decision_output(action: Action, instance: Instance, user,
                      numbers: dict[tuple[str, int], str] | None = None,
-                     exclusions: dict[int, list[dict]] | None = None) -> dict:
+                     exclusions: dict[int, list[dict]] | None = None,
+                     indent_types: dict[int, str] | None = None) -> dict:
     duration_hours = None
     if action.acted_at and instance.started_at:
         duration_hours = round(
@@ -292,6 +293,8 @@ def _decision_output(action: Action, instance: Instance, user,
         "requester": instance.started_by_name,
         "approver_name": action.actor_name or user.full_name,
         "workflow_status": instance.status,
+        "indent_type": (indent_types or {}).get(instance.doc_id)
+        if instance.doc_type == DocType.INDENT.value else None,
         # The lines THIS approver dropped when they signed. An exclusion is part of
         # the decision, not a property of the document that follows it, so the ledger
         # has to carry it: the indent screen shows the line at zero and says nothing
@@ -344,8 +347,23 @@ async def decisions_for_user(db: AsyncSession, user) -> list[dict]:
     numbers = await _document_numbers(db, _missing_numbers(
         (instance.doc_type, instance.doc_id, instance.doc_no) for _, instance in rows
     ))
-    return [_decision_output(action, instance, user, numbers)
+    indent_types = await _indent_types(db, (
+        instance.doc_id for _, instance in rows
+        if instance.doc_type == DocType.INDENT.value
+    ))
+    return [_decision_output(action, instance, user, numbers,
+                             indent_types=indent_types)
             for action, instance in rows]
+
+
+async def _indent_types(db: AsyncSession, indent_ids: Iterable[int]) -> dict[int, str]:
+    ids = [i for i in set(indent_ids) if i]
+    if not ids:
+        return {}
+    rows = (await db.execute(
+        select(Indent.id, Indent.indent_type).where(Indent.id.in_(ids))
+    )).all()
+    return {int(row.id): row.indent_type for row in rows}
 
 
 async def _exclusions_by_indent(
@@ -384,12 +402,14 @@ async def _exclusions_by_indent(
 
 async def decisions_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
-    decision: str = "",
+    decision: str = "", doc_type: str = "",
 ) -> dict:
     # FIXED — hat-scoped, same as `_decision_query`. See `_acted_by_me`.
     conditions = [await _acted_by_me(db, user), Action.action.in_(DECISION_VALUES)]
     if decision:
         conditions.append(Action.action == decision)
+    if doc_type:
+        conditions.append(Instance.doc_type == doc_type.upper())
     term = search.strip()
     if term:
         like = f"%{term}%"
@@ -415,12 +435,1022 @@ async def decisions_page(
          if instance.doc_type == DocType.INDENT.value),
         user.id,
     )
+    indent_types = await _indent_types(db, (
+        instance.doc_id for _, instance in rows
+        if instance.doc_type == DocType.INDENT.value
+    ))
     return {
-        "items": [_decision_output(action, instance, user, numbers, exclusions)
+        "items": [_decision_output(action, instance, user, numbers, exclusions,
+                                   indent_types)
                   for action, instance in rows],
         "total": total,
         "page": page,
         "size": size,
+    }
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _num(value) -> float:
+    try:
+        return float(Decimal(str(value or 0)))
+    except Exception:  # noqa: BLE001 - display fallback only
+        return 0.0
+
+
+def _change_pair(payload: dict | None) -> tuple[float | None, float | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    before = payload.get("from")
+    after = payload.get("to")
+    return (_num(before) if before is not None else None,
+            _num(after) if after is not None else None)
+
+
+def _decision_word(action: str | None, received: float, approved: float | None) -> str:
+    if action is None:
+        return "WAITING"
+    if action == ApprovalAction.REJECTED.value:
+        return "DENIED"
+    if action == ApprovalAction.RETURNED.value:
+        return "RETURNED"
+    if approved is None:
+        return "APPROVED"
+    if approved <= 0 and received > 0:
+        return "DENIED"
+    if approved < received:
+        return "PARTIALLY_APPROVED"
+    return "APPROVED"
+
+
+async def _indent_instances(db: AsyncSession, indent_id: int) -> list[Instance]:
+    return list((await db.execute(
+        select(Instance).where(
+            Instance.doc_type == DocType.INDENT.value,
+            Instance.doc_id == indent_id,
+        ).order_by(Instance.id)
+    )).scalars().all())
+
+
+async def _indent_actions(db: AsyncSession, instance_ids: Iterable[int]) -> list[Action]:
+    ids = [int(i) for i in instance_ids]
+    if not ids:
+        return []
+    return list((await db.execute(
+        select(Action).where(Action.instance_id.in_(ids))
+        .order_by(Action.acted_at.asc(), Action.id.asc())
+    )).scalars().all())
+
+
+async def _indent_quantity_audits(db: AsyncSession, indent_id: int) -> list[AuditLog]:
+    return list((await db.execute(
+        select(AuditLog).where(
+            AuditLog.entity_type == QUANTITY_AUDIT_ENTITY,
+            AuditLog.entity_id == indent_id,
+        ).order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+    )).scalars().all())
+
+
+def _action_for_audit(audit: AuditLog, actions: list[Action]) -> Action | None:
+    """Quantity audit is flushed just before the workflow action on the same click."""
+    candidates = [
+        action for action in actions
+        if action.actor_id == audit.actor_id
+        and action.action == ApprovalAction.APPROVED.value
+        and audit.created_at and action.acted_at
+        and action.acted_at >= audit.created_at
+        and (action.acted_at - audit.created_at).total_seconds() < 300
+    ]
+    return candidates[0] if candidates else None
+
+
+def _quantity_events_by_line(
+    audits: list[AuditLog], actions: list[Action],
+) -> dict[int, list[dict]]:
+    by_line: dict[int, list[dict]] = defaultdict(list)
+    for audit in audits:
+        fields = audit.changed_fields if isinstance(audit.changed_fields, dict) else {}
+        action = _action_for_audit(audit, actions)
+        for key, payload in fields.items():
+            if not key.startswith("line_") or not key.endswith("_approved_qty"):
+                continue
+            try:
+                line_id = int(key.removeprefix("line_").removesuffix("_approved_qty"))
+            except ValueError:
+                continue
+            before, after = _change_pair(payload)
+            if before is None or after is None:
+                continue
+            by_line[line_id].append({
+                "audit_id": audit.id,
+                "previous_quantity": before,
+                "new_quantity": after,
+                "delta": after - before,
+                "reduction": max(before - after, 0),
+                "actor_id": audit.actor_id,
+                "actor_name": audit.actor_name,
+                "changed_at": _iso(audit.created_at),
+                "stage_sequence": action.stage_sequence if action else None,
+                "stage_name": action.stage_name if action else None,
+                "reason": action.comments if action else None,
+                "source": "sys_audit_log",
+            })
+    return by_line
+
+
+async def _pending_names(db: AsyncSession, instance_ids: Iterable[int]) -> list[dict]:
+    ids = [int(i) for i in instance_ids]
+    if not ids:
+        return []
+    rows = (await db.execute(
+        select(Pending, HcmEmployee.full_name)
+        .outerjoin(HcmEmployee, HcmEmployee.id == Pending.approver_id)
+        .where(Pending.instance_id.in_(ids))
+        .order_by(Pending.created_at.asc(), Pending.id.asc())
+    )).all()
+    return [{
+        "approver_id": pending.approver_id,
+        "approver_name": name,
+        "stage_sequence": pending.stage_sequence,
+        "created_at": _iso(pending.created_at),
+        "due_at": _iso(pending.due_at),
+    } for pending, name in rows]
+
+
+async def _ledger_visibility(
+    db: AsyncSession, user, actions: list[Action], pending: list[dict],
+    action: Action | None,
+) -> datetime | None:
+    """How far down this document's trail THIS login may read.
+
+    An approver is shown the indent as it REACHED them and the decision they took on
+    it — never what the rung above did to it afterwards. The OE who cut 10 to 5 and
+    signed sees exactly that. The DM who later cut it to 3 sees both, because the OE's
+    decision is precisely what the DM was handed; the trail below you is the document
+    you were given, and the trail above you is somebody else's decision.
+
+    The rule is the trail itself, never a map of ranks. A cutover re-keys every role
+    id (CLAUDE.md, the HCM section) and a ladder is configured per project per doc
+    type, so a hardcoded "DM may read OE" would be wrong on the day a project
+    configures a different ladder and silently wrong for every project that already
+    has one.
+
+    Three ways to read the whole trail, and each is somebody the document is
+    genuinely theirs to read: the auditor holding APPROVAL_TRAIL_VIEW_ALL, the
+    approver it is sitting with right now, and anybody who has never acted on it at
+    all — the raiser reading their own indent, whose trail is nobody else's secret.
+
+    Returns the instant the viewer's reading stops, or None for no limit at all.
+    """
+    # The auditor, on a permission that exists for exactly this and is granted to
+    # Admin alone until somebody ticks it on.
+    #
+    # It was `report.view` for one revision and that was a real defect, worth the
+    # words: twenty-odd job profiles hold `report.view` — Driver and QC Team among
+    # them, and the OE whose leak started this — so the check passed for nearly every
+    # login and the scoping never engaged. A grant that wide cannot be the one that
+    # lifts a restriction; the test of an escape hatch is who does NOT hold it.
+    from app.platform.rbac import permissions as perms
+    from app.platform.rbac import service as rbac_service
+
+    codes = await rbac_service.get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    if perms.APPROVAL_TRAIL_VIEW_ALL in codes:
+        return None
+    # Holding it now: everything that has happened to this document has happened
+    # BEFORE it reached them, so there is nothing above them to hide.
+    if any(row.get("approver_id") == user.id for row in pending):
+        return None
+    # DECISIONS only. A submission is not a decision, and counting it would cut the
+    # raiser's own document off at the moment they sent it — they would watch their
+    # indent disappear into a ladder and never see a stage of it come back. The
+    # raiser is not who this rule is about: it protects one approver's decision from
+    # the approver BELOW them, and the person who asked for the goods is below all of
+    # them by definition.
+    mine = [
+        row for row in actions
+        if row.actor_id == user.id and row.acted_at
+        and row.action != ApprovalAction.SUBMITTED.value
+    ]
+    if action is not None and action.acted_at:
+        return action.acted_at
+    return max((row.acted_at for row in mine), default=None)
+
+
+def _visible_quantity_events(
+    quantity_by_line: dict[int, list[dict]], cut: datetime | None,
+) -> dict[int, list[dict]]:
+    """The per-line audit, trimmed to the cut. Same shape, fewer rows."""
+    if cut is None:
+        return quantity_by_line
+    limit = _iso(cut) or ""
+    return {
+        line_id: [row for row in rows if (row.get("changed_at") or "") <= limit]
+        for line_id, rows in quantity_by_line.items()
+    }
+
+
+def _user_quantity_audit(
+    audits: list[AuditLog], action: Action | None, user,
+) -> AuditLog | None:
+    if action is None:
+        return None
+    matches = [
+        audit for audit in audits
+        if audit.actor_id == user.id
+        and audit.created_at and action.acted_at
+        and audit.created_at <= action.acted_at
+        and (action.acted_at - audit.created_at).total_seconds() < 300
+    ]
+    return matches[-1] if matches else None
+
+
+def _item_snapshot(
+    line: IndentItem,
+    *,
+    action: Action | None,
+    user_audit: AuditLog | None,
+    history: list[dict],
+    scoped: bool = False,
+) -> dict:
+    received = None
+    approved_by_me = None
+    if user_audit and isinstance(user_audit.changed_fields, dict):
+        received, approved_by_me = _change_pair(
+            user_audit.changed_fields.get(f"line_{line.id}_approved_qty"))
+    if action is None:
+        received = _num(line.approved_quantity or line.quantity)
+    elif approved_by_me is None:
+        # This reader's own change to THIS line. `user_audit` answers the same
+        # question above and is the fast path; this is the fallback for a line their
+        # audit row does not name, which is the COMMON case — an approver cuts one
+        # line out of twenty and leaves the other nineteen alone.
+        stamp = _iso(action.acted_at) or ""
+        own = [row for row in history if row.get("actor_id") == action.actor_id]
+        earlier = [row for row in history if (row.get("changed_at") or "") < stamp]
+        if own:
+            received = own[-1]["previous_quantity"]
+            approved_by_me = own[-1]["new_quantity"]
+        elif action.action == ApprovalAction.APPROVED.value:
+            # They left this line as it reached them, so both figures are the same
+            # number: whatever the last change BEFORE their signature left it at,
+            # else the quantity the indent was raised with.
+            #
+            # NEVER `line.approved_quantity` for a scoped reader. That column is
+            # whatever the rung ABOVE them wrote last, and reading it here is exactly
+            # how the OE's own card came to report the DM's 3 — with the reduction
+            # attributed to the OE, on a line the OE never touched. A full-trail
+            # reader (report.view) still gets the live number, because for them it is
+            # not somebody else's decision.
+            base = earlier[-1]["new_quantity"] if earlier else _num(line.quantity)
+            received = base
+            approved_by_me = base if scoped else _num(line.approved_quantity)
+
+    final_qty = _num(line.approved_quantity)
+    received = _num(line.quantity) if received is None else received
+    if scoped:
+        # Same rule for the outcome column: a scoped reader's last figure is the one
+        # they left behind, never the one the document carries now.
+        final_qty = (
+            approved_by_me if approved_by_me is not None
+            else history[-1]["new_quantity"] if history
+            else received
+        )
+    approved = approved_by_me if approved_by_me is not None else (
+        None if action is None else final_qty)
+    delta = (approved - received) if approved is not None else None
+    return {
+        "line_id": line.id,
+        "item_id": line.item_id,
+        "item_code": line.item_code,
+        "item_name": line.item_name,
+        "uom_code": line.uom_code,
+        "requested_quantity": _num(line.quantity),
+        "received_by_approver_quantity": received,
+        "approved_by_approver_quantity": approved,
+        "change_quantity": delta,
+        "final_approved_quantity": final_qty,
+        "decision": _decision_word(action.action if action else None, received, approved),
+        "changed_by_name": (
+            getattr(action, "actor_name", None)
+            if action else None
+        ) or (history[-1]["actor_name"] if history else None),
+        "changed_at": _iso(action.acted_at) if action else None,
+        "reason": action.comments if action else None,
+        "is_excluded": bool(line.is_excluded),
+        "excluded_by_name": line.excluded_by_name,
+        "excluded_at": _iso(line.excluded_at),
+        "quantity_history": history,
+    }
+
+
+def _plain_summary(action: Action | None, items: list[dict]) -> str:
+    if action is None:
+        total = sum(item["received_by_approver_quantity"] for item in items)
+        return f"You have {total:g} units waiting for your decision."
+    if action.action == ApprovalAction.REJECTED.value:
+        return "You denied this indent."
+    if action.action == ApprovalAction.RETURNED.value:
+        return "You returned this indent for correction."
+    requested = sum(item["received_by_approver_quantity"] for item in items)
+    approved = sum(item["approved_by_approver_quantity"] or 0 for item in items)
+    reduced = requested - approved
+    if reduced > 0:
+        return f"You approved {approved:g} of {requested:g} requested units and reduced the quantity by {reduced:g}."
+    return f"You approved all {approved:g} requested units."
+
+
+def _history_events(
+    indent: Indent,
+    actions: list[Action],
+    quantity_by_line: dict[int, list[dict]],
+    pending: list[dict],
+) -> list[dict]:
+    events = [{
+        "id": f"indent:{indent.id}:created",
+        "kind": "REQUEST_CREATED",
+        "title": "Indent raised",
+        "actor_name": indent.requested_by_name,
+        "actor_role": "Requester",
+        "stage_name": "Draft",
+        "occurred_at": _iso(indent.created_at),
+        "comments": indent.remarks,
+        "quantity_changes": [],
+    }]
+    for action in actions:
+        label = {
+            ApprovalAction.SUBMITTED.value: "Submitted or resubmitted",
+            ApprovalAction.APPROVED.value: "Approved",
+            ApprovalAction.REJECTED.value: "Denied",
+            ApprovalAction.RETURNED.value: "Returned for correction",
+        }.get(action.action, action.action.title())
+        changes = [
+            {**change, "line_id": line_id}
+            for line_id, rows in quantity_by_line.items()
+            for change in rows
+            if change.get("actor_id") == action.actor_id
+            and change.get("changed_at") is not None
+            and action.acted_at is not None
+            and abs((
+                datetime.fromisoformat(change["changed_at"]) - action.acted_at
+            ).total_seconds()) < 300
+        ]
+        events.append({
+            "id": f"action:{action.id}",
+            "kind": action.action,
+            "title": label,
+            "actor_name": action.actor_name,
+            "actor_role": action.actor_position,
+            "stage_sequence": action.stage_sequence,
+            "stage_name": action.stage_name,
+            "occurred_at": _iso(action.acted_at),
+            "comments": action.comments,
+            "quantity_changes": changes,
+        })
+    for wait in pending:
+        events.append({
+            "id": f"pending:{wait['approver_id']}:{wait['stage_sequence']}",
+            "kind": "WAITING",
+            "title": "Currently waiting",
+            "actor_name": wait.get("approver_name"),
+            "actor_role": "Approver",
+            "stage_sequence": wait.get("stage_sequence"),
+            "stage_name": indent.current_stage_name,
+            "occurred_at": wait.get("created_at"),
+            "comments": None,
+            "quantity_changes": [],
+        })
+    return sorted(events, key=lambda e: (e.get("occurred_at") or "", e["id"]))
+
+
+async def _source_indents(db: AsyncSession, indent: Indent) -> list[dict]:
+    if not indent.consolidation_id:
+        rows = [indent]
+    else:
+        rows = list((await db.execute(
+            select(Indent).where(Indent.consolidation_id == indent.consolidation_id)
+            .order_by(Indent.indent_no)
+        )).scalars().all())
+    return [{
+        "id": row.id,
+        "indent_no": row.indent_no,
+        "requested_by_name": row.requested_by_name,
+        "status": row.status,
+        "original_quantity": _num(row.total_qty),
+        "pre_consolidation_quantity": _num(row.total_qty),
+        "consolidated_quantity": _num(row.approved_qty or row.total_qty),
+        "final_approved_quantity": _num(row.approved_qty),
+    } for row in rows]
+
+
+async def decision_ledger(
+    db: AsyncSession, doc_type: str, doc_id: int, user, action_id: int | None = None,
+) -> dict:
+    """Read-only decision ledger for Regular and Monthly/Consolidation indents."""
+    if doc_type.upper() != DocType.INDENT.value:
+        raise ValidationError("Decision ledger is currently available for indents")
+    indent = (await db.execute(
+        select(Indent).options(selectinload(Indent.items)).where(Indent.id == doc_id)
+    )).scalar_one_or_none()
+    if indent is None:
+        raise NotFoundError(f"Indent {doc_id} not found")
+
+    instances = await _indent_instances(db, doc_id)
+    instance_ids = [row.id for row in instances]
+    actions = await _indent_actions(db, instance_ids)
+    pending = await _pending_names(db, instance_ids)
+
+    action = None
+    if action_id is not None:
+        action = next((row for row in actions if row.id == action_id), None)
+        if action is None or action.actor_id != user.id:
+            raise PermissionError_("You can view only decisions you made")
+    else:
+        is_pending = any(row.get("approver_id") == user.id for row in pending)
+        if not is_pending and not any(row.actor_id == user.id for row in actions):
+            raise PermissionError_("This indent is not in your approval history")
+
+    audits = await _indent_quantity_audits(db, doc_id)
+    quantity_by_line = _quantity_events_by_line(audits, actions)
+    # Everything below this line is served THROUGH the cut. One place decides how far
+    # a login may read and every figure, every audit row and the history itself are
+    # taken from that one answer, because two answers is how one of them comes to
+    # disagree with the other on screen.
+    cut = await _ledger_visibility(db, user, actions, pending, action)
+    quantity_by_line = _visible_quantity_events(quantity_by_line, cut)
+    visible_actions = actions if cut is None else [
+        row for row in actions if row.acted_at and row.acted_at <= cut
+    ]
+    user_audit = _user_quantity_audit(audits, action, user)
+    items = [
+        _item_snapshot(
+            line,
+            action=action,
+            user_audit=user_audit,
+            history=quantity_by_line.get(line.id, []),
+            scoped=cut is not None,
+        )
+        for line in sorted(indent.items, key=lambda item: (item.line_no, item.id))
+    ]
+    gaps = []
+    if action and action.action == ApprovalAction.APPROVED.value and user_audit is None:
+        gaps.append("Approver-level before/after quantities are unavailable for this legacy approval action.")
+    if indent.indent_type == IndentType.MONTHLY.value and indent.consolidation_id is None:
+        gaps.append("This monthly indent has no consolidation document snapshot.")
+
+    current_instance = instances[-1] if instances else None
+    decision = action.action if action else "WAITING"
+    return {
+        "decision": {
+            "mode": "DECIDED" if action else "WAITING",
+            "action_id": action.id if action else None,
+            "decision": decision,
+            "decision_label": _decision_word(
+                action.action if action else None,
+                sum(item["received_by_approver_quantity"] for item in items),
+                sum((item["approved_by_approver_quantity"] or 0) for item in items)
+                if action else None,
+            ),
+            "stage_sequence": action.stage_sequence if action else (
+                current_instance.current_sequence if current_instance else None),
+            "stage_name": action.stage_name if action else indent.current_stage_name,
+            "actor_name": action.actor_name if action else getattr(user, "full_name", None),
+            "actor_role": action.actor_position if action else await _acting_position_name(db, user),
+            "decided_at": _iso(action.acted_at) if action else None,
+            "comments": action.comments if action else None,
+            "summary": _plain_summary(action, items),
+        },
+        "indent": {
+            "id": indent.id,
+            "indent_no": indent.indent_no,
+            "type": (
+                "Monthly/Consolidation"
+                if indent.indent_type == IndentType.MONTHLY.value else "Regular"
+            ),
+            "indent_type": indent.indent_type,
+            "status": indent.status,
+            "current_stage_name": indent.current_stage_name,
+            "current_approver_name": indent.current_approver_name,
+            "requester": indent.requested_by_name,
+            "department_name": indent.department_name,
+            "office_name": indent.office_name or indent.region_name,
+            "project_name": indent.project_name,
+            "created_at": _iso(indent.created_at),
+            "purpose": indent.remarks,
+        },
+        "consolidation": {
+            "is_consolidated": indent.indent_type == IndentType.MONTHLY.value,
+            "consolidation_id": indent.consolidation_id,
+            "period": (
+                indent.indent_date.strftime("%Y-%m")
+                if getattr(indent, "indent_date", None) else None
+            ),
+            "cutoff_date": indent.required_date.isoformat() if indent.required_date else None,
+            "milestones": [{
+                "label": "Cut-off date",
+                "date": indent.required_date.isoformat() if indent.required_date else None,
+                "status": (
+                    "UNAVAILABLE" if not indent.required_date else
+                    "MET" if indent.created_at and indent.created_at.date() <= indent.required_date
+                    else "OVERDUE"
+                ),
+            }],
+            "source_indents": await _source_indents(db, indent),
+        },
+        "items": items,
+        # Still served, still trimmed to the cut, and no longer rendered as a journey:
+        # a complete approval history on an approver's own decision page showed every
+        # reader what the rungs above them did. The screen states where the document
+        # is NOW (pending_now) and what THIS reader decided, and nothing else.
+        "timeline": _history_events(indent, visible_actions, quantity_by_line, pending),
+        "pending_now": pending,
+        "visibility": {
+            "scoped": cut is not None,
+            "through": _iso(cut),
+            # The wording is served for the same reason every status word here is:
+            # a screen composing its own sentence about who may see what is a second
+            # copy of a rule that lives on the server.
+            "outcome_label": "Approved at your stage" if cut else "Final approved",
+            "note": (
+                "You are seeing this indent as it reached you and the decision you "
+                "took on it. Later stages are not shown."
+            ) if cut else None,
+        },
+        "legacy_gaps": gaps,
+    }
+
+
+
+# ---------------- The monthly cycle ledger ----------------
+#
+# A monthly indent is never ONE document to the approver who signed it. The
+# Consolidation screen takes a whole month in a single press and
+# `approve_consolidation` walks it indent by indent, so one click writes N rows in
+# `wf_actions` — six on the live database today, nine hundred at the scale this was
+# sized for. Every one of those rows then becomes its own line in My Decisions and
+# its own Decision Ledger page, and each of those pages carries the same sibling
+# table in its sidebar.
+#
+# The regular ledger is right for a regular indent and wrong here for one reason:
+# it answers "what did I do to THIS document", and the question a monthly approver
+# actually has is about the CYCLE — how much of an item did I approve across every
+# site that asked for it, which sites did I cut, and which of the month's indents
+# never reached me at all. Answering that by opening eleven pages and adding them up
+# by hand is what the screen is for.
+#
+# Nothing here is stored. The cycle is the same GROUP BY the Consolidation tab
+# already computes (see "Monthly indent consolidation" below), and every figure on
+# it comes from `_item_snapshot` — the SAME function the single-indent ledger uses —
+# so a number on the roll-up and the number on the indent's own page cannot
+# disagree. Five queries for the whole cycle whatever its size: members, instances,
+# actions, pending, audits.
+
+
+def _last_decision(actions: list[Action], user) -> Action | None:
+    """This login's last DECISION on one document, never their submission.
+
+    Same exclusion `_ledger_visibility` makes and for the same reason: a raiser who
+    submitted their own monthly indent has not decided anything, and treating the
+    submission as a decision would cut their own document off at the moment they
+    sent it.
+    """
+    mine = [
+        row for row in actions
+        if row.actor_id == user.id and row.acted_at
+        and row.action != ApprovalAction.SUBMITTED.value
+    ]
+    return mine[-1] if mine else None
+
+
+def _member_reading(
+    user, actions: list[Action], pending: list[dict], full_trail: bool,
+) -> tuple[Action | None, datetime | None]:
+    """(the decision this login took on this member, how far they may read it).
+
+    The single-indent rule, applied per member without a permission read per
+    document: `_ledger_visibility` asks RBAC for the same answer every time and the
+    cycle asks it once. Everything else about the rule is identical, deliberately —
+    an approver sees each indent as it REACHED them and the decision they took, and
+    never what the rung above did to it afterwards.
+    """
+    action = _last_decision(actions, user)
+    if full_trail:
+        return action, None
+    # Sitting with them right now: everything that has happened to it happened
+    # before it arrived, so there is nothing above them to hide.
+    if any(row.get("approver_id") == user.id for row in pending):
+        return None, None
+    return action, (action.acted_at if action else None)
+
+
+async def _cycle_members(
+    db: AsyncSession, indent: Indent,
+) -> tuple[list[Indent], object | None]:
+    """Every monthly indent in this indent's cycle, and the consolidation document
+    if one has been opened for it.
+
+    Two spellings of "the same cycle", because a monthly indent joins its
+    consolidation only when it finishes approval (`indents._join_consolidation`) —
+    so an indent still climbing the ladder, which is exactly the one an approver is
+    reading a decision on, has no document yet. Before that the cycle is the month,
+    which is what the Consolidation tab groups by; after it the document is the
+    identity, because two consolidations for one month is normal.
+    """
+    from app.modules.indents.models import Consolidation
+
+    if indent.consolidation_id:
+        doc = await db.get(Consolidation, indent.consolidation_id)
+        rows = (await db.execute(
+            select(Indent).options(selectinload(Indent.items))
+            .where(Indent.consolidation_id == indent.consolidation_id)
+            .order_by(Indent.indent_no)
+        )).scalars().all()
+        return list(rows), doc
+
+    # The month, narrowed in SQL rather than by loading every unconsolidated monthly
+    # indent there has ever been and filtering in Python.
+    conditions = [
+        Indent.indent_type == IndentType.MONTHLY.value,
+        Indent.consolidation_id.is_(None),
+    ]
+    if indent.indent_date is None:
+        conditions.append(Indent.indent_date.is_(None))
+    else:
+        first = indent.indent_date.replace(day=1)
+        following = (
+            first.replace(year=first.year + 1, month=1) if first.month == 12
+            else first.replace(month=first.month + 1)
+        )
+        conditions += [Indent.indent_date >= first, Indent.indent_date < following]
+    rows = (await db.execute(
+        select(Indent).options(selectinload(Indent.items))
+        .where(*conditions).order_by(Indent.indent_no)
+    )).scalars().all()
+    return list(rows), None
+
+
+async def _cycle_trails(
+    db: AsyncSession, indent_ids: list[int],
+) -> tuple[dict[int, list[Action]], dict[int, list[dict]], dict[int, list[AuditLog]]]:
+    """(actions, pending, quantity audits) for a whole cycle, keyed by indent id.
+
+    Three grouped queries instead of three per member — a nine-hundred-indent cycle
+    is the size this was written for, and the per-document version of this is
+    thousands of round trips for one page.
+    """
+    if not indent_ids:
+        return {}, {}, {}
+    instances = (await db.execute(
+        select(Instance).where(
+            Instance.doc_type == DocType.INDENT.value,
+            Instance.doc_id.in_(indent_ids),
+        ).order_by(Instance.id)
+    )).scalars().all()
+    doc_by_instance = {row.id: row.doc_id for row in instances}
+
+    actions: dict[int, list[Action]] = defaultdict(list)
+    pending: dict[int, list[dict]] = defaultdict(list)
+    if doc_by_instance:
+        for row in (await db.execute(
+            select(Action).where(Action.instance_id.in_(doc_by_instance))
+            .order_by(Action.acted_at.asc(), Action.id.asc())
+        )).scalars().all():
+            actions[doc_by_instance[row.instance_id]].append(row)
+        for row, name in (await db.execute(
+            select(Pending, HcmEmployee.full_name)
+            .outerjoin(HcmEmployee, HcmEmployee.id == Pending.approver_id)
+            .where(Pending.instance_id.in_(doc_by_instance))
+            .order_by(Pending.created_at.asc(), Pending.id.asc())
+        )).all():
+            pending[doc_by_instance[row.instance_id]].append({
+                "approver_id": row.approver_id,
+                "approver_name": name,
+                "stage_sequence": row.stage_sequence,
+                "created_at": _iso(row.created_at),
+                "due_at": _iso(row.due_at),
+            })
+
+    audits: dict[int, list[AuditLog]] = defaultdict(list)
+    for row in (await db.execute(
+        select(AuditLog).where(
+            AuditLog.entity_type == QUANTITY_AUDIT_ENTITY,
+            AuditLog.entity_id.in_(indent_ids),
+        ).order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+    )).scalars().all():
+        audits[int(row.entity_id)].append(row)
+
+    return dict(actions), dict(pending), dict(audits)
+
+
+def _rollup_decision(requested: float, approved: float | None, decided: int) -> str:
+    """One word for a GROUP of lines, from the numbers rather than from a vote.
+
+    A group nobody has decided is WAITING even though its quantities are populated —
+    `_item_snapshot` fills `received` for a waiting line, and reading that as an
+    approval is how a queue comes to report itself as finished.
+    """
+    if not decided or approved is None:
+        return "WAITING"
+    return _decision_word(ApprovalAction.APPROVED.value, requested, approved)
+
+
+def _cycle_summary(
+    signed: int, reached: int, total: int, sites: int,
+    requested: float, approved: float, waiting: int,
+) -> str:
+    """The whole cycle in one sentence, served for the same reason every other
+    status word here is: a screen composing it is a second copy of the rule."""
+    place = "site" if sites == 1 else "sites"
+    if not reached:
+        return "None of this cycle's indents reached you."
+    if not signed:
+        return (
+            f"{waiting:g} of the {total:g} indents in this cycle are waiting for "
+            f"your decision, across {sites:g} {place}."
+        )
+    scope = f"all {signed:g} indents" if total == signed else (
+        f"{signed:g} of the {total:g} indents")
+    cut = requested - approved
+    tail = (
+        f"{approved:g} of {requested:g} units approved, {cut:g} cut."
+        if cut > 0 else f"all {requested:g} requested units approved."
+    )
+    waited = f" {waiting:g} still waiting for you." if waiting else ""
+    return f"You signed {scope} in this cycle, across {sites:g} {place} — {tail}{waited}"
+
+
+async def cycle_ledger(db: AsyncSession, doc_type: str, doc_id: int, user) -> dict:
+    """The monthly cycle as THIS approver decided it — the roll-up the per-document
+    ledger cannot give, because the decision was never per document.
+
+    Scoped the same way the single ledger is: the members of the cycle this login is
+    part of the trail of — signed, or sitting with them now — and the whole cycle for
+    the auditor holding `APPROVAL_TRAIL_VIEW_ALL`. What was left out is still
+    COUNTED, so a narrowed view reads as narrowed rather than as data that failed to
+    load.
+    """
+    if doc_type.upper() != DocType.INDENT.value:
+        raise ValidationError("The cycle ledger is available for indents")
+    anchor = (await db.execute(
+        select(Indent).options(selectinload(Indent.items)).where(Indent.id == doc_id)
+    )).scalar_one_or_none()
+    if anchor is None:
+        raise NotFoundError(f"Indent {doc_id} not found")
+    if anchor.indent_type != IndentType.MONTHLY.value:
+        raise ValidationError(
+            "The cycle ledger is for monthly indents. A regular indent is one "
+            "decision on one document and is read on its own ledger."
+        )
+
+    from app.platform.rbac import permissions as perms
+    from app.platform.rbac import service as rbac_service
+    codes = await rbac_service.get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    full_trail = perms.APPROVAL_TRAIL_VIEW_ALL in codes
+
+    members, doc = await _cycle_members(db, anchor)
+    if not any(row.id == anchor.id for row in members):
+        members.append(anchor)
+    actions_by, pending_by, audits_by = await _cycle_trails(
+        db, [row.id for row in members],
+    )
+
+    # The anchor must be readable on its own terms before anything else is served:
+    # the cycle is reached FROM one indent's decision, and a login with no standing
+    # on that indent has no business reading the month around it.
+    if not full_trail and not _last_decision(actions_by.get(anchor.id, []), user) \
+            and not any(row.get("approver_id") == user.id
+                        for row in pending_by.get(anchor.id, [])):
+        raise PermissionError_("This indent is not in your approval history")
+
+    items: dict[int, dict] = {}
+    indents: list[dict] = []
+    signed = waiting = reduced_lines = excluded_lines = 0
+    decided_at: list[datetime] = []
+    stages: list[str] = []
+
+    for member in sorted(members, key=lambda row: (row.indent_no or "", row.id)):
+        member_actions = actions_by.get(member.id, [])
+        member_pending = pending_by.get(member.id, [])
+        action, cut = _member_reading(user, member_actions, member_pending, full_trail)
+        mine = action is not None
+        on_my_desk = any(row.get("approver_id") == user.id for row in member_pending)
+        if not (full_trail or mine or on_my_desk):
+            continue
+
+        scoped = cut is not None
+        history = _visible_quantity_events(
+            _quantity_events_by_line(audits_by.get(member.id, []), member_actions), cut,
+        )
+        user_audit = _user_quantity_audit(audits_by.get(member.id, []), action, user)
+        lines = [
+            _item_snapshot(
+                line, action=action, user_audit=user_audit,
+                history=history.get(line.id, []), scoped=scoped,
+            )
+            for line in sorted(member.items, key=lambda row: (row.line_no, row.id))
+        ]
+
+        member_requested = sum(line["received_by_approver_quantity"] for line in lines)
+        member_approved = sum(
+            line["approved_by_approver_quantity"] or 0 for line in lines
+        ) if mine else None
+        if mine:
+            signed += 1
+            if action.acted_at:
+                decided_at.append(action.acted_at)
+            if action.stage_name:
+                stages.append(action.stage_name)
+        else:
+            waiting += 1
+
+        for line in lines:
+            bucket = items.setdefault(line["item_id"], {
+                "item_id": line["item_id"],
+                "item_code": line["item_code"],
+                "item_name": line["item_name"],
+                "uom_code": line["uom_code"],
+                "requested": 0.0, "approved": 0.0, "waiting_quantity": 0.0,
+                "decided_sites": 0, "excluded_sites": 0, "reduced_sites": 0,
+                "sites": [],
+            })
+            approved = line["approved_by_approver_quantity"]
+            bucket["requested"] += line["received_by_approver_quantity"]
+            if approved is None:
+                bucket["waiting_quantity"] += line["received_by_approver_quantity"]
+            else:
+                bucket["approved"] += approved
+                bucket["decided_sites"] += 1
+                if approved < line["received_by_approver_quantity"]:
+                    bucket["reduced_sites"] += 1
+                    reduced_lines += 1
+            if line["is_excluded"]:
+                bucket["excluded_sites"] += 1
+                excluded_lines += 1
+            bucket["sites"].append({
+                "line_id": line["line_id"],
+                "indent_id": member.id,
+                "indent_no": member.indent_no,
+                "requester": member.requested_by_name,
+                "office_name": member.office_name or member.region_name,
+                "requested": line["received_by_approver_quantity"],
+                "approved": approved,
+                "change": line["change_quantity"],
+                "decision": line["decision"],
+                "is_excluded": line["is_excluded"],
+                "reason": line["reason"],
+                # Passed THROUGH, not recomputed. The register opens an indent in
+                # place now and this is the only thing the panel could not answer
+                # off the roll-up: who moved the line, from what to what, at which
+                # rung. It is already in hand -- `_item_snapshot` built it above
+                # from `history`, which was already narrowed by
+                # `_visible_quantity_events` to what this login may read, so it
+                # carries exactly the events the single-document ledger would show
+                # the same person and not one more.
+                "quantity_history": line["quantity_history"],
+                "indent_status": member.status,
+            })
+
+        indents.append({
+            "id": member.id,
+            "indent_no": member.indent_no,
+            "requester": member.requested_by_name,
+            "requested_by_id": member.requested_by_id,
+            "office_name": member.office_name or member.region_name,
+            "project_name": member.project_name,
+            "department_name": member.department_name,
+            "status": member.status,
+            "indent_date": (
+                member.indent_date.isoformat() if member.indent_date else None),
+            "required_date": (
+                member.required_date.isoformat() if member.required_date else None),
+            "line_count": len(lines),
+            "requested": member_requested,
+            "approved": member_approved,
+            "change": (
+                member_approved - member_requested
+                if member_approved is not None else None),
+            "decision": _rollup_decision(
+                member_requested, member_approved, 1 if mine else 0),
+            "action_id": action.id if action else None,
+            "decided_at": _iso(action.acted_at) if action else None,
+            "stage_name": action.stage_name if action else None,
+            "current_stage_name": member.current_stage_name,
+            "current_approver_name": member.current_approver_name,
+            "is_anchor": member.id == anchor.id,
+            "on_my_desk": on_my_desk,
+        })
+
+    for bucket in items.values():
+        # TWO counts, because they are two different numbers and the live data is
+        # exactly the case that proves it: eleven indents from four offices, with
+        # one requester raising several against the same site. One figure labelled
+        # "sites" next to another labelled "sites" saying something else is how a
+        # reader stops trusting both.
+        bucket["request_count"] = len(bucket["sites"])
+        bucket["site_count"] = len({
+            row["office_name"] for row in bucket["sites"] if row["office_name"]
+        })
+        decided_requested = bucket["requested"] - bucket["waiting_quantity"]
+        # Served, not derived on the screen. `requested` counts every site that asked
+        # for the item, `decided_requested` only the ones this reader has answered —
+        # and printing the first beside `approved` reports an approver who has one
+        # site still to sign as having cut the difference.
+        bucket["decided_requested"] = decided_requested
+        bucket["waiting_requests"] = bucket["request_count"] - bucket["decided_sites"]
+        bucket["change"] = (
+            bucket["approved"] - decided_requested if bucket["decided_sites"] else None
+        )
+        bucket["decision"] = _rollup_decision(
+            decided_requested,
+            bucket["approved"] if bucket["decided_sites"] else None,
+            bucket["decided_sites"],
+        )
+        bucket["sites"].sort(key=lambda row: (-row["requested"], row["indent_no"] or ""))
+
+    item_rows = sorted(
+        items.values(), key=lambda row: (-row["requested"], row["item_name"] or ""),
+    )
+    requested_total = sum(row["requested"] for row in item_rows)
+    approved_total = sum(row["approved"] for row in item_rows)
+    decided_total = sum(row["requested"] - row["waiting_quantity"] for row in item_rows)
+    sites = {row["office_name"] for row in indents if row["office_name"]}
+    requesters = {row["requested_by_id"] for row in indents if row["requested_by_id"]}
+    required = [row["required_date"] for row in indents if row["required_date"]]
+
+    return {
+        "cycle": {
+            "key": _consolidation_key(anchor.consolidation_id, anchor),
+            "consolidation_id": anchor.consolidation_id,
+            "consolidation_no": getattr(doc, "consolidation_no", None),
+            "consolidation_status": getattr(doc, "status", None),
+            "sealed_at": _iso(getattr(doc, "sealed_at", None)),
+            "period": _cycle_key(anchor),
+            "period_label": _month_label(_cycle_key(anchor)),
+            "earliest_required_date": min(required) if required else None,
+            "latest_required_date": max(required) if required else None,
+            "project_name": anchor.project_name,
+        },
+        "anchor": {
+            "id": anchor.id,
+            "indent_no": anchor.indent_no,
+            "requester": anchor.requested_by_name,
+            "office_name": anchor.office_name or anchor.region_name,
+            "status": anchor.status,
+        },
+        "scope": {
+            "full_trail": full_trail,
+            "reached_me": len(indents),
+            "total_in_cycle": len(members),
+            "outcome_label": (
+                "Final approved" if full_trail else "Approved at your stage"),
+            # Said out loud, by the server. A roll-up that quietly counts fewer
+            # documents than the cycle holds reads as a page with missing data.
+            "note": (
+                None if full_trail or len(indents) == len(members) else
+                f"{len(indents)} of this cycle's {len(members)} indents reached you. "
+                "The rest are somebody else's decision and are not counted here."
+            ),
+        },
+        "decision": {
+            "mode": (
+                "DECIDED" if signed and not waiting else
+                "WAITING" if waiting and not signed else
+                "MIXED" if signed else "NONE"
+            ),
+            "signed_count": signed,
+            "waiting_count": waiting,
+            "first_decided_at": _iso(min(decided_at)) if decided_at else None,
+            "last_decided_at": _iso(max(decided_at)) if decided_at else None,
+            # One rung for the whole batch is the normal case — one press, one stage.
+            # Several means the cycle reached this login more than once, which is a
+            # fact about the ladder and is stated rather than flattened away.
+            "stage_names": sorted(set(stages)),
+            "summary": _cycle_summary(
+                signed, len(indents), len(members), len(sites),
+                decided_total, approved_total, waiting,
+            ),
+        },
+        "totals": {
+            "indents": len(indents),
+            "sites": len(sites),
+            "requesters": len(requesters),
+            "items": len(item_rows),
+            "lines": sum(row["line_count"] for row in indents),
+            "requested": requested_total,
+            "approved": approved_total,
+            "decided_requested": decided_total,
+            "waiting_quantity": requested_total - decided_total,
+            "change": approved_total - decided_total,
+            "reduced_lines": reduced_lines,
+            "excluded_lines": excluded_lines,
+        },
+        "items": item_rows,
+        "indents": indents,
     }
 
 
@@ -452,6 +1482,17 @@ async def approval_history(db: AsyncSession, doc_type: str, doc_id: int, user) -
         select(Action).where(Action.instance_id.in_(instance_ids))
         .order_by(Action.acted_at, Action.id)
     )).scalars().all())
+    # The SECOND door onto the same trail — this is what the approval review screen
+    # draws its timeline from — so it answers to the same rule as the Decision Ledger
+    # and not to one of its own. Two doors onto one document with two ideas about who
+    # may read it is how the first one came to be wrong.
+    #
+    # Nothing changes for the person this endpoint is actually for: the reviewer is
+    # the current approver, so the cut is None and they see every stage below them.
+    pending = await _pending_names(db, instance_ids)
+    cut = await _ledger_visibility(db, user, actions, pending, None)
+    if cut is not None:
+        actions = [row for row in actions if row.acted_at and row.acted_at <= cut]
     return [{
         "id": action.id,
         "stage_sequence": action.stage_sequence,

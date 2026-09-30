@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { daysUntil, fmtMoneyShort, fmtQty, humanise, normaliseStatus, num, percent } from "../format";
+import { daysUntil, fmtMoneyShort, fmtQty, fmtSerialSuffix, humanise, normaliseStatus, num, percent } from "../format";
 
 describe("warehouse formatting", () => {
   it("normalises the schema's lower_snake putaway statuses to the pill vocabulary", () => {
@@ -31,6 +31,14 @@ describe("warehouse formatting", () => {
   it("shows every quantity at two decimals, so a column lines up", () => {
     expect(fmtQty("12.500")).toBe("12.50");
     expect(fmtQty(0)).toBe("0.00");
+  });
+
+  it("shows only the meaningful final serial segment on public package labels", () => {
+    expect(fmtSerialSuffix("304040-WATER-CAN-SUPREME-SUPREME-0001-1-00003601")).toBe("3601");
+    expect(fmtSerialSuffix("ITEM-00000000")).toBe("0");
+    expect(fmtSerialSuffix("MANUFACTURER-SN-A19")).toBe("A19");
+    expect(fmtSerialSuffix("00003601")).toBe("00003601");
+    expect(fmtSerialSuffix(null)).toBeNull();
   });
 
   it("shortens money for a KPI tile", () => {

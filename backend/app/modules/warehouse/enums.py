@@ -186,6 +186,28 @@ class DispatchStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+class ConsignmentRefType(str, Enum):
+    """`out_dispatches.ref_type` for a consignment built from material issues.
+
+    `ISSUE` is the legacy spelling still on old rows; `WH_ISSUE` is what one issue
+    writes today. `MULTI_ISSUE` is a consignment carrying several issues bound for
+    the same stocking point: `ref_id` is NULL on it, because one column cannot name
+    several documents, and the issues are listed in `out_dispatch_sources`.
+    """
+    ISSUE = "ISSUE"
+    WH_ISSUE = "WH_ISSUE"
+    MULTI_ISSUE = "MULTI_ISSUE"
+
+
+# `ref_type` values under which `out_dispatches.ref_id` is a material issue id.
+SINGLE_ISSUE_REF_TYPES = (ConsignmentRefType.ISSUE.value, ConsignmentRefType.WH_ISSUE.value)
+
+
+class DispatchSourceType(str, Enum):
+    """`out_dispatch_sources.source_type` — which kind of document a row lists."""
+    ISSUE = "ISSUE"
+
+
 class DispatchType(str, Enum):
     """`out_dispatches.dispatch_type`."""
     TRANSFER = "TRANSFER"
@@ -886,6 +908,15 @@ class WarehouseDocType(str, Enum):
     QC_OUTWARD = "QC_OUTWARD"
     # Not a document — a series, so a lot number is numbered like everything else.
     LOT = "lot"
+    # The NUMBERING series of an `out_dispatches` row, the consignment — CON, not DSP
+    # (2026-09-26). A consignment is the warehouse's packed load and was drawing on the
+    # DISPATCH series, so every one of them went to paper as `.../DSP0025` beside a
+    # screen, a print and a label that all say "Consignment". DISPATCH stays the
+    # WORKFLOW doc type — ladders on Approvals Config, `wf_instances` and permissions
+    # are keyed on it — exactly as INSPECTION numbers what QC_OUTWARD approves.
+    # Numbers already issued are never rewritten: package labels encode them
+    # (`scan_package` resolves a label by `dispatch_no`) and the gate pass carries one.
+    CONSIGNMENT = "CONSIGNMENT"
 
 
 class RefType(str, Enum):

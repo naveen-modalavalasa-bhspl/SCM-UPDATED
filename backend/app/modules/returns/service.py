@@ -41,7 +41,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select, true
+from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
@@ -5509,8 +5509,8 @@ async def _document_chain(db: AsyncSession, doc: StockTransferOrder) -> dict:
     )
     from app.modules.warehouse.enums import WarehouseDocType
     from app.modules.warehouse.models import (
-        Dispatch, Inspection, InspectionItem, MaterialIssue, MaterialIssueLine,
-        OutboundInspection, Picking, PutawayTask, Receipt,
+        Dispatch, DispatchSource, Inspection, InspectionItem, MaterialIssue,
+        MaterialIssueLine, OutboundInspection, Picking, PutawayTask, Receipt,
     )
 
     lines = list(doc.items or [])
@@ -5693,8 +5693,13 @@ async def _document_chain(db: AsyncSession, doc: StockTransferOrder) -> dict:
     if issue_ids:
         consignments = await newest(
             select(Dispatch)
-            .where(Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
-                   Dispatch.ref_id.in_(issue_ids))
+            .where(or_(
+                and_(Dispatch.ref_type.in_(["ISSUE", WarehouseDocType.WH_ISSUE.value]),
+                     Dispatch.ref_id.in_(issue_ids)),
+                # A consignment carrying several issues lists them here instead.
+                Dispatch.id.in_(select(DispatchSource.dispatch_id)
+                                .where(DispatchSource.issue_id.in_(issue_ids))),
+            ))
             .order_by(Dispatch.id.desc()))
     dispatch_ids = [row.id for row in consignments]
 

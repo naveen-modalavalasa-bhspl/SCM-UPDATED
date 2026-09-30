@@ -15,7 +15,7 @@
  * their vendor account to quote, accept, run and report a job.
  */
 export {
-  ConsignmentsScreen, ConsignmentFormScreen,
+  ConsignmentsScreen, ConsignmentFormScreen, ScanViewScreen,
 } from "@/modules/warehouse";
 
 /** Dispatch, in Logistics, is the one decision the floor actually makes: how does
@@ -31,6 +31,8 @@ export {
 export { LogisticsOverviewPage } from "./pages/LogisticsOverviewPage";
 export { DispatchPage } from "./pages/DispatchPage";
 export { DispatchConfirmPage } from "./pages/DispatchConfirmPage";
+export { SmartLoadPlannerPage } from "./pages/SmartLoadPlannerPage";
+export { TripConsolePage } from "./pages/TripConsolePage";
 /** The gate pass that press produces, as paper. Mounted outside the app shell in
  *  `App.tsx`, so printing gives the pass and not the sidebar around it. */
 export { GatePassPrintPage } from "./pages/GatePassPrintPage";

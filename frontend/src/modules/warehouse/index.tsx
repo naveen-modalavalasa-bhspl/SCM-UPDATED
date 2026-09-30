@@ -230,5 +230,6 @@ export default WarehouseModule;
 // warehouse-side imports they carry for no gain.
 export { default as ConsignmentsScreen } from "./pages/Consignments";
 export { default as ConsignmentFormScreen } from "./pages/ConsignmentForm";
+export { default as ScanViewScreen } from "./pages/ScanView";
 export { default as DispatchScreen } from "./pages/Dispatch";
 export { default as DispatchFormScreen } from "./pages/DispatchForm";

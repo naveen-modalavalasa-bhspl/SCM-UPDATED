@@ -195,6 +195,13 @@ it to `http://localhost:8000`. Only set it for a deployed build, to the backend'
 public origin. To proxy at a different backend in dev, set `VITE_API_PROXY`
 instead. Never hardcode a host in source.
 
+Each consignment or package label prints one QR code. It opens a signed, read-only
+page with the latest label details and no access to the ERP application. In a deployed
+build the QR automatically uses the deployed site address. When testing from a phone,
+open the frontend using the PC's LAN address (for example `http://192.168.1.20:5173`)
+before printing, or set `VITE_PUBLIC_APP_URL` to that reachable address before starting
+Vite. A QR printed from `localhost` can only be opened by the same computer.
+
 ---
 
 ## 6. Log in

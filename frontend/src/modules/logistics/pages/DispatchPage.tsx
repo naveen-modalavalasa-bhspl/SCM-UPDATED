@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Clock, IndianRupee, Package, RefreshCw, ScrollText, Truck,
+  Clock, IndianRupee, Package, RefreshCw, Route, ScrollText, Truck,
 } from "lucide-react";
 import {
   Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader,
@@ -10,7 +10,7 @@ import {
   type Column, type KpiTileSpec,
 } from "@/shared/components";
 import { fmtDate, fmtTime } from "@/shared/datetime";
-import { consignmentApi, transportApi } from "../api";
+import { consignmentApi, transportApi, tripApi } from "../api";
 import {
   carriageLabel, carriageTint, load, modeLabel, modeTint, money, nextMove,
 } from "../components/modeCopy";
@@ -156,6 +156,14 @@ export function DispatchPage() {
     refetchInterval: LIVE_MS,
     refetchOnWindowFocus: true,
   });
+  // Trips planned on the Smart Load Planner whose ONE shipment still needs its mode
+  // and provider. Their consignments are on this queue too, but a trip is arranged as
+  // a whole, so it is said once, above the rows.
+  const { data: plannedTrips } = useQuery({
+    queryKey: ["consolidated-trips", "PLANNED", "dispatch-band"],
+    queryFn: () => tripApi.list({ status: "PLANNED", size: 5 }),
+    refetchInterval: LIVE_MS,
+  });
   const { data: quoted } = useQuery({
     queryKey: ["transport", String(asking?.tr_id ?? "")],
     queryFn: () => transportApi.get(asking!.tr_id),
@@ -191,6 +199,12 @@ export function DispatchPage() {
 
   const linkOf = (row: Consignment) =>
     links?.find((link) => link.dispatch_id === row.id);
+  /** A consignment planned onto a multi-drop trip rides the TRIP's shipment: the
+   *  link names it, and the trip console is where its own stop is followed. */
+  const tripOf = (row: Consignment) => {
+    const link = linkOf(row);
+    return link?.trip_id ? link : undefined;
+  };
 
   // "This consignment has no transport" and "we do not know yet" are different
   // answers, and the screen used to give the first one for both: for the beat between
@@ -273,7 +287,16 @@ export function DispatchPage() {
     qc.invalidateQueries({ queryKey: ["lgs-dispatch-returns"] });
   };
 
-  const open = (row: Consignment) => dispatch(row);
+  /** A trip is one shipment, so it is worked where every shipment is: arranged on
+   *  the Dispatch screen while it is a draft, followed on the shipment page after. */
+  const openTrip = (trip: NonNullable<ReturnType<typeof tripOf>>) => nav(
+    trip.status === "DRAFT"
+      ? `/logistics/dispatch/new?tr_id=${trip.tr_id}`
+      : `/logistics/shipments/${trip.tr_id}`);
+  const open = (row: Consignment) => {
+    const trip = tripOf(row);
+    if (trip) openTrip(trip); else dispatch(row);
+  };
 
   const columns: Column<Consignment>[] = [
     {
@@ -315,6 +338,18 @@ export function DispatchPage() {
       key: "transport",
       header: "Transport",
       render: (row) => {
+        const trip = tripOf(row);
+        if (trip) return (
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 rounded-full bg-brand-050 px-2 py-0.5 text-[10px] font-semibold text-brand">
+                <Route className="h-3 w-3" /> Multi-drop trip
+              </span>
+              <StatusPill status={trip.status} />
+            </div>
+            <div className="truncate font-mono text-[11px] text-muted">{trip.trip_no} · {trip.tr_no}</div>
+          </div>
+        );
         const link = linkOf(row);
         if (!link) {
           if (!rowKnown(row)) {
@@ -357,6 +392,12 @@ export function DispatchPage() {
       header: "",
       className: "text-right",
       render: (row) => {
+        const trip = tripOf(row);
+        if (trip) return (
+          <Button variant="subtle" onClick={() => openTrip(trip)}>
+            {trip.status === "DRAFT" ? "Arrange trip" : "Open shipment"}
+          </Button>
+        );
         const link = linkOf(row);
         if (!link) {
           // Offering Dispatch before the lookup lands is how a consignment gets a
@@ -542,6 +583,11 @@ export function DispatchPage() {
               <ScrollText className="h-4 w-4" />
               Activity ledger
             </Button>
+            <Can do="transport.create">
+              <Button onClick={() => nav("/logistics/load-planner")}>
+                <Route className="h-4 w-4" /> Smart Load Planner
+              </Button>
+            </Can>
           </>
         }
       />
@@ -549,6 +595,23 @@ export function DispatchPage() {
       {/* Each tile narrows the queue below to the shipments it counted; pressing the
           one already on clears it. "Packed, on this page" is the unfiltered page, so it
           is the way back to everything. */}
+      {!!plannedTrips?.total && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-brand/25 bg-brand-050 px-4 py-3 text-sm">
+          <Route className="h-5 w-5 shrink-0 text-brand" />
+          <div className="min-w-0 flex-1">
+            <b className="text-ink">{plannedTrips.total} multi-drop trip{plannedTrips.total > 1 ? "s" : ""} planned</b>
+            <span className="text-muted"> — {plannedTrips.items.map((trip) => `${trip.trip_no} (${trip.total_consignments} consignments, ${trip.total_stops} stops)`).join(" · ")}</span>
+          </div>
+          {plannedTrips.items.slice(0, 2).map((trip) => (
+            <Button key={trip.id} variant="subtle" onClick={() => nav(trip.next_action.code === "ARRANGE" && trip.tr_id
+              ? `/logistics/dispatch/new?tr_id=${trip.tr_id}`
+              : trip.tr_id ? `/logistics/shipments/${trip.tr_id}` : `/logistics/load-planner/trips/${trip.id}`)}>
+              {trip.next_action.code === "ARRANGE" ? `Arrange ${trip.trip_no}` : `Open ${trip.trip_no}`}
+            </Button>
+          ))}
+        </div>
+      )}
+
       <KpiTiles label="Dispatch queues" className="mb-4" tiles={[
         {
           key: "all", label: "Packed, on this page", value: rows.length,

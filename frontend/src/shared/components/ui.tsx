@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, InputHTMLAttributes, MouseEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowDownRight, ArrowLeft, ArrowUpRight } from "lucide-react";
 import {
@@ -162,12 +162,19 @@ export function StatCard({
   );
 }
 
+function stopLabelReopeningSelect(event: MouseEvent<HTMLLabelElement>) {
+  const target = event.target as Node;
+  if (!event.currentTarget.contains(target)) return;
+  const select = event.currentTarget.querySelector("[data-select-root]");
+  if (select && !select.contains(target)) event.preventDefault();
+}
+
 export function Field(
   { label, children, hint, required }:
   { label: string; children: ReactNode; hint?: string; required?: boolean },
 ) {
   return (
-    <label className="block">
+    <label className="block" onClick={stopLabelReopeningSelect}>
       <span className="mb-1.5 block text-sm font-medium text-body">
         {label}
         {/* The asterisk is the only thing on the form that says "you cannot save
@@ -293,6 +300,7 @@ export function Select({
 
   if (!(searchable ?? options.length >= SEARCHABLE_FROM)) {
     return (
+      <div data-select-root className="contents">
       <HSelect
         {...common}
         placeholder={placeholder ?? "Select an option"}
@@ -319,10 +327,12 @@ export function Select({
         </HSelectItem>
         )}
       </HSelect>
+      </div>
     );
   }
 
   return (
+    <div data-select-root className="contents">
     <Autocomplete
       {...common}
       placeholder={placeholder ?? "Type to search…"}
@@ -343,5 +353,6 @@ export function Select({
       </AutocompleteItem>
       )}
     </Autocomplete>
+    </div>
   );
 }
