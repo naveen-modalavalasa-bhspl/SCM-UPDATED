@@ -19,7 +19,7 @@ from app.platform.hcm.models import HcmDepartment, HcmEmployee, HcmFacility, Hcm
 from app.platform.rbac import permissions as perms
 from app.shared.enums import (
     ItemScope,
-    CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
+    AuditAction, CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AttributeDataType, CategoryTagType, UomClass,
     WarehouseType,
 )
@@ -30,7 +30,8 @@ from app.shared.models.master import (
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
-    Packaging, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    Packaging, Project, Spec, Uom, UomConversion, Vendor, VendorItem, UomClassRow, VendorCategory,
+    VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
 
@@ -69,43 +70,34 @@ async def require_unique(db: AsyncSession, model: type, column: str, value: str,
 # --------------------------------------------------------------------------- #
 #  Items
 # --------------------------------------------------------------------------- #
-def build_item_prefix(category_path: str, general_code: str) -> str:
-    """The part of an item code that identity decides: 101010-PARACET.
+def build_item_prefix(category_path: str) -> str:
+    """The part of an item code the category decides: its six-digit path, L1L2L3.
 
-    Brand and manufacturer are deliberately NOT in the code. One general name
-    is sold by several brands, and each of those is a separate item row — they
-    share every part of the code below and differ only in the serial, so the
-    shelf reads one family of items instead of one code per brand.
+    The general name, brand and manufacturer are NOT in the code (2026-10-01): the
+    code is the category, a hyphen and a running number, 101010-001, 101010-002 — which
+    is what the business reads on a shelf label (101010-001). Items created before keep the
+    longer shape they were created with; a code is never rewritten.
     """
     if not re.fullmatch(r"\d{6}", category_path or ""):
         raise ValidationError(
             "Category: pick the exact category (Level 3), not a main group above it.")
-    part = (general_code or "").strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", part):
-        raise ValidationError(
-            f"General name code “{general_code}” can use only letters, numbers and a "
-            "hyphen between them. Fix it under Masters › General Names."
-        )
-    return f"{category_path}-{part}"
+    return category_path
 
 
-def build_item_code(category_path: str, general_code: str, serial: int) -> str:
-    """The full item code: identity, then a four-digit serial.
+def build_item_code(category_path: str, serial: int) -> str:
+    """The full item code: the category path, then a three-digit series."""
+    if not 1 <= serial <= 999:
+        raise ValidationError(
+            "This category already has 999 items, the most its numbering allows. "
+            "Add the item under another Level 3 category.")
+    return f"{build_item_prefix(category_path)}-{serial:03d}"
 
-    The serial is what lets one category and general name carry several items —
-    Dolo 650 and Dolo 500 share every other part of the code and differ only
-    here, as do two brands of the same general name.
-    """
-    if not 1 <= serial <= 9999:
-        raise ValidationError(
-            "This category and general name already have 9,999 items, the most "
-            "allowed. Use a different general name.")
-    code = f"{build_item_prefix(category_path, general_code)}-{serial:04d}"
-    if len(code) > 50:
-        raise ValidationError(
-            f"The item code would be “{code}”, longer than 50 characters. Shorten the "
-            "general name's code under Masters › General Names.")
-    return code
+
+def _series_codes(prefix: str):
+    """Codes in this category's series: the prefix, a hyphen and exactly 3 digits
+    (101010-001). `_` is LIKE's one-character wildcard, so the older
+    101010-GEN-0001 codes, and the brief 101010001 form, never count."""
+    return Item.code.like(f"{prefix}-___")
 
 
 async def next_item_serial(db: AsyncSession, prefix: str) -> int:
@@ -118,7 +110,7 @@ async def next_item_serial(db: AsyncSession, prefix: str) -> int:
     message rather than two items sharing a code.
     """
     rows = (await db.execute(
-        select(Item.serial_no).where(Item.code.like(f"{prefix}-%")).with_for_update()
+        select(Item.serial_no).where(_series_codes(prefix)).with_for_update()
     )).scalars().all()
     return max([r for r in rows if r] or [0]) + 1
 
@@ -132,7 +124,7 @@ async def peek_item_serial(db: AsyncSession, prefix: str) -> int:
     the authority, and the preview says so beside itself.
     """
     rows = (await db.execute(
-        select(Item.serial_no).where(Item.code.like(f"{prefix}-%"))
+        select(Item.serial_no).where(_series_codes(prefix))
     )).scalars().all()
     return max([r for r in rows if r] or [0]) + 1
 
@@ -190,8 +182,22 @@ class ItemIn(BaseModel):
     is_active: bool = True
 
 
+async def prepare_items(db: AsyncSession, rows: list[Item]) -> None:
+    """The latest photo of every item on the page, in one query, for the list's
+    thumbnail column. Photos live in sys_attachments under entity_type ITEM."""
+    from app.platform.settings.models import Attachment
+    ids = [row.id for row in rows if row.id is not None]
+    latest = dict((await db.execute(
+        select(Attachment.entity_id, func.max(Attachment.id))
+        .where(Attachment.entity_type == "ITEM", Attachment.entity_id.in_(ids))
+        .group_by(Attachment.entity_id))).all()) if ids else {}
+    for row in rows:
+        row._photo_id = latest.get(row.id)
+
+
 def item_out(i: Item) -> dict:
     return {"id": i.id, "code": i.code, "serial_no": i.serial_no, "name": i.name,
+            "photo_id": getattr(i, "_photo_id", None),
             "short_name": i.short_name,
             "uom_id": i.uom_id, "uom_code": i.uom_code, "category_id": i.category_id,
             "category_name": i.category_name, "item_type": i.item_type,
@@ -310,10 +316,9 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     # pointing at the code it was created with. Items created before the brand and
     # manufacturer left the code keep their longer shape for the same reason.
     if item.code is None:
-        prefix = build_item_prefix(category.path, general.code)
+        prefix = build_item_prefix(category.path)
         item.serial_no = await next_item_serial(db, prefix)
-        item.code = build_item_code(category.path, general.code,
-                                    item.serial_no)
+        item.code = build_item_code(category.path, item.serial_no)
     item.uom_code = uom.code
     item.hsn_code = hsn.code
     item.category_name = category.name
@@ -421,6 +426,19 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
 # --------------------------------------------------------------------------- #
 #  UOM and conversions
 # --------------------------------------------------------------------------- #
+class UomClassIn(BaseModel):
+    """A kind of unit (Count, Weight, Volume ...): the UOM form's "What it measures"."""
+    code: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=300)
+    is_active: bool = True
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _upper(cls, value):
+        return str(value).strip().upper() if value is not None else value
+
+
 class UomIn(BaseModel):
     code: str = Field(min_length=1, max_length=20)
     name: str
@@ -434,13 +452,18 @@ def uom_out(u: Uom) -> dict:
 
 
 async def apply_uom(db: AsyncSession, row: Uom, data: UomIn) -> None:
-    # Any case is accepted (“Count”, “count”): the message lists the choices
-    # in readable case, so the check must not then refuse them for it.
+    # Any case is accepted (“Count”, “count”), and the allowed list is the UOM types
+    # master (mst_uom_classes), so a site can add a kind of unit without a release.
     data.uom_class = (data.uom_class or "").strip().upper()
-    if data.uom_class not in {c.value for c in UomClass}:
+    allowed = {code: name for code, name in (await db.execute(
+        select(UomClassRow.code, UomClassRow.name)
+        .where(UomClassRow.is_active.is_(True)))).all()}
+    if not allowed:                       # master not seeded yet: the old fixed list
+        allowed = {c.value: c.value.title() for c in UomClass}
+    if data.uom_class not in allowed:
         raise ValidationError(
             f"Unit type: “{data.uom_class}” is not one of the choices. Pick one of: "
-            f"{', '.join(c.value.title() for c in UomClass)}.")
+            f"{', '.join(allowed.values())} — or add it under Masters › UOM Types.")
     await require_unique(db, Uom, "code", data.code, row, "UOM code")
     # Name is scoped to the class: "Ton" as a weight and "Ton" as a refrigeration
     # capacity are different units that happen to share a word.
@@ -751,8 +774,14 @@ async def apply_project(db: AsyncSession, p: Project, data: ProjectIn) -> None:
 # --------------------------------------------------------------------------- #
 #  Vendors
 # --------------------------------------------------------------------------- #
+VENDOR_CODE = re.compile(r"\d{6,8}")
+
+
 class VendorIn(BaseModel):
     code: str
+    # The vendor categories it belongs to. None = leave its categories alone, so a
+    # sheet or a caller that does not mention them never wipes them.
+    category_ids: list[int] | None = Field(None, max_length=100)
     name: str
     # Free text rather than an enum: the live column is a plain VARCHAR the DB team
     # already fills with values SCM does not own.
@@ -818,7 +847,7 @@ def vendor_kind_filter(request, stmt):
 
 
 def vendor_out(v: Vendor) -> dict:
-    return {"id": v.id, "code": v.code, "name": v.name,
+    return {"category_ids": getattr(v, "_category_ids", []), "id": v.id, "code": v.code, "name": v.name,
             "vendor_type": v.vendor_type,
             "contact_person": v.contact_person, "phone": v.phone, "email": v.email,
             "address": v.address, "city": v.city, "state": v.state,
@@ -900,6 +929,251 @@ class NamedCodeIn(BaseModel):
     name: str
     description: str | None = None
     is_active: bool = True
+
+
+async def apply_vendor(db: AsyncSession, row: Vendor, data: VendorIn) -> None:
+    """A vendor code is 6 to 8 digits (2026-10-01). Checked here rather than on the
+    schema so the vendors created before the rule (V-GODREJ, LGV-EKART) can still be
+    edited without being renumbered — only a NEW code, or a changed one, must fit."""
+    code = (data.code or "").strip()
+    if (row.id is None or code != row.code) and not VENDOR_CODE.fullmatch(code):
+        raise ValidationError(
+            f"Vendor code “{code}” must be a number of 6 to 8 digits, e.g. 100245.")
+    await require_unique(db, Vendor, "code", code, row, "Vendor code")
+    for key, value in data.model_dump(exclude={"category_ids"}).items():
+        setattr(row, key, value)
+    row.code = code
+    if data.category_ids is not None:
+        if row.id is None:
+            db.add(row)
+            await db.flush()
+        await _set_memberships(db, vendor_ids=[row.id], category_ids=data.category_ids,
+                               side="vendor")
+
+
+async def _set_memberships(db: AsyncSession, *, vendor_ids: list[int],
+                           category_ids: list[int], side: str) -> None:
+    """Make one side's links exactly what was chosen. `side` says which list is the
+    one being edited: a vendor's categories, or a category's vendors."""
+    wanted_cats = list(dict.fromkeys(category_ids))
+    wanted_vendors = list(dict.fromkeys(vendor_ids))
+    if wanted_cats and len((await db.execute(select(VendorCategory.id).where(
+            VendorCategory.id.in_(wanted_cats)))).all()) != len(wanted_cats):
+        raise ValidationError(
+            "Vendor categories: one of them no longer exists. Pick them again from the list.")
+    if wanted_vendors and len((await db.execute(select(Vendor.id).where(
+            Vendor.id.in_(wanted_vendors)))).all()) != len(wanted_vendors):
+        raise ValidationError(
+            "Vendors: one of them no longer exists. Pick them again from the list.")
+    owner = VendorCategoryMember.vendor_id if side == "vendor" else VendorCategoryMember.category_id
+    owner_id = wanted_vendors[0] if side == "vendor" else wanted_cats[0]
+    current = (await db.execute(select(VendorCategoryMember).where(
+        owner == owner_id))).scalars().all()
+    keep = set(wanted_cats if side == "vendor" else wanted_vendors)
+    have = set()
+    for link in current:
+        other = link.category_id if side == "vendor" else link.vendor_id
+        if other in keep:
+            have.add(other)
+        else:
+            await db.delete(link)
+    for other in keep - have:
+        db.add(VendorCategoryMember(
+            vendor_id=owner_id if side == "vendor" else other,
+            category_id=other if side == "vendor" else owner_id))
+    await db.flush()
+
+
+async def prepare_vendors(db: AsyncSession, rows: list) -> None:
+    """Each vendor's category ids, one query per page."""
+    ids = [r.id for r in rows if r.id is not None]
+    links = (await db.execute(select(
+        VendorCategoryMember.vendor_id, VendorCategoryMember.category_id).where(
+        VendorCategoryMember.vendor_id.in_(ids)))).all() if ids else []
+    by_vendor: dict[int, list[int]] = {}
+    for v, c in links:
+        by_vendor.setdefault(v, []).append(c)
+    for row in rows:
+        row._category_ids = by_vendor.get(row.id, [])
+
+
+class VendorCategoryIn(BaseModel):
+    code: str = Field(min_length=1, max_length=10)
+    name: str = Field(min_length=1, max_length=150)
+    description: str | None = Field(None, max_length=300)
+    # The vendors tagged to this category. None = leave them as they are.
+    vendor_ids: list[int] | None = Field(None, max_length=500)
+    is_active: bool = True
+
+
+def vendor_category_out(row) -> dict:
+    return {"id": row.id, "code": row.code, "name": row.name,
+            "description": row.description, "is_active": row.is_active,
+            "vendor_ids": getattr(row, "_vendor_ids", [])}
+
+
+async def prepare_vendor_categories(db: AsyncSession, rows: list) -> None:
+    ids = [r.id for r in rows if r.id is not None]
+    links = (await db.execute(select(
+        VendorCategoryMember.category_id, VendorCategoryMember.vendor_id).where(
+        VendorCategoryMember.category_id.in_(ids)))).all() if ids else []
+    by_cat: dict[int, list[int]] = {}
+    for c, v in links:
+        by_cat.setdefault(c, []).append(v)
+    for row in rows:
+        row._vendor_ids = by_cat.get(row.id, [])
+
+
+async def apply_vendor_category(db: AsyncSession, row, data: VendorCategoryIn) -> None:
+    await require_unique(db, VendorCategory, "name", data.name, row, "A vendor category named")
+    await require_unique(db, VendorCategory, "code", data.code, row, "Vendor category code")
+    for key, value in data.model_dump(exclude={"vendor_ids"}).items():
+        setattr(row, key, value)
+    if data.vendor_ids is not None:
+        if row.id is None:
+            db.add(row)
+            await db.flush()
+        await _set_memberships(db, vendor_ids=data.vendor_ids, category_ids=[row.id],
+                               side="category")
+
+
+# --------------------------------------------------------------------------- #
+#  Vendor material mapping (2026-10-01)
+# --------------------------------------------------------------------------- #
+# The Vendor Rates screen made a buyer add one vendor x one item at a time. The
+# mapping screen picks suppliers on one side, categories or items on the other, and
+# saves every combination in one press with the same defaults. Rows are ordinary
+# mst_vendor_items, so RFQs, POs and the supplier filters read them as they always
+# have.
+MAX_MAPPING_PAIRS = 5000      # one request; see shared/limits.py on why requests cap
+
+
+class VendorMappingIn(BaseModel):
+    vendor_ids: list[int] = Field(min_length=1, max_length=200)
+    item_ids: list[int] = Field(default_factory=list, max_length=500)
+    # A category stands for every active item under it, at any depth.
+    category_ids: list[int] = Field(default_factory=list, max_length=500)
+    # Blank = leave an existing mapping's figure alone; a new mapping gets nothing.
+    lead_time_days: int | None = Field(None, ge=0, le=3650)
+    min_order_qty: float | None = Field(None, ge=0)
+    last_rate: float | None = Field(None, ge=0)
+    is_preferred: bool = False
+
+
+async def vendor_mapping_sources(db: AsyncSession) -> dict:
+    """Everything the mapping screen draws, in one call: material suppliers, the
+    category tree and the active items, plus which pairs already exist."""
+    carriers = func.upper(func.coalesce(Vendor.vendor_type, "MATERIAL")).in_(
+        CARRIER_VENDOR_TYPES)
+    vendors = (await db.execute(select(Vendor).where(
+        Vendor.is_active.is_(True), ~carriers).order_by(Vendor.name))).scalars().all()
+    cats = (await db.execute(select(ItemCategory).where(
+        ItemCategory.is_active.is_(True)).order_by(ItemCategory.path))).scalars().all()
+    items = (await db.execute(select(Item).where(
+        Item.is_active.is_(True)).order_by(Item.code))).scalars().all()
+    pairs = (await db.execute(select(VendorItem.vendor_id, VendorItem.item_id))).all()
+    groups = (await db.execute(select(VendorCategory).where(
+        VendorCategory.is_active.is_(True)).order_by(VendorCategory.name))).scalars().all()
+    await prepare_vendor_categories(db, list(groups))
+    return {
+        "vendor_categories": [{"id": g.id, "code": g.code, "name": g.name,
+                               "vendor_ids": g._vendor_ids} for g in groups],
+        "vendors": [{"id": v.id, "code": v.code, "name": v.name,
+                     "status": ("BLOCKED" if v.is_blacklisted
+                                else "APPROVED" if v.is_approved else "PENDING")}
+                    for v in vendors],
+        "categories": [{"id": c.id, "code": c.code, "name": c.name, "level": c.level,
+                        "parent_id": c.parent_id, "path": c.path} for c in cats],
+        "items": [{"id": i.id, "code": i.code, "name": i.name,
+                   "category_id": i.category_id} for i in items],
+        "mapped": [[v, i] for v, i in pairs],
+    }
+
+
+async def save_vendor_mapping(db: AsyncSession, data: VendorMappingIn, user) -> dict:
+    """Create or update one mst_vendor_items row per supplier x item.
+
+    A blacklisted vendor is refused, not skipped: mapping it would put it back in
+    front of buyers. Preferred is one vendor per item, so it needs exactly one
+    supplier picked, and unticks whoever was preferred before.
+    """
+    vendors = (await db.execute(select(Vendor).where(
+        Vendor.id.in_(data.vendor_ids)))).scalars().all()
+    if len(vendors) != len(set(data.vendor_ids)):
+        raise ValidationError(
+            "Suppliers: one of them no longer exists. Refresh and pick again.")
+    blocked = [v.name for v in vendors if v.is_blacklisted]
+    if blocked:
+        raise ValidationError(
+            f"{', '.join(blocked)} {'is' if len(blocked) == 1 else 'are'} blocked and "
+            "cannot be mapped to materials. Untick them, or unblock them under Vendors.")
+
+    item_ids = set(data.item_ids)
+    if data.category_ids:
+        paths = [p for (p,) in (await db.execute(select(ItemCategory.path).where(
+            ItemCategory.id.in_(data.category_ids)))).all() if p]
+        if paths:
+            under = select(ItemCategory.id).where(
+                or_(*[ItemCategory.path.like(f"{p}%") for p in paths]))
+            item_ids |= {i for (i,) in (await db.execute(select(Item.id).where(
+                Item.is_active.is_(True), Item.category_id.in_(under)))).all()}
+    if not item_ids:
+        raise ValidationError(
+            "Materials: pick at least one item, or a category that has items in it.")
+    if len(item_ids) * len(vendors) > MAX_MAPPING_PAIRS:
+        raise ValidationError(
+            f"That is {len(item_ids) * len(vendors):,} combinations; the most in one "
+            f"save is {MAX_MAPPING_PAIRS:,}. Pick fewer suppliers or categories.")
+    if data.is_preferred and len(vendors) != 1:
+        raise ValidationError(
+            "Preferred: an item has only one preferred supplier. Pick one supplier to "
+            "save as preferred, or switch Preferred off.")
+
+    items = {i.id: i for i in (await db.execute(select(Item).where(
+        Item.id.in_(item_ids)))).scalars().all()}
+    existing = {(r.vendor_id, r.item_id): r for r in (await db.execute(
+        select(VendorItem).where(VendorItem.vendor_id.in_([v.id for v in vendors]),
+                                 VendorItem.item_id.in_(list(items))))).scalars().all()}
+    if data.is_preferred:
+        others = (await db.execute(select(VendorItem).where(
+            VendorItem.item_id.in_(list(items)), VendorItem.is_preferred.is_(True),
+            VendorItem.vendor_id != vendors[0].id))).scalars().all()
+        for row in others:
+            row.is_preferred = False
+
+    created = updated = 0
+    for vendor in vendors:
+        for item in items.values():
+            row = existing.get((vendor.id, item.id))
+            if row is None:
+                row = VendorItem(vendor_id=vendor.id, item_id=item.id, is_preferred=False)
+                db.add(row)
+                created += 1
+            else:
+                updated += 1
+            row.item_code, row.item_name = item.code, item.name
+            if data.lead_time_days is not None:
+                row.lead_time_days = data.lead_time_days
+            if data.min_order_qty is not None:
+                row.min_order_qty = data.min_order_qty
+            if data.last_rate is not None:
+                row.last_rate = data.last_rate
+            if data.is_preferred:
+                row.is_preferred = True
+
+    from app.platform.settings.service import write_audit
+    await write_audit(
+        db, entity="mst_vendor_items", action=AuditAction.UPDATE, actor=user,
+        entity_no="VENDOR-MAPPING",
+        summary=(f"Vendor material mapping: {len(vendors)} supplier(s) x "
+                 f"{len(items)} item(s), {created} added, {updated} updated"),
+        after={"vendor_ids": [v.id for v in vendors], "item_ids": sorted(items),
+               "lead_time_days": data.lead_time_days,
+               "min_order_qty": data.min_order_qty,
+               "last_rate": data.last_rate, "is_preferred": data.is_preferred})
+    await db.commit()
+    return {"success": True, "created": created, "updated": updated,
+            "suppliers": len(vendors), "items": len(items)}
 
 
 def named_code_out(row) -> dict:
@@ -2093,7 +2367,7 @@ async def apply_item_eligibility(db: AsyncSession, row: ItemEligibility,
 ITEM_LOOKUPS = (
     Lookup("category_id", ItemCategory, "Category", where={"level": 3},
            where_hint="An item needs a Level 3 category — pick one under it."),
-    Lookup("general_name_id", GeneralName, "General name"),
+    Lookup("general_name_id", GeneralName, "Generic name"),
     Lookup("brand_id", Brand, "Brand"),
     Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
     Lookup("item_class_id", ItemClass, "Item class"),
@@ -2129,7 +2403,7 @@ MASTERS: list[MasterDef] = [
               scope_to_user=restrict_items_to_my_groups,
               filters=("category_id", "item_class_id", "brand_id", "hsn_id",
                        "owner_department_id"),
-              lookups=ITEM_LOOKUPS,
+              lookups=ITEM_LOOKUPS, prepare=prepare_items,
               usage=ITEM_USAGE),
 
     MasterDef(path="item-categories", name="Category", model=ItemCategory,
@@ -2146,7 +2420,7 @@ MASTERS: list[MasterDef] = [
 
     # Carries its brands inline, so there is no General-name/Brand mapping screen.
     # The item form reads this list to narrow the brand dropdown.
-    MasterDef(path="general-names", name="General name", model=GeneralName,
+    MasterDef(path="general-names", name="Generic name", model=GeneralName,
               schema=GeneralNameIn, manage_perm=perms.MASTER_ITEM_MANAGE,
               serialize=general_name_out, search_cols=("name", "code"),
               apply=apply_general_name,
@@ -2163,6 +2437,15 @@ MASTERS: list[MasterDef] = [
               serialize=named_code_out, search_cols=("name", "code"),
               apply=named_code_apply(DosageForm, "A dosage form"),
               usage=((*USED_BY_ITEMS, "dosage_form_id"),)),
+
+    # What a unit measures. Was the UomClass enum; a master since 2026-10-01 so the
+    # UOM form's list can be extended without a release. Same permission as UOM.
+    MasterDef(path="uom-classes", name="UOM type", model=UomClassRow,
+              schema=UomClassIn, manage_perm=perms.MASTER_UOM_MANAGE,
+              serialize=named_code_out, search_cols=("name", "code"),
+              order_col="name", paginated=False,
+              apply=named_code_apply(UomClassRow, "A UOM type"),
+              usage=(("Units of measure", "mst_uom", "uom_class"),)),
 
     MasterDef(path="uom", name="UOM", model=Uom, schema=UomIn,
               manage_perm=perms.MASTER_UOM_MANAGE, serialize=uom_out,
@@ -2200,7 +2483,15 @@ MASTERS: list[MasterDef] = [
               manage_perm=perms.MASTER_VENDOR_MANAGE, serialize=vendor_out,
               search_cols=("name", "code"), default_active_only=True,
               filters=("vendor_type",), list_filter=vendor_kind_filter,
-              usage=VENDOR_USAGE),
+              apply=apply_vendor, prepare=prepare_vendors, usage=VENDOR_USAGE),
+
+    # How suppliers are grouped (Glassware, Reagents ...). Same permission as Vendors.
+    MasterDef(path="vendor-categories", name="Vendor category", model=VendorCategory,
+              schema=VendorCategoryIn, manage_perm=perms.MASTER_VENDOR_MANAGE,
+              serialize=vendor_category_out, search_cols=("name", "code"),
+              order_col="name", paginated=False, apply=apply_vendor_category,
+              prepare=prepare_vendor_categories,
+              usage=(("Vendors tagged", "mst_vendor_category_members", "category_id"),)),
 
     # No is_active column on the live table, so this master cannot be deactivated;
     # the DELETE route still registers and returns a clear 400.

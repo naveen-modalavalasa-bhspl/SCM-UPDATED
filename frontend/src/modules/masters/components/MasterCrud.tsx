@@ -1,4 +1,6 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+import { api } from "@/shared/api/client";
+import { SHORT_CODE_PATHS } from "../tabs/constants";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
@@ -144,8 +146,15 @@ interface Props<T extends { id: number }> {
   columns: Column<T>[];
   renderCard: (r: T) => ReactNode;
   fetchList: (search: string) => Promise<T[]>;
-  fields: FormField[];
+  /** A function when the form changes shape with its own values (a Level 1
+   *  category has no parent; Level 2 and 3 do). */
+  fields: FormField[] | ((values: Values) => FormField[]);
   emptyForm: Values;
+  /** Replaces the single New button with one per kind, each opening the form with
+   *  its own starting values — e.g. New Level 1 / Level 2 / Level 3 category. */
+  newActions?: { label: string; preset: Values }[];
+  /** The form's heading, when "New <title>" does not say enough. */
+  formTitle?: (values: Values, editing: boolean) => string;
   toForm: (r: T) => Values;
   managePerm: string;
   onCreate: (v: Values) => Promise<unknown>;
@@ -191,6 +200,20 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [values, setValues] = useState<Values>(p.emptyForm);
+  // Three-letter codes: the code field takes its rule from here, for every master
+  // in SHORT_CODE_PATHS, so fourteen tabs cannot each spell it differently.
+  const shortPath = SHORT_CODE_PATHS[p.queryKey];
+  const baseFields: FormField[] = typeof p.fields === "function" ? p.fields(values) : p.fields;
+  const fields: FormField[] = shortPath ? baseFields.map((f) => f.key !== "code" ? f : {
+    ...f, maxLength: undefined, pattern: undefined, patternMessage: undefined,
+    hint: "Exactly 3 letters, e.g. ERB for Erba. Filled in from the name; change it if you like.",
+    validate: (v, all) => {
+      const text = String(v ?? "").trim().toUpperCase();
+      return /^[A-Z]{3}$/.test(text) || (all._orig_code && text === String(all._orig_code).toUpperCase())
+        ? null : "The code must be exactly 3 letters, e.g. ERB.";
+    },
+  }) : baseFields;
+  const codeTouched = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState("");
@@ -247,8 +270,16 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   });
 
   const reset = () => { setError(null); setFieldErrors({}); };
-  const openNew = () => { setEditingId(null); setValues(p.emptyForm); reset(); setOpen(true); };
-  const openEdit = (row: T) => { setEditingId(row.id); setValues(p.toForm(row)); reset(); setOpen(true); };
+  const openNew = (preset: Values = {}) => {
+    codeTouched.current = false;
+    setEditingId(null); setValues({ ...p.emptyForm, ...preset }); reset(); setOpen(true);
+  };
+  const openEdit = (row: T) => {
+    codeTouched.current = true;   // an existing row's code is never re-suggested
+    const form = p.toForm(row);
+    setEditingId(row.id); setValues({ ...form, _orig_code: (row as { code?: string }).code ?? form.code ?? null });
+    reset(); setOpen(true);
+  };
 
   // Sorting is done here rather than in ResponsiveList: the list is a shared
   // component used by every module, and a master's list is already fully loaded, so
@@ -270,8 +301,22 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const canEdit = !p.readOnly;
   // Clearing the field's own error as it is edited keeps a stale message from
   // sitting under a value the user has already fixed.
+  const nameForCode = String(values.name ?? "").trim();
+  useEffect(() => {
+    if (!shortPath || !open || editingId != null || codeTouched.current || !nameForCode) return;
+    const timer = window.setTimeout(() => {
+      api.get<{ code: string }>(`${shortPath}/suggest-code`, { params: { name: nameForCode } })
+        .then((r) => {
+          if (!codeTouched.current) setValues((v) => ({ ...v, code: r.data.code }));
+        })
+        .catch(() => undefined);
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [shortPath, open, editingId, nameForCode]);
+
   const set = (f: FormField, v: Values[string]) => {
     const k = f.key;
+    if (k === "code") codeTouched.current = String(v ?? "") !== "";
     const nextValues = { ...values, [k]: v };
     for (const dependent of f.clearOnChange ?? []) nextValues[dependent] = null;
     setValues(nextValues);
@@ -283,7 +328,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
       // A message under another field may have been about this one — the two ends of
       // a validity window judge each other. Re-run the ones still showing and drop
       // whichever this edit has just satisfied, so fixing one end clears both.
-      for (const other of p.fields) {
+      for (const other of fields) {
         if (next[other.key] && !validateForm([other], nextValues)[other.key]) {
           delete next[other.key];
         }
@@ -368,18 +413,18 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   // Consecutive fields marked `half` pair up into one row; everything else keeps a
   // row to itself.
   const rows: FormField[][] = [];
-  for (const f of p.fields) {
+  for (const f of fields) {
     const last = rows[rows.length - 1];
     if (f.half && last?.length === 1 && last[0].half) last.push(f);
     else rows.push([f]);
   }
 
   const submit = () => {
-    const found = validateForm(p.fields, values);
+    const found = validateForm(fields, values);
     setFieldErrors(found);
     if (Object.keys(found).length) return;
     setError(null);
-    save.mutate(buildPayload(p.fields, values));
+    save.mutate(buildPayload(fields, values));
   };
 
   return (
@@ -410,7 +455,17 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         <div className="ml-auto">
           {canEdit && (
             <Can do={p.managePerm}>
-              <Button onClick={openNew}><Plus className="h-4 w-4" /> New</Button>
+              {p.newActions ? (
+                <div className="flex flex-wrap gap-2">
+                  {p.newActions.map((action) => (
+                    <Button key={action.label} onClick={() => openNew(action.preset)}>
+                      <Plus className="h-4 w-4" /> {action.label}
+                    </Button>
+                  ))}
+                </div>
+              ) : (
+                <Button onClick={() => openNew()}><Plus className="h-4 w-4" /> New</Button>
+              )}
             </Can>
           )}
         </div>
@@ -447,7 +502,8 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         <ModalContent>
           {(onClose) => (
             <>
-              <ModalHeader>{editingId == null ? `New ${p.title}` : `Edit ${p.title}`}</ModalHeader>
+              <ModalHeader>{p.formTitle ? p.formTitle(values, editingId != null)
+                : editingId == null ? `New ${p.title}` : `Edit ${p.title}`}</ModalHeader>
               <ModalBody className="gap-3">
                 {error && (
                   <div className="rounded-lg bg-bad-bg px-3 py-2 text-sm font-medium text-bad">{error}</div>

@@ -256,6 +256,8 @@ PAGE_TREE = [
      P.MR_VIEW, 59, "grp_inventory"),
     ("inv_adjustments", "/inventory/adjustments", "Stock Audit", "sliders",
      P.page_view_code("inv_adjustments"), 60, "grp_inventory"),
+    ("inv_stock_edits", "/inventory/stock-edits", "Stock Corrections", "pen-line",
+     P.page_view_code("inv_stock_edits"), 61, "grp_inventory"),
     # ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
     #  P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",

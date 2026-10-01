@@ -36,7 +36,17 @@ bulk={mastersApi.itemSubClasses} usage={mastersApi.itemSubClasses.usage}
   />;
 }
 
-export function CategoriesTab({ cats }: { cats: Option[] }) {
+export function CategoriesTab({ cats: _cats }: { cats: Option[] }) {
+  // Every category with its level, so the Parent list can offer only the rung
+  // directly above the one being created: a Level 2 sits under a Level 1, a Level 3
+  // under a Level 2. A Level 1 has no parent and is not asked for one.
+  const all = useQuery({
+    queryKey: ["masters", "categories", "levels"],
+    queryFn: () => mastersApi.categories.list({ size: 300 }).then((p) => p.items),
+  });
+  const parentsAt = (level: number): Option[] => (all.data ?? [])
+    .filter((c) => c.level === level - 1 && c.is_active)
+    .map((c) => ({ value: c.id, label: `${c.name} · ${c.code}` }));
   const columns: Column<MasterCategory>[] = [
     { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
     { key: "name", header: "Name", render: (r) => r.name },
@@ -54,21 +64,42 @@ export function CategoriesTab({ cats }: { cats: Option[] }) {
         </div>
       )}
       fetchList={(search) => mastersApi.categories.list({ search, size: 200 }).then((p) => p.items)}
-      fields={[
-        { key: "code", label: "Code", required: true, maxLength: 50,
-          pattern: /^[A-Za-z0-9-]+$/,
-          patternMessage: "Use letters, numbers or a hyphen" },
-        { key: "name", label: "Name", required: true, maxLength: 200 },
-        // A name may repeat under a different parent but never under the same one,
-        // so the backend check is scoped to the parent chosen here.
-        { key: "parent_id", label: "Parent category", type: "select", options: cats },
-        { key: "is_active", label: "Active", type: "switch" },
+      newActions={[
+        { label: "Level 1", preset: { level: 1, parent_id: null } },
+        { label: "Level 2", preset: { level: 2, parent_id: null } },
+        { label: "Level 3", preset: { level: 3, parent_id: null } },
       ]}
-      emptyForm={{ code: "", name: "", parent_id: null, is_active: true }}
-      toForm={(r) => ({ code: r.code, name: r.name, parent_id: r.parent_id ?? null, is_active: r.is_active })}
+      formTitle={(v, editing) =>
+        `${editing ? "Edit" : "New"} Level ${Number(v.level) || 1} category`}
+      fields={(v) => {
+        const level = Number(v.level) || 1;
+        return [
+          { key: "code", label: "Code", required: true, maxLength: 50,
+            pattern: /^[A-Za-z0-9-]+$/,
+            patternMessage: "Use letters, numbers or a hyphen" },
+          { key: "name", label: "Name", required: true, maxLength: 200 },
+          // A name may repeat under a different parent but never under the same one,
+          // so the backend check is scoped to the parent chosen here.
+          ...(level > 1 ? [{
+            key: "parent_id", label: `Parent (Level ${level - 1})`, type: "select" as const,
+            options: parentsAt(level), required: true,
+            hint: parentsAt(level).length ? undefined
+              : `No Level ${level - 1} category yet — add one first.`,
+          }] : []),
+          { key: "is_active", label: "Active", type: "switch" as const },
+        ];
+      }}
+      emptyForm={{ code: "", name: "", parent_id: null, level: 1, is_active: true }}
+      toForm={(r) => ({ code: r.code, name: r.name, parent_id: r.parent_id ?? null,
+        level: r.level ?? 1, is_active: r.is_active })}
       bulk={mastersApi.categories} usage={mastersApi.categories.usage}
-      onCreate={(v) => mastersApi.categories.create(v as Partial<MasterCategory>)}
-      onUpdate={(id, v) => mastersApi.categories.update(id, v as Partial<MasterCategory>)}
+      // A Level 1 is created with no parent, whatever the form last held.
+      onCreate={(v) => mastersApi.categories.create(
+        { ...v, parent_id: v.parent_id ?? null } as Partial<MasterCategory>)
+        .then((r) => { void all.refetch(); return r; })}
+      onUpdate={(id, v) => mastersApi.categories.update(
+        id, { ...v, parent_id: v.parent_id ?? null } as Partial<MasterCategory>)
+        .then((r) => { void all.refetch(); return r; })}
       onDeactivate={mastersApi.categories.deactivate}
     />
   );
@@ -170,7 +201,7 @@ export function GeneralNamesTab() {
     .map((r) => ({ value: r.id, label: `${r.code} — ${r.name}` }));
   return (
     <MasterCrud<MasterGeneralName>
-      title="General name" queryKey="general-names" searchable
+      title="Generic name" queryKey="general-names" searchable
       managePerm="master.item.manage"
       columns={[
         { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },

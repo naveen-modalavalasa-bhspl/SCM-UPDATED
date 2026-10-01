@@ -173,6 +173,7 @@ const OutboundQualityInspectionForm = lazy(() => import("@/modules/warehouse/pag
 const MaterialIssueForm = lazy(() => import("@/modules/warehouse/pages/MaterialIssueForm"));
 const StockTransferView = lazy(() => import("@/modules/inventory/components/StockTransferView").then((m) => ({ default: m.StockTransferView })));
 const StockValuationView = lazy(() => import("@/modules/inventory/components/StockValuationView").then((m) => ({ default: m.StockValuationView })));
+const StockEditsPage = lazy(() => import("@/modules/inventory/pages/StockEditsPage").then((m) => ({ default: m.StockEditsPage })));
 const StockingPointsPage = lazy(() => import("@/modules/inventory/pages/StockingPointsPage").then((m) => ({ default: m.StockingPointsPage })));
 const SupplierAccountsPage = lazy(() => import("@/modules/procurement/pages/SupplierAccountsPage").then((m) => ({ default: m.SupplierAccountsPage })));
 const SupplierLayout = lazy(() => import("@/modules/supplier/SupplierLayout").then((m) => ({ default: m.SupplierLayout })));
@@ -600,6 +601,7 @@ function AppRoutes() {
         <Route path="inventory/transfers/issues/:id"
                element={<MaterialIssueForm basePath="/inventory/transfers/issues" />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
+        <Route path="inventory/stock-edits" element={<StockEditsPage />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         {/* The Fulfilment Desk: the Fulfilment Queue and Allocation Approvals as one
             screen (2026-08-21). `/inventory/fulfilment` — one L, the British spelling

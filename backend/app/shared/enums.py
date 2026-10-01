@@ -189,6 +189,11 @@ class DocType(str, Enum):
     # chain for it on Approval Flow; otherwise one holder of `stock.adjust.approve`
     # signs (inventory.service.act_on_adjustment).
     STOCK_ADJUSTMENT = "STOCK_ADJUSTMENT"
+    # A correction to what stock IS rather than how much of it there is: a batch
+    # number, a mfg/expiry date, a unit's serial, IMEI or code typed wrong at receipt.
+    # No quantity moves, so it is not an adjustment — but it rewrites the identity
+    # every later issue, recall and warranty claim reads, so it is signed first.
+    STOCK_EDIT = "STOCK_EDIT"
     # Material going back UP the chain: a LIP returning expired or damaged stock to
     # the MDP above it. Its own doc type, not STOCK_TRANSFER — a transfer is the
     # holder's own call and a return has to be sanctioned by the tier receiving it.

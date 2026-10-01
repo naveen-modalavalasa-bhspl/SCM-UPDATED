@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
+  MasterVendorCategory,
   MasterItemEligibility,
   ItemEligibilityScopes,
   JobProfileOption,
@@ -87,6 +88,26 @@ export interface ImportPreview {
   options: Record<string, { id: number; label: string; code: string }[]>;
   file_errors: string[];
   summary: { total: number; ready: number; blocked: number };
+}
+
+export interface VendorMappingSources {
+  vendor_categories: { id: number; code: string; name: string; vendor_ids: number[] }[];
+  vendors: { id: number; code: string; name: string;
+             status: "APPROVED" | "PENDING" | "BLOCKED" }[];
+  categories: { id: number; code: string; name: string; level: number | null;
+                parent_id: number | null; path: string | null }[];
+  items: { id: number; code: string; name: string; category_id: number }[];
+  mapped: [number, number][];
+}
+
+export interface VendorMappingSave {
+  vendor_ids: number[]; item_ids: number[]; category_ids: number[];
+  lead_time_days: number | null; min_order_qty: number | null;
+  last_rate: number | null; is_preferred: boolean;
+}
+
+export interface ItemPhoto {
+  id: number; file_name: string; uploaded_at: string | null; uploaded_by: string | null;
 }
 
 export interface MasterUsage {
@@ -203,6 +224,32 @@ export const mastersApi = {
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
+  /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
+  uomClasses: crud<NamedMaster>("/api/uom-classes"),
+  /** How suppliers are grouped (Glassware, Reagents ...). */
+  vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
+  vendorMapping: {
+    sources: () => api.get<VendorMappingSources>("/api/vendor-items/mapping-sources")
+      .then((r) => r.data),
+    save: (body: VendorMappingSave) => api.post<{
+      created: number; updated: number; suppliers: number; items: number;
+    }>("/api/vendor-items/mapping", body).then((r) => r.data),
+  },
+  itemPhotos: {
+    list: (itemId: number) =>
+      api.get<ItemPhoto[]>(`/api/items/${itemId}/photos`).then((r) => r.data),
+    add: (itemId: number, file: File) => {
+      const body = new FormData();
+      body.append("file", file);
+      return api.post<ItemPhoto>(`/api/items/${itemId}/photos`, body).then((r) => r.data);
+    },
+    /** Fetched as a blob: an <img src> cannot carry the sign-in token. */
+    blobUrl: (itemId: number, photoId: number) =>
+      api.get(`/api/items/${itemId}/photos/${photoId}/file`, { responseType: "blob" })
+        .then((r) => URL.createObjectURL(r.data as Blob)),
+    remove: (itemId: number, photoId: number) =>
+      api.delete(`/api/items/${itemId}/photos/${photoId}`).then((r) => r.data),
+  },
   brandManufacturers: crud<MasterBrandManufacturer>("/api/brand-manufacturers"),
   itemClasses: crud<MasterItemClass>("/api/item-classes"),
   itemSubClasses: crud<MasterItemSubClass>("/api/item-sub-classes"),

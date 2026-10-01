@@ -60,6 +60,13 @@ STOCK_ADJUST = "stock.adjust"
 # raising and approving, so the second pair of eyes was only ever "somebody else with
 # the same tick". Inherits its grants below, so nobody who approves today loses it.
 STOCK_ADJUST_APPROVE = "stock.adjust.approve"
+# Stock Corrections (2026-10-01): editing what a held unit or batch IS — batch no.,
+# mfg / expiry, serial, IMEI, asset / consumable code. Raise and sign are separate
+# codes for the same reason the audit's are: the second pair of eyes must be somebody
+# else's. New capability, so fail-closed: Admin holds it until a job profile is ticked.
+STOCK_EDIT_VIEW = "stock.edit.view"
+STOCK_EDIT_CREATE = "stock.edit.create"
+STOCK_EDIT_APPROVE = "stock.edit.approve"
 STOCK_RESERVE = "stock.reserve"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
 STOCK_VALUATION_VIEW = "stock.valuation.view"
@@ -349,6 +356,12 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
     Perm(STOCK_ADJUST_APPROVE, "inventory", "stock", "adjust_approve",
          "Approve or reject a stock audit / adjustment"),
+    Perm(STOCK_EDIT_VIEW, "inventory", "stock_edit", "view",
+         "View stock corrections (batch / expiry / serial / IMEI edits)"),
+    Perm(STOCK_EDIT_CREATE, "inventory", "stock_edit", "create",
+         "Raise a stock correction for approval"),
+    Perm(STOCK_EDIT_APPROVE, "inventory", "stock_edit", "approve",
+         "Approve or reject a stock correction"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
          "View stock valuation and cost"),
@@ -731,6 +744,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("pro_ledger", "procurement", "Procurement · Ledger"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
     ("inv_adjustments", "inventory", "Inventory · Stock Audit"),
+    ("inv_stock_edits", "inventory", "Inventory · Stock Corrections"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
     # Rode on `stock.points.manage`, which is the action that RE-TAGS a stocking point.
     ("inv_stocking_points", "inventory", "Inventory · Stocking Points"),

@@ -173,6 +173,8 @@ async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> Non
 
 async def _apply_fields(db: AsyncSession, defn: MasterDef, row, data: BaseModel,
                         user=None) -> None:
+    from app.shared.masters import short_codes
+    await short_codes.enforce(db, defn, row, data)
     if defn.apply is not None:
         if defn.apply_needs_user:
             await defn.apply(db, row, data, user)
@@ -224,6 +226,15 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
     """One call per master, so each handler closes over its own `defn`."""
     schema = defn.schema
     base = f"/api/{defn.path}"
+
+    from app.shared.masters import short_codes
+    if short_codes.applies(defn) and not defn.read_only:
+        # Registered before /{row_id} so "suggest-code" is never read as an id.
+        @router.get(base + "/suggest-code", name=f"suggest_code_{defn.path}")
+        async def suggest_code(name: str = "", db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(defn.manage_perm))):
+            """The three-letter code a new row with this name would get."""
+            return {"code": await short_codes.suggest(db, defn.model, name)}
 
     # Every master gets template/export/import for free, from the same schema the
     # CRUD routes validate against — so a new MasterDef is still just a MasterDef.

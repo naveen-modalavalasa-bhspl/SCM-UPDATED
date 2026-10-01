@@ -724,6 +724,9 @@ def parse_upload(defn, content: bytes) -> tuple[list[dict], list[str]]:
     alias = {_norm(name): name for name in fields}
     alias["id"] = "id"
     alias.update({_norm(lk.label): lk.field for lk in by_field.values()})
+    # Headers renamed since a file may have been filled in.
+    if "general_name_id" in by_field:
+        alias.setdefault(_norm("General name"), "general_name_id")
     known: dict[str, int] = {}
     for index, name in enumerate(headers):
         field = alias.get(_norm(name))
@@ -821,6 +824,13 @@ async def untouched_rows(defn, db: AsyncSession, parsed: list[dict]) -> tuple[li
     return changed, unchanged
 
 
+async def _short_code_problems(defn, db: AsyncSession, parsed: list[dict]) -> list:
+    """Fill blank three-letter codes from the name; report ones that do not fit."""
+    from app.shared.masters import short_codes
+    return [Problem(line, "code", field_label(defn, "code"), message)
+            for line, message in await short_codes.fill_and_check(defn, db, parsed)]
+
+
 def take_pending(parsed: list[dict]) -> dict[int, dict[str, str]]:
     """`{sheet row: {field: name}}` for references to rows of this same sheet, popped
     off the records so the schema never sees them."""
@@ -915,6 +925,7 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
     ready = _in_sheet_order(ready, pending)
     saved_by_key: dict[str, Any] = {}               # code/name -> row, this run
     created = updated = 0
+    from app.shared.masters import short_codes
     for line, row_id, data in ready:
         for field, text in pending.get(line, {}).items():
             target = saved_by_key.get(_norm(text))
@@ -939,6 +950,10 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
         elif has_code:
             row = by_code.get(getattr(data, "code", None))
 
+        try:
+            await short_codes.enforce(db, defn, row, data)
+        except ValidationError as exc:
+            raise ValidationError(f"Row {line} — {exc.message}") from exc
         if row is None:
             row = defn.model()
             if defn.apply is not None:
@@ -1133,6 +1148,7 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             raise ValidationError("That file is empty.")
         parsed, read_errors = parse_upload(defn, content)
         unmatched = await resolve_lookups(defn, db, parsed)
+        read_errors += await _short_code_problems(defn, db, parsed)
         # Validated on a COPY: validate_rows pops `id` and `__row__` off the records,
         # and the screen needs them back to show which sheet row it is talking about.
         copies = [dict(r) for r in parsed]
@@ -1271,7 +1287,9 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
 
         parsed, unchanged = await untouched_rows(defn, db, parsed)
         pending = take_pending(parsed)
+        code_problems = await _short_code_problems(defn, db, parsed)
         ready, problems = validate_rows(defn, parsed)
+        problems = code_problems + problems
         if problems:
             raise ValidationError(summarise(problems))
         return await apply_rows(defn, db, ready, unchanged, user,
@@ -1290,6 +1308,7 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
         unmatched = await resolve_lookups(defn, db, parsed)
         parsed, unchanged = await untouched_rows(defn, db, parsed)
         pending = take_pending(parsed)
+        read_errors += await _short_code_problems(defn, db, parsed)
         ready, schema_errors = validate_rows(defn, parsed)
         problems = (read_errors
                     + [Problem(p["row"], p["field"], p["label"], p["message"])

@@ -189,6 +189,8 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      # them again.
                      "stock_movement": "SMV",
                      "stock_movement_order": "SMO",
+                     # "STO" again otherwise — see above.
+                     "stock_edit": "SCR",
                      # The buyer's change request on a supplier's quotation. "CR"
                      # is what the desk calls it; the three-letter fallback for
                      # QUOTE_CHANGE_REQUEST would have been "QUO", which is what

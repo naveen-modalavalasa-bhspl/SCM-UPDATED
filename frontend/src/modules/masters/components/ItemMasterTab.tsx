@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
 } from "@heroui/react";
-import { Plus, Search } from "lucide-react";
+import { Image as ImageIcon, Plus, Search } from "lucide-react";
 
 import {
   Button, Can, Field, Input, ResponsiveList, Select, type Column,
@@ -19,7 +19,7 @@ import type {
 
 export const ITEM_SECTIONS = [
   "Basic", "Kit Components", "Attributes", "Specifications", "Features", "Units",
-  "Identification", "Tracking", "Packaging", "Additional",
+  "Identification", "Tracking", "Packaging", "Additional", "Photos",
 ] as const;
 type ItemSection = (typeof ITEM_SECTIONS)[number];
 
@@ -92,14 +92,108 @@ export function brandsForGeneralName(
  *  name is sold by several brands, each a separate item row sharing this prefix
  *  and differing only in the serial. The serial is allocated by the server
  *  at save, so a new item shows #### rather than a number that might be taken. */
-export function itemCodePreview(
-  categoryPath?: string | null,
-  generalCode?: string | null,
-  serial?: number | null,
-) {
-  if (![categoryPath, generalCode].every(Boolean)) return "";
-  const tail = serial ? String(serial).padStart(4, "0") : "####";
-  return [categoryPath, generalCode].join("-").toUpperCase() + `-${tail}`;
+/** L1L2L3, a hyphen, a three-digit series: 101010-001. No generic name in it. */
+export function itemCodePreview(categoryPath?: string | null, serial?: number | null) {
+  if (!categoryPath) return "";
+  return `${categoryPath}-${serial ? String(serial).padStart(3, "0") : "###"}`;
+}
+
+/** A 40px picture of the item at the start of its row. Fetched once per photo
+ *  and kept for the session; an item with none shows a quiet placeholder. */
+function ItemThumb({ item }: { item: MasterItem }) {
+  const photo = useQuery({
+    queryKey: ["masters", "item-photo-blob", item.photo_id],
+    queryFn: () => mastersApi.itemPhotos.blobUrl(item.id, item.photo_id!),
+    enabled: Boolean(item.photo_id),
+    staleTime: Infinity,
+    gcTime: 30 * 60_000,
+  });
+  return (
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-line bg-content2">
+      {photo.data
+        ? <img src={photo.data} alt="" loading="lazy" className="h-full w-full object-cover" />
+        : <ImageIcon className="h-4 w-4 text-muted" aria-hidden />}
+    </div>
+  );
+}
+
+/** The item's pictures. Fetched as blobs, because an <img src> cannot carry the
+ *  sign-in token; added and removed only with master.item.manage. */
+function ItemPhotos({ itemId }: { itemId: number }) {
+  const qc = useQueryClient();
+  const photos = useQuery({
+    queryKey: ["masters", "item-photos", itemId],
+    queryFn: () => mastersApi.itemPhotos.list(itemId),
+  });
+  const [urls, setUrls] = useState<Record<number, string>>({});
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const made: string[] = [];
+    for (const p of photos.data ?? []) {
+      if (urls[p.id]) continue;
+      void mastersApi.itemPhotos.blobUrl(itemId, p.id).then((url) => {
+        made.push(url);
+        if (live) setUrls((u) => ({ ...u, [p.id]: url }));
+      }).catch(() => undefined);
+    }
+    return () => { live = false; };
+  }, [photos.data, itemId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const refresh = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ["masters", "item-photos", itemId] }),
+    qc.invalidateQueries({ queryKey: ["masters", "items"] }),
+  ]);
+  const add = useMutation({
+    mutationFn: (file: File) => mastersApi.itemPhotos.add(itemId, file),
+    onSuccess: () => { setProblem(null); void refresh(); },
+    onError: (e: Error) => setProblem(e.message),
+  });
+  const remove = useMutation({
+    mutationFn: (photoId: number) => mastersApi.itemPhotos.remove(itemId, photoId),
+    onSuccess: () => void refresh(),
+    onError: (e: Error) => setProblem(e.message),
+  });
+  return (
+    <div className="space-y-3">
+      {problem && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{problem}</div>}
+      <div className="flex flex-wrap gap-3">
+        {(photos.data ?? []).map((p) => (
+          <figure key={p.id} className="w-36">
+            <div className="flex h-36 w-36 items-center justify-center overflow-hidden rounded-xl border border-line bg-content2">
+              {urls[p.id]
+                ? <img src={urls[p.id]} alt={p.file_name} className="h-full w-full object-cover" />
+                : <span className="text-xs text-muted">Loading…</span>}
+            </div>
+            <figcaption className="mt-1 flex items-center justify-between gap-1 text-xs text-muted">
+              <span className="truncate" title={p.file_name}>{p.file_name}</span>
+              <Can do="master.item.manage">
+                <button type="button" className="min-h-11 px-2 text-bad"
+                        onClick={() => remove.mutate(p.id)} disabled={remove.isPending}>
+                  Remove
+                </button>
+              </Can>
+            </figcaption>
+          </figure>
+        ))}
+        {photos.data?.length === 0 && (
+          <p className="text-sm text-muted">No photos yet.</p>
+        )}
+      </div>
+      <Can do="master.item.manage">
+        <label className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-line px-4 text-sm font-medium">
+          {add.isPending ? "Uploading…" : "Add photo"}
+          <input type="file" accept="image/jpeg,image/png,image/webp" capture="environment"
+                 className="hidden" disabled={add.isPending}
+                 onChange={(e) => {
+                   const file = e.target.files?.[0];
+                   if (file) add.mutate(file);
+                   e.target.value = "";
+                 }} />
+        </label>
+        <p className="mt-1 text-xs text-muted">JPG, PNG or WEBP, up to 20 MB.</p>
+      </Can>
+    </div>
+  );
 }
 
 /** Where one tag's answer is stored in `mst_item_specs.specifications`.
@@ -268,16 +362,16 @@ export function ItemMasterTab() {
   // lock, so the form asks what it would be rather than guessing. `####` only
   // shows while that answer is in flight or when the pair is not picked yet.
   const nextCode = useQuery({
-    queryKey: ["masters", "items", "next-code", form.category_id, form.general_name_id],
+    queryKey: ["masters", "items", "next-code", form.category_id],
     queryFn: () => mastersApi.nextItemCode(
-      Number(form.category_id), Number(form.general_name_id)),
-    enabled: editing === null && Boolean(form.category_id) && Boolean(form.general_name_id),
+      Number(form.category_id), Number(form.general_name_id) || 0),
+    enabled: editing === null && Boolean(form.category_id),
     staleTime: 10_000,
   });
+  // An existing item shows the code it was created with — never re-derived.
   const preview = editing
-    ? itemCodePreview(chosenCategory?.path, chosenGeneral?.code, editing.serial_no)
-    : (nextCode.data?.preview
-      ?? itemCodePreview(chosenCategory?.path, chosenGeneral?.code));
+    ? editing.code
+    : (nextCode.data?.preview ?? itemCodePreview(chosenCategory?.path));
 
   const tags = categoryTags.data ?? [];
   const attributeTags = tags.filter((t) => t.tag_type === "ATTRIBUTE" && t.is_active);
@@ -387,10 +481,10 @@ export function ItemMasterTab() {
   // The Save button stays honest about why it is disabled rather than silently
   // refusing: identity, a unit, an HSN, and every field the category insists on.
   const blocker = !form.category_id ? "Category is required"
-    : !form.general_name_id ? "General name is required"
+    : !form.general_name_id ? "Generic name is required"
     : !form.brand_id ? "Brand is required"
     : !form.manufacturer_id ? "Manufacturer is required"
-    : !preview ? "Complete the category and general name"
+    : !preview ? "Pick the Level 3 category"
     : !form.name.trim() ? "Give the item a name"
     : !form.uom_id ? "Pick a primary unit on the Units tab"
     : !form.owner_department_id ? "Pick an ownership department"
@@ -400,9 +494,10 @@ export function ItemMasterTab() {
     : null;
 
   const columns: Column<MasterItem>[] = [
+    { key: "photo", header: "", render: (row) => <ItemThumb item={row} /> },
     { key: "code", header: "Item Code", render: (row) => <span className="mono font-semibold">{row.code}</span> },
     { key: "name", header: "Name", render: (row) => row.name },
-    { key: "general", header: "General Name", render: (row) => row.general_name ?? "—" },
+    { key: "general", header: "Generic Name", render: (row) => row.general_name ?? "—" },
     { key: "brand", header: "Brand / Manufacturer",
       render: (row) => `${row.brand_name ?? "—"} / ${row.manufacturer_name ?? "—"}` },
     { key: "hsn", header: "HSN", render: (row) => row.hsn_code ?? "—" },
@@ -469,7 +564,7 @@ export function ItemMasterTab() {
               {/* The six-digit path is what the item code is built from, so it is
                   worth showing before the code itself exists. */}
               <Field label="Category Path"><Input value={chosenCategory?.path ?? ""} disabled /></Field>
-              <Field label="General Name *"><Select value={form.general_name_id}
+              <Field label="Generic Name *"><Select value={form.general_name_id}
                 options={opt(general.data ?? [])} onChange={(v) => {
                   // Same clear-the-rung-below rule the brand already follows: the
                   // brand list is about to change, so a stale pick must not survive.
@@ -480,7 +575,7 @@ export function ItemMasterTab() {
                   set("brand_id", v); set("manufacturer_id", "");
                 }}
                 isDisabled={!form.general_name_id}
-                placeholder="Select general name first" /></Field>
+                placeholder="Select generic name first" /></Field>
               <Field label="Manufacturer *"><Select value={form.manufacturer_id}
                 options={opt(manufacturerRows)} onChange={(v) => set("manufacturer_id", v)}
                 isDisabled={!form.brand_id} placeholder="Select brand first" /></Field>
@@ -615,6 +710,10 @@ export function ItemMasterTab() {
                 : <ItemPackagingLadder itemId={editing.id}
                     itemName={editing.name} baseUom={editing.uom_code} />
             )}
+
+            {tab === "Photos" && (editing
+              ? <ItemPhotos itemId={editing.id} />
+              : <p className="text-sm text-muted">Save the item first, then add its photos here.</p>)}
 
             {tab === "Additional" && <div className="grid gap-4 md:grid-cols-2">
               <Field label="Dosage Form"><Select value={form.dosage_form_id}

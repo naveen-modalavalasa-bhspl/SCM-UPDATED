@@ -38,6 +38,7 @@ import type {
   WorkflowPending,
   CountSheetRow,
   StockAdjustment,
+  StockEdit, StockEditBatchRow, StockEditItemRow, StockEditPage, StockEditTarget, StockEditUnitRow,
 } from "./types";
 
 /**
@@ -805,3 +806,31 @@ export const inventoryApi = {
   getMyStockingPoints,
   searchPositions,
 };
+
+// ---- Stock Corrections: served by the warehouse module, which owns batches/units ----
+type StockEditListParams = {
+  warehouse_id: number; search?: string; item_id?: number; page?: number; size?: number;
+};
+export const listStockEditItems = (params: Omit<StockEditListParams, "item_id">) =>
+  api.get<StockEditPage<StockEditItemRow>>("/api/warehouse/stock-edits/items", { params })
+    .then((r) => r.data);
+export const listStockEditUnits = (params: StockEditListParams) =>
+  api.get<StockEditPage<StockEditUnitRow>>("/api/warehouse/stock-edits/units", { params })
+    .then((r) => r.data);
+export const listStockEditBatches = (params: StockEditListParams) =>
+  api.get<StockEditPage<StockEditBatchRow>>("/api/warehouse/stock-edits/batches", { params })
+    .then((r) => r.data);
+export const listStockEdits = (params?: {
+  status?: string; warehouse_id?: number; search?: string;
+  date_from?: string; date_to?: string; page?: number; size?: number;
+}) => api.get<StockEditPage<StockEdit>>("/api/warehouse/stock-edits", { params }).then((r) => r.data);
+export const getStockEdit = (id: number) =>
+  api.get<StockEdit>(`/api/warehouse/stock-edits/${id}`).then((r) => r.data);
+export const createStockEdit = (data: {
+  warehouse_id: number; reason: string; remarks?: string | null;
+  lines: { target_type: StockEditTarget; target_id: number; changes: Record<string, string | null> }[];
+}) => api.post<StockEdit>("/api/warehouse/stock-edits", data).then((r) => r.data);
+export const approveStockEdit = (id: number, remarks?: string) =>
+  api.post<StockEdit>(`/api/warehouse/stock-edits/${id}/approve`, { remarks }).then((r) => r.data);
+export const rejectStockEdit = (id: number, remarks?: string) =>
+  api.post<StockEdit>(`/api/warehouse/stock-edits/${id}/reject`, { remarks }).then((r) => r.data);

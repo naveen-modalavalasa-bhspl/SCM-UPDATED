@@ -55,32 +55,19 @@ def test_ownership_department_options_deduplicate_names_deterministically():
     ]
 
 
-def test_generated_item_code_contains_category_and_general_name():
-    assert build_item_code("101010", "slide", 1) == "101010-SLIDE-0001"
-
-
-def test_generated_item_code_accepts_hyphenated_master_codes():
-    assert build_item_code("161010", "GN-003", 1) == "161010-GN-003-0001"
-
-
-@pytest.mark.parametrize("code", ["-GN003", "GN003-", "GN--003", "GN 003", "GN_003"])
-def test_generated_item_code_rejects_malformed_master_codes(code):
-    with pytest.raises(ValidationError, match="internal hyphens"):
-        build_item_code("161010", code, 1)
+def test_generated_item_code_is_the_category_path_and_a_three_digit_series():
+    assert build_item_code("101010", 1) == "101010-001"
+    assert build_item_code("161010", 42) == "161010-042"
 
 
 def test_generated_item_code_rejects_an_incomplete_category_path():
-    with pytest.raises(ValidationError, match="six-digit"):
-        build_item_code("1010", "SLIDE", 1)
+    with pytest.raises(ValidationError, match="Level 3"):
+        build_item_code("1010", 1)
 
 
-def test_generated_item_code_pads_the_serial_to_four_digits():
-    assert build_item_code("101010", "PARACET", 42) == "101010-PARACET-0042"
-
-
-def test_a_prefix_runs_out_after_9999_items():
-    with pytest.raises(ValidationError, match="9999"):
-        build_item_code("101010", "SLIDE", 10000)
+def test_a_category_runs_out_after_999_items():
+    with pytest.raises(ValidationError, match="999"):
+        build_item_code("101010", 1000)
 
 
 async def item_payload(client, admin, *, name="Bolt"):
@@ -157,7 +144,7 @@ async def test_item_code_uses_category_and_general_name(db):
         manufacturer_id=manufacturer.id, item_class_id=item_class.id,
         uom_id=uom.id, hsn_id=hsn.id,
     ))
-    assert item.code == "101010-SLIDE-0001"
+    assert item.code == "101010-001"
     assert item.serial_no == 1
     assert item.manufacturer_name == "Acme Medical"
     assert item.brand_name == "Lab Brand"
@@ -192,7 +179,7 @@ async def test_create_item_snapshots_uom_and_category(client, admin):
     # Snapshots let the item list render without joining two masters.
     assert body["uom_code"] == "PCS"
     assert body["category_name"] == "Level 3"
-    assert body["code"] == "000000-GEN-0001"
+    assert body["code"] == "000000-001"
 
 
 async def test_item_ownership_snapshots_active_hcm_department_and_filters(
@@ -575,7 +562,7 @@ async def test_a_second_item_on_the_same_prefix_gets_the_next_serial(client, adm
     first = (await client.post("/api/items", json=payload, headers=admin)).json()
     second = (await client.post(
         "/api/items", json={**payload, "name": "Bolt M10"}, headers=admin)).json()
-    assert first["code"].endswith("-0001")
+    assert first["code"].endswith("-001")
     assert second["code"].endswith("-0002")
     assert (first["serial_no"], second["serial_no"]) == (1, 2)
 
@@ -606,7 +593,7 @@ async def test_item_records_the_asset_choice_but_generates_no_code(client, admin
     body = (await client.post("/api/items", json={**payload, "is_asset": True},
                               headers=admin)).json()
     assert body["is_asset"] is True
-    assert body["code"].endswith("-0001")
+    assert body["code"].endswith("-001")
 
 
 async def test_item_can_be_imei_tracked(client, admin):

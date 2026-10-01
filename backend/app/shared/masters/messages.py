@@ -40,6 +40,8 @@ LABELS: dict[str, str] = {
     "city": "City",
     "component_item_id": "Component item",
     "contact_person": "Contact person",
+    "category_ids": "Vendor categories",
+    "vendor_ids": "Vendors",
     "credit_limit": "Credit limit",
     "data_type": "Value type",
     "effective_from": "Effective from",
@@ -124,6 +126,7 @@ LABELS: dict[str, str] = {
 
 HINTS: dict[str, str] = {
     "code": "A short code: letters and numbers, a hyphen only between them.",
+    "uom_class": "What the unit measures: Count, Weight, Volume ... (Masters › UOM Types).",
     "segment_code": "Two digits, 00 to 99.",
     "is_batch_tracked": "Each delivery keeps its own batch number.",
     "is_serial_tracked": "Every single unit has its own serial number.",
@@ -169,6 +172,11 @@ def field_label(defn: Any, field: str) -> str:
 
 
 def field_hint(defn: Any, field: str) -> str:
+    if field == "code":
+        from app.shared.masters.short_codes import applies
+        if applies(defn):
+            return ("Exactly 3 letters, e.g. ERB for Erba. Leave it blank and one is "
+                    "made from the name.")
     return HINTS.get(field, "")
 
 
