@@ -49,22 +49,22 @@ describe("item master identity", () => {
     expect(brandsForGeneralName(brands, undefined)).toHaveLength(2);
   });
 
-  it("previews the generated L1/L2/L3-general-brand-manufacturer code", () => {
-    expect(itemCodePreview("101010", "paracet", "dolo", "dolo", 1))
-      .toBe("101010-PARACET-DOLO-DOLO-0001");
-    expect(itemCodePreview("101010", "slide", "lab", null, 1)).toBe("");
+  it("previews the generated L1/L2/L3-general code", () => {
+    expect(itemCodePreview("101010", "paracet", 1))
+      .toBe("101010-PARACET-0001");
+    expect(itemCodePreview("101010", null, 1)).toBe("");
   });
 
   it("shows #### for the serial until the server allocates one", () => {
     // The serial is a locked MAX+1 on the server. Guessing it in the browser would
     // show a number that another user may already have taken.
-    expect(itemCodePreview("101010", "slide", "lab", "acme"))
-      .toBe("101010-SLIDE-LAB-ACME-####");
+    expect(itemCodePreview("101010", "slide"))
+      .toBe("101010-SLIDE-####");
   });
 
   it("pads an existing serial back to four digits", () => {
-    expect(itemCodePreview("101010", "slide", "lab", "acme", 42))
-      .toBe("101010-SLIDE-LAB-ACME-0042");
+    expect(itemCodePreview("101010", "slide", 42))
+      .toBe("101010-SLIDE-0042");
   });
 });
 

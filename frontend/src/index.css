@@ -99,6 +99,8 @@
      This violet clears both (20.3 / 23.0). Verified with the dataviz validator, not
      by eye. */
   --color-chart-returned: #7b5ea7;
+  --color-chart-returned-bg: #efe9f7;
+  --color-chart-returned-rail: var(--color-chart-returned);
 
   /* Categorical slots for a donut whose slices are IDENTITIES (document types), not
      states. Deliberately NOT the status tokens: reusing ok/bad/warn for "series 4"
@@ -165,6 +167,7 @@
 
   /* Re-stepped for the dark surface, not lightened automatically. */
   --color-chart-returned: #a78bfa;
+  --color-chart-returned-bg: #2a2140;
 
   /* Re-STEPPED for the dark surface, not auto-lightened: the light steps sit above
      the dark lightness band. Validated against #121828, same five checks. */

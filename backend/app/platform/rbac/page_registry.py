@@ -42,7 +42,7 @@ class PageDef:
     parent: str | None = None
     icon: str | None = None
     module: str | None = None
-    sort_order: int = 0
+    sort_order: float = 0
     show_on_mobile: bool = True
     # A page with no permission is visible to everyone — only Home should be that.
     always_on: bool = False
@@ -164,6 +164,15 @@ PAGES: list[PageDef] = [
     PageDef("pro_quotations", "/procurement/quotations", "Quotations",
             parent="grp_purchasing", module="procurement", icon="handshake",
             sort_order=28),
+    # Price Compare (2026-09-26): the war room. One RFQ picked at the top, every
+    # quotation to it side by side underneath, and the award — which used to live
+    # inside the RFQ page and moved here so the tender room never carries prices.
+    # sort_order 29 sorts it after Quotations (28) and before the PO list (31): the
+    # rail reads Requisitions -> Consolidation -> RFQs -> Quotations -> Price
+    # Compare -> Purchase Orders, which is the order the work happens in.
+    PageDef("pro_price_compare", "/procurement/compare", "Compare Quotations",
+            parent="grp_purchasing", module="procurement", icon="git-compare-arrows",
+            sort_order=29),
     # The supplier register: who sells us material, and whether they can actually sign
     # in to answer an RFQ. Under PURCHASING rather than Settings, unlike its carrier
     # twin — a buyer who finds no vendor on the RFQ picker is one click from the list

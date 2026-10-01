@@ -376,7 +376,7 @@ export function RFQFormPage() {
             <span aria-hidden="true" className="ml-0.5 text-danger">*</span>
             <span className="sr-only"> (required)</span>
           </h2>
-          <LinePicker lines={lines} onChange={setLines} />
+          <LinePicker lines={lines} onChange={setLines} vendorsByItem={vendorsByItem} />
         </div>
 
         <div>

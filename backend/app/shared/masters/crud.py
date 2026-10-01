@@ -74,6 +74,11 @@ class Lookup:
     # code typed into Excel loses its leading zero. Tried only after the cell as
     # typed has failed to match, and only ever to FIND a row, never to create one.
     normalize: Callable[[str], str] | None = None
+    # Column values a row must hold to be pickable here, e.g. {"level": 3}: an item
+    # sits only in a Level 3 category, and offering the parents let a sheet pass the
+    # review and then fail at Save. `where_hint` is what the row is told instead.
+    where: dict[str, Any] | None = None
+    where_hint: str = ""
 
 
 @dataclass
@@ -132,6 +137,9 @@ class MasterDef:
     # shared may not import a module (rule 5). Powers GET {base}/{id}/usage, so the
     # admin is told "used by 42 items" before deactivating rather than after.
     usage: Sequence[tuple[str, str, str]] = ()
+    # Columns the blank TEMPLATE leaves out because the system fills them in (a
+    # category's number). Still in the export and still accepted on import.
+    template_omit: Sequence[str] = ()
     # FK columns this master's spreadsheet states by name instead of by id. Empty
     # means the sheet keeps the raw `*_id` columns, which is still what most masters
     # want — a master with no foreign keys has nothing to look up.

@@ -735,6 +735,7 @@ class ReceiptItemRead(_Read):
     uom_code: str | None = None
     is_asset: bool = False
     is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
     #: The item master's "Requires QI". Decides whether this line goes to QC or
     #: straight to putaway on submit.
     requires_qi: bool = False
@@ -3782,6 +3783,24 @@ class IndentIssueSource(BaseModel):
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
     items: list[IssueItemWrite] = []
+
+
+class EmployeeDestination(BaseModel):
+    """Where a direct issue is headed when it names a person, not an indent.
+
+    The same office/SAC/vehicle answer `indent_issue_source` serves for an
+    indent, read off the employee instead: the destination office is the
+    employee's own office, the SAC is that office's code from HCM, and the
+    vehicle is the registration the office name carries, if any. Served so the
+    form can fill Destination / SAC / Vehicle the moment Issued-to is picked,
+    instead of leaving them blank on every issue raised without an indent.
+    """
+    issued_to_id: int
+    issued_to_name: str | None = None
+    destination_office_id: int | None = None
+    destination_office_name: str | None = None
+    destination_office_sac: str | None = None
+    vehicle_number: str | None = None
 
 
 class PickingIssueSource(BaseModel):

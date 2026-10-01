@@ -45,7 +45,7 @@ export function SupplierRFQListPage() {
       render: (r) => (
         <div className="min-w-0">
           <div className="font-mono text-xs font-semibold text-ink">{r.rfq_no}</div>
-          <div className="truncate text-[11px] text-muted">{r.title ?? "Untitled"}</div>
+          <div className="truncate text-[11px] text-muted">{r.title && r.title.trim() !== "" && r.title !== "Untitled" ? r.title : null}</div>
         </div>
       ),
     },
@@ -58,6 +58,14 @@ export function SupplierRFQListPage() {
     {
       key: "status", header: "Status",
       render: (r) => {
+        if (r.has_pending_change_request || r.vendor_status === "CHANGE_PROPOSED") {
+          return (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-3 py-1 text-xs font-bold text-amber-700 shadow-sm">
+              <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
+              Change Proposed (Action Required)
+            </span>
+          );
+        }
         if (r.vendor_status === "SUBMITTED" || r.vendor_status === "REVISED") {
           return <StatusPill status="SUBMITTED" label="Quote submitted" />;
         }
@@ -139,13 +147,18 @@ export function SupplierRFQListPage() {
             <div className="space-y-2 p-1">
               <div className="flex items-start justify-between gap-3">
                 <span className="font-mono text-sm font-bold text-ink">{r.rfq_no}</span>
-                {r.vendor_status === "SUBMITTED" || r.vendor_status === "REVISED" ? (
+                {r.has_pending_change_request || r.vendor_status === "CHANGE_PROPOSED" ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-3 py-1 text-xs font-bold text-amber-700 shadow-sm">
+                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping" />
+                    Change Proposed (Action Required)
+                  </span>
+                ) : r.vendor_status === "SUBMITTED" || r.vendor_status === "REVISED" ? (
                   <StatusPill status="SUBMITTED" label="Quote submitted" />
                 ) : (
                   <StatusPill status={r.status} label={vendorRfqLabel(r.status)} />
                 )}
               </div>
-              <div className="text-base font-medium text-body">{r.title ?? "Untitled"}</div>
+              <div className="text-base font-medium text-body">{r.title && r.title.trim() !== "" && r.title !== "Untitled" ? r.title : null}</div>
               <div className="flex items-center gap-3 text-xs text-muted">
                 <span className="flex items-center gap-1 rounded-md bg-surface-2 px-2 py-1">
                   {r.total_items} item{r.total_items === 1 ? "" : "s"}

@@ -104,10 +104,15 @@ export const VENDOR_RFQ_STATUS_LABEL: Record<string, string> = {
   PUBLISHED: "Open for quotes",
   CLOSED: "Closed",
   AWARDED: "Decided",
+  CHANGE_PROPOSED: "Change Proposed (Action Required)",
 };
 
 export const vendorRfqLabel = (status: string) =>
   VENDOR_RFQ_STATUS_LABEL[status] ?? status.replace(/_/g, " ");
 
-export const VENDOR_RFQ_STATUS_OPTIONS = ["PUBLISHED", "CLOSED", "AWARDED"]
-  .map((value) => ({ value, label: vendorRfqLabel(value) }));
+export const VENDOR_RFQ_STATUS_OPTIONS = [
+  { value: "CHANGE_PROPOSED", label: "Change Proposed (Action Required)" },
+  { value: "PUBLISHED", label: "Open for quotes" },
+  { value: "CLOSED", label: "Closed" },
+  { value: "AWARDED", label: "Decided" },
+];

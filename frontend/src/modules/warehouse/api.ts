@@ -1073,6 +1073,16 @@ export const consignmentRecommendations = (limit = 8) =>
 
 export const employeeOptions = (search?: string) => get<Option[]>(`${BASE}/options/employees`, { search });
 
+export const getEmployeeDestination = (employee_id: number) =>
+  get<{
+    issued_to_id: number;
+    issued_to_name?: string | null;
+    destination_office_id?: number | null;
+    destination_office_name?: string | null;
+    destination_office_sac?: string | null;
+    vehicle_number?: string | null;
+  }>(`${BASE}/options/employee-destination`, { employee_id });
+
 export const projectOptions = (search?: string) => get<Option[]>(`${BASE}/options/projects`, { search });
 
 export const departmentOptions = () => get<Option[]>(`${BASE}/options/departments`);
@@ -1120,7 +1130,7 @@ export const deleteStockMovement = (id: number) => del(`${BASE}/stock-movements/
 
 import type { WDemandPoolResponse, WDemandPoolStage } from './types';
 
-/** Stage metadata served by the backend — never hardcoded in the screen. */
+/** Stage metadata served by the backend ï¿½ never hardcoded in the screen. */
 export const warehouseDemandPoolApi = {
   stages: (signal?: AbortSignal) =>
     api.get<WDemandPoolStage[]>('/api/warehouse/demand-pool/stages', { signal })

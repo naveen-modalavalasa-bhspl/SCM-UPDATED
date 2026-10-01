@@ -1,6 +1,6 @@
 export interface MasterItem {
   id: number;
-  /** L1L2L3-GEN-BRAND-MFR-0001. Assigned once at create, never regenerated. */
+  /** L1L2L3-GEN-0001. Assigned once at create, never regenerated. */
   code: string;
   serial_no?: number | null;
   name: string;
@@ -431,10 +431,9 @@ export interface MasterHsnCode {
   id: number;
   code: string;
   description?: string | null;
-  cgst_rate: number;
-  sgst_rate: number;
-  igst_rate: number;
-  cess_rate: number;
+  /** The one GST rate: the within-state CGST + SGST and the across-state IGST are the
+   *  same number, so a document derives the halves rather than storing them. */
+  gst_rate: number;
   effective_from?: string | null;
   is_active: boolean;
 }

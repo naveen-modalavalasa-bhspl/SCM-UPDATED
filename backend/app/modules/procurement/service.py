@@ -31,7 +31,7 @@ from app.modules.inventory.models import MaterialRequest, MaterialRequestItem
 from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
     PurchaseConsolidationItem, PurchaseConsolidationSource, PurchaseOrder, Quotation,
-    QuotationItem, Requisition,
+    QuotationComment, QuotationItem, QuoteChangeRequest, Requisition,
     PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
 )
@@ -61,8 +61,8 @@ logger = logging.getLogger(__name__)
 from app.shared.enums import (
     CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AuditAction, ConsolidationStatus, DespatchNoteStatus, DocType, IndentStatus,
-    InstanceStatus, MRStatus, POStatus, POVendorStatus, QuotationStatus,
-    RequisitionStatus, RFQStatus,
+    InstanceStatus, MRStatus, POStatus, POVendorStatus, QuoteChangeStatus,
+    QuotationStatus, RequisitionStatus, RFQStatus,
 )
 from app.shared.models.base import utcnow
 from app.shared.time import today as ist_today
@@ -246,27 +246,28 @@ def tax_region(company_gstin: str | None, vendor_gstin: str | None) -> str:
 
 
 async def _hsn_ceilings(db: AsyncSession, item_ids: list[int]) -> dict[int, dict]:
-    """Per item: the HSN code and the rates it notifies. The quote may not exceed them.
+    """Per item: the HSN code and the GST rate it notifies. The quote may not exceed it.
 
     Read through the item's `hsn_id` rather than its `hsn_code` snapshot — the snapshot
     is what the item was created with and the rate is whatever the code says today.
     An item with no HSN gets no ceiling: blocking it would stop the quote outright, and
     an unclassified item is a masters problem, not a vendor's.
+
+    One rate covers both GST routes: the within-state CGST + SGST and the across-state
+    IGST are the same number, so the ceiling is the same figure whichever way the goods
+    are shipped.
     """
     if not item_ids:
         return {}
     rows = (await db.execute(
-        select(Item.id, HsnCode.code, HsnCode.cgst_rate, HsnCode.sgst_rate,
-               HsnCode.igst_rate)
+        select(Item.id, HsnCode.code, HsnCode.gst_rate)
         .join(HsnCode, HsnCode.id == Item.hsn_id)
         .where(Item.id.in_(item_ids))
     )).all()
     return {
         row[0]: {
             "hsn_code": row[1],
-            "cgst_rate": float(row[2] or 0),
-            "sgst_rate": float(row[3] or 0),
-            "igst_rate": float(row[4] or 0),
+            "gst_rate": float(row[2] or 0),
         } for row in rows
     }
 
@@ -531,6 +532,26 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         raise ValidationError(
             f"{quote.quotation_no} did not win {rfq.rfq_no}; only the awarded "
             "quotation becomes a purchase order")
+    # Freeze Prices (2026-09-26): an order may only be raised off a tender whose
+    # prices were locked before the award. WITHOUT this, a PO can be raised while
+    # the suppliers' prices are still open to change — the one thing a PO cannot
+    # survive, since it is an acceptance of a price that must not move.
+    if not rfq.is_price_frozen:
+        raise ValidationError(
+            f"Prices on {rfq.rfq_no} are not frozen yet — freeze prices first; "
+            "POs can only be raised from a frozen comparison")
+    # And no order may be accepted while the price behind it is still being
+    # negotiated: an open change request on this quote means the numbers on the
+    # PO would be a version nobody has both agreed to.
+    open_cr = (await db.execute(
+        select(QuoteChangeRequest.id).where(
+            QuoteChangeRequest.quotation_id == quote.id,
+            QuoteChangeRequest.status == _CR_OPEN)
+    )).scalars().first()
+    if open_cr is not None:
+        raise ValidationError(
+            f"{quote.quotation_no} has a change request awaiting the supplier — "
+            "resolve it before raising the purchase order")
 
     vendor = await db.get(Vendor, quote.vendor_id)
     if vendor is None:
@@ -1953,9 +1974,10 @@ async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
 async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
     # FIXED — the rung is enforced inside `consolidation.get_consolidation`; this only
     # has to hand the user down. Same for `consolidation_approval_trail` below.
+    doc = await consolidation.get_consolidation(db, cons_id, user=user)
+    await consolidation._attach_caps(db, doc)
     return await _attach_pending_one(
-        db, DocType.CONSOLIDATION.value,
-        await consolidation.get_consolidation(db, cons_id, user=user), user)
+        db, DocType.CONSOLIDATION.value, doc, user)
 
 
 async def po_approval_trail(db: AsyncSession, po_id: int, user=None) -> dict:
@@ -3231,6 +3253,35 @@ async def set_rfq_quantities(db: AsyncSession, rfq_id: int,
         rfq.total_items = remaining
         logger.info("%s quantities changed by %s (%s)",
                     rfq.rfq_no, user.full_name, "; ".join(changes))
+
+        # Sync vendor invitation allocations and existing draft quotations with new line quantities
+        rfq_vendors = (await db.execute(
+            select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
+        )).scalars().all()
+        for invited in rfq_vendors:
+            iq = dict(invited.item_quantities or {})
+            for incoming in data.lines:
+                line = by_id.get(incoming.id)
+                if line:
+                    iq[str(line.item_id)] = float(_d(incoming.quantity))
+            invited.item_quantities = iq
+
+        quotations = (await db.execute(
+            select(Quotation).options(selectinload(Quotation.items)).where(Quotation.rfq_id == rfq.id)
+        )).scalars().all()
+        for quote in quotations:
+            for q_item in quote.items:
+                matched_line = next(
+                    (by_id[l_id] for l_id in by_id if (q_item.rfq_item_id and q_item.rfq_item_id == l_id) or (q_item.item_id == by_id[l_id].item_id)),
+                    None
+                )
+                if matched_line:
+                    new_qty = _d(matched_line.quantity)
+                    q_item.requested_quantity = float(new_qty)
+                    if quote.status == QuotationStatus.DRAFT.value:
+                        q_item.quantity = new_qty
+            _quote_totals(quote)
+
         await db.flush()
     await db.commit()
     return await get_rfq(db, rfq_id, user)
@@ -3538,6 +3589,560 @@ async def list_quotations(db: AsyncSession, params: PageParams,
     return await paginate(db, stmt.order_by(Quotation.created_at.desc()), params)
 
 
+# --------------------------------------------------------------------------- #
+#  Freeze Prices (2026-09-26) — the lock before comparison, award and PO
+# --------------------------------------------------------------------------- #
+
+async def _assert_rfq_unfrozen(rfq: RFQ, doing: str) -> None:
+    """Refuse `doing` on a frozen tender, naming the lock and the way out.
+
+    Every price-changing door in this module walks through here, so the wording
+    of the refusal is written once and reads the same from every screen. The
+    message names the NEXT ACTION for whoever is reading it: a buyer can reopen
+    bidding, a supplier can only take it up with the buyer.
+    """
+    if rfq.is_price_frozen:
+        raise ValidationError(
+            f"{rfq.rfq_no} is closed for pricing — prices were frozen on "
+            f"{rfq.frozen_at.date() if rfq.frozen_at else 'an earlier date'} "
+            f"by {rfq.frozen_by_name or 'a buyer'}. {doing} is no longer "
+            "possible on this tender; contact the buyer, or the buyer may "
+            "reopen bidding.")
+
+
+async def freeze_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
+    """Close the tender to pricing. Suppliers may no longer quote, re-quote or
+    accept a change request; the buyer may award and raise POs.
+
+    Not a status — a flag. A tender is "open but frozen" while the buyer reads
+    the sheet, and that state is exactly what a NEW status value would have made
+    every existing filter, KPI and report invent a meaning for. The freeze is
+    audited here rather than left to the route (rule 9: the state change and its
+    audit line are one act).
+    """
+    rfq = await get_rfq(db, rfq_id, user)
+    if rfq.is_price_frozen:
+        raise ValidationError(f"{rfq.rfq_no} is already frozen")
+    rfq.is_price_frozen = True
+    rfq.frozen_at = utcnow()
+    rfq.frozen_by_id = getattr(user, "id", None)
+    rfq.frozen_by_name = getattr(user, "full_name", None)
+    # The quotes-in count at the moment the door closed.
+    rfq.frozen_at_revision = await db.scalar(
+        select(func.count(Quotation.id)).where(
+            Quotation.rfq_id == rfq.id,
+            Quotation.status != QuotationStatus.DRAFT.value))
+    await db.commit()
+    await write_audit(
+        db, entity="pro_rfqs", action=AuditAction.UPDATE, entity_id=rfq.id,
+        entity_no=rfq.rfq_no, actor=user,
+        before={"is_price_frozen": False},
+        after={"is_price_frozen": True,
+               "frozen_at_revision": rfq.frozen_at_revision},
+        summary=f"Prices frozen on {rfq.rfq_no} ({rfq.frozen_at_revision or 0} "
+                "quotes in)")
+    await notifications.notify(
+        db, [rfq.created_by_id], title=f"{rfq.rfq_no} — prices frozen",
+        body="Suppliers can no longer quote or change prices. POs can now be "
+             "raised against its quotations.",
+        entity_type="RFQ", entity_id=rfq.id, deep_link=f"/procurement/rfqs/{rfq.id}")
+    await db.commit()
+    return await get_rfq(db, rfq_id)
+
+
+async def unfreeze_rfq(db: AsyncSession, rfq_id: int, reason: str, user) -> RFQ:
+    """Reopen bidding. The reason is REQUIRED — unfreezing after people were told
+    prices are settled is the one freeze action that can surprise a supplier, and
+    a reopen with no recorded why is the trail answering no questions later.
+    """
+    if not (reason or "").strip():
+        raise ValidationError("Say why bidding is being reopened")
+    rfq = await get_rfq(db, rfq_id, user)
+    if not rfq.is_price_frozen:
+        raise ValidationError(f"{rfq.rfq_no} is not frozen")
+    rfq.is_price_frozen = False
+    rfq.frozen_at = None
+    rfq.frozen_by_id = None
+    rfq.frozen_by_name = None
+    rfq.frozen_at_revision = None
+    await db.commit()
+    await write_audit(
+        db, entity="pro_rfqs", action=AuditAction.UPDATE, entity_id=rfq.id,
+        entity_no=rfq.rfq_no, actor=user,
+        before={"is_price_frozen": True},
+        after={"is_price_frozen": False},
+        summary=f"Bidding reopened on {rfq.rfq_no}: {reason.strip()}")
+    return await get_rfq(db, rfq_id)
+
+
+# --------------------------------------------------------------------------- #
+#  Quotation change requests — the buyer asks, the supplier decides
+# --------------------------------------------------------------------------- #
+
+_CR_OPEN = QuoteChangeStatus.AWAITING_SUPPLIER.value
+
+
+def _quote_snapshot(quote: Quotation) -> dict:
+    """The whole quotation as it stands, header and lines, ready to be filed away.
+
+    Shaped exactly as `_po_snapshot` is, for the same reason: a revision trail is
+    read against a version that still exists, and a diff can only be read against
+    one. `snapshot_before` on every change request holds this.
+    """
+    return {
+        "quotation_no": quote.quotation_no,
+        "vendor_id": quote.vendor_id, "vendor_name": quote.vendor_name,
+        "payment_terms": quote.payment_terms,
+        "freight_amount": float(_d(quote.freight_amount)),
+        "discount_amount": float(_d(quote.discount_amount)),
+        "sub_total": float(_d(quote.sub_total)),
+        "tax_amount": float(_d(quote.tax_amount)),
+        "grand_total": float(_d(quote.grand_total)),
+        "revision_count": quote.revision_count,
+        "items": [{
+            "quotation_item_id": line.id,
+            "item_id": line.item_id, "item_code": line.item_code,
+            "item_name": line.item_name, "uom_code": line.uom_code,
+            "quantity": float(_d(line.quantity)), "rate": float(_d(line.rate)),
+            "discount_percent": float(_d(line.discount_percent)),
+            "tax_percent": float(_d(line.tax_percent)),
+            "amount": float(_d(line.amount)),
+        } for line in quote.items],
+    }
+
+
+async def _load_quotation_locked(db: AsyncSession, quotation_id: int) -> Quotation:
+    """The quotation with its lines, for writing."""
+    quote = (await db.execute(
+        select(Quotation)
+        .options(selectinload(Quotation.items))
+        .where(Quotation.id == quotation_id)
+    )).scalars().first()
+    if quote is None:
+        raise NotFoundError(f"Quotation {quotation_id} not found")
+    return quote
+
+
+async def propose_quote_change(db: AsyncSession, quotation_id: int,
+                               data, user) -> QuoteChangeRequest:
+    """The buyer asks the supplier for better numbers. Nothing is applied yet —
+    a change request is a QUESTION, and applying its numbers before the answer
+    would mean the buyer negotiating with themselves."""
+    quote = await _load_quotation_locked(db, quotation_id)
+    rfq = await db.get(RFQ, quote.rfq_id)
+    if rfq is None:
+        raise NotFoundError(f"RFQ {quote.rfq_id} not found")
+    if quote.status not in (QuotationStatus.SUBMITTED.value,
+                            QuotationStatus.REVISED.value):
+        raise ValidationError(
+            f"{quote.quotation_no} is {quote.status}; a change can only be "
+            "asked of a submitted quotation")
+    await _assert_rfq_unfrozen(
+        rfq, "asking the supplier for changed prices")
+    open_cr = (await db.execute(
+        select(QuoteChangeRequest).where(
+            QuoteChangeRequest.quotation_id == quote.id,
+            QuoteChangeRequest.status == _CR_OPEN)
+    )).scalars().first()
+    if open_cr is not None:
+        raise ValidationError(
+            f"{open_cr.cr_no} is already awaiting the supplier's answer on "
+            f"{quote.quotation_no}. Withdraw it or wait before asking again.")
+    if not (data.reason or "").strip():
+        raise ValidationError("Say why the supplier is being asked to change prices")
+
+    by_id = {line.id: line for line in quote.items}
+    for incoming in data.lines:
+        if incoming.quotation_item_id not in by_id:
+            raise ValidationError(
+                f"Line {incoming.quotation_item_id} is not on this quotation")
+
+    cr = QuoteChangeRequest(
+        quotation_id=quote.id, rfq_id=rfq.id,
+        cr_no=await next_number(db, "quote_change_request"),
+        status=_CR_OPEN,
+        reason=data.reason.strip(),
+        proposed_lines=[{
+            "quotation_item_id": line.quotation_item_id,
+            "proposed_quantity": float(_d(line.proposed_quantity)),
+            "proposed_rate": float(_d(line.proposed_rate)),
+            "proposed_discount_percent": float(_d(line.proposed_discount_percent)),
+            "note": line.note,
+        } for line in data.lines],
+        snapshot_before=_quote_snapshot(quote),
+        proposed_by_id=getattr(user, "id", None),
+        proposed_by_name=getattr(user, "full_name", None),
+    )
+    db.add(cr)
+    quote.under_negotiation = True
+    await db.commit()
+    await db.refresh(cr)
+
+    await notifications.notify(
+        db, [quote.vendor_id], title=f"{quote.quotation_no} — the buyer proposed changes",
+        body=f"{cr.proposed_by_name or 'The buyer'} asked for changes on "
+             f"{rfq.rfq_no} ({cr.cr_no}). Review and respond on your portal.",
+        entity_type="QUOTATION", entity_id=quote.id,
+        deep_link=f"/supplier/rfqs/{rfq.id}")
+    await db.commit()
+    return cr
+
+
+async def withdraw_quote_change(db: AsyncSession, quotation_id: int, cr_id: int,
+                                user) -> QuoteChangeRequest:
+    """The buyer takes their own ask back before an answer. A withdrawn request
+    is history (rule 9), not a deletion — the quote simply stops reading as
+    under negotiation, because nothing is pending any more."""
+    cr = (await db.execute(
+        select(QuoteChangeRequest).where(
+            QuoteChangeRequest.id == cr_id,
+            QuoteChangeRequest.quotation_id == quotation_id)
+    )).scalars().first()
+    if cr is None:
+        raise NotFoundError(f"Change request {cr_id} not found")
+    if cr.status != _CR_OPEN:
+        raise ValidationError(
+            f"{cr.cr_no} is {cr.status} and can no longer be withdrawn")
+    cr.status = QuoteChangeStatus.WITHDRAWN.value
+    cr.supplier_decided_at = utcnow()
+    quote = await _load_quotation_locked(db, quotation_id)
+    quote.under_negotiation = False
+    await db.commit()
+    await db.refresh(cr)
+    return cr
+
+
+def _apply_proposed_lines(quote: Quotation, cr: QuoteChangeRequest) -> None:
+    """Write the accepted proposal onto the quotation and re-derive every total
+    through `_quote_totals` — the same arithmetic that priced the original offer.
+    A proposed line asking for zero quantity stands for "drop this line from the
+    offer"; its rate is kept, the quantity is what speaks."""
+    by_id = {line.id: line for line in quote.items}
+    for proposed in cr.proposed_lines:
+        line = by_id.get(proposed.get("quotation_item_id"))
+        if line is None:
+            continue
+        line.quantity = _d(proposed.get("proposed_quantity", line.quantity))
+        line.rate = _d(proposed.get("proposed_rate", line.rate))
+        line.discount_percent = _d(proposed.get("proposed_discount_percent",
+                                                line.discount_percent))
+    _quote_totals(quote)
+
+
+async def accept_quote_change(db: AsyncSession, vendor_id: int, cr_id: int,
+                              note: str, counter_lines: list | None = None) -> Quotation:
+    """The supplier takes the buyer's numbers (or counter-proposes). THIS is the moment
+    the quotation re-prices: the proposal/counter is applied, the totals re-derived through
+    `_quote_totals`, the quote bumps to REVISED (the same rung a vendor's own
+    re-quote uses, so a buyer sees movement either way) and every other open
+    request on this quote is marked SUPERSEDED — one price, one truth."""
+    cr = (await db.execute(
+        select(QuoteChangeRequest).where(QuoteChangeRequest.id == cr_id)
+    )).scalars().first()
+    if cr is None:
+        raise NotFoundError(f"Change request {cr_id} not found")
+    quote = await _load_quotation_locked(db, cr.quotation_id)
+    if quote.vendor_id != vendor_id:
+        raise NotFoundError(f"Change request {cr_id} not found")
+    rfq = await db.get(RFQ, cr.rfq_id)
+    if rfq is None:
+        raise NotFoundError(f"RFQ {cr.rfq_id} not found")
+    await _assert_rfq_unfrozen(
+        rfq, "accepting changed prices on your quotation")
+    if cr.status != _CR_OPEN:
+        raise ValidationError(
+            f"{cr.cr_no} is {cr.status} and can no longer be answered")
+
+    if counter_lines:
+        parsed_counter = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in counter_lines]
+        cr.supplier_counter_lines = parsed_counter
+        by_id = {line.id: line for line in quote.items}
+        for item_data in parsed_counter:
+            line = by_id.get(item_data.get("quotation_item_id"))
+            if line is None:
+                continue
+            if "proposed_quantity" in item_data:
+                line.quantity = _d(item_data["proposed_quantity"])
+            if "proposed_rate" in item_data:
+                line.rate = _d(item_data["proposed_rate"])
+            if "proposed_discount_percent" in item_data:
+                line.discount_percent = _d(item_data["proposed_discount_percent"])
+        _quote_totals(quote)
+    else:
+        _apply_proposed_lines(quote, cr)
+
+    quote.status = QuotationStatus.REVISED.value
+    quote.revision_count += 1
+    quote.accepted_revision = (quote.accepted_revision or 0) + 1
+    quote.under_negotiation = False
+    quote.submitted_at = utcnow()
+    cr.status = QuoteChangeStatus.ACCEPTED.value
+    cr.supplier_decision_note = (note or "").strip() or None
+    cr.supplier_decided_at = utcnow()
+    for other in (await db.execute(
+            select(QuoteChangeRequest).where(
+                QuoteChangeRequest.quotation_id == quote.id,
+                QuoteChangeRequest.status == _CR_OPEN,
+                QuoteChangeRequest.id != cr.id)
+    )).scalars().all():
+        other.status = QuoteChangeStatus.SUPERSEDED.value
+        other.supplier_decided_at = utcnow()
+    await db.commit()
+    await db.refresh(quote)
+
+    await notifications.notify(
+        db, [cr.proposed_by_id],
+        title=f"{quote.quotation_no} — {cr.cr_no} accepted",
+        body=f"{quote.vendor_name or 'The supplier'} accepted the change request. "
+             f"The quotation now reads {quote.grand_total} ({rfq.rfq_no}).",
+        entity_type="QUOTATION", entity_id=quote.id,
+        deep_link=f"/procurement/quotations/{quote.id}")
+    await db.commit()
+    await _attach_tax_context(db, quote)
+    return quote
+
+
+async def decline_quote_change(db: AsyncSession, vendor_id: int, cr_id: int,
+                               note: str) -> Quotation:
+    """The supplier says no. The quotation was never rewritten — the proposal
+    only ever lived on the request — so there is nothing to revert, unlike the
+    PO decline which must restore a snapshot. The quote stands exactly as the
+    supplier priced it."""
+    cr = (await db.execute(
+        select(QuoteChangeRequest).where(QuoteChangeRequest.id == cr_id)
+    )).scalars().first()
+    if cr is None:
+        raise NotFoundError(f"Change request {cr_id} not found")
+    quote = await _load_quotation_locked(db, cr.quotation_id)
+    if quote.vendor_id != vendor_id:
+        raise NotFoundError(f"Change request {cr_id} not found")
+    if cr.status != _CR_OPEN:
+        raise ValidationError(
+            f"{cr.cr_no} is {cr.status} and can no longer be answered")
+    cr.status = QuoteChangeStatus.DECLINED.value
+    cr.supplier_decision_note = (note or "").strip() or None
+    cr.supplier_decided_at = utcnow()
+    quote.under_negotiation = False
+    await db.commit()
+    await db.refresh(quote)
+
+    await notifications.notify(
+        db, [cr.proposed_by_id],
+        title=f"{quote.quotation_no} — {cr.cr_no} declined",
+        body=f"{quote.vendor_name or 'The supplier'} declined the change request"
+             + (f": {note.strip()}" if (note or "").strip() else ".")
+             + " The quotation stands as quoted.",
+        entity_type="QUOTATION", entity_id=quote.id,
+        deep_link=f"/procurement/quotations/{quote.id}")
+    await db.commit()
+    return quote
+
+
+def _cr_out_lines(cr: QuoteChangeRequest) -> list[dict]:
+    """Decorate the proposed lines with their "before" figures, read off the
+    snapshot — the diff a screen draws is SERVED, never recomputed there."""
+    before = {row.get("quotation_item_id"): row
+              for row in (cr.snapshot_before or {}).get("items", [])}
+    out = []
+    for proposed in cr.proposed_lines:
+        row = before.get(proposed.get("quotation_item_id"), {})
+        out.append({
+            **proposed,
+            "item_id": row.get("item_id"),
+            "item_code": row.get("item_code"),
+            "item_name": row.get("item_name"),
+            "uom_code": row.get("uom_code"),
+            "current_quantity": row.get("quantity", 0),
+            "current_rate": row.get("rate", 0),
+            "current_discount_percent": row.get("discount_percent", 0),
+            "current_amount": row.get("amount", 0),
+        })
+    return out
+
+
+def _cr_out(cr: QuoteChangeRequest) -> dict:
+    return {
+        "id": cr.id, "quotation_id": cr.quotation_id, "rfq_id": cr.rfq_id,
+        "cr_no": cr.cr_no, "status": cr.status, "reason": cr.reason,
+        "proposed_by_name": cr.proposed_by_name,
+        "supplier_decision_note": cr.supplier_decision_note,
+        "supplier_decided_at": cr.supplier_decided_at,
+        "created_at": cr.created_at,
+        "lines": _cr_out_lines(cr),
+        "supplier_counter_lines": cr.supplier_counter_lines,
+    }
+
+
+async def list_quote_change_requests(db: AsyncSession, quotation_id: int,
+                                     user=None) -> list[dict]:
+    """The price trail's requests, oldest last. Buyer-facing — bounded through the
+    quotation's RFQ scope exactly as `get_quotation` is."""
+    stmt = select(QuoteChangeRequest).where(
+        QuoteChangeRequest.quotation_id == quotation_id)
+    if user is not None:
+        stmt = stmt.where(QuoteChangeRequest.rfq_id.in_(
+            select(RFQ.id).where(
+                await scope_condition(db, user, owner_col=RFQ.created_by_id))))
+    rows = (await db.execute(stmt.order_by(QuoteChangeRequest.id))).scalars().all()
+    return [_cr_out(cr) for cr in rows]
+
+
+async def vendor_list_quote_change_requests(db: AsyncSession, vendor_id: int,
+                                            rfq_id: int) -> list[dict]:
+    """The supplier's own trail, scoped to their RFQ."""
+    quote = await vendor_get_quotation(db, vendor_id, rfq_id)
+    rows = (await db.execute(
+        select(QuoteChangeRequest)
+        .where(QuoteChangeRequest.quotation_id == quote.id)
+        .order_by(QuoteChangeRequest.id)
+    )).scalars().all()
+    return [_cr_out(cr) for cr in rows]
+
+
+async def quote_price_trail(db: AsyncSession, quotation_id: int,
+                            user=None) -> list[dict]:
+    """One version line per change to this quotation, oldest first.
+
+    ONE function, ONE answer: the buyer screen, the comparison sheet and the
+    supplier portal all read this, so two readers can never disagree about what
+    version a price belongs to. Sources today: the original offer and every
+    accepted change request (the trail rows live on the requests themselves —
+    the snapshot_before of each carries its "from", its applied lines carry its
+    "to"). A supplier's own re-quote rides `revision_count` and is visible in
+    the same counter, not re-narrated here.
+    """
+    quote = await _load_quotation_locked(db, quotation_id)
+    if user is not None:
+        await get_quotation(db, quotation_id, user)  # scope check, then discard
+    crs = (await db.execute(
+        select(QuoteChangeRequest)
+        .where(QuoteChangeRequest.quotation_id == quotation_id,
+               QuoteChangeRequest.status == QuoteChangeStatus.ACCEPTED.value)
+        .order_by(QuoteChangeRequest.id)
+    )).scalars().all()
+
+    trail: list[dict] = []
+    first = crs[0].snapshot_before if crs else _quote_snapshot(quote)
+    trail.append({
+        "version": 1,
+        "source": "ORIGINAL",
+        "effective_at": quote.created_at,
+        "changed_by": quote.vendor_name or f"Vendor {quote.vendor_id}",
+        "totals": {"sub_total": first.get("sub_total", 0),
+                   "tax_amount": first.get("tax_amount", 0),
+                   "freight_amount": first.get("freight_amount", 0),
+                   "discount_amount": first.get("discount_amount", 0),
+                   "grand_total": first.get("grand_total", 0)},
+        "lines": first.get("items", []),
+        "buyer_requested_lines": first.get("items", []),
+        "cr_no": None, "reason": None, "note": None,
+    })
+    for idx, cr in enumerate(crs):
+        version_num = idx + 2
+        if idx + 1 < len(crs):
+            accepted_snap = crs[idx + 1].snapshot_before
+        else:
+            accepted_snap = _quote_snapshot(quote)
+
+        buyer_req_lines = _cr_out_lines(cr)
+        buyer_sub = sum(
+            float(_d(l.get("proposed_quantity", 0)) * _d(l.get("proposed_rate", 0)) * (1 - _d(l.get("proposed_discount_percent", 0)) / 100))
+            for l in buyer_req_lines
+        )
+        buyer_tax = sum(
+            float(_d(l.get("proposed_quantity", 0)) * _d(l.get("proposed_rate", 0)) * (1 - _d(l.get("proposed_discount_percent", 0)) / 100) * (_d(l.get("tax_percent", 0)) / 100))
+            for l in buyer_req_lines
+        )
+        freight = float(_d((cr.snapshot_before or {}).get("freight_amount", 0)))
+        discount = float(_d((cr.snapshot_before or {}).get("discount_amount", 0)))
+        buyer_grand = buyer_sub + buyer_tax + freight - discount
+
+        trail.append({
+            "version": version_num,
+            "source": "CHANGE_REQUEST",
+            "effective_at": cr.supplier_decided_at,
+            "changed_by": cr.proposed_by_name or quote.vendor_name or f"Vendor {quote.vendor_id}",
+            "totals": {"sub_total": accepted_snap.get("sub_total", 0),
+                       "tax_amount": accepted_snap.get("tax_amount", 0),
+                       "freight_amount": accepted_snap.get("freight_amount", 0),
+                       "discount_amount": accepted_snap.get("discount_amount", 0),
+                       "grand_total": accepted_snap.get("grand_total", 0)},
+            "lines": accepted_snap.get("items", []),
+            "buyer_requested_lines": buyer_req_lines,
+            "buyer_requested_totals": {"sub_total": buyer_sub, "tax_amount": buyer_tax,
+                                       "freight_amount": freight, "discount_amount": discount,
+                                       "grand_total": buyer_grand},
+            "cr_no": cr.cr_no, "reason": cr.reason,
+            "note": cr.supplier_decision_note,
+        })
+    return trail
+
+
+# --------------------------------------------------------------------------- #
+#  Quotation chat — buyer <-> supplier, one thread per quotation
+# --------------------------------------------------------------------------- #
+
+async def quotation_comments(db: AsyncSession, quotation_id: int,
+                             user=None) -> list:
+    """The thread beside the paper. Bounded through the quotation's RFQ scope
+    exactly as the quotation itself is."""
+    stmt = select(QuotationComment).where(
+        QuotationComment.quotation_id == quotation_id)
+    if user is not None:
+        stmt = stmt.where(QuotationComment.quotation_id.in_(
+            select(Quotation.id).where(Quotation.rfq_id.in_(
+                select(RFQ.id).where(
+                    await scope_condition(db, user, owner_col=RFQ.created_by_id))))))
+    return list((await db.execute(
+        stmt.order_by(QuotationComment.id))).scalars().all())
+
+
+async def add_quotation_comment(db: AsyncSession, quotation_id: int,
+                                message: str, user) -> QuotationComment:
+    """The buyer posts. Append-only: no edit, no delete (rule 9)."""
+    quote = await get_quotation(db, quotation_id, user)
+    row = QuotationComment(
+        quotation_id=quote.id,
+        author_id=getattr(user, "id", None),
+        author_name=getattr(user, "full_name", None),
+        author_side="BUYER",
+        message=message.strip(),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+async def vendor_quotation_comments(db: AsyncSession, vendor_id: int,
+                                    rfq_id: int) -> list:
+    """The supplier's view of the same thread."""
+    quote = await vendor_get_quotation(db, vendor_id, rfq_id)
+    return list((await db.execute(
+        select(QuotationComment)
+        .where(QuotationComment.quotation_id == quote.id)
+        .order_by(QuotationComment.id)
+    )).scalars().all())
+
+
+async def add_vendor_quotation_comment(db: AsyncSession, vendor_id: int,
+                                       rfq_id: int, message: str) -> QuotationComment:
+    """The supplier posts into the same thread. The vendor id comes from the
+    token, so a supplier can never write beside another supplier's paper."""
+    quote = await vendor_get_quotation(db, vendor_id, rfq_id)
+    row = QuotationComment(
+        quotation_id=quote.id,
+        author_id=None,
+        author_name=quote.vendor_name or f"Vendor {vendor_id}",
+        author_side="SUPPLIER",
+        message=message.strip(),
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
 def _line_breakup(line) -> dict:
     """One quoted line, split the way a buyer reads it.
 
@@ -3545,20 +4150,15 @@ def _line_breakup(line) -> dict:
     arithmetic that decides a winner must be the same arithmetic that wrote
     `quotation.sub_total`, and two implementations of it will disagree eventually.
 
-    Discount comes off before tax, exactly as `_quote_totals` does it. The GST split
-    is the vendor's own where they gave one; where they only named a single
-    `tax_percent`, that is what is charged and the split is left empty rather than
-    invented — an offer says what it says.
+    Discount comes off before tax, exactly as `_quote_totals` does it. `tax_percent`
+    is the vendor's whole GST figure; which half of it applies is decided by the two
+    GSTINs and shown on the quotation, not recomputed into the line's total here.
     """
     quantity = _d(line.quantity)
     gross = quantity * _d(line.rate)
     discount = gross * _d(line.discount_percent or 0) / 100
     taxable = gross - discount
-    cgst = taxable * _d(line.cgst_rate or 0) / 100
-    sgst = taxable * _d(line.sgst_rate or 0) / 100
-    igst = taxable * _d(line.igst_rate or 0) / 100
-    split = cgst + sgst + igst
-    tax = split if split else taxable * _d(line.tax_percent or 0) / 100
+    tax = taxable * _d(line.tax_percent or 0) / 100
     return {
         "quantity": float(quantity),
         "rate": float(_d(line.rate)),
@@ -3566,12 +4166,6 @@ def _line_breakup(line) -> dict:
         "discount_amount": float(discount),
         "taxable_amount": float(taxable),
         "tax_percent": float(_d(line.tax_percent or 0)),
-        "cgst_rate": float(line.cgst_rate) if line.cgst_rate is not None else None,
-        "cgst_amount": float(cgst) if line.cgst_rate is not None else None,
-        "sgst_rate": float(line.sgst_rate) if line.sgst_rate is not None else None,
-        "sgst_amount": float(sgst) if line.sgst_rate is not None else None,
-        "igst_rate": float(line.igst_rate) if line.igst_rate is not None else None,
-        "igst_amount": float(igst) if line.igst_rate is not None else None,
         "tax_amount": float(tax),
         "line_total": float(taxable + tax),
         "delivery_days": line.delivery_days,
@@ -3913,6 +4507,13 @@ async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
                 "reject that order before awarding this tender again.")
     elif rfq.status not in OPEN:
         raise ValidationError(f"Cannot award an RFQ in {rfq.status} status")
+    # Freeze Prices (2026-09-26): you compare frozen prices and you award from the
+    # same sheet. Awarding from an unfrozen tender is picking a winner while the
+    # race is still open to re-pricing — every loser's number was moving.
+    if not rfq.is_price_frozen:
+        raise ValidationError(
+            f"Freeze prices on {rfq.rfq_no} before awarding — the award must "
+            "rest on prices no supplier can still change")
     quotations = (await db.execute(
         select(Quotation).where(Quotation.rfq_id == rfq.id)
     )).scalars().all()
@@ -3954,6 +4555,14 @@ async def award_rfq(db: AsyncSession, rfq_id: int, data: AwardIn, user) -> RFQ:
         if sheet and sheet.status == ConsolidationStatus.APPROVED.value:
             sheet.status = ConsolidationStatus.RFQ_RAISED.value
     await db.commit()
+    if data.generate_pos:
+        for quote in winners:
+            try:
+                await create_po_from_quotation(db, quote.id, POFromQuotationIn(), user)
+            except ValidationError as err:
+                if "no remaining awarded quantities" in str(err):
+                    continue
+                raise
     return await get_rfq(db, rfq_id)
 
 
@@ -4148,6 +4757,18 @@ def _vendor_visible():
 async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
                            params: PageParams, search: str | None = None,
                            status: str | None = None) -> dict:
+    # Find all RFQs where this vendor has a quotation with an open change request awaiting supplier response
+    pending_cr_rfq_ids = set(
+        (await db.execute(
+            select(QuoteChangeRequest.rfq_id)
+            .join(Quotation, Quotation.id == QuoteChangeRequest.quotation_id)
+            .where(
+                Quotation.vendor_id == vendor_id,
+                QuoteChangeRequest.status == QuoteChangeStatus.AWAITING_SUPPLIER.value
+            )
+        )).scalars().all()
+    )
+
     stmt = (
         select(RFQ, RFQVendor.status)
         .join(RFQVendor, RFQVendor.rfq_id == RFQ.id)
@@ -4163,9 +4784,10 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
                 RFQ.title.ilike(f"%{search}%")
             )
         )
-    # Narrowing only, and only within `_vendor_visible()` — a vendor asking for DRAFT
-    # gets an empty page, never an internal RFQ.
-    if status:
+    # Narrowing only: handle CHANGE_PROPOSED / AWAITING_SUPPLIER filter specifically
+    if status in ("CHANGE_PROPOSED", "CHANGE_REQUESTED", "AWAITING_SUPPLIER"):
+        stmt = stmt.where(RFQ.id.in_(pending_cr_rfq_ids or {0}))
+    elif status:
         stmt = stmt.where(RFQ.status == status, _vendor_visible())
     stmt = stmt.order_by(RFQ.created_at.desc())
     
@@ -4173,7 +4795,12 @@ async def vendor_list_rfqs(db: AsyncSession, vendor_id: int,
     result = await db.execute(stmt.offset(params.offset).limit(params.size))
     items = []
     for rfq, vendor_status in result.all():
-        rfq.vendor_status = vendor_status
+        if rfq.id in pending_cr_rfq_ids:
+            rfq.has_pending_change_request = True
+            rfq.vendor_status = "CHANGE_PROPOSED"
+        else:
+            rfq.has_pending_change_request = False
+            rfq.vendor_status = vendor_status
         items.append(rfq)
     return {"items": items, "total": total or 0, "page": params.page, "size": params.size}
 
@@ -4223,7 +4850,54 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
                                 Quotation.vendor_id == vendor_id)
     )).scalars().first()
     if quote is None:
-        raise NotFoundError("No quotation has been opened for you on this RFQ")
+        invited = (await db.execute(select(RFQVendor).where(
+            RFQVendor.rfq_id == rfq_id, RFQVendor.vendor_id == vendor_id
+        ))).scalar_one_or_none()
+        if invited is None:
+            raise NotFoundError("No quotation has been opened for you on this RFQ")
+
+        rfq = await db.get(RFQ, rfq_id)
+        if rfq is None:
+            raise NotFoundError(f"RFQ {rfq_id} not found")
+
+        vendor = await db.get(Vendor, vendor_id)
+        now = utcnow()
+        quote = Quotation(
+            quotation_no=await next_number(db, DocType.QUOTATION.value, project=rfq.project_name),
+            rfq_id=rfq.id,
+            rfq_no=rfq.rfq_no,
+            vendor_id=vendor_id,
+            vendor_name=vendor.name if vendor else (invited.vendor_name or f"Vendor {vendor_id}"),
+            quotation_date=now.date(),
+            status=QuotationStatus.DRAFT.value,
+            currency="INR",
+        )
+        db.add(quote)
+        await db.flush()
+
+        mapped_item_ids = invited.mapped_item_ids or [i.item_id for i in rfq.items]
+        item_quantities = invited.item_quantities or {}
+        for line in rfq.items:
+            if line.item_id not in mapped_item_ids:
+                continue
+            qty = _d(item_quantities.get(str(line.item_id), line.quantity))
+            db.add(QuotationItem(
+                quotation_id=quote.id,
+                line_no=line.line_no,
+                rfq_item_id=line.id,
+                item_id=line.item_id,
+                item_code=line.item_code,
+                item_name=line.item_name,
+                description=line.description,
+                uom_code=line.uom_code,
+                quantity=qty,
+                requested_quantity=qty,
+                rate=0,
+                discount_percent=0,
+                tax_percent=line.tax_percent or 0,
+            ))
+        await db.commit()
+        await db.refresh(quote)
 
     invited = (await db.execute(select(RFQVendor).where(
         RFQVendor.rfq_id == rfq_id, RFQVendor.vendor_id == vendor_id
@@ -4268,59 +4942,36 @@ async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, d
     quote.vendor_gstin = getattr(vendor, "gstin", None)
     for line in quote.items:
         source = asked.get(line.rfq_item_id)
-        line.requested_quantity = float(source.quantity if source else line.quantity)
+        if not source:
+            source = next((r for r in asked.values() if r.item_id == line.item_id), None)
+        req_qty = float(source.quantity if source else line.quantity)
+        line.requested_quantity = req_qty
+        if quote.status == QuotationStatus.DRAFT.value and (quote.revision_count or 0) == 0:
+            line.quantity = req_qty
         line.required_date = source.required_date if source else None
         limits = ceilings.get(line.item_id)
         line.hsn_code = limits["hsn_code"] if limits else None
         # No HSN means no ceiling — the field stays open rather than closing to zero.
-        line.max_cgst_rate = limits["cgst_rate"] if limits else None
-        line.max_sgst_rate = limits["sgst_rate"] if limits else None
-        line.max_igst_rate = limits["igst_rate"] if limits else None
+        line.max_gst_rate = limits["gst_rate"] if limits else None
     return ceilings
 
 
-def _checked_gst(incoming, interstate: bool, limits: dict | None,
-                 label: str) -> tuple[float, float, float]:
-    """The GST split for one quoted line: which halves apply, and capped at the HSN.
+def _checked_gst_percent(incoming, limits: dict | None, label: str) -> float:
+    """The GST for one quoted line, capped at the rate its HSN notifies.
 
-    A rate sent for the wrong side of the split is REJECTED rather than dropped. A
-    vendor who typed 9 + 9 on an interstate order meant to charge 18%, and silently
-    zeroing it would accept an offer they did not make.
-
-    `tax_percent` is honoured as a whole-rate shorthand for a vendor (or a screen) that
-    sends only one number: it is spread across whichever halves apply, so the same
-    payload works both ways.
+    One rate, not a split: the vendor states the GST they are charging and the two
+    GSTINs decide whether it is charged as CGST + SGST or as IGST. The ceiling is the
+    same figure on either route, so there is nothing to reject on the wrong side.
     """
-    cgst, sgst, igst = incoming.cgst_rate, incoming.sgst_rate, incoming.igst_rate
     whole = float(incoming.tax_percent or 0)
-
-    if interstate:
-        if cgst or sgst:
-            raise ValidationError(
-                f"{label}: this is an inter-state supply — quote IGST only, not CGST/SGST")
-        igst = float(igst) if igst is not None else whole
-        cgst = sgst = 0.0
-    else:
-        if igst:
-            raise ValidationError(
-                f"{label}: this is an intra-state supply — quote CGST and SGST, not IGST")
-        if cgst is None and sgst is None:
-            cgst = sgst = whole / 2
-        else:
-            cgst, sgst = float(cgst or 0), float(sgst or 0)
-        igst = 0.0
-
     if limits:
-        ceiling = ("igst_rate", igst) if interstate else None
-        for field, value in ([ceiling] if ceiling else
-                             [("cgst_rate", cgst), ("sgst_rate", sgst)]):
-            allowed = limits[field]
-            if value > allowed + 1e-9:
-                raise ValidationError(
-                    f"{label}: {field[:4].upper()} may not exceed {allowed}% — the rate "
-                    f"notified for HSN {limits['hsn_code']}. Quote at or below it."
-                )
-    return cgst, sgst, igst
+        allowed = limits["gst_rate"]
+        if whole > allowed + 1e-9:
+            raise ValidationError(
+                f"{label}: GST may not exceed {allowed}% — the rate notified for HSN "
+                f"{limits['hsn_code']}. Quote at or below it."
+            )
+    return whole
 
 
 async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
@@ -4332,6 +4983,11 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         raise ValidationError("This RFQ is closed and no longer accepts quotations")
     if rfq.due_date and rfq.due_date < utcnow().date():
         raise ValidationError("The submission deadline for this RFQ has passed")
+    # Freeze Prices (2026-09-26): the buyer's lock, not the deadline's. A tender
+    # can be open past-due (no quotes yet) or frozen early for comparison — both
+    # close pricing, and this is the third lock after the status and the date.
+    await _assert_rfq_unfrozen(
+        rfq, "quoting or re-quoting on this tender")
 
     # The emailed code, checked BEFORE anything is written. Whoever holds the portal
     # link can reach this endpoint; the code is what proves they are also reading the
@@ -4343,7 +4999,8 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
     # The same two rules the form was drawn with, enforced here because the form is not
     # the guard: this endpoint is reachable by anyone holding a vendor token.
     ceilings = await _attach_tax_context(db, quote)
-    interstate = quote.tax_region == "INTER"
+    # Whether the supply is within a state or across one decides HOW the rate below is
+    # charged (CGST + SGST, or IGST) — not what the rate is, and not what is stored.
 
     lines_by_rfq_item = {line.rfq_item_id: line for line in quote.items}
     for index, incoming in enumerate(data.lines, start=1):
@@ -4352,8 +5009,8 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
             raise ValidationError(
                 f"Line {incoming.rfq_item_id} is not on this RFQ")
         label = line.item_name or line.item_code or f"line {index}"
-        cgst, sgst, igst = _checked_gst(
-            incoming, interstate, ceilings.get(line.item_id), label)
+        gst = _checked_gst_percent(
+            incoming, ceilings.get(line.item_id), label)
         # What they can supply. Short is an ordinary answer — a vendor with 6 of the 10
         # asked for should be able to say so instead of promising 10 — but more is not:
         # the PO rolls its quantities back onto the requisition and the material
@@ -4369,13 +5026,10 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         line.line_no = index
         line.rate = _d(incoming.rate)
         line.discount_percent = _d(incoming.discount_percent)
-        line.cgst_rate = cgst
-        line.sgst_rate = sgst
-        line.igst_rate = igst
-        # The headline rate is the sum of the split that actually applies, never a
-        # third number typed alongside it — `_quote_totals` charges tax_percent, and a
-        # split that disagrees with it is a total nobody can reconcile.
-        line.tax_percent = _d((cgst or 0) + (sgst or 0) + (igst or 0))
+        # The one rate that is charged, and the one `_quote_totals` reads. It is the
+        # vendor's whole GST figure, capped at the HSN above; which half of it applies
+        # is a fact about the two GSTINs and never rewrites the number.
+        line.tax_percent = _d(gst)
         line.delivery_days = incoming.delivery_days
 
     quote.vendor_ref_no = data.vendor_ref_no

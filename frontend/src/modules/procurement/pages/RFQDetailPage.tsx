@@ -1,28 +1,30 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
-import { Can, ErrorBanner, PageHeader, ResponsiveList, Select, StatusPill, useToast, type Column } from "@/shared/components";
+import { Check, Copy, ChevronDown, ChevronRight, Lock, Unlock, Snowflake, Trash2 } from "lucide-react";
+import {
+  Can, ConfirmModal, ErrorBanner, PageHeader, ResponsiveList, StatusPill, Textarea,
+  useToast, type Column,
+} from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
-import { errorMessage } from "@/shared/api/errors";
-import { approvalTrailApi, approvalTrailKey, poApi, rfqApi } from "../api";
+import { approvalTrailApi, approvalTrailKey, rfqApi } from "../api";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import {
-  DetailShell, SectionCard, FactGrid, RefChips, RailStat, DocRef,
+  DetailShell, SectionCard, FactGrid, RailStat, DocRef,
 } from "../components/DetailKit";
-import { QuotationComparison } from "../components/QuotationComparison";
 import type { RFQItem, RFQVendor } from "../types";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { writeToClipboard } from "@/shared/clipboard";
 
 /**
- * One RFQ: its lines, who was asked, and — once quotes are in — the comparison.
+ * One RFQ: its lines, who was asked, and — once quotes are in — WHO answered.
  *
- * The comparison is behind `rfq.compare` and the award behind `rfq.award`, separately,
- * because the sheet carries every vendor's price. That is exactly what must never
- * reach a vendor, so seeing it is a narrower right than raising the RFQ was.
+ * The comparison and the award live in Price Compare (2026-09-26): a tender
+ * room carries no other vendor's price. This page carries the tender itself and
+ * a Quotes strip over its responses, plus the Freeze Prices lock that closes
+ * pricing before the sheet is read.
  */
 export function RFQDetailPage() {
   const { id } = useParams();
@@ -35,6 +37,12 @@ export function RFQDetailPage() {
   // — in `PENDING_APPROVAL` the decision is about how much. Collapsing behind
   // "View" hid the one field the approval exists to change (see screenshot).
   const [linesExpanded, setLinesExpanded] = useState(true);
+  // Freeze / reopen confirm dialogs. The reason is required by the SERVER on
+  // unfreeze; requiring it here too means the confirm button never sends a press
+  // that would 403.
+  const [freezeOpen, setFreezeOpen] = useState(false);
+  const [unfreezeOpen, setUnfreezeOpen] = useState(false);
+  const [unfreezeReason, setUnfreezeReason] = useState("");
 
   const { data: rfq, isLoading, error } = useQuery({
     queryKey: ["rfq", id],
@@ -70,21 +78,9 @@ export function RFQDetailPage() {
   // Previewing a different ranking is a query parameter, not a save: looking at the
   // quotes another way is not choosing one, so the RFQ's own method is untouched
   // until somebody edits it on the form.
-  const [method, setMethod] = useState("");
-
-  const { data: comparison } = useQuery({
-    queryKey: ["rfq-comparison", id, method],
-    queryFn: () => rfqApi.comparison(rfqId, method || undefined),
-    // Only once vendors can actually have answered — asking earlier returns an empty
-    // sheet that reads as "nobody quoted" rather than "nobody was asked yet".
-    enabled: published,
-  });
-
-  const { data: methods } = useQuery({
-    queryKey: ["rfq-evaluation-methods"],
-    queryFn: rfqApi.evaluationMethods,
-    enabled: published,
-  });
+  // The comparison moved to Price Compare (2026-09-26) — this page is the tender
+  // room and carries NO other vendor's price. What remains here is who was asked
+  // and who answered; the method picker went with the sheet.
 
   const { data: invites = [] } = useQuery({
     queryKey: ["rfq-invites", id],
@@ -149,152 +145,43 @@ export function RFQDetailPage() {
   });
   const reject = useMutation({ mutationFn: () => rfqApi.reject(rfqId), onSuccess: refresh("Rejected") });
   const close = useMutation({ mutationFn: () => rfqApi.close(rfqId), onSuccess: refresh("Closed to further quotes") });
-  const award = useMutation({
-    mutationFn: (quotationIds: number[]) => rfqApi.award(rfqId, quotationIds),
-    onSuccess: refresh("Selected quotations awarded"),
+
+  // ── Freeze Prices (2026-09-26) ────────────────────────────────────────────
+  // The lock that stops pricing while the sheet is read, and the gate every PO
+  // raised off this tender hangs on. The server re-checks every door; these
+  // mutations only carry the press.
+  const freeze = useMutation({
+    mutationFn: () => rfqApi.freeze(rfqId),
+    onSuccess: () => refresh("Prices frozen — suppliers can no longer change their quotes")(),
   });
-  /** Raise the order for one winning quotation after another, reporting PER VENDOR.
-   *
-   *  Sequential on purpose: the PO number is minted under a row lock, so firing them
-   *  together only queues them behind each other in the database. A split can refuse on
-   *  one supplier and be fine on the rest, and a single toast would hide which. */
-  const raisePosFor = async (
-    winners: { id: number; vendor_name?: string | null }[],
-  ) => {
-    const raised: string[] = [];
-    const failed: string[] = [];
-    for (const winner of winners) {
-      const who = winner.vendor_name ?? `Quotation ${winner.id}`;
-      try {
-        const po = await poApi.createFromQuotation(winner.id);
-        raised.push(`${po.po_no} (${po.vendor_name ?? who})`);
-      } catch (error) {
-        failed.push(`${who}: ${errorMessage(error)}`);
-      }
-    }
-    return { raised, failed };
-  };
-
-  /** Award the split AND raise every order it decided, in one press.
-   *
-   *  The two acts stay separate on the server — awarding picks the offer, `po.create`
-   *  raises the order, and each order still lands in DRAFT and climbs the PO ladder.
-   *  What is joined here is only the BUTTON: a split award across four suppliers meant
-   *  four more presses down the sheet, and a buyer who stopped halfway left part of a
-   *  decided tender unordered with nothing saying so.
-   *
-   *  The winners are read back off the sheet rather than taken from the allocations just
-   *  sent: a supplier can hold more than one offer on an RFQ, and only the server knows
-   *  which of them it accepted. Vendors already on a live order are skipped — on a
-   *  re-award they keep what they won, and it is already ordered. */
-  const awardSplit = useMutation({
-    mutationFn: async (
-      allocations: { item_id: number; vendor_id: number; quantity: number }[],
-    ) => {
-      const awarded = await rfqApi.awardSplit(rfqId, allocations);
-      const sheet = await rfqApi.comparison(rfqId, method || undefined);
-      const hasNewBalance = (quotationId: number, vendorId: number) => {
-        const vendor = (awarded.vendors ?? []).find((row) => row.vendor_id === vendorId);
-        const target = vendor?.awarded_quantities;
-        // A split award can make a second PO for the amount added above this
-        // supplier's live PO quantity. A whole-quote award still only gets one PO.
-        if (!target) {
-          return !(awarded.purchase_orders ?? []).some(
-            (po) => po.quotation_id === quotationId,
-          );
-        }
-        const alreadySent = vendor?.live_allocated_quantities ?? {};
-        return Object.entries(target).some(([itemId, quantity]) =>
-          Number(quantity) > Number(alreadySent[itemId] ?? 0));
-      };
-      return raisePosFor((sheet.quotations ?? [])
-        .filter((quote) => quote.status === "ACCEPTED"
-          && hasNewBalance(quote.id, quote.vendor_id)));
-    },
-    onSuccess: ({ raised, failed }) => {
-      queryClient.invalidateQueries({ queryKey: ["rfq", id] });
-      queryClient.invalidateQueries({ queryKey: ["rfqs"] });
-      queryClient.invalidateQueries({ queryKey: ["rfq-comparison", id] });
-      queryClient.invalidateQueries({ queryKey: ["pos"] });
-      toast.success(raised.length
-        ? `Items awarded — raised ${raised.join(", ")}`
-        : "Items awarded between suppliers");
-      // Named one by one rather than counted: "2 failed" leaves the buyer opening every
-      // vendor's column to find out which two.
-      failed.forEach((line) => toast.error(line));
-    },
+  const unfreeze = useMutation({
+    mutationFn: (reason: string) => rfqApi.unfreeze(rfqId, reason),
+    onSuccess: () => refresh("Bidding reopened — suppliers can quote again")(),
   });
-
-  // The offer that won. Read off the comparison rather than off the RFQ's awarded
-  // vendor id: a vendor can hold more than one quotation on an RFQ (they revise), and
-  // the PO is raised against the exact quote that was accepted, not against the vendor.
-  const awardedQuoteIds = (comparison?.quotations ?? [])
-    .filter((q) => q.status === "ACCEPTED").map((q) => q.id);
-
-  /** The last hop of the chain: accept the chosen offer as a purchase order.
-   *
-   *  Vendor, rates, discount and tax all come from the quotation server-side — only
-   *  its id is sent — so the PO cannot disagree with the offer it says it is for. It
-   *  lands in DRAFT and still climbs the PO ladder; awarding is not approving a spend,
-   *  and nothing raises an order on the buyer's behalf. */
-  const raisePo = useMutation({
-    mutationFn: (quotationId: number) => poApi.createFromQuotation(quotationId),
-    onSuccess: (po) => {
-      queryClient.invalidateQueries({ queryKey: ["rfq", id] });
-      queryClient.invalidateQueries({ queryKey: ["rfq-comparison", id] });
-      queryClient.invalidateQueries({ queryKey: ["pos"] });
-      toast.success(`${po.po_no} raised from ${po.vendor_name ?? "the winner"}`);
-    },
-  });
-
-  /** Awarded vendors with no live purchase order against them yet, in column order.
-   *
-   *  The server decides what "live" means — a rejected or cancelled order stops being
-   *  listed on the RFQ, which is what puts its vendor back in this list. */
-  const pendingPoQuotes = awardedQuoteIds.filter((quotationId) =>
-    !(rfq?.purchase_orders ?? []).some((po) => po.quotation_id === quotationId));
-
-  /** An awarded tender can be awarded again while some of it is unordered: a purchase
-   *  order rejected in approval hands its quantity back, and the only prices anybody
-   *  quoted for that work are on this sheet. Vendors already on a live order keep what
-   *  they won — the server enforces that; this only decides whether to offer the sheet. */
-  // A supplier can already have PO-A for 6 and still need PO-B for the extra 4
-  // after the buyer increases its split award to 10. That unfinished balance must
-  // reopen the re-share action even though the original PO remains live.
-  const hasUnorderedSplitBalance = (rfq?.vendors ?? []).some((vendor) =>
-    Object.entries(vendor.awarded_quantities ?? {}).some(([itemId, awardedQuantity]) =>
-      Number(awardedQuantity) > Number(
-        vendor.live_allocated_quantities?.[itemId] ?? 0,
-      )));
-  // An RFQ can still have room even when every accepted quotation already has a PO.
-  // Example: the first PO bought 5 of 10 paper. The buyer must be able to re-share
-  // the remaining 5, which will make a new balance PO; testing only "has a PO" hid
-  // that action and incorrectly forced a cancellation of the valid first order.
-  const hasRemainingRfqQuantity = (rfq?.items ?? []).some((item) => {
-    const reportsLiveAllocation = (rfq?.vendors ?? []).some(
-      (vendor) => vendor.live_allocated_quantities != null,
-    );
-    const allocated = reportsLiveAllocation
-      ? (rfq?.vendors ?? []).reduce((sum, vendor) => sum + Number(
-        vendor.live_allocated_quantities?.[String(item.item_id)] ?? 0,
-      ), 0)
-      : (rfq?.purchase_orders ?? []).reduce((sum, po) =>
-        sum + Number(po.item_quantities?.[String(item.item_id)] ?? 0), 0);
-    return allocated < Number(item.quantity);
-  });
-  const reawardable = rfq?.status === "AWARDED"
-    && (pendingPoQuotes.length > 0 || hasUnorderedSplitBalance || hasRemainingRfqQuantity);
-  /** The quantity a supplier currently holds on live PO lines.  Unlike the saved
-   * award split, this immediately drops a PO that is rejected or cancelled. */
-  const liveAllocatedQuantities = Object.fromEntries(
-    (rfq?.vendors ?? [])
-      .filter((vendor) => vendor.live_allocated_quantities)
-      .map((vendor) => [vendor.vendor_id,
-        vendor.live_allocated_quantities as Record<string, number>]),
-  );
 
   const busy = submit.isPending || approve.isPending || reject.isPending
-    || close.isPending || award.isPending || awardSplit.isPending || raisePo.isPending;
+    || close.isPending || freeze.isPending || unfreeze.isPending;
+
+  // ── The Quotes strip (2026-09-26) ─────────────────────────────────────────
+  // One card per supplier who answered: WHO replied and WHEN, never at what
+  // price — the figures live behind `rfq.compare` on Price Compare. The
+  // quotations list endpoint is scoped server-side to the caller's rung, so the
+  // strip shows nothing a login could not already read.
+  const { data: quoteRows } = useQuery({
+    queryKey: ["rfq-quotes-strip", id],
+    queryFn: () => rfqApi.quotations({ rfq_id: rfqId, page: 1, size: 100 }),
+    enabled: published,
+  });
+  const responseCards = (quoteRows?.items ?? [])
+    .filter((q) => q.status !== "DRAFT")
+    .map((q) => ({
+      quotationId: q.id,
+      vendorId: q.vendor_id,
+      vendorName: q.vendor_name,
+      submittedAt: q.submitted_at,
+      // Won is a fact about the AWARD; the rest is the quote's own status.
+      pill: q.status === "ACCEPTED" ? "ACCEPTED" : q.status,
+    }));
 
   const copyInvite = async (vendorId: number, path: string) => {
     const copied = await writeToClipboard(`${location.origin}${path}`);
@@ -389,11 +276,22 @@ export function RFQDetailPage() {
         actions={
           <>
             {rfq && (
-              <StatusPill
-                status={rfq.status === "PENDING_APPROVAL" && trail.data?.stage_name
-                  ? `Pending at ${trail.data.stage_name}`
-                  : rfq.status}
-              />
+              <div className="flex items-center gap-2">
+                <StatusPill
+                  status={rfq.status === "PENDING_APPROVAL" && trail.data?.stage_name
+                    ? `Pending at ${trail.data.stage_name}`
+                    : rfq.status}
+                />
+                {rfq.is_price_frozen ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-700 border border-amber-500/20">
+                    <Lock className="h-3.5 w-3.5" /> Locked (Prices Frozen)
+                  </span>
+                ) : published ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-700 border border-emerald-500/20">
+                    <Unlock className="h-3.5 w-3.5" /> Unlocked
+                  </span>
+                ) : null}
+              </div>
             )}
             <Button variant="subtle" onClick={() => nav("/procurement/rfqs")}>Back</Button>
             {rfq?.status === "DRAFT" && (
@@ -406,13 +304,6 @@ export function RFQDetailPage() {
                 </Button>
               </Can>
             )}
-            {/* FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. The PO clerk who raised the RFQ was shown
-              * "Approve & publish" on one sitting with the CPO; the only thing that
-              * stopped him was a 403 after the press. `awaiting_me` is computed by
-              * engine.actionable_doc_ids, which makes the same two checks the approval
-              * itself makes, so the button appears exactly when the press would work.
-              * <Can> stays: the permission is still required, it was just never
-              * sufficient. */}
             {canDecide && (
               <Can do="rfq.approve">
                 <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
@@ -430,6 +321,23 @@ export function RFQDetailPage() {
                 </Button>
               </Can>
             )}
+            {/* Lock / Unlock Toggle buttons */}
+            {published && !rfq?.is_price_frozen && (
+              <Can do="rfq.approve">
+                <Button className="bg-amber-600 hover:bg-amber-700 text-white font-medium shadow-sm inline-flex items-center gap-1.5" disabled={busy}
+                        onClick={() => setFreezeOpen(true)}>
+                  <Lock className="h-4 w-4" /> Lock RFQ (Freeze)
+                </Button>
+              </Can>
+            )}
+            {rfq?.is_price_frozen && (
+              <Can do="rfq.approve">
+                <Button variant="subtle" className="text-emerald-700 hover:bg-emerald-50 border border-emerald-200 inline-flex items-center gap-1.5" disabled={busy}
+                        onClick={() => setUnfreezeOpen(true)}>
+                  <Unlock className="h-4 w-4" /> Unlock RFQ (Reopen)
+                </Button>
+              </Can>
+            )}
             {/* Once the order exists the offer to raise one is wrong, not merely
               * redundant: the backend refuses the second, so the button could only
               * ever produce an error. It becomes the way to the order instead. */}
@@ -438,7 +346,7 @@ export function RFQDetailPage() {
       />
 
       <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error
-        ?? award.error ?? awardSplit.error ?? raisePo.error ?? saveQuantities.error} />
+        ?? freeze.error ?? unfreeze.error ?? saveQuantities.error} />
 
       <DetailShell
         main={(
@@ -464,14 +372,7 @@ export function RFQDetailPage() {
                   ]}
                 />
 
-                <div className="mt-4 border-t border-line/60 pt-4">
-                  <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-muted">
-                    Indents behind it
-                  </div>
-                  <div className="mt-1.5">
-                    <RefChips items={(rfq.source_indent_nos ?? []).map((no) => ({ no }))} />
-                  </div>
-                </div>
+
 
                 {rfq.terms && (
                   <div className="mt-4 border-t border-line/60 pt-4">
@@ -553,7 +454,7 @@ export function RFQDetailPage() {
               )}
             </SectionCard>
 
-            <SectionCard title="Vendors asked" className="p-2">
+            <SectionCard title="Vendors" className="p-2">
               <ResponsiveList
                 data={rfq?.vendors ?? []}
                 columns={vendorColumns}
@@ -570,43 +471,60 @@ export function RFQDetailPage() {
               />
             </SectionCard>
 
+            {/* ── Supplier responses (2026-09-26) ────────────────────────────
+                The comparison and the award moved to Price Compare; this strip is
+                what a tender room carries: WHO answered, not what they charged. */}
             {published && (
               <SectionCard
-                title="Comparison"
+                title="Supplier responses"
                 action={
-                  <div className="w-56">
-                    <Select
-                      value={method || comparison?.evaluation_method || ""}
-                      placeholder="Rank by\u2026"
-                      options={(methods ?? []).map((m) => ({ value: m.value, label: m.label }))}
-                      onChange={setMethod}
-                    />
-                  </div>
+                  <Can do="rfq.compare">
+                    <Button variant="subtle" className="h-8 text-xs"
+                            onClick={() => nav(`/procurement/compare?rfq=${rfqId}`)}>
+                      Compare &amp; award
+                    </Button>
+                  </Can>
                 }
               >
-                {comparison && comparison.responded > 0 && !comparison.meets_three_quote_norm && (
-                  <p className="mb-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-                    {comparison.responded} of {comparison.rfq.vendor_count} quote{comparison.rfq.vendor_count === 1 ? "" : "s"} on file.
+                {responseCards.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-muted">
+                    No supplier responses yet — vendors see this tender on their portal.
                   </p>
+                ) : (
+                  <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
+                    {responseCards.map((card) => (
+                      <button
+                        key={card.quotationId}
+                        type="button"
+                        onClick={() => nav(`/procurement/quotations/${card.quotationId}`)}
+                        className="rounded-2xl border border-line bg-surface-2/40 p-4 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand/40 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-brand/30 min-w-0"
+                      >
+                        <div className="flex items-start justify-between gap-2 min-w-0">
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-xs font-bold text-brand">
+                              {(card.vendorName ?? "?").trim().charAt(0).toUpperCase()}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-semibold text-ink" title={card.vendorName ?? undefined}>
+                                {card.vendorName ?? `Vendor ${card.vendorId}`}
+                              </div>
+                              <div className="truncate text-[11px] text-muted">
+                                {card.submittedAt ? `Submitted ${fmtDate(card.submittedAt)}` : "—"}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="shrink-0 pt-0.5">
+                            <StatusPill status={card.pill} />
+                          </div>
+                        </div>
+                        <div className="mt-3 flex items-center justify-between border-t border-line/60 pt-2 text-xs">
+                          <span className="text-muted">View quotation</span>
+                          <span className="font-medium text-brand">→</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 )}
-                {/* The sheet decides nothing. It flags the cheapest cell per item and
-                    the top of the ranking, and leaves every column awardable. */}
-                {comparison
-                  ? (
-                    <QuotationComparison
-                      comparison={comparison}
-                      awardedQuotationIds={awardedQuoteIds}
-                      purchaseOrders={rfq?.purchase_orders ?? []}
-                      busy={busy}
-                      reawardable={reawardable}
-                      liveAllocatedQuantities={liveAllocatedQuantities}
-                      onAward={(quotationIds) => award.mutate(quotationIds)}
-                      onAwardSplit={(allocations) => awardSplit.mutate(allocations)}
-                      onCreatePo={(quotationId) => raisePo.mutate(quotationId)}
-                      onOpenPo={(poId) => nav(`/pos/${poId}`)}
-                    />
-                  )
-                  : <p className="py-6 text-center text-sm text-muted">Waiting on quotes.</p>}
               </SectionCard>
             )}
           </>
@@ -641,12 +559,64 @@ export function RFQDetailPage() {
                   ))}
                 </div>
               )}
+              {/* The freeze, in the rail where the status lives: when the door was
+                  closed, by whom, and how many quotes were in at the time. */}
+              {rfq.is_price_frozen && (
+                <div className="mt-4 space-y-1 border-t border-line/60 pt-4">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-700">
+                    <Snowflake className="h-3.5 w-3.5" /> Prices frozen
+                  </div>
+                  <p className="text-[11px] text-muted">
+                    {rfq.frozen_by_name ?? "A buyer"}
+                    {rfq.frozen_at ? ` · ${fmtDate(rfq.frozen_at)}` : ""}
+                    {rfq.frozen_at_revision != null
+                      ? ` · ${rfq.frozen_at_revision} quote${rfq.frozen_at_revision === 1 ? "" : "s"} in`
+                      : ""}
+                  </p>
+                </div>
+              )}
             </SectionCard>
 
             <ApprovalTrail docType="RFQ" docId={rfq.id} />
           </>
         ) : null}
       />
+
+      {/* Freeze / reopen confirms. Each states the consequence in one breath —
+          what closes, what opens — because the freeze is the one act on this
+          page that changes what a SUPPLIER can do next. */}
+      <ConfirmModal
+        isOpen={freezeOpen}
+        title={`Freeze prices on ${rfq?.rfq_no ?? "this RFQ"}?`}
+        message={"Suppliers can no longer quote, re-quote or change prices on this "
+          + "tender — not even to accept a change request. You can award and raise "
+          + "purchase orders against its quotations. You can reopen bidding later, "
+          + "with a recorded reason."}
+        confirmLabel="Freeze prices"
+        tone="warning"
+        busy={freeze.isPending}
+        onConfirm={() => freeze.mutate()}
+        onClose={() => setFreezeOpen(false)}
+      />
+      <ConfirmModal
+        isOpen={unfreezeOpen}
+        title={`Reopen bidding on ${rfq?.rfq_no ?? "this RFQ"}?`}
+        message="Suppliers will be able to quote and change prices again. Say why — it is recorded on the tender."
+        confirmLabel="Reopen bidding"
+        tone="warning"
+        busy={unfreeze.isPending}
+        confirmDisabled={unfreezeReason.trim().length < 3}
+        onConfirm={() => unfreeze.mutate(unfreezeReason.trim())}
+        onClose={() => setUnfreezeOpen(false)}
+      >
+        <Textarea
+          value={unfreezeReason}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUnfreezeReason(e.target.value)}
+          minRows={2}
+          placeholder="e.g. Winning vendor's delivery date slipped — re-opening the tender"
+          aria-label="Reason for reopening bidding"
+        />
+      </ConfirmModal>
     </div>
   );
 }

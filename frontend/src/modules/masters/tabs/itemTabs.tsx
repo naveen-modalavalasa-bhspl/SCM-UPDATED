@@ -119,10 +119,7 @@ export function HsnCodesTab() {
       columns={[
         { key: "code", header: "HSN", render: (r) => <Code>{r.code}</Code> },
         { key: "desc", header: "Description", render: (r) => r.description ?? "—" },
-        { key: "gst", header: "CGST + SGST", render: (r) =>
-            `${r.cgst_rate}% + ${r.sgst_rate}%` },
-        { key: "igst", header: "IGST", render: (r) => `${r.igst_rate}%` },
-        { key: "cess", header: "Cess", hideOnNarrow: true, render: (r) => `${r.cess_rate}%` },
+        { key: "gst", header: "GST %", render: (r) => `${r.gst_rate}%` },
         { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
       ]}
       renderCard={(r) => (
@@ -131,9 +128,7 @@ export function HsnCodesTab() {
             <Code>{r.code}</Code><Active on={r.is_active} />
           </div>
           <div className="text-sm text-body">{r.description ?? "—"}</div>
-          <div className="text-xs text-muted">
-            {r.cgst_rate}% + {r.sgst_rate}% · IGST {r.igst_rate}%
-          </div>
+          <div className="text-xs text-muted">GST {r.gst_rate}%</div>
         </div>
       )}
       fetchList={(search) => mastersApi.hsnCodes.list({ search, size: 300 }).then((p) => p.items)}
@@ -142,28 +137,18 @@ export function HsnCodesTab() {
           pattern: /^\d{8}$/,
           patternMessage: "Enter exactly 8 digits, for example 10063010" },
         { key: "description", label: "Description", maxLength: 300 },
-        { key: "cgst_rate", label: "CGST %", ...RATE_RULE },
-        { key: "sgst_rate", label: "SGST %", ...RATE_RULE },
-        // CGST + SGST is the within-state route and IGST the across-state one. They
-        // must total the same, or the same sale is taxed differently by destination.
-        { key: "igst_rate", label: "IGST %", ...RATE_RULE,
-          validate: (value, all) => {
-            const split = Number(all.cgst_rate ?? 0) + Number(all.sgst_rate ?? 0);
-            const igst = Number(value ?? 0);
-            return igst && Math.abs(split - igst) > 0.001
-              ? `CGST + SGST is ${split}%, which must equal IGST` : null;
-          } },
-        { key: "cess_rate", label: "Cess %", ...RATE_RULE },
+        // One rate. The within-state CGST + SGST and the across-state IGST are the
+        // same number, so there is no second figure to keep consistent.
+        { key: "gst_rate", label: "GST %", ...RATE_RULE },
         { key: "effective_from", label: "Effective from (YYYY-MM-DD)",
           pattern: /^\d{4}-\d{2}-\d{2}$/,
           patternMessage: "Use the format 2026-04-01" },
         { key: "is_active", label: "Active", type: "switch" },
       ]}
-      emptyForm={{ code: "", description: "", cgst_rate: 0, sgst_rate: 0,
-                   igst_rate: 0, cess_rate: 0, effective_from: "", is_active: true }}
+      emptyForm={{ code: "", description: "", gst_rate: 0,
+                   effective_from: "", is_active: true }}
       toForm={(r) => ({ code: r.code, description: r.description ?? "",
-        cgst_rate: r.cgst_rate, sgst_rate: r.sgst_rate, igst_rate: r.igst_rate,
-        cess_rate: r.cess_rate, effective_from: r.effective_from ?? "",
+        gst_rate: r.gst_rate, effective_from: r.effective_from ?? "",
         is_active: r.is_active })}
       bulk={mastersApi.hsnCodes} usage={mastersApi.hsnCodes.usage}
       onCreate={(v) => mastersApi.hsnCodes.create(v as Partial<MasterHsnCode>)}

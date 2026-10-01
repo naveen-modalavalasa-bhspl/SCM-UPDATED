@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, FileUp, Loader2, Sheet } from "lucide-react";
+import { Download, FileUp, History, Loader2, Sheet } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button, Can } from "@/shared/components";
-import type { BulkApi, ImportPreview, ImportResult, ImportRow } from "../api";
+import { useAuth } from "@/shared/auth/AuthContext";
+import type { BulkApi, ImportDraft, ImportPreview, ImportResult, ImportRow } from "../api";
 import { ImportReview } from "./ImportReview";
 import { TONE_BLUE } from "@/shared/components/tones";
 
@@ -43,6 +44,68 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
 
+  // --- The review in progress survives logout, refresh and a change of machine. ---
+  // Kept on the server (per person, per master) and mirrored in this browser, so an
+  // expired login that bounces Save to /login costs nothing: sign back in, press
+  // Resume. Whichever copy is newer wins.
+  const { me } = useAuth();
+  const localKey = me ? `scm-import-draft:${me.employee.id}:${label}` : null;
+  const [resume, setResume] = useState<ImportDraft | null>(null);
+  const [initial, setInitial] = useState<Pick<ImportDraft, "picked" | "edits">>();
+  const [draftNote, setDraftNote] = useState<string>();
+  const [reviewKey, setReviewKey] = useState(0);
+  const timer = useRef<number>();
+
+  const readLocal = (): ImportDraft | null => {
+    try { return localKey ? JSON.parse(localStorage.getItem(localKey) ?? "null") : null; }
+    catch { return null; }
+  };
+  const writeLocal = (draft: ImportDraft) => {
+    try { if (localKey) localStorage.setItem(localKey, JSON.stringify(draft)); }
+    catch { /* quota or private mode — the server copy still stands */ }
+  };
+  const clearDraft = () => {
+    window.clearTimeout(timer.current);
+    try { if (localKey) localStorage.removeItem(localKey); } catch { /* ignore */ }
+    setResume(null); setDraftNote(undefined);
+    void api.draft.clear().catch(() => undefined);
+  };
+
+  useEffect(() => {
+    if (!localKey) return;
+    let live = true;
+    const local = readLocal();
+    api.draft.get()
+      .then((r) => r.draft)
+      .catch(() => null)
+      .then((server) => {
+        if (!live) return;
+        const newer = [server, local].filter(Boolean)
+          .sort((a, b) => (b!.savedAt > a!.savedAt ? 1 : -1))[0] ?? null;
+        setResume(newer);
+      });
+    return () => { live = false; };
+  }, [localKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const keep = (current: ImportPreview, picked: ImportDraft["picked"],
+                edits: ImportDraft["edits"]) => {
+    const draft: ImportDraft = { preview: current, picked, edits,
+                                 savedAt: new Date().toISOString() };
+    writeLocal(draft);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      api.draft.put(draft)
+        .then(() => setDraftNote(`Draft saved ${new Date().toLocaleTimeString([], {
+          hour: "numeric", minute: "2-digit" })}`))
+        .catch(() => setDraftNote("Draft kept on this computer only"));
+    }, 1500);
+  };
+
+  const openReview = (next: ImportPreview, from?: Pick<ImportDraft, "picked" | "edits">) => {
+    setInitial(from); setPreview(next); setResume(null);
+    setReviewKey((k) => k + 1);
+  };
+
   const run = async (kind: "template" | "export", call: () => Promise<void>) => {
     setBusy(kind); setError(null); setResult(null);
     try {
@@ -57,14 +120,21 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
   const done = (outcome: ImportResult) => {
     setResult(outcome);
     setPreview(null);
+    clearDraft();
     qc.invalidateQueries({ queryKey: ["masters", queryKey] });
   };
 
   const upload = async (file: File) => {
+    if ((resume || preview) && !window.confirm(
+      "You have an unsaved review with your fixes. Uploading a new file replaces it. Continue?")) {
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     setBusy("import"); setError(null); setResult(null); setPreview(null);
     try {
       const draft = await api.preview(file);
-      setPreview(draft);
+      openReview(draft);
+      keep(draft, {}, {});
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
@@ -116,11 +186,34 @@ export function BulkBar({ api, managePerm, queryKey, label }: {
         />
       </div>
 
+      {resume && !preview && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-sm">
+          <History className="h-4 w-4 text-muted" />
+          <span className="flex-1">
+            You have an unsaved {label.toLowerCase()} import from{" "}
+            {new Date(resume.savedAt).toLocaleString([], {
+              day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}
+            {" "}— {resume.preview.rows.length} rows,{" "}
+            {Object.keys(resume.picked).length + Object.keys(resume.edits).length} fixes.
+          </span>
+          <Button onClick={() => openReview(resume.preview, resume)}>Resume</Button>
+          <Button variant="ghost" onClick={() => {
+            if (window.confirm("Discard this saved review and all its fixes?")) clearDraft();
+          }}>Discard</Button>
+        </div>
+      )}
       {preview && (
         <ImportReview
+          key={reviewKey}
           preview={preview} label={label} busy={busy === "import"}
+          initial={initial} draftNote={draftNote}
+          onChange={(picked, edits) => keep(preview, picked, edits)}
           onCommit={(rows) => void commit(rows)}
-          onCancel={() => setPreview(null)}
+          onCancel={() => {
+            if (!window.confirm("Close this review? Your fixes stay saved — press Resume to carry on.")) return;
+            setPreview(null);
+            setResume(readLocal());
+          }}
         />
       )}
       {result && (

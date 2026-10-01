@@ -250,10 +250,14 @@ async def test_split_award_creates_quantity_limited_purchase_orders(db):
         ))
     await db.commit()
 
+    # Freeze Prices (2026-09-26): an award is only legal on a frozen comparison.
+    rfq.is_price_frozen = True
+    await db.commit()
+
     awarded = await service.award_rfq(db, rfq.id, AwardIn(allocations=[
         {"item_id": item.id, "vendor_id": first_vendor.id, "quantity": 4},
         {"item_id": item.id, "vendor_id": second_vendor.id, "quantity": 6},
-    ]), creator)
+    ], generate_pos=False), creator)
     assert awarded.awarded_vendor_id is None
     assert all(quote.status == QuotationStatus.ACCEPTED.value for quote in quotes)
 
@@ -284,9 +288,11 @@ async def test_split_award_creates_quantity_limited_purchase_orders(db):
     # Bravo's first PO remains live. The saved award grows from 6 to 10, while the
     # next PO contains only the extra 4; neither the first PO nor its commercial
     # amounts are duplicated.
+    # The re-award stays on the frozen comparison (the freeze flag was never
+    # cleared; unfreezing would also block the PO below).
     await service.award_rfq(db, rfq.id, AwardIn(allocations=[
         {"item_id": item.id, "vendor_id": second_vendor.id, "quantity": 10},
-    ]), creator)
+    ], generate_pos=False), creator)
     balance_po = await service.create_po_from_quotation(
         db, quotes[1].id, POFromQuotationIn(), creator)
     assert float(balance_po.items[0].quantity) == 4
@@ -301,3 +307,56 @@ async def test_split_award_creates_quantity_limited_purchase_orders(db):
     assert [row.item_quantities for row in bravo_orders] == [
         {str(item.id): 6.0}, {str(item.id): 4.0},
     ]
+
+
+async def test_split_award_auto_generates_pos_for_each_supplier(db):
+    item, first_vendor, _indent, _ind_item, creator, _approver = await _world(db)
+    second_vendor = Vendor(code="V-3", name="Charlie", gstin="GST3", is_active=True)
+    db.add(second_vendor)
+    await db.flush()
+
+    rfq = RFQ(
+        rfq_no="RFQ/2026/AUTO_PO", status=RFQStatus.PUBLISHED.value,
+        total_items=1, vendor_count=2, is_price_frozen=True,
+        created_by_id=creator.id, created_by_name=creator.full_name,
+    )
+    db.add(rfq)
+    await db.flush()
+    rfq_line = RFQItem(
+        rfq_id=rfq.id, line_no=1, item_id=item.id, item_code=item.code,
+        item_name=item.name, uom_code="NOS", quantity=10,
+    )
+    db.add(rfq_line)
+    for vendor in (first_vendor, second_vendor):
+        db.add(RFQVendor(
+            rfq_id=rfq.id, vendor_id=vendor.id, vendor_name=vendor.name,
+            mapped_item_ids=[item.id], item_quantities={str(item.id): 10},
+        ))
+        quote = Quotation(
+            quotation_no=f"Q-AUTO-{vendor.code}", rfq_id=rfq.id, rfq_no=rfq.rfq_no,
+            vendor_id=vendor.id, vendor_name=vendor.name,
+            status=QuotationStatus.SUBMITTED.value, sub_total=1000,
+            discount_amount=50, tax_amount=180, freight_amount=100,
+            grand_total=1230,
+        )
+        db.add(quote)
+        await db.flush()
+        db.add(QuotationItem(
+            quotation_id=quote.id, line_no=1, rfq_item_id=rfq_line.id,
+            item_id=item.id, item_code=item.code, item_name=item.name,
+            uom_code="NOS", quantity=10, rate=100, tax_percent=18,
+            amount=1000,
+        ))
+    await db.commit()
+
+    awarded_rfq = await service.award_rfq(db, rfq.id, AwardIn(allocations=[
+        {"item_id": item.id, "vendor_id": first_vendor.id, "quantity": 3},
+        {"item_id": item.id, "vendor_id": second_vendor.id, "quantity": 7},
+    ], generate_pos=True), creator)
+
+    assert awarded_rfq.status == RFQStatus.AWARDED.value
+    pos = awarded_rfq.purchase_orders
+    assert len(pos) == 2
+    pos_by_vendor = {po.vendor_id: po for po in pos}
+    assert pos_by_vendor[first_vendor.id].item_quantities == {str(item.id): 3.0}
+    assert pos_by_vendor[second_vendor.id].item_quantities == {str(item.id): 7.0}

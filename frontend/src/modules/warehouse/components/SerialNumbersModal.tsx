@@ -370,7 +370,7 @@ export function SerialNumbersModal({
               <span className="font-display text-lg font-bold text-ink">
                 {selectMode
                   ? `Assign ${plural(2)}`
-                  : "Reject serial numbers"}
+                  : `Reject ${plural(2)}`}
               </span>
               <TrackingBadge type={trackingType} meta={trackingMeta} />
             </span>
@@ -448,8 +448,8 @@ export function SerialNumbersModal({
             <div className="mb-3 flex items-center justify-between text-sm">
               <span className="text-muted">
                 {selectMode
-                  ? trackingMeta?.hint ?? `Select exactly ${required} ${plural(required)}.`
-                  : "Tick the units you are rejecting."}
+                  ? trackingMeta?.hint ?? `Choose exactly ${required} ${plural(required)}.`
+                  : `Tick exactly ${available ? available.length - required : 0} units to reject.`}
               </span>
               <span className="font-semibold text-ink">
                 {selectMode ? (

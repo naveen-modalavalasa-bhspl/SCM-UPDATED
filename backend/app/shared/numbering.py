@@ -188,7 +188,12 @@ _DEFAULT_PREFIXES = {"indent": "IND", "mr": "MR", "po": "PO", "grn": "GRN",
                      # document. Named explicitly so the fallback can never rename
                      # them again.
                      "stock_movement": "SMV",
-                     "stock_movement_order": "SMO"}
+                     "stock_movement_order": "SMO",
+                     # The buyer's change request on a supplier's quotation. "CR"
+                     # is what the desk calls it; the three-letter fallback for
+                     # QUOTE_CHANGE_REQUEST would have been "QUO", which is what
+                     # the quotation itself is already numbered as.
+                     "quote_change_request": "CR"}
 
 
 # A doc type whose number is more than prefix/year/sequence says so here, or the

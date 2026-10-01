@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { Can, Card, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Lock, Unlock } from "lucide-react";
+import { Can, Card, ConfirmModal, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill, Textarea, useToast, type Column } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
@@ -35,17 +37,21 @@ const FILTER_KEYS = ["status", "search", "closing", "pending_for_me", "ready_to_
 
 export function RFQListPage() {
   const nav = useNavigate();
+  const toast = useToast();
+  const queryClient = useQueryClient();
+
   // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
   const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
   const status = get("status");
-  // Closing window, filtered in the browser: the endpoint takes no date parameter, and
-  // "what shuts this week" is the question a buyer actually asks of this register.
   const closing = get("closing");
   const search = get("search");
   const pendingForMe = getBool("pending_for_me");
   const readyToAward = getBool("ready_to_award");
-  // Debounce the search input to avoid spamming the API on every keystroke
   const debouncedSearch = useDebouncedValue(search);
+
+  // Unfreeze modal state
+  const [unfreezeTarget, setUnfreezeTarget] = useState<{ id: number; no: string } | null>(null);
+  const [unfreezeReason, setUnfreezeReason] = useState("");
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["rfqs", status, debouncedSearch, pendingForMe, readyToAward, page],
@@ -56,6 +62,32 @@ export function RFQListPage() {
       ready_to_award: readyToAward || undefined,
       page, size: SIZE,
     }),
+  });
+
+  const freezeMutation = useMutation({
+    mutationFn: (id: number) => rfqApi.freeze(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["rfqs"] });
+      toast.success("RFQ prices locked");
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Failed to freeze prices";
+      toast.error(msg);
+    },
+  });
+
+  const unfreezeMutation = useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason: string }) => rfqApi.unfreeze(id, reason),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["rfqs"] });
+      setUnfreezeTarget(null);
+      setUnfreezeReason("");
+      toast.success("Bidding reopened");
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : "Failed to unfreeze prices";
+      toast.error(msg);
+    },
   });
 
   const all = data?.items ?? [];
@@ -77,8 +109,15 @@ export function RFQListPage() {
       header: "RFQ",
       render: (r) => (
         <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{r.rfq_no}</div>
-          <div className="truncate text-[11px] text-muted">{r.title ?? "Untitled"}</div>
+          <div className="font-mono text-xs font-semibold text-ink flex items-center gap-1.5">
+            {r.is_price_frozen && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-700 border border-amber-500/20" title="Prices locked">
+                <Lock className="h-3 w-3" /> Locked
+              </span>
+            )}
+            {r.rfq_no}
+          </div>
+          <div className="truncate text-[11px] text-muted">{r.title && r.title.trim() !== "" && r.title !== "Untitled" ? r.title : null}</div>
         </div>
       ),
     },
@@ -87,18 +126,14 @@ export function RFQListPage() {
       key: "with",
       header: "Pending with",
       hideOnNarrow: true,
-      // Live from the approval engine. `current_approver_name` behind it is the
-      // snapshot the row used to carry, kept only as a fallback.
       render: (r) => (r.pending_with?.length
         ? r.pending_with.join(", ")
         : (r.current_approver_name ?? "—")),
     },
-
     {
       key: "responses",
       header: "Responses",
       className: "text-right",
-      // The pair, not a percentage: "2 of 5" is what a buyer chases, and 40% is not.
       render: (r) => (
         <span className="text-sm text-body">
           {r.response_count} of {r.vendor_count}
@@ -117,6 +152,44 @@ export function RFQListPage() {
       hideOnNarrow: true,
       render: (r) => r.awarded_vendor_name ?? "—",
     },
+    {
+      key: "lock",
+      header: "Lock / Pricing",
+      render: (r) => {
+        if (r.status !== "PUBLISHED" && !r.is_price_frozen) {
+          return <span className="text-xs text-muted">—</span>;
+        }
+        if (r.is_price_frozen) {
+          return (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setUnfreezeTarget({ id: r.id, no: r.rfq_no });
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-amber-700 bg-amber-500/10 hover:bg-amber-500/20 transition border border-amber-500/20"
+              title="Prices are locked. Click to unlock/reopen bidding."
+            >
+              <Lock className="h-3.5 w-3.5" /> Locked
+            </button>
+          );
+        }
+        return (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              freezeMutation.mutate(r.id);
+            }}
+            disabled={freezeMutation.isPending}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-emerald-700 bg-emerald-500/10 hover:bg-emerald-500/20 transition border border-emerald-500/20"
+            title="Click to lock RFQ prices and freeze bidding."
+          >
+            <Unlock className="h-3.5 w-3.5" /> Lock RFQ
+          </button>
+        );
+      },
+    },
   ];
 
   return (
@@ -131,13 +204,10 @@ export function RFQListPage() {
         }
       />
 
-      {/* The KPI strip. Gated inside the component on `rfq.view`, the same code this
-          screen's endpoint checks. */}
       <div className="mb-4">
         <RFQKpis />
       </div>
 
-      {/* Shared filter strip — see RequisitionListPage for why the local copies went. */}
       <FilterBar
         search={search}
         onSearch={(value) => set({ search: value })}
@@ -174,10 +244,38 @@ export function RFQListPage() {
           renderCard={(r) => (
             <div className="space-y-1.5">
               <div className="flex items-start justify-between gap-2">
-                <span className="font-mono text-xs font-semibold text-ink">{r.rfq_no}</span>
-                <StatusPill status={r.status} />
+                <span className="font-mono text-xs font-semibold text-ink flex items-center gap-1.5">
+                  {r.is_price_frozen && <Lock className="h-3.5 w-3.5 text-amber-600" />}
+                  {r.rfq_no}
+                </span>
+                <div className="flex items-center gap-2">
+                  {r.is_price_frozen ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setUnfreezeTarget({ id: r.id, no: r.rfq_no });
+                      }}
+                      className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 bg-amber-500/10 border border-amber-500/20"
+                    >
+                      Locked
+                    </button>
+                  ) : r.status === "PUBLISHED" ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        freezeMutation.mutate(r.id);
+                      }}
+                      className="px-2 py-0.5 rounded text-[11px] font-medium text-emerald-700 bg-emerald-500/10 border border-emerald-500/20"
+                    >
+                      Lock RFQ
+                    </button>
+                  ) : null}
+                  <StatusPill status={r.status} />
+                </div>
               </div>
-              <div className="text-sm text-body">{r.title ?? "Untitled"}</div>
+              <div className="text-sm text-body">{r.title && r.title.trim() !== "" && r.title !== "Untitled" ? r.title : null}</div>
               <div className="text-xs text-muted">
                 {r.response_count} of {r.vendor_count} replied
                 {r.due_date ? ` · closes ${fmtDate(r.due_date)}` : ""}
@@ -186,6 +284,33 @@ export function RFQListPage() {
           )}
         />
       </Card>
+
+      <ConfirmModal
+        isOpen={!!unfreezeTarget}
+        title={`Reopen bidding on ${unfreezeTarget?.no ?? "this RFQ"}?`}
+        message="Suppliers will be able to quote and change prices again. Say why — it is recorded on the tender."
+        confirmLabel="Reopen bidding"
+        tone="warning"
+        busy={unfreezeMutation.isPending}
+        confirmDisabled={unfreezeReason.trim().length < 3}
+        onConfirm={() => {
+          if (unfreezeTarget) {
+            unfreezeMutation.mutate({ id: unfreezeTarget.id, reason: unfreezeReason.trim() });
+          }
+        }}
+        onClose={() => {
+          setUnfreezeTarget(null);
+          setUnfreezeReason("");
+        }}
+      >
+        <Textarea
+          value={unfreezeReason}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUnfreezeReason(e.target.value)}
+          minRows={2}
+          placeholder="e.g. Winning vendor's delivery date slipped — re-opening the tender"
+          aria-label="Reason for reopening bidding"
+        />
+      </ConfirmModal>
     </div>
   );
 }

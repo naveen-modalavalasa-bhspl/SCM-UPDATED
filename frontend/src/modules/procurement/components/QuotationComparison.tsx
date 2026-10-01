@@ -35,23 +35,10 @@ const COL = "min-w-[210px] w-[210px]";
  *  show through it. */
 const PINNED = "sticky left-0 z-10 bg-content1 min-w-[220px] w-[220px]";
 
-function TaxLine({ label, rate, amount }: {
-  label: string; rate?: number | null; amount?: number | null;
-}) {
-  if (rate == null || amount == null) return null;
-  return (
-    <div className="flex justify-between gap-2 text-[11px] text-muted">
-      <span>{label} ({rate}%)</span>
-      <span className="font-mono">{money(amount)}</span>
-    </div>
-  );
-}
-
 function Cell({ cell }: { cell: ComparisonCell }) {
   // The whole breakup, always: unit rate, what came off, what tax was added, what the
   // line comes to. A comparison that shows only the total is a comparison nobody can
   // argue with — and buyers have to be able to argue with it.
-  const split = cell.cgst_rate != null || cell.sgst_rate != null || cell.igst_rate != null;
   return (
     <div
       className={`h-full rounded-lg border p-2.5 ${
@@ -82,18 +69,10 @@ function Cell({ cell }: { cell: ComparisonCell }) {
           <span>Taxable</span>
           <span className="font-mono text-body">{money(cell.taxable_amount)}</span>
         </div>
-        {split ? (
-          <>
-            <TaxLine label="CGST" rate={cell.cgst_rate} amount={cell.cgst_amount} />
-            <TaxLine label="SGST" rate={cell.sgst_rate} amount={cell.sgst_amount} />
-            <TaxLine label="IGST" rate={cell.igst_rate} amount={cell.igst_amount} />
-          </>
-        ) : (
-          <div className="flex justify-between gap-2 text-[11px] text-muted">
-            <span>Tax ({cell.tax_percent}%)</span>
-            <span className="font-mono">{money(cell.tax_amount)}</span>
-          </div>
-        )}
+        <div className="flex justify-between gap-2 text-[11px] text-muted">
+          <span>GST ({cell.tax_percent}%)</span>
+          <span className="font-mono">{money(cell.tax_amount)}</span>
+        </div>
       </div>
       {cell.is_best && (
         <div className="mt-2 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-success">
@@ -380,7 +359,14 @@ export function QuotationComparison({
                     <span className="text-sm font-semibold text-ink">
                       {total.vendor_name ?? `Vendor ${total.vendor_id}`}
                     </span>
-                    <StatusPill status={total.status} />
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      <StatusPill status={total.status} />
+                      {total.revision_count > 0 && (
+                        <span className="rounded-full bg-surface-2/80 border border-line px-2 py-0.5 text-[10px] font-semibold text-body">
+                          v{total.revision_count + 1} pricing
+                        </span>
+                      )}
+                    </div>
                     <div className="flex flex-wrap justify-end gap-1">
                       {total.is_recommended && (
                         <span className="flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
@@ -546,12 +532,32 @@ export function QuotationComparison({
                   {!splitting ? (
                     <Can do="rfq.award">
                       <Button variant="subtle" disabled={busy} onClick={() => {
-                        // A re-share asks only for NEW quantity. Existing PO lines
-                        // remain in `liveAllocation`, are shown as Allocated, and are
-                        // added back to the final request at submit time. Starting the
-                        // boxes at zero means entering 5 after a live 5 really creates
-                        // another PO for 5 and makes the item 10/10 allocated.
-                        setSplit({});
+                        // A re-share asks only for NEW quantity. For items mapped to a single
+                        // supplier, pre-fill the remaining unallocated RFQ quantity into the
+                        // split input box (editable by the user).
+                        const initialSplit: Record<string, string> = {};
+                        (comparison.items ?? []).forEach((row) => {
+                          const quotingVendorIds = Array.from(
+                            new Set(
+                              row.cells
+                                .map((cell) => totals.find((t) => t.quotation_id === cell.quotation_id)?.vendor_id)
+                                .filter((vId): vId is number => vId != null),
+                            ),
+                          );
+                          if (quotingVendorIds.length === 1) {
+                            const singleVendorId = quotingVendorIds[0];
+                            const totalAllocatedOnItem = splitVendorIds.reduce(
+                              (sum, vId) => sum + liveAllocation(row.item_id, vId),
+                              0,
+                            );
+                            const unallocatedQty = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
+                            if (unallocatedQty > 0) {
+                              initialSplit[splitKey(row.item_id, singleVendorId)] = String(unallocatedQty);
+                            }
+                          }
+                        });
+
+                        setSplit(initialSplit);
                         // Every supplier that quoted an item is eligible for the new
                         // share. Open every quotation while editing so no eligible
                         // supplier is hidden behind the four-column default window.
@@ -629,7 +635,68 @@ export function QuotationComparison({
               {columns.map((total) => {
                 const won = awardedQuotationIds.includes(total.quotation_id);
                 const pos = purchaseOrders.filter(
-                  (row) => row.quotation_id === total.quotation_id);
+                  (row) => row.quotation_id === total.quotation_id || row.vendor_id === total.vendor_id,
+                );
+                const awardedMap = liveAllocatedQuantities[total.vendor_id];
+                let remainingAwardedQty = 0;
+                let claimableUnallocatedRfqQty = 0;
+
+                (comparison.items ?? []).forEach((row) => {
+                  const cell = row.cells.find((c) => c.quotation_id === total.quotation_id);
+                  if (!cell) return;
+                  const wonQty = awardedMap != null
+                    ? Number(awardedMap[String(row.item_id)] ?? 0)
+                    : (won ? Number(cell.quantity) : 0);
+                  const orderedQty = pos.reduce(
+                    (sum, po) => sum + Number(po.item_quantities?.[String(row.item_id)] ?? 0),
+                    0,
+                  );
+                  const remAwarded = wonQty - orderedQty;
+                  if (remAwarded > 0.001) remainingAwardedQty += remAwarded;
+
+                  const totalAllocatedOnItem = splitVendorIds.reduce(
+                    (sum, vId) => sum + liveAllocation(row.item_id, vId),
+                    0,
+                  );
+                  const unallocatedOnRfq = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
+                  const vendorAlreadyWon = liveAllocation(row.item_id, total.vendor_id);
+                  const vendorMaxQuota = Number(cell.quantity);
+                  const vendorCanTakeMore = Math.max(0, vendorMaxQuota - vendorAlreadyWon);
+                  const claimable = Math.min(unallocatedOnRfq, vendorCanTakeMore);
+                  if (claimable > 0.001) claimableUnallocatedRfqQty += claimable;
+                });
+
+                const canRaiseRemaining = remainingAwardedQty > 0.001 || claimableUnallocatedRfqQty > 0.001;
+
+                const handleRaiseRemaining = () => {
+                  if (remainingAwardedQty > 0.001 || !onAwardSplit) {
+                    onCreatePo(total.quotation_id);
+                    return;
+                  }
+                  const autoAllocations = (comparison.items ?? []).flatMap((row) =>
+                    splitVendorIds.map((vendorId) => {
+                      const currentAlloc = liveAllocation(row.item_id, vendorId);
+                      if (vendorId === total.vendor_id) {
+                        const cell = row.cells.find((c) => c.quotation_id === total.quotation_id);
+                        const cellQty = Number(cell?.quantity ?? 0);
+                        const totalAlloc = splitVendorIds.reduce((sum, vId) => sum + liveAllocation(row.item_id, vId), 0);
+                        const unallocatedOnRfq = Math.max(0, Number(row.quantity) - totalAlloc);
+                        const vendorCanTake = Math.max(0, cellQty - currentAlloc);
+                        const added = Math.min(unallocatedOnRfq, vendorCanTake);
+                        const newQty = currentAlloc + added;
+                        return newQty > 0 ? { item_id: row.item_id, vendor_id: vendorId, quantity: newQty } : null;
+                      }
+                      return currentAlloc > 0 ? { item_id: row.item_id, vendor_id: vendorId, quantity: currentAlloc } : null;
+                    }).filter((r): r is { item_id: number; vendor_id: number; quantity: number } => r !== null),
+                  );
+
+                  if (autoAllocations.length > 0) {
+                    onAwardSplit(autoAllocations);
+                  } else {
+                    onCreatePo(total.quotation_id);
+                  }
+                };
+
                 return (
                   <td key={total.quotation_id} className={`${COL} border-t border-line px-3 py-3`}>
                     {won ? (
@@ -637,26 +704,27 @@ export function QuotationComparison({
                         <div className="flex items-center justify-end gap-1 text-xs font-semibold text-success">
                           <Award className="h-3.5 w-3.5" /> Awarded
                         </div>
-                        {pos.length > 0 ? (
+                        {pos.length > 0 && (
                           <div className="space-y-1">
                             {pos.map((po) => (
-                              <Button key={po.id} variant="subtle" className="w-full"
+                              <Button key={po.id} variant="subtle" className="w-full text-xs"
                                       onClick={() => onOpenPo(po.id)}>
                                 {po.po_no}
                               </Button>
                             ))}
                           </div>
-                        ) : (
-                          <Can do="po.create">
-                            <Button
-                              className="w-full"
-                              disabled={busy}
-                              onClick={() => onCreatePo(total.quotation_id)}
-                            >
-                              Create PO
-                            </Button>
-                          </Can>
                         )}
+                        <Can do="po.create">
+                          <Button
+                            className="w-full text-xs"
+                            variant={pos.length > 0 ? "subtle" : "primary"}
+                            disabled={busy || (pos.length > 0 && !canRaiseRemaining)}
+                            title={!canRaiseRemaining && pos.length > 0 ? "All items are fully allocated and ordered" : undefined}
+                            onClick={handleRaiseRemaining}
+                          >
+                            {pos.length > 0 ? "Raise PO to remaining qtys" : "Create PO"}
+                          </Button>
+                        </Can>
                       </div>
                     ) : isAnyAwarded ? (
                       <p className="text-right text-xs text-muted">Not selected</p>

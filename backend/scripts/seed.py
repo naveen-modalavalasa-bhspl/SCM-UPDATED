@@ -552,8 +552,7 @@ async def seed_hsn_codes(db):
     ]
     for code, description in hsn_codes:
         row, _ = await get_or_create(db, HsnCode, defaults={
-            "description": description, "cgst_rate": 0, "sgst_rate": 0,
-            "igst_rate": 0, "cess_rate": 0, "is_active": True}, code=code)
+            "description": description, "gst_rate": 0, "is_active": True}, code=code)
         row.description = row.description or description
         row.is_active = True
 

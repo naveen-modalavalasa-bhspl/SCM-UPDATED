@@ -102,11 +102,8 @@ export function POListPage() {
       key: "po",
       header: "PO",
       render: (r) => (
-        <div className="min-w-0">
-          <div className="font-mono text-xs font-semibold text-ink">{formatPONo(r.po_no, r.revision_no)}</div>
-          <div className="text-[11px] text-muted">
-            {r.indent_no ? `from ${r.indent_no}` : "No indent"}
-          </div>
+        <div className="min-w-0 font-mono text-xs font-semibold text-ink">
+          {formatPONo(r.po_no, r.revision_no)}
         </div>
       ),
     },
@@ -225,7 +222,7 @@ export function POListPage() {
               </div>
               <div className="text-sm text-body">{r.vendor_name ?? "—"}</div>
               <div className="text-xs text-muted">
-                {r.indent_no ? `from ${r.indent_no} · ` : ""}{money(r.total_amount)}
+                {money(r.total_amount)}
               </div>
             </div>
           )}

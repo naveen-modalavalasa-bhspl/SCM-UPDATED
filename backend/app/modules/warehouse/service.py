@@ -1565,9 +1565,9 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         # unlabelled, and the units nobody could read a number off are given one from
         # the Serial format (Settings > Code Formats) when the receipt is submitted.
         # Demanding the full set here is what stopped those lorries at the gate.
-        if item.is_serial_tracked and len(serials) > int(received):
+        if item.is_serial_tracked and len(serials) != int(received):
             raise ValidationError(
-                f"Line {index}: {len(serials)} serial numbers for {int(received)} "
+                f"Line {index}: Please provide exactly {int(received)} serial numbers for "
                 f"received units of {item.code}"
             )
         if serials:
@@ -1601,9 +1601,7 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             seen_for_item.update(normalized_serials)
 
         # IMEIs follow exactly the serial rules above: anything may be captured at the
-        # gate, but a GRN must account for every unit. `is_imei_tracked` had no
-        # consumer at all until now — the flag was on the item master and nothing read
-        # it, so ticking it changed nothing anywhere.
+        # gate, but a GRN must account for every unit.
         imeis = [value.strip() for value in (line.imei_numbers or []) if value.strip()]
         normalized_imeis = [value.lower() for value in imeis]
         if len(normalized_imeis) != len(set(normalized_imeis)):
@@ -1616,26 +1614,10 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: IMEI-tracked quantity must be a whole number"
             )
-        # FIXED 2026-08-20 — this demanded EXACTLY one IMEI per unit once the receipt
-        # left the gate, and a GRN could not be saved without them. Vendors routinely
-        # deliver without an IMEI list, and the numbers are on the handsets inside
-        # sealed cartons, so the storekeeper physically cannot supply them at the
-        # goods-in desk. WITHOUT this relaxation a real delivery is stuck at the gate
-        # over paperwork the vendor never sent.
-        #
-        # Now the same rule serial numbers have always had: more than received is
-        # always wrong, FEWER is not. Whatever was actually read is kept.
-        #
-        # Deliberately NOT minted the way missing serials are. A serial is ours to
-        # issue, so `codeformat.mint_serials` gives an unlabelled unit one. An IMEI is
-        # assigned by the manufacturer and burned into the handset — inventing one
-        # would put a number in that field which matches no device on earth, and it
-        # would be indistinguishable from a real one downstream. The units keep their
-        # minted SERIAL for identity and their IMEI stays blank until somebody reads
-        # it off the device, which is put-away's job.
-        if item.is_imei_tracked and len(imeis) > int(received):
+        
+        if item.is_imei_tracked and len(imeis) != int(received):
             raise ValidationError(
-                f"Line {index}: {len(imeis)} IMEI numbers for {int(received)} "
+                f"Line {index}: Please provide exactly {int(received)} IMEI numbers for "
                 f"received units of {item.code}"
             )
         if imeis:
@@ -2326,7 +2308,7 @@ async def _name_received_units(db: AsyncSession, receipt: m.Receipt) -> None:
     executes once the GRN's approval chain is FINISHED. On a project that configured a
     GRN chain the receipt parked at its first rung with zero serials on the line, and
     QC — which is not gated on that approval, and should not be, the goods are
-    physically on the floor — then asked the inspector to "select exactly 30 accepted
+    physically on the floor — then asked the inspector to "choose exactly 30 accepted
     serial numbers" out of a list that was empty. The document was unfinishable from
     the moment it was submitted.
 
@@ -3275,17 +3257,33 @@ async def _register_serials(
     """
     all_serials = list(line.serial_numbers or [])
     all_imeis = list(getattr(line, "imei_numbers", None) or [])
-    imei_by_serial = {
-        str(serial).strip().lower(): str(imei).strip()
-        for serial, imei in zip(all_serials, all_imeis)
-        if serial and imei
-    }
+    
+    # If the caller didn't pass a specific list, default to what's on the line.
+    # If it's serial tracked, use serials. If ONLY imei tracked, use imeis.
+    primary_list = serial_numbers if serial_numbers is not None else all_serials
+    if not primary_list and all_imeis:
+        primary_list = all_imeis
+
+    imei_by_primary = {}
+    if all_serials and all_imeis:
+        imei_by_primary = {
+            str(s).strip().lower(): str(i).strip()
+            for s, i in zip(all_serials, all_imeis)
+            if s and i
+        }
+    elif not all_serials and all_imeis:
+        # If only IMEI tracked, the primary identifier IS the IMEI.
+        imei_by_primary = {
+            str(i).strip().lower(): str(i).strip()
+            for i in all_imeis
+            if i
+        }
 
     rows: list[m.SerialNumber] = []
-    for serial in serial_numbers if serial_numbers is not None else (line.serial_numbers or []):
+    for primary_id in primary_list:
         clash = await db.scalar(select(m.SerialNumber).where(
             m.SerialNumber.item_id == line.item_id,
-            m.SerialNumber.serial_number == serial,
+            m.SerialNumber.serial_number == primary_id,
             m.SerialNumber.is_active.is_(True)))
         if clash:
             if clash.warehouse_id != receipt.warehouse_id:
@@ -3297,7 +3295,7 @@ async def _register_serials(
                 # rejected on arrival by the serials that prove it is the right load.
                 if clash.status == SerialStatus.AVAILABLE.value:
                     raise ValidationError(
-                        f"Serial {serial} is already recorded against this item "
+                        f"Unit {primary_id} is already recorded against this item "
                         f"(warehouse {clash.warehouse_id}).")
                 clash.warehouse_id = receipt.warehouse_id
                 clash.batch_id = line.batch_id or clash.batch_id
@@ -3305,12 +3303,12 @@ async def _register_serials(
             clash.status = status
             # A unit re-homed by an onward GRN keeps the IMEI it was first recorded
             # with unless this receipt states one — the handset does not change hands.
-            clash.imei = imei_by_serial.get(serial.strip().lower()) or clash.imei
+            clash.imei = imei_by_primary.get(primary_id.strip().lower()) or clash.imei
             rows.append(clash)
             continue
         row = m.SerialNumber(
-            item_id=line.item_id, serial_number=serial,
-            imei=imei_by_serial.get(serial.strip().lower()),
+            item_id=line.item_id, serial_number=primary_id,
+            imei=imei_by_primary.get(primary_id.strip().lower()),
             batch_id=line.batch_id or None, warehouse_id=receipt.warehouse_id,
             bin_id=bin_id, status=status, remarks=remarks, is_active=True,
         )
@@ -3843,7 +3841,8 @@ async def _raise_inspection_for(
             batch_no=line.batch_no,
             inspected_qty=_d(line.received_qty), accepted_qty=_d(line.received_qty),
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
-            serial_numbers=list(line.serial_numbers or []),
+            serial_numbers=list(line.serial_numbers) if line.serial_numbers else None,
+            imei_numbers=list(line.imei_numbers) if getattr(line, 'imei_numbers', None) else None,
         ))
     _inspection_totals(inspection)
     await db.flush()
@@ -3994,19 +3993,30 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             raise ValidationError(
                 f"{item.code} is not configured for serial tracking"
             )
-        # IMEIs are checked but not stored: `inb_inspection_items` has no column for
-        # them, and it needs none — an IMEI names the same physical unit its serial
-        # does, and the GRN line it came off already holds the list.
         imeis = [value.strip() for value in (line.imei_numbers or []) if value.strip()]
         if len(imeis) != len(set(imeis)):
             raise ValidationError(f"{item.code}: accepted IMEI numbers must be unique")
+            
+        if imeis and not item.is_imei_tracked:
+            raise ValidationError(
+                f"{item.code} is not configured for IMEI tracking"
+            )
+
         if item.is_serial_tracked and accepted != accepted.to_integral_value():
             raise ValidationError(
                 f"{item.code}: accepted quantity must be a whole number for serialized items"
             )
+        if item.is_imei_tracked and accepted != accepted.to_integral_value():
+            raise ValidationError(
+                f"{item.code}: accepted quantity must be a whole number for IMEI tracked items"
+            )
         if item.is_serial_tracked and len(serials) != int(accepted):
             raise ValidationError(
-                f"{item.code}: select exactly {int(accepted)} accepted serial numbers"
+                f"{item.code}: choose exactly {int(accepted)} accepted serial numbers"
+            )
+        if item.is_imei_tracked and len(imeis) != int(accepted):
+            raise ValidationError(
+                f"{item.code}: choose exactly {int(accepted)} accepted IMEI numbers"
             )
         reason = line.rejection_reason or line.defect_type
 
@@ -4023,6 +4033,7 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             parameters=[p.model_dump() for p in line.parameters] if line.parameters else None,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers=serials or None,
+            imei_numbers=imeis or None,
         ))
     _inspection_totals(inspection)
 
@@ -4136,6 +4147,8 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 continue
             original_serials = list(line.serial_numbers or [])
             accepted_serials = list(verdict.serial_numbers or [])
+            original_imeis = list(line.imei_numbers or [])
+            accepted_imeis = list(verdict.imei_numbers or [])
             # A serial-tracked line always reaches QC with its full list, because the GRN
             # will not save without one serial per received unit. The guard stays
             # conditional for the untracked lines, whose list is empty and whose
@@ -4144,22 +4157,30 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 raise ValidationError(
                     f"{line.item_code}: accepted serials must come from the GRN"
                 )
+            if original_imeis and not set(accepted_imeis).issubset(set(original_imeis)):
+                raise ValidationError(
+                    f"{line.item_code}: accepted IMEIs must come from the GRN"
+                )
             rejected_serials = [
                 serial for serial in original_serials if serial not in set(accepted_serials)
+            ]
+            rejected_imeis = [
+                imei for imei in original_imeis if imei not in set(accepted_imeis)
             ]
             line.accepted_qty = _d(verdict.accepted_qty)
             line.rejected_qty = _d(verdict.rejected_qty)
             line.qc_status = verdict.result
             line.rejection_reason = verdict.defect_type or line.rejection_reason
             line.serial_numbers = accepted_serials or None
+            line.imei_numbers = accepted_imeis or None
             rate = _d(line.rate)
             line.amount = (line.accepted_qty * rate) if rate else None
-            if rejected_serials:
+            if rejected_serials or rejected_imeis:
                 await _register_serials(
                     db,
                     receipt,
                     line,
-                    serial_numbers=rejected_serials,
+                    serial_numbers=rejected_serials or rejected_imeis,
                     status=SerialStatus.MAINTENANCE.value,
                     remarks=f"Rejected by inspection {inspection.inspection_no}",
                 )
@@ -4811,14 +4832,31 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     serials = list(data.serial_numbers or (
         receipt_item.serial_numbers if receipt_item else []
     ) or [])
+    imeis = list(data.imei_numbers or (
+        receipt_item.imei_numbers if receipt_item else []
+    ) or [])
+    
+    primary_list = serials
+    if not primary_list and imeis:
+        primary_list = imeis
+
     if item.is_serial_tracked:
         if qty != qty.to_integral_value() or len(serials) != int(qty):
             raise ValidationError(
-                f"Select exactly {int(qty)} serial numbers for this putaway"
+                f"Choose exactly {int(qty)} serial numbers for this putaway"
             )
         if qty != _d(task.qty):
             raise ValidationError(
                 "A serialized putaway cannot be split; place all selected units together"
+            )
+    elif item.is_imei_tracked:
+        if qty != qty.to_integral_value() or len(imeis) != int(qty):
+            raise ValidationError(
+                f"Choose exactly {int(qty)} IMEI numbers for this putaway"
+            )
+        if qty != _d(task.qty):
+            raise ValidationError(
+                "An IMEI-tracked putaway cannot be split; place all selected units together"
             )
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
 
@@ -4834,7 +4872,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     # ledger screen fell back to the units standing in that lot TODAY: every movement
     # that ever touched the lot drew the same first code. Nothing in here needs the
     # balance row; it is keyed on the task, the bin and the lot, all settled above.
-    moved_units = await _place_serials(db, task, target, serials, receipt, receipt_item,
+    moved_units = await _place_serials(db, task, target, primary_list, receipt, receipt_item,
                                        qty=qty)
 
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
@@ -5443,7 +5481,7 @@ async def _movement_units(
     wanted = int(qty)
     if len(names) != wanted:
         raise ValidationError(
-            f"{label}: select exactly {wanted} {noun} for this movement "
+            f"{label}: choose exactly {wanted} {noun} for this movement "
             f"— {len(names)} selected")
 
     scope = _unit_scope_clause(item_id=item.id, warehouse_id=warehouse_id,
@@ -7521,6 +7559,50 @@ def _unit_keys(row, mode: str) -> list[str]:
         if value and value not in seen:
             seen.append(value)
     return seen
+
+
+def _outbound_seed_units(rows, *, item, item_id: int,
+                         batch_id: int | None) -> list[str]:
+    """Which identifiers an auto-raised outward inspection opens with.
+
+    One string per unit this issue line sent out, named the way the issue
+    picker named it (`_unit_mode` currency) — the same value the issue hands
+    back as `unit_keys`, so the QC modal opens with everything accepted and
+    the save validates against the same set.
+
+    Every kind is seeded, not just serial-tracked lines: seeding only those
+    left every IMEI / asset / consumable line stored with no units, which the
+    picker reads as "every unit rejected" (an untouched `None` would mean no
+    decision, but a stored empty list means rejected).
+
+    A row carrying none of its mode's identifiers still contributes its first
+    recorded one — an IMEI-tracked row with no IMEI recorded still has its
+    code in `serial_number`, and an inspection seeded with nothing for it
+    reads as rejected by default. Pure, so it is pinned without a database.
+    """
+    mode = _unit_mode(item)
+    seen: set[int] = set()
+    names: list[str] = []
+    for row in rows:
+        row_id = getattr(row, "id", None)
+        if row_id in seen:
+            continue
+        if getattr(row, "item_id", None) != item_id:
+            continue
+        if batch_id and getattr(row, "batch_id", None) != batch_id:
+            continue
+        seen.add(row_id)
+        marker = next(iter(_unit_keys(row, mode)), None)
+        if marker is None:
+            marker = next((value for value in (
+                getattr(row, "serial_number", None),
+                getattr(row, "imei", None),
+                getattr(row, "asset_code", None),
+                getattr(row, "consumable_code", None),
+            ) if value), None)
+        if marker and marker not in names:
+            names.append(marker)
+    return names
 
 
 async def _reserve_issue_serials(
@@ -10382,7 +10464,7 @@ async def _raise_outbound_inspection_for(
         item = await _item_snapshot(db, line.item_id)
         if not item.requires_qi:
             continue
-            
+
         # FIXED 2026-08-21 — one STRING per unit, seeded once.
         #
         # This appended a dict per entry, but `serial_numbers` is a list of strings
@@ -10400,22 +10482,12 @@ async def _raise_outbound_inspection_for(
         #
         # Deduplicated on the unit's own id, and named by whichever identifier it
         # actually carries — the same value the issue hands the picker, so QC and the
-        # issue speak about a unit with one name.
-        line_serials = []
-        if item.is_serial_tracked:
-            seen_units: set[int] = set()
-            for s_row in issued_serials.values():
-                if s_row.id in seen_units:
-                    continue
-                if s_row.item_id != line.item_id:
-                    continue
-                if line.batch_id and s_row.batch_id != line.batch_id:
-                    continue
-                seen_units.add(s_row.id)
-                marker = (s_row.serial_number or s_row.asset_code
-                          or s_row.consumable_code)
-                if marker:
-                    line_serials.append(marker)
+        # issue speak about a unit with one name. Every kind is seeded: gating this on
+        # `is_serial_tracked` left IMEI / asset / consumable lines with no units
+        # stored, which the picker reads as "every unit rejected".
+        line_serials = _outbound_seed_units(
+            issued_serials.values(), item=item, item_id=line.item_id,
+            batch_id=line.batch_id)
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.id, item_id=line.item_id,
@@ -11872,7 +11944,7 @@ async def _apply_consignment_packages(
                     raise ValidationError(f"{package_no}: {item.code} serial quantity must be whole")
                 if len(serials) != int(qty):
                     raise ValidationError(
-                        f"{package_no}: select exactly {int(qty)} serials for {item.code}"
+                        f"{package_no}: choose exactly {int(qty)} serials for {item.code}"
                     )
 
             key = (source_issue.id, item.id, batch_id)
@@ -19747,7 +19819,8 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
     # suppressed here instead, which keeps the row's key and its code intact.
     tracked = {r[0] for r in (await db.execute(
         select(Item.id).where(Item.id.in_(item_ids),
-                              Item.is_serial_tracked.is_(True))
+                              or_(Item.is_serial_tracked.is_(True),
+                                  Item.is_imei_tracked.is_(True)))
     )).all()}
 
     # Keyed down to the BIN and the BATCH, not just the stocking point: "which units
@@ -22798,6 +22871,30 @@ async def employee_options(db: AsyncSession, search: str | None = None) -> list[
     return [{"id": r.id, "code": r.emp_code, "name": r.full_name} for r in rows]
 
 
+async def employee_destination(db: AsyncSession, employee_id: int) -> dict:
+    """Where a direct issue goes when it names this employee.
+
+    Same answer `_issue_destination` falls back to on a saved issue — the
+    employee's own office — plus the SAC and vehicle the form shows beside it,
+    so a direct issue fills Destination / SAC / Vehicle on Issued-to select
+    instead of waiting for an indent that is never coming.
+    """
+    from app.platform.hcm.models import HcmEmployee
+
+    employee = await db.get(HcmEmployee, employee_id)
+    if employee is None:
+        raise NotFoundError(f"Employee {employee_id} not found")
+    office_name = employee.office_name
+    return {
+        "issued_to_id": employee.id,
+        "issued_to_name": employee.full_name,
+        "destination_office_id": employee.office_id,
+        "destination_office_name": office_name,
+        "destination_office_sac": await _office_sac(db, employee.office_id),
+        "vehicle_number": _vehicle_from_office_name(office_name),
+    }
+
+
 async def project_options(db: AsyncSession, search: str | None = None) -> list[dict]:
     from app.shared.models.master import Project
     stmt = select(Project)
@@ -23683,11 +23780,11 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                     f"{label}: {', '.join(stray[:5])} did not go out on this issue line")
             if len(serials) != int(accepted):
                 raise ValidationError(
-                    f"{label}: select exactly {int(accepted)} accepted units "
+                    f"{label}: choose exactly {int(accepted)} accepted units "
                     f"({len(serials)} selected)")
         elif item.is_serial_tracked and len(serials) != int(accepted):
             raise ValidationError(
-                f"{label}: select exactly {int(accepted)} accepted serial numbers")
+                f"{label}: choose exactly {int(accepted)} accepted serial numbers")
 
         reason = line.rejection_reason or line.defect_type
         if rejected > ZERO and not (reason or "").strip():

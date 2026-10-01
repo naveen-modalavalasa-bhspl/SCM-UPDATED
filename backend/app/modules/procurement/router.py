@@ -31,8 +31,9 @@ from app.modules.procurement.schemas import (
     ReqStatsOut, RFQStatsOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
     POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
-    PORevisionOut, POVendorResponseIn, QuoteListRow,
-    QuoteOtpOut, QuoteOut, QuoteSubmit, ReqCreate, ReqFromMRsIn, ReqListRow,
+    PORevisionOut, POVendorResponseIn, QuoteChangeDecisionIn, QuoteChangeRequestIn,
+    QuoteChangeRequestOut, QuoteCommentIn, QuoteCommentOut, QuoteListRow,
+    QuoteOtpOut, QuoteOut, QuoteSubmit, QuoteUnfreezeIn, ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate,
     SupplierCreate, SupplierLoginIn, SupplierOut, SupplierUpdate, VendorAccountIn,
     LedgerRow,
@@ -526,6 +527,76 @@ async def close_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
     return await service.close_rfq(db, rfq_id, user)
 
 
+# ── Freeze Prices (2026-09-26) ──────────────────────────────────────────────
+
+@rfqs.post("/{rfq_id}/freeze", response_model=RFQOut)
+async def freeze_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.RFQ_APPROVE))):
+    """Close the tender to pricing: no supplier may quote, re-quote or accept a
+    change request; the buyer may award and raise POs. `rfq.approve`, not
+    `rfq.create` — closing prices is the signer's act, like publishing was."""
+    return await service.freeze_rfq(db, rfq_id, user)
+
+
+@rfqs.post("/{rfq_id}/unfreeze", response_model=RFQOut)
+async def unfreeze_rfq(rfq_id: int, body: QuoteUnfreezeIn,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.RFQ_APPROVE))):
+    """Reopen bidding. The reason is required and audited."""
+    return await service.unfreeze_rfq(db, rfq_id, body.reason, user)
+
+
+# ── Quotation change requests, price trail and chat (2026-09-26) ───────────
+
+@rfqs.get("/quotations/{quote_id}/change-requests",
+          response_model=list[QuoteChangeRequestOut])
+async def quote_change_requests(quote_id: int,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.RFQ_VIEW))):
+    """The buyer's price trail on one quotation, oldest last."""
+    return await service.list_quote_change_requests(db, quote_id, user=user)
+
+
+@rfqs.post("/quotations/{quote_id}/change-requests",
+           response_model=QuoteChangeRequestOut, status_code=201)
+async def propose_quote_change(quote_id: int, body: QuoteChangeRequestIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.RFQ_CREATE))):
+    """Ask the supplier for better numbers. Nothing is applied until THEY accept."""
+    return await service.propose_quote_change(db, quote_id, body, user)
+
+
+@rfqs.post("/quotations/{quote_id}/change-requests/{cr_id}/withdraw",
+           response_model=QuoteChangeRequestOut)
+async def withdraw_quote_change(quote_id: int, cr_id: int,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.RFQ_CREATE))):
+    return await service.withdraw_quote_change(db, quote_id, cr_id, user)
+
+
+@rfqs.get("/quotations/{quote_id}/price-trail", response_model=list[dict])
+async def quote_price_trail(quote_id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.RFQ_VIEW))):
+    """One version line per change to this quotation — the ONE trail every
+    screen reads, buyer and supplier alike."""
+    return await service.quote_price_trail(db, quote_id, user=user)
+
+
+@rfqs.get("/quotations/{quote_id}/comments", response_model=list[QuoteCommentOut])
+async def quotation_comments(quote_id: int, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.quotation_comments(db, quote_id, user=user)
+
+
+@rfqs.post("/quotations/{quote_id}/comments", response_model=QuoteCommentOut,
+           status_code=201)
+async def add_quotation_comment(quote_id: int, body: QuoteCommentIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.RFQ_CREATE))):
+    """The buyer posts into the thread beside the paper. Append-only."""
+    return await service.add_quotation_comment(db, quote_id, body.message, user)
+
+
 @rfqs.post("/{rfq_id}/cancel", response_model=RFQOut)
 async def cancel_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
                      user=Depends(require_permission(perms.RFQ_CREATE))):
@@ -781,6 +852,67 @@ async def vendor_submit_quotation(rfq_id: int, body: QuoteSubmit,
                                   account=Depends(get_current_vendor)):
     return await service.vendor_submit_quotation(
         db, account.vendor_id, rfq_id, body)
+
+
+# ── The supplier's side of negotiation (2026-09-26) ────────────────────────
+
+@supplier.get("/rfqs/{rfq_id}/quotation/change-requests",
+              response_model=list[QuoteChangeRequestOut])
+async def vendor_quote_change_requests(rfq_id: int,
+                                       db: AsyncSession = Depends(get_db),
+                                       account=Depends(get_current_vendor)):
+    """The buyer's asks on this supplier's quotation, oldest last."""
+    return await service.vendor_list_quote_change_requests(
+        db, account.vendor_id, rfq_id)
+
+
+@supplier.post("/rfqs/{rfq_id}/quotation/change-requests/{cr_id}/accept",
+               response_model=QuoteOut)
+async def vendor_accept_quote_change(rfq_id: int, cr_id: int,
+                                     body: QuoteChangeDecisionIn,
+                                     db: AsyncSession = Depends(get_db),
+                                     account=Depends(get_current_vendor)):
+    """Take the buyer's numbers. THIS re-prices the quotation."""
+    await quote_otp.verify(db, rfq_id, account.vendor_id, body.otp_code)
+    return await service.accept_quote_change(
+        db, account.vendor_id, cr_id, body.note, body.counter_lines)
+
+
+@supplier.get("/rfqs/{rfq_id}/quotation/price-trail", response_model=list[dict])
+async def vendor_quote_price_trail(rfq_id: int, db: AsyncSession = Depends(get_db),
+                                    account=Depends(get_current_vendor)):
+    """The supplier reads the SAME price trail as the buyer — ONE trail, ONE writer."""
+    quote = await service.vendor_get_quotation(db, account.vendor_id, rfq_id)
+    return await service.quote_price_trail(db, quote.id)
+
+
+@supplier.post("/rfqs/{rfq_id}/quotation/change-requests/{cr_id}/decline",
+               response_model=QuoteOut)
+async def vendor_decline_quote_change(rfq_id: int, cr_id: int,
+                                      body: QuoteChangeDecisionIn,
+                                      db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    """Say no. The quotation stands exactly as the supplier priced it."""
+    return await service.decline_quote_change(
+        db, account.vendor_id, cr_id, body.note)
+
+
+@supplier.get("/rfqs/{rfq_id}/quotation/comments",
+              response_model=list[QuoteCommentOut])
+async def vendor_quotation_comments(rfq_id: int,
+                                    db: AsyncSession = Depends(get_db),
+                                    account=Depends(get_current_vendor)):
+    return await service.vendor_quotation_comments(db, account.vendor_id, rfq_id)
+
+
+@supplier.post("/rfqs/{rfq_id}/quotation/comments",
+               response_model=QuoteCommentOut, status_code=201)
+async def add_vendor_quotation_comment(rfq_id: int, body: QuoteCommentIn,
+                                       db: AsyncSession = Depends(get_db),
+                                       account=Depends(get_current_vendor)):
+    """The supplier posts into the same thread. Vendor id from the token."""
+    return await service.add_vendor_quotation_comment(
+        db, account.vendor_id, rfq_id, body.message)
 
 
 # --------------------------------------------------------------------------- #

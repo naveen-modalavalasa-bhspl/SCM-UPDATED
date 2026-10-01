@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, Loader2, X } from "lucide-react";
 import { Button } from "@/shared/components";
 import type { ImportPreview, ImportRow } from "../api";
@@ -21,10 +21,11 @@ import type { ImportPreview, ImportRow } from "../api";
  */
 
 /** A cell the sheet could not answer, with the master's real values to pick from. */
-function Fix({ label, raw, message, options, value, onPick }: {
+function Fix({ label, raw, message, hint, options, value, onPick }: {
   label: string;
   raw: string | null;
   message: string;
+  hint?: string;
   options: { id: number; label: string; code: string }[];
   value: number | null;
   onPick: (id: number | null) => void;
@@ -50,8 +51,9 @@ function Fix({ label, raw, message, options, value, onPick }: {
             {raw}
           </span>
         )}
-        <span className="text-xs text-muted">{message}</span>
+        <span className="text-sm text-ink">{message}</span>
       </div>
+      {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}
 
       {options.length > 0 ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -91,22 +93,32 @@ function Fix({ label, raw, message, options, value, onPick }: {
   );
 }
 
-export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
+export function ImportReview({
+  preview, label, busy, onCommit, onCancel, initial, onChange, draftNote,
+}: {
   preview: ImportPreview;
   /** The master's name, for the heading. */
   label: string;
   busy: boolean;
   onCommit: (rows: ImportRow[]) => void;
   onCancel: () => void;
+  /** Picks and edits from a resumed draft. */
+  initial?: { picked: Record<string, number>; edits: Record<string, unknown> };
+  /** Every change, so the caller can keep the draft — a day of fixing must survive
+   *  an expired login, a refresh or a closed tab. */
+  onChange?: (picked: Record<string, number>, edits: Record<string, unknown>) => void;
+  /** "Draft saved 3:41 pm", shown beside the heading. */
+  draftNote?: string;
 }) {
   // The fixes, keyed "<row>:<field>". Held here rather than written back into the
   // preview so cancelling leaves the uploaded file untouched.
-  const [picked, setPicked] = useState<Record<string, number>>({});
+  const [picked, setPicked] = useState<Record<string, number>>(initial?.picked ?? {});
   // Any cell in a problem row can be repaired here — not only a mapped lookup.
   // This is deliberately a small spreadsheet-like editor rather than another form
   // whose fields vary by master.
-  const [edits, setEdits] = useState<Record<string, unknown>>({});
+  const [edits, setEdits] = useState<Record<string, unknown>>(initial?.edits ?? {});
   const [showAll, setShowAll] = useState(false);
+  useEffect(() => { onChange?.(picked, edits); }, [picked, edits]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nameField = preview.columns.find((c) => c.field === "name")?.field;
   const troubled = preview.rows.filter((r) => r.problems.length > 0);
@@ -151,6 +163,7 @@ export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
               {preview.summary.blocked} need{preview.summary.blocked === 1 ? "s" : ""} attention
             </span>
             . Nothing is saved until you press Save.
+            {draftNote && <span className="ml-1 text-ok">{draftNote}</span>}
           </p>
         </div>
         <div className="flex gap-2">
@@ -197,6 +210,7 @@ export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
                     label={problem.label ?? "This row"}
                     raw={problem.raw}
                     message={problem.message}
+                    hint={preview.columns.find((c) => c.field === problem.field)?.hint}
                     options={problem.field
                       ? (problem.candidates.length
                           ? problem.candidates
@@ -228,7 +242,8 @@ export function ImportReview({ preview, label, busy, onCommit, onCancel }: {
                       ? preview.options[column.field] ?? []
                       : column.type === "boolean" ? ["true", "false"] : column.choices;
                     return (
-                      <label key={column.field} className="min-w-0 text-xs text-muted">
+                      <label key={column.field} className="min-w-0 text-xs text-muted"
+                             title={column.hint}>
                         {column.label}{column.required ? " *" : ""}
                         {choices.length > 0 ? (
                           <select

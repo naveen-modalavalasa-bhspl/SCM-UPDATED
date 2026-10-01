@@ -14,9 +14,10 @@ from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
-    MASTERS, UOM_SUGGESTIONS, check_hsn_code, hsn_out, packaging_breakdown,
+    MASTERS, UOM_SUGGESTIONS, build_item_code, build_item_prefix,
+    check_hsn_code, hsn_out, packaging_breakdown, peek_item_serial,
 )
-from app.shared.models.master import HsnCode, Item, ItemSpec, Uom
+from app.shared.models.master import GeneralName, HsnCode, Item, ItemCategory, ItemSpec, Uom
 
 router = build_router(MASTERS)
 
@@ -212,8 +213,7 @@ async def resolve_hsn_code(
     if existing is not None:
         return hsn_out(existing)
 
-    row = HsnCode(code=data.code, cgst_rate=0, sgst_rate=0, igst_rate=0,
-                  cess_rate=0, is_active=True)
+    row = HsnCode(code=data.code, gst_rate=0, is_active=True)
     db.add(row)
     await db.flush()
 
@@ -318,6 +318,28 @@ router.include_router(_specs)
 # and has no session. The form asks for it here instead, and writes it back through
 # `ItemIn.generate_unit_code` on save.
 _tracking = APIRouter(tags=["masters"])
+
+
+@_tracking.get("/api/items/next-code")
+async def next_item_code(category_id: int, general_name_id: int,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    """The code a new item is about to get, for the form's preview.
+
+    Read-only and lock-free: the save re-derives the serial under lock, so the
+    preview can be off by one if two people save into the same prefix together.
+    The hint beside the field says exactly that.
+    """
+    category = await db.get(ItemCategory, category_id)
+    general = await db.get(GeneralName, general_name_id)
+    if category is None or category.level != 3:
+        raise ValidationError("Select a Level 3 category first")
+    if general is None:
+        raise ValidationError("Select a general name first")
+    prefix = build_item_prefix(category.path, general.code)
+    serial = await peek_item_serial(db, prefix)
+    return {"prefix": prefix, "next_serial": serial,
+            "preview": build_item_code(category.path, general.code, serial)}
 
 
 @_tracking.get("/api/items/{item_id}/unit-code-tracking")

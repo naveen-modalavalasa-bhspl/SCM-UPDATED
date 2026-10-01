@@ -54,48 +54,57 @@ async def require_unique(db: AsyncSession, model: type, column: str, value: str,
     """
     text = (value or "").strip()
     if not text:
-        raise ValidationError(f"{label} is required")
+        raise ValidationError(f"{label} is empty. Please fill it in.")
     stmt = select(model.id).where(func.lower(getattr(model, column)) == text.lower())
     if scope is not None:
         stmt = stmt.where(scope)
     if getattr(row, "id", None) is not None:
         stmt = stmt.where(model.id != row.id)
     if await db.scalar(stmt) is not None:
-        raise ValidationError(f"{label} '{text}' already exists")
+        raise ValidationError(
+            f"{label} “{text}” is already used by another entry. Use a different one, "
+            "or edit the existing entry instead.")
 
 
 # --------------------------------------------------------------------------- #
 #  Items
 # --------------------------------------------------------------------------- #
-def build_item_prefix(category_path: str, general_code: str, brand_code: str,
-                      manufacturer_code: str) -> str:
-    """The part of an item code that identity decides: 101010-PARACET-DOLO-DOLO."""
+def build_item_prefix(category_path: str, general_code: str) -> str:
+    """The part of an item code that identity decides: 101010-PARACET.
+
+    Brand and manufacturer are deliberately NOT in the code. One general name
+    is sold by several brands, and each of those is a separate item row — they
+    share every part of the code below and differ only in the serial, so the
+    shelf reads one family of items instead of one code per brand.
+    """
     if not re.fullmatch(r"\d{6}", category_path or ""):
-        raise ValidationError("Select a Level 3 category with a six-digit category path")
-    parts = [general_code, brand_code, manufacturer_code]
-    if any(not re.fullmatch(
-        r"[A-Z0-9]+(?:-[A-Z0-9]+)*", (part or "").strip().upper())
-           for part in parts):
         raise ValidationError(
-            "General name, brand and manufacturer codes may contain letters, "
-            "numbers and internal hyphens only"
+            "Category: pick the exact category (Level 3), not a main group above it.")
+    part = (general_code or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]+(?:-[A-Z0-9]+)*", part):
+        raise ValidationError(
+            f"General name code “{general_code}” can use only letters, numbers and a "
+            "hyphen between them. Fix it under Masters › General Names."
         )
-    return "-".join([category_path, *(part.strip().upper() for part in parts)])
+    return f"{category_path}-{part}"
 
 
-def build_item_code(category_path: str, general_code: str, brand_code: str,
-                    manufacturer_code: str, serial: int) -> str:
+def build_item_code(category_path: str, general_code: str, serial: int) -> str:
     """The full item code: identity, then a four-digit serial.
 
-    The serial is what lets one brand and manufacturer carry several items — Dolo
-    650 and Dolo 500 share every other part of the code and differ only here.
+    The serial is what lets one category and general name carry several items —
+    Dolo 650 and Dolo 500 share every other part of the code and differ only
+    here, as do two brands of the same general name.
     """
     if not 1 <= serial <= 9999:
         raise ValidationError(
-            "This brand and manufacturer already have 9999 items in this category")
-    code = f"{build_item_prefix(category_path, general_code, brand_code, manufacturer_code)}-{serial:04d}"
+            "This category and general name already have 9,999 items, the most "
+            "allowed. Use a different general name.")
+    code = f"{build_item_prefix(category_path, general_code)}-{serial:04d}"
     if len(code) > 50:
-        raise ValidationError("Generated item code exceeds 50 characters")
+        raise ValidationError(
+            f"The item code would be “{code}”, longer than 50 characters. Shorten the "
+            "general name's code under Masters › General Names.")
     return code
 
 
@@ -110,6 +119,20 @@ async def next_item_serial(db: AsyncSession, prefix: str) -> int:
     """
     rows = (await db.execute(
         select(Item.serial_no).where(Item.code.like(f"{prefix}-%")).with_for_update()
+    )).scalars().all()
+    return max([r for r in rows if r] or [0]) + 1
+
+
+async def peek_item_serial(db: AsyncSession, prefix: str) -> int:
+    """What `next_item_serial` would hand out, without taking the lock.
+
+    For the item form's code preview only: the save re-reads under lock, so two
+    people creating into the same prefix still serialize there. A preview taken
+    a moment ago may be off by one by the time it is saved — the saved code is
+    the authority, and the preview says so beside itself.
+    """
+    rows = (await db.execute(
+        select(Item.serial_no).where(Item.code.like(f"{prefix}-%"))
     )).scalars().all()
     return max([r for r in rows if r] or [0]) + 1
 
@@ -246,24 +269,35 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     if uom is None:
         missing.append("UOM")
     if missing:
-        raise ValidationError(f"Missing required item fields: {', '.join(missing)}")
+        raise ValidationError(
+            f"These are empty or do not exist: {', '.join(missing)}. "
+            "Pick each one from its list.")
     if hsn is None:
-        raise ValidationError("An HSN code is required")
+        raise ValidationError("HSN code is empty. Pick the HSN code for this item.")
     if data.owner_department_id and (
         owner_department is None or not owner_department.is_active
     ):
-        raise ValidationError("Select an active ownership department from HCM")
+        raise ValidationError(
+            "Ownership department: that department is closed or does not exist. "
+            "Pick an active department from the list.")
     if category.level != 3:
-        raise ValidationError("Select a Level 3 category with a six-digit category path")
+        raise ValidationError(
+            f"Category: “{category.name}” is a main group (Level {category.level}). "
+            "Pick the exact category under it (Level 3).")
     mapping = await db.scalar(select(BrandManufacturer.id).where(
         BrandManufacturer.brand_id == brand.id,
         BrandManufacturer.manufacturer_id == manufacturer.id,
         BrandManufacturer.is_active.is_(True),
     ))
     if mapping is None:
-        raise ValidationError("The selected manufacturer is not mapped to this brand")
+        raise ValidationError(
+            f"Manufacturer: “{manufacturer.name}” is not linked to the brand "
+            f"“{brand.name}”. Pick the right manufacturer, or link them under "
+            "Masters › Brands.")
     if sub_class and sub_class.item_class_id != item_class.id:
-        raise ValidationError("The selected subclass does not belong to this item class")
+        raise ValidationError(
+            f"Item sub class: “{sub_class.name}” belongs to a different item class, "
+            f"not “{item_class.name}”. Pick a sub class of “{item_class.name}”.")
 
     payload = data.model_dump()
     # Not a column on mst_items — it is stored per item code in sys_settings, applied
@@ -273,13 +307,13 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         setattr(item, key, value)
     # The code is assigned once and never regenerated. Re-deriving it on every edit
     # would renumber an item that already has stock, ledger rows and documents
-    # pointing at the code it was created with.
+    # pointing at the code it was created with. Items created before the brand and
+    # manufacturer left the code keep their longer shape for the same reason.
     if item.code is None:
-        prefix = build_item_prefix(category.path, general.code, brand.code,
-                                   manufacturer.code)
+        prefix = build_item_prefix(category.path, general.code)
         item.serial_no = await next_item_serial(db, prefix)
-        item.code = build_item_code(category.path, general.code, brand.code,
-                                    manufacturer.code, item.serial_no)
+        item.code = build_item_code(category.path, general.code,
+                                    item.serial_no)
     item.uom_code = uom.code
     item.hsn_code = hsn.code
     item.category_name = category.name
@@ -348,13 +382,17 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
     """`level` is derived, never supplied: a sub-category is always one below its
     parent, so the tree cannot be saved into an inconsistent depth."""
     if data.parent_id is not None and data.parent_id == cat.id:
-        raise ValidationError("A category cannot be its own parent")
+        raise ValidationError(
+            "Parent: a category cannot be placed under itself. Pick a different parent.")
     parent = await db.get(ItemCategory, data.parent_id) if data.parent_id else None
     if data.parent_id is not None and parent is None:
-        raise ValidationError("Parent category not found")
+        raise ValidationError(
+            "Parent: that category does not exist. Pick one from the list.")
     level = (parent.level or 1) + 1 if parent else 1
     if level > 3:
-        raise ValidationError("Item categories support only Level 1, 2 and 3")
+        raise ValidationError(
+            f"Parent: “{parent.name}” is already at Level 3, the lowest level. "
+            "Pick a Level 1 or Level 2 category as the parent.")
     # Scoped to the parent, not to the level: Furniture must not appear twice among
     # the Level 1 roots, but it may still be a Level 2 under a different Level 1.
     await require_unique(
@@ -371,7 +409,8 @@ async def apply_category(db: AsyncSession, cat: ItemCategory, data: CategoryIn) 
         ))
         segment = f"{int(sibling_max or -1) + 1:02d}"
     if len(segment) != 2 or not segment.isdigit() or not 0 <= int(segment) <= 99:
-        raise ValidationError("Category segment must be two digits from 00 to 99")
+        raise ValidationError(
+            f"Category number “{segment}” must be two digits, 00 to 99, e.g. 07.")
     for key, value in data.model_dump(exclude={"segment_code"}).items():
         setattr(cat, key, value)
     cat.level = level
@@ -395,9 +434,13 @@ def uom_out(u: Uom) -> dict:
 
 
 async def apply_uom(db: AsyncSession, row: Uom, data: UomIn) -> None:
+    # Any case is accepted (“Count”, “count”): the message lists the choices
+    # in readable case, so the check must not then refuse them for it.
+    data.uom_class = (data.uom_class or "").strip().upper()
     if data.uom_class not in {c.value for c in UomClass}:
         raise ValidationError(
-            f"uom_class must be one of {', '.join(c.value for c in UomClass)}")
+            f"Unit type: “{data.uom_class}” is not one of the choices. Pick one of: "
+            f"{', '.join(c.value.title() for c in UomClass)}.")
     await require_unique(db, Uom, "code", data.code, row, "UOM code")
     # Name is scoped to the class: "Ton" as a weight and "Ton" as a refrigeration
     # capacity are different units that happen to share a word.
@@ -452,13 +495,16 @@ def uom_conversion_out(c: UomConversion) -> dict:
 async def apply_uom_conversion(db: AsyncSession, row: UomConversion,
                                data: UomConversionIn) -> None:
     if data.from_uom_id == data.to_uom_id:
-        raise ValidationError("A UOM cannot convert to itself")
+        raise ValidationError(
+            "From unit and To unit are the same. Pick two different units.")
     if data.factor <= 0:
-        raise ValidationError("Conversion factor must be greater than zero")
+        raise ValidationError(
+            f"Conversion factor must be more than 0. You typed {data.factor}.")
     from_uom = await db.get(Uom, data.from_uom_id)
     to_uom = await db.get(Uom, data.to_uom_id)
     if from_uom is None or to_uom is None:
-        raise ValidationError("Both units of measure must exist")
+        raise ValidationError(
+            "From unit or To unit does not exist. Pick both from the list.")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
     # Attach the loaded rows to the relationships. Serialising a brand-new row would
@@ -520,16 +566,19 @@ def warehouse_out(w: Warehouse) -> dict:
 async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> None:
     """Snapshot facility, office and incharge names so the warehouse list renders from
     one query instead of joining three HCM mirrors."""
+    # Any case is accepted (“Count”, “count”): the message lists the choices
+    # in readable case, so the check must not then refuse them for it.
+    data.warehouse_type = (data.warehouse_type or "").strip().upper()
     if data.warehouse_type not in {t.value for t in WarehouseType}:
         raise ValidationError(
-            f"warehouse_type must be one of "
-            f"{', '.join(t.value for t in WarehouseType)}")
+            f"Warehouse type: “{data.warehouse_type}” is not one of the choices. "
+            f"Pick one of: {', '.join(t.value for t in WarehouseType)}.")
     facility = await db.get(HcmFacility, data.facility_id) if data.facility_id else None
     if data.facility_id is not None and facility is None:
-        raise ValidationError("Facility not found")
+        raise ValidationError("Facility: that facility does not exist. Pick one from the list.")
     incharge = await db.get(HcmEmployee, data.incharge_id) if data.incharge_id else None
     if data.incharge_id is not None and incharge is None:
-        raise ValidationError("Incharge employee not found")
+        raise ValidationError("In-charge: that employee does not exist. Pick one from the list.")
 
     for key, value in data.model_dump().items():
         setattr(w, key, value)
@@ -620,8 +669,8 @@ async def _resolve_storage_type(db: AsyncSession, code: str) -> int | None:
             return int(row_id)
     live = sorted((c or "") for _i, c, active in rows if active)
     raise ValidationError(
-        f"bin_type must be one of {', '.join(live)} — add it under "
-        f"Warehouse > Masters > Storage types if this site has one.")
+        f"Location type: “{code}” is not one of the choices. Pick one of: "
+        f"{', '.join(live)} — or add it under Warehouse › Masters › Storage types.")
 
 
 async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
@@ -629,15 +678,17 @@ async def apply_bin(db: AsyncSession, b: Bin, data: BinIn) -> None:
     cannot be saved into a depth that disagrees with its own ancestry."""
     storage_type_id = await _resolve_storage_type(db, data.bin_type)
     if await db.get(Warehouse, data.warehouse_id) is None:
-        raise ValidationError("Warehouse not found")
+        raise ValidationError("Warehouse: that warehouse does not exist. Pick one from the list.")
     if data.parent_id is not None and data.parent_id == b.id:
-        raise ValidationError("A bin cannot be its own parent")
+        raise ValidationError("Parent: a location cannot be placed inside itself.")
 
     parent = await db.get(Bin, data.parent_id) if data.parent_id else None
     if data.parent_id is not None and parent is None:
-        raise ValidationError("Parent bin not found")
+        raise ValidationError("Parent: that location does not exist. Pick one from the list.")
     if parent is not None and parent.warehouse_id != data.warehouse_id:
-        raise ValidationError("A bin's parent must be in the same warehouse")
+        raise ValidationError(
+            f"Parent: “{parent.code}” is in a different warehouse. Pick a parent "
+            "location in the same warehouse.")
     await _reject_bin_cycle(db, b, parent)
 
     for key, value in data.model_dump().items():
@@ -657,7 +708,9 @@ async def _reject_bin_cycle(db: AsyncSession, b: Bin, parent) -> None:
     seen, node = set(), parent
     while node is not None:
         if node.id == b.id:
-            raise ValidationError("That parent would create a bin loop")
+            raise ValidationError(
+                "Parent: that location is already inside this one, so it cannot also "
+                "be its parent. Pick a different parent.")
         if node.id in seen:
             return
         seen.add(node.id)
@@ -686,7 +739,9 @@ def project_out(p: Project) -> dict:
 
 async def apply_project(db: AsyncSession, p: Project, data: ProjectIn) -> None:
     if data.start_date and data.end_date and data.end_date < data.start_date:
-        raise ValidationError("end_date cannot be before start_date")
+        raise ValidationError(
+            f"End date {data.end_date:%d-%m-%Y} is before start date "
+            f"{data.start_date:%d-%m-%Y}. Check both dates.")
     office = await db.get(HcmOffice, data.office_id) if data.office_id else None
     for key, value in data.model_dump().items():
         setattr(p, key, value)
@@ -808,10 +863,10 @@ async def apply_vendor_item(db: AsyncSession, row: VendorItem,
     """
     vendor = await db.get(Vendor, data.vendor_id)
     if vendor is None:
-        raise ValidationError("That vendor does not exist")
+        raise ValidationError("Vendor: that vendor does not exist. Pick one from the list.")
     item = await db.get(Item, data.item_id)
     if item is None:
-        raise ValidationError("That item does not exist")
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
 
     clash = (await db.execute(
         select(VendorItem).where(VendorItem.vendor_id == data.vendor_id,
@@ -894,7 +949,8 @@ async def apply_general_name(db: AsyncSession, row: GeneralName,
         select(Brand).where(Brand.id.in_(wanted))
     )).scalars().all() if wanted else []
     if len(rows) != len(wanted):
-        raise ValidationError("One of the selected brands does not exist")
+        raise ValidationError(
+            "Brands: one of the brands does not exist any more. Pick them again from the list.")
 
     for key, value in data.model_dump(exclude={"brand_ids"}).items():
         setattr(row, key, value)
@@ -956,7 +1012,9 @@ async def apply_brand(db: AsyncSession, row: Brand, data: BrandIn) -> None:
         select(Manufacturer).where(Manufacturer.id.in_(wanted))
     )).scalars().all() if wanted else []
     if len(rows) != len(wanted):
-        raise ValidationError("One of the selected manufacturers does not exist")
+        raise ValidationError(
+            "Manufacturers: one of the manufacturers does not exist any more. Pick them "
+            "again from the list.")
 
     for key, value in data.model_dump(exclude={"manufacturer_ids"}).items():
         setattr(row, key, value)
@@ -1005,7 +1063,7 @@ async def apply_brand_manufacturer(
     brand = await db.get(Brand, data.brand_id)
     manufacturer = await db.get(Manufacturer, data.manufacturer_id)
     if not brand or not manufacturer:
-        raise ValidationError("Brand and manufacturer are required")
+        raise ValidationError("Brand and Manufacturer: pick both from their lists.")
     row.brand_id, row.brand_code, row.brand_name = brand.id, brand.code, brand.name
     row.manufacturer_id = manufacturer.id
     row.manufacturer_code, row.manufacturer_name = manufacturer.code, manufacturer.name
@@ -1059,7 +1117,7 @@ async def apply_item_sub_class(
 ) -> None:
     item_class = await db.get(ItemClass, data.item_class_id)
     if not item_class:
-        raise ValidationError("Item class not found")
+        raise ValidationError("Item class: that item class does not exist. Pick one from the list.")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
     row.item_class_code, row.item_class_name = item_class.code, item_class.name
@@ -1178,15 +1236,22 @@ def attribute_out(a: Attribute) -> dict:
 
 
 async def apply_attribute(db: AsyncSession, row: Attribute, data: AttributeIn) -> None:
+    # Any case is accepted (“Count”, “count”): the message lists the choices
+    # in readable case, so the check must not then refuse them for it.
+    data.data_type = (data.data_type or "").strip().upper()
     if data.data_type not in {t.value for t in AttributeDataType}:
         raise ValidationError(
-            f"data_type must be one of {', '.join(t.value for t in AttributeDataType)}")
+            f"Value type: “{data.data_type}” is not one of the choices. Pick one of: "
+            f"{', '.join(t.value for t in AttributeDataType)}.")
     # A LIST attribute with no options would render an empty dropdown nobody can use.
     if data.data_type == AttributeDataType.LIST.value and not data.allowed_values:
-        raise ValidationError("A LIST attribute needs at least one allowed value")
+        raise ValidationError(
+            "Allowed values is empty. A LIST attribute needs the choices people can "
+            "pick, separated by commas, e.g. Red, Blue, Green.")
     uom = await db.get(Uom, data.uom_id) if data.uom_id else None
     if data.uom_id is not None and uom is None:
-        raise ValidationError("Unit of measure not found")
+        raise ValidationError(
+            "Unit of measure: that unit does not exist. Pick one from the list.")
     await require_unique(db, Attribute, "name", data.name, row, "An attribute named")
     await require_unique(db, Attribute, "code", data.code, row, "Attribute code")
     for key, value in data.model_dump().items():
@@ -1217,7 +1282,8 @@ def spec_out(s: Spec) -> dict:
 async def apply_spec(db: AsyncSession, row: Spec, data: SpecIn) -> None:
     uom = await db.get(Uom, data.uom_id) if data.uom_id else None
     if data.uom_id is not None and uom is None:
-        raise ValidationError("Unit of measure not found")
+        raise ValidationError(
+            "Unit of measure: that unit does not exist. Pick one from the list.")
     await require_unique(db, Spec, "name", data.name, row, "A spec named")
     await require_unique(db, Spec, "code", data.code, row, "Spec code")
     for key, value in data.model_dump().items():
@@ -1249,19 +1315,24 @@ async def apply_category_tag(db: AsyncSession, row: CategoryTag,
     """Snapshots the category and the tagged thing so the tagging list reads without
     joining four tables — the target table changes with tag_type, so a join would
     have to be written three times."""
+    # Any case is accepted (“Count”, “count”): the message lists the choices
+    # in readable case, so the check must not then refuse them for it.
+    data.tag_type = (data.tag_type or "").strip().upper()
     if data.tag_type not in {t.value for t in CategoryTagType}:
         raise ValidationError(
-            f"tag_type must be one of {', '.join(t.value for t in CategoryTagType)}")
+            f"Tag type: “{data.tag_type}” is not one of the choices. Pick one of: "
+            f"{', '.join(t.value for t in CategoryTagType)}.")
     category = await db.get(ItemCategory, data.category_id)
     if category is None:
-        raise ValidationError("Category not found")
+        raise ValidationError("Category: that category does not exist. Pick one from the list.")
 
     model = {CategoryTagType.ATTRIBUTE.value: Attribute,
              CategoryTagType.SPEC.value: Spec,
              CategoryTagType.FEATURE.value: Feature}[data.tag_type]
     target = await db.get(model, data.tag_id)
     if target is None:
-        raise ValidationError(f"{data.tag_type.title()} not found")
+        raise ValidationError(
+            f"Tag: that {data.tag_type.lower()} does not exist. Pick one from the list.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1294,10 +1365,10 @@ async def apply_item_group(db: AsyncSession, row: ItemGroup,
 
     item = await db.get(Item, data.item_id)
     if item is None:
-        raise ValidationError("Item not found")
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
     group = await db.get(UserGroup, data.group_id)
     if group is None:
-        raise ValidationError("User group not found")
+        raise ValidationError("Group: that group does not exist. Pick one from the list.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1358,18 +1429,19 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
     below it. The rungs are stored, never the running totals — a stored total is one
     edit away from disagreeing with its own parts."""
     if data.level < 1:
-        raise ValidationError("Packaging levels start at 1")
+        raise ValidationError(f"Pack level must be 1 or more. You typed {data.level}.")
     if data.quantity <= 0:
-        raise ValidationError("Quantity must be greater than zero")
+        raise ValidationError(f"Quantity must be more than 0. You typed {data.quantity}.")
     item = await db.get(Item, data.item_id)
     if item is None:
-        raise ValidationError("Item not found")
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
     package = await db.get(Packaging, data.package_id)
     if package is None:
-        raise ValidationError("Package not found")
+        raise ValidationError("Package: that package does not exist. Pick one from the list.")
     if data.level > 1 and not float(data.quantity).is_integer():
         raise ValidationError(
-            "Levels above 1 must contain a whole number of the package below")
+            f"Quantity: level {data.level} must hold a whole number of the pack below "
+            f"it, e.g. 12 — not {data.quantity}.")
 
     # A ladder with a missing rung cannot be multiplied up, so a level may only be
     # added directly on top of one that already exists.
@@ -1380,7 +1452,8 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
             ItemPackaging.is_active.is_(True)))
         if below is None:
             raise ValidationError(
-                f"Add level {data.level - 1} before level {data.level}")
+                f"Pack level {data.level - 1} does not exist yet. Add level "
+                f"{data.level - 1} before level {data.level}.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1412,7 +1485,8 @@ async def validate_item_packaging_deactivate(
     ))
     if higher is not None:
         raise ValidationError(
-            "Remove the highest packaging level first")
+            "There is a bigger pack level above this one. Remove the highest level "
+            "first, then this one.")
 
 
 async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
@@ -1508,22 +1582,26 @@ def item_component_out(c: ItemComponent) -> dict:
 async def apply_item_component(db: AsyncSession, row: ItemComponent,
                                data: ItemComponentIn) -> None:
     if data.quantity <= 0:
-        raise ValidationError("Quantity must be greater than zero")
+        raise ValidationError(f"Quantity must be more than 0. You typed {data.quantity}.")
     # A kit inside itself would make any expansion of its contents recurse forever.
     if data.item_id == data.component_item_id:
-        raise ValidationError("A kit cannot contain itself")
+        raise ValidationError(
+            "Component item is the kit itself. A kit cannot contain itself — pick a "
+            "different item.")
     kit = await db.get(Item, data.item_id)
     if kit is None:
-        raise ValidationError("Item not found")
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
     if not kit.has_components:
         raise ValidationError(
             "Turn on Has Components / Kit and save the item before adding components")
     component = await db.get(Item, data.component_item_id)
     if component is None:
-        raise ValidationError("Component item not found")
+        raise ValidationError(
+            "Component item: that item does not exist. Pick one from the list.")
     uom = await db.get(Uom, data.uom_id) if data.uom_id else None
     if data.uom_id is not None and uom is None:
-        raise ValidationError("Unit of measure not found")
+        raise ValidationError(
+            "Unit of measure: that unit does not exist. Pick one from the list.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1627,46 +1705,12 @@ class HsnIn(BaseModel):
     # the importer reads it to tell a fixed-width code column from free text.
     code: str = Field(min_length=HSN_CODE_LENGTH, max_length=HSN_CODE_LENGTH)
     description: str | None = Field(None, max_length=300)
-    cgst_rate: float = Field(0, ge=0, le=100)
-    sgst_rate: float = Field(0, ge=0, le=100)
-    igst_rate: float = Field(0, ge=0, le=100)
-    cess_rate: float = Field(0, ge=0, le=100)
+    # The single GST rate for this classification. The within-state split (CGST +
+    # SGST) and the across-state rate (IGST) are the same number on two routes, so
+    # they are one field here and documents derive the halves when they need them.
+    gst_rate: float = Field(0, ge=0, le=100)
     effective_from: date | None = None
     is_active: bool = True
-
-    @model_validator(mode="before")
-    @classmethod
-    def _complete_the_gst_split(cls, data):
-        """Fill in the GST figures a sheet commonly leaves out, from the ones it gave.
-
-        Only a rate that was NOT SUPPLIED is derived; a stated figure is never
-        overwritten, so a contradiction is still reported rather than repaired.
-        Tariff lists are routinely published with only the IGST column, and CGST and
-        SGST are by law each half of it — refusing such a row, or saving it as 0 + 0
-        and undertaxing every intra-state sale, are both worse than the arithmetic.
-        """
-        if not isinstance(data, dict):
-            return data
-        data = dict(data)
-
-        def number(key):
-            try:
-                return None if _is_blank(data.get(key)) else float(data[key])
-            except (TypeError, ValueError):
-                return None                       # left for the field to refuse
-
-        blank = {k: _is_blank(data.get(k)) for k in ("cgst_rate", "sgst_rate", "igst_rate")}
-        cgst, sgst, igst = number("cgst_rate"), number("sgst_rate"), number("igst_rate")
-        # CGST and SGST are always equal, so either one states the other.
-        if blank["cgst_rate"] and sgst is not None:
-            data["cgst_rate"], cgst, blank["cgst_rate"] = sgst, sgst, False
-        elif blank["sgst_rate"] and cgst is not None:
-            data["sgst_rate"], sgst, blank["sgst_rate"] = cgst, cgst, False
-        if blank["cgst_rate"] and blank["sgst_rate"] and igst is not None:
-            data["cgst_rate"] = data["sgst_rate"] = round(igst / 2, 3)
-        elif blank["igst_rate"] and cgst is not None and sgst is not None:
-            data["igst_rate"] = round(cgst + sgst, 3)
-        return data
 
     @field_validator("code", mode="before")
     @classmethod
@@ -1681,36 +1725,18 @@ class HsnIn(BaseModel):
         text = str(value).strip()
         return text or None
 
-    @field_validator("igst_rate")
-    @classmethod
-    def _igst_matches_the_split(cls, value, info):
-        # GST is split as CGST + SGST within a state and charged as IGST across
-        # states, so the two routes must come to the same number. They disagreeing
-        # means one of them is wrong, and the document would tax the same sale
-        # differently by destination. Checked on the schema, not in apply_hsn, so an
-        # import preview reports it against the row instead of the Save failing.
-        cgst, sgst = info.data.get("cgst_rate"), info.data.get("sgst_rate")
-        if value and cgst is not None and sgst is not None \
-                and round(cgst + sgst, 3) != round(value, 3):
-            raise PydanticCustomError(
-                "gst_split",
-                "CGST {cgst}% + SGST {sgst}% = {split}%, which must equal IGST {igst}%",
-                {"cgst": _pct(cgst), "sgst": _pct(sgst),
-                 "split": _pct(round(cgst + sgst, 3)), "igst": _pct(value)})
-        return value
 
 
 def hsn_out(h: HsnCode) -> dict:
     return {"id": h.id, "code": h.code, "description": h.description,
-            "cgst_rate": _num(h.cgst_rate), "sgst_rate": _num(h.sgst_rate),
-            "igst_rate": _num(h.igst_rate), "cess_rate": _num(h.cess_rate),
+            "gst_rate": _num(h.gst_rate),
             "effective_from": h.effective_from.isoformat() if h.effective_from else None,
             "is_active": h.is_active}
 
 
 async def apply_hsn(db: AsyncSession, row: HsnCode, data: HsnIn) -> None:
-    # The 0-100 range and CGST + SGST = IGST are enforced by HsnIn itself, so the
-    # form, the API and every import door refuse the same rows in the same words.
+    # The 0-100 range is enforced by HsnIn itself, so the form, the API and every
+    # import door refuse the same rows in the same words.
     await require_unique(db, HsnCode, "code", data.code, row, "HSN code")
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1724,7 +1750,8 @@ def check_validity_window(data) -> None:
     than saved as a row nobody can use."""
     if data.effective_from and data.effective_to \
             and data.effective_to < data.effective_from:
-        raise ValidationError("Active to cannot be before Active from")
+        raise ValidationError(
+            "Effective to is before Effective from. Check both dates.")
 
 
 def in_effect(row) -> bool:
@@ -1816,7 +1843,7 @@ async def apply_bom(db: AsyncSession, row: Bom, data: BomIn) -> None:
     check_validity_window(data)
     project = await db.get(Project, data.project_id) if data.project_id else None
     if data.project_id is not None and project is None:
-        raise ValidationError("Project not found")
+        raise ValidationError("Project: that project does not exist. Pick one from the list.")
     await require_unique(db, Bom, "name", data.name, row, "A BOM named")
     await require_unique(db, Bom, "code", data.code, row, "BOM code")
 
@@ -1845,15 +1872,16 @@ def bom_item_out(r: BomItem) -> dict:
 async def apply_bom_item(db: AsyncSession, row: BomItem, data: BomItemIn) -> None:
     bom = await db.get(Bom, data.bom_id)
     if bom is None:
-        raise ValidationError("BOM not found")
+        raise ValidationError("BOM: that BOM does not exist. Pick one from the list.")
     if data.quantity <= 0:
-        raise ValidationError("Quantity must be greater than zero")
+        raise ValidationError(f"Quantity must be more than 0. You typed {data.quantity}.")
     item = await db.get(Item, data.item_id)
     if item is None:
-        raise ValidationError("Item not found")
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
     uom = await db.get(Uom, data.uom_id) if data.uom_id else None
     if data.uom_id is not None and uom is None:
-        raise ValidationError("Unit of measure not found")
+        raise ValidationError(
+            "Unit of measure: that unit does not exist. Pick one from the list.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -1922,12 +1950,13 @@ async def apply_bom_group(db: AsyncSession, row: BomGroup, data: BomGroupIn,
 
     bom = await db.get(Bom, data.bom_id)
     if bom is None:
-        raise ValidationError("BOM not found")
+        raise ValidationError("BOM: that BOM does not exist. Pick one from the list.")
     check_validity_window(data)
     profile = next((p for p in await profile_options(db, user)
                     if p["key"] == data.profile_key), None)
     if profile is None:
-        raise ValidationError("Job profile not found")
+        raise ValidationError(
+            "Job profile: that job profile does not exist. Pick one from the list.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
@@ -2015,25 +2044,26 @@ async def apply_item_eligibility(db: AsyncSession, row: ItemEligibility,
     scope = (data.scope_type or "").strip().upper()
     if scope not in {s.value for s in ItemScope}:
         raise ValidationError(
-            f"scope_type must be one of {sorted(s.value for s in ItemScope)}")
+            f"Applies to: “{data.scope_type}” is not one of the choices. Pick one of: "
+            f"{', '.join(sorted(s.value for s in ItemScope))}.")
     row.scope_type = scope
 
     item = await db.get(Item, data.item_id)
     if item is None:
-        raise NotFoundError(f"Unknown item id: {data.item_id}")
+        raise NotFoundError("Item: that item does not exist. Pick one from the list.")
     row.item_code, row.item_name = item.code, item.name
 
     if scope == ItemScope.ROLE.value:
         found = (await db.execute(
             select(Role.name).where(Role.id == data.scope_id))).scalar_one_or_none()
         if found is None:
-            raise NotFoundError(f"Unknown role id: {data.scope_id}")
+            raise NotFoundError("Role: that role does not exist. Pick one from the list.")
     else:
         found = (await db.execute(
             select(HcmOffice.name).where(
                 HcmOffice.id == data.scope_id))).scalar_one_or_none()
         if found is None:
-            raise NotFoundError(f"Unknown region (office) id: {data.scope_id}")
+            raise NotFoundError("Region: that office does not exist. Pick one from the list.")
     row.scope_name = found
 
     # Checked in Python as well as by the unique index: the message an admin needs is
@@ -2061,7 +2091,8 @@ async def apply_item_eligibility(db: AsyncSession, row: ItemEligibility,
 # the way in and rejects a combination that does not hold, so a second copy in the
 # sheet would only be a second opinion to keep in step.
 ITEM_LOOKUPS = (
-    Lookup("category_id", ItemCategory, "Category"),
+    Lookup("category_id", ItemCategory, "Category", where={"level": 3},
+           where_hint="An item needs a Level 3 category — pick one under it."),
     Lookup("general_name_id", GeneralName, "General name"),
     Lookup("brand_id", Brand, "Brand"),
     Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
@@ -2105,6 +2136,12 @@ MASTERS: list[MasterDef] = [
               schema=CategoryIn, manage_perm=perms.MASTER_CATEGORY_MANAGE,
               serialize=category_out, search_cols=("name", "code"),
               apply=apply_category,
+              # Numbered automatically under its parent; not asked for in a new sheet.
+              template_omit=("segment_code",),
+              # The parent by NAME or CODE, never an id nobody filling a sheet knows.
+              # A parent added in the same file is created first (bulk.take_pending).
+              lookups=(Lookup("parent_id", ItemCategory, "Parent category",
+                              match=("code", "name"), display=("name",)),),
               usage=((*USED_BY_ITEMS, "category_id"), ("Category tags", "mst_category_tags", "category_id"),)),
 
     # Carries its brands inline, so there is no General-name/Brand mapping screen.

@@ -661,6 +661,9 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("pro_consolidations", "procurement", "Procurement · Consolidation"),
     ("pro_rfqs", "procurement", "Procurement · RFQs"),
     ("pro_quotations", "procurement", "Procurement · Quotations"),
+    # The comparison studio (2026-09-26): every quotation to one RFQ side by side,
+    # and the award. It took over the sheet that used to live inside the RFQ page.
+    ("pro_price_compare", "procurement", "Procurement · Compare Quotations"),
     # The module's front door: the buying chain as one board — what is waiting on me,
     # what each rung is holding, and the demand pool underneath it. Every tile on it is
     # gated separately on the document family it counts, so the screen's own code is
@@ -880,6 +883,11 @@ INHERITS_GRANTS_FROM.update({
     page_view_code("pro_suppliers"): VENDOR_PORTAL_MANAGE,
     page_view_code("pro_demand_pool"): REQUISITION_VIEW,
     page_view_code("wh_demand_pool"): ISSUE_VIEW,   # the endpoint is gated on issue.view
+    # Price Compare (2026-09-26) took over the comparison sheet and the award from the
+    # RFQ detail. It lands with the desk that worked that sheet — the wider of the two
+    # pages that used to carry it — so nobody loses the screen the day it moves; the
+    # DATA inside stays gated by `rfq.compare` exactly as before.
+    page_view_code("pro_price_compare"): page_view_code("pro_rfqs"),
     # Same screen, same audience: App Integrations reads the configuration and logs
     # behind the console anybody holding `integration.view` already opens, and every
     # route on it is gated by that code. Fail-closed would put a Settings row on the

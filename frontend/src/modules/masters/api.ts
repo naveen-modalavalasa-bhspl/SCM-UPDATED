@@ -63,6 +63,8 @@ export interface ImportProblem {
 export interface ImportColumn {
   field: string;
   label: string;
+  /** What the column is for and the rule it follows, in plain words. */
+  hint?: string;
   required: boolean;
   lookup: boolean;
   choices: string[];
@@ -99,6 +101,20 @@ export interface BulkApi {
   import: (file: File) => Promise<ImportResult>;
   preview: (file: File) => Promise<ImportPreview>;
   commit: (rows: ImportRow[]) => Promise<ImportResult>;
+  /** The review in progress, kept server-side per person per master. */
+  draft: {
+    get: () => Promise<{ draft: ImportDraft | null; saved_at?: string }>;
+    put: (draft: ImportDraft) => Promise<{ saved_at: string }>;
+    clear: () => Promise<unknown>;
+  };
+}
+
+/** Everything the review screen needs to resume exactly where it stopped. */
+export interface ImportDraft {
+  preview: ImportPreview;
+  picked: Record<string, number>;
+  edits: Record<string, unknown>;
+  savedAt: string;
 }
 
 function crud<T>(path: string) {
@@ -136,6 +152,13 @@ function crud<T>(path: string) {
       api.post<ImportResult>(`${path}/import/commit`, { rows: rows.map((r) => ({
         ...r.values, __row__: r.row,
       })) }).then((r) => r.data),
+    draft: {
+      get: () => api.get<{ draft: ImportDraft | null; saved_at?: string }>(
+        `${path}/import/draft`).then((r) => r.data),
+      put: (draft: ImportDraft) =>
+        api.put<{ saved_at: string }>(`${path}/import/draft`, draft).then((r) => r.data),
+      clear: () => api.delete(`${path}/import/draft`).then((r) => r.data),
+    },
   };
 }
 
@@ -255,6 +278,15 @@ export const mastersApi = {
   unitCodeTracking: (itemId: number) =>
     api.get<{ generate_unit_code: boolean }>(`/api/items/${itemId}/unit-code-tracking`)
       .then((r) => r.data.generate_unit_code),
+
+  /** The code a new item is about to get. Lock-free peek for the form's
+   *  preview — the save re-derives the serial under lock, so this can be off
+   *  by one if two people save into the same prefix together. */
+  nextItemCode: (categoryId: number, generalNameId: number) =>
+    api.get<{ prefix: string; next_serial: number; preview: string }>(
+      "/api/items/next-code",
+      { params: { category_id: categoryId, general_name_id: generalNameId } },
+    ).then((r) => r.data),
 
   /** Read-only lookup of rbac_user_groups, so the item-group screen can name the
    *  group it is tagging to. Groups are created and edited in the RBAC module;
