@@ -74,6 +74,11 @@ class Lookup:
     # code typed into Excel loses its leading zero. Tried only after the cell as
     # typed has failed to match, and only ever to FIND a row, never to create one.
     normalize: Callable[[str], str] | None = None
+    # Column values a row must hold to be pickable here, e.g. {"level": 3}: an item
+    # sits only in a Level 3 category, and offering the parents let a sheet pass the
+    # review and then fail at Save. `where_hint` is what the row is told instead.
+    where: dict[str, Any] | None = None
+    where_hint: str = ""
 
 
 @dataclass
@@ -132,6 +137,9 @@ class MasterDef:
     # shared may not import a module (rule 5). Powers GET {base}/{id}/usage, so the
     # admin is told "used by 42 items" before deactivating rather than after.
     usage: Sequence[tuple[str, str, str]] = ()
+    # Columns the blank TEMPLATE leaves out because the system fills them in (a
+    # category's number). Still in the export and still accepted on import.
+    template_omit: Sequence[str] = ()
     # FK columns this master's spreadsheet states by name instead of by id. Empty
     # means the sheet keeps the raw `*_id` columns, which is still what most masters
     # want — a master with no foreign keys has nothing to look up.
@@ -165,6 +173,8 @@ async def _write(db: AsyncSession, defn: MasterDef, commit: bool = False) -> Non
 
 async def _apply_fields(db: AsyncSession, defn: MasterDef, row, data: BaseModel,
                         user=None) -> None:
+    from app.shared.masters import short_codes
+    await short_codes.enforce(db, defn, row, data)
     if defn.apply is not None:
         if defn.apply_needs_user:
             await defn.apply(db, row, data, user)
@@ -216,6 +226,15 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
     """One call per master, so each handler closes over its own `defn`."""
     schema = defn.schema
     base = f"/api/{defn.path}"
+
+    from app.shared.masters import short_codes
+    if short_codes.applies(defn) and not defn.read_only:
+        # Registered before /{row_id} so "suggest-code" is never read as an id.
+        @router.get(base + "/suggest-code", name=f"suggest_code_{defn.path}")
+        async def suggest_code(name: str = "", db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(defn.manage_perm))):
+            """The three-letter code a new row with this name would get."""
+            return {"code": await short_codes.suggest(db, defn.model, name)}
 
     # Every master gets template/export/import for free, from the same schema the
     # CRUD routes validate against — so a new MasterDef is still just a MasterDef.

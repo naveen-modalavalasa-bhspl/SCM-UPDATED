@@ -993,3 +993,28 @@ from app.platform.rbac.permissions import (  # noqa: F401  (re-exported)
 # and the catalogue calls it ISSUE_ISSUE. Aliased rather than renamed so no router
 # line changes and no permission code moves.
 from app.platform.rbac.permissions import ISSUE_ISSUE as ISSUE_POST  # noqa: F401
+
+
+class StockEditStatus(str, Enum):
+    """`whs_stock_edits.status` — a stock correction's lifecycle. Nothing is written
+    to the batch or the unit until APPROVED."""
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+
+
+class StockEditTarget(str, Enum):
+    """What one correction line rewrites. A BATCH line changes every unit of that lot
+    (batch no., mfg, expiry); a UNIT line changes one physical unit's identifiers."""
+    BATCH = "BATCH"
+    UNIT = "UNIT"
+
+
+#: The fields each target may change, in screen order. Anything else on a line is
+#: refused, so the request cannot reach a column nobody meant to expose.
+STOCK_EDIT_FIELDS: dict[str, tuple[str, ...]] = {
+    StockEditTarget.BATCH.value: ("batch_no", "mfg_date", "expiry_date"),
+    StockEditTarget.UNIT.value: ("serial_number", "imei", "asset_code",
+                                 "consumable_code", "lot_no"),
+}

@@ -1,5 +1,7 @@
 export interface MasterItem {
   id: number;
+  /** The latest photo, for the list's thumbnail. Null when there is none. */
+  photo_id?: number | null;
   /** L1L2L3-GEN-0001. Assigned once at create, never regenerated. */
   code: string;
   serial_no?: number | null;
@@ -91,8 +93,15 @@ export interface MasterItemSubClass extends NamedMaster {
   item_class_name?: string | null;
 }
 
+export interface MasterVendorCategory {
+  id: number; code: string; name: string; description: string | null;
+  is_active: boolean; vendor_ids: number[];
+}
+
 export interface MasterVendor {
   id: number;
+  /** The vendor categories it is tagged to. */
+  category_ids?: number[];
   code: string;
   name: string;
   vendor_type?: string | null;

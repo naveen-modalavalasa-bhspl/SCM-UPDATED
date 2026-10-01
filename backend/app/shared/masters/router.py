@@ -1,7 +1,8 @@
 """Master-data endpoints. CRUD comes from the MasterDef registry; the only things
 written by hand here are the two HCM mirrors (read-only, rule 10) and item specs,
 whose primary key is item_id rather than a surrogate id."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,8 @@ from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
-    MASTERS, UOM_SUGGESTIONS, build_item_code, build_item_prefix,
+    MASTERS, UOM_SUGGESTIONS, VendorMappingIn, build_item_code, build_item_prefix,
+    save_vendor_mapping, vendor_mapping_sources,
     check_hsn_code, hsn_out, packaging_breakdown, peek_item_serial,
 )
 from app.shared.models.master import GeneralName, HsnCode, Item, ItemCategory, ItemSpec, Uom
@@ -321,7 +323,7 @@ _tracking = APIRouter(tags=["masters"])
 
 
 @_tracking.get("/api/items/next-code")
-async def next_item_code(category_id: int, general_name_id: int,
+async def next_item_code(category_id: int, general_name_id: int | None = None,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
     """The code a new item is about to get, for the form's preview.
@@ -331,15 +333,12 @@ async def next_item_code(category_id: int, general_name_id: int,
     The hint beside the field says exactly that.
     """
     category = await db.get(ItemCategory, category_id)
-    general = await db.get(GeneralName, general_name_id)
     if category is None or category.level != 3:
         raise ValidationError("Select a Level 3 category first")
-    if general is None:
-        raise ValidationError("Select a general name first")
-    prefix = build_item_prefix(category.path, general.code)
+    prefix = build_item_prefix(category.path)
     serial = await peek_item_serial(db, prefix)
     return {"prefix": prefix, "next_serial": serial,
-            "preview": build_item_code(category.path, general.code, serial)}
+            "preview": build_item_code(category.path, serial)}
 
 
 @_tracking.get("/api/items/{item_id}/unit-code-tracking")
@@ -540,6 +539,94 @@ async def set_item_eligibility_assignments(
     return {"scope_type": scope, "scope_id": body.scope_id,
             "scope_name": scope_name, "total": len(wanted),
             "added": added, "restored": restored, "removed": removed}
+
+
+# --------------------------------------------------------------------------- #
+#  Item photos (2026-10-01)
+# --------------------------------------------------------------------------- #
+# Kept in the shared attachment store (sys_attachments, entity_type ITEM), which
+# already whitelists file types by their leading bytes, caps the size while it
+# streams, and audits deletes. Reading is any signed-in user (the item list is);
+# adding and removing needs master.item.manage, like every other item edit.
+ITEM_PHOTO = "ITEM"
+PHOTO_TYPES = (".jpg", ".jpeg", ".png", ".webp")
+
+
+async def _item_or_404(db: AsyncSession, item_id: int) -> Item:
+    item = await db.get(Item, item_id)
+    if item is None:
+        raise NotFoundError("Item: that item does not exist.")
+    return item
+
+
+def _photo_out(row) -> dict:
+    return {"id": row.id, "file_name": row.file_name,
+            "uploaded_at": row.created_at.isoformat() if row.created_at else None,
+            "uploaded_by": row.uploaded_by_name}
+
+
+@_tracking.get("/api/items/{item_id}/photos")
+async def item_photos(item_id: int, db: AsyncSession = Depends(get_db),
+                      user=Depends(get_current_user)):
+    from app.platform.settings import attachments
+    await _item_or_404(db, item_id)
+    return [_photo_out(r) for r in
+            await attachments.list_attachments(db, ITEM_PHOTO, item_id)]
+
+
+@_tracking.post("/api/items/{item_id}/photos")
+async def add_item_photo(item_id: int, file: UploadFile = File(...),
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    from app.platform.settings import attachments
+    await _item_or_404(db, item_id)
+    if not (file.filename or "").lower().endswith(PHOTO_TYPES):
+        raise ValidationError("Photo: use a JPG, PNG or WEBP picture.")
+    row = await attachments.add_attachment(
+        db, entity_type=ITEM_PHOTO, entity_id=item_id, upload=file,
+        doc_category="PHOTO", user=user)
+    await db.commit()
+    return _photo_out(row)
+
+
+@_tracking.get("/api/items/{item_id}/photos/{photo_id}/file")
+async def item_photo_file(item_id: int, photo_id: int,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    from app.platform.settings import attachments
+    await attachments.require_attachment(db, photo_id, entity_type=ITEM_PHOTO,
+                                         entity_id=item_id)
+    path, name, mime = await attachments.attachment_file(db, photo_id)
+    # Inline: these are pictures (the upload refused anything else), shown in an <img>.
+    return FileResponse(path, media_type=mime, filename=name,
+                        content_disposition_type="inline")
+
+
+@_tracking.delete("/api/items/{item_id}/photos/{photo_id}")
+async def delete_item_photo(item_id: int, photo_id: int,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    from app.platform.settings import attachments
+    await attachments.delete_attachment(db, photo_id, user, entity_type=ITEM_PHOTO,
+                                        entity_id=item_id)
+    await db.commit()
+    return {"success": True}
+
+
+# Vendor material mapping: suppliers x categories/items in one save. Same permission
+# as the Vendor Rates rows it writes (master.vendor.manage).
+@_tracking.get("/api/vendor-items/mapping-sources")
+async def vendor_mapping_sources_route(
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_VENDOR_MANAGE))):
+    return await vendor_mapping_sources(db)
+
+
+@_tracking.post("/api/vendor-items/mapping")
+async def save_vendor_mapping_route(
+        data: VendorMappingIn, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_VENDOR_MANAGE))):
+    return await save_vendor_mapping(db, data, user)
 
 
 router.include_router(_tracking)

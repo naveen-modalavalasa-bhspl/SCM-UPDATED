@@ -40,6 +40,7 @@ admin who knows the ids and does not want a review screen. All three end in the 
 from __future__ import annotations
 
 import asyncio
+import json
 import io
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -58,6 +59,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_permission
 from app.core.exceptions import ValidationError
+from app.shared.enums import (
+    AttributeDataType, CategoryTagType, UomClass, WarehouseType,
+)
+from app.shared.masters.messages import (
+    Problem, field_hint, field_label, plain_error, rule_text, summarise,
+)
 from app.shared.enums import AuditAction
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheetml"
@@ -68,6 +75,9 @@ XLSX_CONTENT_TYPE = (
 LIST_SEPARATOR = ","
 # Import is for humans fixing a file by hand, not for feeding a migration through.
 MAX_IMPORT_ROWS = 5000
+# A draft carries the preview plus every edit; 5,000 rows of an item sheet with its
+# dropdown options is a few MB. The cap only stops a runaway body.
+MAX_DRAFT_BYTES = 19 * 1024 * 1024   # under nginx client_max_body_size 20m
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +143,10 @@ def _enum_choices(defn, field: str) -> list[str]:
     return {
         "valuation_method": ["FIFO", "LIFO", "WEIGHTED_AVERAGE"],
         "barcode_type": ["EAN13", "UPC", "CODE128", "QR"],
+        "uom_class": [c.value for c in UomClass],
+        "warehouse_type": [t.value for t in WarehouseType],
+        "data_type": [t.value for t in AttributeDataType],
+        "tag_type": [t.value for t in CategoryTagType],
     }.get(field, [])
 
 
@@ -152,6 +166,8 @@ async def lookup_choices(defn, db: AsyncSession) -> dict[str, list[dict]]:
         stmt = select(lk.model)
         if hasattr(lk.model, "is_active"):
             stmt = stmt.where(lk.model.is_active.is_(True))
+        for column, value in (getattr(lk, "where", None) or {}).items():
+            stmt = stmt.where(getattr(lk.model, column) == value)
         stmt = stmt.order_by(order).limit(lk.max_options + 1)
         rows = (await db.execute(stmt)).scalars().all()
         out[lk.field] = [
@@ -176,6 +192,12 @@ def _display(row: Any, lk: Any) -> str:
     return ""
 
 
+def _eligible(row: Any, lk: Any) -> bool:
+    """Whether the row passes the lookup's `where`, e.g. a Level 3 category."""
+    return all(getattr(row, column, None) == value
+               for column, value in (getattr(lk, "where", None) or {}).items())
+
+
 async def resolve_lookups(defn, db: AsyncSession,
                           parsed: list[dict]) -> list[dict]:
     """Turn the names in `__lookup__` into ids on the record itself.
@@ -197,6 +219,11 @@ async def resolve_lookups(defn, db: AsyncSession,
         return problems
 
     wanted = {f for record in parsed for f in record.get("__lookup__", {})}
+    # Codes and names this sheet itself is about to create, for lookups that point
+    # back at the same master (a category's parent). Such a name cannot match the
+    # database yet; it is resolved at save time, once that row exists.
+    in_sheet = {_norm(record.get(key)) for record in parsed
+                for key in ("code", "name") if record.get(key)}
     index: dict[str, dict[str, list]] = {}
     ids: dict[str, set[int]] = {}
     for field in wanted:
@@ -209,7 +236,7 @@ async def resolve_lookups(defn, db: AsyncSession,
                 if key:
                     table.setdefault(f"{column}:{key}", []).append(row)
         index[field] = table
-        ids[field] = {row.id for row in rows}
+        ids[field] = {row.id for row in rows if _eligible(row, lk)}
 
     for record in parsed:
         line = record.get("__row__")
@@ -250,7 +277,20 @@ async def resolve_lookups(defn, db: AsyncSession,
                     record[field] = candidate
                     continue
 
-            if len(hits) == 1:
+            if (not hits and lk.model is getattr(defn, "model", None)
+                    and _norm(text) in in_sheet):
+                record.setdefault("__pending__", {})[field] = text
+                continue
+
+            barred = [row for row in hits if not _eligible(row, lk)]
+            hits = [row for row in hits if _eligible(row, lk)]
+            if barred and not hits:
+                problems.append({
+                    "row": line, "field": field, "label": lk.label, "raw": text,
+                    "message": f"“{text}” cannot be used here. {lk.where_hint}".strip(),
+                    "candidates": [],
+                })
+            elif len(hits) == 1:
                 record[field] = hits[0].id
             else:
                 problems.append({
@@ -259,10 +299,11 @@ async def resolve_lookups(defn, db: AsyncSession,
                     "label": lk.label,
                     "raw": text,
                     "message": (
-                        f"{lk.label} “{text}” matches "
-                        f"{len(hits)} rows — pick which one."
+                        f"“{text}” matches {len(hits)} different "
+                        f"{lk.label.lower()} entries. Pick the right one from the list."
                         if hits else
-                        f"No {lk.label.lower()} called “{text}”."),
+                        f"There is no {lk.label.lower()} called “{text}”. Pick one "
+                        f"from the list, or add it on the {lk.label} master first."),
                     "candidates": [
                         {"id": row.id,
                          "label": _display(row, lk),
@@ -418,7 +459,12 @@ def _workbook_bytes(book: Workbook) -> bytes:
     return buffer.getvalue()
 
 
-def _dropdown(sheet, lists, column_index: int, values: list[str]) -> None:
+# How many Data rows a template's dropdowns cover.
+TEMPLATE_ROWS = 1000
+
+
+def _dropdown(sheet, lists, column_index: int, values: list[str],
+              sheet_column: int | None = None) -> None:
     """Put `values` on the hidden Lists sheet and point the column's cells at them.
 
     A validation list written inline (`formula1='"A,B,C"'`) is capped at 255
@@ -426,15 +472,29 @@ def _dropdown(sheet, lists, column_index: int, values: list[str]) -> None:
     all — the storekeeper picks from a list that is missing the row they need and
     has no way to know it is missing.
     """
-    if not values:
+    if not values and sheet_column is None:
         return
     letter = get_column_letter(lists.max_column + 1)
     lists.cell(row=1, column=lists.max_column + 1, value=f"__{column_index}")
     for offset, value in enumerate(values, start=2):
         lists[f"{letter}{offset}"] = value
+    last = len(values) + 1
+    formula = f"=Lists!${letter}$2:${letter}${last}"
+    if sheet_column is not None:
+        # The list also offers what THIS sheet is adding (a parent category typed
+        # three rows up), not only what existed when the template was downloaded.
+        # Each Data row is mirrored under the stored names, and the range is cut to
+        # the cells that hold something, so the dropdown carries no blank tail.
+        source = get_column_letter(sheet_column)
+        for offset in range(2, TEMPLATE_ROWS + 1):
+            lists[f"{letter}{last + offset - 1}"] = (
+                f'=IF(Data!${source}${offset}="","",Data!${source}${offset})')
+        end = last + TEMPLATE_ROWS - 1
+        formula = (f'=OFFSET(Lists!${letter}$2,0,0,'
+                   f'MAX(1,COUNTIF(Lists!${letter}$2:${letter}${end},"?*")),1)')
     rule = DataValidation(
         type="list",
-        formula1=f"=Lists!${letter}$2:${letter}${len(values) + 1}",
+        formula1=formula,
         allow_blank=True,
     )
     rule.error = "Pick a value from the list."
@@ -483,7 +543,8 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
     sheet = book.active
     sheet.title = "Data"
     fields = defn.schema.model_fields
-    columns = columns_for(defn.schema)
+    columns = [c for c in columns_for(defn.schema)
+               if c not in getattr(defn, "template_omit", ())]
     sheet.append([header_for(defn, c) for c in columns])
     for cell in sheet[1]:
         cell.font = cell.font.copy(bold=True)
@@ -498,8 +559,11 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
             options = choices.get(name) or []
             # Over the cap the list is served by the review screen instead; a
             # truncated dropdown would look complete and be wrong.
-            if 0 < len(options) <= lk.max_options:
-                _dropdown(sheet, lists, position, [o["label"] for o in options if o["label"]])
+            same_sheet = (lk.model is getattr(defn, "model", None) and "name" in columns)
+            if len(options) <= lk.max_options and (options or same_sheet):
+                _dropdown(sheet, lists, position,
+                          [o["label"] for o in options if o["label"]],
+                          sheet_column=columns.index("name") + 1 if same_sheet else None)
         elif _unwrap_optional(field.annotation) is bool:
             _dropdown(sheet, lists, position, ["Yes", "No"])
         elif _enum_choices(defn, name):
@@ -516,7 +580,7 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
     guide.append(["Column", "Required", "What to write", "Notes"])
     for cell in guide[1]:
         cell.font = cell.font.copy(bold=True)
-    for name, field in fields.items():
+    for name, field in ((n, fields[n]) for n in columns):
         lk = lookups_by_field(defn).get(name)
         note = field.description or ""
         if lk:
@@ -532,7 +596,7 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
         elif _enum_choices(defn, name):
             how = " / ".join(_enum_choices(defn, name))
         else:
-            how = _type_hint(field.annotation)
+            how = rule_text(field) or _type_hint(field.annotation)
             width = fixed_width(field)
             if width:
                 how = f"exactly {width} characters"
@@ -543,7 +607,8 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
             elif name.endswith("_ids"):
                 note = note or "Numeric ids separated by commas."
         guide.append([header_for(defn, name),
-                      "Yes" if field.is_required() else "No", how, note])
+                      "Yes" if field.is_required() else "No", how,
+                      note or field_hint(defn, name)])
     guide.append([])
     guide.append(["Leave a cell empty and that column is left alone."])
     guide.append(["Rows are matched on `id` first, then on `code`."])
@@ -614,6 +679,22 @@ def build_export(defn, rows: list,
 # --------------------------------------------------------------------------- #
 #  Reading an uploaded file
 # --------------------------------------------------------------------------- #
+def _cell_problem(raw: Any, annotation: Any, exc: Exception) -> str:
+    """Why a cell could not even be read, in words — never Python's own message
+    ("could not convert string to float: 'ten'")."""
+    inner = _unwrap_optional(annotation)
+    shown = f"“{str(raw).strip()[:60]}”"
+    if inner is bool:
+        return f"{shown} is not Yes or No. Type Yes or No."
+    if inner is int:
+        return f"{shown} is not a whole number. Type a number like 10."
+    if inner in (Decimal, float):
+        return f"{shown} is not a number. Type a number like 12.5."
+    if get_origin(inner) is list:
+        return f"{shown} could not be read. Separate the values with commas."
+    return f"{shown} could not be read."
+
+
 def parse_upload(defn, content: bytes) -> tuple[list[dict], list[str]]:
     """Returns (row dicts keyed by schema field, per-row errors).
 
@@ -643,6 +724,9 @@ def parse_upload(defn, content: bytes) -> tuple[list[dict], list[str]]:
     alias = {_norm(name): name for name in fields}
     alias["id"] = "id"
     alias.update({_norm(lk.label): lk.field for lk in by_field.values()})
+    # Headers renamed since a file may have been filled in.
+    if "general_name_id" in by_field:
+        alias.setdefault(_norm("General name"), "general_name_id")
     known: dict[str, int] = {}
     for index, name in enumerate(headers):
         field = alias.get(_norm(name))
@@ -679,7 +763,8 @@ def parse_upload(defn, content: bytes) -> tuple[list[dict], list[str]]:
             try:
                 parsed_value = _cell_in(raw, annotation, width)
             except (ValueError, TypeError) as exc:
-                errors.append(f"Row {offset}, {name}: {exc}")
+                errors.append(Problem(offset, name, field_label(defn, name),
+                                      _cell_problem(raw, annotation, exc)))
                 continue
             # An empty cell means "say nothing about this column", so the key is
             # left out and the schema's own default applies. Passing None instead
@@ -739,6 +824,47 @@ async def untouched_rows(defn, db: AsyncSession, parsed: list[dict]) -> tuple[li
     return changed, unchanged
 
 
+async def _short_code_problems(defn, db: AsyncSession, parsed: list[dict]) -> list:
+    """Fill blank three-letter codes from the name; report ones that do not fit."""
+    from app.shared.masters import short_codes
+    return [Problem(line, "code", field_label(defn, "code"), message)
+            for line, message in await short_codes.fill_and_check(defn, db, parsed)]
+
+
+def take_pending(parsed: list[dict]) -> dict[int, dict[str, str]]:
+    """`{sheet row: {field: name}}` for references to rows of this same sheet, popped
+    off the records so the schema never sees them."""
+    out: dict[int, dict[str, str]] = {}
+    for record in parsed:
+        pending = record.pop("__pending__", None)
+        if pending:
+            out[int(record["__row__"])] = dict(pending)
+    return out
+
+
+def _in_sheet_order(ready: list, pending: dict[int, dict[str, str]]) -> list:
+    """Parents before children, whatever order the sheet lists them in."""
+    if not pending:
+        return ready
+    line_of = {}
+    for line, _row_id, data in ready:
+        for key in ("code", "name"):
+            if getattr(data, key, None):
+                line_of[_norm(getattr(data, key))] = line
+    depth: dict[int, int] = {}
+
+    def walk(line: int, seen: frozenset = frozenset()) -> int:
+        if line in depth:
+            return depth[line]
+        if line in seen:
+            return 0                                  # a loop; apply refuses it
+        parents = [line_of.get(_norm(t)) for t in pending.get(line, {}).values()]
+        depth[line] = 1 + max((walk(p, seen | {line}) for p in parents if p), default=-1)
+        return depth[line]
+
+    return sorted(ready, key=lambda item: walk(item[0]))
+
+
 def validate_rows(defn, parsed: list[dict]) -> tuple[list[tuple[int, int | None, BaseModel]], list[str]]:
     """Run every row through the master's own schema before anything is written."""
     ready: list[tuple[int, int | None, BaseModel]] = []
@@ -749,11 +875,12 @@ def validate_rows(defn, parsed: list[dict]) -> tuple[list[tuple[int, int | None,
         try:
             ready.append((line, row_id, defn.schema(**record)))
         except PydanticValidationError as exc:
+            fields = defn.schema.model_fields
             for problem in exc.errors():
-                where = ".".join(str(p) for p in problem["loc"]) or "row"
-                # "Value error, ..." is Pydantic describing its own plumbing.
-                message = problem["msg"].removeprefix("Value error, ")
-                errors.append(f"Row {line}, {where}: {message}")
+                field = str(problem["loc"][0]) if problem["loc"] else None
+                label = field_label(defn, field) if field else "This row"
+                errors.append(Problem(line, field, label, plain_error(
+                    problem, label, fields.get(field) if field else None)))
     return ready, errors
 
 
@@ -761,7 +888,8 @@ def validate_rows(defn, parsed: list[dict]) -> tuple[list[tuple[int, int | None,
 #  Writing the rows
 # --------------------------------------------------------------------------- #
 async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
-                     *, write: Any, audit: Any) -> dict:
+                     *, write: Any, audit: Any,
+                     pending: dict[int, dict[str, str]] | None = None) -> dict:
     """Create or update every validated row, then commit once.
 
     Shared by all three doors — the straight file import, the reviewed commit, and
@@ -789,18 +917,31 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
                    else defn.apply(db, row, data))
         except ValidationError as exc:
             if not exc.message.startswith("Row "):
-                exc.message = f"Row {line}: {exc.message}"
+                exc.message = f"Row {line} — {exc.message}"
                 exc.args = (exc.message,)
             raise
 
+    pending = pending or {}
+    ready = _in_sheet_order(ready, pending)
+    saved_by_key: dict[str, Any] = {}               # code/name -> row, this run
     created = updated = 0
+    from app.shared.masters import short_codes
     for line, row_id, data in ready:
+        for field, text in pending.get(line, {}).items():
+            target = saved_by_key.get(_norm(text))
+            if target is None:
+                raise ValidationError(
+                    f"Row {line} — {field_label(defn, field)}: “{text}” is in this "
+                    "file but could not be saved first. Check that row.")
+            setattr(data, field, target.id)
         row = None
         if row_id is not None:
             row = await db.get(defn.model, row_id)
             if row is None:
                 raise ValidationError(
-                    f"Row {line}: no {defn.name.lower()} with id {row_id}.")
+                    f"Row {line} — the ID column says {row_id}, but there is no "
+                    f"{defn.name.lower()} with that ID. Clear the ID cell to add it "
+                    "as a new row.")
             # The same boundary PUT enforces. Imported here rather than at module
             # level: crud imports THIS module to register these routes, so the
             # dependency only runs one way if it is resolved at call time.
@@ -809,6 +950,10 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
         elif has_code:
             row = by_code.get(getattr(data, "code", None))
 
+        try:
+            await short_codes.enforce(db, defn, row, data)
+        except ValidationError as exc:
+            raise ValidationError(f"Row {line} — {exc.message}") from exc
         if row is None:
             row = defn.model()
             if defn.apply is not None:
@@ -834,6 +979,9 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
                         after=defn.serialize(row))
             if has_code and getattr(row, "code", None):
                 by_code[row.code] = row
+            for key in ("code", "name"):
+                if getattr(row, key, None):
+                    saved_by_key[_norm(getattr(row, key))] = row
             created += 1
         else:
             before = defn.serialize(row)
@@ -850,6 +998,9 @@ async def apply_rows(defn, db: AsyncSession, ready, unchanged: int, user,
             await audit(db, entity=defn.model.__tablename__, entity_id=row.id,
                         action=AuditAction.UPDATE, actor=user,
                         before=before, after=defn.serialize(row))
+            for key in ("code", "name"):
+                if getattr(row, key, None):
+                    saved_by_key[_norm(getattr(row, key))] = row
             updated += 1
 
     await write(db, defn, commit=True)
@@ -922,6 +1073,57 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
     if defn.read_only:
         return
 
+    # The review in progress, kept on the server so it survives an expired login, a
+    # refresh or a different machine. The page sends the whole state (the preview it
+    # was given plus every pick and edit) and gets it back unchanged; nothing here
+    # interprets it, because Save re-validates everything regardless.
+    async def _draft_row(db: AsyncSession, user):
+        from app.platform.settings.models import ImportDraft
+        return await db.scalar(select(ImportDraft).where(
+            ImportDraft.employee_id == user.id,
+            ImportDraft.master_path == defn.path))
+
+    @router.get(base + "/import/draft", name=f"import_draft_get_{defn.path}")
+    async def import_draft_get(
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(defn.manage_perm)),
+    ):
+        row = await _draft_row(db, user)
+        if row is None:
+            return {"draft": None}
+        return {"draft": json.loads(row.payload),
+                "saved_at": row.updated_at.isoformat() + "Z"}
+
+    @router.put(base + "/import/draft", name=f"import_draft_put_{defn.path}")
+    async def import_draft_put(
+        payload: dict,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(defn.manage_perm)),
+    ):
+        from app.platform.settings.models import ImportDraft
+        body = json.dumps(payload, default=str)
+        if len(body) > MAX_DRAFT_BYTES:
+            raise ValidationError("This review is too large to keep as a draft.")
+        row = await _draft_row(db, user)
+        if row is None:
+            row = ImportDraft(employee_id=user.id, master_path=defn.path)
+            db.add(row)
+        row.payload = body
+        row.updated_at = datetime.utcnow()
+        await db.commit()
+        return {"saved_at": row.updated_at.isoformat() + "Z"}
+
+    @router.delete(base + "/import/draft", name=f"import_draft_delete_{defn.path}")
+    async def import_draft_delete(
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(defn.manage_perm)),
+    ):
+        row = await _draft_row(db, user)
+        if row is not None:
+            await db.delete(row)
+            await db.commit()
+        return {"success": True}
+
     @router.post(base + "/import/preview", name=f"import_preview_{defn.path}")
     async def import_preview(
         file: UploadFile = File(...),
@@ -946,9 +1148,12 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             raise ValidationError("That file is empty.")
         parsed, read_errors = parse_upload(defn, content)
         unmatched = await resolve_lookups(defn, db, parsed)
+        read_errors += await _short_code_problems(defn, db, parsed)
         # Validated on a COPY: validate_rows pops `id` and `__row__` off the records,
         # and the screen needs them back to show which sheet row it is talking about.
-        ready, schema_errors = validate_rows(defn, [dict(r) for r in parsed])
+        copies = [dict(r) for r in parsed]
+        take_pending(copies)
+        ready, schema_errors = validate_rows(defn, copies)
         await db.rollback()
 
         # Show each row as it WILL be saved, not as the sheet spelled it: the code
@@ -971,22 +1176,16 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
         by_row: dict[int, list[dict]] = {}
         for problem in unmatched:
             by_row.setdefault(problem["row"], []).append(problem)
-        for message in [*read_errors, *schema_errors]:
-            # "Row 12, name: Field required" — the row number is the only part the
-            # screen needs to attach it to a line.
-            try:
-                head, detail = message.split(": ", 1)
-                row_part, field = head.split(", ", 1)
-                line = int(row_part.removeprefix("Row "))
-            except (ValueError, AttributeError):
+        for problem in [*read_errors, *schema_errors]:
+            line, field = getattr(problem, "row", None), getattr(problem, "field", None)
+            if line is None:
                 continue
             blocked.add(line)
             if any(p.get("field") == field for p in by_row.get(line, [])):
                 continue
             by_row.setdefault(line, []).append(
-                {"row": line, "field": field,
-                 "label": header_for(defn, field) if field in defn.schema.model_fields else field,
-                 "raw": None, "message": detail, "candidates": []})
+                {"row": line, "field": field, "label": problem.label,
+                 "raw": None, "message": problem.detail, "candidates": []})
 
         # Show duplicate business keys in preview instead of discovering them only
         # after Save. The commit path still revalidates authoritatively.
@@ -1004,8 +1203,10 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
                     blocked.add(line)
                     by_row.setdefault(line, []).append({
                         "row": line, "field": duplicate_field,
-                        "label": header_for(defn, duplicate_field), "raw": str(raw),
-                        "message": f"Duplicate of row {seen[key]}. Enter a different value.",
+                        "label": field_label(defn, duplicate_field), "raw": str(raw),
+                        "message": (f"“{raw}” is already used on row {seen[key]} of this "
+                                    "file. Each row needs its own "
+                                    f"{field_label(defn, duplicate_field).lower()}."),
                         "candidates": [],
                     })
                 else:
@@ -1015,7 +1216,9 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             "success": not blocked,
             "columns": [
                 {"field": name,
-                 "label": header_for(defn, name),
+                 "label": field_label(defn, name),
+                 "hint": " ".join(filter(None, [field_hint(defn, name),
+                                                rule_text(field).capitalize()])),
                  "required": field.is_required(),
                  "lookup": name in lookups_by_field(defn),
                  "choices": _enum_choices(defn, name),
@@ -1083,14 +1286,14 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
             parsed.append(record)
 
         parsed, unchanged = await untouched_rows(defn, db, parsed)
+        pending = take_pending(parsed)
+        code_problems = await _short_code_problems(defn, db, parsed)
         ready, problems = validate_rows(defn, parsed)
+        problems = code_problems + problems
         if problems:
-            raise ValidationError(
-                f"{len(problems)} problem(s) found — nothing was saved.\n"
-                + "\n".join(problems[:50])
-                + ("\n…and more." if len(problems) > 50 else ""))
+            raise ValidationError(summarise(problems))
         return await apply_rows(defn, db, ready, unchanged, user,
-                                write=write, audit=audit)
+                                write=write, audit=audit, pending=pending)
 
     @router.post(base + "/import", name=f"import_{defn.path}")
     async def import_rows(
@@ -1104,20 +1307,19 @@ def register_bulk_routes(router, defn, *, write: Any, audit: Any) -> None:
         parsed, read_errors = parse_upload(defn, content)
         unmatched = await resolve_lookups(defn, db, parsed)
         parsed, unchanged = await untouched_rows(defn, db, parsed)
+        pending = take_pending(parsed)
+        read_errors += await _short_code_problems(defn, db, parsed)
         ready, schema_errors = validate_rows(defn, parsed)
         problems = (read_errors
-                    + [f"Row {p['row']}, {p['label']}: {p['message']}"
+                    + [Problem(p["row"], p["field"], p["label"], p["message"])
                        for p in unmatched]
                     + schema_errors)
         if problems:
             # Everything wrong with the file, not just the first thing: the admin is
             # going to fix this in Excel and re-upload, and one error per round trip
             # across 400 rows is how an afternoon disappears.
-            raise ValidationError(
-                f"{len(problems)} problem(s) found — nothing was saved.\n"
-                + "\n".join(problems[:50])
-                + ("\n…and more." if len(problems) > 50 else ""))
+            raise ValidationError(summarise(problems))
 
         return await apply_rows(defn, db, ready, unchanged, user,
-                                write=write, audit=audit)
+                                write=write, audit=audit, pending=pending)
 

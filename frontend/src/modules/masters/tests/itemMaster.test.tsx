@@ -50,21 +50,21 @@ describe("item master identity", () => {
   });
 
   it("previews the generated L1/L2/L3-general code", () => {
-    expect(itemCodePreview("101010", "paracet", 1))
-      .toBe("101010-PARACET-0001");
-    expect(itemCodePreview("101010", null, 1)).toBe("");
+    expect(itemCodePreview("101010", 1))
+      .toBe("101010-001");
+    expect(itemCodePreview(null, 1)).toBe("");
   });
 
   it("shows #### for the serial until the server allocates one", () => {
     // The serial is a locked MAX+1 on the server. Guessing it in the browser would
     // show a number that another user may already have taken.
-    expect(itemCodePreview("101010", "slide"))
-      .toBe("101010-SLIDE-####");
+    expect(itemCodePreview("101010"))
+      .toBe("101010-###");
   });
 
-  it("pads an existing serial back to four digits", () => {
-    expect(itemCodePreview("101010", "slide", 42))
-      .toBe("101010-SLIDE-0042");
+  it("pads a serial to three digits", () => {
+    expect(itemCodePreview("101010", 42))
+      .toBe("101010-042");
   });
 });
 

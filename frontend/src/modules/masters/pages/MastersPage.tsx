@@ -12,7 +12,8 @@ import {
   ItemSubClassesTab, ItemsTab,
 } from "../tabs/itemTabs";
 import { ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
-import { VendorItemsTab, VendorsTab } from "../tabs/vendorTabs";
+import { VendorCategoriesTab, VendorItemsTab, VendorsTab } from "../tabs/vendorTabs";
+import { VendorMappingPanel } from "../components/VendorMappingPanel";
 import { ConversionsTab, UomTab } from "../tabs/uomTabs";
 import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
@@ -24,8 +25,8 @@ const TABS = [
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
   "features", "packaging", "item-groups",
   "attributes", "specs", "category-tags",
-  "uom", "conversions", "warehouses",
-  "projects", "vendors", "vendor-items", "boms", "bom-groups",
+  "uom", "uom-classes", "conversions", "warehouses",
+  "projects", "vendors", "vendor-categories", "vendor-items", "boms", "bom-groups",
   "departments", "facilities", "item-eligibility",
 ] as const;
 
@@ -46,8 +47,8 @@ const GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups", "item-eligibility"] },
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
-  { label: "Units", tabs: ["uom", "conversions"] },
-  { label: "Vendors", tabs: ["vendors", "vendor-items"] },
+  { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
+  { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items"] },
   { label: "BOM", tabs: ["boms", "bom-groups"] },
   { label: "Locations", tabs: ["warehouses", "facilities", "projects", "departments"] },
 ];
@@ -73,13 +74,13 @@ export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups"] },
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
-  { label: "Units", tabs: ["uom", "conversions"] },
+  { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
 ];
 
 /** Tax lives on the HSN code and is read at PO/GRN time, never copied onto an item —
  *  so it is the buyer's master, not the catalogue's. */
 export const PROCUREMENT_MASTER_GROUPS: MasterGroup[] = [
-  { label: "Vendors", tabs: ["vendors", "vendor-items"] },
+  { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items"] },
   { label: "Tax", tabs: ["hsn-codes"] },
 ];
 
@@ -100,13 +101,13 @@ export const ORG_MASTER_GROUPS: MasterGroup[] = [
 
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   items: "Items", categories: "Categories", "item-classes": "Item Classes",
-  "general-names": "General Names", "item-sub-classes": "Item Subclasses",
+  "general-names": "Generic Names", "item-sub-classes": "Item Subclasses",
   brands: "Brands", manufacturers: "Manufacturers",
   "dosage-forms": "Dosage Forms", "hsn-codes": "HSN Codes",
   features: "Features", packaging: "Packages", "item-groups": "Item Groups",
   attributes: "Attributes", specs: "Specifications", "category-tags": "Category Tagging",
-  uom: "UOM", conversions: "Conversions", warehouses: "Warehouses",
-  projects: "Projects", vendors: "Vendors", "vendor-items": "Vendor Rates",
+  uom: "UOM", "uom-classes": "UOM Types", conversions: "Conversions", warehouses: "Warehouses",
+  projects: "Projects", vendors: "Vendors", "vendor-categories": "Vendor Categories", "vendor-items": "Vendor Material Mapping",
   boms: "BOM", "bom-groups": "BOM Groups",
   departments: "Departments", facilities: "Facilities",
   "item-eligibility": "Item Eligibility",
@@ -305,11 +306,19 @@ export function MastersShell({
           fetches them itself rather than joining the shared NEEDS sources above. */}
       {tab === "bom-groups" && <BomGroupsTab />}
       {tab === "uom" && <UomTab />}
+      {tab === "uom-classes" && <NamedLookupTab title="UOM type" queryKey="uom-classes"
+        api={mastersApi.uomClasses} managePerm="master.uom.manage"
+        codeRule={{ maxLength: 30, pattern: /^[A-Za-z0-9_]+$/,
+                    patternMessage: "Use letters, numbers or an underscore, e.g. COUNT" }} />}
       {tab === "conversions" && <ConversionsTab uoms={uomOpts} />}
       {tab === "warehouses" && <WarehousesTab facilities={facOpts} />}
       {tab === "projects" && <ProjectsTab />}
       {tab === "vendors" && <VendorsTab />}
-      {tab === "vendor-items" && <VendorItemsTab items={itemOpts} />}
+      {tab === "vendor-categories" && <VendorCategoriesTab />}
+      {tab === "vendor-items" && <>
+        <VendorMappingPanel />
+        <VendorItemsTab items={itemOpts} />
+      </>}
       {/* Which items a role or a region may raise an indent for. Untagged
           items stay open to everyone, so this screen only ever narrows. */}
       {tab === "item-eligibility" && <ItemEligibilityTab items={itemOpts} />}

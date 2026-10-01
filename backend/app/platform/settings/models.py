@@ -1,7 +1,7 @@
 """sys_ tables — mapped to the canonical scm_rebuild schema (database-first)."""
 from sqlalchemy import (
     JSON, BigInteger, Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary,
-    String, Text,
+    String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.mysql import LONGBLOB, LONGTEXT
 from sqlalchemy.orm import relationship
@@ -358,3 +358,23 @@ class MailAttachment(Base):
     created_at = Column(DateTime, nullable=False, default=utcnow)
 
     message = relationship("MailMessage", back_populates="attachments")
+
+
+class ImportDraft(Base):
+    """`sys_import_drafts` — a bulk import being reviewed, kept until it is saved.
+
+    The review screen is where a day of fixing happens, and it used to live only in
+    the browser tab: an expired login, a refresh or a closed window threw it all
+    away. One row per person per master, so they can log out, come back from any
+    machine and carry on where they stopped. Deleted on a successful save or an
+    explicit discard; never read by anyone but its owner.
+    """
+    __tablename__ = "sys_import_drafts"
+    __table_args__ = (UniqueConstraint("employee_id", "master_path",
+                                       name="uq_import_draft_owner_master"),)
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    employee_id = Column(BigInteger, nullable=False, index=True)
+    master_path = Column(String(100), nullable=False)
+    payload = Column(LONG_TEXT, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+    updated_at = Column(DateTime, nullable=False, default=utcnow)

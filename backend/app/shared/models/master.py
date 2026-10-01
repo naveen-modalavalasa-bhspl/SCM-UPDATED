@@ -24,6 +24,44 @@ class Uom(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class VendorCategory(Base):
+    """`mst_vendor_categories` — how the business groups its suppliers (Glassware,
+    Reagents ...). Read by the vendor material mapping screen to group suppliers."""
+    __tablename__ = "mst_vendor_categories"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(150), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class VendorCategoryMember(Base):
+    """A vendor in a category. Many-to-many: Borosil can be Glassware AND Lab
+    Consumables. Edited from either side — the category form or the vendor form."""
+    __tablename__ = "mst_vendor_category_members"
+    __table_args__ = (UniqueConstraint("category_id", "vendor_id",
+                                       name="uq_vendor_category_member"),)
+    id = pk()
+    category_id = Column(ForeignKey("mst_vendor_categories.id", ondelete="CASCADE"),
+                         index=True, nullable=False)
+    vendor_id = Column(ForeignKey("mst_vendors.id", ondelete="CASCADE"),
+                       index=True, nullable=False)
+
+
+class UomClassRow(Base):
+    """`mst_uom_classes` — the kinds of unit (Count, Weight, Volume ...).
+
+    `mst_uom.uom_class` holds this row's CODE, as it always held the enum's value,
+    so every query already reading the code keeps working.
+    """
+    __tablename__ = "mst_uom_classes"
+    id = pk()
+    code = Column(String(30), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class HsnCode(Base):
     """An HSN/SAC code and the GST rate that goes with it.
 

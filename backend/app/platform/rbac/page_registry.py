@@ -262,6 +262,10 @@ PAGES: list[PageDef] = [
     PageDef("inv_adjustments", "/inventory/adjustments", "Stock Audit",
             parent="grp_inventory", module="inventory", icon="sliders",
             sort_order=60),
+    # Edit a held unit's / batch's identity, signed on the STOCK_EDIT ladder.
+    PageDef("inv_stock_edits", "/inventory/stock-edits", "Stock Corrections",
+            parent="grp_inventory", module="inventory", icon="pen-line",
+            sort_order=61),
 
     # ------------------------------------------------------------------ #
     #  Masters, on the module that owns them

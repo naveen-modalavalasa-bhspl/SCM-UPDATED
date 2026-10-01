@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LogOut, Moon, PanelLeftClose, PanelLeftOpen, Sun, UserRound } from "lucide-react";
 import { getTheme, setTheme, type ThemeChoice } from "@/shared/theme";
 import {
@@ -137,7 +137,9 @@ function wheelToScroll(e: React.WheelEvent<HTMLDivElement>) {
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <div className="flex items-center gap-2.5">
+    /* The mark is the way home, as on any site. */
+    <Link to="/" title="Home" className="flex items-center gap-2.5 rounded-md">
+
       {/* The SCM wordmark, lifted from the sign-in artwork so the rail and the door
           the user just came through carry the same mark. It is a picture of the word
           "SCM", which is why it is `alt=""` and hidden from the reader: the name is
@@ -161,7 +163,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
           compact ? "h-5 w-[52px]" : "h-9 w-[94px]"
         }`}
       />
-    </div>
+    </Link>
   );
 }
 

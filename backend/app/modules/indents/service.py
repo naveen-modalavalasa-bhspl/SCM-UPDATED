@@ -1568,7 +1568,7 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
             workflow_context[engine.LADDER_DOC_TYPE_KEY] = (
                 monthly_indent_service.MONTHLY_INDENT_LADDER_DOC_TYPE
             )
-    await engine.start(
+    instance = await engine.start(
         db, doc_type=DocType.INDENT.value, doc_id=indent.id,
         context=workflow_context,
         user=user,
@@ -1587,8 +1587,18 @@ async def submit_indent(db: AsyncSession, indent_id: int, user) -> Indent:
         doc_type=DocType.INDENT.value,
         doc_id=indent.id,
     )
-    indent.status = IndentStatus.PENDING_APPROVAL.value
-    await _refresh_current_approver(db, indent)
+    # A configured NO_APPROVAL ladder completes inside engine.start(): there is no
+    # pending task and therefore no later approval action that could hand the indent
+    # to Inventory. Keep the module-owned status in step with the engine-owned result,
+    # using the same fulfilment handoff as the final-approval path in act_on_indent.
+    if instance.status == InstanceStatus.APPROVED.value:
+        indent.status = IndentStatus.APPROVED.value
+        indent.approved_at = utcnow()
+        indent.current_approver_name = None
+        await _fulfil(db, indent, user)
+    else:
+        indent.status = IndentStatus.PENDING_APPROVAL.value
+        await _refresh_current_approver(db, indent)
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
         action=AuditAction.UPDATE, actor=user,

@@ -66,6 +66,7 @@ CREATE_PERMISSION = {
     DocType.DISPATCH.value: "dispatch.create",
     DocType.STOCK_TRANSFER.value: "stock.transfer",
     DocType.STOCK_TRANSFER_REQUEST.value: "stock.transfer.request",
+    DocType.STOCK_EDIT.value: "stock.edit.create",
 }
 
 
