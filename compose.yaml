@@ -66,6 +66,8 @@ x-backend-env: &backend-env
   # Where a reset link points. Defaults to localhost IN CODE, which is useless in a
   # container — the link is opened by a person on their own machine.
   APP_BASE_URL: ${APP_BASE_URL:-}
+  # Where a printed label's QR code points (a phone opens it). See .env.deploy.example.
+  PUBLIC_SCAN_URL: ${PUBLIC_SCAN_URL:-}
   PASSWORD_RESET_MINUTES: ${PASSWORD_RESET_MINUTES:-30}
   PASSWORD_RESET_EMAIL_DOMAIN: ${PASSWORD_RESET_EMAIL_DOMAIN:-}
   # Unset means an HCM joiner gets NO login and an admin has to cut one by hand.

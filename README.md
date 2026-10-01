@@ -196,11 +196,13 @@ public origin. To proxy at a different backend in dev, set `VITE_API_PROXY`
 instead. Never hardcode a host in source.
 
 Each consignment or package label prints one QR code. It opens a signed, read-only
-page with the latest label details and no access to the ERP application. In a deployed
-build the QR automatically uses the deployed site address. When testing from a phone,
-open the frontend using the PC's LAN address (for example `http://192.168.1.20:5173`)
-before printing, or set `VITE_PUBLIC_APP_URL` to that reachable address before starting
-Vite. A QR printed from `localhost` can only be opened by the same computer.
+page with the latest label details and no access to the ERP application. The SERVER
+decides the address the QR carries: `PUBLIC_SCAN_URL` in `backend/.env` when set (set it
+to the public address in UAT and production, e.g. `https://scm.com`), otherwise the
+address the app was opened on, with `localhost` swapped for this PC's network IP. A
+LAN-IP label opens only on the same Wi-Fi or office VPN; for phones on any network, use
+a public domain or a tunnel (e.g. Cloudflare Tunnel) and put it in `PUBLIC_SCAN_URL`.
+Printing is refused when the address could only be opened by this computer.
 
 ---
 

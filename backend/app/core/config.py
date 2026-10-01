@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     #: Where the reset link points. The FRONTEND origin, not the API's — the link is
     #: opened by a person in a browser. Never a literal in code.
     APP_BASE_URL: str = "http://localhost:5173"
+    #: Where a printed consignment/package label's QR code points: the address a
+    #: PHONE opens, so it must be reachable from wherever the carton travels, e.g.
+    #: `https://scm.com` or a Cloudflare Tunnel hostname. Unset = the address the
+    #: printing browser is on, with `localhost` swapped for this machine's network
+    #: IP (development). Read at RUNTIME, so one build serves every environment.
+    PUBLIC_SCAN_URL: str | None = None
     #: How long a reset link lives. Short on purpose: it is a bearer secret in an
     #: inbox, and a long window is the whole risk of the feature.
     PASSWORD_RESET_MINUTES: int = 30

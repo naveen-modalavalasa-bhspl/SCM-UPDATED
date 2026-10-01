@@ -993,3 +993,17 @@ from app.platform.rbac.permissions import (  # noqa: F401  (re-exported)
 # and the catalogue calls it ISSUE_ISSUE. Aliased rather than renamed so no router
 # line changes and no permission code moves.
 from app.platform.rbac.permissions import ISSUE_ISSUE as ISSUE_POST  # noqa: F401
+
+
+class ScanOriginSource(str, Enum):
+    """Where a printed label's QR address came from (`scan_links.resolve_scan_origin`)."""
+    CONFIGURED = "CONFIGURED"        # PUBLIC_SCAN_URL in the environment
+    BROWSER = "BROWSER"              # the address the printing browser is on
+    DETECTED_LAN = "DETECTED_LAN"    # localhost swapped for this machine's network IP
+
+
+class ScanReach(str, Enum):
+    """Who can open a QR address — the question a label actually has to answer."""
+    PUBLIC = "PUBLIC"                    # any phone, any network
+    PRIVATE_NETWORK = "PRIVATE_NETWORK"  # same Wi-Fi / office VPN only
+    THIS_DEVICE = "THIS_DEVICE"          # nobody but the printing computer

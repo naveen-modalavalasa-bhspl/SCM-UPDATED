@@ -841,6 +841,25 @@ export const scanCode = (code: string) => get<ScanResult>(`${BASE}/scan/${encode
 export const getPublicLabel = (token: string) =>
   get<ScanResult>(`${BASE}/public-label/${encodeURIComponent(token)}`);
 
+/** Who can open a label's QR address: any phone, the same network only, or nobody
+ * but the printing computer. */
+export type ScanReach = "PUBLIC" | "PRIVATE_NETWORK" | "THIS_DEVICE";
+
+/** The address a printed label's QR carries - decided by the SERVER per environment
+ * (PUBLIC_SCAN_URL, else this browser's address with localhost swapped for the PC's
+ * network IP), so the label never encodes an address the scanning phone cannot open. */
+export interface ScanOrigin {
+  origin: string;
+  source: "CONFIGURED" | "BROWSER" | "DETECTED_LAN";
+  reach: ScanReach;
+  printable: boolean;
+  headline: string;
+  detail: string;
+}
+
+export const getScanOrigin = (origin: string) =>
+  get<ScanOrigin>(`${BASE}/public-label-origin`, { origin });
+
 /* ------------------------------------------------------------- attachments -- */
 
 export const listAttachments = (entity_type: string, entity_id: number) =>

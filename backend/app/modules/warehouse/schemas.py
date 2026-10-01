@@ -15,7 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.modules.warehouse.enums import (
     VENDOR_RETURN_INBOUND_RESPONSES, VENDOR_RETURN_REFUND_RESPONSES,
     DispatchEventType, DispatchType, InspectionResult, InspectionType, IssueDirection,
-    IssueType, PickStrategy, ReceiptType, VendorReturnResponse,
+    IssueType, PickStrategy, ReceiptType, ScanOriginSource, ScanReach,
+    VendorReturnResponse,
 )
 from app.shared.time import today as ist_today
 from app.shared.limits import (  # request-size guards, see the module
@@ -4099,6 +4100,21 @@ class StockReportScopes(BaseModel):
     floor_restricted: bool = False
     row_cap: int
     options: list[StockReportScopeOption] = Field(default_factory=list)
+
+
+
+class ScanOrigin(BaseModel):
+    """The address a printed label's QR code carries, and who can open it.
+
+    Decided by the server so every environment prints a reachable address without a
+    rebuild. The wording is SERVED, so the label screen never composes its own."""
+    origin: str
+    source: ScanOriginSource
+    reach: ScanReach
+    #: False only when the address opens on the printing computer and nowhere else.
+    printable: bool
+    headline: str
+    detail: str
 
 
 # Forward references: LocationOccupancy names CapacityGate/OccupancyLine and

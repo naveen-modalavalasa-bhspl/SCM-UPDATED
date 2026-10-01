@@ -31,6 +31,7 @@ from app.modules.indents import service as indent_service
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
+from app.modules.warehouse import scan_links
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
 from app.platform.rbac.permissions import (
@@ -1351,6 +1352,13 @@ async def list_batches(params: PageParams = Depends(), item_id: int | None = Non
 async def scan(code: str, db: AsyncSession = Depends(get_db),
                _=Depends(require_permission(STOCK_VIEW))):
     return await service.scan(db, code)
+
+
+@router.get("/public-label-origin", response_model=s.ScanOrigin)
+async def public_label_origin(origin: str | None = Query(None, max_length=255),
+                              _=Depends(require_permission(DISPATCH_VIEW))):
+    """The address a label printed from `origin` (the printing browser) should carry."""
+    return await scan_links.resolve_scan_origin(origin)
 
 
 @router.get("/public-label/{token}", response_model=s.ScanResult)

@@ -18,9 +18,11 @@ import {
   getConsignment,
   getIssueDispatchSource,
   getIssueDispatchSources,
+  getScanOrigin,
   issueOptions,
   updateConsignment,
   allWarehouseOptions,
+  type ScanOrigin,
 } from "../api";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type {
@@ -147,12 +149,35 @@ type ScanCardSpec = {
 /** How many content lines fit on a label before it stops being one card. */
 const LABEL_LINES = 6;
 
-/** A deployment normally uses its current public origin. Developers printing from
- * localhost can set this to the PC's LAN URL, e.g. http://192.168.1.20:5173. */
-const publicAppOrigin = () => (
+/** The address this browser is printing from. Only a HINT to the server, which
+ * decides what the QR actually carries (`getScanOrigin`): PUBLIC_SCAN_URL when the
+ * environment sets one, else this address with localhost swapped for the PC's
+ * network IP. VITE_PUBLIC_APP_URL is still honoured as the hint. */
+const browserAppOrigin = () => (
   (import.meta.env.VITE_PUBLIC_APP_URL as string | undefined)?.trim().replace(/\/+$/, "")
   || window.location.origin
 );
+
+/** Used only if the server cannot be asked: the old rule, with loopback refused. */
+const fallbackScanOrigin = (): ScanOrigin => {
+  const origin = browserAppOrigin();
+  let local = true;
+  try {
+    local = ["localhost", "127.0.0.1", "[::1]", "::1"].includes(new URL(origin).hostname);
+  } catch {
+    // Not a URL: treat it as unscannable.
+  }
+  return {
+    origin,
+    source: "BROWSER",
+    reach: local ? "THIS_DEVICE" : "PRIVATE_NETWORK",
+    printable: !local,
+    headline: local ? "These labels cannot be scanned" : "Label address not confirmed",
+    detail: local
+      ? "The QR code would point at this computer only. Open the app by its network address, then print."
+      : `The QR code points at ${origin}. The server could not confirm who can open it.`,
+  };
+};
 
 /** The QR matrix and the barcode encoding, and NOTHING that changes while packing.
  *
@@ -182,18 +207,16 @@ const ScanBarcode = memo(function ScanBarcode({ code }: { code: string }) {
 /** One card's identity — which label a per-card download prints. */
 const scanKey = (card: ScanCardSpec) => `${card.accent}-${card.code}`;
 
-function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () => void }) {
+function ScanCard({ spec, scanOrigin, onDownload }: {
+  spec: ScanCardSpec;
+  scanOrigin: ScanOrigin;
+  onDownload?: () => void;
+}) {
   const accent = spec.accent === "consignment"
     ? "border-brand/40 bg-brand-050/30"
     : "border-line bg-content1";
-  const appOrigin = publicAppOrigin();
-  const onlineUrl = `${appOrigin}/c/${spec.publicToken}`;
-  let onlineIsLocal = false;
-  try {
-    onlineIsLocal = ["localhost", "127.0.0.1", "::1"].includes(new URL(appOrigin).hostname);
-  } catch {
-    onlineIsLocal = true;
-  }
+  const onlineUrl = `${scanOrigin.origin}/c/${spec.publicToken}`;
+  const onlineIsLocal = !scanOrigin.printable;
   return (
     <div className={`rounded-lg border ${accent} p-4 shadow-sm`}>
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -216,9 +239,10 @@ function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () =>
             <button
               type="button"
               onClick={onDownload}
+              disabled={onlineIsLocal}
               title="Download this label (choose Save as PDF)"
               aria-label={`Download label ${spec.code}`}
-              className="flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-white text-brand hover:bg-brand-050 print:hidden"
+              className="flex h-11 w-11 items-center justify-center rounded-lg border border-line bg-white text-brand hover:bg-brand-050 disabled:cursor-not-allowed disabled:opacity-40 print:hidden"
             >
               <Download className="h-4 w-4" />
             </button>
@@ -233,7 +257,7 @@ function ScanCard({ spec, onDownload }: { spec: ScanCardSpec; onDownload?: () =>
           <div className="mb-1 text-[9px] font-bold uppercase tracking-wide text-brand">Scan · View details</div>
           <ScanQr value={onlineUrl} size={108} level="M" />
           <div className="mt-1 text-[9px] leading-tight text-muted">
-            {onlineIsLocal ? "Open this app by its LAN address before printing" : "Current read-only details"}
+            {onlineIsLocal ? "Not scannable from a phone" : "Current read-only details"}
           </div>
         </div>
         <div className="min-w-0 rounded-lg border border-line bg-white p-3">
@@ -919,6 +943,16 @@ export default function ConsignmentForm() {
 
   // Which label the next print run carries: null = every card on the sheet.
   const [printOnly, setPrintOnly] = useState<string | null>(null);
+  // Where every QR on this sheet points. Asked of the server, never inferred here:
+  // a label is only as good as the phone that scans it being able to open it.
+  const scanOriginQuery = useQuery({
+    queryKey: ["wh-scan-origin", browserAppOrigin()],
+    queryFn: () => getScanOrigin(browserAppOrigin()),
+    enabled: !!doc?.public_scan_token,
+    staleTime: 60_000,
+    retry: 1,
+  });
+  const scanOrigin = scanOriginQuery.data ?? (scanOriginQuery.isError ? fallbackScanOrigin() : null);
   /** Print one label, or all of them. The browser's dialog is the download — "Save as
    *  PDF" names the file after the label, because the page title is the label's code
    *  for the duration of the print run. flushSync so the sheet is narrowed to that one
@@ -1593,7 +1627,10 @@ export default function ConsignmentForm() {
             icon={ScanLine}
             hint="Consignment and package identities. Each card carries both QR and barcode for scanning."
             actions={
-              <Button onClick={() => printLabels(null)} disabled={scanCards.length === 0}>
+              <Button
+                onClick={() => printLabels(null)}
+                disabled={scanCards.length === 0 || !scanOrigin?.printable}
+              >
                 <Printer className="h-4 w-4" /> Print all labels
               </Button>
             }
@@ -1601,18 +1638,45 @@ export default function ConsignmentForm() {
             {/* The printed sheet is its own copy of the cards, portalled to <body>.
                 Printing the on-screen node put it inside a clipping card and the paper
                 came out blank; see PrintPortal. */}
-            <PrintPortal id="wh-consignment-scan-labels">
-              {scanCards
-                .filter((card) => printOnly === null || scanKey(card) === printOnly)
-                .map((card) => (
-                  <ScanCard key={`print-${scanKey(card)}`} spec={card} />
-                ))}
-            </PrintPortal>
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              {scanCards.map((card) => (
-                <ScanCard key={scanKey(card)} spec={card} onDownload={() => printLabels(card)} />
-              ))}
-            </div>
+            {scanCards.length > 0 && !scanOrigin && (
+              <div className="mb-4 text-sm text-muted print:hidden">Checking where the labels point...</div>
+            )}
+            {scanOrigin && scanOrigin.reach !== "PUBLIC" && (
+              <div
+                className={`mb-4 flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm print:hidden ${
+                  scanOrigin.printable
+                    ? "border-warning/40 bg-warning/10 text-ink"
+                    : "border-danger/40 bg-danger/10 text-ink"
+                }`}
+              >
+                <AlertCircle className={`mt-0.5 h-4 w-4 shrink-0 ${scanOrigin.printable ? "text-warning" : "text-danger"}`} />
+                <div className="min-w-0">
+                  <div className="font-semibold">{scanOrigin.headline}</div>
+                  <div className="mt-0.5 text-xs leading-5 text-muted">{scanOrigin.detail}</div>
+                </div>
+              </div>
+            )}
+            {scanOrigin && (
+              <>
+                <PrintPortal id="wh-consignment-scan-labels">
+                  {scanCards
+                    .filter((card) => printOnly === null || scanKey(card) === printOnly)
+                    .map((card) => (
+                      <ScanCard key={`print-${scanKey(card)}`} spec={card} scanOrigin={scanOrigin} />
+                    ))}
+                </PrintPortal>
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {scanCards.map((card) => (
+                    <ScanCard
+                      key={scanKey(card)}
+                      spec={card}
+                      scanOrigin={scanOrigin}
+                      onDownload={() => printLabels(card)}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </ConsignmentSection>
         </>
       )}
