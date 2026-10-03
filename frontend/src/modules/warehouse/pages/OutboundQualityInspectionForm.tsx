@@ -496,7 +496,8 @@ export default function OutboundQualityInspectionForm({
       key: "defect",
       header: "Rejection reason",
       width: "w-36",
-      hideOnNarrow: true,
+      // Always shown: the save refuses a rejection without it, so hiding it under
+      // 1024 px left a laptop inspector unable to reject anything.
       render: (l, i) => (
         <TextInput
           ariaLabel={`Defect, line ${i + 1}`}
@@ -763,7 +764,7 @@ export default function OutboundQualityInspectionForm({
       </Section>
 
       <Section title="Evidence" hint="Test certificates, photographs of the defect.">
-        <AttachmentsPanel entityType="INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
+        <AttachmentsPanel entityType="OUTBOUND_INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
       </Section>
 
       <SerialNumbersModal

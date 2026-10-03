@@ -50,7 +50,8 @@ from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
 from app.modules.warehouse.enums import (
-    DEAD_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, SINGLE_ISSUE_REF_TYPES,
+    DEAD_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
+    SINGLE_ISSUE_REF_TYPES, STOCK_VIEW,
     ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
@@ -427,7 +428,15 @@ _ATTACHMENT_PARENTS = {
     "INSPECTION": (lambda: m.Inspection, lambda: m.Inspection.warehouse_id),
     "ISSUE": (lambda: m.MaterialIssue, lambda: m.MaterialIssue.warehouse_id),
     "DISPATCH": (lambda: m.Dispatch, lambda: m.Dispatch.warehouse_id),
+    # Outward QC is its own table (`whs_inspections`); "INSPECTION" is the inward one
+    # (`inb_inspections`), so filing an outward QC's report under it looked up the
+    # wrong table and answered "INSPECTION 57 not found".
+    "OUTBOUND_INSPECTION": (lambda: m.OutboundInspection,
+                            lambda: m.OutboundInspection.warehouse_id),
 }
+
+#: What an outward-QC grant alone (no stock.view / receipt.create) may file against.
+_QC_OUTWARD_ATTACHMENT_TYPES = {"OUTBOUND_INSPECTION"}
 
 
 async def assert_attachment_scope(db: AsyncSession, user, entity_type: str,
@@ -436,6 +445,12 @@ async def assert_attachment_scope(db: AsyncSession, user, entity_type: str,
     if user is None:
         return
     parent = _ATTACHMENT_PARENTS.get((entity_type or "").upper())
+    # A login that reached the attachment routes on its outward-QC grant (rather than
+    # stock.view / receipt.create) is confined to outward QC's own paperwork.
+    if ((via_scoped_grant(db, STOCK_VIEW) or via_scoped_grant(db, RECEIPT_CREATE))
+            and (entity_type or "").upper() not in _QC_OUTWARD_ATTACHMENT_TYPES):
+        raise PermissionError_(
+            "Your outward QC access covers outward QC attachments only")
     if parent is None:
         raise ValidationError(
             f"{entity_type!r} is not a document attachments can be read for")
@@ -23788,7 +23803,9 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
 
         reason = line.rejection_reason or line.defect_type
         if rejected > ZERO and not (reason or "").strip():
-            raise ValidationError(f"{item.code}: a failed line needs a defect type")
+            raise ValidationError(
+                f"{label}: {rejected} rejected — enter a Rejection reason on this line "
+                "before saving")
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.issue_item_id,

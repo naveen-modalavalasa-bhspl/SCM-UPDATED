@@ -169,6 +169,16 @@ export function SerialNumbersModal({
   const article = /^[aeiou]/i.test(noun) ? "an" : "a";
   const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const [entry, setEntry] = useState("");
+  // The list's height follows the window. It was a fixed 400 px inside a modal that
+  // already scrolls: on a laptop the header, scope and search took most of the screen,
+  // so the 400 px box was clipped to three or four rows behind a second scrollbar.
+  const [viewportHeight, setViewportHeight] = useState(
+    () => (typeof window === "undefined" ? 800 : window.innerHeight));
+  useEffect(() => {
+    const onResize = () => setViewportHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [bulkEntry, setBulkEntry] = useState("");
   const [error, setError] = useState<string | null>(null);
   /** Draw the whole captured list rather than the tail of it. See CAPTURE_WINDOW. */
@@ -268,6 +278,12 @@ export function SerialNumbersModal({
           needle ? aliases(s).some((token) => token.toLowerCase().includes(needle)) : true,
         );
     const rejected = (available ?? []).filter((s) => !selected.has(s));
+    // Whatever the screen has left after the modal's own chrome (~360 px), never
+    // taller than the rows themselves and never below five rows.
+    const listHeight = Math.min(
+      visible.length * 44,
+      Math.max(220, viewportHeight - 360),
+    );
     const toggle = (serial: string) =>
       setSerials((rows) =>
         rows.includes(serial) ? rows.filter((r) => r !== serial) : [...rows, serial],
@@ -363,7 +379,8 @@ export function SerialNumbersModal({
     const plural = (count: number) => `${unitNoun}${count === 1 ? "" : "s"}`;
 
     return (
-      <Modal isOpen={isOpen} onClose={onClose} size={typed ? "3xl" : "lg"} scrollBehavior="inside">
+      <Modal isOpen={isOpen} onClose={onClose} size={typed ? "3xl" : "lg"} scrollBehavior="inside"
+        classNames={{ wrapper: "items-center", base: "my-4 max-h-[calc(100dvh-2rem)]" }}>
         <ModalContent>
           <ModalHeader className="flex-col items-start gap-1 bg-content1/80 backdrop-blur-md border-b border-line/50 pb-4">
             <span className="flex flex-wrap items-center gap-2">
@@ -516,7 +533,7 @@ export function SerialNumbersModal({
                   <div className="w-24 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Location</div>
                 </div>
                 <FixedSizeList
-                  height={400}
+                  height={listHeight}
                   itemCount={visible.length}
                   itemSize={44}
                   width="100%"
@@ -567,7 +584,7 @@ export function SerialNumbersModal({
             ) : (
               <div className="rounded-xl border border-line/70 overflow-hidden">
                 <FixedSizeList
-                  height={400}
+                  height={listHeight}
                   itemCount={visible.length}
                   itemSize={44}
                   width="100%"

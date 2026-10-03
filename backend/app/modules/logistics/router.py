@@ -223,7 +223,7 @@ async def transport_activity_types(
     return service.activity_catalogue()
 
 
-@transport_router.get("", response_model=Page[TRListRow])
+@transport_router.get("", response_model=Page[ProviderBoardRow])
 async def list_transport(params: PageParams = Depends(), status: str | None = None,
                          mode: str | None = None, carrier_id: int | None = None,
                          indent_id: int | None = None, search: str | None = None,

@@ -622,7 +622,9 @@ async def sync_pages(db: AsyncSession) -> dict:
             continue
 
         required = None if spec.always_on else perms.page_view_code(spec.code)
+        minted = False
         if required and required not in permission_by_code:
+            minted = True
             permission = Permission(
                 code=required, module=spec.module or "admin",
                 resource=perms.PAGE_RESOURCE, action="view",
@@ -675,7 +677,13 @@ async def sync_pages(db: AsyncSession) -> dict:
 
         # Fail closed: Admin only, and only on first registration. Re-granting on
         # every start would undo an admin who deliberately took it off Admin.
-        if required and admin_role is not None and spec.code in added:
+        #
+        # "First registration" is the PERMISSION's as well as the page's. A page the
+        # seed's PAGE_TREE already inserted (rbac_job_profiles, admin_code_formats) is
+        # not `added` here, but its `page.<code>.view` is minted here — and the moment
+        # it exists `get_user_menu` gates on it, so without this grant the page
+        # vanished for Admin too on every freshly bootstrapped database.
+        if required and admin_role is not None and (spec.code in added or minted):
             permission = permission_by_code[required]
             held = (await db.execute(select(RolePermission).where(
                 RolePermission.role_id == admin_role.id,
