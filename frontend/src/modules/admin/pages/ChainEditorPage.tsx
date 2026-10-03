@@ -53,8 +53,15 @@ function rungHint(kind: StepKind, rung: FlowRung): string | undefined {
     : `${rung.name}: ${posts}${people} under this rank.`;
 }
 
-export function ChainEditorPage() {
-  const { docType = "" } = useParams();
+/** `embedded`: rendered inside another screen (Settings > Monthly Indent) for one fixed
+ *  document type. Same editor, same saves — plus its own project picker, since there
+ *  is no Approval Flow list in front of it to have chosen the project. */
+export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
+  docType?: string;
+  embedded?: boolean;
+} = {}) {
+  const { docType: routeDocType = "" } = useParams();
+  const docType = fixedDocType ?? routeDocType;
   const [params, setParams] = useSearchParams();
   const projectId = params.get("project") ? Number(params.get("project")) : null;
   // Which RANK of raiser this chain is for. Absent means the chain everybody else
@@ -104,7 +111,7 @@ export function ChainEditorPage() {
   useEffect(() => {
     setLoaded(false);
     setDirty(false);
-  }, [raiserRoleId]);
+  }, [raiserRoleId, projectId]);
 
   const save = useMutation({
     mutationFn: () => adminApi.flow.save(projectId, docType, steps, {
@@ -147,6 +154,17 @@ export function ChainEditorPage() {
     if (next === raiserRoleId) return;
     if (dirty) { setPendingRaiser(next === null ? "DEFAULT" : next); return; }
     applyRaiser(next);
+  }
+
+  function pickProject(next: number | null) {
+    if (next === projectId) return;
+    const params_ = new URLSearchParams(params);
+    if (next == null) params_.delete("project");
+    else params_.set("project", String(next));
+    // A rank's chain belongs to its project; carrying it across would open a chain
+    // nobody chose.
+    params_.delete("raiser");
+    setParams(params_, { replace: true });
   }
 
   function applyRaiser(next: number | null) {
@@ -215,18 +233,20 @@ export function ChainEditorPage() {
   }));
 
   return (
-    <div className="mx-auto max-w-3xl">
-      <button
-        type="button"
-        onClick={leave}
-        className="mb-2 flex min-h-11 items-center gap-1 text-sm text-muted hover:text-body"
-      >
-        <ChevronLeft size={16} /> Approval Flow
-      </button>
+    <div className={embedded ? "" : "mx-auto max-w-3xl"}>
+      {!embedded && (
+        <button
+          type="button"
+          onClick={leave}
+          className="mb-2 flex min-h-11 items-center gap-1 text-sm text-muted hover:text-body"
+        >
+          <ChevronLeft size={16} /> Approval Flow
+        </button>
+      )}
 
       <PageHeader
         eyebrow={chain.data?.is_legacy ? "Built on the old screen" : undefined}
-        title={label}
+        title={embedded ? `${label} approval chain` : label}
         actions={
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => { setCopyTargets([]); setCopying(true); }}>
@@ -246,6 +266,22 @@ export function ChainEditorPage() {
       />
 
       <ErrorBanner error={save.error ?? chain.error} />
+
+      {embedded && (
+        <div className="mb-4 w-72">
+          <Select
+            label="Project"
+            value={projectId ?? ""}
+            onChange={(value) => pickProject(value ? Number(value) : null)}
+            options={[
+              { value: "", label: "All projects (company-wide)" },
+              ...(options.data?.projects ?? []).map((project) => ({
+                value: String(project.id), label: project.name,
+              })),
+            ]}
+          />
+        </div>
+      )}
 
       {perRaiser && (
         <div className="mb-4">

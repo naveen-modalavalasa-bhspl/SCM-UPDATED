@@ -40,9 +40,8 @@ import {
 import {
   Alert, Button, Card, ErrorBanner, Field, Input, PageHeader, Select, useToast,
 } from "@/shared/components";
-import { StepList, stepKey } from "@/modules/admin/components/StepList";
+import { ChainEditorPage } from "@/modules/admin/pages/ChainEditorPage";
 import { adminApi } from "@/modules/admin/api";
-import type { CustomLadderStep, FlowRung, StepKind } from "@/modules/admin/types";
 import { monthlyIndentApi } from "../api";
 import type {
   MonthlyIndentCycle, MonthlyIndentLog, MonthlyIndentRule, MonthlyIndentSubmissionRule,
@@ -146,7 +145,6 @@ const clampOffset = (value: number) => Math.max(0, Math.min(12, value));
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const stepSignature = (steps: CustomLadderStep[]) => steps.map(stepKey).join("|");
 
 function emptySubmissionRule(day: number): Partial<MonthlyIndentSubmissionRule> {
   return {
@@ -168,9 +166,6 @@ export function MonthlyIndentPage() {
   const settings = useQuery({ queryKey: ["monthly-indent"], queryFn: monthlyIndentApi.get });
 
   const [cycle, setCycle] = useState<MonthlyIndentCycle | null>(null);
-  const [steps, setSteps] = useState<CustomLadderStep[]>([]);
-  // Which rank of raiser this chain is for; null is the chain everybody else uses.
-  const [raiserRoleId, setRaiserRoleId] = useState<number | null>(null);
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [editing, setEditing] = useState<{ rule: Partial<MonthlyIndentRule>; id: number | null }
     | null>(null);
@@ -183,21 +178,15 @@ export function MonthlyIndentPage() {
 
   const customFlow = Boolean(cycle?.approval_flow_enabled);
 
-  const chain = useQuery({
-    queryKey: ["approval-flow-chain", null, DOC_TYPE, raiserRoleId],
-    queryFn: () => adminApi.flow.chain(null, DOC_TYPE, raiserRoleId),
-    enabled: customFlow,
-  });
   const rungs = useQuery({
     queryKey: ["approval-flow-rungs", null, ""],
     queryFn: () => adminApi.flow.rungs(null, ""),
-    enabled: customFlow || needChoices,
+    enabled: needChoices,
   });
 
   const serverCycle = settings.data ? normalizeCycle(settings.data.cycle) : null;
   const serverSignature = serverCycle
     ? CYCLE_FIELDS.map((field) => String(serverCycle[field])).join("|") : null;
-  const chainSignature = chain.data ? stepSignature(chain.data.steps ?? []) : null;
 
   /* The draft survives a refetch.
    *
@@ -216,26 +205,8 @@ export function MonthlyIndentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSignature]);
 
-  const lastChain = useRef<string | null>(null);
-  useEffect(() => {
-    // Switched back to the normal approvals: drop the draft chain AND the memory of
-    // which one was loaded, or switching on again would compare an empty list against
-    // a chain still on the server and report a change nobody made.
-    if (!customFlow) {
-      lastChain.current = null;
-      setSteps([]);
-      return;
-    }
-    if (chainSignature == null || chainSignature === lastChain.current) return;
-    lastChain.current = chainSignature;
-    setSteps(chain.data?.steps ?? []);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customFlow, chainSignature]);
-
   const cycleDirty = cycleChanged(cycle, serverCycle);
-  const flowDirty = customFlow && chain.data != null
-    && stepSignature(steps) !== stepSignature(chain.data.steps ?? []);
-  const dirty = cycleDirty || flowDirty;
+  const dirty = cycleDirty;
 
   /* What the save bar names. Every one of these lives on the same cycle row, so
      "the month settings changed" was what came out when somebody had only switched
@@ -250,7 +221,6 @@ export function MonthlyIndentPage() {
       ? "how monthly indents are approved" : null,
     cycle && serverCycle && cycle.restrict_to_rules !== serverCycle.restrict_to_rules
       ? "who may raise a monthly indent" : null,
-    flowDirty ? "the approver list" : null,
   ].filter(Boolean) as string[];
   const changedSentence = changedParts.length <= 1
     ? changedParts[0] ?? ""
@@ -319,12 +289,6 @@ export function MonthlyIndentPage() {
   const saveAll = useMutation({
     mutationFn: async () => {
       if (cycleDirty) await monthlyIndentApi.updateCycle(cycle!);
-      if (flowDirty && steps.length > 0) {
-        await adminApi.flow.save(null, DOC_TYPE, steps, {
-          self_approval_policy: chain.data?.self_approval_policy ?? "INDEPENDENT",
-          fallback_position_id: chain.data?.fallback_position_id ?? null,
-        }, raiserRoleId);
-      }
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["monthly-indent"] });
@@ -414,19 +378,6 @@ export function MonthlyIndentPage() {
     setNeedChoices(true);
     saveSubmissionRule.reset();
     setEditingSubmission({ rule, id });
-  }
-
-  function addStep(kind: StepKind, rung: FlowRung) {
-    const next: CustomLadderStep = {
-      sequence: steps.length + 1,
-      name: rung.name,
-      kind,
-      position_id: kind === "hcm" ? rung.id : null,
-      post_id: kind === "local" ? rung.id : null,
-      position_role_id: kind === "rank" || kind === "shared_rank" ? rung.id : null,
-      holders: rung.members ?? [],
-    };
-    if (!steps.some((step) => stepKey(step) === stepKey(next))) setSteps([...steps, next]);
   }
 
   /* ---- loading / failure ------------------------------------------------ */
@@ -724,7 +675,6 @@ export function MonthlyIndentPage() {
         {/* ── Approvals ───────────────────────────────────────────────────── */}
         <Card className="p-4 sm:p-5">
           <Heading icon={Users} title="Who approves a monthly indent" />
-          <ErrorBanner error={chain.error} />
           <div className="grid gap-3 sm:grid-cols-2">
             <ChoiceTile
               selected={!customFlow}
@@ -743,54 +693,11 @@ export function MonthlyIndentPage() {
           </div>
 
           {customFlow && (
-            <div className="mt-4 grid gap-4 border-t border-line pt-4 lg:grid-cols-[1fr_19rem]">
-              <div>
-                {chain.data?.supports_raiser_chains && (
-                  <div className="mb-3 w-72">
-                    <Select
-                      label="When raised by"
-                      value={raiserRoleId ?? ""}
-                      onChange={(value) => {
-                        // A new rank is a different chain: drop the draft so its own loads.
-                        lastChain.current = null;
-                        setRaiserRoleId(value ? Number(value) : null);
-                      }}
-                      options={[
-                        { value: "", label: "Everyone (default chain)" },
-                        ...[...(rungs.data?.ranks ?? [])]
-                          .sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0)
-                            || a.name.localeCompare(b.name))
-                          .map((rank) => ({
-                            value: String(rank.id),
-                            label: `${rank.name}${(chain.data?.raiser_chains ?? [])
-                              .some((entry) => entry.role_id === rank.id) ? " ✓" : ""}`,
-                          })),
-                      ]}
-                    />
-                  </div>
-                )}
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
-                  They approve in this order
-                </p>
-                <StepList steps={steps} onChange={setSteps} />
-                {steps.length === 0 && (
-                  <p className="mt-2 text-xs text-warn">
-                    Add at least one approver, or switch back to the normal approvals.
-                  </p>
-                )}
-              </div>
-              <div className="space-y-3">
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted">
-                  Add an approver
-                </p>
-                {rungs.isLoading && <p className="text-sm text-muted">Loading the list…</p>}
-                <RungGroup title="Reporting line" items={rungs.data?.ranks ?? []}
-                           kind="rank" onAdd={addStep} />
-                <RungGroup title="Shared chairs" items={rungs.data?.shared_ranks ?? []}
-                           kind="shared_rank" onAdd={addStep} />
-                <RungGroup title="HCM posts" items={rungs.data?.hcm ?? []}
-                           kind="hcm" onAdd={addStep} />
-              </div>
+            // The Approval Flow editor itself — project, raiser rank, who approves,
+            // copy and history — not a second, thinner copy of it. It saves on its own
+            // button; the switch above saves on the bar below.
+            <div className="mt-4 border-t border-line pt-4">
+              <ChainEditorPage docType={DOC_TYPE} embedded />
             </div>
           )}
         </Card>
@@ -868,14 +775,13 @@ export function MonthlyIndentPage() {
                 variant="ghost"
                 onClick={() => {
                   if (serverCycle) setCycle(serverCycle);
-                  if (chain.data) setSteps(chain.data.steps ?? []);
                 }}
               >
                 <Undo2 className="h-4 w-4" /> Undo changes
               </Button>
               <Button
                 onClick={() => saveAll.mutate()}
-                disabled={saveAll.isPending || (customFlow && steps.length === 0)}
+                disabled={saveAll.isPending}
               >
                 <Save className="h-4 w-4" /> {saveAll.isPending ? "Saving…" : "Save"}
               </Button>
@@ -1403,36 +1309,6 @@ function ChoiceTile({ selected, title, body, onSelect }: {
         </span>
       </span>
     </button>
-  );
-}
-
-function RungGroup({ title, items, kind, onAdd }: {
-  title: string;
-  items: FlowRung[];
-  kind: StepKind;
-  onAdd: (kind: StepKind, rung: FlowRung) => void;
-}) {
-  if (!items.length) return null;
-  return (
-    <div>
-      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">
-        {title}
-      </p>
-      <div className="flex flex-wrap gap-1.5">
-        {items.slice(0, 18).map((item) => (
-          <button
-            key={`${kind}-${item.id}`}
-            type="button"
-            onClick={() => onAdd(kind, item)}
-            className="inline-flex min-h-9 items-center rounded-full border border-line/70
-                       px-2.5 text-xs text-body transition-colors hover:border-brand
-                       hover:bg-brand-050 hover:text-brand"
-          >
-            <Plus className="mr-1 h-3 w-3" /> {item.name}
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }
 
