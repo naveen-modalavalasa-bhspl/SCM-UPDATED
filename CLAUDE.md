@@ -26,8 +26,10 @@ copy .env.example .env          # set DATABASE_URL=mysql+aiomysql://root:<pw>@12
 # permissions/roles/menu, provisions each module and mints the `admin` login. No demo
 # rows, no masters: log in, run the HCM sync, then load the masters. Idempotent.
 .venv/Scripts/python -m scripts.bootstrap
-# An EXISTING database is brought forward by Alembic, as before:
-.venv/Scripts/python -m alembic upgrade head
+# An EXISTING database: run the SAME bootstrap after every pull. It runs
+# `alembic upgrade heads`, then adds every table/column/index the models have and the
+# database lacks, tops admin up to every permission and page, keeps admin's password
+# (--reset-admin-password to reset it), and exits 1 with a list if anything is short.
 $env:ALLOW_DEMO_DATA="true"       # development only; demo seeds are blocked otherwise
 .venv/Scripts/python -m scripts.seed
 # --reload-dir app: without it the reloader also watches .venv, so a pip install

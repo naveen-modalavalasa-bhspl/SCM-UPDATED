@@ -458,7 +458,7 @@ export default function ProcurementDemandPoolPage() {
       setIsExporting(true);
       const groupsToExport = await fetchAllFilteredExportData();
       if (groupsToExport.length === 0) {
-        toast.error("No demand pool items available to export.");
+        toast.error("There is nothing in the list to download.");
         return;
       }
 
@@ -491,7 +491,7 @@ export default function ProcurementDemandPoolPage() {
       exportToCSV({ filename, headers, rows });
       toast.success(`Exported ${groupsToExport.length} item group(s) to CSV`);
     } catch (err: any) {
-      toast.error(err?.message ?? "Export failed.");
+      toast.error(err?.message ?? "Could not download the Excel file. Try again.");
     } finally {
       setIsExporting(false);
       setExportOpen(false);
@@ -503,7 +503,7 @@ export default function ProcurementDemandPoolPage() {
       setIsExporting(true);
       const groupsToExport = await fetchAllFilteredExportData();
       if (groupsToExport.length === 0) {
-        toast.error("No indent line records available to export.");
+        toast.error("There are no indent items to download.");
         return;
       }
 
@@ -541,7 +541,7 @@ export default function ProcurementDemandPoolPage() {
       exportToCSV({ filename, headers, rows });
       toast.success(`Exported ${rows.length} detailed line(s) to CSV`);
     } catch (err: any) {
-      toast.error(err?.message ?? "Export failed.");
+      toast.error(err?.message ?? "Could not download the Excel file. Try again.");
     } finally {
       setIsExporting(false);
       setExportOpen(false);

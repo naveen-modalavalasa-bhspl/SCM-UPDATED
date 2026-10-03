@@ -995,7 +995,7 @@ export function JobProfilesPage() {
       toast.success(`${selected?.name} saved`);
       queryClient.invalidateQueries({ queryKey: ["rbac", "job-profiles"] });
     },
-    onError: () => toast.error("Could not save this profile"),
+    onError: () => toast.error("Job profile not saved. Try again."),
   });
 
   const reset = useMutation({
@@ -1004,7 +1004,7 @@ export function JobProfilesPage() {
       toast.success(`${selected?.name} handed back to its HCM role`);
       queryClient.invalidateQueries({ queryKey: ["rbac", "job-profiles"] });
     },
-    onError: () => toast.error("Could not reset this profile"),
+    onError: () => toast.error("Job profile not reset. Try again."),
   });
 
   const filtered = useMemo(() => {

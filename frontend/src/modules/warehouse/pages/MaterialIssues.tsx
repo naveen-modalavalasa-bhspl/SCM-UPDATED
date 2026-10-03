@@ -153,7 +153,7 @@ export default function MaterialIssues({
       className: "w-24 text-right",
       render: (r) => (
         <div className="flex justify-end gap-1">
-          {r.qc_status && ["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) && (
+          {r.qc_status && (["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) || (r.qc_status === "NOT_REQUIRED" && r.direction === "OUT" && r.is_stock_posted)) && (
             <button
               type="button"
               aria-label={`QC ${r.issue_no}`}
@@ -229,7 +229,7 @@ export default function MaterialIssues({
           <div className="flex items-center justify-between gap-2">
             <div className="truncate text-sm text-body">{r.issued_to_name ?? r.department_name ?? "—"}</div>
             <div className="flex items-center gap-1">
-              {r.qc_status && ["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) && (
+              {r.qc_status && (["PENDING", "PARTIAL", "FAILED"].includes(r.qc_status) || (r.qc_status === "NOT_REQUIRED" && r.direction === "OUT" && r.is_stock_posted)) && (
                 <button
                   type="button"
                   className="text-primary hover:bg-primary-50 p-1 rounded"

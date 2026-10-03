@@ -883,7 +883,7 @@ export function SupplierRFQDetailPage() {
         busy={answerCr.isPending}
         onConfirm={() => {
           if (decide === "ACCEPT" && otpCode.trim().length < 5) {
-            toast.error("Please request & enter a valid 6-digit OTP code before accepting");
+            toast.error("First press Send OTP, then type the 6-digit code you received, then press Accept.");
             return;
           }
           if (decide) {

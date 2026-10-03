@@ -393,7 +393,7 @@ export function BomLines() {
     mutationFn: async () => {
       if (batchError) throw new Error(batchError);
       if (validLines.length !== selectedItemIds.length) {
-        throw new Error("Quantity must be greater than zero for every selected item.");
+        throw new Error("Every ticked item needs a quantity of 1 or more.");
       }
       for (const [index, line] of validLines.entries()) {
         await mastersApi.bomItems.create({

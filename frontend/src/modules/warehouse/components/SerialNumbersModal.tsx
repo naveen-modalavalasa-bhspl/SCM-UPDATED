@@ -332,18 +332,18 @@ export function SerialNumbersModal({
           void paging.onResolve(value).then((found) => {
             if (!found) {
               setError(
-                `${value} is not among the units in this batch and location.`
+                `${value} is not at this location. Check the label, or pick a different batch or location.`
                 + (selectMode ? " Check the split it belongs to." : ""),
               );
               return;
             }
             setSerials((rows2) => {
               if (rows2.includes(found)) {
-                setError(`${found} is already on this pick.`);
+                setError(`${found} is already scanned. Scan a different one.`);
                 return rows2;
               }
               if (selectMode && rows2.length >= required) {
-                setError(`This pick is for ${required}; remove one before scanning another.`);
+                setError(`You need only ${required}. Remove one before scanning another.`);
                 return rows2;
               }
               return [...rows2, found];
@@ -352,7 +352,7 @@ export function SerialNumbersModal({
           return;
         }
         setError(
-          `${value} is not among the units in this batch and location.`
+          `${value} is not at this location. Check the label, or pick a different batch or location.`
           + (selectMode ? " Check the split it belongs to." : ""),
         );
         return;
@@ -363,11 +363,11 @@ export function SerialNumbersModal({
         return;
       }
       if (selected.has(hit)) {
-        setError(`${hit} is already on this pick.`);
+        setError(`${hit} is already scanned. Scan a different one.`);
         return;
       }
       if (selected.size >= required) {
-        setError(`This pick is for ${required}; remove one before scanning another.`);
+        setError(`You need only ${required}. Remove one before scanning another.`);
         return;
       }
       setError(null);
@@ -725,11 +725,11 @@ export function SerialNumbersModal({
     const value = raw.trim();
     if (!value) return;
     if (serials.includes(value)) {
-      setError(`${value} is already on this line.`);
+      setError(`${value} is already scanned. Scan a different one.`);
       return;
     }
     if (serials.length >= required) {
-      setError(`This line is for ${required}; remove one before adding another.`);
+      setError(`You need only ${required}. Remove one before adding another.`);
       return;
     }
     setError(null);
@@ -758,19 +758,19 @@ export function SerialNumbersModal({
       return false;
     });
     if (repeated) {
-      setError(`${repeated} appears more than once in the pasted list.`);
+      setError(`${repeated} is typed twice in your list. Remove the extra one.`);
       return;
     }
 
     const existing = new Set(serials);
     const duplicate = incoming.find((value) => existing.has(value));
     if (duplicate) {
-      setError(`${duplicate} is already on this line.`);
+      setError(`${duplicate} is already scanned. Scan a different one.`);
       return;
     }
 
     if (serials.length + incoming.length > required) {
-      setError(`This line is for ${required}; pasted list would capture ${serials.length + incoming.length}.`);
+      setError(`You need only ${required}, but your list has ${serials.length + incoming.length}. Remove the extra ones.`);
       return;
     }
 
@@ -805,7 +805,7 @@ export function SerialNumbersModal({
 
   const save = () => {
     if (!partial && serials.length !== required) {
-      setError(`This line needs exactly ${required} serial numbers; ${serials.length} captured.`);
+      setError(`You need ${required} serial numbers. You have entered ${serials.length}. Add the missing ones.`);
       return;
     }
     onSave(serials);

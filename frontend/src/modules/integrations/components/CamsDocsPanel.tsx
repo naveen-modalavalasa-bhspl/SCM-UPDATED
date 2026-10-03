@@ -266,7 +266,7 @@ function CamsSecretSection() {
       setSecret(null);
       return;
     }
-    toast.error("The secret could not be copied.");
+    toast.error("Copy did not work. Select the text with your mouse and press Ctrl+C.");
   };
 
   const configured = status.data?.configured ?? false;

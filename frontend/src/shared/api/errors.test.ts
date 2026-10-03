@@ -46,8 +46,8 @@ describe("describeError", () => {
     const notice = describeError(failure(403, {}));
 
     expect(notice.level).toBe("error");
-    expect(notice.title).toBe("You don't have permission");
-    expect(notice.message).toContain("You don't have permission to perform this action");
+    expect(notice.title).toBe("Not allowed");
+    expect(notice.message).toContain("Your login cannot do this");
     expect(notice.message).not.toMatch(/403|forbidden/i);
   });
 
@@ -56,8 +56,8 @@ describe("describeError", () => {
       error: 'sqlalchemy.exc.OperationalError: (1054, "Unknown column \'x\'")',
     }));
 
-    expect(notice.message).toContain("server problem");
-    expect(notice.message).toContain("Nothing was saved");
+    expect(notice.message).toContain("Something went wrong on our side");
+    expect(notice.message).toContain("Your work was not saved");
     expect(notice.message).not.toMatch(/sqlalchemy|1054|column/i);
   });
 
@@ -67,15 +67,15 @@ describe("describeError", () => {
     }));
 
     expect(notice.message).not.toMatch(/traceback|service\.py/i);
-    expect(notice.message).toContain("Correct them and try again");
+    expect(notice.message).toContain("fix them, then save again");
   });
 
   it("says nothing about proxies when the server is unreachable", () => {
     const notice = describeError(offline());
 
     expect(notice.level).toBe("error");
-    expect(notice.title).toBe("Can't reach the server");
-    expect(notice.message).toContain("Unable to connect to the server");
+    expect(notice.title).toBe("No internet");
+    expect(notice.message).toContain("The app cannot connect");
   });
 
   it("tells a rejected sign-in apart from an expired session", () => {
@@ -89,8 +89,8 @@ describe("describeError", () => {
 
     const expired = describeError(failure(401, { error: "Invalid or expired token" },
       "/api/indents"));
-    expect(expired.title).toBe("Signed out");
-    expect(expired.message).toContain("Sign in again");
+    expect(expired.title).toBe("You have been logged out");
+    expect(expired.message).toContain("Log in again");
     // "Invalid or expired token" is a fact about a JWT, not an answer to a person.
     expect(expired.message).not.toMatch(/token/i);
   });

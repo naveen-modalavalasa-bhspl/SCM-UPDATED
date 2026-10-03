@@ -355,24 +355,24 @@ export default function QualityInspectionForm({
       const availableSerialsForLine = availableSerials(index);
       if (availableSerialsForLine) {
         if (num(line.accepted_qty) !== required) {
-          throw new Error(`Line ${index + 1}: accepted quantity must be a whole number for serialized items.`);
+          throw new Error(`Line ${index + 1}: Accepted quantity must be a full number (like 5, not 5.5).`);
         }
         const actual = resolvedSerials(index).length;
         if (actual !== required) {
           const rejectedQty = num(line.inspected_qty) - required;
-          throw new Error(`Line ${index + 1}: choose exactly ${rejectedQty} serial numbers to reject.`);
+          throw new Error(`Line ${index + 1}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} serial numbers from the list.`);
         }
       }
 
       const availableImeisForLine = availableImeis(index);
       if (availableImeisForLine) {
         if (num(line.accepted_qty) !== required) {
-          throw new Error(`Line ${index + 1}: accepted quantity must be a whole number for IMEI-tracked items.`);
+          throw new Error(`Line ${index + 1}: Accepted quantity must be a full number (like 5, not 5.5).`);
         }
         const actual = resolvedImeis(index).length;
         if (actual !== required) {
           const rejectedQty = num(line.inspected_qty) - required;
-          throw new Error(`Line ${index + 1}: choose exactly ${rejectedQty} IMEI numbers to reject.`);
+          throw new Error(`Line ${index + 1}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} IMEI numbers from the list.`);
         }
       }
     }

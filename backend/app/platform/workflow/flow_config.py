@@ -72,9 +72,9 @@ CREATE_PERMISSION = {
 
 # Documents whose chain may differ by the RANK that raised it. An indent is the one
 # that genuinely does: a Store Keeper's climbs the whole field line, an RM's has almost
-# nobody above it. Every other type has one chain for everybody, and offering a rank
+# nobody above it — and a monthly indent is raised by the same ranks. Every other type has one chain for everybody, and offering a rank
 # selector on all of them would be twenty ways to configure something nobody wanted.
-RAISER_SCOPED_DOC_TYPES = frozenset({DocType.INDENT.value})
+RAISER_SCOPED_DOC_TYPES = frozenset({DocType.INDENT.value, DocType.MONTHLY_INDENT.value})
 
 
 async def _raiser_chains(db: AsyncSession, project_id: int | None,

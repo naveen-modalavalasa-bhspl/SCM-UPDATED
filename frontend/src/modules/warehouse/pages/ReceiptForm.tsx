@@ -610,7 +610,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     for (const [index, line] of form.items.entries()) {
       if (line.po_item_id && num(line.received_qty) > num(line.ordered_qty)) {
         const name = savedLine(index)?.item_name ?? line.item_name ?? "";
-        throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: Received quantity cannot exceed ordered quantity.`);
+        throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: You received more than was ordered. Enter a number up to the ordered quantity.`);
       }
     }
     
@@ -631,11 +631,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       if (!line.is_serial_tracked) continue;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
-        throw new Error(`Line ${index + 1}: serialized received quantity must be a whole number.`);
+        throw new Error(`Line ${index + 1}: Enter a full number (like 5, not 5.5). Each piece has its own serial number.`);
       }
       const actual = line.serial_numbers?.length ?? 0;
       if (actual !== required) {
-        throw new Error(`Line ${index + 1}: Please provide exactly ${required} serial numbers for confirmation.`);
+        throw new Error(`Line ${index + 1}: Scan or type ${required} serial numbers, one for each piece.`);
       }
     }
 
@@ -644,11 +644,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       if (!line.is_imei_tracked) continue;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
-        throw new Error(`Line ${index + 1}: IMEI-tracked received quantity must be a whole number.`);
+        throw new Error(`Line ${index + 1}: Enter a full number (like 5, not 5.5). Each piece has its own IMEI number.`);
       }
       const actual = line.imei_numbers?.length ?? 0;
       if (actual !== required) {
-        throw new Error(`Line ${index + 1}: Please provide exactly ${required} IMEI numbers for confirmation.`);
+        throw new Error(`Line ${index + 1}: Scan or type ${required} IMEI numbers, one for each piece.`);
       }
     }
   };

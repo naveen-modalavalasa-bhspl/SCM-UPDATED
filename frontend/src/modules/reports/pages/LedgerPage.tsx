@@ -189,7 +189,7 @@ export function ReportLedgerPage({ ledgerKey, embedded = false }: {
       saveFile(blob, filename);
       toast.success(`Downloaded ${filename}`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Export failed");
+      toast.error(error instanceof Error ? error.message : "Could not download the Excel file. Try again.");
     } finally {
       setExporting(false);
     }

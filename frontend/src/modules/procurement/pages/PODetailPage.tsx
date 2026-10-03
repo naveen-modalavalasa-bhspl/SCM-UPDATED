@@ -201,7 +201,7 @@ export function PODetailPage() {
       setQtyTouched(false);
       refresh();
     },
-    onError: (e: any) => toast.error(e?.message ?? "Could not save quantities"),
+    onError: (e: any) => toast.error(e?.message ?? "Quantities not saved. Check the numbers and try again."),
   });
 
   if (po.isLoading) return <p className="p-6 text-sm text-muted">Loading purchase order…</p>;

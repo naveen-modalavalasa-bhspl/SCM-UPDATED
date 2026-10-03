@@ -63,13 +63,13 @@ export default function WebhookDetailPage() {
       refresh();
       toast.success(`${source} will accept any sequence on the next push`);
     },
-    onError: () => toast.error("That sequence could not be reset."),
+    onError: () => toast.error("Could not reset the message counter for this webhook. Try again."),
   });
 
   const disable = useMutation({
     mutationFn: () => webhooksApi.disable(source),
     onSuccess: () => { refresh(); toast.success(`${source} switched off`); },
-    onError: () => toast.error("That webhook could not be switched off."),
+    onError: () => toast.error("Could not turn this webhook off. Try again."),
   });
 
   // The way back. Switching off is a soft delete — the registration and everything it
@@ -89,7 +89,7 @@ export default function WebhookDetailPage() {
       is_active: true,
     }),
     onSuccess: () => { refresh(); toast.success(`${source} switched back on`); },
-    onError: () => toast.error("That webhook could not be switched back on."),
+    onError: () => toast.error("Could not turn this webhook on. Try again."),
   });
 
   if (hook.error) return <ErrorBanner error="This webhook could not be loaded." />;

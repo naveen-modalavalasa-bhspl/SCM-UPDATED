@@ -334,7 +334,7 @@ export default function OutboundQualityInspectionForm({
       const actual = resolvedSerials(index).length;
       if (actual !== required) {
         const rejectedQty = num(line.inspected_qty) - required;
-        throw new Error(`${label}: choose exactly ${rejectedQty} units to reject.`);
+        throw new Error(`${label}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} units from the list.`);
       }
     }
   };

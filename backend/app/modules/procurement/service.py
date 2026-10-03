@@ -653,7 +653,9 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         vendor_gstin=vendor.gstin,
         created_by_id=user.id,
         created_by_name=user.full_name,
-        office_id=None,
+        # The raiser's office, as the direct-create path does. Left None, every PO
+        # read below ALL as "only my own" and a buyer could not open a colleague's PO.
+        office_id=getattr(user, "office_id", None),
         facility_id=None,
         facility_name=rfq.warehouse_name,
         project_id=rfq.project_id,
@@ -904,16 +906,41 @@ async def _release_po_claims(db: AsyncSession, po: PurchaseOrder) -> None:
                 po.po_no, len(req_items))
 
 
-async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
+async def _po_approver_condition(db: AsyncSession, user):
+    """POs this login is signing or has signed, whatever its scope rung says — the
+    same rule `_rfq_approver_condition` applies. The queue is the engine's."""
+    pending = await _pending_doc_ids(db, user, DocType.PO.value)
+    signed = (
+        select(WorkflowInstance.doc_id)
+        .join(WorkflowAction, WorkflowAction.instance_id == WorkflowInstance.id)
+        .where(WorkflowInstance.doc_type == DocType.PO.value,
+               WorkflowAction.actor_id == user.id)
+    )
+    return or_(PurchaseOrder.id.in_(pending) if pending else false(),
+               PurchaseOrder.id.in_(signed))
+
+
+async def _po_scope(db: AsyncSession, user, *, include_approver: bool = False):
+    condition = await scope_condition(
+        db, user,
+        owner_col=PurchaseOrder.created_by_id,
+        office_col=PurchaseOrder.office_id,
+        project_col=PurchaseOrder.project_id,
+    )
+    if include_approver:
+        condition = or_(condition, await _po_approver_condition(db, user))
+    return condition
+
+
+async def get_po(db: AsyncSession, po_id: int, user=None, *,
+                 include_approver: bool = False) -> PurchaseOrder:
     po = (await db.execute(select(PurchaseOrder).where(
             PurchaseOrder.id == po_id,
             # Same scope the list applies. A document hidden from the list must
-            # not be readable by putting its id in the URL.
-            await scope_condition(
-                db, user,
-                owner_col=PurchaseOrder.created_by_id,
-                office_col=PurchaseOrder.office_id,
-            ) if user is not None else true(),
+            # not be readable by putting its id in the URL. Approvers read (and
+            # sign) what is on their chain; edits keep the raiser's scope.
+            await _po_scope(db, user, include_approver=include_approver)
+            if user is not None else true(),
         ))).scalar_one_or_none()
     if not po:
         raise NotFoundError(f"PO {po_id} not found")
@@ -979,11 +1006,7 @@ async def list_pos(
 ) -> dict:
     stmt = select(PurchaseOrder)
     if user is not None:
-        stmt = stmt.where(await scope_condition(
-            db, user,
-            owner_col=PurchaseOrder.created_by_id,
-            office_col=PurchaseOrder.office_id,
-        ))
+        stmt = stmt.where(await _po_scope(db, user, include_approver=True))
     if search:
         search_term = f"%{search}%"
         stmt = stmt.where(
@@ -1025,11 +1048,7 @@ async def export_pos(
 
     stmt = select(PurchaseOrder)
     if user is not None:
-        stmt = stmt.where(await scope_condition(
-            db, user,
-            owner_col=PurchaseOrder.created_by_id,
-            office_col=PurchaseOrder.office_id,
-        ))
+        stmt = stmt.where(await _po_scope(db, user, include_approver=True))
     if search:
         search_term = f"%{search}%"
         stmt = stmt.where(
@@ -1693,7 +1712,7 @@ async def mark_vendor_notification_read(db: AsyncSession, vendor_id: int,
 
 async def po_comments(db: AsyncSession, po_id: int, user=None) -> list:
     """Discussion thread between the raiser and the approver."""
-    await get_po(db, po_id, user)
+    await get_po(db, po_id, user, include_approver=True)
     return list((await db.execute(
         select(POComment).where(POComment.po_id == po_id)
         .order_by(POComment.created_at.asc(), POComment.id.asc())
@@ -1702,7 +1721,7 @@ async def po_comments(db: AsyncSession, po_id: int, user=None) -> list:
 
 async def add_po_comment(db: AsyncSession, po_id: int, message: str, user) -> object:
     """Post a question or reply on a PO."""
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     clean = (message or "").strip()
     if not clean:
         raise ValidationError("Message cannot be empty")
@@ -1729,7 +1748,7 @@ async def update_po_approval_quantities(
     approval. An increase is refused — the approver can only trim a request,
     never inflate it.
     """
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     if po.status != POStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Only a PO awaiting approval can be edited (status {po.status})")
     actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
@@ -1808,7 +1827,7 @@ async def update_po_approval_quantities(
 
 async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
     """Every version this order has been, newest first. Read-only, always."""
-    await get_po(db, po_id, user)
+    await get_po(db, po_id, user, include_approver=True)
     return list((await db.execute(
         select(PORevision).where(PORevision.po_id == po_id)
         .order_by(PORevision.revision_no.desc(), PORevision.id.desc())
@@ -1947,7 +1966,7 @@ async def _attach_pending_one(db: AsyncSession, doc_type: str, doc, user=None):
 
 
 async def get_po_detail(db: AsyncSession, po_id: int, user=None):
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     # A submitted despatch locks the PO before a GRN necessarily changes its status.
     po.amendment_allowed = (
         po.status not in _UNAMENDABLE
@@ -1981,7 +2000,7 @@ async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
 
 
 async def po_approval_trail(db: AsyncSession, po_id: int, user=None) -> dict:
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     return await _approval_trail(db, DocType.PO.value, po.id)
 
 

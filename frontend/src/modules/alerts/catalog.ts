@@ -456,46 +456,46 @@ const DEFINITIONS: AlertDef[] = [
 
   // ------------------------------------------------------------------- error
   alert(
-    "request.failed", "error", "Something went wrong",
-    "The server could not complete your request. Nothing has been saved.",
+    "request.failed", "error", "Could not save",
+    "Something went wrong. Your work was not saved. Press Retry.",
     "Retry",
   ),
   alert(
     "permission.denied", "error", "Not allowed",
-    "Your role does not include {permission}. Ask an administrator if you need it.",
+    "Your login cannot do this. Ask your admin to give you access. {permission}",
   ),
   alert(
-    "session.expired", "error", "Signed out",
-    "Your session has expired. Sign in again to carry on; unsaved work on this screen is lost.",
+    "session.expired", "error", "You have been logged out",
+    "You were away too long. Log in again. Anything you did not save is lost.",
     "Sign In",
   ),
   alert(
-    "network.unreachable", "error", "Can't reach the server",
-    "Check your connection. Nothing has been saved.",
+    "network.unreachable", "error", "No internet",
+    "The app cannot connect. Check your internet or Wi-Fi, then press Retry. Nothing was saved.",
     "Retry",
   ),
   alert(
-    "hcm.sync_failed", "error", "HCM sync failed",
-    "{entity} could not be synced: {reason}",
+    "hcm.sync_failed", "error", "Employee data not updated",
+    "{entity} could not be brought in from HCM. Reason: {reason}. Press Retry.",
     "Retry",
   ),
   alert(
     "stock.insufficient", "error", "Not enough stock",
-    "{item} has {available} available but {qty} was requested.",
+    "You asked for {qty} {item}, but only {available} are free. Lower the quantity.",
     "Adjust Quantity",
   ),
   alert(
-    "document.duplicate", "error", "Already exists",
-    "{number} has already been recorded against {vendor}.",
+    "document.duplicate", "error", "Already entered",
+    "{number} is already saved for {vendor}. Do not enter it again.",
   ),
   alert(
-    "excel.import_failed", "error", "Excel import failed",
-    "{count} row(s) in {name} could not be read. Nothing was imported — fix the file and upload it again.",
+    "excel.import_failed", "error", "Upload failed",
+    "{count} rows in {name} have mistakes. Nothing was uploaded. Press View Errors, fix those rows, and upload again.",
     "View Errors",
   ),
   alert(
-    "print.failed", "error", "Print failed",
-    "The label printer did not respond. The job has not been sent.",
+    "print.failed", "error", "Printer not responding",
+    "Check the printer is on and has paper, then press Retry.",
     "Retry",
   ),
 ];

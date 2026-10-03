@@ -10477,8 +10477,6 @@ async def _raise_outbound_inspection_for(
     
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
-        if not item.requires_qi:
-            continue
 
         # FIXED 2026-08-21 — one STRING per unit, seeded once.
         #
@@ -10724,6 +10722,9 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     issue.issued_by_id = getattr(user, "id", None)
     issue.issued_by_name = _name(user)
     issue.status = IssueStatus.ISSUED.value
+    # Every OUTWARD issue is inspected before logistics may take it: a consignment is
+    # built only from what outward QC passed, whatever the item's `requires_qi` says.
+    needs_qc = needs_qc or outward
     issue.qc_status = QcStatus.PENDING.value if needs_qc else QcStatus.NOT_REQUIRED.value
 
     if needs_qc and outward:
@@ -12384,10 +12385,10 @@ async def _consignment_issues(
         if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
             raise ValidationError(
                 f"{issue.issue_no}: only a posted outward material issue can become a consignment")
-        if issue.qc_status == QcStatus.PENDING.value:
-            raise ValidationError(f"{issue.issue_no} is pending outward quality inspection")
-        if issue.qc_status == QcStatus.FAILED.value:
-            raise ValidationError(f"{issue.issue_no} failed outward quality inspection")
+        if issue.qc_status not in CONSIGNABLE_QC:
+            raise ValidationError(
+                f"{issue.issue_no}: outward QC is {issue.qc_status}, not passed. "
+                f"Complete QC Outward before it goes to logistics.")
         existing = await _live_consignment_for_issue(
             db, issue.id, exclude_dispatch_id=exclude_dispatch_id)
         if existing is not None:
@@ -12649,6 +12650,9 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         ref_issue = await get_issue(db, data.ref_id)
         if not ref_issue.is_stock_posted:
             raise ValidationError(f"{ref_issue.issue_no} has not posted stock yet")
+        if ref_issue.qc_status not in CONSIGNABLE_QC:
+            raise ValidationError(
+                f"{ref_issue.issue_no}: outward QC is {ref_issue.qc_status}, not passed")
         if ref_issue.warehouse_id != wh.id:
             raise ValidationError(f"{ref_issue.issue_no} belongs to another warehouse")
         existing = await _live_consignment_for_issue(db, ref_issue.id)
@@ -20936,7 +20940,16 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.requested_by_id == getattr(user, "id", 0),
-               Indent.status.in_(visible_statuses))
+               Indent.status.in_(visible_statuses),
+               # Only what logistics has taken out of the gate. An indent whose stock
+               # is merely set aside, still being bought or issued but not yet on a
+               # consignment has nothing for the requester to acknowledge.
+               select(m.MaterialIssue.id)
+               .join(m.Dispatch, _carries_issue(m.MaterialIssue.id))
+               .where(m.MaterialIssue.indent_id == Indent.id,
+                      m.MaterialIssue.is_stock_posted.is_(True),
+                      m.Dispatch.status.in_(_ON_THE_ROAD))
+               .correlate(Indent).exists())
     )
     if position_id is not None:
         stmt = stmt.where(or_(Indent.position_id == position_id,
@@ -22433,7 +22446,7 @@ async def inspectable_issue_options(db: AsyncSession,
     stmt = select(m.MaterialIssue).where(
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.is_stock_posted.is_(True),
-        m.MaterialIssue.qc_status.in_([QcStatus.PENDING.value, QcStatus.FAILED.value]),
+        m.MaterialIssue.qc_status.in_(INSPECTABLE_QC),
     )
     if inspected:
         stmt = stmt.where(m.MaterialIssue.id.notin_(inspected))
@@ -22495,6 +22508,13 @@ async def _requesting_points(
     }
 
 
+# An outward issue reaches logistics only once outward QC has passed it (PARTIAL: the
+# accepted part). NOT_REQUIRED is not in it — issues posted before QC became mandatory
+# for every outward issue are inspected first, which is why it is INSPECTABLE.
+CONSIGNABLE_QC = (QcStatus.PASSED.value, QcStatus.PARTIAL.value)
+INSPECTABLE_QC = (QcStatus.PENDING.value, QcStatus.FAILED.value, QcStatus.NOT_REQUIRED.value)
+
+
 def _consignable_issues_stmt():
     """Posted outward issues whose outward QC does not hold them back.
 
@@ -22504,7 +22524,7 @@ def _consignable_issues_stmt():
     return select(m.MaterialIssue).where(
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.is_stock_posted.is_(True),
-        m.MaterialIssue.qc_status.notin_([QcStatus.PENDING.value, QcStatus.FAILED.value]),
+        m.MaterialIssue.qc_status.in_(CONSIGNABLE_QC),
     )
 
 
@@ -22727,7 +22747,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
     issue = await get_issue(db, issue_id)
     if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
         raise ValidationError("Only a posted outward issue can become a dispatch")
-    if issue.qc_status in (QcStatus.PENDING.value, QcStatus.FAILED.value):
+    if issue.qc_status not in CONSIGNABLE_QC:
         raise ValidationError("QC Outward must be completed before dispatch.")
     existing = await _live_consignment_for_issue(db, issue.id)
     if existing is not None:
@@ -23844,7 +23864,7 @@ async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectio
                 f"{issue.issue_no} is already inspected on {existing.inspection_no}. "
                 f"Cancel that one to inspect it again."
             )
-        if issue.qc_status not in (QcStatus.PENDING.value, QcStatus.FAILED.value):
+        if issue.qc_status not in INSPECTABLE_QC:
             raise ValidationError(
                 f"{issue.issue_no} QC status is {issue.qc_status}. Cannot inspect."
             )

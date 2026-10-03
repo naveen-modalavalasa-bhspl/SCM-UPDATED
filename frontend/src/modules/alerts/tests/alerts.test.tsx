@@ -81,9 +81,9 @@ describe("an informational alert", () => {
     mount();
     void raise(() => alerts.error("request.failed"));
 
-    expect(await screen.findByText("Something went wrong")).toBeInTheDocument();
+    expect(await screen.findByText("Could not save")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    expect(screen.getByText("Something went wrong")).toBeInTheDocument();
+    expect(screen.getByText("Could not save")).toBeInTheDocument();
   });
 
   it("does not close a confirm", async () => {

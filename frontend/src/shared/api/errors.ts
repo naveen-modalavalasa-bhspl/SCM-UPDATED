@@ -98,9 +98,9 @@ function statusDefault(status: number): Notice {
   if (status >= 500) {
     return {
       level: "error",
-      title: "Server problem",
-      message: "We couldn't complete this request because of a server problem. "
-        + "Nothing was saved. Please try again in a moment.",
+      title: "System error",
+      message: "Something went wrong on our side. Your work was not saved. "
+        + "Wait 1 minute and try again. If it keeps happening, tell your admin.",
     };
   }
   switch (status) {
@@ -108,80 +108,77 @@ function statusDefault(status: number): Notice {
     case 422:
       return {
         level: "warning",
-        title: "Check the details entered",
-        message: "Some of the details on this form are missing or not valid. "
-          + "Correct them and try again.",
+        title: "Some details are wrong or missing",
+        message: "Check the boxes marked in red, fix them, then save again.",
       };
     case 401:
       return {
         level: "error",
-        title: "Signed out",
-        message: "Your session has expired. Sign in again to continue — "
-          + "anything unsaved on this screen is lost.",
+        title: "You have been logged out",
+        message: "You were away too long. Log in again. "
+          + "Anything you did not save is lost.",
       };
     case 403:
       return {
         level: "error",
-        title: "You don't have permission",
-        message: "You don't have permission to perform this action. "
-          + "Ask an administrator if you need it.",
+        title: "Not allowed",
+        message: "Your login cannot do this. Ask your admin to give you access.",
       };
     case 404:
       return {
         level: "error",
         title: "Not found",
-        message: "We couldn't find what you asked for. "
-          + "It may have been removed, or somebody else may have changed it.",
+        message: "This record is not there anymore. Someone may have deleted or "
+          + "changed it. Go back and refresh the list.",
       };
     case 405:
       return {
         level: "error",
-        title: "Not available here",
-        message: "That action is not available on this screen.",
+        title: "Cannot do this here",
+        message: "This button does not work on this screen. "
+          + "Go back and try from the correct screen.",
       };
     case 408:
       return {
         level: "error",
-        title: "That took too long",
-        message: "The request timed out before it finished. "
-          + "Check your connection and try again.",
+        title: "Taking too long",
+        message: "The system did not answer in time. "
+          + "Check your internet, then try again.",
       };
     case 409:
       return {
         level: "warning",
-        title: "Already exists",
-        message: "This clashes with something already recorded. "
-          + "Refresh the screen to see the current state, then try again.",
+        title: "Already saved or changed",
+        message: "Someone already saved or changed this. "
+          + "Refresh the page (F5) and check before trying again.",
       };
     case 413:
       return {
         level: "warning",
-        title: "File is too large",
-        message: "The file you attached is larger than this screen accepts. "
-          + "Attach a smaller file and try again.",
+        title: "File too big",
+        message: "This file is over 20 MB. Choose a smaller file or a smaller photo.",
       };
     case 429:
       return {
         level: "warning",
-        title: "Too many attempts",
-        message: "Too many requests were sent in a row. "
-          + "Wait a moment and try again.",
+        title: "Too many tries",
+        message: "You clicked too many times. Wait 1 minute, then try once.",
       };
     default:
       return {
         level: "warning",
-        title: "Could not complete that",
-        message: "We couldn't complete this request. "
-          + "Check the details and try again.",
+        title: "Could not save",
+        message: "Check what you entered and try again. "
+          + "If it still fails, tell your admin.",
       };
   }
 }
 
 const OFFLINE: Notice = {
   level: "error",
-  title: "Can't reach the server",
-  message: "Unable to connect to the server. Nothing was saved. "
-    + "Check your connection and try again.",
+  title: "No internet",
+  message: "The app cannot connect. Check your internet or Wi-Fi, "
+    + "then try again. Nothing was saved.",
 };
 
 /** A sign-in attempt, as opposed to a request made with an expired token. */

@@ -169,6 +169,8 @@ export function MonthlyIndentPage() {
 
   const [cycle, setCycle] = useState<MonthlyIndentCycle | null>(null);
   const [steps, setSteps] = useState<CustomLadderStep[]>([]);
+  // Which rank of raiser this chain is for; null is the chain everybody else uses.
+  const [raiserRoleId, setRaiserRoleId] = useState<number | null>(null);
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
   const [editing, setEditing] = useState<{ rule: Partial<MonthlyIndentRule>; id: number | null }
     | null>(null);
@@ -182,8 +184,8 @@ export function MonthlyIndentPage() {
   const customFlow = Boolean(cycle?.approval_flow_enabled);
 
   const chain = useQuery({
-    queryKey: ["approval-flow-chain", null, DOC_TYPE, null],
-    queryFn: () => adminApi.flow.chain(null, DOC_TYPE, null),
+    queryKey: ["approval-flow-chain", null, DOC_TYPE, raiserRoleId],
+    queryFn: () => adminApi.flow.chain(null, DOC_TYPE, raiserRoleId),
     enabled: customFlow,
   });
   const rungs = useQuery({
@@ -321,7 +323,7 @@ export function MonthlyIndentPage() {
         await adminApi.flow.save(null, DOC_TYPE, steps, {
           self_approval_policy: chain.data?.self_approval_policy ?? "INDEPENDENT",
           fallback_position_id: chain.data?.fallback_position_id ?? null,
-        });
+        }, raiserRoleId);
       }
     },
     onSuccess: () => {
@@ -743,6 +745,30 @@ export function MonthlyIndentPage() {
           {customFlow && (
             <div className="mt-4 grid gap-4 border-t border-line pt-4 lg:grid-cols-[1fr_19rem]">
               <div>
+                {chain.data?.supports_raiser_chains && (
+                  <div className="mb-3 w-72">
+                    <Select
+                      label="When raised by"
+                      value={raiserRoleId ?? ""}
+                      onChange={(value) => {
+                        // A new rank is a different chain: drop the draft so its own loads.
+                        lastChain.current = null;
+                        setRaiserRoleId(value ? Number(value) : null);
+                      }}
+                      options={[
+                        { value: "", label: "Everyone (default chain)" },
+                        ...[...(rungs.data?.ranks ?? [])]
+                          .sort((a, b) => (a.depth ?? 0) - (b.depth ?? 0)
+                            || a.name.localeCompare(b.name))
+                          .map((rank) => ({
+                            value: String(rank.id),
+                            label: `${rank.name}${(chain.data?.raiser_chains ?? [])
+                              .some((entry) => entry.role_id === rank.id) ? " ✓" : ""}`,
+                          })),
+                      ]}
+                    />
+                  </div>
+                )}
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
                   They approve in this order
                 </p>

@@ -29,7 +29,9 @@ ADMIN_CODE = "admin"
 ADMIN_PASSWORD = "Bavya@123"
 
 
-async def main() -> None:
+async def main(reset_password: bool = True) -> None:
+    """`reset_password=False` (what the bootstrap passes) keeps a password somebody
+    already changed: a redeploy must not hand the admin login back to the default."""
     async with SessionLocal() as db:
         role = (await db.execute(
             select(Role).where(Role.code == "ADMIN")
@@ -65,15 +67,22 @@ async def main() -> None:
             employee_id=ADMIN_ID, role_id=role.id,
         ))
 
-        await db.execute(
-            delete(UserCredential).where(UserCredential.employee_id == ADMIN_ID)
-        )
-        db.add(UserCredential(employee_id=ADMIN_ID,
-                              password_hash=hash_password(ADMIN_PASSWORD),
-                              must_change=False))
+        has_credential = (await db.execute(
+            select(UserCredential.employee_id).where(UserCredential.employee_id == ADMIN_ID)
+        )).first() is not None
+        if reset_password or not has_credential:
+            await db.execute(
+                delete(UserCredential).where(UserCredential.employee_id == ADMIN_ID)
+            )
+            db.add(UserCredential(employee_id=ADMIN_ID,
+                                  password_hash=hash_password(ADMIN_PASSWORD),
+                                  must_change=False))
+            password_note = f"password set to '{ADMIN_PASSWORD}'"
+        else:
+            password_note = "existing password kept"
         await db.commit()
 
-        print(f"admin ready: login '{ADMIN_CODE}' / '{ADMIN_PASSWORD}' "
+        print(f"admin ready: login '{ADMIN_CODE}', {password_note} "
               f"(employee {ADMIN_ID}), role {role.code} with "
               f"{len(held) + len(missing)} permissions (+{len(missing)} added)")
 
