@@ -706,9 +706,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       bin: l.bin_code,
       need: Math.trunc(num(l.issued_qty)),
       have: l.units_available ?? null,
-      serial: !!l.is_serial_tracked,
+      strict: !!l.has_units,
     }))
-    .filter((r) => r.serial && r.need > 0 && r.have !== null && r.have < r.need);
+    .filter((r) => r.strict && r.need > 0 && r.have !== null && r.have < r.need);
 
   const save = useMutation({
     mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
@@ -806,9 +806,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
+    mutationFn: async (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
       const numId = Number(id);
-      if (what === "submit") return submitIssue(numId);
+      if (what === "submit") {
+        if (editing) {
+          await save.mutateAsync();
+        }
+        return submitIssue(numId);
+      }
       if (what === "approve") return approveIssue(numId, reason);
       if (what === "reject") return rejectIssue(numId, reason);
       if (what === "post") return postIssue(numId);
@@ -1228,7 +1233,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         {unitShort.length > 0 && (
           <div className="mb-3 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-ink">
             <b>These picks cannot be posted as they stand.</b> Approval freezes the
-            batch, and issuing from stock needs one serial per unit — change the batch,
+            batch, and issuing from stock needs one identified unit per issued unit — change the batch,
             split the quantity onto another location, or reduce it now.
             <ul className="mt-1 list-disc pl-5">
               {unitShort.map((row) => (

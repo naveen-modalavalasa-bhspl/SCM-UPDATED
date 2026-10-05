@@ -8031,13 +8031,14 @@ async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> 
     if issue.direction != IssueDirection.OUT.value:
         return
     supply = await _issue_unit_supply(db, issue)
+    code_config = await codeformat.code_settings(db)
     short: list[str] = []
     for line in issue.items:
         wanted = _d(line.issued_qty)
         if wanted <= ZERO:
             continue
         item = await _item_snapshot(db, line.item_id)
-        if not item.is_serial_tracked:
+        if not await _unit_codes_required(db, item, config=code_config):
             continue
         # `_issue_unit_supply` already counts the units this line is holding — they
         # are `available` rows stamped with its own marker — so adding the captured
@@ -8048,12 +8049,13 @@ async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> 
         where = (f"batch {line.batch_no}" if line.batch_no else "the unbatched stock")
         if line.bin_code:
             where += f" in bin {line.bin_code}"
+        noun = _UNIT_NOUN[_unit_mode(item)]
         short.append(
-            f"line {line.line_no} ({item.code}) needs {int(wanted)} serial numbers "
+            f"line {line.line_no} ({item.code}) needs {int(wanted)} {noun} "
             f"but {where} holds {available}")
     if short:
         raise ValidationError(
-            "This issue cannot be served with the serial numbers on the shelf — "
+            "This issue cannot be served with the units on the shelf — "
             + "; ".join(short)
             + ". Change the batch or the quantity before submitting: after approval "
               "the batch is frozen and the issue could never be posted.")
@@ -22168,8 +22170,20 @@ async def indent_options(
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
     rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
-    return [{"id": r.id, "code": r.indent_no,
-             "name": getattr(r, "department_name", None) or r.indent_no} for r in rows]
+    
+    if warehouse_id is not None:
+        peers = await _same_tier_warehouse_ids(db, warehouse_id)
+    else:
+        peers = None
+
+    items = []
+    for r in rows:
+        caps = await _indent_cap(db, r.id)
+        taken = await _already_issued(db, r.id, warehouse_ids=peers)
+        if any(cap > taken.get(item_id, ZERO) for item_id, cap in caps.items()):
+            items.append({"id": r.id, "code": r.indent_no,
+                          "name": getattr(r, "department_name", None) or r.indent_no})
+    return items
 
 
 async def indent_issue_source(
@@ -22241,6 +22255,36 @@ async def indent_issue_source(
         for b in (await db.execute(select(m.Batch).where(m.Batch.id.in_(batch_ids)))).scalars().all()
     } if batch_ids else {}
 
+    peers = await _same_tier_warehouse_ids(db, warehouse_id)
+    taken = await _already_issued(db, indent_id, warehouse_ids=peers)
+    caps = await _indent_cap(db, indent_id)
+
+    items = []
+    for row in rows:
+        item_id = row.item_id
+        reserved_qty = _d(row[5])
+        remaining = max(ZERO, caps.get(item_id, ZERO) - taken.get(item_id, ZERO))
+        qty = min(reserved_qty, remaining)
+        if qty <= ZERO:
+            continue
+        items.append({
+            "indent_item_id": row.ref_line_id,
+            "item_id": item_id,
+            "item_code": item_by_id[item_id].code if item_id in item_by_id else None,
+            "item_name": item_by_id[item_id].name if item_id in item_by_id else None,
+            "is_serial_tracked": (
+                bool(item_by_id[item_id].is_serial_tracked)
+                if item_id in item_by_id else False
+            ),
+            "bin_id": row.bin_id or None,
+            "bin_code": bin_by_id[row.bin_id].code if row.bin_id and row.bin_id in bin_by_id else None,
+            "bin_path": getattr(bin_by_id[row.bin_id], "path", None) if row.bin_id and row.bin_id in bin_by_id else None,
+            "batch_id": row.batch_id or None,
+            "batch_no": batch_by_id[row.batch_id].batch_no if row.batch_id and row.batch_id in batch_by_id else None,
+            "requested_qty": qty,
+            "issued_qty": qty,
+        })
+
     return {
         "indent_id": indent.id,
         "indent_no": indent.indent_no,
@@ -22264,26 +22308,7 @@ async def indent_issue_source(
         # code, never the storekeeper's own.
         "destination_office_sac": await _office_sac(
             db, requested_by.office_id if requested_by else None),
-        "items": [
-            {
-                "indent_item_id": row.ref_line_id,
-                "item_id": row.item_id,
-                "item_code": item_by_id[row.item_id].code if row.item_id in item_by_id else None,
-                "item_name": item_by_id[row.item_id].name if row.item_id in item_by_id else None,
-                "is_serial_tracked": (
-                    bool(item_by_id[row.item_id].is_serial_tracked)
-                    if row.item_id in item_by_id else False
-                ),
-                "bin_id": row.bin_id or None,
-                "bin_code": bin_by_id[row.bin_id].code if row.bin_id and row.bin_id in bin_by_id else None,
-                "bin_path": getattr(bin_by_id[row.bin_id], "path", None) if row.bin_id and row.bin_id in bin_by_id else None,
-                "batch_id": row.batch_id or None,
-                "batch_no": batch_by_id[row.batch_id].batch_no if row.batch_id and row.batch_id in batch_by_id else None,
-                "requested_qty": _d(row[5]),
-                "issued_qty": _d(row[5]),
-            }
-            for row in rows
-        ],
+        "items": items,
     }
 
 
