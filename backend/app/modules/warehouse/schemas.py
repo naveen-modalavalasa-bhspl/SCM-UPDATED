@@ -1779,6 +1779,21 @@ class IssueDetail(IssueRead):
     # False until the indent raiser has confirmed this issue's quantities in My
     # Deliveries. The sending store must not be able to certify its own delivery.
     can_acknowledge: bool = False
+    # On a split PARENT: the floor issues carrying its goods, newest status each. Its
+    # own status is rolled up from these, so the screen shows what it is waiting on.
+    child_issues: list["IssueChildRead"] = []
+
+
+class IssueChildRead(BaseModel):
+    id: int
+    issue_no: str
+    status: str
+    floor_location_name: str | None = None
+    is_stock_posted: bool = False
+    total_qty: Decimal = Decimal(0)
+
+
+IssueDetail.model_rebuild()
 
 
 # ---------------------------------------------------------------------------

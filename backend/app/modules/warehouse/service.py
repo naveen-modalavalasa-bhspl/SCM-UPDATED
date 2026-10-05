@@ -50,7 +50,7 @@ from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
 from app.modules.warehouse.enums import (
-    DEAD_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
+    DEAD_ISSUE_STATUSES, UNSERVED_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
     SINGLE_ISSUE_REF_TYPES, STOCK_VIEW,
     ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
@@ -8818,6 +8818,13 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         setattr(issue, "floor_in_charge_names",
                 (await stock_locations.floor_incharge_names(
                     db, {issue.floor_location_id})).get(issue.floor_location_id, []))
+    setattr(issue, "child_issues", [dict(row._mapping) for row in (await db.execute(
+        select(m.MaterialIssue.id, m.MaterialIssue.issue_no, m.MaterialIssue.status,
+               m.MaterialIssue.floor_location_name, m.MaterialIssue.is_stock_posted,
+               m.MaterialIssue.total_qty)
+        .where(m.MaterialIssue.parent_issue_id == issue.id)
+        .order_by(m.MaterialIssue.id)
+    )).all()] if not issue.parent_issue_id else [])
     return await _decorate_issue_destination(db, issue)
 
 
@@ -9970,14 +9977,29 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
     from app.modules.inventory.models import Reservation, Stock
 
     parent = await get_issue(db, issue_id)
+    if parent.status in (IssueStatus.SPLIT.value, IssueStatus.CLOSED.value):
+        raise ValidationError(
+            f"{parent.issue_no} has already been split. Work its floor issues, or "
+            "cancel all of them to split it again.")
     _guard(parent.status, {IssueStatus.APPROVED.value}, "split", "issue")
+    # The split code says WHO may split; this says WHERE. A storekeeper of another
+    # warehouse holding the code must not be able to break this one's issue up.
+    await _assert_in_scope(db, user, m.MaterialIssue, parent,
+                           warehouse_col=m.MaterialIssue.warehouse_id,
+                           owner_col=m.MaterialIssue.created_by_id, label="Issue")
+    # Handing work ACROSS floors is a warehouse-wide decision. A floor in-charge sees
+    # only their own floors, so a split by one would hand out stock they cannot see.
+    if await floor_scope_ids(db, user) is not None:
+        raise ValidationError(
+            "Only a warehouse-wide user can split an issue across floors — you are "
+            "assigned to specific floors.")
     if parent.parent_issue_id:
         raise ValidationError(
             f"{parent.issue_no} is already a split of {parent.parent_issue_no}.")
     existing = await db.scalar(
         select(func.count()).select_from(m.MaterialIssue).where(
             m.MaterialIssue.parent_issue_id == parent.id,
-            m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+            m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES),
         )
     )
     if existing:
@@ -10079,6 +10101,9 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 "batch_id": row.batch_id, "batch_no": row.batch_no,
                 "expiry_date": row.expiry_date,
                 "qty": take,
+                # The parent line's own rate, so a child is valued exactly as the
+                # parent was — a child written without one listed at Rs 0.
+                "rate": line.rate,
             })
             outstanding -= take
         if outstanding > ZERO:
@@ -10093,12 +10118,21 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             "is nothing to split. Post the issue yourself, or put the stock away "
             "first.")
 
+    # Numbered in the same series as the parent: `_build_issue` numbers from the
+    # INDENT's project first, and `out_issues.project_name` is often empty, so
+    # numbering off the issue alone put children in a separate "NA" series.
+    series_project = parent.project_name
+    if parent.indent_id:
+        from app.modules.indents.models import Indent
+        indent = await db.get(Indent, parent.indent_id)
+        series_project = getattr(indent, "project_name", None) or series_project
+
     created: list[m.MaterialIssue] = []
     for floor_id, bucket in by_floor.items():
         child = m.MaterialIssue(
             items=[],
             issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
-                                       project=parent.project_name),
+                                       project=series_project),
             issue_type=parent.issue_type,
             issue_date=parent.issue_date,
             indent_id=parent.indent_id, indent_no=parent.indent_no,
@@ -10141,9 +10175,10 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 # for lines with a quantity, so an item that must be inspected went
                 # out as NOT_REQUIRED and never reached the Outward QC queue.
                 requested_qty=spec["qty"], issued_qty=spec["qty"],
+                rate=spec["rate"],
+                amount=(spec["qty"] * _d(spec["rate"])) if spec["rate"] else None,
             ))
-        child.total_items = len(child.items)
-        child.total_qty = sum((_d(i.requested_qty) for i in child.items), ZERO)
+        _issue_totals(child)
         db.add(child)
         created.append(child)
 
@@ -10155,6 +10190,14 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                                  "parent_issue_no": parent.issue_no,
                                  "floor": child.floor_location_name,
                                  "total_qty": str(child.total_qty)})
+    # The parent is now carried by its children: locked against posting, editing and
+    # cancelling, and out of every indent count (see `IssueStatus.SPLIT`).
+    parent.status = IssueStatus.SPLIT.value
+    await write_audit(db, entity="out_issues", entity_id=parent.id,
+                      entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": IssueStatus.APPROVED.value},
+                      after={"status": parent.status,
+                             "children": [c.issue_no for c in created]})
     await db.commit()
 
     # Who each piece went to. A floor name alone left the manager guessing whose
@@ -10173,6 +10216,52 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         # Said out loud, never rounded away — see the docstring.
         "unfulfilled": shortfall,
     }
+
+
+async def _sync_split_parent(db: AsyncSession, parent_id: int | None, user) -> None:
+    """Roll a split parent's status up from its children. Never set by hand.
+
+    - any child still open (draft, in approval, approved, not yet posted) -> SPLIT
+    - every child that was not cancelled/rejected has posted              -> CLOSED
+    - every child cancelled or rejected                                  -> APPROVED
+
+    The last is the way BACK, and matters as much as the way forward: with nothing
+    serving it the parent's own lines are the only claim left, so it returns to the
+    state it was split from and can be posted or split again. Whatever a CLOSED
+    parent's children did not cover (a shortfall at split time, a cancelled child) is
+    left reserved against the indent exactly as a short issue leaves it, and the
+    parent no longer counts toward the indent cap, so a fresh issue can take it.
+
+    Read on every child transition — post, reject, cancel — and by
+    `scripts.sync_split_issues` for parents split before this existed.
+    """
+    if not parent_id:
+        return
+    parent = await db.get(m.MaterialIssue, parent_id)
+    if parent is None or parent.status not in (
+            IssueStatus.APPROVED.value, IssueStatus.SPLIT.value, IssueStatus.CLOSED.value):
+        return
+    children = (await db.execute(
+        select(m.MaterialIssue.status, m.MaterialIssue.is_stock_posted)
+        .where(m.MaterialIssue.parent_issue_id == parent_id)
+    )).all()
+    if not children:
+        return
+    live = [row for row in children if row.status not in UNSERVED_ISSUE_STATUSES]
+    if not live:
+        after = IssueStatus.APPROVED.value
+    elif all(row.is_stock_posted for row in live):
+        after = IssueStatus.CLOSED.value
+    else:
+        after = IssueStatus.SPLIT.value
+    if after == parent.status:
+        return
+    before = parent.status
+    parent.status = after
+    await write_audit(db, entity="out_issues", entity_id=parent.id,
+                      entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": before},
+                      after={"status": after, "reason": "rolled up from its floor issues"})
 
 
 async def act_on_issue(
@@ -10222,6 +10311,7 @@ async def act_on_issue(
         before={"status": before},
         after={"status": issue.status, "comments": comments},
     )
+    await _sync_split_parent(db, issue.parent_issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
 
@@ -10531,6 +10621,17 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     _guard(issue.status, {IssueStatus.APPROVED.value}, "issue stock against", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
+    # A parent split before SPLIT existed still reads APPROVED. Its children carry
+    # its goods, so posting it as well would take the same stock off the shelf twice.
+    live_children = (await db.execute(
+        select(m.MaterialIssue.issue_no).where(
+            m.MaterialIssue.parent_issue_id == issue.id,
+            m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES))
+    )).scalars().all()
+    if live_children:
+        raise ValidationError(
+            f"{issue.issue_no} has been split into {', '.join(live_children)}. Post "
+            "those instead — or cancel all of them to post this one.")
     await _assert_issue_floor_access(db, issue, user)
 
     outward = issue.direction == IssueDirection.OUT.value
@@ -10748,6 +10849,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                       after={"is_stock_posted": True, "status": issue.status,
                              "qc_status": issue.qc_status,
                              "total_qty": str(issue.total_qty)})
+    await _sync_split_parent(db, issue.parent_issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
 
@@ -11686,6 +11788,13 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
         raise ValidationError(
             f"{issue.issue_no} has already left the store. Raise a return against it "
             "instead — cancelling would leave the stock unaccounted for.")
+    if issue.status == IssueStatus.SPLIT.value or await db.scalar(
+            select(func.count()).select_from(m.MaterialIssue).where(
+                m.MaterialIssue.parent_issue_id == issue.id,
+                m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES))):
+        raise ValidationError(
+            f"{issue.issue_no} has been split into floor issues. Cancel those instead "
+            "— once all of them are cancelled it returns to Approved.")
     _guard(issue.status,
            {IssueStatus.DRAFT.value, IssueStatus.PENDING_APPROVAL.value,
             IssueStatus.APPROVED.value, IssueStatus.REJECTED.value},
@@ -11706,6 +11815,7 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
                       after={"status": issue.status, "reason": reason})
+    await _sync_split_parent(db, issue.parent_issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
 

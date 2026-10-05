@@ -194,6 +194,9 @@ function buildPayload(fields: FormField[], values: Values): Values {
   return out;
 }
 
+/** Rows per page on a master list. The list is loaded whole; only the view is paged. */
+export const MASTER_PAGE_SIZE = 25;
+
 export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
@@ -217,6 +220,9 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [sortKey, setSortKey] = useState("");
+  const [page, setPage] = useState(1);
+  // A new search or sort starts again at page 1, or a narrowed list sits on an empty page.
+  useEffect(() => setPage(1), [search, sortKey]);
 
   // loadError is surfaced, never swallowed. Defaulting a failed list to [] made a
   // broken request look like an empty master, which hid a 422 on every tab that asked
@@ -488,7 +494,10 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         </div>
       ) : (
         <ResponsiveList
-          data={sorted}
+          data={sorted.slice((page - 1) * MASTER_PAGE_SIZE, page * MASTER_PAGE_SIZE)}
+          page={page}
+          totalPages={Math.ceil(sorted.length / MASTER_PAGE_SIZE)}
+          onPageChange={setPage}
           loading={isLoading}
           keyOf={(r) => r.id}
           columns={p.columns}

@@ -2372,7 +2372,8 @@ ITEM_LOOKUPS = (
     Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
     Lookup("item_class_id", ItemClass, "Item class"),
     Lookup("item_sub_class_id", ItemSubClass, "Item sub class"),
-    Lookup("owner_department_id", HcmDepartment, "Ownership department"),
+    Lookup("owner_department_id", HcmDepartment, "Ownership department",
+           same_name_is_one=True),
     Lookup("uom_id", Uom, "Unit of measure"),
     # An HSN row has no `name` — it is a code and a description, and the code is
     # what is written on an invoice, so that is what the sheet asks for and matches

@@ -3137,6 +3137,8 @@ _STO_STAGE_BY_ISSUE = {
     "ISSUED": "ISSUED", "DISPATCHED": "IN_TRANSIT", "ACKNOWLEDGED": "RECEIVED",
     "PARTIALLY_RETURNED": "RECEIVED", "RETURNED": "RECEIVED",
     "REJECTED": "CANCELLED", "CANCELLED": "CANCELLED",
+    # Split into per-floor children: still being issued, then issued.
+    "SPLIT": "TO_ISSUE", "CLOSED": "ISSUED",
 }
 
 

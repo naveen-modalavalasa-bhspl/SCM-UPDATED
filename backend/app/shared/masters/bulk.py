@@ -168,8 +168,15 @@ async def lookup_choices(defn, db: AsyncSession) -> dict[str, list[dict]]:
             stmt = stmt.where(lk.model.is_active.is_(True))
         for column, value in (getattr(lk, "where", None) or {}).items():
             stmt = stmt.where(getattr(lk.model, column) == value)
-        stmt = stmt.order_by(order).limit(lk.max_options + 1)
-        rows = (await db.execute(stmt)).scalars().all()
+        if getattr(lk, "same_name_is_one", False):
+            rows = (await db.execute(stmt.order_by(order))).scalars().all()
+            by_name: dict[str, list] = {}
+            for row in rows:
+                by_name.setdefault(_norm(_display(row, lk)), []).append(row)
+            rows = [_one_of_a_name(group) for group in by_name.values()][:lk.max_options + 1]
+        else:
+            stmt = stmt.order_by(order).limit(lk.max_options + 1)
+            rows = (await db.execute(stmt)).scalars().all()
         out[lk.field] = [
             {"id": row.id,
              "label": _display(row, lk),
@@ -190,6 +197,13 @@ def _display(row: Any, lk: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _one_of_a_name(rows: list) -> Any:
+    """The row the Item form offers for a name HCM repeats per office: active first,
+    then one carrying a code, then the lowest id (`router._ownership_department_options`)."""
+    return min(rows, key=lambda r: (getattr(r, "is_active", True) is False,
+                                    0 if getattr(r, "code", None) else 1, r.id))
 
 
 def _eligible(row: Any, lk: Any) -> bool:
@@ -284,6 +298,8 @@ async def resolve_lookups(defn, db: AsyncSession,
 
             barred = [row for row in hits if not _eligible(row, lk)]
             hits = [row for row in hits if _eligible(row, lk)]
+            if getattr(lk, "same_name_is_one", False) and len(hits) > 1:
+                hits = [_one_of_a_name(hits)]
             if barred and not hits:
                 problems.append({
                     "row": line, "field": field, "label": lk.label, "raw": text,
@@ -538,6 +554,7 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
     before — but a person who has never seen the file cannot infer from an empty grid
     what "Category" wants, and would guess. A separate sheet answers both.
     """
+    from app.shared.masters import short_codes
     choices = choices or {}
     book = Workbook()
     sheet = book.active
@@ -602,6 +619,10 @@ def build_template(defn, choices: dict[str, list[dict]] | None = None) -> bytes:
                 how = f"exactly {width} characters"
                 note = note or ("Keep any leading zeros. The column is formatted as "
                                 "text; a number that lost them is repaired on upload.")
+            if name == "code" and short_codes.applies(defn):
+                how = "Exactly 3 letters (A–Z), different on every row"
+                note = ("e.g. ERB for Erba. No two rows may share a code. Leave it "
+                        "blank and one is made from the name.")
             if name == "id":
                 note = note or "Leave blank to create. Fill to update that row."
             elif name.endswith("_ids"):

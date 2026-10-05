@@ -31,6 +31,8 @@ const STATUSES = [
   { value: "DRAFT", label: "Draft" },
   { value: "PENDING_APPROVAL", label: "In approval" },
   { value: "APPROVED", label: "Approved" },
+  { value: "SPLIT", label: "Split across floors" },
+  { value: "CLOSED", label: "Split, all posted" },
   { value: "REJECTED", label: "Rejected" },
   { value: "ISSUED", label: "Issued" },
   { value: "DISPATCHED", label: "Dispatched" },
@@ -74,6 +76,12 @@ export default function MaterialIssues({
         <div>
           <div className="font-mono text-xs font-semibold text-ink">{r.issue_no}</div>
           <div className="text-[11px] text-muted">{fmtDate(r.issue_date)}</div>
+          {r.parent_issue_no && (
+            <div className="text-[11px] text-muted">
+              Split of <span className="font-mono">{r.parent_issue_no}</span>
+              {r.floor_location_name ? ` · ${r.floor_location_name}` : ""}
+            </div>
+          )}
         </div>
       ),
     },
@@ -226,6 +234,11 @@ export default function MaterialIssues({
             <span className="font-mono text-xs font-semibold text-ink">{r.issue_no}</span>
             <StatusPill status={r.status} />
           </div>
+          {r.parent_issue_no && (
+            <div className="text-[11px] text-muted">
+              Split of <span className="font-mono">{r.parent_issue_no}</span>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2">
             <div className="truncate text-sm text-body">{r.issued_to_name ?? r.department_name ?? "—"}</div>
             <div className="flex items-center gap-1">

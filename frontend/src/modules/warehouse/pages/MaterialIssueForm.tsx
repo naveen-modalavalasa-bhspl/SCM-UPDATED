@@ -1033,7 +1033,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 </Button>
               </Can>
             )}
-            {editing && doc && !["CANCELLED", "ACKNOWLEDGED"].includes(doc.status) && (
+            {/* Never on a split parent: its floor issues are what get cancelled, and
+                the server refuses it here. */}
+            {editing && doc && !doc.is_stock_posted
+              && !["CANCELLED", "ACKNOWLEDGED", "SPLIT", "CLOSED"].includes(doc.status) && (
               <Can do="issue.create">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
@@ -1057,6 +1060,34 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           shortfall is the half that matters and it must not scroll away — a quantity
           no floor was holding is a shortage on the indent, and the manager is the
           only person who sees this screen at the moment it is known. */}
+      {/* A split parent is carried by its floor issues: say so, and which of them it is
+          still waiting on, since its own status is rolled up from theirs. Hidden while
+          the just-split result is up — that card already lists the same children. */}
+      {!splitResult && doc && (doc.child_issues?.length ?? 0) > 0 && (
+        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+          <div className="font-semibold">
+            {doc.status === "SPLIT"
+              ? "Split across floors — closes when every floor issue below is posted"
+              : doc.status === "CLOSED"
+                ? "Split across floors — every floor issue has been posted"
+                : "Split across floors — every floor issue was cancelled, so this one is back in your hands"}
+          </div>
+          <ul className="mt-2 space-y-1">
+            {doc.child_issues!.map((child) => (
+              <li key={child.id} className="flex flex-wrap items-center gap-2">
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`${listPath}/${child.id}`)}>
+                  {child.issue_no}
+                </button>
+                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>· {fmtQty(Number(child.total_qty))}</span>
+                <StatusPill status={child.status} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {splitResult && (
         <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
           <div className="flex items-center justify-between gap-3">
@@ -1122,6 +1153,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             * still has an author, and a blank field read as missing data. */}
           <MetaRow label="Issued by" value={doc.issued_by_name || doc.created_by_name || "—"} />
           <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
+          {doc.parent_issue_id && (
+            <MetaRow
+              label="Split of"
+              value={
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`${listPath}/${doc.parent_issue_id}`)}>
+                  {doc.parent_issue_no}
+                </button>
+              }
+            />
+          )}
           {doc.floor_location_name && (
             <MetaRow
               label="Handed to"
