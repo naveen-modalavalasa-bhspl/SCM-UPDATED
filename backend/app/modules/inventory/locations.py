@@ -311,6 +311,79 @@ async def floor_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     return automatic | extra
 
 
+async def floor_incharge_names(db: AsyncSession,
+                               floor_ids: set[int]) -> dict[int, list[str]]:
+    """Who is in charge of each floor — `floor_ids_for_user` read the other way round.
+
+    Same three links, so the names a split shows are exactly the people who will see
+    that piece in their queue: the post's own stocking-point tag on the floor, an
+    admin grant on top, and the one-floor-building fallback for a tag that names only
+    the warehouse. A floor nobody holds comes back with an empty list, never missing.
+    """
+    out: dict[int, list[str]] = {floor_id: [] for floor_id in floor_ids}
+    if not floor_ids:
+        return out
+    floor_posts = select(HcmPosition.id).where(
+        or_(HcmPosition.role_name.ilike("%FLOOR%INCHARGE%"),
+            HcmPosition.name.ilike("%FLOOR%INCHARGE%")))
+
+    links: set[tuple[int, int]] = set()          # (floor_id, position_id)
+    for location_id, position_id in (await db.execute(
+        select(PositionLocation.location_id, PositionLocation.position_id).where(
+            PositionLocation.location_id.in_(floor_ids),
+            PositionLocation.is_active == 1,
+            PositionLocation.position_id.in_(floor_posts)))).all():
+        links.add((int(location_id), int(position_id)))
+    for location_id, position_id in (await db.execute(
+        select(PositionLocationAccess.location_id, PositionLocationAccess.position_id)
+        .where(PositionLocationAccess.location_id.in_(floor_ids),
+               PositionLocationAccess.is_active == 1,
+               PositionLocationAccess.position_id.in_(floor_posts)))).all():
+        links.add((int(location_id), int(position_id)))
+
+    # The one-floor fallback: a tag carrying only the warehouse means that building's
+    # single floor, exactly as `floor_ids_for_user` reads it.
+    floors = (await db.execute(
+        select(WarehouseLocation.id, WarehouseLocation.warehouse_id)
+        .where(WarehouseLocation.id.in_(floor_ids)))).all()
+    warehouse_ids = {int(w) for _f, w in floors if w is not None}
+    if warehouse_ids:
+        floor_counts = dict((await db.execute(
+            select(WarehouseLocation.warehouse_id, func.count())
+            .where(WarehouseLocation.warehouse_id.in_(warehouse_ids),
+                   WarehouseLocation.bin_type == FLOOR_STORAGE_TYPE,
+                   WarehouseLocation.is_active.is_(True))
+            .group_by(WarehouseLocation.warehouse_id))).all())
+        single = {int(f): int(w) for f, w in floors
+                  if w is not None and floor_counts.get(w) == 1}
+        if single:
+            for warehouse_id, position_id in (await db.execute(
+                select(PositionLocation.warehouse_id, PositionLocation.position_id)
+                .where(PositionLocation.location_id.is_(None),
+                       PositionLocation.warehouse_id.in_(set(single.values())),
+                       PositionLocation.is_active == 1,
+                       PositionLocation.position_id.in_(floor_posts)))).all():
+                for floor_id, w in single.items():
+                    if w == int(warehouse_id):
+                        links.add((floor_id, int(position_id)))
+    if not links:
+        return out
+
+    holders: dict[int, list[str]] = {}
+    for position_id, name in (await db.execute(
+        select(HcmPositionAssignment.position_id, HcmEmployee.full_name)
+        .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
+        .where(HcmPositionAssignment.position_id.in_({p for _f, p in links}),
+               HcmPositionAssignment.is_active.is_(True),
+               HcmEmployee.is_active.is_(True)))).all():
+        holders.setdefault(int(position_id), []).append(name)
+    for floor_id, position_id in sorted(links):
+        for name in holders.get(position_id, []):
+            if name and name not in out[floor_id]:
+                out[floor_id].append(name)
+    return out
+
+
 async def floor_location_ids_for_user(db: AsyncSession, user) -> set[int] | None:
     """Assigned floors plus every active storage node below them."""
     roots = await floor_ids_for_user(db, user)

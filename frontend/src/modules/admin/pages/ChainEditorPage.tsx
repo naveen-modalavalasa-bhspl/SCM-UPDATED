@@ -33,24 +33,42 @@ const PICKER_GROUPS: { kind: StepKind; label: string }[] = [
   { kind: "hcm", label: "HCM posts" },
 ];
 
+/** A project name short enough for a chip: "104-MMU" stays as it is, "SUPPLY CHAIN
+ *  MANAGEMENT" becomes "SCM". The full name is in the chip's hover text. */
+export function shortProject(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length <= 10) return trimmed;
+  const words = trimmed.split(/[\s_]+/).filter(Boolean);
+  return words.length > 1
+    ? words.map((w) => (/\d/.test(w) ? `${w} ` : w[0].toUpperCase())).join("").trim()
+    : trimmed;
+}
+
 /** The hover text behind a chip: what this rung is, in the numbers that decide whether
  *  it is the right one. Two ranks can share a name (HCM's cutover left old role ids in
  *  place), and the size is what separates the live one from the leftover. */
 function rungHint(kind: StepKind, rung: FlowRung): string | undefined {
+  const from = rung.project_name ? ` (${rung.project_name})` : "";
   if (kind === "shared_rank") {
     const people = rung.people?.length
       ? rung.people.join(", ") : "nobody is seated in it yet";
-    return `${rung.name}: signed by ${people}. Not on the raiser's reporting line, `
+    return `${rung.name}${from}: signed by ${people}. Not on the raiser's reporting line, `
       + `so every holder of this rank sees it whoever raised the document.`;
   }
   if (kind !== "rank" || rung.position_count === undefined) return undefined;
+  if (rung.other_project) {
+    return `${rung.name} of ${rung.project_name ?? "another project"}: not this `
+      + `project's rank. It is listed only because someone here sits on one of its `
+      + `posts; raisers in this project will not climb through it, so the step will `
+      + `be skipped.`;
+  }
   const posts = `${rung.position_count} post${rung.position_count === 1 ? "" : "s"}`;
   const people = rung.people_count === undefined
     ? "" : `, ${rung.people_count} ${rung.people_count === 1 ? "person" : "people"}`;
   return rung.position_count <= 1
-    ? `${rung.name}: only ${posts}${people}. Almost every raiser will climb past this `
+    ? `${rung.name}${from}: only ${posts}${people}. Almost every raiser will climb past this `
       + `rung — check it is not an old rank left behind by the HCM cutover.`
-    : `${rung.name}: ${posts}${people} under this rank.`;
+    : `${rung.name}${from}: ${posts}${people} under this rank.`;
 }
 
 /** `embedded`: rendered inside another screen (Settings > Monthly Indent) for one fixed
@@ -223,14 +241,24 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
     else navigate(-1);
   }
 
-  const groups = PICKER_GROUPS.map(({ kind, label: groupLabel }) => ({
-    kind,
-    label: groupLabel,
-    items: (kind === "local" ? rungs.data?.local
+  // The box filters every group on screen — rank, project ("scm", "108-MMU"), post or
+  // department. HCM posts are already searched on the server, so they pass through.
+  const term = search.trim().toLowerCase();
+  const matches = (rung: FlowRung) => [
+    rung.name, rung.role_name, rung.department, rung.project_name,
+    rung.project_name ? shortProject(rung.project_name) : null,
+  ].some((text) => text?.toLowerCase().includes(term));
+  const groups = PICKER_GROUPS.map(({ kind, label: groupLabel }) => {
+    const items = (kind === "local" ? rungs.data?.local
       : kind === "rank" ? rungs.data?.ranks
         : kind === "shared_rank" ? rungs.data?.shared_ranks
-          : rungs.data?.hcm) ?? [],
-  }));
+          : rungs.data?.hcm) ?? [];
+    return {
+      kind,
+      label: groupLabel,
+      items: kind === "hcm" || !term ? items : items.filter(matches),
+    };
+  });
 
   return (
     <div className={embedded ? "" : "mx-auto max-w-3xl"}>
@@ -333,7 +361,7 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
       ) : (
         <div className="grid gap-4 md:grid-cols-[1fr_18rem]">
           <div>
-            <StepList steps={steps} onChange={update} />
+            <StepList steps={steps} onChange={update} ranks={rungs.data?.ranks} />
             {(chain.data?.warnings ?? []).map((warning) => (
               <p key={warning} className="mt-2 text-xs text-warn">{warning}</p>
             ))}
@@ -353,7 +381,7 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
               </button>
             </div>
             <input
-              placeholder="Search HCM posts…"
+              placeholder="Search ranks, projects, posts…"
               value={search}
               onFocus={selectOnFocus}
               onChange={(e) => setSearch(e.target.value)}
@@ -394,14 +422,22 @@ export function ChainEditorPage({ docType: fixedDocType, embedded = false }: {
                               · {rung.position_count}
                             </span>
                           )}
+                          {(kind === "rank" || kind === "shared_rank") && rung.project_name && (
+                            <span className={`ml-0.5 rounded-full px-1.5 text-[10px] font-medium ${
+                              kind === "rank" && rung.other_project
+                                ? "bg-warn/15 text-warn" : "bg-content2 text-muted"
+                            }`}>
+                              {shortProject(rung.project_name)}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>
                   </div>
                 )
               ))}
-              {search.trim().length >= 2 && (rungs.data?.hcm.length ?? 0) === 0 && (
-                <p className="text-xs text-muted">No HCM post matches “{search}”.</p>
+              {term && groups.every((group) => group.items.length === 0) && (
+                <p className="text-xs text-muted">Nothing matches “{search}”.</p>
               )}
             </div>
           </Card>

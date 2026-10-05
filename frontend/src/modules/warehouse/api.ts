@@ -521,6 +521,8 @@ export interface IssueSplitResult {
   children: {
     id: number; issue_no: string;
     floor_location_id: number | null; floor_location_name: string | null;
+    /** The floor in-charge(s) this piece now waits on; empty when nobody holds it. */
+    in_charge_names: string[];
     total_items: number; total_qty: string;
   }[];
   /** What no floor was holding. Reported, never rounded away — the shortage belongs

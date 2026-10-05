@@ -1312,7 +1312,7 @@ async def list_indents(
         # row only invites an allocation the backend will refuse. Counted like
         # `committed`, so a partly-ordered line still shows what is genuinely owed.
         on_order = (
-            select(func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+            select(func.coalesce(func.sum(_MR_STILL_COMING), 0))
             .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
             .where(
                 MaterialRequestItem.indent_item_id == IndentItem.id,
@@ -5626,6 +5626,13 @@ async def list_notifications(
 # The queue and the allocation guards both subtract what is "on order", and both must
 # read the same list — a delivered request counted as outstanding is stock nobody can
 # allocate, a rejected one counted as outstanding is a line nobody can serve.
+#: What of an MR line is still being bought: asked for, less what has already reached
+#: stock. A request delivered in parts stays OPEN, so the status filter alone kept the
+#: lines that had arrived counting as on order and the desk offered 0 of them.
+_MR_STILL_COMING = func.greatest(
+    MaterialRequestItem.quantity
+    - func.coalesce(MaterialRequestItem.received_quantity, 0), 0)
+
 _SETTLED_MR_STATUSES = (
     MRStatus.REJECTED.value, MRStatus.CANCELLED.value, MRStatus.RECEIVED.value,
     # FIXED 2026-08-21 — DRAFT counts as settled for this arithmetic, which is only
@@ -6015,7 +6022,7 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
     rows = (await db.execute(
         select(
             MaterialRequestItem.indent_item_id,
-            func.coalesce(func.sum(MaterialRequestItem.quantity), 0),
+            func.coalesce(func.sum(_MR_STILL_COMING), 0),
         )
         .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
         .join(IndentItem, IndentItem.id == MaterialRequestItem.indent_item_id)
@@ -7059,7 +7066,7 @@ async def _on_order_by_lines(db: AsyncSession,
         return {}
     return {int(row[0]): _d(row[1]) for row in (await db.execute(
         select(MaterialRequestItem.indent_item_id,
-               func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+               func.coalesce(func.sum(_MR_STILL_COMING), 0))
         .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
         .where(MaterialRequestItem.indent_item_id.in_(line_ids),
                MaterialRequest.status.notin_(_SETTLED_MR_STATUSES))

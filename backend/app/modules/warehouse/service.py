@@ -8814,6 +8814,10 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         db, issue, await _issue_doc_type_of(db, issue.id), user)
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
+    if issue.floor_location_id:
+        setattr(issue, "floor_in_charge_names",
+                (await stock_locations.floor_incharge_names(
+                    db, {issue.floor_location_id})).get(issue.floor_location_id, []))
     return await _decorate_issue_destination(db, issue)
 
 
@@ -10153,12 +10157,17 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                                  "total_qty": str(child.total_qty)})
     await db.commit()
 
+    # Who each piece went to. A floor name alone left the manager guessing whose
+    # queue it had landed in — and a floor nobody holds says so, empty, on screen.
+    in_charge = await stock_locations.floor_incharge_names(
+        db, {c.floor_location_id for c in created if c.floor_location_id})
     return {
         "parent_issue_id": parent.id,
         "parent_issue_no": parent.issue_no,
         "children": [{"id": c.id, "issue_no": c.issue_no,
                       "floor_location_id": c.floor_location_id,
                       "floor_location_name": c.floor_location_name,
+                      "in_charge_names": in_charge.get(c.floor_location_id, []),
                       "total_items": c.total_items,
                       "total_qty": str(c.total_qty)} for c in created],
         # Said out loud, never rounded away — see the docstring.

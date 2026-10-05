@@ -667,6 +667,9 @@ export default function OutboundQualityInspectionForm({
         <LinesEditor
           rows={form.items}
           columns={columns}
+          // Wide enough for every column's own width: narrower, and the auto table
+          // squeezed the Result dropdown and the quantities until they read "Pa…".
+          minTableWidth="min-w-[1160px]"
           keyOf={(_, i) => i}
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
           rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}

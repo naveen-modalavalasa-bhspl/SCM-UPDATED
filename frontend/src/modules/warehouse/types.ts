@@ -1112,6 +1112,8 @@ export interface Issue {
   parent_issue_no?: string | null;
   floor_location_id?: number | null;
   floor_location_name?: string | null;
+  /** Who holds that floor — the in-charge(s) a split piece was handed to. */
+  floor_in_charge_names?: string[];
   status: IssueStatus;
   total_items: number;
   total_qty: number;

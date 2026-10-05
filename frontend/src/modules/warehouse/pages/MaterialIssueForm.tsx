@@ -1074,6 +1074,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   {child.issue_no}
                 </button>
                 <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>
+                  → {child.in_charge_names.length
+                    ? <span className="font-medium">{child.in_charge_names.join(", ")}</span>
+                    : <span className="text-warn">no floor in-charge assigned</span>}
+                </span>
                 <span>· {child.total_items} line{child.total_items === 1 ? "" : "s"}</span>
                 <span>· {fmtQty(Number(child.total_qty))}</span>
               </li>
@@ -1117,6 +1122,19 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             * still has an author, and a blank field read as missing data. */}
           <MetaRow label="Issued by" value={doc.issued_by_name || doc.created_by_name || "—"} />
           <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
+          {doc.floor_location_name && (
+            <MetaRow
+              label="Handed to"
+              value={
+                <span>
+                  {doc.floor_location_name} ·{" "}
+                  {doc.floor_in_charge_names?.length
+                    ? doc.floor_in_charge_names.join(", ")
+                    : <span className="text-warn">no floor in-charge assigned</span>}
+                </span>
+              }
+            />
+          )}
           <MetaRow
             label="Reverses"
             value={doc.original_issue_no ? <span className="font-mono">{doc.original_issue_no}</span> : "—"}

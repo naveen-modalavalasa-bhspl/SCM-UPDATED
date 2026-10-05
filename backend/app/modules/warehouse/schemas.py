@@ -1745,6 +1745,8 @@ class IssueRead(_Read):
     parent_issue_no: str | None = None
     floor_location_id: int | None = None
     floor_location_name: str | None = None
+    # Who holds that floor — the floor in-charge(s) this piece was handed to.
+    floor_in_charge_names: list[str] = []
     status: str
     total_items: int
     total_qty: Decimal
