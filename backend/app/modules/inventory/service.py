@@ -450,7 +450,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
     posted_rate = _d(stock.valuation_rate) or _d(getattr(item, "purchase_price", None) or 0)
     stock.stock_value = (stock.total_qty * posted_rate).quantize(Decimal("0.01"))
 
-    db.add(StockMovement(
+    movement = StockMovement(
         warehouse_id=warehouse_id,
         warehouse_name=stock.warehouse_name,
         item_id=item_id, item_code=stock.item_code, item_name=stock.item_name,
@@ -473,8 +473,15 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                         else stock.serial_number),
         ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
         created_by_id=user.id, created_by_name=user.full_name,
-    ))
+    )
+    db.add(movement)
     await db.flush()
+
+    # Goods arrived: tell whoever registered (the AIMS outbox). Each hook runs in its
+    # own savepoint and can never fail this movement — see `hooks.fire_stock_in`.
+    if (direction == StockDirection.IN.value and hooks.ON_STOCK_IN
+            and ref_type in hooks.STOCK_IN_REF_TYPES):
+        await hooks.fire_stock_in(db, movement, user)
 
     # Warehouse-wide availability after this move, and what it was a moment ago.
     if direction == StockDirection.OUT.value:
@@ -1298,6 +1305,12 @@ async def mark_mrs_received(db: AsyncSession,
             ]),
         )
     )).scalars().unique().all():
+        # Per line first: a request delivered in parts stays open, but the lines that
+        # did arrive must stop counting as on order (`received_quantity`).
+        for line in mr.items:
+            if line.indent_item_id in receipts:
+                line.received_quantity = min(
+                    _d(receipts[line.indent_item_id]), _d(line.quantity))
         covered = all(
             _d(receipts.get(line.indent_item_id or 0, 0)) >= _d(line.quantity)
             for line in mr.items
@@ -3124,6 +3137,8 @@ _STO_STAGE_BY_ISSUE = {
     "ISSUED": "ISSUED", "DISPATCHED": "IN_TRANSIT", "ACKNOWLEDGED": "RECEIVED",
     "PARTIALLY_RETURNED": "RECEIVED", "RETURNED": "RECEIVED",
     "REJECTED": "CANCELLED", "CANCELLED": "CANCELLED",
+    # Split into per-floor children: still being issued, then issued.
+    "SPLIT": "TO_ISSUE", "CLOSED": "ISSUED",
 }
 
 

@@ -7,7 +7,8 @@
  * fallback can never produce the right words; only a table can.
  */
 export const DOC_TYPE_LABELS: Record<string, string> = {
-  INDENT: "Indent", ALLOCATION: "Stock allocation", MR: "Material request",
+  INDENT: "Indent", MONTHLY_INDENT: "Monthly indent",
+  ALLOCATION: "Stock allocation", MR: "Material request",
   PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
   WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
   OWN_STOCK_ALLOCATION: "Allocation from my point",
@@ -21,6 +22,7 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   STOCK_RETURN: "Stock return", STOCK_RETURN_RECEIPT: "Stock return receipt", STOCK_RETURN_LOGISTICS: "Stock return logistics",
   STOCK_MOVEMENT_ORDER: "Stock movement order",
   STOCK_ADJUSTMENT: "Stock audit",
+  STOCK_EDIT: "Stock correction",
   STOCK_TRANSFER: "Stock transfer order", STOCK_TRANSFER_REQUEST: "Stock transfer request",
 };
 

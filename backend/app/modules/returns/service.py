@@ -69,6 +69,7 @@ from app.modules.logistics.enums import (
     TransportMode, TransportSource, TransportStatus, is_inbound,
 )
 from app.modules.warehouse.models import PurchaseReturn, PurchaseReturnItem
+from app.modules.warehouse import service as warehouse
 from app.platform.hcm.models import HcmPosition, HcmPositionAssignment
 from app.platform.settings import attachments
 # The audit rows are the only record of the presses that leave no `wf_actions`
@@ -2700,20 +2701,25 @@ async def _carry_out(db: AsyncSession, doc: StockTransferOrder, user) -> None:
                 db, RESERVE_REF_TYPE, doc.id, ref_line_id=line.id)
             moved = ZERO
             for slice_ in consumed:
+                units = await _ship_return_units(db, doc, line.item_id,
+                                                 slice_.quantity, slice_.batch_id)
                 await inventory.move_stock(
                     db, line.item_id, slice_.quantity, StockDirection.OUT.value,
                     ref_type, doc.id, doc.sto_no, user,
                     warehouse_id=doc.from_warehouse_id,
                     bin_id=slice_.bin_id, batch_id=slice_.batch_id,
-                    project_id=slice_.project_id,
+                    project_id=slice_.project_id, serial_numbers=units,
                 )
                 if movement is Movement.TRANSFER:
+                    landed = await _land_return_units(db, doc, line.item_id,
+                                                      slice_.quantity)
                     await inventory.move_stock(
                         db, line.item_id, slice_.quantity, StockDirection.IN.value,
                         ref_type, doc.id, doc.sto_no, user,
                         warehouse_id=doc.to_warehouse_id,
                         bin_id=NO_BIN, batch_id=slice_.batch_id,
                         project_id=doc.to_project_id or slice_.project_id,
+                        serial_numbers=landed,
                     )
                 moved += slice_.quantity
             line.dispatched_qty = moved
@@ -2973,6 +2979,36 @@ async def _raise_transport_leg(db: AsyncSession, doc: StockTransferOrder, user) 
     logger.info("Return %s released to logistics as %s", fresh.sto_no, tr.tr_no)
 
 
+def _units_marker(doc: StockTransferOrder) -> str:
+    """What a returned unit is stamped with between the source and the far end."""
+    return f"Returned by {doc.sto_no}"
+
+
+async def _ship_return_units(db: AsyncSession, doc: StockTransferOrder, item_id: int,
+                             quantity, batch_id) -> list[str] | None:
+    """Send this slice's coded units out of the source with the quantity (2026-10-05).
+
+    A return used to move the QUANTITY only: RET0002 credited 2 units at the main store
+    while all ten unit rows stayed at the LIP, so the store's balance said 2 and its
+    serial picker said 0 — an issue against that stock could never be completed. The
+    units travel the way a consignment's do (`warehouse._ship_units` / `_land_units`).
+    Best effort, as there: bulk stock has no unit rows and must still move.
+    """
+    codes = await warehouse._ship_units(
+        db, item_id=item_id, warehouse_id=doc.from_warehouse_id, qty=quantity,
+        marker=_units_marker(doc), batch_id=batch_id or None)
+    return codes or None
+
+
+async def _land_return_units(db: AsyncSession, doc: StockTransferOrder, item_id: int,
+                             quantity) -> list[str] | None:
+    """Re-home the units this return shipped at the point that received them."""
+    codes = await warehouse._land_units(
+        db, markers=(_units_marker(doc),), item_id=item_id, qty=quantity,
+        to_warehouse_id=doc.to_warehouse_id, ref_no=doc.sto_no)
+    return codes or None
+
+
 async def _dispatch_stock(db: AsyncSession, doc: StockTransferOrder, user) -> None:
     """The load has left: consume the hold and debit the source.
 
@@ -2993,12 +3029,14 @@ async def _dispatch_stock(db: AsyncSession, doc: StockTransferOrder, user) -> No
             db, RESERVE_REF_TYPE, doc.id, ref_line_id=line.id)
         moved = ZERO
         for slice_ in consumed:
+            units = await _ship_return_units(db, doc, line.item_id, slice_.quantity,
+                                             slice_.batch_id)
             await inventory.move_stock(
                 db, line.item_id, slice_.quantity, StockDirection.OUT.value,
                 ref_type, doc.id, doc.sto_no, user,
                 warehouse_id=doc.from_warehouse_id,
                 bin_id=slice_.bin_id, batch_id=slice_.batch_id,
-                project_id=slice_.project_id,
+                project_id=slice_.project_id, serial_numbers=units,
             )
             moved += slice_.quantity
         line.dispatched_qty = moved
@@ -3068,6 +3106,7 @@ async def _land_stock(db: AsyncSession, doc: StockTransferOrder, user, *,
             outstanding[row.item_id] = left - quantity
         if quantity <= ZERO:
             continue
+        units = await _land_return_units(db, doc, row.item_id, quantity)
         await inventory.move_stock(
             db, row.item_id, quantity, StockDirection.IN.value,
             ref_type, doc.id, doc.sto_no, user,
@@ -3076,6 +3115,7 @@ async def _land_stock(db: AsyncSession, doc: StockTransferOrder, user, *,
             # with the material, which is the whole reason they are read back.
             bin_id=NO_BIN, batch_id=row.batch_id or NO_BATCH,
             project_id=doc.to_project_id or row.project_id or NO_PROJECT,
+            serial_numbers=units,
         )
         landed_by_item[row.item_id] = landed_by_item.get(row.item_id, ZERO) + quantity
 

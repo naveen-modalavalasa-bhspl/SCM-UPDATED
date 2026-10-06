@@ -98,6 +98,29 @@ export function AllocationApprovalDetailPage() {
     const value = typed === undefined || typed === "" ? Number(item.quantity) : Number(typed);
     return Number.isFinite(value) ? value : 0;
   };
+  // One indent line served from two points is two rows sharing ONE request: the desk
+  // writes the whole ask on the first row (10) and 0 on the next. Requested, shortage
+  // and the cap are therefore the indent LINE's, never one row's — read per row, the
+  // second point's 8 was capped at 0 and drawn as "Nothing free" over 41 on the shelf.
+  const groupOf = (item: { id: number; indent_item_id?: number | null }) =>
+    item.indent_item_id ? `line-${item.indent_item_id}` : `row-${item.id}`;
+  const groupRows = (key: string) => (a?.items ?? []).filter((row) => groupOf(row) === key);
+  const askedFor = (key: string) =>
+    groupRows(key).reduce((sum, row) => sum + Number(row.requested_qty), 0);
+  const givenFor = (key: string) =>
+    groupRows(key).reduce((sum, row) => sum + giveFor(row), 0);
+  /** The most this row may give: what is free at its point, and what the line still
+   *  asks for once its other rows have taken theirs. */
+  const capFor = (item: { id: number; indent_item_id?: number | null }) => {
+    const live = freeFor(item.id);
+    if (live === undefined) return undefined;
+    const key = groupOf(item);
+    const others = groupRows(key)
+      .filter((row) => row.id !== item.id)
+      .reduce((sum, row) => sum + giveFor(row), 0);
+    return Math.max(0, Math.min(live.free, askedFor(key) - others));
+  };
+
   const givenTotal = (a?.items ?? []).reduce((sum, item) => sum + giveFor(item), 0);
   const requestedTotal = (a?.items ?? []).reduce((sum, item) => sum + Number(item.requested_qty), 0);
   const buys = givenTotal < requestedTotal;
@@ -120,7 +143,7 @@ export function AllocationApprovalDetailPage() {
   const overCap = (a?.items ?? []).some((item) => {
     const typed = edits[item.id];
     if (typed === undefined || typed === "") return false;
-    const cap = freeFor(item.id)?.max_allowed;
+    const cap = capFor(item);
     return cap !== undefined && Number(typed) > cap;
   });
 
@@ -210,22 +233,31 @@ export function AllocationApprovalDetailPage() {
                   const typed = edits[item.id];
                   const give = typed === undefined || typed === ""
                     ? Number(item.quantity) : Number(typed);
-                  const cap = live?.max_allowed;
+                  const cap = capFor(item);
                   const tooMuch = cap !== undefined && give > cap;
+                  const group = groupOf(item);
+                  // Requested and shortage are said once, on the line's first row.
+                  const firstOfLine = groupRows(group)[0]?.id === item.id;
                   // Nothing free at any point this login can draw from: there is no
                   // number to type. The box stayed editable and accepted one, and the
                   // server then refused the approval — the shelf is the answer, not a
                   // matter of what the approver would like to give. Only once the live
                   // re-check has actually come back (`live`), so a slow request never
                   // greys out a line that does have stock.
-                  const nothingFree = live !== undefined && cap === 0;
+                  // The SHELF, not the cap: a cap of 0 also means "the line's other rows
+                  // already cover the request", which is not the same as nothing free.
+                  const nothingFree = live !== undefined && live.free <= 0 && give <= 0;
                   return (
                     <tr key={item.id}>
                       <td className="p-3">
                         <div className="font-medium text-ink">{item.item_name}</div>
                         <div className="text-xs text-muted">{item.item_code}</div>
                       </td>
-                      <td className="p-3">{fmt(item.requested_qty)} {item.uom_code}</td>
+                      <td className="p-3">
+                        {firstOfLine
+                          ? <>{fmt(askedFor(group))} {item.uom_code}</>
+                          : <span className="text-xs text-muted">same line, another point</span>}
+                      </td>
                       <td className="p-3">
                         {waitingOnMe ? (
                           <div className="w-32">
@@ -275,7 +307,9 @@ export function AllocationApprovalDetailPage() {
                       </td>
                       <td className="p-3">{item.warehouse_name ?? "Not allocated"}</td>
                       <td className="p-3 text-warn">
-                        {fmt(Math.max(0, item.requested_qty - give))} {item.uom_code}
+                        {firstOfLine
+                          ? <>{fmt(Math.max(0, askedFor(group) - givenFor(group)))} {item.uom_code}</>
+                          : <span className="text-xs text-muted">—</span>}
                       </td>
                     </tr>
                   );

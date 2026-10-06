@@ -22,11 +22,13 @@ export const Code = ({ children }: { children: React.ReactNode }) => (
 
 
 export function NamedLookupTab({
-  title, queryKey, api, managePerm = "master.item.manage",
+  title, queryKey, api, managePerm = "master.item.manage", codeRule = CODE_RULE,
 }: {
   title: string;
   queryKey: string;
   managePerm?: string;
+  /** The code's rule, when a master's codes are not the short item-identity kind. */
+  codeRule?: { maxLength: number; pattern: RegExp; patternMessage: string };
   api: {
     list: (p?: {
       search?: string; page?: number; size?: number; include_inactive?: boolean;
@@ -47,7 +49,7 @@ export function NamedLookupTab({
     ]}
     renderCard={(r) => <div><Code>{r.code}</Code><div>{r.name}</div></div>}
     fetchList={(search) => api.list({ search, size: 300 }).then((r) => r.items)}
-    fields={[{key:"code",label:"Code",required:true,...CODE_RULE},
+    fields={[{key:"code",label:"Code",required:true,...codeRule},
       {key:"name",label:"Name",required:true,maxLength:200},
       {key:"description",label:"Description",maxLength:300},
       {key:"is_active",label:"Active",type:"switch"}]}

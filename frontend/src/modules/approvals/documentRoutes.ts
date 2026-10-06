@@ -50,6 +50,7 @@ export function approvalDocumentPath(document: ApprovalDocument): string {
     // transport screen, which offers the decision off `awarded_at`, not off a status.
     case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?approval=1`;
     case "STOCK_ADJUSTMENT": return `/inventory/adjustments?review=${document.doc_id}`;
+    case "STOCK_EDIT": return `/inventory/stock-edits?review=${document.doc_id}`;
     case "STOCK_TRANSFER": return `/inventory/transfers?tab=orders&review=${document.doc_id}`;
     default: return "/approvals";
   }
@@ -91,6 +92,7 @@ export function approvalDecisionDocumentPath(document: ApprovalDocument): string
     case "TRANSPORT_REQUEST": return `/logistics/shipments/${document.doc_id}?decision=1`;
     case "CARRIER_AWARD": return `/logistics/shipments/${document.doc_id}?decision=1`;
     case "STOCK_ADJUSTMENT": return `/inventory/adjustments?review=${document.doc_id}`;
+    case "STOCK_EDIT": return `/inventory/stock-edits?review=${document.doc_id}`;
     case "STOCK_TRANSFER": return `/inventory/transfers?tab=orders&review=${document.doc_id}`;
     default: return "/approvals/decisions";
   }

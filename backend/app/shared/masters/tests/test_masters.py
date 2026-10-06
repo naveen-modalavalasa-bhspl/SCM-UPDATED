@@ -55,35 +55,19 @@ def test_ownership_department_options_deduplicate_names_deterministically():
     ]
 
 
-def test_generated_item_code_contains_all_identity_parts():
-    assert build_item_code("101010", "slide", "lab", "acme", 1) == \
-        "101010-SLIDE-LAB-ACME-0001"
-
-
-def test_generated_item_code_accepts_hyphenated_master_codes():
-    assert build_item_code("161010", "GN-003", "DOLO650", "RAMESHLABS", 1) == \
-        "161010-GN-003-DOLO650-RAMESHLABS-0001"
-
-
-@pytest.mark.parametrize("code", ["-GN003", "GN003-", "GN--003", "GN 003", "GN_003"])
-def test_generated_item_code_rejects_malformed_master_codes(code):
-    with pytest.raises(ValidationError, match="internal hyphens"):
-        build_item_code("161010", code, "DOLO650", "RAMESHLABS", 1)
+def test_generated_item_code_is_the_category_path_and_a_three_digit_series():
+    assert build_item_code("101010", 1) == "101010-001"
+    assert build_item_code("161010", 42) == "161010-042"
 
 
 def test_generated_item_code_rejects_an_incomplete_category_path():
-    with pytest.raises(ValidationError, match="six-digit"):
-        build_item_code("1010", "SLIDE", "LAB", "ACME", 1)
+    with pytest.raises(ValidationError, match="Level 3"):
+        build_item_code("1010", 1)
 
 
-def test_generated_item_code_pads_the_serial_to_four_digits():
-    assert build_item_code("101010", "PARACET", "DOLO", "DOLO", 42) == \
-        "101010-PARACET-DOLO-DOLO-0042"
-
-
-def test_a_prefix_runs_out_after_9999_items():
-    with pytest.raises(ValidationError, match="9999"):
-        build_item_code("101010", "SLIDE", "LAB", "ACME", 10000)
+def test_a_category_runs_out_after_999_items():
+    with pytest.raises(ValidationError, match="999"):
+        build_item_code("101010", 1000)
 
 
 async def item_payload(client, admin, *, name="Bolt"):
@@ -116,8 +100,7 @@ async def item_payload(client, admin, *, name="Bolt"):
     uom = (await client.post("/api/uom", json={"code": "PCS", "name": "Pieces", "uom_class": "COUNT"},
                              headers=admin)).json()
     hsn = (await client.post("/api/hsn-codes",
-                             json={"code": "73181500", "cgst_rate": 9,
-                                   "sgst_rate": 9, "igst_rate": 18},
+                             json={"code": "73181500", "gst_rate": 18},
                              headers=admin)).json()
     return {
         "name": name, "category_id": l3["id"], "general_name_id": general["id"],
@@ -136,7 +119,7 @@ async def test_identity_masters_accept_internal_hyphens(client, admin):
     assert manufacturer.status_code == 200, manufacturer.text
 
 
-async def test_item_code_uses_category_general_brand_and_manufacturer(db):
+async def test_item_code_uses_category_and_general_name(db):
     category = ItemCategory(
         code="MIC", name="Microscopy", level=3, segment_code="10",
         path="101010", is_active=True,
@@ -161,7 +144,7 @@ async def test_item_code_uses_category_general_brand_and_manufacturer(db):
         manufacturer_id=manufacturer.id, item_class_id=item_class.id,
         uom_id=uom.id, hsn_id=hsn.id,
     ))
-    assert item.code == "101010-SLIDE-LAB-ACME-0001"
+    assert item.code == "101010-001"
     assert item.serial_no == 1
     assert item.manufacturer_name == "Acme Medical"
     assert item.brand_name == "Lab Brand"
@@ -180,7 +163,7 @@ async def test_item_rejects_manufacturer_not_mapped_to_brand(db):
     hsn = HsnCode(code="90118000", is_active=True)
     db.add_all([category, general, brand, manufacturer, item_class, uom, hsn])
     await db.flush()
-    with pytest.raises(ValidationError, match="not mapped"):
+    with pytest.raises(ValidationError, match="is not linked to the brand"):
         await apply_item(db, Item(), ItemIn(
             name="Slides", category_id=category.id, general_name_id=general.id,
             brand_id=brand.id, manufacturer_id=manufacturer.id,
@@ -196,7 +179,7 @@ async def test_create_item_snapshots_uom_and_category(client, admin):
     # Snapshots let the item list render without joining two masters.
     assert body["uom_code"] == "PCS"
     assert body["category_name"] == "Level 3"
-    assert body["code"] == "000000-GEN-BR-MFR-0001"
+    assert body["code"] == "000000-001"
 
 
 async def test_item_ownership_snapshots_active_hcm_department_and_filters(
@@ -317,7 +300,7 @@ async def test_two_level_1_categories_cannot_share_a_name(client, admin):
     r = await client.post("/api/item-categories",
                           json={"code": "F2", "name": "Furniture"}, headers=admin)
     assert r.status_code == 422
-    assert "already exists" in r.json()["error"]
+    assert "already used" in r.json()["error"]
 
 
 async def test_a_level_1_name_may_reappear_as_a_level_2(client, admin):
@@ -431,18 +414,24 @@ async def test_brand_rejects_a_manufacturer_that_does_not_exist(client, admin):
 # ------------------------------- HSN -------------------------------- #
 async def test_create_hsn_code(client, admin):
     r = await client.post("/api/hsn-codes", json={
-        "code": "30049099", "description": "Medicaments",
-        "cgst_rate": 6, "sgst_rate": 6, "igst_rate": 12}, headers=admin)
+        "code": "30049099", "description": "Medicaments", "gst_rate": 12}, headers=admin)
     assert r.status_code == 200, r.text
-    assert r.json()["igst_rate"] == 12.0
+    assert r.json()["gst_rate"] == 12.0
 
 
-async def test_hsn_rejects_cgst_plus_sgst_that_disagrees_with_igst(client, admin):
-    """The two GST routes must charge the same total, or the same sale would be
-    taxed differently depending on where the buyer is."""
+async def test_hsn_carries_one_gst_rate_and_no_split(client, admin):
+    """A single rate. The within-state CGST + SGST and the across-state IGST are the
+    same number, so there is no second figure to keep consistent."""
+    body = (await client.post("/api/hsn-codes", json={
+        "code": "30049099", "gst_rate": 18}, headers=admin)).json()
+    assert body["gst_rate"] == 18.0
+    for gone in ("cgst_rate", "sgst_rate", "igst_rate", "cess_rate"):
+        assert gone not in body
+
+
+async def test_hsn_rejects_a_gst_rate_above_one_hundred(client, admin):
     r = await client.post("/api/hsn-codes", json={
-        "code": "30049099", "cgst_rate": 6, "sgst_rate": 6, "igst_rate": 18},
-        headers=admin)
+        "code": "30049099", "gst_rate": 150}, headers=admin)
     assert r.status_code == 422
 
 
@@ -462,7 +451,7 @@ async def test_item_entry_can_register_a_provisional_hsn(client, admin):
                                 json={"code": "10063010"}, headers=admin)
     assert created.status_code == 200, created.text
     assert created.json()["code"] == "10063010"
-    assert created.json()["igst_rate"] == 0
+    assert created.json()["gst_rate"] == 0
 
     # Resolving the same code again selects the existing master row.
     resolved = await client.post("/api/hsn-codes/resolve",
@@ -573,7 +562,7 @@ async def test_a_second_item_on_the_same_prefix_gets_the_next_serial(client, adm
     first = (await client.post("/api/items", json=payload, headers=admin)).json()
     second = (await client.post(
         "/api/items", json={**payload, "name": "Bolt M10"}, headers=admin)).json()
-    assert first["code"].endswith("-0001")
+    assert first["code"].endswith("-001")
     assert second["code"].endswith("-0002")
     assert (first["serial_no"], second["serial_no"]) == (1, 2)
 
@@ -604,7 +593,7 @@ async def test_item_records_the_asset_choice_but_generates_no_code(client, admin
     body = (await client.post("/api/items", json={**payload, "is_asset": True},
                               headers=admin)).json()
     assert body["is_asset"] is True
-    assert body["code"].endswith("-0001")
+    assert body["code"].endswith("-001")
 
 
 async def test_item_can_be_imei_tracked(client, admin):
@@ -1368,7 +1357,7 @@ async def test_import_preview_marks_duplicate_codes_before_commit(client, admin)
     body = preview.json()
     assert body["summary"] == {"total": 2, "ready": 1, "blocked": 1}
     assert body["rows"][1]["problems"][0]["field"] == "code"
-    assert "Duplicate of row 2" in body["rows"][1]["problems"][0]["message"]
+    assert "already used on row 2" in body["rows"][1]["problems"][0]["message"]
 
 
 # ---------------------- HSN codes through the importer ---------------------- #
@@ -1385,8 +1374,7 @@ def _hsn_workbook(rows):
     book = Workbook()
     sheet = book.active
     sheet.title = "Data"
-    sheet.append(["code", "description", "cgst_rate", "sgst_rate", "igst_rate",
-                  "cess_rate", "effective_from", "is_active"])
+    sheet.append(["code", "description", "gst_rate", "effective_from", "is_active"])
     for row in rows:
         sheet.append(row)
     payload = io.BytesIO()
@@ -1408,15 +1396,15 @@ def _hsn_parse(rows):
 
 
 def test_a_numeric_hsn_cell_imports_as_its_text():
-    ready, problems = _hsn_parse([[10005040, None, 5, 5, 10],
-                                  [28289011.0, "From a CSV", 9, 9, 18]])
+    ready, problems = _hsn_parse([[10005040, None, 5],
+                                  [28289011.0, "From a CSV", 18]])
     assert problems == []
     assert ready[2].code == "10005040"
     assert ready[3].code == "28289011"
 
 
 def test_a_numeric_hsn_cell_gets_its_lost_leading_zero_back():
-    ready, problems = _hsn_parse([[1012100, "Live horses", 0, 0, 0]])
+    ready, problems = _hsn_parse([[1012100, "Live horses", 0]])
     assert problems == []
     assert ready[2].code == "01012100"
 
@@ -1435,18 +1423,15 @@ def test_a_grouped_hsn_code_is_read_as_its_digits():
     assert [ready[2].code, ready[3].code] == ["84713010", "84713020"]
 
 
-def test_an_igst_only_row_is_split_into_cgst_and_sgst():
-    ready, problems = _hsn_parse([[10005040, None, None, None, 10],
-                                  [10005041, None, 9, None, None]])
+def test_a_row_states_one_gst_rate():
+    ready, problems = _hsn_parse([[10005040, None, 10], [10005041, None, 18]])
     assert problems == []
-    assert (ready[2].cgst_rate, ready[2].sgst_rate, ready[2].igst_rate) == (5, 5, 10)
-    assert (ready[3].cgst_rate, ready[3].sgst_rate, ready[3].igst_rate) == (9, 9, 18)
+    assert (ready[2].gst_rate, ready[3].gst_rate) == (10, 18)
 
 
-def test_a_stated_gst_contradiction_is_reported_against_its_row():
-    _, problems = _hsn_parse([[30049099, None, 6, 6, 18], [30049098, None, 0, 0, 150]])
-    assert problems[0].startswith("Row 2, igst_rate: CGST 6% + SGST 6% = 12%")
-    assert any(p.startswith("Row 3, igst_rate") for p in problems)
+def test_a_gst_rate_out_of_range_is_reported_against_its_row():
+    _, problems = _hsn_parse([[30049099, None, 150]])
+    assert any(p.startswith("Row 2, gst_rate") for p in problems)
 
 
 def test_the_hsn_template_formats_the_code_column_as_text():
@@ -1467,15 +1452,15 @@ def test_an_item_sheet_finds_an_hsn_that_lost_its_leading_zero():
 
 async def test_the_api_accepts_an_hsn_code_posted_as_a_number(client, admin):
     r = await client.post("/api/hsn-codes", json={
-        "code": 10005040, "cgst_rate": 5, "sgst_rate": 5, "igst_rate": 10},
+        "code": 10005040, "gst_rate": 10},
         headers=admin)
     assert r.status_code == 200, r.text
     assert r.json()["code"] == "10005040"
 
 
 async def test_hsn_import_preview_then_commit_saves_numeric_codes(client, admin):
-    content = _hsn_workbook([[10005040, None, None, None, 10],
-                             [1012100, "Live horses", 0, 0, 0]])
+    content = _hsn_workbook([[10005040, None, 10],
+                             [1012100, "Live horses", 0]])
     preview = await client.post(
         "/api/hsn-codes/import/preview", headers=admin,
         files={"file": ("hsn.xlsx", content, XLSX)})
@@ -1484,7 +1469,7 @@ async def test_hsn_import_preview_then_commit_saves_numeric_codes(client, admin)
     assert body["summary"] == {"total": 2, "ready": 2, "blocked": 0}
     # The review shows each row as it will be saved.
     assert body["rows"][0]["values"]["code"] == "10005040"
-    assert body["rows"][0]["values"]["cgst_rate"] == 5
+    assert body["rows"][0]["values"]["gst_rate"] == 10
     assert body["rows"][1]["values"]["code"] == "01012100"
 
     # The review screen posts the values back as it holds them — here the code as a
@@ -1502,7 +1487,7 @@ async def test_hsn_import_preview_then_commit_saves_numeric_codes(client, admin)
 
 
 async def test_hsn_straight_import_accepts_numeric_codes(client, admin):
-    content = _hsn_workbook([[28289011, "Hypochlorites", 9, 9, 18]])
+    content = _hsn_workbook([[28289011, "Hypochlorites", 18]])
     r = await client.post("/api/hsn-codes/import", headers=admin,
                           files={"file": ("hsn.xlsx", content, XLSX)})
     assert r.status_code == 200, r.text

@@ -38,6 +38,7 @@ DOC_LINKS: dict[str, str] = {
     "DISPATCH": "/warehouse/dispatch/{id}",
     "PURCHASE_RETURN": "/warehouse/purchase-returns/{id}",
     "STOCK_ADJUSTMENT": "/inventory/adjustments?review={id}",
+    "STOCK_EDIT": "/inventory/stock-edits?review={id}",
     "STOCK_TRANSFER": "/inventory/transfers?tab=orders&review={id}",
 }
 

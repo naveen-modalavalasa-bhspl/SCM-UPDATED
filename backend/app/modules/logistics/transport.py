@@ -396,7 +396,13 @@ async def list_trs(db: AsyncSession, params: PageParams, status: str | None = No
             TransportRequest.carrier_name.ilike(like),
             TransportRequest.to_location_name.ilike(like),
         ))
-    return await paginate(db, stmt.order_by(TransportRequest.id.desc()), params)
+    page = await paginate(db, stmt.order_by(TransportRequest.id.desc()), params)
+    # The register shows the tender too: a carrier's price sent from the portal used
+    # to be visible only on Provider Selection, so the desk read "Not set / —" here
+    # and took the quote for lost. Same permission and `_tr_readable` scope as that
+    # board, so nothing is shown here that the caller could not already read there.
+    _attach_tender(page["items"])
+    return page
 
 
 def mode_catalogue() -> list[dict]:
@@ -891,8 +897,13 @@ async def provider_board(db: AsyncSession, params: PageParams,
             TransportRequest.to_location_name.ilike(like),
         ))
     page = await paginate(db, stmt.order_by(TransportRequest.id.desc()), params)
+    _attach_tender(page["items"])
+    return page
 
-    for row in page["items"]:
+
+def _attach_tender(rows) -> None:
+    """Reply counts and the best price on the table, onto each row (ProviderBoardRow)."""
+    for row in rows:
         priced = [q for q in row.quotes if q.freight_amount is not None
                   and q.status != QuoteStatus.INVITED.value]
         row.invited_count = len(row.quotes)
@@ -904,7 +915,6 @@ async def provider_board(db: AsyncSession, params: PageParams,
         row.best_amount = float(_landed_cost(best)) if best else None
         row.best_carrier_name = best.carrier_name if best else None
         row.best_transit_days = best.transit_days if best else None
-    return page
 
 
 async def carrier_options(db: AsyncSession, search: str | None = None) -> list[dict]:

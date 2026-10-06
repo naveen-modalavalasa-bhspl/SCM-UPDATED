@@ -42,7 +42,7 @@ class PageDef:
     parent: str | None = None
     icon: str | None = None
     module: str | None = None
-    sort_order: int = 0
+    sort_order: float = 0
     show_on_mobile: bool = True
     # A page with no permission is visible to everyone — only Home should be that.
     always_on: bool = False
@@ -165,6 +165,15 @@ PAGES: list[PageDef] = [
     PageDef("pro_quotations", "/procurement/quotations", "Quotations",
             parent="grp_purchasing", module="procurement", icon="handshake",
             sort_order=28),
+    # Price Compare (2026-09-26): the war room. One RFQ picked at the top, every
+    # quotation to it side by side underneath, and the award — which used to live
+    # inside the RFQ page and moved here so the tender room never carries prices.
+    # sort_order 29 sorts it after Quotations (28) and before the PO list (31): the
+    # rail reads Requisitions -> Consolidation -> RFQs -> Quotations -> Price
+    # Compare -> Purchase Orders, which is the order the work happens in.
+    PageDef("pro_price_compare", "/procurement/compare", "Compare Quotations",
+            parent="grp_purchasing", module="procurement", icon="git-compare-arrows",
+            sort_order=29),
     # The supplier register: who sells us material, and whether they can actually sign
     # in to answer an RFQ. Under PURCHASING rather than Settings, unlike its carrier
     # twin — a buyer who finds no vendor on the RFQ picker is one click from the list
@@ -254,6 +263,10 @@ PAGES: list[PageDef] = [
     PageDef("inv_adjustments", "/inventory/adjustments", "Stock Audit",
             parent="grp_inventory", module="inventory", icon="sliders",
             sort_order=60),
+    # Edit a held unit's / batch's identity, signed on the STOCK_EDIT ladder.
+    PageDef("inv_stock_edits", "/inventory/stock-edits", "Stock Corrections",
+            parent="grp_inventory", module="inventory", icon="pen-line",
+            sort_order=61),
 
     # ------------------------------------------------------------------ #
     #  Masters, on the module that owns them
@@ -610,7 +623,9 @@ async def sync_pages(db: AsyncSession) -> dict:
             continue
 
         required = None if spec.always_on else perms.page_view_code(spec.code)
+        minted = False
         if required and required not in permission_by_code:
+            minted = True
             permission = Permission(
                 code=required, module=spec.module or "admin",
                 resource=perms.PAGE_RESOURCE, action="view",
@@ -663,7 +678,13 @@ async def sync_pages(db: AsyncSession) -> dict:
 
         # Fail closed: Admin only, and only on first registration. Re-granting on
         # every start would undo an admin who deliberately took it off Admin.
-        if required and admin_role is not None and spec.code in added:
+        #
+        # "First registration" is the PERMISSION's as well as the page's. A page the
+        # seed's PAGE_TREE already inserted (rbac_job_profiles, admin_code_formats) is
+        # not `added` here, but its `page.<code>.view` is minted here — and the moment
+        # it exists `get_user_menu` gates on it, so without this grant the page
+        # vanished for Admin too on every freshly bootstrapped database.
+        if required and admin_role is not None and (spec.code in added or minted):
             permission = permission_by_code[required]
             held = (await db.execute(select(RolePermission).where(
                 RolePermission.role_id == admin_role.id,

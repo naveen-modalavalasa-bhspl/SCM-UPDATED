@@ -19,6 +19,7 @@ describe("masters api", () => {
       "dosageForms", "facilities", "features", "generalNames", "hsnCodes",
       "itemClasses", "itemComponents", "itemEligibility", "itemGroups", "itemPackaging",
       "itemSpecs", "itemSubClasses", "items", "manufacturers",
+      "nextItemCode",
       "ownershipDepartments", "packaging", "projects", "specs", "unitCodeTracking", "uom", "uomConversions",
       "userGroups", "vendorItems", "vendors", "warehouses",
     ]);

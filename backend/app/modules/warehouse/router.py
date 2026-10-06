@@ -32,10 +32,12 @@ from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
 from app.modules.warehouse import scan_links
+from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
 from app.platform.rbac.permissions import (
-    INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
+    STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
+    INDENT_ACKNOWLEDGE, INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
     ADMIN_SETTINGS_MANAGE, TRANSPORT_CREATE, TRANSPORT_TRACK, TRANSPORT_VIEW,
 )
@@ -654,9 +656,13 @@ async def issue_unit_supply(body: s.UnitSupplyQuery,
     )
 
 
+# `indent.acknowledge` too: the requester's acknowledgement screen names the code it
+# asks for off this catalogue (static wording, no stock), and without it every
+# acknowledger who is not also a storekeeper got a 403 on the screen.
 @router.get("/tracking-types", response_model=list[s.TrackingTypeRead])
 async def tracking_types(user=Depends(require_permission_or(
-        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.anywhere_in_reach))):
+        ISSUE_VIEW, (STOCK_TRANSFER_ISSUE, INDENT_ACKNOWLEDGE),
+        service.anywhere_in_reach))):
     """What each kind of unit identifier is called, so no screen names them itself."""
     return service.tracking_types()
 
@@ -1410,7 +1416,8 @@ async def indent_fulfilment(indent_id: int, db: AsyncSession = Depends(get_db),
 @router.get("/attachments", response_model=list[s.AttachmentRead])
 async def list_attachments(entity_type: str, entity_id: int,
                            db: AsyncSession = Depends(get_db),
-                           user=Depends(require_permission(STOCK_VIEW))):
+                           user=Depends(require_permission_or(
+        STOCK_VIEW, QC_OUTWARD_VIEW, service.anywhere_in_reach))):
     # FIXED — see `service.assert_attachment_scope`.
     await service.assert_attachment_scope(db, user, entity_type, entity_id)
     return await service.list_attachments(db, entity_type, entity_id)
@@ -1420,7 +1427,9 @@ async def list_attachments(entity_type: str, entity_id: int,
 async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...),
                          doc_category: str | None = Form(None), file: UploadFile = File(...),
                          db: AsyncSession = Depends(get_db),
-                         user=Depends(require_permission(RECEIPT_CREATE))):
+                         user=Depends(require_permission_or(
+        RECEIPT_CREATE, (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
+        service.anywhere_in_reach))):
     # `entity_type`/`entity_id` arrive as form fields — see `service.add_attachment`,
     # which scopes them before a byte is written.
     return await service.add_attachment(
@@ -1430,7 +1439,8 @@ async def add_attachment(entity_type: str = Form(...), entity_id: int = Form(...
 
 @router.get("/attachments/{attachment_id}/download")
 async def download_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
-                              user=Depends(require_permission(STOCK_VIEW))):
+                              user=Depends(require_permission_or(
+        STOCK_VIEW, QC_OUTWARD_VIEW, service.anywhere_in_reach))):
     # FIXED — see `service.assert_attachment_scope`. Checked before the bytes are
     # opened, so an out-of-scope id never reaches the filesystem.
     await service.assert_attachment_readable(db, user, attachment_id)
@@ -1440,7 +1450,9 @@ async def download_attachment(attachment_id: int, db: AsyncSession = Depends(get
 
 @router.delete("/attachments/{attachment_id}", status_code=204)
 async def delete_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
-                            user=Depends(require_permission(RECEIPT_CREATE))):
+                            user=Depends(require_permission_or(
+        RECEIPT_CREATE, (QC_OUTWARD_CREATE, QC_OUTWARD_UPDATE),
+        service.anywhere_in_reach))):
     await service.delete_attachment(db, attachment_id, user)
 
 
@@ -1676,8 +1688,16 @@ async def consignment_recommendations(limit: int = Query(8, ge=1, le=20),
 
 @router.get("/options/employees", response_model=list[s.Option])
 async def employee_options(search: str | None = None, db: AsyncSession = Depends(get_db),
-                           _=Depends(require_permission(STOCK_VIEW))):
+                           _=Depends(require_permission_or(
+        STOCK_VIEW, QC_OUTWARD_VIEW, service.anywhere_in_reach))):
     return await service.employee_options(db, search)
+
+
+@router.get("/options/employee-destination", response_model=s.EmployeeDestination)
+async def employee_destination(employee_id: int = Query(...),
+                               db: AsyncSession = Depends(get_db),
+                               _=Depends(require_permission(STOCK_VIEW))):
+    return await service.employee_destination(db, employee_id)
 
 
 @router.get("/options/projects", response_model=list[s.Option])
@@ -1847,6 +1867,75 @@ async def delete_outbound_inspection(inspection_id: int, db: AsyncSession = Depe
 # the axios interceptor picks it by URL segment — everything under `/api/supplier/`
 # gets the vendor token and everything else gets the employee one — so a route served
 # anywhere else would reach the portal with the wrong credentials.
+# ---------------------------------------------------------------------------
+# Stock corrections — edit a held batch's / unit's identity, after approval
+# ---------------------------------------------------------------------------
+
+@router.get("/stock-edits/items", response_model=Page[s.StockEditItemRow])
+async def stock_edit_items(warehouse_id: int, params: PageParams = Depends(),
+                           search: str | None = None, db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(STOCK_EDIT_CREATE))):
+    return await stock_edits.list_items(db, params, warehouse_id, user, search=search)
+
+
+@router.get("/stock-edits/units", response_model=Page[s.StockEditUnitRow])
+async def stock_edit_units(warehouse_id: int, params: PageParams = Depends(),
+                           search: str | None = None, item_id: int | None = None,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(STOCK_EDIT_CREATE))):
+    return await stock_edits.list_units(db, params, warehouse_id, user,
+                                        search=search, item_id=item_id)
+
+
+@router.get("/stock-edits/batches", response_model=Page[s.StockEditBatchRow])
+async def stock_edit_batches(warehouse_id: int, params: PageParams = Depends(),
+                             search: str | None = None, item_id: int | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(STOCK_EDIT_CREATE))):
+    return await stock_edits.list_batches(db, params, warehouse_id, user,
+                                          search=search, item_id=item_id)
+
+
+@router.get("/stock-edits", response_model=Page[s.StockEditListRow])
+async def list_stock_edits(params: PageParams = Depends(), status: str | None = None,
+                           warehouse_id: int | None = None, search: str | None = None,
+                           date_from: date | None = None, date_to: date | None = None,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(require_permission(STOCK_EDIT_VIEW))):
+    return await stock_edits.list_edits(db, params, user, status=status,
+                                        warehouse_id=warehouse_id, search=search,
+                                        date_from=date_from, date_to=date_to)
+
+
+@router.post("/stock-edits", response_model=s.StockEditRead)
+async def create_stock_edit(body: s.StockEditIn, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_EDIT_CREATE))):
+    return await stock_edits.create_edit(db, body, user)
+
+
+@router.get("/stock-edits/{edit_id}", response_model=s.StockEditRead)
+async def get_stock_edit(edit_id: int, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission_or(
+                             STOCK_EDIT_VIEW, STOCK_EDIT_APPROVE, stock_edits.approver_in_reach))):
+    return await stock_edits.get_edit(db, edit_id, user)
+
+
+@router.post("/stock-edits/{edit_id}/approve", response_model=s.StockEditRead)
+async def approve_stock_edit(edit_id: int, body: s.StockEditDecisionIn | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(STOCK_EDIT_APPROVE))):
+    return await stock_edits.act_on_edit(db, edit_id, "APPROVE", user,
+                                         remarks=body.remarks if body else None)
+
+
+@router.post("/stock-edits/{edit_id}/reject", response_model=s.StockEditRead)
+async def reject_stock_edit(edit_id: int, body: s.StockEditDecisionIn | None = None,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_EDIT_APPROVE))):
+    return await stock_edits.act_on_edit(db, edit_id, "REJECT", user,
+                                         remarks=body.remarks if body else None)
+
+
 supplier_router = APIRouter(prefix="/api/supplier", tags=["supplier-portal"])
 
 

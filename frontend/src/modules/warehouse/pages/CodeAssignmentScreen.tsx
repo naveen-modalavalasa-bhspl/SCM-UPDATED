@@ -268,7 +268,7 @@ export function CodeAssignmentScreen({
     setPicked((current) => {
       if (current.includes(value)) return current.filter((v) => v !== value);
       if (current.length >= required) {
-        setError(`This pick is for ${required}; remove one before adding another.`);
+        setError(`You need only ${required}. Remove one before adding another.`);
         return current;
       }
       return [...current, value];
@@ -293,7 +293,7 @@ export function CodeAssignmentScreen({
     if (onPage) {
       setEntry("");
       const found = keyOf(onPage);
-      if (selected.has(found)) { setError(`${found} is already on this pick.`); return; }
+      if (selected.has(found)) { setError(`${found} is already scanned. Scan a different one.`); return; }
       toggle(found);
       return;
     }
@@ -307,14 +307,14 @@ export function CodeAssignmentScreen({
           .some((token) => token && same(token, value)));
       setEntry("");
       if (!match) {
-        setError(`${value} is not among the ${noun}s in this batch and location.`);
+        setError(`${value} is not at this location. Check the label, or pick a different batch or location.`);
         return;
       }
       const found = keyOf(match);
-      if (selected.has(found)) { setError(`${found} is already on this pick.`); return; }
+      if (selected.has(found)) { setError(`${found} is already scanned. Scan a different one.`); return; }
       toggle(found);
     } catch {
-      setError(`${value} could not be looked up. The request failed.`);
+      setError(`Could not check ${value}. Check your internet and scan again.`);
     } finally {
       setBusyScan(false);
     }

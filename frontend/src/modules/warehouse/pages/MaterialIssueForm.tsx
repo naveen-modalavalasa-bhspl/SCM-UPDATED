@@ -19,7 +19,7 @@ import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import {
   acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
-  employeeOptions, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  employeeOptions, getEmployeeDestination, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
@@ -213,6 +213,19 @@ function BreakdownGroup({
   );
 }
 
+const parseCodes = (arr: any): string[] | null => {
+  if (!arr) return null;
+  if (!Array.isArray(arr)) {
+    if (arr.accepted && Array.isArray(arr.accepted)) {
+      return parseCodes(arr.accepted);
+    }
+    return null;
+  }
+  if (arr.length === 0) return [];
+  if (typeof arr[0] === "string") return arr;
+  return arr.map((u: any) => u?.serial_number || u?.imei_no || u?.asset_code || u?.consumable_code || u?.serial_no || u?.code).filter(Boolean);
+};
+
 /** `basePath` re-homes the screen: Inventory > Stock Transfer mounts this same form at
  *  `/inventory/transfers/issues` so an STO's issue is worked without leaving it. */
 export default function MaterialIssueForm({ direction = "OUT", basePath }: {
@@ -345,7 +358,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // Stated in the currency the item is validated on — the serial for a
         // serialized item, the IMEI for a handset, the asset/consumable code
         // otherwise. The backend resolves any of the three back to the same unit.
-        serial_numbers: l.unit_keys ?? l.serial_numbers ?? [],
+        serial_numbers: parseCodes(l.unit_keys ?? l.serial_numbers) ?? [],
       })),
     });
   }, [doc]);
@@ -737,6 +750,22 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     },
   });
 
+  const pullEmployee = useMutation({
+    mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
+    onSuccess: (source) => {
+      // Issued-to wins over the indent for where the goods are headed — the same
+      // precedence `_issue_destination` applies on a saved issue — so picking the
+      // person fills Destination / SAC from their office. The vehicle follows only
+      // when the office name carries one; an indent-set number is kept otherwise.
+      setDestination(source.destination_office_name ?? "");
+      setDestinationSac(source.destination_office_sac ?? null);
+      if (source.issued_to_name) setIssuedToName(source.issued_to_name);
+      if (source.vehicle_number) {
+        setForm((current) => ({ ...current, vehicle_number: source.vehicle_number ?? current.vehicle_number }));
+      }
+    },
+  });
+
   const pullOriginal = useMutation({
     mutationFn: (issueId: number) => getIssue(issueId),
     onSuccess: (source) => {
@@ -758,7 +787,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               requested_qty: open,
               issued_qty: open,
               rate: line.rate,
-              serial_numbers: line.serial_numbers ?? [],
+              serial_numbers: parseCodes(line.serial_numbers) ?? [],
             };
           })
           .filter((line) => line.requested_qty > 0),
@@ -1004,7 +1033,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 </Button>
               </Can>
             )}
-            {editing && doc && !["CANCELLED", "ACKNOWLEDGED"].includes(doc.status) && (
+            {/* Never on a split parent: its floor issues are what get cancelled, and
+                the server refuses it here. */}
+            {editing && doc && !doc.is_stock_posted
+              && !["CANCELLED", "ACKNOWLEDGED", "SPLIT", "CLOSED"].includes(doc.status) && (
               <Can do="issue.create">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
@@ -1022,12 +1054,40 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         }
       />
 
-      <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pickingSource.error} />
+      <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pullEmployee.error ?? pickingSource.error} />
 
       {/* What the split actually handed out. Shown here rather than as a toast: the
           shortfall is the half that matters and it must not scroll away — a quantity
           no floor was holding is a shortage on the indent, and the manager is the
           only person who sees this screen at the moment it is known. */}
+      {/* A split parent is carried by its floor issues: say so, and which of them it is
+          still waiting on, since its own status is rolled up from theirs. Hidden while
+          the just-split result is up — that card already lists the same children. */}
+      {!splitResult && doc && (doc.child_issues?.length ?? 0) > 0 && (
+        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+          <div className="font-semibold">
+            {doc.status === "SPLIT"
+              ? "Split across floors — closes when every floor issue below is posted"
+              : doc.status === "CLOSED"
+                ? "Split across floors — every floor issue has been posted"
+                : "Split across floors — every floor issue was cancelled, so this one is back in your hands"}
+          </div>
+          <ul className="mt-2 space-y-1">
+            {doc.child_issues!.map((child) => (
+              <li key={child.id} className="flex flex-wrap items-center gap-2">
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`${listPath}/${child.id}`)}>
+                  {child.issue_no}
+                </button>
+                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>· {fmtQty(Number(child.total_qty))}</span>
+                <StatusPill status={child.status} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {splitResult && (
         <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
           <div className="flex items-center justify-between gap-3">
@@ -1045,6 +1105,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   {child.issue_no}
                 </button>
                 <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>
+                  → {child.in_charge_names.length
+                    ? <span className="font-medium">{child.in_charge_names.join(", ")}</span>
+                    : <span className="text-warn">no floor in-charge assigned</span>}
+                </span>
                 <span>· {child.total_items} line{child.total_items === 1 ? "" : "s"}</span>
                 <span>· {fmtQty(Number(child.total_qty))}</span>
               </li>
@@ -1088,6 +1153,30 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             * still has an author, and a blank field read as missing data. */}
           <MetaRow label="Issued by" value={doc.issued_by_name || doc.created_by_name || "—"} />
           <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
+          {doc.parent_issue_id && (
+            <MetaRow
+              label="Split of"
+              value={
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`${listPath}/${doc.parent_issue_id}`)}>
+                  {doc.parent_issue_no}
+                </button>
+              }
+            />
+          )}
+          {doc.floor_location_name && (
+            <MetaRow
+              label="Handed to"
+              value={
+                <span>
+                  {doc.floor_location_name} ·{" "}
+                  {doc.floor_in_charge_names?.length
+                    ? doc.floor_in_charge_names.join(", ")
+                    : <span className="text-warn">no floor in-charge assigned</span>}
+                </span>
+              }
+            />
+          )}
           <MetaRow
             label="Reverses"
             value={doc.original_issue_no ? <span className="font-mono">{doc.original_issue_no}</span> : "—"}
@@ -1166,21 +1255,24 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       ? [{ id: form.issued_to_id, name: issuedToName ?? String(form.issued_to_id) }]
                       : []}
                     onChange={(v, option) => {
-                      set("issued_to_id", v === "" ? null : v);
+                      const personId = v === "" ? null : v;
+                      set("issued_to_id", personId);
                       setIssuedToName(option?.name ?? null);
+                      if (personId) pullEmployee.mutate(personId);
+                      else if (!form.indent_id) { setDestination(""); setDestinationSac(null); }
                     }} placeholder="Person" />
           </Field>
           <Field label="Vehicle">
             <Input value={form.vehicle_number ?? ""} disabled={locked}
                    onChange={(e) => set("vehicle_number", e.target.value)} placeholder="Vehicle number" />
           </Field>
-          <Field label="Destination" hint="Office of the issued-to employee from the selected indent.">
+          <Field label="Destination" hint="Office of the issued-to employee — from the indent when one is picked, else from the person.">
             <Input value={destination || "—"} disabled />
           </Field>
           {/* Read-only like Destination above it, and filled from the same answer: the
               SAC belongs to the office receiving the goods, so it follows the indent
-              rather than being chosen. */}
-          <Field label="Service area code (SAC)" hint="Of the destination office, from the selected indent.">
+              when one is picked and the issued-to person otherwise. */}
+          <Field label="Service area code (SAC)" hint="Of the destination office — from the indent when one is picked, else from the person.">
             <Input
               value={destinationSac ?? (destination ? "No service area code for this office" : "—")}
               disabled

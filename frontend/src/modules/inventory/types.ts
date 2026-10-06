@@ -1215,3 +1215,91 @@ export interface BatchDemand {
   items: BatchDemandItem[];
   total: number;
 }
+
+// ---- Stock Corrections (whs_stock_edits) ----
+export type StockEditTarget = "BATCH" | "UNIT";
+
+export interface StockEditItemRow {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  is_serial_tracked: boolean;
+  is_imei_tracked: boolean;
+  is_asset: boolean;
+  is_batch_tracked: boolean;
+  has_expiry: boolean;
+  qty: number;
+  unit_count: number;
+  batch_count: number;
+}
+
+export interface StockEditUnitRow {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  serial_number?: string | null;
+  imei?: string | null;
+  asset_code?: string | null;
+  consumable_code?: string | null;
+  lot_no?: string | null;
+  status?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  batch_qty?: number | null;
+  pending_edit_no?: string | null;
+}
+
+export interface StockEditBatchRow {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  mfg_date?: string | null;
+  expiry_date?: string | null;
+  qty: number;
+  grn_no?: string | null;
+  pending_edit_no?: string | null;
+}
+
+export interface StockEditLine {
+  id: number;
+  target_type: StockEditTarget;
+  batch_id?: number | null;
+  serial_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  label?: string | null;
+  changes: Record<string, { from: string | null; to: string | null }>;
+}
+
+export interface StockEdit {
+  id: number;
+  edit_no: string;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  status: string;
+  reason: string;
+  remarks?: string | null;
+  created_by_id?: number | null;
+  created_by_name?: string | null;
+  approved_by_name?: string | null;
+  approved_at?: string | null;
+  current_approver_name?: string | null;
+  created_at: string;
+  items?: StockEditLine[];
+  can_act?: boolean;
+}
+
+export interface StockEditPage<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+}

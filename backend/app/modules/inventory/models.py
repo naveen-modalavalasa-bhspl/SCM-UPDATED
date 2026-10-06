@@ -287,6 +287,13 @@ class MaterialRequestItem(Base):
     uom_code = Column(String(20), nullable=True)      # snapshot
     quantity = Column(Numeric(16, 3), nullable=False)
     ordered_quantity = Column(Numeric(16, 3), nullable=False, default=0)
+    # How much of THIS line has reached stock, set (never added to) by
+    # `mark_mrs_received` from the cumulative receipts. "On order" is
+    # quantity - received_quantity per line: a request delivered in parts stays open,
+    # and without this the lines that HAD arrived kept counting as still being bought,
+    # so the fulfilment desk offered 0 of stock sitting on the shelf.
+    received_quantity = Column(Numeric(16, 3), nullable=False, default=0,
+                               server_default="0")
     project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
     indent_item_id = Column(BigInteger, index=True, nullable=True)
     remarks = Column(String(500), nullable=True)

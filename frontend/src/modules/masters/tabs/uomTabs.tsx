@@ -83,7 +83,19 @@ export function UomSuggestions() {
   );
 }
 
+/** The UOM types master as dropdown options, falling back to the built-in list
+ *  while it loads or if it is empty. */
+function useUomClassOptions(): Option[] {
+  const q = useQuery({
+    queryKey: ["masters", "uom-classes", "options"],
+    queryFn: () => mastersApi.uomClasses.list({ size: 200 }).then((p) => p.items),
+  });
+  const rows = (q.data ?? []).filter((r) => r.is_active);
+  return rows.length ? rows.map((r) => ({ value: r.code, label: r.name })) : UOM_CLASS_OPTS;
+}
+
 export function UomTab() {
+  const classOpts = useUomClassOptions();
   const columns: Column<MasterUom>[] = [
     { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
     { key: "name", header: "Name", render: (r) => r.name },
@@ -109,7 +121,8 @@ export function UomTab() {
         fetchList={() => mastersApi.uom.listAll()}
         fields={[
           { key: "uom_class", label: "What it measures", type: "select",
-            options: UOM_CLASS_OPTS, required: true },
+            options: classOpts, required: true,
+            hint: "Add more under Masters › UOM Types." },
           { key: "code", label: "Code", required: true, maxLength: 20,
             pattern: /^[A-Za-z0-9/]+$/,
             patternMessage: "Use letters, numbers or a slash" },

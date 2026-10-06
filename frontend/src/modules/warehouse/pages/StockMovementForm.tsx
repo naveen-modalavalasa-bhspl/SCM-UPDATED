@@ -64,7 +64,7 @@ function lineProblem(line: DraftLine, avail: StockAvailability | undefined, noun
   if (avail?.units_required) {
     if (!Number.isInteger(qty)) return `A quantity named by ${noun}s must be a whole number.`;
     const picked = line.serial_numbers?.length ?? 0;
-    if (picked !== qty) return `Select exactly ${qty} ${noun}${qty === 1 ? "" : "s"} — ${picked} selected.`;
+    if (picked !== qty) return `Choose exactly ${qty} ${noun}${qty === 1 ? "" : "s"} — ${picked} selected.`;
   }
   return null;
 }

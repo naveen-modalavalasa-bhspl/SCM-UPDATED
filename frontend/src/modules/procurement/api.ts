@@ -11,7 +11,8 @@ import type {
   VendorReturnDecisionInput, VendorReturnSettlementInput,
   VendorTransportInput, ReplacementDispatchInput,
   ReplacementDocumentType,
-  Quotation, QuoteListRow, QuoteOtpSent, QuoteSubmit, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
+  Quotation, QuoteListRow, QuoteOtpSent, QuoteSubmit, QuoteChangeRequest,
+  QuoteComment, PriceTrailVersion, ReqCreate, ReqFromMRs, ReqListRow, Requisition, RFQ,
   RFQCreate, RFQInvite, RFQListRow, RFQUpdate, VendorAccount, VendorProfile,
   ProcurementLedgerFilters, ProcurementLedgerRow,
   VendorNotification, VendorToken,
@@ -217,13 +218,14 @@ export const rfqApi = {
   evaluationMethods: () =>
     api.get<EvaluationMethodOption[]>("/api/rfqs/evaluation-methods")
       .then((r) => r.data),
-  award: (id: number, quotation_ids: number[], comments = "") =>
-    api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_ids, comments }).then((r) => r.data),
+  award: (id: number, quotation_ids: number[], comments = "", generate_pos = true) =>
+    api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_ids, comments, generate_pos }).then((r) => r.data),
   awardSplit: (
     id: number,
     allocations: { item_id: number; vendor_id: number; quantity: number }[],
     comments = "",
-  ) => api.post<RFQ>(`/api/rfqs/${id}/award`, { allocations, comments }).then((r) => r.data),
+    generate_pos = true,
+  ) => api.post<RFQ>(`/api/rfqs/${id}/award`, { allocations, comments, generate_pos }).then((r) => r.data),
   quotations: (params: {
     rfq_id?: number; vendor_id?: number; search?: string;
     /** One status or a comma-separated set, so a KPI tile counting a bucket
@@ -234,6 +236,42 @@ export const rfqApi = {
     api.get<Paginated<QuoteListRow>>("/api/rfqs/quotations", { params }).then((r) => r.data),
   quotation: (id: number) =>
     api.get<Quotation>(`/api/rfqs/quotations/${id}`).then((r) => r.data),
+
+  // ── Freeze Prices (2026-09-26) ───────────────────────────────────────
+  /** Close the tender to pricing. Suppliers can no longer quote or re-price;
+   *  award and POs unlock. */
+  freeze: (id: number) =>
+    api.post<RFQ>(`/api/rfqs/${id}/freeze`).then((r) => r.data),
+  /** Reopen bidding. The reason is required and audited. */
+  unfreeze: (id: number, reason: string) =>
+    api.post<RFQ>(`/api/rfqs/${id}/unfreeze`, { reason }).then((r) => r.data),
+
+  // ── Change Requests, Price Trail, quotation chat ─────────────────────
+  changeRequests: (quoteId: number) =>
+    api.get<QuoteChangeRequest[]>(`/api/rfqs/quotations/${quoteId}/change-requests`)
+      .then((r) => r.data),
+  proposeChange: (quoteId: number, body: {
+    reason: string;
+    lines: {
+      quotation_item_id: number; proposed_quantity: number;
+      proposed_rate: number; proposed_discount_percent: number; note?: string;
+    }[];
+  }) =>
+    api.post<QuoteChangeRequest>(`/api/rfqs/quotations/${quoteId}/change-requests`, body)
+      .then((r) => r.data),
+  withdrawChange: (quoteId: number, crId: number) =>
+    api.post<QuoteChangeRequest>(
+      `/api/rfqs/quotations/${quoteId}/change-requests/${crId}/withdraw`)
+      .then((r) => r.data),
+  priceTrail: (quoteId: number) =>
+    api.get<PriceTrailVersion[]>(`/api/rfqs/quotations/${quoteId}/price-trail`)
+      .then((r) => r.data),
+  quoteComments: (quoteId: number) =>
+    api.get<QuoteComment[]>(`/api/rfqs/quotations/${quoteId}/comments`)
+      .then((r) => r.data),
+  postQuoteComment: (quoteId: number, message: string) =>
+    api.post<QuoteComment>(`/api/rfqs/quotations/${quoteId}/comments`, { message })
+      .then((r) => r.data),
 };
 
 /** The internal side of the portal: who outside the company may sign in. */
@@ -372,6 +410,27 @@ export const supplierApi = {
    *  holding the portal link could read the code out of the network tab. */
   requestQuoteOtp: (rfqId: number) =>
     api.post<QuoteOtpSent>(`/api/supplier/rfqs/${rfqId}/quotation/request-otp`)
+      .then((r) => r.data),
+
+  priceTrail: (rfqId: number) =>
+    api.get<PriceTrailVersion[]>(`/api/supplier/rfqs/${rfqId}/quotation/price-trail`)
+      .then((r) => r.data),
+  changeRequests: (rfqId: number) =>
+    api.get<QuoteChangeRequest[]>(`/api/supplier/rfqs/${rfqId}/quotation/change-requests`)
+      .then((r) => r.data),
+  acceptChange: (rfqId: number, crId: number, note = "", counterLines?: Record<string, unknown>[], otpCode?: string) =>
+    api.post<Quotation>(
+      `/api/supplier/rfqs/${rfqId}/quotation/change-requests/${crId}/accept`, { note, counter_lines: counterLines, otp_code: otpCode })
+      .then((r) => r.data),
+  declineChange: (rfqId: number, crId: number, note = "") =>
+    api.post<Quotation>(
+      `/api/supplier/rfqs/${rfqId}/quotation/change-requests/${crId}/decline`, { note })
+      .then((r) => r.data),
+  quoteComments: (rfqId: number) =>
+    api.get<QuoteComment[]>(`/api/supplier/rfqs/${rfqId}/quotation/comments`)
+      .then((r) => r.data),
+  postQuoteComment: (rfqId: number, message: string) =>
+    api.post<QuoteComment>(`/api/supplier/rfqs/${rfqId}/quotation/comments`, { message })
       .then((r) => r.data),
 };
 
@@ -529,7 +588,7 @@ export const supplierRegisterApi = {
 
 import type { DemandPoolResponse, DemandPoolStage } from './types';
 
-/** Stage metadata served by the backend � stage codes, labels, tones, deep links.
+/** Stage metadata served by the backend � stage codes, labels, tones, deep links.
  *  Never hardcoded in the screen: the backend is the single source of truth. */
 export const procurementDemandPoolApi = {
   stages: (signal?: AbortSignal) =>

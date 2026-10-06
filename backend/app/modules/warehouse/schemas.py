@@ -736,6 +736,7 @@ class ReceiptItemRead(_Read):
     uom_code: str | None = None
     is_asset: bool = False
     is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
     #: The item master's "Requires QI". Decides whether this line goes to QC or
     #: straight to putaway on submit.
     requires_qi: bool = False
@@ -1745,6 +1746,8 @@ class IssueRead(_Read):
     parent_issue_no: str | None = None
     floor_location_id: int | None = None
     floor_location_name: str | None = None
+    # Who holds that floor — the floor in-charge(s) this piece was handed to.
+    floor_in_charge_names: list[str] = []
     status: str
     total_items: int
     total_qty: Decimal
@@ -1777,6 +1780,21 @@ class IssueDetail(IssueRead):
     # False until the indent raiser has confirmed this issue's quantities in My
     # Deliveries. The sending store must not be able to certify its own delivery.
     can_acknowledge: bool = False
+    # On a split PARENT: the floor issues carrying its goods, newest status each. Its
+    # own status is rolled up from these, so the screen shows what it is waiting on.
+    child_issues: list["IssueChildRead"] = []
+
+
+class IssueChildRead(BaseModel):
+    id: int
+    issue_no: str
+    status: str
+    floor_location_name: str | None = None
+    is_stock_posted: bool = False
+    total_qty: Decimal = Decimal(0)
+
+
+IssueDetail.model_rebuild()
 
 
 # ---------------------------------------------------------------------------
@@ -3785,6 +3803,24 @@ class IndentIssueSource(BaseModel):
     items: list[IssueItemWrite] = []
 
 
+class EmployeeDestination(BaseModel):
+    """Where a direct issue is headed when it names a person, not an indent.
+
+    The same office/SAC/vehicle answer `indent_issue_source` serves for an
+    indent, read off the employee instead: the destination office is the
+    employee's own office, the SAC is that office's code from HCM, and the
+    vehicle is the registration the office name carries, if any. Served so the
+    form can fill Destination / SAC / Vehicle the moment Issued-to is picked,
+    instead of leaving them blank on every issue raised without an indent.
+    """
+    issued_to_id: int
+    issued_to_name: str | None = None
+    destination_office_id: int | None = None
+    destination_office_name: str | None = None
+    destination_office_sac: str | None = None
+    vehicle_number: str | None = None
+
+
 class PickingIssueSource(BaseModel):
     picking_id: int
     warehouse_id: int
@@ -4121,3 +4157,108 @@ class ScanOrigin(BaseModel):
 # PutawayRead names HandlingUnit, all declared after them.
 LocationOccupancy.model_rebuild()
 PutawayRead.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Stock corrections (2026-10-01) — see stock_edits.py
+# ---------------------------------------------------------------------------
+
+class StockEditItemRow(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
+    is_asset: bool = False
+    is_batch_tracked: bool = False
+    has_expiry: bool = False
+    qty: float = 0
+    unit_count: int = 0
+    batch_count: int = 0
+
+
+class StockEditUnitRow(BaseModel):
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    serial_number: str | None = None
+    imei: str | None = None
+    asset_code: str | None = None
+    consumable_code: str | None = None
+    lot_no: str | None = None
+    status: str | None = None
+    batch_id: int | None = None
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+    batch_qty: float | None = None
+    pending_edit_no: str | None = None
+
+
+class StockEditBatchRow(BaseModel):
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+    qty: float = 0
+    grn_no: str | None = None
+    pending_edit_no: str | None = None
+
+
+class StockEditLineIn(BaseModel):
+    target_type: Literal["BATCH", "UNIT"]
+    target_id: int
+    # {field: new value}. The old value is read by the server, never sent.
+    changes: dict[str, str | None] = Field(max_length=10)
+
+
+class StockEditIn(BaseModel):
+    warehouse_id: int
+    reason: str = Field(max_length=500)
+    remarks: str | None = None
+    lines: Annotated[list[StockEditLineIn], DocumentLines]
+
+
+class StockEditDecisionIn(BaseModel):
+    remarks: str | None = None
+
+
+class StockEditItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    target_type: str
+    batch_id: int | None = None
+    serial_id: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    label: str | None = None
+    changes: dict
+
+
+class StockEditListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    edit_no: str
+    warehouse_id: int
+    warehouse_name: str | None = None
+    status: str
+    reason: str
+    created_by_id: int | None = None
+    created_by_name: str | None = None
+    approved_by_name: str | None = None
+    approved_at: datetime | None = None
+    current_approver_name: str | None = None
+    created_at: datetime
+
+
+class StockEditRead(StockEditListRow):
+    remarks: str | None = None
+    items: list[StockEditItemRead] = Field(default_factory=list)
+    can_act: bool = False

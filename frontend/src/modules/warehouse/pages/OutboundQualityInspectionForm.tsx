@@ -16,6 +16,7 @@ import {
   updateOutboundInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
+import { resolveAcceptedUnits } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import type {
   OutboundInspection as Inspection, OutboundInspectionItemWrite as InspectionItemWrite, InspectionParameter, OutboundInspectionWrite as InspectionWrite, Issue as Receipt,
@@ -48,6 +49,19 @@ const deriveResult = (inspected: number, accepted: number): InspectionItemWrite[
   if (accepted >= inspected) return "PASSED";
   if (accepted <= 0) return "FAILED";
   return "PARTIAL";
+};
+
+const parseCodes = (arr: any): string[] | null => {
+  if (!arr) return null;
+  if (!Array.isArray(arr)) {
+    if (arr.accepted && Array.isArray(arr.accepted)) {
+      return parseCodes(arr.accepted);
+    }
+    return null;
+  }
+  if (arr.length === 0) return [];
+  if (typeof arr[0] === "string") return arr;
+  return arr.map((u: any) => u?.serial_number || u?.imei_no || u?.asset_code || u?.consumable_code || u?.serial_no || u?.code).filter(Boolean);
 };
 
 /** `basePath` re-homes the form — Inventory > Stock Transfer mounts it at
@@ -113,9 +127,7 @@ export default function OutboundQualityInspectionForm({
         remarks: l.remarks,
         // Left null when the line carries no decision yet — the picker reads that as
         // "nothing rejected", where [] would mean "every unit rejected".
-        serial_numbers: Array.isArray(l.serial_numbers) 
-          ? l.serial_numbers 
-          : ((l.serial_numbers as any)?.accepted ?? null),
+        serial_numbers: parseCodes(l.serial_numbers),
       })),
     });
   }, [doc]);
@@ -178,8 +190,8 @@ export default function OutboundQualityInspectionForm({
     const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[] }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
-        is_serial_tracked: line.is_serial_tracked,
-        serials: line.serial_numbers ?? [],
+        is_serial_tracked: line.is_serial_tracked || line.is_imei_tracked,
+        serials: parseCodes(line.unit_keys?.length ? line.unit_keys : line.serial_numbers) ?? [],
       });
     }
     return byLine;
@@ -200,6 +212,18 @@ export default function OutboundQualityInspectionForm({
     if (!issueItemId) return null;
     const meta = deliveryMeta.get(issueItemId);
     return meta?.serials?.length ? meta.serials : null;
+  };
+
+  /** What the line is keeping, with pre-seed rows repaired: a line raised before
+   *  every kind was seeded carries nothing stored while accepting the whole
+   *  offered set, which reads as "every unit rejected" unless it is resolved
+   *  back to the offered set here. Read-only — the form keeps what it was
+   *  given until the modal writes an explicit decision. */
+  const resolvedSerials = (index: number): string[] => {
+    const line = form.items[index];
+    if (!line) return [];
+    return resolveAcceptedUnits(
+      line.serial_numbers, availableSerials(index), num(line.accepted_qty));
   };
 
   /** Pulling the receipt in seeds the lines from what was actually issued. */
@@ -225,7 +249,7 @@ export default function OutboundQualityInspectionForm({
           defect_type: null,
           rejection_reason: null,
           remarks: null,
-          serial_numbers: l.serial_numbers ?? [],
+          serial_numbers: parseCodes(l.unit_keys?.length ? l.unit_keys : l.serial_numbers),
         })),
       }));
     },
@@ -243,11 +267,22 @@ export default function OutboundQualityInspectionForm({
         if (i !== index) return l;
         const next = { ...l, ...patch };
         const inspected = num(next.inspected_qty);
-        const accepted = Math.min(num(next.accepted_qty), inspected);
+        
+        let accepted = 0;
+        let rejected = 0;
+        
+        if (patch.rejected_qty !== undefined) {
+          rejected = Math.min(Math.max(num(patch.rejected_qty), 0), inspected);
+          accepted = Math.max(inspected - rejected, 0);
+        } else {
+          accepted = Math.min(Math.max(num(next.accepted_qty), 0), inspected);
+          rejected = Math.max(inspected - accepted, 0);
+        }
+
         return {
           ...next,
           accepted_qty: accepted,
-          rejected_qty: Math.max(inspected - accepted, 0),
+          rejected_qty: rejected,
           // An explicitly chosen result wins; otherwise it follows the split.
           result: patch.result ?? deriveResult(inspected, accepted),
         };
@@ -296,23 +331,24 @@ export default function OutboundQualityInspectionForm({
         );
       }
       if (!available) continue;
-      const actual = line.serial_numbers?.length ?? available.length;
+      const actual = resolvedSerials(index).length;
       if (actual !== required) {
-        throw new Error(`${label}: select exactly ${required} accepted units.`);
+        const rejectedQty = num(line.inspected_qty) - required;
+        throw new Error(`${label}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} units from the list.`);
       }
     }
   };
 
   /** An untouched picker means "every unit passed" (see the column below). Say so on
-   *  the wire: the server counts what it is sent, and null reads as zero selected. */
+   *  the wire: the server counts what it is sent, and null reads as zero selected.
+   *  `resolvedSerials` also repairs pre-seed rows back to the offered set, so the
+   *  repair is what gets stored and the row opens correctly ever after. */
   const payload = (): InspectionWrite => ({
     ...form,
-    items: form.items.map((line, index) => {
-      const available = availableSerials(index);
-      return line.serial_numbers == null && available
-        ? { ...line, serial_numbers: available }
-        : line;
-    }),
+    items: form.items.map((line, index) => ({
+      ...line,
+      serial_numbers: resolvedSerials(index),
+    })),
   });
 
   const save = useMutation({
@@ -431,11 +467,15 @@ export default function OutboundQualityInspectionForm({
       key: "rejected",
       header: "Rejected",
       numeric: true,
-      width: "w-24",
-      render: (l) => (
-        <span className={`tabular ${num(l.rejected_qty) > 0 ? "font-semibold text-bad" : "text-muted"}`}>
-          {fmtQty(l.rejected_qty)}
-        </span>
+      width: "w-28",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Rejected quantity, line ${i + 1}`}
+          value={l.rejected_qty}
+          max={num(l.inspected_qty)}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { rejected_qty: v })}
+        />
       ),
     },
     {
@@ -456,7 +496,8 @@ export default function OutboundQualityInspectionForm({
       key: "defect",
       header: "Rejection reason",
       width: "w-36",
-      hideOnNarrow: true,
+      // Always shown: the save refuses a rejection without it, so hiding it under
+      // 1024 px left a laptop inspector unable to reject anything.
       render: (l, i) => (
         <TextInput
           ariaLabel={`Defect, line ${i + 1}`}
@@ -474,12 +515,13 @@ export default function OutboundQualityInspectionForm({
       header: "Accepted units",
       width: "w-32",
       hideOnNarrow: true,
-      render: (line, index) => {
+      render: (_line, index) => {
         const available = availableSerials(index);
         if (!available && !isSerialTracked(index)) return <span className="text-muted">—</span>;
         // An untouched line has decided nothing, which means nothing rejected — show it
-        // as all accepted rather than as zero.
-        const accepted = line.serial_numbers?.length ?? available?.length ?? 0;
+        // as all accepted rather than as zero. `resolvedSerials` additionally repairs
+        // pre-seed rows (nothing stored, whole set accepted) back to the offered set.
+        const accepted = resolvedSerials(index).length;
         return (
           <Button variant="ghost" onClick={() => setSerialsFor(index)} disabled={locked}>
             <ScanLine className="h-4 w-4" />
@@ -625,6 +667,9 @@ export default function OutboundQualityInspectionForm({
         <LinesEditor
           rows={form.items}
           columns={columns}
+          // Wide enough for every column's own width: narrower, and the auto table
+          // squeezed the Result dropdown and the quantities until they read "Pa…".
+          minTableWidth="min-w-[1160px]"
           keyOf={(_, i) => i}
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
           rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
@@ -722,14 +767,14 @@ export default function OutboundQualityInspectionForm({
       </Section>
 
       <Section title="Evidence" hint="Test certificates, photographs of the defect.">
-        <AttachmentsPanel entityType="INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
+        <AttachmentsPanel entityType="OUTBOUND_INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
       </Section>
 
       <SerialNumbersModal
         isOpen={serialsFor !== null}
         onClose={() => setSerialsFor(null)}
         quantity={serialsFor === null ? 0 : num(form.items[serialsFor]?.accepted_qty)}
-        initial={serialsFor === null ? null : form.items[serialsFor]?.serial_numbers}
+        initial={serialsFor === null ? null : resolvedSerials(serialsFor)}
         available={availableSerials(serialsFor)}
         itemLabel={
           serialsFor === null

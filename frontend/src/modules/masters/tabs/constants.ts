@@ -52,3 +52,16 @@ export const UOM_CLASS_OPTS: Option[] = UOM_CLASSES.map((v) => ({
 
 export const DATA_TYPES: Option[] = ["TEXT", "NUMBER", "BOOLEAN", "DATE", "LIST"]
   .map((v) => ({ value: v, label: v }));
+
+/** Masters whose code is exactly three letters (ERB for Erba), keyed by the tab's
+ *  queryKey, valued by the API path that suggests one from a name. A row saved
+ *  before the rule keeps its old code; only a new or changed code must fit. */
+export const SHORT_CODE_PATHS: Record<string, string> = {
+  categories: "/api/item-categories", "general-names": "/api/general-names",
+  brands: "/api/brands", manufacturers: "/api/manufacturers",
+  "item-classes": "/api/item-classes", "item-subclasses": "/api/item-sub-classes",
+  "dosage-forms": "/api/dosage-forms", attributes: "/api/attributes",
+  specs: "/api/specs", features: "/api/features", packaging: "/api/packaging",
+  uom: "/api/uom", "uom-classes": "/api/uom-classes", boms: "/api/boms",
+  "vendor-categories": "/api/vendor-categories",
+};

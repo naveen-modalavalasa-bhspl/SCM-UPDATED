@@ -1,6 +1,8 @@
 export interface MasterItem {
   id: number;
-  /** L1L2L3-GEN-BRAND-MFR-0001. Assigned once at create, never regenerated. */
+  /** The latest photo, for the list's thumbnail. Null when there is none. */
+  photo_id?: number | null;
+  /** L1L2L3-GEN-0001. Assigned once at create, never regenerated. */
   code: string;
   serial_no?: number | null;
   name: string;
@@ -91,8 +93,15 @@ export interface MasterItemSubClass extends NamedMaster {
   item_class_name?: string | null;
 }
 
+export interface MasterVendorCategory {
+  id: number; code: string; name: string; description: string | null;
+  is_active: boolean; vendor_ids: number[];
+}
+
 export interface MasterVendor {
   id: number;
+  /** The vendor categories it is tagged to. */
+  category_ids?: number[];
   code: string;
   name: string;
   vendor_type?: string | null;
@@ -431,10 +440,9 @@ export interface MasterHsnCode {
   id: number;
   code: string;
   description?: string | null;
-  cgst_rate: number;
-  sgst_rate: number;
-  igst_rate: number;
-  cess_rate: number;
+  /** The one GST rate: the within-state CGST + SGST and the across-state IGST are the
+   *  same number, so a document derives the halves rather than storing them. */
+  gst_rate: number;
   effective_from?: string | null;
   is_active: boolean;
 }

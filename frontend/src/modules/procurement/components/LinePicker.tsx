@@ -7,6 +7,7 @@ import { useToast } from "@/shared/components/Toast";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import { api } from "@/shared/api/client";
 import { todayIst } from "@/shared/datetime";
+import { ChevronRight } from "lucide-react";
 
 /** One editable line. `rate` is optional — an RFQ asks for a price rather than
  *  stating one, so the same editor serves both with the column switched off. */
@@ -51,6 +52,7 @@ export function LinePicker({
   allowRepricing = false,
   capQuantityAtOriginal = true,
   hideAddLine = false,
+  vendorsByItem,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
@@ -72,6 +74,7 @@ export function LinePicker({
   capQuantityAtOriginal?: boolean;
   /** Amendments may revise existing quantities but cannot introduce new items. */
   hideAddLine?: boolean;
+  vendorsByItem?: Record<number, { name: string; code?: string | null }[]>;
 }) {
   const [search, setSearch] = useState("");
   const toast = useToast();
@@ -142,12 +145,12 @@ export function LinePicker({
                 isDisabled={disabled || !!line.id}
                 // Pressing a greyed-out row says why rather than doing nothing at all.
                 onDisabledSelect={() =>
-                  toast.error("Item already exists, just update the quantity.")}
+                  toast.error("This item is already in the list. Change its quantity instead of adding it again.")}
                 onChange={(value) => {
                   // Kept as the backstop: the greying is computed from `lines`, and a
                   // duplicate could still arrive from a prefill or a stale render.
                   if (lines.some((l, i) => i !== index && l.item_id === value)) {
-                    toast.error("Item already exists, just update the quantity.");
+                    toast.error("This item is already in the list. Change its quantity instead of adding it again.");
                     return;
                   }
                   const chosen = items.find((item) => item.id === value);
@@ -238,6 +241,30 @@ export function LinePicker({
               <Trash2 className="h-4 w-4" />
             </button>
           </div>
+          
+          {vendorsByItem && line.item_id !== "" && (
+            <div className="sm:col-span-12">
+              <details className="group">
+                <summary className="flex cursor-pointer list-none items-center gap-1 text-sm font-medium text-brand hover:underline [&::-webkit-details-marker]:hidden">
+                  <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+                  Mapped Suppliers ({vendorsByItem[line.item_id as number]?.length || 0})
+                </summary>
+                <div className="mt-2 pl-5 text-sm text-muted">
+                  {vendorsByItem[line.item_id as number]?.length > 0 ? (
+                    <ul className="list-inside list-disc space-y-1">
+                      {vendorsByItem[line.item_id as number].map((v, i) => (
+                        <li key={i}>
+                          {v.name} {v.code ? `(${v.code})` : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>No mapped suppliers.</p>
+                  )}
+                </div>
+              </details>
+            </div>
+          )}
         </div>
       ))}
 

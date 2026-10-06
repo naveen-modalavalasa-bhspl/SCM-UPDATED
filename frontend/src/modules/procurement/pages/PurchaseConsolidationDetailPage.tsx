@@ -15,10 +15,10 @@ const EDITABLE = ["DRAFT"];
 /**
  * One consolidated sheet: the item-wise roll-up, and what each line came from.
  *
- * `approved_qty` is the only editable number and it can only go DOWN. The sheet is
- * where over-ordering gets trimmed; buying more than the approved requisitions asked
- * for is demand nobody signed off, so the backend refuses it and the input says so
- * before the save rather than after.
+ * `approved_qty` can go DOWN freely, and UP to the replenishment ceiling the
+ * backend serves per line (`max_allowed_qty` = requested + max−available at the
+ * shipment warehouses that asked for it). Where no replenishment rule exists the
+ * ceiling equals what was requested, so the line stays decrease-only.
  */
 export function PurchaseConsolidationDetailPage() {
   const nav = useNavigate();
@@ -77,6 +77,9 @@ export function PurchaseConsolidationDetailPage() {
   const editable = EDITABLE.includes(doc.status);
   const trimmed = doc.items.some(
     (line) => Number(line.approved_qty) < Number(line.quantity),
+  );
+  const toppedUp = doc.items.some(
+    (line) => Number(line.approved_qty) > Number(line.quantity),
   );
 
   return (
@@ -145,6 +148,11 @@ export function PurchaseConsolidationDetailPage() {
                 Trimmed below what was requested — only the approved quantity is tendered.
               </p>
             )}
+            {toppedUp && (
+              <p className="mb-3 rounded-lg border border-info/30 bg-info-bg px-3 py-2 text-sm text-info">
+                Topped up above what was requested, within each line's replenishment ceiling.
+              </p>
+            )}
 
             <div className="overflow-x-auto">
               <table className="w-full min-w-[720px] text-sm">
@@ -174,13 +182,24 @@ export function PurchaseConsolidationDetailPage() {
                       </td>
                       <td className="px-3 py-3 text-right">
                         {editable ? (
-                          <div className="ml-auto w-24">
+                          <div className="ml-auto w-28">
                             <Input
                               type="number"
                               value={edits[line.id] ?? ""}
-                              max={Number(line.quantity)}
+                              max={Number(line.max_allowed_qty ?? line.quantity)}
                               onChange={(e) => setEdits({ ...edits, [line.id]: e.target.value })}
                             />
+                            {Number(line.replenishment_qty ?? 0) > 0 ? (
+                              <div className="mt-1 text-[11px] leading-tight text-muted">
+                                Up to {Number(line.max_allowed_qty ?? line.quantity)} {line.uom_code}
+                                {" "}(+{Number(line.replenishment_qty)} top-up
+                                {line.replenishment_at ? ` at ${line.replenishment_at}` : ""})
+                              </div>
+                            ) : (
+                              <div className="mt-1 text-[11px] leading-tight text-muted">
+                                Max {Number(line.quantity)} {line.uom_code} — no top-up (no replenishment rule here)
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <span className="font-semibold text-ink">{Number(line.approved_qty)}</span>

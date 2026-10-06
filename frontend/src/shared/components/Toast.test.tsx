@@ -78,7 +78,7 @@ describe("the toast strip", () => {
       })));
 
     // The server's reason, under the heading the status earns — and no "403".
-    expect(screen.getByText("You don't have permission")).toBeInTheDocument();
+    expect(screen.getByText("Not allowed")).toBeInTheDocument();
     expect(
       screen.getByText("This indent is not assigned to you at the current stage."),
     ).toBeInTheDocument();

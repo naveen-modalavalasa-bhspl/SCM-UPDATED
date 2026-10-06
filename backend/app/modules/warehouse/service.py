@@ -50,7 +50,8 @@ from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
 from app.modules.warehouse.enums import (
-    DEAD_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, SINGLE_ISSUE_REF_TYPES,
+    DEAD_ISSUE_STATUSES, UNSERVED_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
+    SINGLE_ISSUE_REF_TYPES, STOCK_VIEW,
     ConsignmentRefType, DispatchEventType, DispatchSourceType, DispatchStatus, DispatchType, InspectionResult, InspectionStatus,
     InspectionType, IssueDirection, IssueStatus, IssueType, PackageStatus,
     PickLineStatus,
@@ -427,7 +428,15 @@ _ATTACHMENT_PARENTS = {
     "INSPECTION": (lambda: m.Inspection, lambda: m.Inspection.warehouse_id),
     "ISSUE": (lambda: m.MaterialIssue, lambda: m.MaterialIssue.warehouse_id),
     "DISPATCH": (lambda: m.Dispatch, lambda: m.Dispatch.warehouse_id),
+    # Outward QC is its own table (`whs_inspections`); "INSPECTION" is the inward one
+    # (`inb_inspections`), so filing an outward QC's report under it looked up the
+    # wrong table and answered "INSPECTION 57 not found".
+    "OUTBOUND_INSPECTION": (lambda: m.OutboundInspection,
+                            lambda: m.OutboundInspection.warehouse_id),
 }
+
+#: What an outward-QC grant alone (no stock.view / receipt.create) may file against.
+_QC_OUTWARD_ATTACHMENT_TYPES = {"OUTBOUND_INSPECTION"}
 
 
 async def assert_attachment_scope(db: AsyncSession, user, entity_type: str,
@@ -436,6 +445,12 @@ async def assert_attachment_scope(db: AsyncSession, user, entity_type: str,
     if user is None:
         return
     parent = _ATTACHMENT_PARENTS.get((entity_type or "").upper())
+    # A login that reached the attachment routes on its outward-QC grant (rather than
+    # stock.view / receipt.create) is confined to outward QC's own paperwork.
+    if ((via_scoped_grant(db, STOCK_VIEW) or via_scoped_grant(db, RECEIPT_CREATE))
+            and (entity_type or "").upper() not in _QC_OUTWARD_ATTACHMENT_TYPES):
+        raise PermissionError_(
+            "Your outward QC access covers outward QC attachments only")
     if parent is None:
         raise ValidationError(
             f"{entity_type!r} is not a document attachments can be read for")
@@ -1565,9 +1580,9 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         # unlabelled, and the units nobody could read a number off are given one from
         # the Serial format (Settings > Code Formats) when the receipt is submitted.
         # Demanding the full set here is what stopped those lorries at the gate.
-        if item.is_serial_tracked and len(serials) > int(received):
+        if item.is_serial_tracked and len(serials) != int(received):
             raise ValidationError(
-                f"Line {index}: {len(serials)} serial numbers for {int(received)} "
+                f"Line {index}: Please provide exactly {int(received)} serial numbers for "
                 f"received units of {item.code}"
             )
         if serials:
@@ -1601,9 +1616,7 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             seen_for_item.update(normalized_serials)
 
         # IMEIs follow exactly the serial rules above: anything may be captured at the
-        # gate, but a GRN must account for every unit. `is_imei_tracked` had no
-        # consumer at all until now — the flag was on the item master and nothing read
-        # it, so ticking it changed nothing anywhere.
+        # gate, but a GRN must account for every unit.
         imeis = [value.strip() for value in (line.imei_numbers or []) if value.strip()]
         normalized_imeis = [value.lower() for value in imeis]
         if len(normalized_imeis) != len(set(normalized_imeis)):
@@ -1616,26 +1629,10 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: IMEI-tracked quantity must be a whole number"
             )
-        # FIXED 2026-08-20 — this demanded EXACTLY one IMEI per unit once the receipt
-        # left the gate, and a GRN could not be saved without them. Vendors routinely
-        # deliver without an IMEI list, and the numbers are on the handsets inside
-        # sealed cartons, so the storekeeper physically cannot supply them at the
-        # goods-in desk. WITHOUT this relaxation a real delivery is stuck at the gate
-        # over paperwork the vendor never sent.
-        #
-        # Now the same rule serial numbers have always had: more than received is
-        # always wrong, FEWER is not. Whatever was actually read is kept.
-        #
-        # Deliberately NOT minted the way missing serials are. A serial is ours to
-        # issue, so `codeformat.mint_serials` gives an unlabelled unit one. An IMEI is
-        # assigned by the manufacturer and burned into the handset — inventing one
-        # would put a number in that field which matches no device on earth, and it
-        # would be indistinguishable from a real one downstream. The units keep their
-        # minted SERIAL for identity and their IMEI stays blank until somebody reads
-        # it off the device, which is put-away's job.
-        if item.is_imei_tracked and len(imeis) > int(received):
+        
+        if item.is_imei_tracked and len(imeis) != int(received):
             raise ValidationError(
-                f"Line {index}: {len(imeis)} IMEI numbers for {int(received)} "
+                f"Line {index}: Please provide exactly {int(received)} IMEI numbers for "
                 f"received units of {item.code}"
             )
         if imeis:
@@ -2326,7 +2323,7 @@ async def _name_received_units(db: AsyncSession, receipt: m.Receipt) -> None:
     executes once the GRN's approval chain is FINISHED. On a project that configured a
     GRN chain the receipt parked at its first rung with zero serials on the line, and
     QC — which is not gated on that approval, and should not be, the goods are
-    physically on the floor — then asked the inspector to "select exactly 30 accepted
+    physically on the floor — then asked the inspector to "choose exactly 30 accepted
     serial numbers" out of a list that was empty. The document was unfinishable from
     the moment it was submitted.
 
@@ -3275,17 +3272,33 @@ async def _register_serials(
     """
     all_serials = list(line.serial_numbers or [])
     all_imeis = list(getattr(line, "imei_numbers", None) or [])
-    imei_by_serial = {
-        str(serial).strip().lower(): str(imei).strip()
-        for serial, imei in zip(all_serials, all_imeis)
-        if serial and imei
-    }
+    
+    # If the caller didn't pass a specific list, default to what's on the line.
+    # If it's serial tracked, use serials. If ONLY imei tracked, use imeis.
+    primary_list = serial_numbers if serial_numbers is not None else all_serials
+    if not primary_list and all_imeis:
+        primary_list = all_imeis
+
+    imei_by_primary = {}
+    if all_serials and all_imeis:
+        imei_by_primary = {
+            str(s).strip().lower(): str(i).strip()
+            for s, i in zip(all_serials, all_imeis)
+            if s and i
+        }
+    elif not all_serials and all_imeis:
+        # If only IMEI tracked, the primary identifier IS the IMEI.
+        imei_by_primary = {
+            str(i).strip().lower(): str(i).strip()
+            for i in all_imeis
+            if i
+        }
 
     rows: list[m.SerialNumber] = []
-    for serial in serial_numbers if serial_numbers is not None else (line.serial_numbers or []):
+    for primary_id in primary_list:
         clash = await db.scalar(select(m.SerialNumber).where(
             m.SerialNumber.item_id == line.item_id,
-            m.SerialNumber.serial_number == serial,
+            m.SerialNumber.serial_number == primary_id,
             m.SerialNumber.is_active.is_(True)))
         if clash:
             if clash.warehouse_id != receipt.warehouse_id:
@@ -3297,7 +3310,7 @@ async def _register_serials(
                 # rejected on arrival by the serials that prove it is the right load.
                 if clash.status == SerialStatus.AVAILABLE.value:
                     raise ValidationError(
-                        f"Serial {serial} is already recorded against this item "
+                        f"Unit {primary_id} is already recorded against this item "
                         f"(warehouse {clash.warehouse_id}).")
                 clash.warehouse_id = receipt.warehouse_id
                 clash.batch_id = line.batch_id or clash.batch_id
@@ -3305,12 +3318,12 @@ async def _register_serials(
             clash.status = status
             # A unit re-homed by an onward GRN keeps the IMEI it was first recorded
             # with unless this receipt states one — the handset does not change hands.
-            clash.imei = imei_by_serial.get(serial.strip().lower()) or clash.imei
+            clash.imei = imei_by_primary.get(primary_id.strip().lower()) or clash.imei
             rows.append(clash)
             continue
         row = m.SerialNumber(
-            item_id=line.item_id, serial_number=serial,
-            imei=imei_by_serial.get(serial.strip().lower()),
+            item_id=line.item_id, serial_number=primary_id,
+            imei=imei_by_primary.get(primary_id.strip().lower()),
             batch_id=line.batch_id or None, warehouse_id=receipt.warehouse_id,
             bin_id=bin_id, status=status, remarks=remarks, is_active=True,
         )
@@ -3843,7 +3856,8 @@ async def _raise_inspection_for(
             batch_no=line.batch_no,
             inspected_qty=_d(line.received_qty), accepted_qty=_d(line.received_qty),
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
-            serial_numbers=list(line.serial_numbers or []),
+            serial_numbers=list(line.serial_numbers) if line.serial_numbers else None,
+            imei_numbers=list(line.imei_numbers) if getattr(line, 'imei_numbers', None) else None,
         ))
     _inspection_totals(inspection)
     await db.flush()
@@ -3994,19 +4008,30 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             raise ValidationError(
                 f"{item.code} is not configured for serial tracking"
             )
-        # IMEIs are checked but not stored: `inb_inspection_items` has no column for
-        # them, and it needs none — an IMEI names the same physical unit its serial
-        # does, and the GRN line it came off already holds the list.
         imeis = [value.strip() for value in (line.imei_numbers or []) if value.strip()]
         if len(imeis) != len(set(imeis)):
             raise ValidationError(f"{item.code}: accepted IMEI numbers must be unique")
+            
+        if imeis and not item.is_imei_tracked:
+            raise ValidationError(
+                f"{item.code} is not configured for IMEI tracking"
+            )
+
         if item.is_serial_tracked and accepted != accepted.to_integral_value():
             raise ValidationError(
                 f"{item.code}: accepted quantity must be a whole number for serialized items"
             )
+        if item.is_imei_tracked and accepted != accepted.to_integral_value():
+            raise ValidationError(
+                f"{item.code}: accepted quantity must be a whole number for IMEI tracked items"
+            )
         if item.is_serial_tracked and len(serials) != int(accepted):
             raise ValidationError(
-                f"{item.code}: select exactly {int(accepted)} accepted serial numbers"
+                f"{item.code}: choose exactly {int(accepted)} accepted serial numbers"
+            )
+        if item.is_imei_tracked and len(imeis) != int(accepted):
+            raise ValidationError(
+                f"{item.code}: choose exactly {int(accepted)} accepted IMEI numbers"
             )
         reason = line.rejection_reason or line.defect_type
 
@@ -4023,6 +4048,7 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             parameters=[p.model_dump() for p in line.parameters] if line.parameters else None,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers=serials or None,
+            imei_numbers=imeis or None,
         ))
     _inspection_totals(inspection)
 
@@ -4136,6 +4162,8 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 continue
             original_serials = list(line.serial_numbers or [])
             accepted_serials = list(verdict.serial_numbers or [])
+            original_imeis = list(line.imei_numbers or [])
+            accepted_imeis = list(verdict.imei_numbers or [])
             # A serial-tracked line always reaches QC with its full list, because the GRN
             # will not save without one serial per received unit. The guard stays
             # conditional for the untracked lines, whose list is empty and whose
@@ -4144,22 +4172,30 @@ async def complete_inspection(db: AsyncSession, inspection_id: int, user) -> m.I
                 raise ValidationError(
                     f"{line.item_code}: accepted serials must come from the GRN"
                 )
+            if original_imeis and not set(accepted_imeis).issubset(set(original_imeis)):
+                raise ValidationError(
+                    f"{line.item_code}: accepted IMEIs must come from the GRN"
+                )
             rejected_serials = [
                 serial for serial in original_serials if serial not in set(accepted_serials)
+            ]
+            rejected_imeis = [
+                imei for imei in original_imeis if imei not in set(accepted_imeis)
             ]
             line.accepted_qty = _d(verdict.accepted_qty)
             line.rejected_qty = _d(verdict.rejected_qty)
             line.qc_status = verdict.result
             line.rejection_reason = verdict.defect_type or line.rejection_reason
             line.serial_numbers = accepted_serials or None
+            line.imei_numbers = accepted_imeis or None
             rate = _d(line.rate)
             line.amount = (line.accepted_qty * rate) if rate else None
-            if rejected_serials:
+            if rejected_serials or rejected_imeis:
                 await _register_serials(
                     db,
                     receipt,
                     line,
-                    serial_numbers=rejected_serials,
+                    serial_numbers=rejected_serials or rejected_imeis,
                     status=SerialStatus.MAINTENANCE.value,
                     remarks=f"Rejected by inspection {inspection.inspection_no}",
                 )
@@ -4811,14 +4847,31 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     serials = list(data.serial_numbers or (
         receipt_item.serial_numbers if receipt_item else []
     ) or [])
+    imeis = list(data.imei_numbers or (
+        receipt_item.imei_numbers if receipt_item else []
+    ) or [])
+    
+    primary_list = serials
+    if not primary_list and imeis:
+        primary_list = imeis
+
     if item.is_serial_tracked:
         if qty != qty.to_integral_value() or len(serials) != int(qty):
             raise ValidationError(
-                f"Select exactly {int(qty)} serial numbers for this putaway"
+                f"Choose exactly {int(qty)} serial numbers for this putaway"
             )
         if qty != _d(task.qty):
             raise ValidationError(
                 "A serialized putaway cannot be split; place all selected units together"
+            )
+    elif item.is_imei_tracked:
+        if qty != qty.to_integral_value() or len(imeis) != int(qty):
+            raise ValidationError(
+                f"Choose exactly {int(qty)} IMEI numbers for this putaway"
+            )
+        if qty != _d(task.qty):
+            raise ValidationError(
+                "An IMEI-tracked putaway cannot be split; place all selected units together"
             )
     batch = await db.get(m.Batch, task.batch_id) if task.batch_id else None
 
@@ -4834,7 +4887,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     # ledger screen fell back to the units standing in that lot TODAY: every movement
     # that ever touched the lot drew the same first code. Nothing in here needs the
     # balance row; it is keyed on the task, the bin and the lot, all settled above.
-    moved_units = await _place_serials(db, task, target, serials, receipt, receipt_item,
+    moved_units = await _place_serials(db, task, target, primary_list, receipt, receipt_item,
                                        qty=qty)
 
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
@@ -5443,7 +5496,7 @@ async def _movement_units(
     wanted = int(qty)
     if len(names) != wanted:
         raise ValidationError(
-            f"{label}: select exactly {wanted} {noun} for this movement "
+            f"{label}: choose exactly {wanted} {noun} for this movement "
             f"— {len(names)} selected")
 
     scope = _unit_scope_clause(item_id=item.id, warehouse_id=warehouse_id,
@@ -7523,6 +7576,50 @@ def _unit_keys(row, mode: str) -> list[str]:
     return seen
 
 
+def _outbound_seed_units(rows, *, item, item_id: int,
+                         batch_id: int | None) -> list[str]:
+    """Which identifiers an auto-raised outward inspection opens with.
+
+    One string per unit this issue line sent out, named the way the issue
+    picker named it (`_unit_mode` currency) — the same value the issue hands
+    back as `unit_keys`, so the QC modal opens with everything accepted and
+    the save validates against the same set.
+
+    Every kind is seeded, not just serial-tracked lines: seeding only those
+    left every IMEI / asset / consumable line stored with no units, which the
+    picker reads as "every unit rejected" (an untouched `None` would mean no
+    decision, but a stored empty list means rejected).
+
+    A row carrying none of its mode's identifiers still contributes its first
+    recorded one — an IMEI-tracked row with no IMEI recorded still has its
+    code in `serial_number`, and an inspection seeded with nothing for it
+    reads as rejected by default. Pure, so it is pinned without a database.
+    """
+    mode = _unit_mode(item)
+    seen: set[int] = set()
+    names: list[str] = []
+    for row in rows:
+        row_id = getattr(row, "id", None)
+        if row_id in seen:
+            continue
+        if getattr(row, "item_id", None) != item_id:
+            continue
+        if batch_id and getattr(row, "batch_id", None) != batch_id:
+            continue
+        seen.add(row_id)
+        marker = next(iter(_unit_keys(row, mode)), None)
+        if marker is None:
+            marker = next((value for value in (
+                getattr(row, "serial_number", None),
+                getattr(row, "imei", None),
+                getattr(row, "asset_code", None),
+                getattr(row, "consumable_code", None),
+            ) if value), None)
+        if marker and marker not in names:
+            names.append(marker)
+    return names
+
+
 async def _reserve_issue_serials(
     db: AsyncSession,
     issue: m.MaterialIssue,
@@ -8717,6 +8814,17 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         db, issue, await _issue_doc_type_of(db, issue.id), user)
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
+    if issue.floor_location_id:
+        setattr(issue, "floor_in_charge_names",
+                (await stock_locations.floor_incharge_names(
+                    db, {issue.floor_location_id})).get(issue.floor_location_id, []))
+    setattr(issue, "child_issues", [dict(row._mapping) for row in (await db.execute(
+        select(m.MaterialIssue.id, m.MaterialIssue.issue_no, m.MaterialIssue.status,
+               m.MaterialIssue.floor_location_name, m.MaterialIssue.is_stock_posted,
+               m.MaterialIssue.total_qty)
+        .where(m.MaterialIssue.parent_issue_id == issue.id)
+        .order_by(m.MaterialIssue.id)
+    )).all()] if not issue.parent_issue_id else [])
     return await _decorate_issue_destination(db, issue)
 
 
@@ -9869,14 +9977,29 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
     from app.modules.inventory.models import Reservation, Stock
 
     parent = await get_issue(db, issue_id)
+    if parent.status in (IssueStatus.SPLIT.value, IssueStatus.CLOSED.value):
+        raise ValidationError(
+            f"{parent.issue_no} has already been split. Work its floor issues, or "
+            "cancel all of them to split it again.")
     _guard(parent.status, {IssueStatus.APPROVED.value}, "split", "issue")
+    # The split code says WHO may split; this says WHERE. A storekeeper of another
+    # warehouse holding the code must not be able to break this one's issue up.
+    await _assert_in_scope(db, user, m.MaterialIssue, parent,
+                           warehouse_col=m.MaterialIssue.warehouse_id,
+                           owner_col=m.MaterialIssue.created_by_id, label="Issue")
+    # Handing work ACROSS floors is a warehouse-wide decision. A floor in-charge sees
+    # only their own floors, so a split by one would hand out stock they cannot see.
+    if await floor_scope_ids(db, user) is not None:
+        raise ValidationError(
+            "Only a warehouse-wide user can split an issue across floors — you are "
+            "assigned to specific floors.")
     if parent.parent_issue_id:
         raise ValidationError(
             f"{parent.issue_no} is already a split of {parent.parent_issue_no}.")
     existing = await db.scalar(
         select(func.count()).select_from(m.MaterialIssue).where(
             m.MaterialIssue.parent_issue_id == parent.id,
-            m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+            m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES),
         )
     )
     if existing:
@@ -9978,6 +10101,9 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 "batch_id": row.batch_id, "batch_no": row.batch_no,
                 "expiry_date": row.expiry_date,
                 "qty": take,
+                # The parent line's own rate, so a child is valued exactly as the
+                # parent was — a child written without one listed at Rs 0.
+                "rate": line.rate,
             })
             outstanding -= take
         if outstanding > ZERO:
@@ -9992,12 +10118,21 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             "is nothing to split. Post the issue yourself, or put the stock away "
             "first.")
 
+    # Numbered in the same series as the parent: `_build_issue` numbers from the
+    # INDENT's project first, and `out_issues.project_name` is often empty, so
+    # numbering off the issue alone put children in a separate "NA" series.
+    series_project = parent.project_name
+    if parent.indent_id:
+        from app.modules.indents.models import Indent
+        indent = await db.get(Indent, parent.indent_id)
+        series_project = getattr(indent, "project_name", None) or series_project
+
     created: list[m.MaterialIssue] = []
     for floor_id, bucket in by_floor.items():
         child = m.MaterialIssue(
             items=[],
             issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
-                                       project=parent.project_name),
+                                       project=series_project),
             issue_type=parent.issue_type,
             issue_date=parent.issue_date,
             indent_id=parent.indent_id, indent_no=parent.indent_no,
@@ -10040,9 +10175,10 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                 # for lines with a quantity, so an item that must be inspected went
                 # out as NOT_REQUIRED and never reached the Outward QC queue.
                 requested_qty=spec["qty"], issued_qty=spec["qty"],
+                rate=spec["rate"],
+                amount=(spec["qty"] * _d(spec["rate"])) if spec["rate"] else None,
             ))
-        child.total_items = len(child.items)
-        child.total_qty = sum((_d(i.requested_qty) for i in child.items), ZERO)
+        _issue_totals(child)
         db.add(child)
         created.append(child)
 
@@ -10054,19 +10190,78 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                                  "parent_issue_no": parent.issue_no,
                                  "floor": child.floor_location_name,
                                  "total_qty": str(child.total_qty)})
+    # The parent is now carried by its children: locked against posting, editing and
+    # cancelling, and out of every indent count (see `IssueStatus.SPLIT`).
+    parent.status = IssueStatus.SPLIT.value
+    await write_audit(db, entity="out_issues", entity_id=parent.id,
+                      entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": IssueStatus.APPROVED.value},
+                      after={"status": parent.status,
+                             "children": [c.issue_no for c in created]})
     await db.commit()
 
+    # Who each piece went to. A floor name alone left the manager guessing whose
+    # queue it had landed in — and a floor nobody holds says so, empty, on screen.
+    in_charge = await stock_locations.floor_incharge_names(
+        db, {c.floor_location_id for c in created if c.floor_location_id})
     return {
         "parent_issue_id": parent.id,
         "parent_issue_no": parent.issue_no,
         "children": [{"id": c.id, "issue_no": c.issue_no,
                       "floor_location_id": c.floor_location_id,
                       "floor_location_name": c.floor_location_name,
+                      "in_charge_names": in_charge.get(c.floor_location_id, []),
                       "total_items": c.total_items,
                       "total_qty": str(c.total_qty)} for c in created],
         # Said out loud, never rounded away — see the docstring.
         "unfulfilled": shortfall,
     }
+
+
+async def _sync_split_parent(db: AsyncSession, parent_id: int | None, user) -> None:
+    """Roll a split parent's status up from its children. Never set by hand.
+
+    - any child still open (draft, in approval, approved, not yet posted) -> SPLIT
+    - every child that was not cancelled/rejected has posted              -> CLOSED
+    - every child cancelled or rejected                                  -> APPROVED
+
+    The last is the way BACK, and matters as much as the way forward: with nothing
+    serving it the parent's own lines are the only claim left, so it returns to the
+    state it was split from and can be posted or split again. Whatever a CLOSED
+    parent's children did not cover (a shortfall at split time, a cancelled child) is
+    left reserved against the indent exactly as a short issue leaves it, and the
+    parent no longer counts toward the indent cap, so a fresh issue can take it.
+
+    Read on every child transition — post, reject, cancel — and by
+    `scripts.sync_split_issues` for parents split before this existed.
+    """
+    if not parent_id:
+        return
+    parent = await db.get(m.MaterialIssue, parent_id)
+    if parent is None or parent.status not in (
+            IssueStatus.APPROVED.value, IssueStatus.SPLIT.value, IssueStatus.CLOSED.value):
+        return
+    children = (await db.execute(
+        select(m.MaterialIssue.status, m.MaterialIssue.is_stock_posted)
+        .where(m.MaterialIssue.parent_issue_id == parent_id)
+    )).all()
+    if not children:
+        return
+    live = [row for row in children if row.status not in UNSERVED_ISSUE_STATUSES]
+    if not live:
+        after = IssueStatus.APPROVED.value
+    elif all(row.is_stock_posted for row in live):
+        after = IssueStatus.CLOSED.value
+    else:
+        after = IssueStatus.SPLIT.value
+    if after == parent.status:
+        return
+    before = parent.status
+    parent.status = after
+    await write_audit(db, entity="out_issues", entity_id=parent.id,
+                      entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
+                      before={"status": before},
+                      after={"status": after, "reason": "rolled up from its floor issues"})
 
 
 async def act_on_issue(
@@ -10116,6 +10311,7 @@ async def act_on_issue(
         before={"status": before},
         after={"status": issue.status, "comments": comments},
     )
+    await _sync_split_parent(db, issue.parent_issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
 
@@ -10380,9 +10576,7 @@ async def _raise_outbound_inspection_for(
     
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
-        if not item.requires_qi:
-            continue
-            
+
         # FIXED 2026-08-21 — one STRING per unit, seeded once.
         #
         # This appended a dict per entry, but `serial_numbers` is a list of strings
@@ -10400,22 +10594,12 @@ async def _raise_outbound_inspection_for(
         #
         # Deduplicated on the unit's own id, and named by whichever identifier it
         # actually carries — the same value the issue hands the picker, so QC and the
-        # issue speak about a unit with one name.
-        line_serials = []
-        if item.is_serial_tracked:
-            seen_units: set[int] = set()
-            for s_row in issued_serials.values():
-                if s_row.id in seen_units:
-                    continue
-                if s_row.item_id != line.item_id:
-                    continue
-                if line.batch_id and s_row.batch_id != line.batch_id:
-                    continue
-                seen_units.add(s_row.id)
-                marker = (s_row.serial_number or s_row.asset_code
-                          or s_row.consumable_code)
-                if marker:
-                    line_serials.append(marker)
+        # issue speak about a unit with one name. Every kind is seeded: gating this on
+        # `is_serial_tracked` left IMEI / asset / consumable lines with no units
+        # stored, which the picker reads as "every unit rejected".
+        line_serials = _outbound_seed_units(
+            issued_serials.values(), item=item, item_id=line.item_id,
+            batch_id=line.batch_id)
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.id, item_id=line.item_id,
@@ -10437,6 +10621,17 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     _guard(issue.status, {IssueStatus.APPROVED.value}, "issue stock against", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
+    # A parent split before SPLIT existed still reads APPROVED. Its children carry
+    # its goods, so posting it as well would take the same stock off the shelf twice.
+    live_children = (await db.execute(
+        select(m.MaterialIssue.issue_no).where(
+            m.MaterialIssue.parent_issue_id == issue.id,
+            m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES))
+    )).scalars().all()
+    if live_children:
+        raise ValidationError(
+            f"{issue.issue_no} has been split into {', '.join(live_children)}. Post "
+            "those instead — or cancel all of them to post this one.")
     await _assert_issue_floor_access(db, issue, user)
 
     outward = issue.direction == IssueDirection.OUT.value
@@ -10637,6 +10832,9 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     issue.issued_by_id = getattr(user, "id", None)
     issue.issued_by_name = _name(user)
     issue.status = IssueStatus.ISSUED.value
+    # Every OUTWARD issue is inspected before logistics may take it: a consignment is
+    # built only from what outward QC passed, whatever the item's `requires_qi` says.
+    needs_qc = needs_qc or outward
     issue.qc_status = QcStatus.PENDING.value if needs_qc else QcStatus.NOT_REQUIRED.value
 
     if needs_qc and outward:
@@ -10651,6 +10849,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                       after={"is_stock_posted": True, "status": issue.status,
                              "qc_status": issue.qc_status,
                              "total_qty": str(issue.total_qty)})
+    await _sync_split_parent(db, issue.parent_issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
 
@@ -11589,6 +11788,13 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
         raise ValidationError(
             f"{issue.issue_no} has already left the store. Raise a return against it "
             "instead — cancelling would leave the stock unaccounted for.")
+    if issue.status == IssueStatus.SPLIT.value or await db.scalar(
+            select(func.count()).select_from(m.MaterialIssue).where(
+                m.MaterialIssue.parent_issue_id == issue.id,
+                m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES))):
+        raise ValidationError(
+            f"{issue.issue_no} has been split into floor issues. Cancel those instead "
+            "— once all of them are cancelled it returns to Approved.")
     _guard(issue.status,
            {IssueStatus.DRAFT.value, IssueStatus.PENDING_APPROVAL.value,
             IssueStatus.APPROVED.value, IssueStatus.REJECTED.value},
@@ -11609,6 +11815,7 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
                       after={"status": issue.status, "reason": reason})
+    await _sync_split_parent(db, issue.parent_issue_id, user)
     await db.commit()
     return await get_issue(db, issue_id)
 
@@ -11872,7 +12079,7 @@ async def _apply_consignment_packages(
                     raise ValidationError(f"{package_no}: {item.code} serial quantity must be whole")
                 if len(serials) != int(qty):
                     raise ValidationError(
-                        f"{package_no}: select exactly {int(qty)} serials for {item.code}"
+                        f"{package_no}: choose exactly {int(qty)} serials for {item.code}"
                     )
 
             key = (source_issue.id, item.id, batch_id)
@@ -12562,6 +12769,9 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         ref_issue = await get_issue(db, data.ref_id)
         if not ref_issue.is_stock_posted:
             raise ValidationError(f"{ref_issue.issue_no} has not posted stock yet")
+        if ref_issue.qc_status not in CONSIGNABLE_QC:
+            raise ValidationError(
+                f"{ref_issue.issue_no}: outward QC is {ref_issue.qc_status}, not passed")
         if ref_issue.warehouse_id != wh.id:
             raise ValidationError(f"{ref_issue.issue_no} belongs to another warehouse")
         existing = await _live_consignment_for_issue(db, ref_issue.id)
@@ -19755,7 +19965,8 @@ async def serial_summary(db: AsyncSession, *, item_ids: list[int],
     # suppressed here instead, which keeps the row's key and its code intact.
     tracked = {r[0] for r in (await db.execute(
         select(Item.id).where(Item.id.in_(item_ids),
-                              Item.is_serial_tracked.is_(True))
+                              or_(Item.is_serial_tracked.is_(True),
+                                  Item.is_imei_tracked.is_(True)))
     )).all()}
 
     # Keyed down to the BIN and the BATCH, not just the stocking point: "which units
@@ -20860,7 +21071,16 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
         select(Indent)
         .options(selectinload(Indent.items))
         .where(Indent.requested_by_id == getattr(user, "id", 0),
-               Indent.status.in_(visible_statuses))
+               Indent.status.in_(visible_statuses),
+               # Only what logistics has taken out of the gate. An indent whose stock
+               # is merely set aside, still being bought or issued but not yet on a
+               # consignment has nothing for the requester to acknowledge.
+               select(m.MaterialIssue.id)
+               .join(m.Dispatch, _carries_issue(m.MaterialIssue.id))
+               .where(m.MaterialIssue.indent_id == Indent.id,
+                      m.MaterialIssue.is_stock_posted.is_(True),
+                      m.Dispatch.status.in_(_ON_THE_ROAD))
+               .correlate(Indent).exists())
     )
     if position_id is not None:
         stmt = stmt.where(or_(Indent.position_id == position_id,
@@ -22357,7 +22577,7 @@ async def inspectable_issue_options(db: AsyncSession,
     stmt = select(m.MaterialIssue).where(
         m.MaterialIssue.direction == IssueDirection.OUT.value,
         m.MaterialIssue.is_stock_posted.is_(True),
-        m.MaterialIssue.qc_status.in_([QcStatus.PENDING.value, QcStatus.FAILED.value]),
+        m.MaterialIssue.qc_status.in_(INSPECTABLE_QC),
     )
     if inspected:
         stmt = stmt.where(m.MaterialIssue.id.notin_(inspected))
@@ -22417,6 +22637,14 @@ async def _requesting_points(
         issue_id: point_of_office.get(office_id) if office_id else None
         for issue_id, office_id in office_of_issue.items()
     }
+
+
+
+# An outward issue reaches logistics only once outward QC has passed it (PARTIAL: the
+# accepted part). NOT_REQUIRED is not in it — issues posted before QC became mandatory
+# for every outward issue are inspected first, which is why it is INSPECTABLE.
+CONSIGNABLE_QC = (QcStatus.PASSED.value, QcStatus.PARTIAL.value)
+INSPECTABLE_QC = (QcStatus.PENDING.value, QcStatus.FAILED.value, QcStatus.NOT_REQUIRED.value)
 
 
 def _consignable_issues_stmt():
@@ -22651,7 +22879,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
     issue = await get_issue(db, issue_id)
     if issue.direction != IssueDirection.OUT.value or not issue.is_stock_posted:
         raise ValidationError("Only a posted outward issue can become a dispatch")
-    if issue.qc_status in (QcStatus.PENDING.value, QcStatus.FAILED.value):
+    if issue.qc_status not in CONSIGNABLE_QC:
         raise ValidationError("QC Outward must be completed before dispatch.")
     existing = await _live_consignment_for_issue(db, issue.id)
     if existing is not None:
@@ -22808,6 +23036,30 @@ async def employee_options(db: AsyncSession, search: str | None = None) -> list[
     rows = (await db.execute(
         stmt.order_by(HcmEmployee.full_name).limit(LOOKUP_LIMIT))).scalars().all()
     return [{"id": r.id, "code": r.emp_code, "name": r.full_name} for r in rows]
+
+
+async def employee_destination(db: AsyncSession, employee_id: int) -> dict:
+    """Where a direct issue goes when it names this employee.
+
+    Same answer `_issue_destination` falls back to on a saved issue — the
+    employee's own office — plus the SAC and vehicle the form shows beside it,
+    so a direct issue fills Destination / SAC / Vehicle on Issued-to select
+    instead of waiting for an indent that is never coming.
+    """
+    from app.platform.hcm.models import HcmEmployee
+
+    employee = await db.get(HcmEmployee, employee_id)
+    if employee is None:
+        raise NotFoundError(f"Employee {employee_id} not found")
+    office_name = employee.office_name
+    return {
+        "issued_to_id": employee.id,
+        "issued_to_name": employee.full_name,
+        "destination_office_id": employee.office_id,
+        "destination_office_name": office_name,
+        "destination_office_sac": await _office_sac(db, employee.office_id),
+        "vehicle_number": _vehicle_from_office_name(office_name),
+    }
 
 
 async def project_options(db: AsyncSession, search: str | None = None) -> list[dict]:
@@ -23695,15 +23947,17 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                     f"{label}: {', '.join(stray[:5])} did not go out on this issue line")
             if len(serials) != int(accepted):
                 raise ValidationError(
-                    f"{label}: select exactly {int(accepted)} accepted units "
+                    f"{label}: choose exactly {int(accepted)} accepted units "
                     f"({len(serials)} selected)")
         elif item.is_serial_tracked and len(serials) != int(accepted):
             raise ValidationError(
-                f"{label}: select exactly {int(accepted)} accepted serial numbers")
+                f"{label}: choose exactly {int(accepted)} accepted serial numbers")
 
         reason = line.rejection_reason or line.defect_type
         if rejected > ZERO and not (reason or "").strip():
-            raise ValidationError(f"{item.code}: a failed line needs a defect type")
+            raise ValidationError(
+                f"{label}: {rejected} rejected — enter a Rejection reason on this line "
+                "before saving")
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.issue_item_id,
@@ -23742,7 +23996,7 @@ async def create_outbound_inspection(db: AsyncSession, data: s.OutboundInspectio
                 f"{issue.issue_no} is already inspected on {existing.inspection_no}. "
                 f"Cancel that one to inspect it again."
             )
-        if issue.qc_status not in (QcStatus.PENDING.value, QcStatus.FAILED.value):
+        if issue.qc_status not in INSPECTABLE_QC:
             raise ValidationError(
                 f"{issue.issue_no} QC status is {issue.qc_status}. Cannot inspect."
             )

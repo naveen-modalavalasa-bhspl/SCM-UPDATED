@@ -38,14 +38,14 @@ export function POApprovalChat({ poId }: { poId: number }) {
       setDraft("");
       qc.invalidateQueries({ queryKey: ["po-comments", poId] });
     },
-    onError: (e: any) => toast.error(e?.message ?? "Could not send message"),
+    onError: (e: any) => toast.error(e?.message ?? "Message not sent. Check your internet and try again."),
   });
 
   const items: POComment[] = chat.data ?? [];
   const myId = me?.employee?.id as number | undefined;
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-white/20 bg-gradient-to-br from-teal-500 via-cyan-500 to-sky-600 shadow-lg">
+    <div className="overflow-hidden rounded-2xl border border-pink-200/50 bg-gradient-to-br from-pink-600 via-rose-500 to-pink-700 shadow-lg">
       <div className="bg-white/10 backdrop-blur">
         <div className="flex items-center gap-3 px-4 py-3 text-white">
           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/20 backdrop-blur">

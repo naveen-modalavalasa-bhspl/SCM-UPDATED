@@ -339,6 +339,11 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   inv_labels: {
     hint: "Create and print labels for stock items.",
   },
+  inv_stock_edits: {
+    label: "Stock Corrections",
+    hint: "Correct a held batch (batch no., mfg / expiry date) or unit (serial, IMEI, asset / "
+      + "consumable code). Every correction goes through the Stock Correction approval ladder.",
+  },
   masters: {
     hint: "Set up the shared item, vendor, category, and other master records.",
   },
@@ -470,6 +475,12 @@ const PLAIN_FEATURE_HELP: Record<string, string> = {
     "See stock in every warehouse, not only the user's own office.",
   "stock.adjust":
     "Correct a stock quantity when the recorded balance is wrong.",
+  "stock.edit.view":
+    "See stock correction requests and their approval status.",
+  "stock.edit.create":
+    "Raise a correction to a batch's number or dates, or a unit's serial, IMEI or code.",
+  "stock.edit.approve":
+    "Approve or reject a stock correction. Approving writes the corrected values.",
   "stock.reserve":
     "Set stock aside so it can be used for a specific request or document.",
   "stock.valuation.view":
@@ -984,7 +995,7 @@ export function JobProfilesPage() {
       toast.success(`${selected?.name} saved`);
       queryClient.invalidateQueries({ queryKey: ["rbac", "job-profiles"] });
     },
-    onError: () => toast.error("Could not save this profile"),
+    onError: () => toast.error("Job profile not saved. Try again."),
   });
 
   const reset = useMutation({
@@ -993,7 +1004,7 @@ export function JobProfilesPage() {
       toast.success(`${selected?.name} handed back to its HCM role`);
       queryClient.invalidateQueries({ queryKey: ["rbac", "job-profiles"] });
     },
-    onError: () => toast.error("Could not reset this profile"),
+    onError: () => toast.error("Job profile not reset. Try again."),
   });
 
   const filtered = useMemo(() => {

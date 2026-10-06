@@ -256,6 +256,8 @@ PAGE_TREE = [
      P.MR_VIEW, 59, "grp_inventory"),
     ("inv_adjustments", "/inventory/adjustments", "Stock Audit", "sliders",
      P.page_view_code("inv_adjustments"), 60, "grp_inventory"),
+    ("inv_stock_edits", "/inventory/stock-edits", "Stock Corrections", "pen-line",
+     P.page_view_code("inv_stock_edits"), 61, "grp_inventory"),
     # ("inv_valuation", "/inventory/valuation", "Valuation & Ageing", "indian-rupee",
     #  P.STOCK_VALUATION_VIEW, 63, "grp_inventory"),
     ("inv_labels", "/inventory/labels", "Labels & Printing", "printer",
@@ -552,8 +554,7 @@ async def seed_hsn_codes(db):
     ]
     for code, description in hsn_codes:
         row, _ = await get_or_create(db, HsnCode, defaults={
-            "description": description, "cgst_rate": 0, "sgst_rate": 0,
-            "igst_rate": 0, "cess_rate": 0, "is_active": True}, code=code)
+            "description": description, "gst_rate": 0, "is_active": True}, code=code)
         row.description = row.description or description
         row.is_active = True
 

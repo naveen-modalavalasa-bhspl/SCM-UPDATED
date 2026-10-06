@@ -70,6 +70,13 @@ STOCK_ADJUST = "stock.adjust"
 # raising and approving, so the second pair of eyes was only ever "somebody else with
 # the same tick". Inherits its grants below, so nobody who approves today loses it.
 STOCK_ADJUST_APPROVE = "stock.adjust.approve"
+# Stock Corrections (2026-10-01): editing what a held unit or batch IS — batch no.,
+# mfg / expiry, serial, IMEI, asset / consumable code. Raise and sign are separate
+# codes for the same reason the audit's are: the second pair of eyes must be somebody
+# else's. New capability, so fail-closed: Admin holds it until a job profile is ticked.
+STOCK_EDIT_VIEW = "stock.edit.view"
+STOCK_EDIT_CREATE = "stock.edit.create"
+STOCK_EDIT_APPROVE = "stock.edit.approve"
 STOCK_RESERVE = "stock.reserve"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
 STOCK_VALUATION_VIEW = "stock.valuation.view"
@@ -362,6 +369,12 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_ADJUST, "inventory", "stock", "adjust", "Adjust stock"),
     Perm(STOCK_ADJUST_APPROVE, "inventory", "stock", "adjust_approve",
          "Approve or reject a stock audit / adjustment"),
+    Perm(STOCK_EDIT_VIEW, "inventory", "stock_edit", "view",
+         "View stock corrections (batch / expiry / serial / IMEI edits)"),
+    Perm(STOCK_EDIT_CREATE, "inventory", "stock_edit", "create",
+         "Raise a stock correction for approval"),
+    Perm(STOCK_EDIT_APPROVE, "inventory", "stock_edit", "approve",
+         "Approve or reject a stock correction"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
          "View stock valuation and cost"),
@@ -596,6 +609,7 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
+    MONTHLY_INDENT_MANAGE: ADMIN_SETTINGS_MANAGE,
     # Everyone who could raise a transfer yesterday can request one today.
     STOCK_TRANSFER_REQUEST: STOCK_TRANSFER,
     # The lists were read under `stock.view`; whoever read them keeps them.
@@ -676,6 +690,9 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("pro_consolidations", "procurement", "Procurement · Consolidation"),
     ("pro_rfqs", "procurement", "Procurement · RFQs"),
     ("pro_quotations", "procurement", "Procurement · Quotations"),
+    # The comparison studio (2026-09-26): every quotation to one RFQ side by side,
+    # and the award. It took over the sheet that used to live inside the RFQ page.
+    ("pro_price_compare", "procurement", "Procurement · Compare Quotations"),
     # The module's front door: the buying chain as one board — what is waiting on me,
     # what each rung is holding, and the demand pool underneath it. Every tile on it is
     # gated separately on the document family it counts, so the screen's own code is
@@ -743,6 +760,7 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("pro_ledger", "procurement", "Procurement · Ledger"),
     ("inv_mr", "inventory", "Inventory · Material Requests"),
     ("inv_adjustments", "inventory", "Inventory · Stock Audit"),
+    ("inv_stock_edits", "inventory", "Inventory · Stock Corrections"),
     ("inv_labels", "inventory", "Inventory · Labels & Printing"),
     # Rode on `stock.points.manage`, which is the action that RE-TAGS a stocking point.
     ("inv_stocking_points", "inventory", "Inventory · Stocking Points"),
@@ -895,6 +913,11 @@ INHERITS_GRANTS_FROM.update({
     page_view_code("pro_suppliers"): VENDOR_PORTAL_MANAGE,
     page_view_code("pro_demand_pool"): REQUISITION_VIEW,
     page_view_code("wh_demand_pool"): ISSUE_VIEW,   # the endpoint is gated on issue.view
+    # Price Compare (2026-09-26) took over the comparison sheet and the award from the
+    # RFQ detail. It lands with the desk that worked that sheet — the wider of the two
+    # pages that used to carry it — so nobody loses the screen the day it moves; the
+    # DATA inside stays gated by `rfq.compare` exactly as before.
+    page_view_code("pro_price_compare"): page_view_code("pro_rfqs"),
     # Same screen, same audience: App Integrations reads the configuration and logs
     # behind the console anybody holding `integration.view` already opens, and every
     # route on it is gated by that code. Fail-closed would put a Settings row on the

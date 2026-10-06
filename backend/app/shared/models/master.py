@@ -24,22 +24,62 @@ class Uom(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class VendorCategory(Base):
+    """`mst_vendor_categories` — how the business groups its suppliers (Glassware,
+    Reagents ...). Read by the vendor material mapping screen to group suppliers."""
+    __tablename__ = "mst_vendor_categories"
+    id = pk()
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(150), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class VendorCategoryMember(Base):
+    """A vendor in a category. Many-to-many: Borosil can be Glassware AND Lab
+    Consumables. Edited from either side — the category form or the vendor form."""
+    __tablename__ = "mst_vendor_category_members"
+    __table_args__ = (UniqueConstraint("category_id", "vendor_id",
+                                       name="uq_vendor_category_member"),)
+    id = pk()
+    category_id = Column(ForeignKey("mst_vendor_categories.id", ondelete="CASCADE"),
+                         index=True, nullable=False)
+    vendor_id = Column(ForeignKey("mst_vendors.id", ondelete="CASCADE"),
+                       index=True, nullable=False)
+
+
+class UomClassRow(Base):
+    """`mst_uom_classes` — the kinds of unit (Count, Weight, Volume ...).
+
+    `mst_uom.uom_class` holds this row's CODE, as it always held the enum's value,
+    so every query already reading the code keeps working.
+    """
+    __tablename__ = "mst_uom_classes"
+    id = pk()
+    code = Column(String(30), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class HsnCode(Base):
-    """An HSN/SAC code and the GST rates that go with it.
+    """An HSN/SAC code and the GST rate that goes with it.
 
     Tax is a property of the classification, not of the item: hundreds of items share
     one HSN, and a rate change is a government notification, not an item edit. So the
-    rates live here and documents read them at PO/GRN time rather than copying them
-    onto mst_items, where a change would mean rewriting every affected row.
+    rate lives here and documents read it at PO/GRN time rather than copying it onto
+    mst_items, where a change would mean rewriting every affected row.
+
+    A single `gst_rate`: the central/state split of a within-state supply and the
+    integrated rate of an across-state one are the same number on two routes, and
+    storing both let them drift apart. Where a document genuinely needs a split it
+    derives it from this rate — CGST and SGST are each half, IGST is the whole.
     """
     __tablename__ = "mst_hsn_codes"
     id = pk()
     code = Column(String(20), unique=True, nullable=False)
     description = Column(String(300), nullable=True)
-    cgst_rate = Column(Numeric(6, 3), nullable=False, default=0)
-    sgst_rate = Column(Numeric(6, 3), nullable=False, default=0)
-    igst_rate = Column(Numeric(6, 3), nullable=False, default=0)
-    cess_rate = Column(Numeric(6, 3), nullable=False, default=0)
+    gst_rate = Column(Numeric(6, 3), nullable=False, default=0)
     effective_from = Column(Date, nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
 
@@ -154,7 +194,7 @@ class Item(Base):
     # Assets are not consumed on issue. The asset or consumable code itself is
     # generated during putaway in the warehouse module, never here.
     is_asset = Column(Boolean, nullable=False, default=False)
-    # The 4-digit tail of `code`, counted per L1L2L3-GEN-BRAND-MFR prefix. Stored so
+    # The 4-digit tail of `code`, counted per L1L2L3-GEN prefix. Stored so
     # the serial can be read without re-parsing the code string.
     serial_no = Column(Integer, nullable=True)
     description = Column(Text, nullable=True)

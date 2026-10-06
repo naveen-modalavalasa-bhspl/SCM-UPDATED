@@ -89,7 +89,7 @@ export const transportApi = {
     /** CONSIGNMENT / ISSUE for the outward leg, RETURN for the way back (doc E7). */
     source_type?: string;
   } = {}) =>
-    api.get<Paginated<TRListRow>>("/api/transport", { params }).then((r) => r.data),
+    api.get<Paginated<ProviderBoardRow>>("/api/transport", { params }).then((r) => r.data),
 
   /** "Where is my material?" — the legs carrying an indent, readable by the person
    * who RAISED that indent rather than by the logistics desk. Authorised by

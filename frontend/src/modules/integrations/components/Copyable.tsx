@@ -70,7 +70,7 @@ export function CopyButton({
       window.setTimeout(() => setCopied(false), 1600);
       toast.success("Copied to clipboard");
     } else {
-      toast.error("Could not copy. Select the text and copy it.");
+      toast.error("Copy did not work. Select the text with your mouse and press Ctrl+C.");
     }
   };
 
@@ -130,7 +130,7 @@ export function CopyChip({
       window.setTimeout(() => setCopied(false), 1600);
       toast.success(copiedMessage ?? "Copied to clipboard");
     } else {
-      toast.error("Could not copy. Select the text and copy it.");
+      toast.error("Copy did not work. Select the text with your mouse and press Ctrl+C.");
     }
   };
 

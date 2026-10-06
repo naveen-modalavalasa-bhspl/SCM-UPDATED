@@ -16,6 +16,7 @@ import {
   updateInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
+import { resolveAcceptedUnits } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type {
@@ -55,6 +56,19 @@ const deriveResult = (inspected: number, accepted: number): InspectionItemWrite[
   return "PARTIAL";
 };
 
+const parseCodes = (arr: any): string[] | null => {
+  if (!arr) return null;
+  if (!Array.isArray(arr)) {
+    if (arr.accepted && Array.isArray(arr.accepted)) {
+      return parseCodes(arr.accepted);
+    }
+    return null;
+  }
+  if (arr.length === 0) return [];
+  if (typeof arr[0] === "string") return arr;
+  return arr.map((u: any) => u?.serial_number || u?.imei_no || u?.asset_code || u?.consumable_code || u?.serial_no || u?.code).filter(Boolean);
+};
+
 export default function QualityInspectionForm({
   type = "INCOMING",
 }: {
@@ -84,6 +98,7 @@ export default function QualityInspectionForm({
   const [pulled, setPulled] = useState<Receipt | null>(null);
   const [paramsFor, setParamsFor] = useState<number | null>(null);
   const [serialsFor, setSerialsFor] = useState<number | null>(null);
+  const [paramsForImeis, setParamsForImeis] = useState<number | null>(null);
 
   /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
    * list of every active employee in HCM with the person actually inspecting somewhere
@@ -129,7 +144,8 @@ export default function QualityInspectionForm({
         remarks: l.remarks,
         // Left null when the line carries no decision yet — the picker reads that as
         // "nothing rejected", where [] would mean "every unit rejected".
-        serial_numbers: l.serial_numbers ?? null,
+        serial_numbers: parseCodes(l.serial_numbers),
+        imei_numbers: parseCodes(l.imei_numbers),
       })),
     });
   }, [doc]);
@@ -163,11 +179,13 @@ export default function QualityInspectionForm({
   const delivery = grn ?? pulled;
 
   const deliveryMeta = useMemo(() => {
-    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[] }>();
+    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[] }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
         is_serial_tracked: line.is_serial_tracked,
-        serials: line.serial_numbers ?? [],
+        serials: parseCodes(line.serial_numbers) ?? [],
+        is_imei_tracked: line.is_imei_tracked,
+        imeis: parseCodes(line.imei_numbers) ?? [],
       });
     }
     return byLine;
@@ -180,6 +198,13 @@ export default function QualityInspectionForm({
     return deliveryMeta.get(receiptItemId)?.is_serial_tracked ?? false;
   };
 
+  const isImeiTracked = (index: number | null) => {
+    if (index === null) return false;
+    const receiptItemId = form.items[index]?.receipt_item_id;
+    if (!receiptItemId) return false;
+    return deliveryMeta.get(receiptItemId)?.is_imei_tracked ?? false;
+  };
+
   /** The GRN serials behind an inspection line. Serial-tracked items must already have
    *  these from goods receipt, so QC selects accepted units from this list. */
   const availableSerials = (index: number | null) => {
@@ -188,6 +213,33 @@ export default function QualityInspectionForm({
     if (!receiptItemId) return null;
     const meta = deliveryMeta.get(receiptItemId);
     return meta?.serials?.length ? meta.serials : null;
+  };
+
+  /** The GRN IMEIs behind an inspection line. */
+  const availableImeis = (index: number | null) => {
+    if (index === null) return null;
+    const receiptItemId = form.items[index]?.receipt_item_id;
+    if (!receiptItemId) return null;
+    const meta = deliveryMeta.get(receiptItemId);
+    return meta?.imeis?.length ? meta.imeis : null;
+  };
+
+  /** What the line is keeping, with pre-seed rows repaired: a line stored with
+   *  nothing while accepting the whole offered set reads as "every unit
+   *  rejected" unless it is resolved back to the offered set here. Read-only —
+   *  the form keeps what it was given until the modal writes an explicit
+   *  decision. */
+  const resolvedSerials = (index: number): string[] => {
+    const line = form.items[index];
+    if (!line) return [];
+    return resolveAcceptedUnits(
+      line.serial_numbers, availableSerials(index), num(line.accepted_qty));
+  };
+  const resolvedImeis = (index: number): string[] => {
+    const line = form.items[index];
+    if (!line) return [];
+    return resolveAcceptedUnits(
+      line.imei_numbers, availableImeis(index), num(line.accepted_qty));
   };
 
   /** Pulling the receipt in seeds the lines from what was actually received. */
@@ -214,7 +266,8 @@ export default function QualityInspectionForm({
           defect_type: null,
           rejection_reason: null,
           remarks: null,
-          serial_numbers: l.serial_numbers ?? [],
+          serial_numbers: parseCodes(l.serial_numbers),
+          imei_numbers: parseCodes(l.imei_numbers),
         })),
       }));
       if (receipt.warehouse_name) setWarehouseName(receipt.warehouse_name);
@@ -249,11 +302,22 @@ export default function QualityInspectionForm({
         if (i !== index) return l;
         const next = { ...l, ...patch };
         const inspected = num(next.inspected_qty);
-        const accepted = Math.min(num(next.accepted_qty), inspected);
+        
+        let accepted = 0;
+        let rejected = 0;
+        
+        if (patch.rejected_qty !== undefined) {
+          rejected = Math.min(Math.max(num(patch.rejected_qty), 0), inspected);
+          accepted = Math.max(inspected - rejected, 0);
+        } else {
+          accepted = Math.min(Math.max(num(next.accepted_qty), 0), inspected);
+          rejected = Math.max(inspected - accepted, 0);
+        }
+
         return {
           ...next,
           accepted_qty: accepted,
-          rejected_qty: Math.max(inspected - accepted, 0),
+          rejected_qty: rejected,
           // An explicitly chosen result wins; otherwise it follows the split.
           result: patch.result ?? deriveResult(inspected, accepted),
         };
@@ -284,25 +348,48 @@ export default function QualityInspectionForm({
 
   const locked = !!doc && doc.status !== "DRAFT" && doc.status !== "IN_PROGRESS";
 
-  const validateAcceptedSerials = () => {
+  const validateAcceptedUnits = () => {
     for (const [index, line] of form.items.entries()) {
-      const available = availableSerials(index);
-      if (!available) continue;
       const required = Math.floor(num(line.accepted_qty));
-      if (num(line.accepted_qty) !== required) {
-        throw new Error(`Line ${index + 1}: accepted quantity must be a whole number for serialized items.`);
+
+      const availableSerialsForLine = availableSerials(index);
+      if (availableSerialsForLine) {
+        if (num(line.accepted_qty) !== required) {
+          throw new Error(`Line ${index + 1}: Accepted quantity must be a full number (like 5, not 5.5).`);
+        }
+        const actual = resolvedSerials(index).length;
+        if (actual !== required) {
+          const rejectedQty = num(line.inspected_qty) - required;
+          throw new Error(`Line ${index + 1}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} serial numbers from the list.`);
+        }
       }
-      const actual = line.serial_numbers?.length ?? available.length;
-      if (actual !== required) {
-        throw new Error(`Line ${index + 1}: select exactly ${required} accepted serial numbers.`);
+
+      const availableImeisForLine = availableImeis(index);
+      if (availableImeisForLine) {
+        if (num(line.accepted_qty) !== required) {
+          throw new Error(`Line ${index + 1}: Accepted quantity must be a full number (like 5, not 5.5).`);
+        }
+        const actual = resolvedImeis(index).length;
+        if (actual !== required) {
+          const rejectedQty = num(line.inspected_qty) - required;
+          throw new Error(`Line ${index + 1}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} IMEI numbers from the list.`);
+        }
       }
     }
   };
 
   const save = useMutation({
     mutationFn: () => {
-      validateAcceptedSerials();
-      return editing ? updateInspection(Number(id), form) : createInspection(form);
+      validateAcceptedUnits();
+      const payload = {
+        ...form,
+        items: form.items.map((line, index) => ({
+          ...line,
+          serial_numbers: resolvedSerials(index),
+          imei_numbers: resolvedImeis(index),
+        })),
+      };
+      return editing ? updateInspection(Number(id), payload) : createInspection(payload);
     },
     onSuccess: (saved: Inspection) => {
       qc.invalidateQueries({ queryKey: [`wh-inspections-${type}`] });
@@ -317,8 +404,16 @@ export default function QualityInspectionForm({
      * who filled the grid and pressed Complete was told the lines were still pending
      * while the confirm modal in front of them counted their own unsaved passes. */
     mutationFn: async () => {
-      validateAcceptedSerials();
-      await updateInspection(Number(id), form);
+      validateAcceptedUnits();
+      const payload = {
+        ...form,
+        items: form.items.map((line, index) => ({
+          ...line,
+          serial_numbers: resolvedSerials(index),
+          imei_numbers: resolvedImeis(index),
+        })),
+      };
+      await updateInspection(Number(id), payload);
       return completeInspection(Number(id));
     },
     onSuccess: () => {
@@ -398,11 +493,15 @@ export default function QualityInspectionForm({
       key: "rejected",
       header: "Rejected",
       numeric: true,
-      width: "w-24",
-      render: (l) => (
-        <span className={`tabular ${num(l.rejected_qty) > 0 ? "font-semibold text-bad" : "text-muted"}`}>
-          {fmtQty(l.rejected_qty)}
-        </span>
+      width: "w-28",
+      render: (l, i) => (
+        <QtyInput
+          ariaLabel={`Rejected quantity, line ${i + 1}`}
+          value={l.rejected_qty}
+          max={num(l.inspected_qty)}
+          disabled={locked}
+          onChange={(v) => patchLine(i, { rejected_qty: v })}
+        />
       ),
     },
     {
@@ -435,17 +534,36 @@ export default function QualityInspectionForm({
       ),
     },
     {
+      key: "imeis",
+      header: "Accepted IMEIs",
+      width: "w-32",
+      hideOnNarrow: true,
+      render: (_line, index) => {
+        if (!isImeiTracked(index)) return <span className="text-muted">—</span>;
+
+        const available = availableImeis(index);
+        const accepted = resolvedImeis(index).length;
+        return (
+          <Button variant="ghost" onClick={() => setParamsForImeis(index)} disabled={locked}>
+            <ScanLine className="h-4 w-4" />
+            {available ? `${accepted}/${available.length}` : accepted}
+          </Button>
+        );
+      },
+    },
+    {
       key: "serials",
       header: "Accepted serials",
       width: "w-32",
       hideOnNarrow: true,
-      render: (line, index) => {
+      render: (_line, index) => {
         if (!isSerialTracked(index)) return <span className="text-muted">—</span>;
 
         const available = availableSerials(index);
         // An untouched line has decided nothing, which means nothing rejected — show it
-        // as all accepted rather than as zero.
-        const accepted = line.serial_numbers?.length ?? available?.length ?? 0;
+        // as all accepted rather than as zero. `resolvedSerials` additionally repairs
+        // pre-seed rows (nothing stored, whole set accepted) back to the offered set.
+        const accepted = resolvedSerials(index).length;
         return (
           <Button variant="ghost" onClick={() => setSerialsFor(index)} disabled={locked}>
             <ScanLine className="h-4 w-4" />
@@ -618,6 +736,9 @@ export default function QualityInspectionForm({
         <LinesEditor
           rows={form.items}
           columns={columns}
+          // Wide enough for every column's own width: narrower, and the auto table
+          // squeezed the Result dropdown and the quantities until they read "Pa…".
+          minTableWidth="min-w-[1280px]"
           keyOf={(_, i) => i}
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
           rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
@@ -724,10 +845,33 @@ export default function QualityInspectionForm({
       {doc && <InspectionLinkedDocuments inspection={doc} receipt={delivery} />}
 
       <SerialNumbersModal
+        noun="IMEI"
+        isOpen={paramsForImeis !== null}
+        onClose={() => setParamsForImeis(null)}
+        quantity={paramsForImeis === null ? 0 : num(form.items[paramsForImeis]?.accepted_qty)}
+        initial={paramsForImeis === null ? null : resolvedImeis(paramsForImeis)}
+        available={availableImeis(paramsForImeis)}
+        itemLabel={
+          paramsForImeis === null
+            ? ""
+            : savedLine(paramsForImeis)?.item_name ?? `Line ${paramsForImeis + 1}`
+        }
+        readOnly={locked}
+        onSave={(accepted) => {
+          if (paramsForImeis !== null) {
+            patchLine(paramsForImeis, {
+              imei_numbers: accepted,
+              ...(availableImeis(paramsForImeis) ? { accepted_qty: accepted.length } : {}),
+            });
+          }
+        }}
+      />
+
+      <SerialNumbersModal
         isOpen={serialsFor !== null}
         onClose={() => setSerialsFor(null)}
         quantity={serialsFor === null ? 0 : num(form.items[serialsFor]?.accepted_qty)}
-        initial={serialsFor === null ? null : form.items[serialsFor]?.serial_numbers}
+        initial={serialsFor === null ? null : resolvedSerials(serialsFor)}
         available={availableSerials(serialsFor)}
         itemLabel={
           serialsFor === null

@@ -202,6 +202,11 @@ class DocType(str, Enum):
     # chain for it on Approval Flow; otherwise one holder of `stock.adjust.approve`
     # signs (inventory.service.act_on_adjustment).
     STOCK_ADJUSTMENT = "STOCK_ADJUSTMENT"
+    # A correction to what stock IS rather than how much of it there is: a batch
+    # number, a mfg/expiry date, a unit's serial, IMEI or code typed wrong at receipt.
+    # No quantity moves, so it is not an adjustment — but it rewrites the identity
+    # every later issue, recall and warranty claim reads, so it is signed first.
+    STOCK_EDIT = "STOCK_EDIT"
     # Material going back UP the chain: a LIP returning expired or damaged stock to
     # the MDP above it. Its own doc type, not STOCK_TRANSFER — a transfer is the
     # holder's own call and a return has to be sanctioned by the tier receiving it.
@@ -504,6 +509,28 @@ class QuotationStatus(str, Enum):
     # Lost, or the RFQ closed without them. Kept for the comparison sheet.
     REJECTED = "REJECTED"
     ACCEPTED = "ACCEPTED"
+
+
+class QuoteChangeStatus(str, Enum):
+    """pro_quote_change_requests.status — the buyer's ask on a supplier's price.
+
+    The negotiation overlay lives on its own table, NOT on QuotationStatus: a
+    request being open does not move the quotation anywhere, and folding it into
+    the quote's status would have made every existing filter, KPI and report
+    invent a meaning for a value they never knew about.
+    """
+    # The buyer's ask, sent and waiting. One per quotation, enforced in service.
+    AWAITING_SUPPLIER = "AWAITING_SUPPLIER"
+    # The supplier took the new numbers — service applied them through
+    # `_quote_totals` and the quotation re-prices on the spot.
+    ACCEPTED = "ACCEPTED"
+    # The supplier said no. The quote stands exactly as it was — nothing was ever
+    # pre-applied, so unlike the PO revert there is nothing to put back.
+    DECLINED = "DECLINED"
+    # The buyer took their own ask back before an answer.
+    WITHDRAWN = "WITHDRAWN"
+    # A different request on the same quotation was accepted first.
+    SUPERSEDED = "SUPERSEDED"
 
 
 class PickStrategy(str, Enum):

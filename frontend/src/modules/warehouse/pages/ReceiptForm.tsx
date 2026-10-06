@@ -50,6 +50,19 @@ import { useMyPoint, usePointLabel } from "../usePointLabel";
  * ordered quantity, which is why a PO-backed line shows it and a free line does not.
  */
 
+const parseCodes = (arr: any): string[] | null => {
+  if (!arr) return null;
+  if (!Array.isArray(arr)) {
+    if (arr.accepted && Array.isArray(arr.accepted)) {
+      return parseCodes(arr.accepted);
+    }
+    return null;
+  }
+  if (arr.length === 0) return [];
+  if (typeof arr[0] === "string") return arr;
+  return arr.map((u: any) => u?.serial_number || u?.imei_no || u?.asset_code || u?.consumable_code || u?.serial_no || u?.code).filter(Boolean);
+};
+
 const emptyLine = (): ReceiptItemWrite => ({
   item_id: 0,
   uom_code: null,
@@ -217,8 +230,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         bin_id: l.bin_id || null,
         rejection_reason: l.rejection_reason,
         remarks: l.remarks,
-        serial_numbers: l.serial_numbers,
-        imei_numbers: l.imei_numbers,
+        serial_numbers: parseCodes(l.serial_numbers),
+        imei_numbers: parseCodes(l.imei_numbers),
       })),
     });
     if (doc.vendor_name) setVendorName(doc.vendor_name);
@@ -453,8 +466,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           bin_id: line.bin_id || null,
           rejection_reason: null,
           remarks: line.remarks,
-          serial_numbers: line.serial_numbers,
-          imei_numbers: line.imei_numbers,
+          serial_numbers: parseCodes(line.serial_numbers),
+          imei_numbers: parseCodes(line.imei_numbers),
         })),
       });
     },
@@ -597,7 +610,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     for (const [index, line] of form.items.entries()) {
       if (line.po_item_id && num(line.received_qty) > num(line.ordered_qty)) {
         const name = savedLine(index)?.item_name ?? line.item_name ?? "";
-        throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: Received quantity cannot exceed ordered quantity.`);
+        throw new Error(`Line ${index + 1}${name ? ` (${name})` : ""}: You received more than was ordered. Enter a number up to the ordered quantity.`);
       }
     }
     
@@ -612,49 +625,30 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       + "0 if none of it did.");
   };
 
-  /** Only "not more serials than units" is checked now.
-   *
-   *  A GRN used to demand the full set, which stopped a lorry of unlabelled goods
-   *  dead — there was no serial to type. The units left without one are given a
-   *  serial on submit, from the Serial format in Settings > Code Formats, and a
-   *  serial the storekeeper actually read is never replaced. So a partial list is a
-   *  legitimate save on both documents. */
-  const validateSerialLines = (strict: boolean = false) => {
+  /** Enforces that serials and IMEIs match exactly the received quantity. */
+  const validateSerialLines = () => {
     for (const [index, line] of form.items.entries()) {
       if (!line.is_serial_tracked) continue;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
-        throw new Error(`Line ${index + 1}: serialized received quantity must be a whole number.`);
+        throw new Error(`Line ${index + 1}: Enter a full number (like 5, not 5.5). Each piece has its own serial number.`);
       }
       const actual = line.serial_numbers?.length ?? 0;
-      if (actual > required) {
-        throw new Error(`Line ${index + 1}: ${actual} serial numbers for ${required} received units.`);
-      }
-      if (strict && actual !== required) {
-        throw new Error(`Line ${index + 1}: Please provide exactly ${required} serial numbers for confirmation.`);
+      if (actual !== required) {
+        throw new Error(`Line ${index + 1}: Scan or type ${required} serial numbers, one for each piece.`);
       }
     }
 
-    // Same rules for IMEIs, minus the count floor. The backend enforces them too;
-    // this only saves the storekeeper a round-trip once the lines are on screen.
+    // Same rules for IMEIs
     for (const [index, line] of form.items.entries()) {
-      // Only a TRACKED item carries the whole-number and count rules. An optional IMEI
-      // typed against an ordinary item is just a note on the unit (see the IMEIs column
-      // above) and has nothing to be counted against.
       if (!line.is_imei_tracked) continue;
       const required = Math.floor(num(line.received_qty));
       if (num(line.received_qty) !== required) {
-        throw new Error(`Line ${index + 1}: IMEI-tracked received quantity must be a whole number.`);
+        throw new Error(`Line ${index + 1}: Enter a full number (like 5, not 5.5). Each piece has its own IMEI number.`);
       }
-      // FIXED 2026-08-20 — the GRN demanded exactly one IMEI per unit and would not
-      // save without them. Vendors routinely deliver with no IMEI list, and the
-      // numbers are on handsets inside sealed cartons, so the goods-in desk cannot
-      // supply them. WITHOUT this a real delivery is stuck at the gate over paperwork
-      // the vendor never sent. Same rule as serials now: more than received is wrong,
-      // fewer is fine, and the missing ones are read off the devices at put-away.
       const actual = line.imei_numbers?.length ?? 0;
-      if (actual > required) {
-        throw new Error(`Line ${index + 1}: ${actual} IMEI numbers for ${required} received units.`);
+      if (actual !== required) {
+        throw new Error(`Line ${index + 1}: Scan or type ${required} IMEI numbers, one for each piece.`);
       }
     }
   };
@@ -705,7 +699,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       // Same check as Save, and for the same reason: this posts the whole form, so a
       // box cleared since the last save fails on the server's parser rather than here.
       if (!locked) validateQuantities();
-      validateSerialLines(true);
+      validateSerialLines();
       if (!locked) await updateReceipt(Number(id), form);
       return what === "submit" ? submitReceipt(Number(id)) : completeReceipt(Number(id));
     },
@@ -1480,10 +1474,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ?? `Line ${serialLine + 1}`
         }
         readOnly={locked}
-        // Partial on a GRN too: the units nobody could read a serial off are given
-        // one on submit, from Settings > Code Formats. Demanding the full set here
-        // was the same wall as the old backend rule, one screen earlier.
-        partial
         onSave={(serials) => serialLine !== null && patchLine(serialLine, { serial_numbers: serials })}
       />
 
@@ -1501,17 +1491,6 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ?? `Line ${imeiLine + 1}`
         }
         readOnly={locked}
-        // FIXED 2026-08-21 — was `partial={!isGrn}`, so at GRN stage the modal still
-        // demanded exactly one IMEI per received unit. The BACKEND stopped demanding
-        // that on 2026-08-20 (`_apply_receipt_lines`: more than received is wrong,
-        // fewer is not — vendors deliver without IMEI lists and the numbers are on
-        // handsets inside sealed cartons). The screen was never brought in line, so the
-        // wall simply moved one step earlier: the storekeeper could not get out of the
-        // modal to reach the save that would have accepted it.
-        //
-        // Unconditionally partial now, exactly like the serial modal above it. Whatever
-        // was actually read is kept; the rest is filled in at put-away.
-        partial
         onSave={(imeis) => imeiLine !== null && patchLine(imeiLine, { imei_numbers: imeis })}
       />
 

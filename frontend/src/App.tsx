@@ -144,7 +144,9 @@ const PurchaseReturnsPage = lazy(() => import("@/modules/returns").then((m) => (
 const PurchaseReturnFormPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnFormPage })));
 const PurchaseReturnDetailPage = lazy(() => import("@/modules/returns").then((m) => ({ default: m.PurchaseReturnDetailPage })));
 const PutawayPrintPage = lazy(() => import("@/modules/warehouse/pages/PutawayPrintPage").then((m) => ({ default: m.PutawayPrintPage })));
+const QuotationDetailPage = lazy(() => import("@/modules/procurement/pages/QuotationDetailPage").then((m) => ({ default: m.QuotationDetailPage })));
 const QuotationListPage = lazy(() => import("@/modules/procurement/pages/QuotationListPage").then((m) => ({ default: m.QuotationListPage })));
+const PriceComparePage = lazy(() => import("@/modules/procurement/pages/PriceComparePage").then((m) => ({ default: m.PriceComparePage })));
 const RFQDetailPage = lazy(() => import("@/modules/procurement/pages/RFQDetailPage").then((m) => ({ default: m.RFQDetailPage })));
 const RFQFormPage = lazy(() => import("@/modules/procurement/pages/RFQFormPage").then((m) => ({ default: m.RFQFormPage })));
 const RFQListPage = lazy(() => import("@/modules/procurement/pages/RFQListPage").then((m) => ({ default: m.RFQListPage })));
@@ -171,6 +173,7 @@ const OutboundQualityInspectionForm = lazy(() => import("@/modules/warehouse/pag
 const MaterialIssueForm = lazy(() => import("@/modules/warehouse/pages/MaterialIssueForm"));
 const StockTransferView = lazy(() => import("@/modules/inventory/components/StockTransferView").then((m) => ({ default: m.StockTransferView })));
 const StockValuationView = lazy(() => import("@/modules/inventory/components/StockValuationView").then((m) => ({ default: m.StockValuationView })));
+const StockEditsPage = lazy(() => import("@/modules/inventory/pages/StockEditsPage").then((m) => ({ default: m.StockEditsPage })));
 const StockingPointsPage = lazy(() => import("@/modules/inventory/pages/StockingPointsPage").then((m) => ({ default: m.StockingPointsPage })));
 const SupplierAccountsPage = lazy(() => import("@/modules/procurement/pages/SupplierAccountsPage").then((m) => ({ default: m.SupplierAccountsPage })));
 const SupplierLayout = lazy(() => import("@/modules/supplier/SupplierLayout").then((m) => ({ default: m.SupplierLayout })));
@@ -468,6 +471,11 @@ function AppRoutes() {
         <Route path="procurement/rfqs/:id" element={<RFQDetailPage />} />
         <Route path="procurement/rfqs/:id/edit" element={<RFQFormPage />} />
         <Route path="procurement/quotations" element={<QuotationListPage />} />
+        <Route path="procurement/quotations/:id" element={<QuotationDetailPage />} />
+        {/* Price Compare (2026-09-26): every quotation to one RFQ side by side, and
+          * the award — which moved here from the RFQ page so the tender room carries
+          * no prices. Deep-linked with ?rfq= from the RFQ page. */}
+        <Route path="procurement/compare" element={<PriceComparePage />} />
         {/* Many requisitions, one buying sheet (doc B7). */}
         <Route path="procurement/consolidations" element={<PurchaseConsolidationListPage />} />
         <Route path="procurement/consolidations/new" element={<PurchaseConsolidationFormPage />} />
@@ -601,6 +609,7 @@ function AppRoutes() {
         <Route path="inventory/transfers/issues/:id"
                element={<MaterialIssueForm basePath="/inventory/transfers/issues" />} />
         <Route path="inventory/adjustments" element={<StockAdjustmentsView />} />
+        <Route path="inventory/stock-edits" element={<StockEditsPage />} />
         <Route path="inventory/valuation" element={<StockValuationView />} />
         {/* The Fulfilment Desk: the Fulfilment Queue and Allocation Approvals as one
             screen (2026-08-21). `/inventory/fulfilment` — one L, the British spelling
@@ -645,8 +654,8 @@ function AppRoutes() {
         <Route path="inventory/material-requests/:id" element={<MaterialRequestDetailPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="admin/settings" element={<SettingsPage />} />
-        <Route path="admin/code-formats" element={<CodeFormatsPage />} />
         <Route path="admin/monthly-indent" element={<MonthlyIndentPage />} />
+        <Route path="admin/code-formats" element={<CodeFormatsPage />} />
         {/* The company mailbox: Inbox, Sent, Compose. Gated by
             `page.settings_mail.view`, and the Compose tab additionally by
             `mail.send` — the server checks both independently. */}

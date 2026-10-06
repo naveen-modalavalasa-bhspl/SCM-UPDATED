@@ -24,7 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.platform.hcm.models import HcmEmployee, HcmPosition
+from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmRole
 from app.platform.rbac.models import Permission, Role, RolePermission
 from app.platform.settings.service import write_audit
 from app.platform.workflow import custom_ladder, engine, ladder, posts
@@ -66,14 +66,15 @@ CREATE_PERMISSION = {
     DocType.DISPATCH.value: "dispatch.create",
     DocType.STOCK_TRANSFER.value: "stock.transfer",
     DocType.STOCK_TRANSFER_REQUEST.value: "stock.transfer.request",
+    DocType.STOCK_EDIT.value: "stock.edit.create",
 }
 
 
 # Documents whose chain may differ by the RANK that raised it. An indent is the one
 # that genuinely does: a Store Keeper's climbs the whole field line, an RM's has almost
-# nobody above it. Every other type has one chain for everybody, and offering a rank
+# nobody above it — and a monthly indent is raised by the same ranks. Every other type has one chain for everybody, and offering a rank
 # selector on all of them would be twenty ways to configure something nobody wanted.
-RAISER_SCOPED_DOC_TYPES = frozenset({DocType.INDENT.value})
+RAISER_SCOPED_DOC_TYPES = frozenset({DocType.INDENT.value, DocType.MONTHLY_INDENT.value})
 
 
 async def _raiser_chains(db: AsyncSession, project_id: int | None,
@@ -605,6 +606,27 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
     # the empty twin is exactly the one that reads as correct in the dropdown.
     climbable = [rank for rank in ranks if rank.get("holder_count")]
 
+    # Which project HCM says each rank belongs to. Every project has its own "OE" and
+    # "District Manager", and a 104-MMU employee seated on a 108 post drags 108's rank
+    # into 104's list under the same bare name. A 104 ladder built on that twin
+    # resolves to nobody on a 104 raiser's line and the rung is dropped at submit
+    # (BHS/104/2026-27/IND0071 went straight to the DM). The name cannot tell them
+    # apart; the project can.
+    role_ids = {rank["role_id"] for rank in climbable} | {r["role_id"] for r in shared}
+    role_project = {
+        row.id: (row.project_id, row.project_name)
+        for row in (await db.execute(
+            select(HcmRole.id, HcmRole.project_id, HcmRole.project_name)
+            .where(HcmRole.id.in_(role_ids))
+        )).all()
+    } if role_ids else {}
+
+    def _project_of(role_id: int) -> dict:
+        owner_id, owner_name = role_project.get(role_id, (None, None))
+        return {"project_name": owner_name,
+                "other_project": bool(project_id and owner_id
+                                      and owner_id != project_id)}
+
     return {
         "local": [{"id": row["id"], "name": row["name"],
                    "department": row["department"],
@@ -615,13 +637,15 @@ async def rungs(db: AsyncSession, project_id: int | None, search: str = "") -> d
         "ranks": [{"id": rank["role_id"], "name": rank["role_name"],
                    "position_count": rank.get("position_count", 0),
                    "people_count": rank.get("holder_count", 0),
-                   "depth": rank.get("depth", 0)} for rank in climbable],
+                   "depth": rank.get("depth", 0),
+                   **_project_of(rank["role_id"])} for rank in climbable],
         # Same shape, different bucket. `people` is who would actually sign, which the
         # admin needs to see: these rungs name a chair rather than a step up the line.
         "shared_ranks": [{"id": rank["role_id"], "name": rank["role_name"],
                           "position_count": rank.get("position_count", 0),
                           "people_count": rank.get("holder_count", 0),
-                          "people": [p["name"] for p in rank.get("holders", [])]}
+                          "people": [p["name"] for p in rank.get("holders", [])],
+                          **_project_of(rank["role_id"])}
                          for rank in shared],
         "hcm": hcm,
     }

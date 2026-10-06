@@ -39,7 +39,7 @@ EXTRA_PAGES = {
     "approvals": ["approval_waiting", "approval_consolidation",
                   "approval_decisions"],
     "inventory": ["inv_overview", "inv_fulfilment_desk", "inv_stocking_points",
-                  "inv_adjustments", "inv_valuation", "inv_labels"],
+                  "inv_adjustments", "inv_stock_edits", "inv_valuation", "inv_labels"],
     "warehouse": [],
 }
 

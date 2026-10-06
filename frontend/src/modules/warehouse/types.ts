@@ -50,7 +50,10 @@ export type PickingStatus =
 export type IssueStatus =
   | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "ISSUED"
   | "DISPATCHED" | "ACKNOWLEDGED" | "PARTIALLY_RETURNED" | "RETURNED"
-  | "CANCELLED";
+  | "CANCELLED"
+  // A parent broken into floor issues: SPLIT while any is open, CLOSED once all have
+  // posted. Rolled up by the server — never posted, edited or cancelled itself.
+  | "SPLIT" | "CLOSED";
 
 // REJECTED was missing. The backend has always been able to set it (a release turned
 // down on Approvals lands there), so the queue could hold a row this union said was
@@ -1112,6 +1115,8 @@ export interface Issue {
   parent_issue_no?: string | null;
   floor_location_id?: number | null;
   floor_location_name?: string | null;
+  /** Who holds that floor — the in-charge(s) a split piece was handed to. */
+  floor_in_charge_names?: string[];
   status: IssueStatus;
   total_items: number;
   total_qty: number;
@@ -1146,6 +1151,15 @@ export interface Issue {
    * unlocks once those 4 are confirmed. Gate the Acknowledge button on this.
    */
   can_acknowledge?: boolean;
+  /** On a split parent: the floor issues carrying its goods. */
+  child_issues?: {
+    id: number;
+    issue_no: string;
+    status: IssueStatus;
+    floor_location_name?: string | null;
+    is_stock_posted: boolean;
+    total_qty: number;
+  }[];
 }
 
 /**

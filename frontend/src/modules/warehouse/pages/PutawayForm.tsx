@@ -15,6 +15,19 @@ import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../form
 import { alerts } from "@/modules/alerts";
 import { usePointLabel } from "../usePointLabel";
 
+const parseCodes = (arr: any): string[] | null => {
+  if (!arr) return null;
+  if (!Array.isArray(arr)) {
+    if (arr.accepted && Array.isArray(arr.accepted)) {
+      return parseCodes(arr.accepted);
+    }
+    return null;
+  }
+  if (arr.length === 0) return [];
+  if (typeof arr[0] === "string") return arr;
+  return arr.map((u: any) => u?.serial_number || u?.imei_no || u?.asset_code || u?.consumable_code || u?.serial_no || u?.code).filter(Boolean);
+};
+
 /**
  * One putaway task: take this quantity to this bin and confirm it.
  *
@@ -79,7 +92,7 @@ export default function PutawayForm() {
     // sitting in the box before he has looked at the shelf is a suggestion by another
     // name.
     setBinId(task.actual_bin_id ?? "");
-    setSerials(task.serial_numbers ?? []);
+    setSerials(parseCodes(task.serial_numbers) ?? []);
     // Whatever the task was raised with, else the item's default putaway unit — both
     // already resolved by the server, so the screen never picks a rung of its own.
     setPackId(task.item_packaging_id ?? null);

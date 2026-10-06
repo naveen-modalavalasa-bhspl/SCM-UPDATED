@@ -94,7 +94,7 @@ export function RulesPage() {
   const simulate = useMutation({
     mutationFn: () => adminApi.rules.simulate(activeEvent, JSON.parse(simContext || "{}")),
     onSuccess: setSimResult,
-    onError: () => setError("That example is not valid. Check the curly braces and commas."),
+    onError: () => setError("The example text has a mistake. Check every { } and comma."),
   });
 
   const openNew = () => {

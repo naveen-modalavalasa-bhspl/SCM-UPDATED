@@ -1,6 +1,7 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
+  MasterVendorCategory,
   MasterItemEligibility,
   ItemEligibilityScopes,
   JobProfileOption,
@@ -63,6 +64,8 @@ export interface ImportProblem {
 export interface ImportColumn {
   field: string;
   label: string;
+  /** What the column is for and the rule it follows, in plain words. */
+  hint?: string;
   required: boolean;
   lookup: boolean;
   choices: string[];
@@ -87,6 +90,26 @@ export interface ImportPreview {
   summary: { total: number; ready: number; blocked: number };
 }
 
+export interface VendorMappingSources {
+  vendor_categories: { id: number; code: string; name: string; vendor_ids: number[] }[];
+  vendors: { id: number; code: string; name: string;
+             status: "APPROVED" | "PENDING" | "BLOCKED" }[];
+  categories: { id: number; code: string; name: string; level: number | null;
+                parent_id: number | null; path: string | null }[];
+  items: { id: number; code: string; name: string; category_id: number }[];
+  mapped: [number, number][];
+}
+
+export interface VendorMappingSave {
+  vendor_ids: number[]; item_ids: number[]; category_ids: number[];
+  lead_time_days: number | null; min_order_qty: number | null;
+  last_rate: number | null; is_preferred: boolean;
+}
+
+export interface ItemPhoto {
+  id: number; file_name: string; uploaded_at: string | null; uploaded_by: string | null;
+}
+
 export interface MasterUsage {
   id: number; total: number; used_by: { label: string; count: number }[];
 }
@@ -99,6 +122,20 @@ export interface BulkApi {
   import: (file: File) => Promise<ImportResult>;
   preview: (file: File) => Promise<ImportPreview>;
   commit: (rows: ImportRow[]) => Promise<ImportResult>;
+  /** The review in progress, kept server-side per person per master. */
+  draft: {
+    get: () => Promise<{ draft: ImportDraft | null; saved_at?: string }>;
+    put: (draft: ImportDraft) => Promise<{ saved_at: string }>;
+    clear: () => Promise<unknown>;
+  };
+}
+
+/** Everything the review screen needs to resume exactly where it stopped. */
+export interface ImportDraft {
+  preview: ImportPreview;
+  picked: Record<string, number>;
+  edits: Record<string, unknown>;
+  savedAt: string;
 }
 
 function crud<T>(path: string) {
@@ -136,6 +173,13 @@ function crud<T>(path: string) {
       api.post<ImportResult>(`${path}/import/commit`, { rows: rows.map((r) => ({
         ...r.values, __row__: r.row,
       })) }).then((r) => r.data),
+    draft: {
+      get: () => api.get<{ draft: ImportDraft | null; saved_at?: string }>(
+        `${path}/import/draft`).then((r) => r.data),
+      put: (draft: ImportDraft) =>
+        api.put<{ saved_at: string }>(`${path}/import/draft`, draft).then((r) => r.data),
+      clear: () => api.delete(`${path}/import/draft`).then((r) => r.data),
+    },
   };
 }
 
@@ -180,6 +224,32 @@ export const mastersApi = {
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
+  /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
+  uomClasses: crud<NamedMaster>("/api/uom-classes"),
+  /** How suppliers are grouped (Glassware, Reagents ...). */
+  vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
+  vendorMapping: {
+    sources: () => api.get<VendorMappingSources>("/api/vendor-items/mapping-sources")
+      .then((r) => r.data),
+    save: (body: VendorMappingSave) => api.post<{
+      created: number; updated: number; suppliers: number; items: number;
+    }>("/api/vendor-items/mapping", body).then((r) => r.data),
+  },
+  itemPhotos: {
+    list: (itemId: number) =>
+      api.get<ItemPhoto[]>(`/api/items/${itemId}/photos`).then((r) => r.data),
+    add: (itemId: number, file: File) => {
+      const body = new FormData();
+      body.append("file", file);
+      return api.post<ItemPhoto>(`/api/items/${itemId}/photos`, body).then((r) => r.data);
+    },
+    /** Fetched as a blob: an <img src> cannot carry the sign-in token. */
+    blobUrl: (itemId: number, photoId: number) =>
+      api.get(`/api/items/${itemId}/photos/${photoId}/file`, { responseType: "blob" })
+        .then((r) => URL.createObjectURL(r.data as Blob)),
+    remove: (itemId: number, photoId: number) =>
+      api.delete(`/api/items/${itemId}/photos/${photoId}`).then((r) => r.data),
+  },
   brandManufacturers: crud<MasterBrandManufacturer>("/api/brand-manufacturers"),
   itemClasses: crud<MasterItemClass>("/api/item-classes"),
   itemSubClasses: crud<MasterItemSubClass>("/api/item-sub-classes"),
@@ -255,6 +325,15 @@ export const mastersApi = {
   unitCodeTracking: (itemId: number) =>
     api.get<{ generate_unit_code: boolean }>(`/api/items/${itemId}/unit-code-tracking`)
       .then((r) => r.data.generate_unit_code),
+
+  /** The code a new item is about to get. Lock-free peek for the form's
+   *  preview — the save re-derives the serial under lock, so this can be off
+   *  by one if two people save into the same prefix together. */
+  nextItemCode: (categoryId: number, generalNameId: number) =>
+    api.get<{ prefix: string; next_serial: number; preview: string }>(
+      "/api/items/next-code",
+      { params: { category_id: categoryId, general_name_id: generalNameId } },
+    ).then((r) => r.data),
 
   /** Read-only lookup of rbac_user_groups, so the item-group screen can name the
    *  group it is tagging to. Groups are created and edited in the RBAC module;

@@ -60,7 +60,7 @@ describe("the shared client", () => {
     // one thing never repeated back, because it is the case where what is on the
     // wire may not have been through the backend's own sanitising at all.
     expect(error.message).not.toContain("boom");
-    expect(error.message).toContain("server problem");
+    expect(error.message).toContain("Something went wrong on our side");
   });
 
   it("explains an unreachable API in the message", async () => {
@@ -69,7 +69,7 @@ describe("the shared client", () => {
 
     // What a storekeeper can act on. The endpoint that failed is in sys_app_logs;
     // "check that the frontend proxy is running" was an instruction for a developer.
-    expect(error.message).toContain("Unable to connect to the server");
+    expect(error.message).toContain("The app cannot connect");
     expect(error.message).toContain("Nothing was saved");
     expect(error.message).not.toContain("/api/test");
   });
@@ -123,7 +123,7 @@ describe("the alert interceptor", () => {
     noResponse();
     await failingRequest();
 
-    expect(raised()).toEqual(["Can't reach the server"]);
+    expect(raised()).toEqual(["No internet"]);
   });
 
   it("says nothing when a request is cancelled", async () => {

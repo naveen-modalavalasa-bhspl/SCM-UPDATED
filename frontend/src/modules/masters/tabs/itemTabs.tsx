@@ -36,7 +36,17 @@ bulk={mastersApi.itemSubClasses} usage={mastersApi.itemSubClasses.usage}
   />;
 }
 
-export function CategoriesTab({ cats }: { cats: Option[] }) {
+export function CategoriesTab({ cats: _cats }: { cats: Option[] }) {
+  // Every category with its level, so the Parent list can offer only the rung
+  // directly above the one being created: a Level 2 sits under a Level 1, a Level 3
+  // under a Level 2. A Level 1 has no parent and is not asked for one.
+  const all = useQuery({
+    queryKey: ["masters", "categories", "levels"],
+    queryFn: () => mastersApi.categories.list({ size: 300 }).then((p) => p.items),
+  });
+  const parentsAt = (level: number): Option[] => (all.data ?? [])
+    .filter((c) => c.level === level - 1 && c.is_active)
+    .map((c) => ({ value: c.id, label: `${c.name} · ${c.code}` }));
   const columns: Column<MasterCategory>[] = [
     { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
     { key: "name", header: "Name", render: (r) => r.name },
@@ -54,21 +64,42 @@ export function CategoriesTab({ cats }: { cats: Option[] }) {
         </div>
       )}
       fetchList={(search) => mastersApi.categories.list({ search, size: 200 }).then((p) => p.items)}
-      fields={[
-        { key: "code", label: "Code", required: true, maxLength: 50,
-          pattern: /^[A-Za-z0-9-]+$/,
-          patternMessage: "Use letters, numbers or a hyphen" },
-        { key: "name", label: "Name", required: true, maxLength: 200 },
-        // A name may repeat under a different parent but never under the same one,
-        // so the backend check is scoped to the parent chosen here.
-        { key: "parent_id", label: "Parent category", type: "select", options: cats },
-        { key: "is_active", label: "Active", type: "switch" },
+      newActions={[
+        { label: "Level 1", preset: { level: 1, parent_id: null } },
+        { label: "Level 2", preset: { level: 2, parent_id: null } },
+        { label: "Level 3", preset: { level: 3, parent_id: null } },
       ]}
-      emptyForm={{ code: "", name: "", parent_id: null, is_active: true }}
-      toForm={(r) => ({ code: r.code, name: r.name, parent_id: r.parent_id ?? null, is_active: r.is_active })}
+      formTitle={(v, editing) =>
+        `${editing ? "Edit" : "New"} Level ${Number(v.level) || 1} category`}
+      fields={(v) => {
+        const level = Number(v.level) || 1;
+        return [
+          { key: "code", label: "Code", required: true, maxLength: 50,
+            pattern: /^[A-Za-z0-9-]+$/,
+            patternMessage: "Use letters, numbers or a hyphen" },
+          { key: "name", label: "Name", required: true, maxLength: 200 },
+          // A name may repeat under a different parent but never under the same one,
+          // so the backend check is scoped to the parent chosen here.
+          ...(level > 1 ? [{
+            key: "parent_id", label: `Parent (Level ${level - 1})`, type: "select" as const,
+            options: parentsAt(level), required: true,
+            hint: parentsAt(level).length ? undefined
+              : `No Level ${level - 1} category yet — add one first.`,
+          }] : []),
+          { key: "is_active", label: "Active", type: "switch" as const },
+        ];
+      }}
+      emptyForm={{ code: "", name: "", parent_id: null, level: 1, is_active: true }}
+      toForm={(r) => ({ code: r.code, name: r.name, parent_id: r.parent_id ?? null,
+        level: r.level ?? 1, is_active: r.is_active })}
       bulk={mastersApi.categories} usage={mastersApi.categories.usage}
-      onCreate={(v) => mastersApi.categories.create(v as Partial<MasterCategory>)}
-      onUpdate={(id, v) => mastersApi.categories.update(id, v as Partial<MasterCategory>)}
+      // A Level 1 is created with no parent, whatever the form last held.
+      onCreate={(v) => mastersApi.categories.create(
+        { ...v, parent_id: v.parent_id ?? null } as Partial<MasterCategory>)
+        .then((r) => { void all.refetch(); return r; })}
+      onUpdate={(id, v) => mastersApi.categories.update(
+        id, { ...v, parent_id: v.parent_id ?? null } as Partial<MasterCategory>)
+        .then((r) => { void all.refetch(); return r; })}
       onDeactivate={mastersApi.categories.deactivate}
     />
   );
@@ -119,10 +150,7 @@ export function HsnCodesTab() {
       columns={[
         { key: "code", header: "HSN", render: (r) => <Code>{r.code}</Code> },
         { key: "desc", header: "Description", render: (r) => r.description ?? "—" },
-        { key: "gst", header: "CGST + SGST", render: (r) =>
-            `${r.cgst_rate}% + ${r.sgst_rate}%` },
-        { key: "igst", header: "IGST", render: (r) => `${r.igst_rate}%` },
-        { key: "cess", header: "Cess", hideOnNarrow: true, render: (r) => `${r.cess_rate}%` },
+        { key: "gst", header: "GST %", render: (r) => `${r.gst_rate}%` },
         { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
       ]}
       renderCard={(r) => (
@@ -131,9 +159,7 @@ export function HsnCodesTab() {
             <Code>{r.code}</Code><Active on={r.is_active} />
           </div>
           <div className="text-sm text-body">{r.description ?? "—"}</div>
-          <div className="text-xs text-muted">
-            {r.cgst_rate}% + {r.sgst_rate}% · IGST {r.igst_rate}%
-          </div>
+          <div className="text-xs text-muted">GST {r.gst_rate}%</div>
         </div>
       )}
       fetchList={(search) => mastersApi.hsnCodes.list({ search, size: 300 }).then((p) => p.items)}
@@ -142,28 +168,18 @@ export function HsnCodesTab() {
           pattern: /^\d{8}$/,
           patternMessage: "Enter exactly 8 digits, for example 10063010" },
         { key: "description", label: "Description", maxLength: 300 },
-        { key: "cgst_rate", label: "CGST %", ...RATE_RULE },
-        { key: "sgst_rate", label: "SGST %", ...RATE_RULE },
-        // CGST + SGST is the within-state route and IGST the across-state one. They
-        // must total the same, or the same sale is taxed differently by destination.
-        { key: "igst_rate", label: "IGST %", ...RATE_RULE,
-          validate: (value, all) => {
-            const split = Number(all.cgst_rate ?? 0) + Number(all.sgst_rate ?? 0);
-            const igst = Number(value ?? 0);
-            return igst && Math.abs(split - igst) > 0.001
-              ? `CGST + SGST is ${split}%, which must equal IGST` : null;
-          } },
-        { key: "cess_rate", label: "Cess %", ...RATE_RULE },
+        // One rate. The within-state CGST + SGST and the across-state IGST are the
+        // same number, so there is no second figure to keep consistent.
+        { key: "gst_rate", label: "GST %", ...RATE_RULE },
         { key: "effective_from", label: "Effective from (YYYY-MM-DD)",
           pattern: /^\d{4}-\d{2}-\d{2}$/,
           patternMessage: "Use the format 2026-04-01" },
         { key: "is_active", label: "Active", type: "switch" },
       ]}
-      emptyForm={{ code: "", description: "", cgst_rate: 0, sgst_rate: 0,
-                   igst_rate: 0, cess_rate: 0, effective_from: "", is_active: true }}
+      emptyForm={{ code: "", description: "", gst_rate: 0,
+                   effective_from: "", is_active: true }}
       toForm={(r) => ({ code: r.code, description: r.description ?? "",
-        cgst_rate: r.cgst_rate, sgst_rate: r.sgst_rate, igst_rate: r.igst_rate,
-        cess_rate: r.cess_rate, effective_from: r.effective_from ?? "",
+        gst_rate: r.gst_rate, effective_from: r.effective_from ?? "",
         is_active: r.is_active })}
       bulk={mastersApi.hsnCodes} usage={mastersApi.hsnCodes.usage}
       onCreate={(v) => mastersApi.hsnCodes.create(v as Partial<MasterHsnCode>)}
@@ -185,7 +201,7 @@ export function GeneralNamesTab() {
     .map((r) => ({ value: r.id, label: `${r.code} — ${r.name}` }));
   return (
     <MasterCrud<MasterGeneralName>
-      title="General name" queryKey="general-names" searchable
+      title="Generic name" queryKey="general-names" searchable
       managePerm="master.item.manage"
       columns={[
         { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },

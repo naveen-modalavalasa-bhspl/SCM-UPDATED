@@ -17,9 +17,10 @@ asking for the same item in different units are genuinely different lines — 5 
 wrong quantity. Everything else about a line is the sum.
 """
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from datetime import date
 from decimal import Decimal
+import json
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +32,7 @@ from app.modules.procurement.models import (
     PurchaseConsolidation, PurchaseConsolidationItem, PurchaseConsolidationSource,
     Requisition, RequisitionItem, RFQ,
 )
-from app.platform.settings.service import write_audit
+from app.platform.settings.service import get_setting, write_audit
 from app.platform.workflow import engine
 from app.shared.enums import (
     AuditAction, ConsolidationStatus, DocType, InstanceStatus, RequisitionStatus,
@@ -387,10 +388,10 @@ async def create_consolidation(db: AsyncSession, data, user) -> PurchaseConsolid
                       after={"requisitions": len(requisitions),
                              "items": doc.total_items},
                       summary=f"Consolidated {len(requisitions)} requisition(s) "
-                              f"into {doc.cons_no}")
+                               f"into {doc.cons_no}")
     await db.commit()
     await db.refresh(doc)
-    return doc
+    return await _attach_caps(db, doc)
 
 
 async def rebuild_consolidation(db: AsyncSession, cons_id: int, data,
@@ -427,26 +428,144 @@ async def rebuild_consolidation(db: AsyncSession, cons_id: int, data,
                       entity_no=doc.cons_no, action=AuditAction.UPDATE, actor=user,
                       after={"requisitions": len(requisitions),
                              "items": doc.total_items},
-                      summary=f"Rebuilt {doc.cons_no} from "
-                              f"{len(requisitions)} requisition(s)")
+                       summary=f"Rebuilt {doc.cons_no} from "
+                               f"{len(requisitions)} requisition(s)")
     await db.commit()
     await db.refresh(doc)
+    return await _attach_caps(db, doc)
+
+
+async def _line_caps(db: AsyncSession,
+                   doc: PurchaseConsolidation) -> dict[int, dict]:
+    """Per-line buying ceiling: requested + replenishment top-up.
+
+    A sheet is built from requisitions raised against a shipment address — a
+    warehouse, an MDP or a LIP point — and the buyer may raise the tendered
+    quantity above what was asked ONLY by the replenishment shortfall of that
+    location: ``max_qty - available`` per (warehouse, item), summed over the
+    distinct shipment warehouses that asked for the line.
+
+    No replenishment rule for an item at a location contributes nothing, so a
+    line with no rule anywhere keeps a cap of exactly what was requested
+    (decrease-only, as before). The top-up is clamped at zero: stock above max
+    is not a negative allowance.
+    """
+    caps: dict[int, dict] = {}
+    for line in doc.items:
+        caps[line.id] = {"cap": _d(line.quantity), "allowance": ZERO,
+                         "warehouses": []}
+    sources = await sources_of(db, doc.id)
+    req_ids = [row.requisition_id for row in sources]
+    if not req_ids or not doc.items:
+        return caps
+
+    requisitions = (await db.execute(
+        select(Requisition).where(Requisition.id.in_(req_ids))
+    )).scalars().all()
+    wh_of = {r.id: r.warehouse_id for r in requisitions}
+    wh_names = {r.id: r.warehouse_name for r in requisitions}
+
+    req_lines = (await db.execute(
+        select(RequisitionItem.requisition_id, RequisitionItem.item_id,
+               RequisitionItem.uom_code)
+        .where(RequisitionItem.requisition_id.in_(req_ids))
+    )).all()
+    # Which shipment warehouses asked for each (item, uom) bucket — the same key
+    # `_aggregate` merges on.
+    wh_by_key: dict[tuple, set] = defaultdict(set)
+    for req_id, item_id, uom in req_lines:
+        wh = wh_of.get(req_id)
+        if wh is None:
+            continue
+        wh_by_key[(item_id, (uom or "").upper())].add(wh)
+
+    try:
+        raw = await get_setting(db, "inventory.replenishment_rules")
+        rules_map = json.loads(raw) if raw else {}
+    except Exception:  # noqa: BLE001 — a cap must never fail the read
+        logger.exception("Replenishment rules unreadable for %s",
+                         getattr(doc, "cons_no", doc.id))
+        return caps
+
+    pairs = {(wh, line.item_id)
+             for line in doc.items
+             for wh in wh_by_key.get(
+                 (line.item_id, (line.uom_code or "").upper()), set())
+             if f"{wh}:{line.item_id}" in rules_map}
+    available: dict[tuple, Decimal] = {}
+    if pairs:
+        # Lazy import: procurement sits after inventory in the chain (rule 5)
+        # and inventory imports nothing from app.modules, so no cycle — but a
+        # top-level import would still hard-link the modules.
+        from app.modules.inventory.models import Stock
+        rows = (await db.execute(
+            select(Stock.warehouse_id, Stock.item_id,
+                   func.coalesce(func.sum(Stock.available_qty), 0))
+            .where(func.concat(Stock.warehouse_id, ":", Stock.item_id).in_(
+                [f"{wh}:{item}" for wh, item in pairs]))
+            .group_by(Stock.warehouse_id, Stock.item_id)
+        )).all()
+        available = {(w, i): _d(qty) for w, i, qty in rows}
+
+    for line in doc.items:
+        key = (line.item_id, (line.uom_code or "").upper())
+        allowance = ZERO
+        names: list[str] = []
+        for wh in sorted(wh_by_key.get(key, set())):
+            rule = rules_map.get(f"{wh}:{line.item_id}")
+            if not rule:
+                continue
+            try:
+                top_up = _d(rule.get("max_qty")) - available.get(
+                    (wh, line.item_id), ZERO)
+            except Exception:  # noqa: BLE001 — one bad rule, not the sheet
+                continue
+            if top_up > ZERO:
+                allowance += top_up
+            # Named even when the top-up is zero, so the screen can say the
+            # rule exists but the shelf is already at max.
+            for req_id in req_ids:
+                if wh_of.get(req_id) == wh and wh_names.get(req_id):
+                    if wh_names[req_id] not in names:
+                        names.append(wh_names[req_id])
+                    break
+        caps[line.id] = {"cap": _d(line.quantity) + allowance,
+                         "allowance": allowance, "warehouses": names}
+    return caps
+
+
+async def _attach_caps(db: AsyncSession,
+                       doc: PurchaseConsolidation) -> PurchaseConsolidation:
+    """Serve the ceiling the save enforces, so the screen and the guard cannot
+    drift apart. Transient attributes for `ConsolidationItemOut` — never stored.
+    """
+    try:
+        caps = await _line_caps(db, doc)
+    except Exception:  # noqa: BLE001 — see `_line_caps`
+        return doc
+    for line in doc.items:
+        cap = caps.get(line.id)
+        if cap is None:
+            continue
+        line.max_allowed_qty = cap["cap"]
+        line.replenishment_qty = cap["allowance"]
+        line.replenishment_at = ", ".join(cap["warehouses"])
     return doc
 
 
 async def set_line_quantities(db: AsyncSession, cons_id: int, data,
                               user) -> PurchaseConsolidation:
-    """Trim what will actually be tendered. The sheet is where over-ordering is cut.
-
-    Only downward: a buyer may buy less than was asked for, but buying MORE than the
-    approved requisitions asked for is demand nobody signed off, and it would have to
-    go back through the requisition ladder to be legitimate.
+    """Trim what will actually be tendered — or top it up to the replenishment
+    ceiling. Below the requested quantity is always allowed; above it only up to
+    `quantity + (max - available)` at the shipment warehouses that asked for the
+    line, and with no rule there the ceiling stays at what was requested.
     """
     doc = await get_consolidation(db, cons_id)
     if doc.status in LOCKED:
         raise ValidationError(f"{doc.cons_no} can no longer be edited")
 
     by_id = {line.id: line for line in doc.items}
+    caps = await _line_caps(db, doc)
     for change in data.lines:
         line = by_id.get(change.line_id)
         if line is None:
@@ -454,7 +573,16 @@ async def set_line_quantities(db: AsyncSession, cons_id: int, data,
         wanted = _d(change.approved_qty)
         if wanted < ZERO:
             raise ValidationError("A quantity cannot be negative")
-        if wanted > _d(line.quantity):
+        cap = caps.get(change.line_id, {}).get("cap", _d(line.quantity))
+        allowance = caps.get(change.line_id, {}).get("allowance", ZERO)
+        if wanted > cap:
+            if allowance > ZERO:
+                at = ", ".join(caps[change.line_id]["warehouses"]) or "its shipment point"
+                raise ValidationError(
+                    f"{line.item_name}: {wanted:g} is more than the "
+                    f"{_d(line.quantity):g} the requisitions asked for plus the "
+                    f"{allowance:g} replenishment top-up at {at} "
+                    f"(max {cap:g}). Raise a new requisition instead.")
             raise ValidationError(
                 f"{line.item_name}: {wanted:g} is more than the {_d(line.quantity):g} "
                 "the requisitions asked for. Raise a new requisition instead.")
@@ -469,7 +597,7 @@ async def set_line_quantities(db: AsyncSession, cons_id: int, data,
                       summary=f"Adjusted {len(data.lines)} line(s) on {doc.cons_no}")
     await db.commit()
     await db.refresh(doc)
-    return doc
+    return await _attach_caps(db, doc)
 
 
 async def delete_consolidation(db: AsyncSession, cons_id: int, user) -> dict:

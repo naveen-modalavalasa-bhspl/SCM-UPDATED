@@ -279,6 +279,7 @@ class InspectionItem(Base):
     rejection_reason = synonym("defect_type")
     remarks = Column(String(500), nullable=True)
     serial_numbers = Column(JSON, nullable=True)
+    imei_numbers = Column(JSON, nullable=True)
 
     inspection = relationship("Inspection", back_populates="items")
 
@@ -1314,3 +1315,56 @@ doc_registry.register(DocType.DISPATCH.value, "out_dispatches")
 doc_registry.register(DocType.WH_ISSUE.value, "out_issues")
 doc_registry.register(DocType.OWN_STOCK_ISSUE.value, "out_issues")
 doc_registry.register(DocType.FORWARD_ISSUE.value, "out_issues")
+
+
+# ---------------------------------------------------------------------------
+# Stock corrections (2026-10-01)
+# ---------------------------------------------------------------------------
+
+class StockEdit(Base):
+    """`whs_stock_edits`. A request to correct what held stock IS — a batch's number
+    or dates, a unit's serial / IMEI / code — signed on the STOCK_EDIT ladder before
+    anything is written. Quantities never move, so `stk_ledger` is untouched."""
+    __tablename__ = "whs_stock_edits"
+
+    id = pk()
+    edit_no = Column(String(50), unique=True, nullable=False)
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_name = Column(String(200), nullable=True)
+    status = Column(String(30), index=True, nullable=False)
+    reason = Column(String(500), nullable=False)
+    remarks = Column(Text, nullable=True)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    approved_by_id = soft_fk()
+    approved_by_name = Column(String(200), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    current_approver_name = Column(String(300), nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    items = relationship("StockEditItem", back_populates="edit",
+                         cascade="all, delete-orphan", lazy="selectin")
+
+
+class StockEditItem(Base):
+    """One corrected batch or unit. `changes` is `{field: {"from": old, "to": new}}`,
+    with `from` read by the server at raise time, never taken from the client."""
+    __tablename__ = "whs_stock_edit_items"
+
+    id = pk()
+    edit_id = Column(ForeignKey("whs_stock_edits.id", ondelete="CASCADE"),
+                     index=True, nullable=False)
+    target_type = Column(String(10), nullable=False)       # StockEditTarget
+    batch_id = Column(BigInteger, index=True, nullable=True)
+    serial_id = Column(BigInteger, index=True, nullable=True)
+    item_id = Column(BigInteger, index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    label = Column(String(200), nullable=True)              # what the row was, at raise
+    changes = Column(JSON, nullable=False)
+
+    edit = relationship("StockEdit", back_populates="items")
+
+
+doc_registry.register(DocType.STOCK_EDIT.value, "whs_stock_edits")

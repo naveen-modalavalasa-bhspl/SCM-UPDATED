@@ -8,6 +8,7 @@ import {
   SearchCheck, Send, Store,
   Settings, Shield, ShoppingCart, SlidersHorizontal, Sparkles, Split, TrendingUp,
   Truck, Undo2, UserCog, Users, Warehouse, type LucideIcon,
+  PieChart, GitCompareArrows
 } from "lucide-react";
 
 /**
@@ -97,6 +98,8 @@ const MAP: Record<string, LucideIcon> = {
   // without an entry the Suppliers tab drew the generic box, which in the procurement
   // rail sat next to seven glyphs that all meant something.
   store: Store,
+  "pie-chart": PieChart,
+  "git-compare-arrows": GitCompareArrows,
 };
 
 /** Names already reported, so one missing glyph does not log on every render. */

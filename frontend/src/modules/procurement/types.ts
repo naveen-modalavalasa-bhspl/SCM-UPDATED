@@ -220,7 +220,7 @@ export interface ConsolidationItem {
   uom_code?: string | null;
   /** What the requisitions asked for, summed. */
   quantity: number;
-  /** What the buyer decided to tender. Never more than `quantity`. */
+  /** What the buyer decided to tender. Between 0 and `max_allowed_qty`. */
   approved_qty: number;
   estimated_rate: number;
   estimated_amount: number;
@@ -229,6 +229,14 @@ export interface ConsolidationItem {
   sources?: string | null;
   source_count: number;
   remarks?: string | null;
+  /** Buying ceiling served by the backend: requested + replenishment top-up
+   *  (max − available) at the shipment warehouses that asked for the line.
+   *  Equals `quantity` where no replenishment rule exists — increase blocked. */
+  max_allowed_qty?: number | null;
+  /** The top-up above `quantity` included in the ceiling. 0 = decrease-only. */
+  replenishment_qty?: number | null;
+  /** Shipment point(s) the top-up was read at. */
+  replenishment_at?: string | null;
 }
 
 export interface ConsolidationSource {
@@ -411,6 +419,11 @@ export interface RFQListRow {
    *  wearing a position the ladder named. Served by the backend because a screen can
    *  only see the status and its own permissions, and neither answers "is it with me". */
   awaiting_me?: boolean;
+  /** Freeze Prices (2026-09-26): the tender is closed to pricing. Suppliers can no
+   *  longer quote or change prices; POs can be raised against its quotations. */
+  is_price_frozen?: boolean;
+  /** True when the buyer has sent a change request on this supplier's quotation that is awaiting answer. */
+  has_pending_change_request?: boolean;
   created_at: string;
 }
 
@@ -453,6 +466,11 @@ export interface RFQ extends RFQListRow {
   priority?: string | null;
   requisition_status?: string | null;
   source_indent_nos?: string[];
+  /** Freeze Prices detail: when the door was closed, by whom, and how many
+   *  quotations were in at the time. All null on an open tender. */
+  frozen_at?: string | null;
+  frozen_by_name?: string | null;
+  frozen_at_revision?: number | null;
   items: RFQItem[];
   vendors: RFQVendor[];
 }
@@ -510,18 +528,15 @@ export interface QuoteItem {
   quantity: number;
   rate: number;
   discount_percent: number;
+  /** The one GST rate the vendor quoted. Which half of it applies is decided by the
+   *  two GSTINs, so the offer states a single figure. */
   tax_percent: number;
-  cgst_rate?: number | null;
-  sgst_rate?: number | null;
-  igst_rate?: number | null;
   amount: number;
   delivery_days?: number | null;
-  /** The item's HSN and the rates it notifies — the ceiling this line may quote up to.
+  /** The item's HSN and the rate it notifies — the ceiling this line may quote up to.
    *  Null means the item has no HSN, so no ceiling applies. */
   hsn_code?: string | null;
-  max_cgst_rate?: number | null;
-  max_sgst_rate?: number | null;
-  max_igst_rate?: number | null;
+  max_gst_rate?: number | null;
   /** What the RFQ line asked for, and when it is wanted. `quantity` above is the
    *  vendor's ANSWER and may be short of it. */
   requested_quantity?: number | null;
@@ -542,6 +557,12 @@ export interface QuoteListRow {
    * produced the ranking. Null on a quote the scorer could not place. */
   evaluation_score?: number | null;
   revision_count: number;
+  /** The negotiation overlay: amber "Under negotiation" badge while the buyer's
+   *  change request sits with the supplier. */
+  under_negotiation?: boolean;
+  /** How many change requests the supplier has ACCEPTED — "v2 pricing" as a
+   *  number, not archaeology. */
+  accepted_revision?: number;
   submitted_at?: string | null;
   created_at: string;
 }
@@ -564,6 +585,82 @@ export interface Quotation extends QuoteListRow {
   company_gstin?: string | null;
   vendor_gstin?: string | null;
   items: QuoteItem[];
+}
+
+/** One line of the buyer's change request, WITH the "before" figures read off the
+ *  snapshot — the diff is served, never recomputed in the screen. */
+export interface QuoteChangeLine {
+  quotation_item_id: number;
+  item_id?: number | null;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  current_quantity: number;
+  current_rate: number;
+  current_discount_percent: number;
+  current_amount?: number;
+  proposed_quantity: number;
+  proposed_rate: number;
+  proposed_discount_percent: number;
+  note?: string | null;
+}
+
+/** A Change Request: the buyer's ask on a supplier's quotation. Status words the
+ *  desk reads: Awaiting supplier / Accepted / Declined / Withdrawn / Superseded. */
+export interface QuoteChangeRequest {
+  id: number;
+  quotation_id: number;
+  rfq_id: number;
+  cr_no: string;
+  status: "AWAITING_SUPPLIER" | "ACCEPTED" | "DECLINED" | "WITHDRAWN" | "SUPERSEDED" | string;
+  reason: string;
+  proposed_by_name?: string | null;
+  supplier_decision_note?: string | null;
+  supplier_decided_at?: string | null;
+  created_at: string;
+  lines: QuoteChangeLine[];
+  supplier_counter_lines?: Record<string, unknown>[] | null;
+}
+
+/** One version of a quotation, off the Price Trail. `source` says how this
+ *  version came to be; totals are null except on the newest version. */
+export interface PriceTrailVersion {
+  version: number;
+  source: "ORIGINAL" | "REQUOTE" | "CHANGE_REQUEST" | string;
+  effective_at: string | null;
+  changed_by?: string | null;
+  totals: {
+    sub_total: number | null;
+    tax_amount: number | null;
+    freight_amount: number | null;
+    discount_amount: number | null;
+    grand_total: number | null;
+  };
+  lines: Record<string, unknown>[];
+  buyer_requested_lines?: Record<string, unknown>[];
+  buyer_requested_totals?: {
+    sub_total: number | null;
+    tax_amount: number | null;
+    freight_amount: number | null;
+    discount_amount: number | null;
+    grand_total: number | null;
+  };
+  cr_no?: string | null;
+  reason?: string | null;
+  note?: string | null;
+}
+
+/** The quotation chat. One thread per quotation — which is one supplier on one
+ *  RFQ — so two suppliers' negotiations can never mix. */
+export interface QuoteComment {
+  id: number;
+  quotation_id: number;
+  author_id?: number | null;
+  author_name?: string | null;
+  /** "BUYER" or "SUPPLIER" — written at post time, so the bubble tint is never guessed. */
+  author_side: string;
+  message: string;
+  created_at: string;
 }
 
 /** What the vendor's screen learns when a code is sent: which address it went to,
@@ -592,10 +689,8 @@ export interface QuoteSubmit {
     quantity?: number | null;
     rate: number;
     discount_percent?: number;
+    /** The vendor's whole GST rate. */
     tax_percent?: number;
-    cgst_rate?: number | null;
-    sgst_rate?: number | null;
-    igst_rate?: number | null;
     delivery_days?: number | null;
   }[];
 }
@@ -612,12 +707,6 @@ export interface ComparisonCell {
   discount_amount: number;
   taxable_amount: number;
   tax_percent: number;
-  cgst_rate?: number | null;
-  cgst_amount?: number | null;
-  sgst_rate?: number | null;
-  sgst_amount?: number | null;
-  igst_rate?: number | null;
-  igst_amount?: number | null;
   tax_amount: number;
   line_total: number;
   delivery_days?: number | null;
