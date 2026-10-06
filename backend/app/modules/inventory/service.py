@@ -1305,6 +1305,12 @@ async def mark_mrs_received(db: AsyncSession,
             ]),
         )
     )).scalars().unique().all():
+        # Per line first: a request delivered in parts stays open, but the lines that
+        # did arrive must stop counting as on order (`received_quantity`).
+        for line in mr.items:
+            if line.indent_item_id in receipts:
+                line.received_quantity = min(
+                    _d(receipts[line.indent_item_id]), _d(line.quantity))
         covered = all(
             _d(receipts.get(line.indent_item_id or 0, 0)) >= _d(line.quantity)
             for line in mr.items
@@ -3131,6 +3137,8 @@ _STO_STAGE_BY_ISSUE = {
     "ISSUED": "ISSUED", "DISPATCHED": "IN_TRANSIT", "ACKNOWLEDGED": "RECEIVED",
     "PARTIALLY_RETURNED": "RECEIVED", "RETURNED": "RECEIVED",
     "REJECTED": "CANCELLED", "CANCELLED": "CANCELLED",
+    # Split into per-floor children: still being issued, then issued.
+    "SPLIT": "TO_ISSUE", "CLOSED": "ISSUED",
 }
 
 

@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { ArrowDown, ArrowUp, GripVertical, X } from "lucide-react";
 
-import type { CustomLadderStep, StepKind } from "../types";
+import type { CustomLadderStep, FlowRung, StepKind } from "../types";
 
 const KIND_LABEL: Record<StepKind, string> = {
   local: "Post",
@@ -41,9 +41,11 @@ export function reorder(steps: CustomLadderStep[], from: number,
   return next.map((step, index) => ({ ...step, sequence: index + 1 }));
 }
 
-export function StepList({ steps, onChange }: {
+export function StepList({ steps, onChange, ranks }: {
   steps: CustomLadderStep[];
   onChange: (steps: CustomLadderStep[]) => void;
+  /** The palette's ranks, to name a step whose rank belongs to another project. */
+  ranks?: FlowRung[];
 }) {
   const [dragging, setDragging] = useState<number | null>(null);
   const [over, setOver] = useState<number | null>(null);
@@ -61,6 +63,9 @@ export function StepList({ steps, onChange }: {
       {steps.map((step, index) => {
         const kind = stepKind(step);
         const seats = step.holders ?? [];
+        const foreign = kind === "rank"
+          ? ranks?.find((r) => r.id === step.position_role_id && r.other_project)
+          : undefined;
         return (
           <li
             key={stepKey(step)}
@@ -89,6 +94,12 @@ export function StepList({ steps, onChange }: {
               <p className="truncate text-xs text-muted">
                 {KIND_LABEL[kind]}
                 {seats.length > 0 && ` · ${seats.map((h) => h.name).join(", ")}`}
+                {foreign && (
+                  <span className="text-warn">
+                    {" "}· {foreign.project_name ?? "another project"}'s rank, not on this
+                    project's line, will be skipped
+                  </span>
+                )}
                 {seats.length === 0 && kind !== "rank" && (
                   <span className="text-warn"> · nobody seated, will be skipped</span>
                 )}

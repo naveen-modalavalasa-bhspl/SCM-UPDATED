@@ -118,6 +118,13 @@ PAGES: list[PageDef] = [
     PageDef("returns_receiving_config", "/returns/settings/receiving",
             "Receiving Points", parent="grp_returns", module="returns",
             icon="map-pin", sort_order=8),
+    # Accounts (2026-10-06) — a module of its own: what each PO owes its vendor by
+    # payment milestone, and the payments recorded against them.
+    PageDef("grp_accounts", "/accounts", "Accounts", module="accounts",
+            icon="indian-rupee", sort_order=65),
+    PageDef("acc_payments", "/accounts/payments", "Vendor Payments",
+            parent="grp_accounts", module="accounts", icon="receipt",
+            sort_order=1),
     # The module row itself, listed only to rename it: the menu said "Purchasing"
     # while the permission catalogue, the backend package and the table prefix all
     # said procurement, and the RBAC screen needed a hard-coded alias to reconcile
@@ -622,7 +629,9 @@ async def sync_pages(db: AsyncSession) -> dict:
             continue
 
         required = None if spec.always_on else perms.page_view_code(spec.code)
+        minted = False
         if required and required not in permission_by_code:
+            minted = True
             permission = Permission(
                 code=required, module=spec.module or "admin",
                 resource=perms.PAGE_RESOURCE, action="view",
@@ -675,7 +684,13 @@ async def sync_pages(db: AsyncSession) -> dict:
 
         # Fail closed: Admin only, and only on first registration. Re-granting on
         # every start would undo an admin who deliberately took it off Admin.
-        if required and admin_role is not None and spec.code in added:
+        #
+        # "First registration" is the PERMISSION's as well as the page's. A page the
+        # seed's PAGE_TREE already inserted (rbac_job_profiles, admin_code_formats) is
+        # not `added` here, but its `page.<code>.view` is minted here — and the moment
+        # it exists `get_user_menu` gates on it, so without this grant the page
+        # vanished for Admin too on every freshly bootstrapped database.
+        if required and admin_role is not None and (spec.code in added or minted):
             permission = permission_by_code[required]
             held = (await db.execute(select(RolePermission).where(
                 RolePermission.role_id == admin_role.id,

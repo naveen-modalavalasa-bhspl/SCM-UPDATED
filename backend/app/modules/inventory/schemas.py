@@ -351,6 +351,8 @@ class AllocationLineAvailability(BaseModel):
     pledged_elsewhere: float
     free: float
     max_allowed: float
+    # The indent LINE's request, shared by every row serving it from another point.
+    line_requested_qty: float = 0
 
 
 class AllocationHistoryBatchIn(BaseModel):

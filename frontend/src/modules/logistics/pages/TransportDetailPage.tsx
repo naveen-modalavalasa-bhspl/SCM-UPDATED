@@ -389,6 +389,35 @@ export function TransportDetailPage() {
         </Card>
       )}
 
+      {/* The prices carriers have sent in, read-only. The award itself stays on
+          Provider Selection; this only stops a submitted quote looking lost. */}
+      {doc.status === "QUOTING" && doc.quotes.length > 0 && (
+        <Card className="mb-4 p-4">
+          <p className="mb-2 text-sm font-semibold text-ink">
+            Quotes — {doc.quotes.filter((q) => q.status !== "INVITED").length} of{" "}
+            {doc.quotes.length} carriers replied
+          </p>
+          <div className="divide-y divide-line">
+            {doc.quotes.map((q) => (
+              <div key={q.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                <span className="font-medium text-ink">{q.carrier_name ?? `Carrier ${q.carrier_id}`}</span>
+                {q.status === "INVITED" ? (
+                  <span className="text-muted">Awaiting price</span>
+                ) : (
+                  <span className="text-body">
+                    {money(q.freight_amount)}
+                    {q.other_charges ? ` + ${money(q.other_charges)}` : ""}
+                    {q.tax_percent != null ? ` · ${q.tax_percent}% tax` : ""}
+                    {q.transit_days != null ? ` · ${q.transit_days} d` : ""}
+                    {q.submitted_at ? ` · ${fmtDateTime(q.submitted_at)}` : ""}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {["IN_TRANSIT", "DELIVERED"].includes(doc.status) && doc.indent_id && (
         <Card className="mb-4 border-brand/30 bg-brand/5 p-4">
           <p className="text-sm font-semibold text-ink">

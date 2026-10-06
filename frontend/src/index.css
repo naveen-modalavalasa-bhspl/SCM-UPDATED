@@ -251,6 +251,16 @@ body,
   max-width: 100%;
 }
 
+/* The page ground is painted by BODY and must reach the bottom of every scroll.
+ * HeroUI's plugin paints `:root, [data-theme]` with its own plain background, and a
+ * root with a background stops body's from propagating to the canvas — so the module
+ * tint ended at body's box (height: 100%, one viewport) and the rest of a long screen
+ * showed HeroUI's flat colour underneath. Transparent here lets body's ground cover
+ * the whole canvas again. `html:root` outranks `:root` and `[data-theme]`. */
+html:root {
+  background-color: transparent;
+}
+
 body {
   margin: 0;
   background:

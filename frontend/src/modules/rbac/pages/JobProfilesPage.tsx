@@ -339,6 +339,11 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   inv_labels: {
     hint: "Create and print labels for stock items.",
   },
+  acc_payments: {
+    label: "Vendor Payments",
+    hint: "What each PO owes by payment milestone (advance, delivery, installation, warranty), "
+      + "the supplier's invoices, and recording payments. Every payment goes through the Vendor Payment approval ladder.",
+  },
   inv_stock_edits: {
     label: "Stock Corrections",
     hint: "Correct a held batch (batch no., mfg / expiry date) or unit (serial, IMEI, asset / "
@@ -995,7 +1000,7 @@ export function JobProfilesPage() {
       toast.success(`${selected?.name} saved`);
       queryClient.invalidateQueries({ queryKey: ["rbac", "job-profiles"] });
     },
-    onError: () => toast.error("Could not save this profile"),
+    onError: () => toast.error("Job profile not saved. Try again."),
   });
 
   const reset = useMutation({
@@ -1004,7 +1009,7 @@ export function JobProfilesPage() {
       toast.success(`${selected?.name} handed back to its HCM role`);
       queryClient.invalidateQueries({ queryKey: ["rbac", "job-profiles"] });
     },
-    onError: () => toast.error("Could not reset this profile"),
+    onError: () => toast.error("Job profile not reset. Try again."),
   });
 
   const filtered = useMemo(() => {

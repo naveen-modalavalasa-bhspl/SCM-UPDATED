@@ -45,6 +45,32 @@ def _apply(sync_conn, tables, columns):
         sync_conn.exec_driver_sql(f"ALTER TABLE `{table.name}` ADD COLUMN {ddl}")
 
 
+def _missing_indexes(sync_conn):
+    """Model indexes the database lacks. Tables created by hand never got theirs."""
+    insp = inspect(sync_conn)
+    existing = set(insp.get_table_names())
+    out = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            continue
+        have = {ix["name"] for ix in insp.get_indexes(table.name)}
+        have |= {uc["name"] for uc in insp.get_unique_constraints(table.name)}
+        out += [ix for ix in table.indexes if ix.name and ix.name not in have]
+    return out
+
+
+def _apply_indexes(sync_conn, indexes) -> list[str]:
+    """Create each one on its own: a UNIQUE index over duplicate rows must not stop
+    the rest. Returns the ones that could not be built, with the reason."""
+    failed = []
+    for ix in indexes:
+        try:
+            ix.create(sync_conn, checkfirst=False)
+        except Exception as exc:              # noqa: BLE001 -- reported, never fatal
+            failed.append(f"{ix.table.name}.{ix.name}: {str(exc).splitlines()[0][:160]}")
+    return failed
+
+
 async def main(apply: bool) -> None:
     async with engine.begin() as conn:
         tables, columns = await conn.run_sync(_missing)

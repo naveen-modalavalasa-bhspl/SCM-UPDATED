@@ -291,6 +291,13 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
   const anythingToConfirm = row.lines.some((line) => receivable(line) > 0);
   const waiting = row.lines.reduce((sum, line) => sum + receivable(line), 0);
   const nothingSentYet = row.lines.every((line) => line.dispatched_quantity <= 0);
+  // A leg booked but not yet released by logistics: the goods are still in the yard,
+  // so there is nothing to confirm. Named, so the requester knows whom to chase
+  // instead of reading "Nothing to acknowledge" as the screen being broken.
+  const heldLeg = nothingSentYet
+    ? (tracking.data ?? []).find((leg) =>
+      ["DRAFT", "PENDING_APPROVAL", "QUOTING", "AWAITING_CARRIER", "READY"].includes(leg.status))
+    : undefined;
   const receivingSummary = useMemo(() => {
     const payload = acknowledgementPayload(row.lines, received);
     return {
@@ -574,7 +581,9 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
               {anythingToConfirm
                 ? blocker
                   ?? `Ready to acknowledge: ${qty(receivingSummary.quantity)} across ${receivingSummary.lines} item${receivingSummary.lines === 1 ? "" : "s"}`
-                : "Nothing to acknowledge."}
+                : heldLeg
+                  ? `Nothing to acknowledge yet — shipment ${heldLeg.tr_no} is ${heldLeg.status.replace(/_/g, " ").toLowerCase()} and has not left the warehouse. Logistics must dispatch it first.`
+                  : "Nothing to acknowledge."}
             </span>
           </p>
           {anythingToConfirm && (

@@ -169,6 +169,16 @@ export function SerialNumbersModal({
   const article = /^[aeiou]/i.test(noun) ? "an" : "a";
   const Noun = noun.charAt(0).toUpperCase() + noun.slice(1);
   const [entry, setEntry] = useState("");
+  // The list's height follows the window. It was a fixed 400 px inside a modal that
+  // already scrolls: on a laptop the header, scope and search took most of the screen,
+  // so the 400 px box was clipped to three or four rows behind a second scrollbar.
+  const [viewportHeight, setViewportHeight] = useState(
+    () => (typeof window === "undefined" ? 800 : window.innerHeight));
+  useEffect(() => {
+    const onResize = () => setViewportHeight(window.innerHeight);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [bulkEntry, setBulkEntry] = useState("");
   const [error, setError] = useState<string | null>(null);
   /** Draw the whole captured list rather than the tail of it. See CAPTURE_WINDOW. */
@@ -268,6 +278,12 @@ export function SerialNumbersModal({
           needle ? aliases(s).some((token) => token.toLowerCase().includes(needle)) : true,
         );
     const rejected = (available ?? []).filter((s) => !selected.has(s));
+    // Whatever the screen has left after the modal's own chrome (~360 px), never
+    // taller than the rows themselves and never below five rows.
+    const listHeight = Math.min(
+      visible.length * 44,
+      Math.max(220, viewportHeight - 360),
+    );
     const toggle = (serial: string) =>
       setSerials((rows) =>
         rows.includes(serial) ? rows.filter((r) => r !== serial) : [...rows, serial],
@@ -316,18 +332,18 @@ export function SerialNumbersModal({
           void paging.onResolve(value).then((found) => {
             if (!found) {
               setError(
-                `${value} is not among the units in this batch and location.`
+                `${value} is not at this location. Check the label, or pick a different batch or location.`
                 + (selectMode ? " Check the split it belongs to." : ""),
               );
               return;
             }
             setSerials((rows2) => {
               if (rows2.includes(found)) {
-                setError(`${found} is already on this pick.`);
+                setError(`${found} is already scanned. Scan a different one.`);
                 return rows2;
               }
               if (selectMode && rows2.length >= required) {
-                setError(`This pick is for ${required}; remove one before scanning another.`);
+                setError(`You need only ${required}. Remove one before scanning another.`);
                 return rows2;
               }
               return [...rows2, found];
@@ -336,7 +352,7 @@ export function SerialNumbersModal({
           return;
         }
         setError(
-          `${value} is not among the units in this batch and location.`
+          `${value} is not at this location. Check the label, or pick a different batch or location.`
           + (selectMode ? " Check the split it belongs to." : ""),
         );
         return;
@@ -347,11 +363,11 @@ export function SerialNumbersModal({
         return;
       }
       if (selected.has(hit)) {
-        setError(`${hit} is already on this pick.`);
+        setError(`${hit} is already scanned. Scan a different one.`);
         return;
       }
       if (selected.size >= required) {
-        setError(`This pick is for ${required}; remove one before scanning another.`);
+        setError(`You need only ${required}. Remove one before scanning another.`);
         return;
       }
       setError(null);
@@ -363,7 +379,8 @@ export function SerialNumbersModal({
     const plural = (count: number) => `${unitNoun}${count === 1 ? "" : "s"}`;
 
     return (
-      <Modal isOpen={isOpen} onClose={onClose} size={typed ? "3xl" : "lg"} scrollBehavior="inside">
+      <Modal isOpen={isOpen} onClose={onClose} size={typed ? "3xl" : "lg"} scrollBehavior="inside"
+        classNames={{ wrapper: "items-center", base: "my-4 max-h-[calc(100dvh-2rem)]" }}>
         <ModalContent>
           <ModalHeader className="flex-col items-start gap-1 bg-content1/80 backdrop-blur-md border-b border-line/50 pb-4">
             <span className="flex flex-wrap items-center gap-2">
@@ -516,7 +533,7 @@ export function SerialNumbersModal({
                   <div className="w-24 px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-muted">Location</div>
                 </div>
                 <FixedSizeList
-                  height={400}
+                  height={listHeight}
                   itemCount={visible.length}
                   itemSize={44}
                   width="100%"
@@ -567,7 +584,7 @@ export function SerialNumbersModal({
             ) : (
               <div className="rounded-xl border border-line/70 overflow-hidden">
                 <FixedSizeList
-                  height={400}
+                  height={listHeight}
                   itemCount={visible.length}
                   itemSize={44}
                   width="100%"
@@ -708,11 +725,11 @@ export function SerialNumbersModal({
     const value = raw.trim();
     if (!value) return;
     if (serials.includes(value)) {
-      setError(`${value} is already on this line.`);
+      setError(`${value} is already scanned. Scan a different one.`);
       return;
     }
     if (serials.length >= required) {
-      setError(`This line is for ${required}; remove one before adding another.`);
+      setError(`You need only ${required}. Remove one before adding another.`);
       return;
     }
     setError(null);
@@ -741,19 +758,19 @@ export function SerialNumbersModal({
       return false;
     });
     if (repeated) {
-      setError(`${repeated} appears more than once in the pasted list.`);
+      setError(`${repeated} is typed twice in your list. Remove the extra one.`);
       return;
     }
 
     const existing = new Set(serials);
     const duplicate = incoming.find((value) => existing.has(value));
     if (duplicate) {
-      setError(`${duplicate} is already on this line.`);
+      setError(`${duplicate} is already scanned. Scan a different one.`);
       return;
     }
 
     if (serials.length + incoming.length > required) {
-      setError(`This line is for ${required}; pasted list would capture ${serials.length + incoming.length}.`);
+      setError(`You need only ${required}, but your list has ${serials.length + incoming.length}. Remove the extra ones.`);
       return;
     }
 
@@ -788,7 +805,7 @@ export function SerialNumbersModal({
 
   const save = () => {
     if (!partial && serials.length !== required) {
-      setError(`This line needs exactly ${required} serial numbers; ${serials.length} captured.`);
+      setError(`You need ${required} serial numbers. You have entered ${serials.length}. Add the missing ones.`);
       return;
     }
     onSave(serials);

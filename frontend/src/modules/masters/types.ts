@@ -93,6 +93,15 @@ export interface MasterItemSubClass extends NamedMaster {
   item_class_name?: string | null;
 }
 
+export interface MasterPaymentTerm {
+  id: number; code: string; name: string; description: string | null; is_active: boolean;
+  advance_pct: number; advance_days: number; delivery_pct: number; delivery_days: number;
+  installation_pct: number; installation_days: number;
+  warranty_pct: number; warranty_days: number;
+  /** "30,60,90": the delivery share in equal instalments. */
+  delivery_schedule: string | null;
+}
+
 export interface MasterVendorCategory {
   id: number; code: string; name: string; description: string | null;
   is_active: boolean; vendor_ids: number[];

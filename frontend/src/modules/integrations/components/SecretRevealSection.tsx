@@ -69,7 +69,7 @@ export function SecretRevealSection({
       onRevealed?.();
       toast.success("New secret issued — copy it and send it to them now");
     },
-    onError: () => toast.error("That secret could not be replaced."),
+    onError: () => toast.error("Could not create a new secret key. Try again."),
   });
 
   useEffect(() => {
@@ -122,7 +122,7 @@ export function SecretRevealSection({
       if (!ok) throw new Error("Copy failed");
       toast.success(copiedMessage);
     } catch {
-      toast.error("Secret key could not be copied.");
+      toast.error("Copy did not work. Select the text with your mouse and press Ctrl+C.");
     } finally {
       setSecret(null);
     }

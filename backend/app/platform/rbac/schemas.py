@@ -1,15 +1,16 @@
 from pydantic import BaseModel, Field
-from app.shared.limits import (  # request-size guards, see the module
-    Annotated, ConfigEntries, MAX_CONFIG_ENTRIES,
-)
+
+# Grant lists are NOT capped by shared.limits.MAX_CONFIG_ENTRIES: they are a
+# selection from the whole page/permission catalogue, which is several hundred
+# codes, so "every permission" must always be a legal save.
 
 
 class RolePageAccessIn(BaseModel):
-    page_codes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
+    page_codes: list[str] = Field(default_factory=list)
 
 
 class RoleFeatureAccessIn(BaseModel):
-    permission_codes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
+    permission_codes: list[str] = Field(default_factory=list)
 
 
 class UserGroupIn(BaseModel):
@@ -32,7 +33,7 @@ class RoleIn(BaseModel):
 
 
 class RolePermissionsIn(BaseModel):
-    permission_codes: list[str] = Field(default_factory=list, max_length=MAX_CONFIG_ENTRIES)
+    permission_codes: list[str] = Field(default_factory=list)
 
 
 class RoleCloneIn(BaseModel):
@@ -42,7 +43,7 @@ class RoleCloneIn(BaseModel):
 
 class JobProfileAccessIn(BaseModel):
     """A job profile's whole grant, saved in one shot (profiles.py)."""
-    page_codes: Annotated[list[str], ConfigEntries] = []
-    permission_codes: Annotated[list[str], ConfigEntries] = []
+    page_codes: list[str] = []
+    permission_codes: list[str] = []
     scope: str = "SELF"
     name: str | None = None

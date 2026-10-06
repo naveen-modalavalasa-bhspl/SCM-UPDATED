@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.logistics import partners, service
+from app.modules.logistics import carrier_invoices, partners, service
 from app.modules.logistics.schemas import (
     AcceptQuoteIn, ActionIn, ActivityRow, AwardIn, CarrierAcceptIn, CarrierAckIn,
     CarrierConfirmIn, CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
@@ -223,7 +223,7 @@ async def transport_activity_types(
     return service.activity_catalogue()
 
 
-@transport_router.get("", response_model=Page[TRListRow])
+@transport_router.get("", response_model=Page[ProviderBoardRow])
 async def list_transport(params: PageParams = Depends(), status: str | None = None,
                          mode: str | None = None, carrier_id: int | None = None,
                          indent_id: int | None = None, search: str | None = None,
@@ -486,6 +486,22 @@ async def close_transport(tr_id: int, db: AsyncSession = Depends(get_db),
     return await service.close_tr(db, tr_id, user)
 
 
+@transport_router.get("/{tr_id}/carrier-invoices", response_model=list[AttachmentRead])
+async def transport_carrier_invoices(tr_id: int, db: AsyncSession = Depends(get_db),
+                                     user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    """The freight invoices the carrier filed from their portal."""
+    return await carrier_invoices.list_invoices(db, tr_id)
+
+
+@transport_router.get("/{tr_id}/carrier-invoices/{attachment_id}/download")
+async def transport_carrier_invoice_download(
+        tr_id: int, attachment_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    path, file_name, mime_type = await carrier_invoices.invoice_file(
+        db, tr_id, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
+
+
 @transport_router.get("/{tr_id}/history", response_model=list)
 async def transport_history(tr_id: int, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.TRANSPORT_VIEW))):
@@ -576,6 +592,40 @@ async def carrier_deliver_job(tr_id: int, body: DeliverIn = DeliverIn(),
                               db: AsyncSession = Depends(get_db),
                               account=Depends(get_current_vendor)):
     return await service.carrier_deliver(db, account.vendor_id, tr_id, body)
+
+
+@carrier_router.get("/transport/{tr_id}/invoices", response_model=list[AttachmentRead])
+async def carrier_list_invoices(tr_id: int, db: AsyncSession = Depends(get_db),
+                                account=Depends(get_current_vendor)):
+    """The freight invoices this carrier has filed against the shipment they won."""
+    return await carrier_invoices.carrier_list_invoices(db, account.vendor_id, tr_id)
+
+
+@carrier_router.post("/transport/{tr_id}/invoices", response_model=list[AttachmentRead],
+                     status_code=201)
+async def carrier_upload_invoice(tr_id: int, file: UploadFile = File(...),
+                                 db: AsyncSession = Depends(get_db),
+                                 account=Depends(get_current_vendor)):
+    return await carrier_invoices.carrier_upload_invoice(
+        db, account.vendor_id, tr_id, file)
+
+
+@carrier_router.delete("/transport/{tr_id}/invoices/{attachment_id}",
+                       response_model=list[AttachmentRead])
+async def carrier_delete_invoice(tr_id: int, attachment_id: int,
+                                 db: AsyncSession = Depends(get_db),
+                                 account=Depends(get_current_vendor)):
+    return await carrier_invoices.carrier_delete_invoice(
+        db, account.vendor_id, tr_id, attachment_id)
+
+
+@carrier_router.get("/transport/{tr_id}/invoices/{attachment_id}/download")
+async def carrier_download_invoice(tr_id: int, attachment_id: int,
+                                   db: AsyncSession = Depends(get_db),
+                                   account=Depends(get_current_vendor)):
+    path, file_name, mime_type = await carrier_invoices.carrier_invoice_file(
+        db, account.vendor_id, tr_id, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @carrier_router.post("/transport/{tr_id}/stops/{stop_id}/deliver", response_model=TROut)

@@ -14,7 +14,7 @@ import { transportApi } from "../api";
 import {
   load, modeLabel, modeTint, money, nextMove, TR_STATUSES,
 } from "../components/modeCopy";
-import type { TransportSummary, TRListRow } from "../transportTypes";
+import type { ProviderBoardRow as TRListRow, TransportSummary } from "../transportTypes";
 import { legDestination } from "../components/manifestView";
 import { TONE_MINT } from "@/shared/components/tones";
 
@@ -184,7 +184,20 @@ export function TransportRequestsPage() {
       key: "carrier",
       header: "Carrier",
       hideOnNarrow: true,
-      render: (r) => r.carrier_name ?? <span className="text-muted">Not set</span>,
+      render: (r) => r.carrier_name ?? (
+        r.status === "QUOTING" && r.invited_count > 0 ? (
+          <div className="min-w-0">
+            <div className="text-sm text-body">
+              {r.responded_count} of {r.invited_count} quoted
+            </div>
+            {r.best_carrier_name && (
+              <div className="truncate text-[11px] text-muted">
+                Best: {r.best_carrier_name}
+              </div>
+            )}
+          </div>
+        ) : <span className="text-muted">Not set</span>
+      ),
     },
     {
       key: "load",
@@ -207,7 +220,13 @@ export function TransportRequestsPage() {
       key: "freight",
       header: "Freight",
       className: "text-right",
-      render: (r) => (
+      // Before the award `freight_amount` is empty; the best quote so far stands in,
+      // labelled so it is never read as the agreed price.
+      render: (r) => r.freight_amount == null && r.best_amount != null ? (
+        <span className="text-sm text-body" title="Best quote so far — not yet awarded">
+          {money(r.best_amount)} <span className="text-[11px] text-muted">quoted</span>
+        </span>
+      ) : (
         <span className="font-semibold text-ink">{money(r.freight_amount)}</span>
       ),
     },

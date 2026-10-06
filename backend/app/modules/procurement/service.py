@@ -32,7 +32,7 @@ from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
     PurchaseConsolidationItem, PurchaseConsolidationSource, PurchaseOrder, Quotation,
     QuotationComment, QuotationItem, QuoteChangeRequest, Requisition,
-    PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
+    POPaymentMilestone, PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
 )
 from app.modules.procurement.schemas import (
@@ -149,12 +149,69 @@ async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
         if value is None:
             continue
         setattr(po, field, value.strip() or None)
+    term_id = getattr(data, "payment_term_id", None)
+    if term_id is not None and term_id != po.payment_term_id:
+        await _apply_payment_term(db, po, term_id)
     # Both columns are NOT NULL, so these are assigned only when the caller named a
     # number. Omitted, the order keeps what it had (or the column default on create).
     if getattr(data, "discount_amount", None) is not None:
         po.discount_amount = _d(data.discount_amount)
     if getattr(data, "freight_amount", None) is not None:
         po.freight_amount = _d(data.freight_amount)
+
+
+async def _apply_payment_term(db: AsyncSession, po: PurchaseOrder, term_id: int) -> None:
+    """Copy a payment-term master onto the order: its wording into `payment_terms` and
+    its non-zero milestones into `pro_po_payment_milestones` (2026-10-06).
+
+    Only before the order is approved. From then on accounts may have paid against
+    those milestones, and swapping them would leave a payment pointing at a stage the
+    order no longer has. A change after approval is an amendment conversation, not a
+    dropdown.
+    """
+    from app.shared.enums import PAYMENT_MILESTONE_META
+    from app.shared.models.master import PaymentTerm
+
+    if po.id is not None:
+        # Loaded explicitly: touching an unloaded collection is an implicit await
+        # under asyncio, and replacing it needs the old rows to delete them.
+        await db.refresh(po, attribute_names=["payment_milestones"])
+    if po.status not in (None, POStatus.DRAFT.value, POStatus.REJECTED.value) \
+            and po.payment_milestones:
+        raise ValidationError(
+            "Payment terms are fixed once the order is approved — accounts pays "
+            "against them. Keep the current terms.")
+    term = await db.get(PaymentTerm, term_id)
+    if term is None or not term.is_active:
+        raise ValidationError("Payment terms: pick an active payment term from the list.")
+    po.payment_term_id = term.id
+    from app.shared.masters.defs import parse_schedule
+
+    parts, rows = [], []
+    for stage in PAYMENT_MILESTONE_META:
+        pct = _d(getattr(term, f"{stage['field']}_pct") or 0)
+        if pct <= 0:
+            continue
+        days = getattr(term, f"{stage['field']}_days") or 0
+        schedule = parse_schedule(term.delivery_schedule) \
+            if stage["field"] == "delivery" else []
+        if len(schedule) > 1:
+            # Equal instalments; the last takes the rounding so they add up to `pct`.
+            share = (pct / len(schedule)).quantize(Decimal("0.01"))
+            shares = [share] * (len(schedule) - 1) + [pct - share * (len(schedule) - 1)]
+            parts.append(f"{float(pct):g}% {stage['label'].lower()} in {len(schedule)} "
+                         f"instalments ({'/'.join(map(str, schedule))} days)")
+            for when, piece in zip(schedule, shares):
+                rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                               percent=piece, due_days=when))
+            continue
+        days = schedule[0] if schedule else days
+        parts.append(f"{float(pct):g}% {stage['label'].lower()}"
+                     + (f" ({days} days)" if days else ""))
+        rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                       percent=pct, due_days=days))
+    po.payment_milestones = rows
+    po.payment_terms = f"{term.name}: {', '.join(parts)}"
 
 
 def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:
@@ -653,7 +710,9 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
         vendor_gstin=vendor.gstin,
         created_by_id=user.id,
         created_by_name=user.full_name,
-        office_id=None,
+        # The raiser's office, as the direct-create path does. Left None, every PO
+        # read below ALL as "only my own" and a buyer could not open a colleague's PO.
+        office_id=getattr(user, "office_id", None),
         facility_id=None,
         facility_name=rfq.warehouse_name,
         project_id=rfq.project_id,
@@ -904,16 +963,41 @@ async def _release_po_claims(db: AsyncSession, po: PurchaseOrder) -> None:
                 po.po_no, len(req_items))
 
 
-async def get_po(db: AsyncSession, po_id: int, user=None) -> PurchaseOrder:
+async def _po_approver_condition(db: AsyncSession, user):
+    """POs this login is signing or has signed, whatever its scope rung says — the
+    same rule `_rfq_approver_condition` applies. The queue is the engine's."""
+    pending = await _pending_doc_ids(db, user, DocType.PO.value)
+    signed = (
+        select(WorkflowInstance.doc_id)
+        .join(WorkflowAction, WorkflowAction.instance_id == WorkflowInstance.id)
+        .where(WorkflowInstance.doc_type == DocType.PO.value,
+               WorkflowAction.actor_id == user.id)
+    )
+    return or_(PurchaseOrder.id.in_(pending) if pending else false(),
+               PurchaseOrder.id.in_(signed))
+
+
+async def _po_scope(db: AsyncSession, user, *, include_approver: bool = False):
+    condition = await scope_condition(
+        db, user,
+        owner_col=PurchaseOrder.created_by_id,
+        office_col=PurchaseOrder.office_id,
+        project_col=PurchaseOrder.project_id,
+    )
+    if include_approver:
+        condition = or_(condition, await _po_approver_condition(db, user))
+    return condition
+
+
+async def get_po(db: AsyncSession, po_id: int, user=None, *,
+                 include_approver: bool = False) -> PurchaseOrder:
     po = (await db.execute(select(PurchaseOrder).where(
             PurchaseOrder.id == po_id,
             # Same scope the list applies. A document hidden from the list must
-            # not be readable by putting its id in the URL.
-            await scope_condition(
-                db, user,
-                owner_col=PurchaseOrder.created_by_id,
-                office_col=PurchaseOrder.office_id,
-            ) if user is not None else true(),
+            # not be readable by putting its id in the URL. Approvers read (and
+            # sign) what is on their chain; edits keep the raiser's scope.
+            await _po_scope(db, user, include_approver=include_approver)
+            if user is not None else true(),
         ))).scalar_one_or_none()
     if not po:
         raise NotFoundError(f"PO {po_id} not found")
@@ -979,11 +1063,7 @@ async def list_pos(
 ) -> dict:
     stmt = select(PurchaseOrder)
     if user is not None:
-        stmt = stmt.where(await scope_condition(
-            db, user,
-            owner_col=PurchaseOrder.created_by_id,
-            office_col=PurchaseOrder.office_id,
-        ))
+        stmt = stmt.where(await _po_scope(db, user, include_approver=True))
     if search:
         search_term = f"%{search}%"
         stmt = stmt.where(
@@ -1025,11 +1105,7 @@ async def export_pos(
 
     stmt = select(PurchaseOrder)
     if user is not None:
-        stmt = stmt.where(await scope_condition(
-            db, user,
-            owner_col=PurchaseOrder.created_by_id,
-            office_col=PurchaseOrder.office_id,
-        ))
+        stmt = stmt.where(await _po_scope(db, user, include_approver=True))
     if search:
         search_term = f"%{search}%"
         stmt = stmt.where(
@@ -1693,7 +1769,7 @@ async def mark_vendor_notification_read(db: AsyncSession, vendor_id: int,
 
 async def po_comments(db: AsyncSession, po_id: int, user=None) -> list:
     """Discussion thread between the raiser and the approver."""
-    await get_po(db, po_id, user)
+    await get_po(db, po_id, user, include_approver=True)
     return list((await db.execute(
         select(POComment).where(POComment.po_id == po_id)
         .order_by(POComment.created_at.asc(), POComment.id.asc())
@@ -1702,7 +1778,7 @@ async def po_comments(db: AsyncSession, po_id: int, user=None) -> list:
 
 async def add_po_comment(db: AsyncSession, po_id: int, message: str, user) -> object:
     """Post a question or reply on a PO."""
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     clean = (message or "").strip()
     if not clean:
         raise ValidationError("Message cannot be empty")
@@ -1729,7 +1805,7 @@ async def update_po_approval_quantities(
     approval. An increase is refused — the approver can only trim a request,
     never inflate it.
     """
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     if po.status != POStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Only a PO awaiting approval can be edited (status {po.status})")
     actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
@@ -1808,7 +1884,7 @@ async def update_po_approval_quantities(
 
 async def po_revisions(db: AsyncSession, po_id: int, user=None) -> list:
     """Every version this order has been, newest first. Read-only, always."""
-    await get_po(db, po_id, user)
+    await get_po(db, po_id, user, include_approver=True)
     return list((await db.execute(
         select(PORevision).where(PORevision.po_id == po_id)
         .order_by(PORevision.revision_no.desc(), PORevision.id.desc())
@@ -1947,7 +2023,7 @@ async def _attach_pending_one(db: AsyncSession, doc_type: str, doc, user=None):
 
 
 async def get_po_detail(db: AsyncSession, po_id: int, user=None):
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     # A submitted despatch locks the PO before a GRN necessarily changes its status.
     po.amendment_allowed = (
         po.status not in _UNAMENDABLE
@@ -1981,7 +2057,7 @@ async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
 
 
 async def po_approval_trail(db: AsyncSession, po_id: int, user=None) -> dict:
-    po = await get_po(db, po_id, user)
+    po = await get_po(db, po_id, user, include_approver=True)
     return await _approval_trail(db, DocType.PO.value, po.id)
 
 
@@ -5542,15 +5618,21 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     if data.invoice_date and data.invoice_date > today:
         raise ValidationError(f"Invoice date {data.invoice_date} is in the future")
 
+    # REQ_111 — one PO line may be sent in several batches, one note line per batch.
+    # The ceiling is therefore checked on the SUM of this note's lines per PO line:
+    # two batches each under the remainder can still add up to more than is owed.
+    claimed: dict[int, Decimal] = {}
     for line in lines:
         po_line = po_items.get(line.po_item_id)
         if po_line is None:
             raise ValidationError(f"Line {line.po_item_id} is not on {po.po_no}")
         pending = _d(po_line.quantity) - already.get(line.po_item_id, Decimal(0))
-        if _d(line.despatched_qty) > pending:
+        claimed[line.po_item_id] = claimed.get(line.po_item_id, Decimal(0)) \
+            + _d(line.despatched_qty)
+        if claimed[line.po_item_id] > pending:
             raise ValidationError(
-                f"{po_line.item_code or po_line.item_name}: {line.despatched_qty} "
-                f"exceeds the {pending} still owed on {po.po_no}")
+                f"{po_line.item_code or po_line.item_name}: {claimed[line.po_item_id]} "
+                f"across its batches exceeds the {pending} still owed on {po.po_no}")
         if line.expiry_date and line.mfg_date and line.expiry_date <= line.mfg_date:
             raise ValidationError(
                 f"{po_line.item_code or po_line.item_name}: expiry must be after "
@@ -5672,6 +5754,20 @@ async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
         raise ValidationError(
             "Say how this consignment travels before despatching it: an e-way bill "
             "number, or a vehicle number, LR number or transporter name.")
+
+    # The invoice and the delivery challan must be ON FILE, not just quoted: accounts
+    # pays against the invoice and the gate checks the vehicle against the DC. They
+    # are filed per order (po_documents), so the order must hold at least one of each.
+    from app.modules.procurement.po_documents import list_po_documents
+    filed = {(a.doc_category or "").upper()
+             for a in await list_po_documents(db, note.po_id)}
+    missing = [label for code, label in (("INVOICE", "invoice"),
+                                         ("DC", "delivery challan (DC)"))
+               if code not in filed]
+    if missing:
+        raise ValidationError(
+            f"Upload the {' and the '.join(missing)} under Invoices & delivery "
+            "challans before submitting this dispatch note.")
 
     note.status = DespatchNoteStatus.SUBMITTED.value
     note.submitted_at = utcnow()

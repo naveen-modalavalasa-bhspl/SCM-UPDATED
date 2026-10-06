@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.inventory import availability
 from app.modules.inventory.models import NO_PROJECT, Reservation, Stock
-from app.shared.enums import PickStrategy, ReservationStatus
+from app.shared.enums import PickStrategy, RefType, ReservationStatus
 from app.shared.models.base import utcnow
 
 ZERO = Decimal("0")
@@ -52,13 +52,28 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
     if qty <= ZERO:
         raise ValidationError("Reservation quantity must be positive")
 
+    remaining, reserved_total = qty, ZERO
+    # The project's OWN held lots first: that is what they were set aside for, and
+    # drawing free stock instead would leave the hold sitting while the pool shrinks
+    # for everybody else. A hold is already in reserved_qty, so this moves the
+    # reservation from the hold onto the document and touches neither column.
+    if project_id and project_id != NO_PROJECT:
+        taken = await take_from_holds(
+            db, item_id=item_id, project_id=project_id, qty=remaining,
+            ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, ref_line_id=ref_line_id,
+            user=user, warehouse_ids=warehouse_ids, warehouse_types=warehouse_types)
+        remaining -= taken
+        reserved_total += taken
+        if remaining <= ZERO:
+            await db.flush()
+            return reserved_total, ZERO
+
     strategy = (availability.pick_strategy_for(item) if item is not None
                 else PickStrategy.FIFO.value)
     rows = await availability.candidate_stock(db, item_id, project_id,
                                               warehouse_types, strategy,
                                               warehouse_ids=warehouse_ids)
 
-    remaining, reserved_total = qty, ZERO
     for stock in rows:
         if remaining <= ZERO:
             break
@@ -81,6 +96,169 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
 
     await db.flush()
     return reserved_total, remaining
+
+
+# ---------------- project holds ----------------
+
+async def held_for(db: AsyncSession, project_id: int | None, item_ids,
+                   warehouse_ids=None) -> dict[tuple[int, int], Decimal]:
+    """What a project has set aside, per (item, warehouse). Read by every screen that
+    answers "how much can THIS project's document draw", which is free stock plus
+    this. Empty for no project: a hold is never anybody else's to draw."""
+    from app.modules.inventory.models import ProjectHold
+    from app.shared.enums import ProjectHoldStatus
+    item_ids = {int(i) for i in (item_ids or []) if i}
+    if not project_id or project_id == NO_PROJECT or not item_ids:
+        return {}
+    stmt = (
+        select(ProjectHold.item_id, ProjectHold.warehouse_id,
+               func.coalesce(func.sum(
+                   ProjectHold.quantity - func.coalesce(ProjectHold.release_qty, 0)), 0))
+        .where(ProjectHold.status == ProjectHoldStatus.ACTIVE.value,
+               ProjectHold.project_id == project_id,
+               ProjectHold.item_id.in_(item_ids))
+        .group_by(ProjectHold.item_id, ProjectHold.warehouse_id)
+    )
+    if warehouse_ids:
+        stmt = stmt.where(ProjectHold.warehouse_id.in_(set(warehouse_ids)))
+    return {(int(i), int(w)): _d(q) for i, w, q in (await db.execute(stmt)).all()}
+
+
+async def hold(db: AsyncSession, stock_id: int, qty, hold_id: int, hold_no: str,
+               user) -> Reservation:
+    """Set `qty` of one balance row aside for a project. available -> reserved."""
+    qty = _d(qty)
+    if qty <= ZERO:
+        raise ValidationError("Hold quantity must be positive")
+    stock = await db.get(Stock, stock_id, with_for_update=True)
+    if stock is None:
+        raise NotFoundError(f"Stock row {stock_id} not found")
+    if _d(stock.available_qty or 0) < qty:
+        raise ValidationError(
+            f"Only {_d(stock.available_qty or 0)} of {stock.item_code or stock.item_id} is "
+            f"free at {stock.bin_code or 'this location'}; the rest is already "
+            "reserved for a document or another project.")
+    stock.available_qty = _d(stock.available_qty or 0) - qty
+    stock.reserved_qty = _d(stock.reserved_qty or 0) + qty
+    res = Reservation(
+        stock_id=stock.id, item_id=stock.item_id, warehouse_id=stock.warehouse_id,
+        bin_id=stock.bin_id, batch_id=stock.batch_id, project_id=stock.project_id,
+        quantity=qty, ref_type=RefType.PROJECT_HOLD.value, ref_id=hold_id,
+        ref_no=hold_no, status=ReservationStatus.ACTIVE.value,
+        created_by_id=getattr(user, "id", None),
+        created_by_name=getattr(user, "full_name", None),
+    )
+    db.add(res)
+    await db.flush()
+    return res
+
+
+async def unhold(db: AsyncSession, hold_id: int, qty=None, user=None) -> Decimal:
+    """Give some or all of a hold back to the shared pool. reserved -> available.
+
+    A part release closes the hold's reservation and opens a new one for what stays
+    held, so `inv_reservations` keeps both the original and the remainder."""
+    rows = await _active(db, RefType.PROJECT_HOLD.value, hold_id, None)
+    want = None if qty is None else _d(qty)
+    returned = ZERO
+    for res in rows:
+        give = _d(res.quantity) if want is None else min(_d(res.quantity), want - returned)
+        if give <= ZERO:
+            break
+        stock = await db.get(Stock, res.stock_id, with_for_update=True)
+        if stock is not None:
+            stock.reserved_qty = _d(stock.reserved_qty or 0) - give
+            stock.available_qty = _d(stock.available_qty or 0) + give
+        res.status = ReservationStatus.RELEASED.value
+        res.released_at = utcnow()
+        keep = _d(res.quantity) - give
+        if keep > ZERO:
+            db.add(_copy(res, keep, user))
+        returned += give
+    await db.flush()
+    return returned
+
+
+def _copy(res: Reservation, qty: Decimal, user, **over) -> Reservation:
+    fields = dict(
+        stock_id=res.stock_id, item_id=res.item_id, warehouse_id=res.warehouse_id,
+        bin_id=res.bin_id, batch_id=res.batch_id, project_id=res.project_id,
+        quantity=qty, ref_type=res.ref_type, ref_id=res.ref_id, ref_no=res.ref_no,
+        ref_line_id=res.ref_line_id, status=ReservationStatus.ACTIVE.value,
+        created_by_id=getattr(user, "id", None),
+        created_by_name=getattr(user, "full_name", None),
+    )
+    fields.update(over)
+    return Reservation(**fields)
+
+
+async def take_from_holds(db: AsyncSession, *, item_id: int, project_id: int, qty,
+                          ref_type: str | None, ref_id: int | None, ref_no: str | None,
+                          ref_line_id: int | None, user,
+                          warehouse_ids: list[int] | None = None,
+                          warehouse_types: list[str] | None = None,
+                          bin_id: int | None = None,
+                          batch_id: int | None = None) -> Decimal:
+    """Draw up to `qty` of a project's held stock for that project's own document.
+
+    With a `ref_type` the reservation MOVES from the hold onto the document — neither
+    balance column changes, the units were reserved and stay reserved. With
+    `ref_type=None` (a manual issue about to post, which takes from `available_qty`)
+    the units are handed back to available for the posting to take. Either way the
+    hold's `quantity` goes down, and the hold reaches USED at zero."""
+    from app.modules.inventory.models import ProjectHold
+    from app.shared.enums import ProjectHoldStatus
+    want = _d(qty)
+    if want <= ZERO or not project_id:
+        return ZERO
+    stmt = select(ProjectHold).where(
+        ProjectHold.status == ProjectHoldStatus.ACTIVE.value,
+        ProjectHold.project_id == project_id,
+        ProjectHold.item_id == item_id,
+        ProjectHold.quantity > 0,
+    )
+    if warehouse_ids:
+        stmt = stmt.where(ProjectHold.warehouse_id.in_(warehouse_ids))
+    elif warehouse_types:
+        from app.shared.models.warehouse import Warehouse
+        stmt = stmt.where(ProjectHold.warehouse_id.in_(
+            select(Warehouse.id).where(Warehouse.warehouse_type.in_(warehouse_types))))
+    if bin_id is not None:
+        stmt = stmt.where(ProjectHold.bin_id == bin_id)
+    if batch_id is not None:
+        stmt = stmt.where(ProjectHold.batch_id == batch_id)
+    taken = ZERO
+    holds = (await db.execute(stmt.order_by(ProjectHold.id).with_for_update())).scalars().all()
+    for ph in holds:
+        if taken >= want:
+            break
+        # A quantity being released by a movement order is not this project's to draw.
+        spare = _d(ph.quantity) - _d(ph.release_qty or 0)
+        for res in await _active(db, RefType.PROJECT_HOLD.value, ph.id, None):
+            if taken >= want or spare <= ZERO:
+                break
+            give = min(_d(res.quantity), want - taken, spare)
+            spare -= give
+            res.status = ReservationStatus.CONSUMED.value
+            res.released_at = utcnow()
+            keep = _d(res.quantity) - give
+            if keep > ZERO:
+                db.add(_copy(res, keep, user))
+            if ref_type:
+                db.add(_copy(res, give, user, ref_type=ref_type, ref_id=ref_id,
+                             ref_no=ref_no, ref_line_id=ref_line_id))
+            else:
+                stock = await db.get(Stock, res.stock_id, with_for_update=True)
+                if stock is not None:
+                    stock.reserved_qty = _d(stock.reserved_qty or 0) - give
+                    stock.available_qty = _d(stock.available_qty or 0) + give
+            ph.quantity = _d(ph.quantity) - give
+            taken += give
+        if _d(ph.quantity) <= ZERO:
+            ph.quantity = ZERO
+            ph.status = ProjectHoldStatus.USED.value
+    await db.flush()
+    return taken
 
 
 async def _active(db: AsyncSession, ref_type: str, ref_id: int,

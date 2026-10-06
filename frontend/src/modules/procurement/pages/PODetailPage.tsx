@@ -11,6 +11,7 @@ import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
 import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
+import { POPaymentsPanel } from "../components/POPaymentsPanel";
 import { POApprovalChat } from "../components/POApprovalChat";
 import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
@@ -201,7 +202,7 @@ export function PODetailPage() {
       setQtyTouched(false);
       refresh();
     },
-    onError: (e: any) => toast.error(e?.message ?? "Could not save quantities"),
+    onError: (e: any) => toast.error(e?.message ?? "Quantities not saved. Check the numbers and try again."),
   });
 
   if (po.isLoading) return <p className="p-6 text-sm text-muted">Loading purchase order…</p>;
@@ -566,6 +567,8 @@ export function PODetailPage() {
           </div>
         </div>
       </div>
+
+      {!isDraft && <POPaymentsPanel poId={poId} />}
 
       {isDraft && (
         <Can do="po.edit">

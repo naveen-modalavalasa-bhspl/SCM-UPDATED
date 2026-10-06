@@ -50,7 +50,10 @@ export type PickingStatus =
 export type IssueStatus =
   | "DRAFT" | "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "ISSUED"
   | "DISPATCHED" | "ACKNOWLEDGED" | "PARTIALLY_RETURNED" | "RETURNED"
-  | "CANCELLED";
+  | "CANCELLED"
+  // A parent broken into floor issues: SPLIT while any is open, CLOSED once all have
+  // posted. Rolled up by the server — never posted, edited or cancelled itself.
+  | "SPLIT" | "CLOSED";
 
 // REJECTED was missing. The backend has always been able to set it (a release turned
 // down on Approvals lands there), so the queue could hold a row this union said was
@@ -1112,12 +1115,16 @@ export interface Issue {
   parent_issue_no?: string | null;
   floor_location_id?: number | null;
   floor_location_name?: string | null;
+  /** Who holds that floor — the in-charge(s) a split piece was handed to. */
+  floor_in_charge_names?: string[];
   status: IssueStatus;
   total_items: number;
   total_qty: number;
   total_value: number;
   is_stock_posted: boolean;
   posted_at?: string | null;
+  /** Who the document is with right now — raiser, approver, or the issuer. */
+  currently_with?: string | null;
   current_approver_name?: string | null;
   approved_by_name?: string | null;
   approved_at?: string | null;
@@ -1140,12 +1147,26 @@ export interface Issue {
    * one named in the approval chain may act. Gate the Approve button on this.
    */
   can_approve?: boolean;
+  /** Only the person an approved issue is with (or someone they report to) may pick
+   *  its serials and issue it from stock. The server enforces the same rule. */
+  can_issue_from_stock?: boolean;
+  /** Who submitted it for approval; shown until stock is posted. */
+  submitted_by_name?: string | null;
   /**
    * False until the indent raiser has confirmed this issue's quantities in My
    * deliveries. Per ISSUE, not per indent: a 10-unit indent served by a 4-unit issue
    * unlocks once those 4 are confirmed. Gate the Acknowledge button on this.
    */
   can_acknowledge?: boolean;
+  /** On a split parent: the floor issues carrying its goods. */
+  child_issues?: {
+    id: number;
+    issue_no: string;
+    status: IssueStatus;
+    floor_location_name?: string | null;
+    is_stock_posted: boolean;
+    total_qty: number;
+  }[];
 }
 
 /**
@@ -2825,4 +2846,98 @@ export interface WDemandPoolResponse {
   page: number;
   size: number;
   total: number;
+}
+
+// --- Project lots (Stock Segregation > Project Lots) -------------------------
+
+export interface ProjectLotHold {
+  id: number;
+  hold_no: string;
+  project_id: number;
+  project_name?: string | null;
+  quantity: number;
+  serial_count: number;
+}
+
+export interface ProjectLot {
+  stock_id: number;
+  /** Put-away lot numbers that landed on this row — usually one, sometimes several. */
+  lot_nos: string[];
+  /** Warehouse / floor / lane / rack / bin. */
+  location_path?: string | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  received_for_project?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  held_qty: number;
+  holds: ProjectLotHold[];
+  is_unit_tracked: boolean;
+}
+
+export interface ProjectHold {
+  id: number;
+  hold_no: string;
+  stock_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  bin_id?: number | null;
+  bin_code?: string | null;
+  batch_id?: number | null;
+  batch_no?: string | null;
+  project_id: number;
+  project_name?: string | null;
+  held_qty: number;
+  quantity: number;
+  serial_numbers?: string[] | null;
+  reason?: string | null;
+  status: "ACTIVE" | "RELEASED" | "USED";
+  created_by_name?: string | null;
+  created_at?: string | null;
+  released_by_name?: string | null;
+  released_at?: string | null;
+  release_reason?: string | null;
+  released_for_project_name?: string | null;
+  /** A release in flight — the Stock Movement Order moving it off the lot. */
+  release_order_no?: string | null;
+  release_qty?: number | null;
+  release_destination?: string | null;
+  pending_lend_project_name?: string | null;
+  is_unit_tracked?: boolean;
+}
+
+export interface ProjectHoldReleaseResult {
+  hold: ProjectHold;
+  order_no?: string | null;
+  order_status?: string | null;
+}
+
+export interface ProjectHoldCreate {
+  stock_id: number;
+  project_id: number;
+  quantity: number;
+  serial_numbers: string[];
+  reason: string;
+}
+
+export interface ProjectHoldRelease {
+  quantity?: number | null;
+  serial_numbers?: string[];
+  reason: string;
+  for_project_id?: number | null;
+  /** Where the released stock is moved to: a release is a Stock Movement Order. */
+  destination_bin_id: number;
 }

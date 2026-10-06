@@ -227,6 +227,59 @@ class DocType(str, Enum):
     # CPO and the SCM Head see the whole month's demand as one document instead of
     # forty. Approved once; the RFQs that follow point back at it.
     CONSOLIDATION = "CONSOLIDATION"
+    # Accounts. A payment against one milestone of a PO's payment terms, recorded by
+    # the accounts desk and signed on its own ladder before the milestone reads paid.
+    VENDOR_PAYMENT = "VENDOR_PAYMENT"
+
+
+# --------------------------------------------------------------------------- #
+#  Payment terms and vendor payments (2026-10-06)
+# --------------------------------------------------------------------------- #
+class PaymentMilestoneStage(str, Enum):
+    """The four points at which a PO's value falls due, in the order they happen."""
+    ADVANCE = "ADVANCE"
+    AGAINST_DELIVERY = "AGAINST_DELIVERY"
+    POST_INSTALLATION = "POST_INSTALLATION"
+    POST_WARRANTY = "POST_WARRANTY"
+
+
+# Served to every screen (the master form, the PO, the accounts desk), so a stage reads
+# the same everywhere. `field` is the column prefix on mst_payment_terms.
+PAYMENT_MILESTONE_META = [
+    {"value": PaymentMilestoneStage.ADVANCE.value, "field": "advance",
+     "label": "Advance", "trigger": "On PO approval"},
+    {"value": PaymentMilestoneStage.AGAINST_DELIVERY.value, "field": "delivery",
+     "label": "Against delivery", "trigger": "On receipt of goods"},
+    {"value": PaymentMilestoneStage.POST_INSTALLATION.value, "field": "installation",
+     "label": "Post commissioning / installation",
+     "trigger": "After commissioning or installation"},
+    {"value": PaymentMilestoneStage.POST_WARRANTY.value, "field": "warranty",
+     "label": "Post support / warranty period",
+     "trigger": "After the support or warranty period"},
+]
+
+
+class VendorPaymentStatus(str, Enum):
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    PAID = "PAID"           # approved: the money went out and the milestone counts it
+    REJECTED = "REJECTED"
+
+
+class PaymentMode(str, Enum):
+    NEFT = "NEFT"
+    RTGS = "RTGS"
+    IMPS = "IMPS"
+    UPI = "UPI"
+    CHEQUE = "CHEQUE"
+    DD = "DD"
+    CASH = "CASH"
+
+
+# What a vendor may file against a PO from the portal (sys_attachments.doc_category).
+# A carrier files only the INVOICE, against its shipment.
+class VendorDocCategory(str, Enum):
+    INVOICE = "INVOICE"
+    DC = "DC"               # delivery challan
 
 
 class InstanceStatus(str, Enum):
@@ -314,6 +367,8 @@ class RefType(str, Enum):
     CYCLE_COUNT = "CYCLE_COUNT"
     # Not a movement: the hold recorded on inv_reservations.
     RESERVATION = "RESERVATION"
+    # Not a movement: a lot set aside for one project (stk_project_holds).
+    PROJECT_HOLD = "PROJECT_HOLD"
 
 
 class Priority(str, Enum):
@@ -365,6 +420,15 @@ class WarehouseType(str, Enum):
 
 
 # ---- Inventory: reservations and material requests ----
+
+class ProjectHoldStatus(str, Enum):
+    """stk_project_holds.status. ACTIVE holds stock for the project; RELEASED gave it
+    back to the shared pool (by hand, or lent to another project); USED means the
+    project's own indent or issue drew it. Rows are kept, never deleted."""
+    ACTIVE = "ACTIVE"
+    RELEASED = "RELEASED"
+    USED = "USED"
+
 
 class ReservationStatus(str, Enum):
     """inv_reservations.status. Released and consumed rows are kept, never deleted —

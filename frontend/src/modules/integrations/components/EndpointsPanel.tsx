@@ -228,7 +228,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
       writeToClipboard(text).then((ok) => toast.success(
         ok ? done : `${done} They are in the box below — select it and copy.`));
     },
-    onError: () => toast.error("Those APIs could not be copied."),
+    onError: () => toast.error("Could not copy the selected APIs. Try again."),
   });
 
   const importSet = useMutation({
@@ -303,7 +303,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
       queryClient.invalidateQueries({ queryKey: ["apis"] });
       toast.success("Endpoint switched back on — it is being served again");
     },
-    onError: () => toast.error("That API could not be switched back on."),
+    onError: () => toast.error("Could not turn this API on. Try again."),
   });
 
   /* The picker is served off a schema cache the server builds once and keeps. A
@@ -319,7 +319,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
       await queryClient.invalidateQueries({ queryKey: ["apis", "columns"] });
       toast.success("Schema re-read — new tables and columns are pickable now");
     },
-    onError: () => toast.error("The schema could not be re-read."),
+    onError: () => toast.error("Could not refresh this API's details. Try again."),
   });
 
   const close = () => {
@@ -389,7 +389,7 @@ export function EndpointsPanel({ clientCode }: { clientCode: string }) {
       toast.success("Copied to clipboard");
       return;
     }
-    toast.error("This browser would not copy. Select the text and press Ctrl+C.");
+    toast.error("Copy did not work. Select the text with your mouse and press Ctrl+C.");
   };
 
   const grid: Column<ApiEndpoint>[] = [

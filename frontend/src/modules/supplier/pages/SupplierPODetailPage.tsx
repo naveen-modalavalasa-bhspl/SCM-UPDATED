@@ -15,6 +15,8 @@ import type {
 import { revisionLines } from "@/modules/procurement/types";
 import { formatPONo } from "@/shared/format";
 import { vendorPoLabel } from "../status";
+import { supplierPoDocs } from "@/modules/accounts/api";
+import { DocumentFiles } from "@/modules/accounts/components/DocumentFiles";
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -61,6 +63,15 @@ export function SupplierPODetailPage() {
     queryFn: () => supplierApi.revisions(poId),
     enabled: !!po?.revision_no,
   });
+
+  // Same key as the DocumentFiles card below, so an upload there updates this too.
+  const poDocs = useQuery({
+    queryKey: ["supplier-po-docs", poId],
+    queryFn: () => supplierPoDocs(poId).list(),
+    enabled: !!poId,
+  });
+  const filedCategories = new Set(
+    (poDocs.data ?? []).map((d) => (d.doc_category ?? "").toUpperCase()));
 
   const [header, setHeader] = useState<Omit<DespatchNoteWrite, "lines">>({
     dn_date: today(),
@@ -179,6 +190,29 @@ export function SupplierPODetailPage() {
   const setLine = (index: number, patch: Partial<LineDraft>) =>
     setLines((current) => current.map((line, i) => (i === index ? { ...line, ...patch } : line)));
 
+  // REQ_111 — one item sent in several batches is one note line per batch. A new batch
+  // row lands after the item's last row, empty, so the vendor splits the quantity.
+  const addBatch = (index: number) =>
+    setLines((current) => {
+      const id = current[index].po_item_id;
+      let last = index;
+      while (last + 1 < current.length && current[last + 1].po_item_id === id) last += 1;
+      const row = { ...current[index], despatched_qty: 0, batch_no: "",
+                    mfg_date: null, expiry_date: null, remarks: null };
+      return [...current.slice(0, last + 1), row, ...current.slice(last + 1)];
+    });
+  const removeLine = (index: number) =>
+    setLines((current) => current.filter((_, i) => i !== index));
+
+  // What each item's batches add up to, against what is still owed. The server
+  // refuses the same thing; this says it before the press.
+  const sentByItem = new Map<number, number>();
+  lines.forEach((l) => sentByItem.set(l.po_item_id,
+    (sentByItem.get(l.po_item_id) ?? 0) + num(l.despatched_qty)));
+  const overSent = lines.filter((l, i) =>
+    lines.findIndex((x) => x.po_item_id === l.po_item_id) === i
+    && (sentByItem.get(l.po_item_id) ?? 0) > l.pending_qty);
+
   if (isLoading) return <p className="p-6 text-sm text-muted">Loading order…</p>;
   if (error) return <ErrorBanner error={error} />;
   if (!po) return <p className="p-6 text-muted">Order not found.</p>;
@@ -212,6 +246,9 @@ export function SupplierPODetailPage() {
     !header.invoice_no?.trim() ? "invoice number" : null,
     !hasTransportRef ? "an e-way bill, vehicle, LR or transporter" : null,
     ewayMalformed ? "a valid 12-digit e-way bill number (or none at all)" : null,
+    // Same rule as vendor_submit_despatch_note: both papers on file for the order.
+    !filedCategories.has("INVOICE") ? "invoice file (upload it under Invoices & delivery challans)" : null,
+    !filedCategories.has("DC") ? "delivery challan file" : null,
   ].filter(Boolean) as string[];
 
   // An order is an offer to buy. Until it is answered nothing can be despatched
@@ -399,6 +436,17 @@ export function SupplierPODetailPage() {
         </p>
       )}
 
+      {/* The supplier's paperwork for this order: one invoice and one delivery challan
+          per delivery. Accounts pays against the invoices filed here. */}
+      <Card className="mb-5 space-y-3 p-4">
+        <div>
+          <h2 className="text-base font-semibold text-ink">Invoices & delivery challans</h2>
+          <p className="text-sm text-muted">Upload the invoice and the DC for each delivery. PDF or a clear photo.</p>
+        </div>
+        <DocumentFiles queryKey={["supplier-po-docs", po.id]} endpoints={supplierPoDocs(po.id)}
+          categories={["INVOICE", "DC"]} emptyText="Nothing uploaded yet." />
+      </Card>
+
       {(po.payment_terms || po.delivery_terms || po.material_terms || po.logistics_terms) && (
         <Accordion variant="splitted" className="mb-5 px-0">
           <AccordionItem key="terms" aria-label="Terms and Conditions" title={<h2 className="text-base font-semibold text-ink">Terms and Conditions</h2>}>
@@ -510,7 +558,8 @@ export function SupplierPODetailPage() {
               {editing ? `Dispatch note ${editing.dn_no}` : "New dispatch note"}
             </h2>
             <p className="text-xs text-muted">
-              The invoice number and e-way bill are required before you can submit.
+              The invoice number, how it travels, and the uploaded invoice and delivery
+              challan are required before you can submit.
             </p>
           </div>
 
@@ -598,13 +647,29 @@ export function SupplierPODetailPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {lines.map((line, index) => (
-                  <tr key={line.po_item_id}>
+                {lines.map((line, index) => {
+                  const extraBatch = index > 0 && lines[index - 1].po_item_id === line.po_item_id;
+                  return (
+                  <tr key={index} className={extraBatch ? "border-t-0" : ""}>
                     <td className="p-3">
-                      <strong className="text-ink">{line.item_name ?? "—"}</strong>
-                      <p className="font-mono text-xs text-muted">
-                        {line.item_code} · up to {line.pending_qty} {line.uom_code ?? ""}
-                      </p>
+                      {extraBatch ? (
+                        <div className="flex items-center gap-2 pl-3 text-xs text-muted">
+                          ↳ another batch
+                          <Button variant="ghost" onClick={() => removeLine(index)}>
+                            <X className="h-3.5 w-3.5" /> Remove
+                          </Button>
+                        </div>
+                      ) : (
+                        <>
+                          <strong className="text-ink">{line.item_name ?? "—"}</strong>
+                          <p className="font-mono text-xs text-muted">
+                            {line.item_code} · up to {line.pending_qty} {line.uom_code ?? ""}
+                          </p>
+                          <Button variant="ghost" onClick={() => addBatch(index)}>
+                            + Add batch
+                          </Button>
+                        </>
+                      )}
                     </td>
                     <td className="p-2 text-right">
                       <Input
@@ -641,10 +706,19 @@ export function SupplierPODetailPage() {
                       />
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
+
+          {overSent.length > 0 && (
+            <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
+              {overSent.map((l) =>
+                `${l.item_code ?? l.item_name}: batches add up to ${sentByItem.get(l.po_item_id)}, `
+                + `only ${l.pending_qty} is still owed`).join(". ")}
+            </p>
+          )}
 
           {missingPapers.length > 0 && (
             <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
@@ -661,7 +735,7 @@ export function SupplierPODetailPage() {
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
             <Button
-              disabled={busy || missingPapers.length > 0}
+              disabled={busy || missingPapers.length > 0 || overSent.length > 0}
               onClick={() => submit.mutate()}
             >
               <Send className="h-4 w-4" /> {submit.isPending ? "Submitting…" : "Submit dispatch"}

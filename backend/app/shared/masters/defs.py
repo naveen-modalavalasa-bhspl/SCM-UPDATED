@@ -21,7 +21,7 @@ from app.shared.enums import (
     ItemScope,
     AuditAction, CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AttributeDataType, CategoryTagType, UomClass,
-    WarehouseType,
+    WarehouseType, PAYMENT_MILESTONE_META,
 )
 from app.shared.masters.crud import Lookup, MasterDef
 from app.platform.rbac.models import Role
@@ -30,8 +30,8 @@ from app.shared.models.master import (
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
-    Packaging, Project, Spec, Uom, UomConversion, Vendor, VendorItem, UomClassRow, VendorCategory,
-    VendorCategoryMember,
+    Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    UomClassRow, VendorCategory, VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
 
@@ -127,6 +127,21 @@ async def peek_item_serial(db: AsyncSession, prefix: str) -> int:
         select(Item.serial_no).where(_series_codes(prefix))
     )).scalars().all()
     return max([r for r in rows if r] or [0]) + 1
+
+
+async def sibling_item(db: AsyncSession, prefix: str, category_id: int,
+                       general_name_id: int | None) -> Item | None:
+    """An item already coded for this category + general name (2026-10-06).
+
+    Brand variants of one product share ONE code — 070001-001 is the 300 Ltr
+    Refrigerator whether Elanpro or Western makes it — so a new brand of an existing
+    general name reuses that code and serial instead of taking the next one."""
+    if not general_name_id:
+        return None
+    return (await db.execute(
+        select(Item).where(_series_codes(prefix), Item.category_id == category_id,
+                           Item.general_name_id == general_name_id)
+        .order_by(Item.id).limit(1))).scalars().first()
 
 
 class ItemIn(BaseModel):
@@ -317,8 +332,20 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     # manufacturer left the code keep their longer shape for the same reason.
     if item.code is None:
         prefix = build_item_prefix(category.path)
-        item.serial_no = await next_item_serial(db, prefix)
-        item.code = build_item_code(category.path, item.serial_no)
+        await next_item_serial(db, prefix)            # takes the series lock first
+        sibling = await sibling_item(db, prefix, category.id, general.id)
+        if sibling is not None:
+            clash = await db.scalar(select(Item.id).where(
+                Item.code == sibling.code, Item.brand_id == brand.id,
+                Item.manufacturer_id == manufacturer.id))
+            if clash is not None:
+                raise ValidationError(
+                    f"“{general.name}” by {brand.name} / {manufacturer.name} already "
+                    f"exists as {sibling.code}. Edit that item instead.")
+            item.serial_no, item.code = sibling.serial_no, sibling.code
+        else:
+            item.serial_no = await next_item_serial(db, prefix)
+            item.code = build_item_code(category.path, item.serial_no)
     item.uom_code = uom.code
     item.hsn_code = hsn.code
     item.category_name = category.name
@@ -1010,6 +1037,73 @@ def vendor_category_out(row) -> dict:
     return {"id": row.id, "code": row.code, "name": row.name,
             "description": row.description, "is_active": row.is_active,
             "vendor_ids": getattr(row, "_vendor_ids", [])}
+
+
+def parse_schedule(value: str | None) -> list[int]:
+    """"30, 60/90" -> [30, 60, 90]: the days after delivery each instalment is due."""
+    parts = [p for p in re.split(r"[\s,/;]+", (value or "").strip()) if p]
+    if not parts:
+        return []
+    if len(parts) > 12 or not all(p.isdigit() and int(p) <= 3650 for p in parts):
+        raise PydanticCustomError(
+            "payment_schedule",
+            "Delivery instalments: list the days after delivery, e.g. 30,60,90 "
+            "(at most 12, each 0–3650).")
+    return sorted(int(p) for p in parts)
+
+
+class PaymentTermIn(BaseModel):
+    """A payment term: the four milestones' share of the order value, and how many days
+    after its trigger each one is payable. The shares must add up to 100."""
+    code: str = Field(min_length=1, max_length=20)
+    name: str = Field(min_length=1, max_length=150)
+    description: str | None = Field(None, max_length=300)
+    advance_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
+    advance_days: int = Field(default=0, ge=0, le=3650)
+    delivery_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
+    delivery_days: int = Field(default=0, ge=0, le=3650)
+    # Equal instalments of the delivery share, e.g. "30,60,90" days after delivery.
+    delivery_schedule: str | None = Field(None, max_length=60)
+    installation_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
+    installation_days: int = Field(default=0, ge=0, le=3650)
+    warranty_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
+    warranty_days: int = Field(default=0, ge=0, le=3650)
+    is_active: bool = True
+
+    @field_validator("delivery_schedule")
+    @classmethod
+    def _schedule(cls, value: str | None) -> str | None:
+        days = parse_schedule(value)
+        return ",".join(str(d) for d in days) or None
+
+    @model_validator(mode="after")
+    def _adds_to_hundred(self):
+        total = (self.advance_pct + self.delivery_pct + self.installation_pct
+                 + self.warranty_pct)
+        if total != 100:
+            raise PydanticCustomError(
+                "payment_split",
+                "Advance + delivery + installation + warranty must add up to 100% "
+                "(they add up to {total}%).", {"total": f"{total:g}"})
+        return self
+
+
+def payment_term_out(row) -> dict:
+    out = {"id": row.id, "code": row.code, "name": row.name,
+           "description": row.description, "is_active": row.is_active}
+    for stage in PAYMENT_MILESTONE_META:
+        f = stage["field"]
+        out[f"{f}_pct"] = float(getattr(row, f"{f}_pct") or 0)
+        out[f"{f}_days"] = getattr(row, f"{f}_days") or 0
+    out["delivery_schedule"] = row.delivery_schedule
+    return out
+
+
+async def apply_payment_term(db: AsyncSession, row, data: PaymentTermIn) -> None:
+    await require_unique(db, PaymentTerm, "name", data.name, row, "A payment term named")
+    await require_unique(db, PaymentTerm, "code", data.code, row, "Payment term code")
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
 
 
 async def prepare_vendor_categories(db: AsyncSession, rows: list) -> None:
@@ -2372,7 +2466,8 @@ ITEM_LOOKUPS = (
     Lookup("manufacturer_id", Manufacturer, "Manufacturer"),
     Lookup("item_class_id", ItemClass, "Item class"),
     Lookup("item_sub_class_id", ItemSubClass, "Item sub class"),
-    Lookup("owner_department_id", HcmDepartment, "Ownership department"),
+    Lookup("owner_department_id", HcmDepartment, "Ownership department",
+           same_name_is_one=True),
     Lookup("uom_id", Uom, "Unit of measure"),
     # An HSN row has no `name` — it is a code and a description, and the code is
     # what is written on an invoice, so that is what the sheet asks for and matches
@@ -2579,6 +2674,13 @@ MASTERS: list[MasterDef] = [
               search_cols=("component_name", "component_code"), order_col="line_no",
               apply=apply_item_component, filters=("item_id",),
               default_active_only=True),
+
+    # ---- payment terms (2026-10-06) ----
+    MasterDef(path="payment-terms", name="Payment term", model=PaymentTerm,
+              schema=PaymentTermIn, manage_perm=perms.MASTER_PAYMENT_TERM_MANAGE,
+              serialize=payment_term_out, search_cols=("name", "code"),
+              apply=apply_payment_term,
+              usage=(("Purchase orders", "pro_purchase_orders", "payment_term_id"),)),
 
     # ---- tax classification ----
     MasterDef(path="hsn-codes", name="HSN code", model=HsnCode, schema=HsnIn,

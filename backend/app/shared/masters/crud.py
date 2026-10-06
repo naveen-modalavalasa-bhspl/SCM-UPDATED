@@ -79,6 +79,11 @@ class Lookup:
     # review and then fail at Save. `where_hint` is what the row is told instead.
     where: dict[str, Any] | None = None
     where_hint: str = ""
+    # Rows sharing one name are ONE choice, not an ambiguity. HCM sends a separate
+    # department row per office — 503 of them called "104" — and the Item form already
+    # offers each name once (`router._ownership_department_options`); the import picks
+    # the same row that form does: an active row with a code first, then the lowest id.
+    same_name_is_one: bool = False
 
 
 @dataclass

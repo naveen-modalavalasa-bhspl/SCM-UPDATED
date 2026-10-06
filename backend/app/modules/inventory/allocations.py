@@ -222,6 +222,24 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             if entry is not None:
                 entry["available_qty"] = max(entry["available_qty"] - qty, ZERO)
 
+        # Lots set aside for THIS line's project are free to it, and to nobody else.
+        # Added after the netting: a pledge is against the shared pool, never a hold.
+        held = await allocation.held_for(
+            db, line.get("project_id"), {line["item_id"]}, warehouse_ids)
+        for (_item, warehouse_id), qty in held.items():
+            entry = by_warehouse.get(warehouse_id)
+            if entry is None:
+                warehouse = await db.get(Warehouse, warehouse_id)
+                if warehouse is None or (warehouse_types
+                                         and warehouse.warehouse_type not in warehouse_types):
+                    continue
+                entry = by_warehouse.setdefault(warehouse_id, {
+                    "warehouse_id": warehouse_id, "warehouse_name": warehouse.name,
+                    "warehouse_type": warehouse.warehouse_type, "available_qty": ZERO,
+                })
+            entry["available_qty"] += qty
+            entry["project_held_qty"] = qty
+
         out.append({
             **line,
             "available_total": sum(
@@ -421,8 +439,20 @@ async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
                 for item_id, warehouse_id, qty in (await db.execute(stmt)).all()}
     pledged = await pledged_by_point(
         db, item_ids, warehouse_ids, exclude_allocation_id=exclude_allocation_id)
-    return {pair: max(on_shelf.get(pair, ZERO) - pledged.get(pair, ZERO), ZERO)
+    free = {pair: max(on_shelf.get(pair, ZERO) - pledged.get(pair, ZERO), ZERO)
             for pair in pairs}
+    # Each line's own project's held lots. One allocation serves one indent, so its
+    # lines share a project; grouped anyway rather than assumed.
+    by_project: dict[int, set[int]] = {}
+    for line in lines:
+        if line.warehouse_id and getattr(line, "project_id", None):
+            by_project.setdefault(int(line.project_id), set()).add(int(line.item_id))
+    for project_id, project_items in by_project.items():
+        for pair, qty in (await allocation.held_for(
+                db, project_id, project_items, warehouse_ids)).items():
+            if pair in free:
+                free[pair] += qty
+    return free
 
 
 async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
@@ -475,6 +505,12 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
             if item_id in tier_free:
                 tier_free[item_id] = max(tier_free[item_id] - qty, ZERO)
 
+    # One indent line served from two points is two rows, and the desk writes the
+    # whole request on the FIRST of them (10 + 0), so a per-row cap of
+    # min(requested, free) read the second row as "requested 0" and capped it at 0
+    # while 41 sat free there. The request is the indent LINE's, shared by its rows.
+    asked = _requested_by_indent_line(lines)
+
     out = []
     for line in lines:
         pair = (line.item_id, line.warehouse_id)
@@ -503,15 +539,32 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
             "warehouse_id": line.warehouse_id,
             "warehouse_name": line.warehouse_name,
             "requested_qty": float(_d(line.requested_qty)),
+            "line_requested_qty": float(asked[_indent_line_key(line)]),
             "quantity": float(_d(line.quantity)),
             "on_shelf": float(on_shelf),
             "pledged_elsewhere": float(max(on_shelf - free, ZERO)),
             "free": float(free + already_held),
             # Never more than was asked for: an approver revises downward, or back up
             # to the request — raising it above is a new requirement, not an approval.
-            "max_allowed": float(min(_d(line.requested_qty), free + already_held)),
+            # The indent LINE's request; the screen nets off the line's other rows.
+            "max_allowed": float(min(asked[_indent_line_key(line)], free + already_held)),
         })
     return out
+
+
+def _indent_line_key(line) -> tuple:
+    """Rows of one allocation that serve the same indent line share one request."""
+    return ("line", line.indent_item_id) if line.indent_item_id else ("row", line.id)
+
+
+def _requested_by_indent_line(lines) -> dict[tuple, Decimal]:
+    """What each indent line asked for, summed over its rows — the desk DISTRIBUTES
+    the request (10 on the first point, 0 on the second), never repeats it."""
+    asked: dict[tuple, Decimal] = {}
+    for line in lines:
+        key = _indent_line_key(line)
+        asked[key] = asked.get(key, ZERO) + _d(line.requested_qty)
+    return asked
 
 
 async def revise(db: AsyncSession, alloc: Allocation,
@@ -525,21 +578,30 @@ async def revise(db: AsyncSession, alloc: Allocation,
     if not revisions:
         return []
     by_id = {int(r["id"]): _d(r["quantity"]) for r in revisions}
-    lines = (await db.execute(
-        select(AllocationItem).where(AllocationItem.allocation_id == alloc.id,
-                                     AllocationItem.id.in_(by_id))
+    # Every row, not only the revised ones: the cap is per indent LINE, and a line
+    # served from two points is two rows sharing one request.
+    every = (await db.execute(
+        select(AllocationItem).where(AllocationItem.allocation_id == alloc.id)
     )).scalars().all()
+    lines = [line for line in every if line.id in by_id]
     missing = by_id.keys() - {line.id for line in lines}
     if missing:
         raise ValidationError(
             f"Line {sorted(missing)[0]} does not belong to {alloc.allocation_no}")
 
+    asked = _requested_by_indent_line(every)
+    giving: dict[tuple, Decimal] = {}
+    for row in every:
+        key = _indent_line_key(row)
+        giving[key] = giving.get(key, ZERO) + by_id.get(row.id, _d(row.quantity))
+    for line in lines:
+        key = _indent_line_key(line)
+        if giving[key] > asked[key]:
+            raise ValidationError(
+                f"{line.item_name or line.item_id}: cannot give {giving[key]} in all — "
+                f"only {asked[key]} was requested.")
     for line in lines:
         wanted = by_id[line.id]
-        if wanted > _d(line.requested_qty):
-            raise ValidationError(
-                f"{line.item_name or line.item_id}: cannot give {wanted} — only "
-                f"{_d(line.requested_qty)} was requested.")
         if wanted > ZERO and not line.warehouse_id:
             raise ValidationError(
                 f"{line.item_name or line.item_id}: no warehouse on this line, so "
@@ -670,6 +732,9 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
             pledged = await pledged_by_point(
                 db, {d["item_id"]}, {d["warehouse_id"]})
             free = on_shelf - pledged.get((d["item_id"], d["warehouse_id"]), ZERO)
+            free += (await allocation.held_for(
+                db, d.get("project_id"), {d["item_id"]}, {d["warehouse_id"]}
+            )).get((d["item_id"], d["warehouse_id"]), ZERO)
             if quantity > free:
                 raise ValidationError(
                     f"{d.get('item_name') or d['item_id']}: cannot allocate "

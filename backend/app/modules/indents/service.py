@@ -1312,7 +1312,7 @@ async def list_indents(
         # row only invites an allocation the backend will refuse. Counted like
         # `committed`, so a partly-ordered line still shows what is genuinely owed.
         on_order = (
-            select(func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+            select(func.coalesce(func.sum(_MR_STILL_COMING), 0))
             .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
             .where(
                 MaterialRequestItem.indent_item_id == IndentItem.id,
@@ -5626,6 +5626,13 @@ async def list_notifications(
 # The queue and the allocation guards both subtract what is "on order", and both must
 # read the same list — a delivered request counted as outstanding is stock nobody can
 # allocate, a rejected one counted as outstanding is a line nobody can serve.
+#: What of an MR line is still being bought: asked for, less what has already reached
+#: stock. A request delivered in parts stays OPEN, so the status filter alone kept the
+#: lines that had arrived counting as on order and the desk offered 0 of them.
+_MR_STILL_COMING = func.greatest(
+    MaterialRequestItem.quantity
+    - func.coalesce(MaterialRequestItem.received_quantity, 0), 0)
+
 _SETTLED_MR_STATUSES = (
     MRStatus.REJECTED.value, MRStatus.CANCELLED.value, MRStatus.RECEIVED.value,
     # FIXED 2026-08-21 — DRAFT counts as settled for this arithmetic, which is only
@@ -6015,7 +6022,7 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
     rows = (await db.execute(
         select(
             MaterialRequestItem.indent_item_id,
-            func.coalesce(func.sum(MaterialRequestItem.quantity), 0),
+            func.coalesce(func.sum(_MR_STILL_COMING), 0),
         )
         .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
         .join(IndentItem, IndentItem.id == MaterialRequestItem.indent_item_id)
@@ -6143,6 +6150,12 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     own_stock = (sources <= my_points) if sources else bool(my_points)
     doc_type = (DocType.OWN_STOCK_ALLOCATION.value if own_stock
                 else DocType.ALLOCATION.value)
+
+    # The project is the INDENT's, stated by the server. The batch screen sends 0 on
+    # every decision, and a held lot (Stock Segregation > Project Lots) is offered
+    # only to its own project's decisions — so trusting the client hid every hold.
+    for d in decisions:
+        d["project_id"] = indent.project_id or 0
 
     alloc = await allocations.create(
         db, indent.id, indent.indent_no, decisions, user,
@@ -7059,7 +7072,7 @@ async def _on_order_by_lines(db: AsyncSession,
         return {}
     return {int(row[0]): _d(row[1]) for row in (await db.execute(
         select(MaterialRequestItem.indent_item_id,
-               func.coalesce(func.sum(MaterialRequestItem.quantity), 0))
+               func.coalesce(func.sum(_MR_STILL_COMING), 0))
         .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
         .where(MaterialRequestItem.indent_item_id.in_(line_ids),
                MaterialRequest.status.notin_(_SETTLED_MR_STATUSES))
@@ -7236,6 +7249,7 @@ async def fulfilment_batch(db: AsyncSession, user,
                 "indent_item_id": line.id,
                 "requested_by_name": indent.requested_by_name,
                 "office_name": indent.office_name,
+                "project_id": indent.project_id,
                 "project_name": indent.project_name,
                 "priority": indent.priority,
                 "pending_qty": float(pending),
@@ -7277,6 +7291,37 @@ async def fulfilment_batch(db: AsyncSession, user,
                 "available_qty": float(quantity),
             })
 
+    # Lots set aside for a project (Stock Segregation > Project Lots). Not in
+    # `available_qty`, so not in the figures above: only that project's lines may
+    # draw them, and the screen shows them per line.
+    from app.modules.inventory.models import ProjectHold
+    from app.shared.enums import ProjectHoldStatus
+    held_stmt = (
+        select(ProjectHold.item_id, ProjectHold.project_id, ProjectHold.project_name,
+               ProjectHold.warehouse_id, func.sum(ProjectHold.quantity))
+        .where(ProjectHold.status == ProjectHoldStatus.ACTIVE.value,
+               ProjectHold.item_id.in_(by_item))
+        .group_by(ProjectHold.item_id, ProjectHold.project_id,
+                  ProjectHold.project_name, ProjectHold.warehouse_id)
+    )
+    if warehouse_ids is not None:
+        held_stmt = held_stmt.where(ProjectHold.warehouse_id.in_(warehouse_ids or {0}))
+    project_holds: dict[int, list[dict]] = defaultdict(list)
+    held_by_project: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    for item_id, project_id, project_name, warehouse_id, qty in (
+            await db.execute(held_stmt)).all():
+        project_holds[item_id].append({
+            "project_id": project_id, "project_name": project_name,
+            "warehouse_id": warehouse_id,
+            "warehouse_name": names.get(warehouse_id) or f"Warehouse {warehouse_id}",
+            "quantity": float(_d(qty)),
+        })
+        held_by_project[(item_id, project_id)] += _d(qty)
+    for item_id, lines in by_item.items():
+        for line in lines:
+            line["project_held_qty"] = float(
+                held_by_project.get((item_id, line["project_id"]), Decimal("0")))
+
     # One query for the whole queue: which of these units may be split, and how finely.
     uom_decimals = await uom.decimals_by_code(
         db, {row.uom_code for row in items.values()})
@@ -7303,6 +7348,7 @@ async def fulfilment_batch(db: AsyncSession, user,
             # one holding the most, and offering it first saves a click per item.
             "warehouses": sorted(shelves.get(item_id, []),
                                  key=lambda w: -w["available_qty"]),
+            "project_holds": project_holds.get(item_id, []),
             "demand": sorted(lines, key=lambda line: (
                 line["priority"] != Priority.URGENT.value, line["raised_at"] or "")),
         })

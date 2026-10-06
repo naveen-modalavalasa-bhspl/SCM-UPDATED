@@ -334,7 +334,7 @@ export default function OutboundQualityInspectionForm({
       const actual = resolvedSerials(index).length;
       if (actual !== required) {
         const rejectedQty = num(line.inspected_qty) - required;
-        throw new Error(`${label}: choose exactly ${rejectedQty} units to reject.`);
+        throw new Error(`${label}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} units from the list.`);
       }
     }
   };
@@ -496,7 +496,8 @@ export default function OutboundQualityInspectionForm({
       key: "defect",
       header: "Rejection reason",
       width: "w-36",
-      hideOnNarrow: true,
+      // Always shown: the save refuses a rejection without it, so hiding it under
+      // 1024 px left a laptop inspector unable to reject anything.
       render: (l, i) => (
         <TextInput
           ariaLabel={`Defect, line ${i + 1}`}
@@ -666,6 +667,9 @@ export default function OutboundQualityInspectionForm({
         <LinesEditor
           rows={form.items}
           columns={columns}
+          // Wide enough for every column's own width: narrower, and the auto table
+          // squeezed the Result dropdown and the quantities until they read "Pa…".
+          minTableWidth="min-w-[1160px]"
           keyOf={(_, i) => i}
           onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
           rowTone={(l) => (l.result === "FAILED" ? "bg-bad-bg/40" : undefined)}
@@ -763,7 +767,7 @@ export default function OutboundQualityInspectionForm({
       </Section>
 
       <Section title="Evidence" hint="Test certificates, photographs of the defect.">
-        <AttachmentsPanel entityType="INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
+        <AttachmentsPanel entityType="OUTBOUND_INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
       </Section>
 
       <SerialNumbersModal

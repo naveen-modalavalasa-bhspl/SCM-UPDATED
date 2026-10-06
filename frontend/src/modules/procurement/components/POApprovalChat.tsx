@@ -38,7 +38,7 @@ export function POApprovalChat({ poId }: { poId: number }) {
       setDraft("");
       qc.invalidateQueries({ queryKey: ["po-comments", poId] });
     },
-    onError: (e: any) => toast.error(e?.message ?? "Could not send message"),
+    onError: (e: any) => toast.error(e?.message ?? "Message not sent. Check your internet and try again."),
   });
 
   const items: POComment[] = chat.data ?? [];

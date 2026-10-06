@@ -70,7 +70,7 @@ export default function ApiClientDetailPage() {
         ? `${code} switched back on — its keys are accepted again`
         : `${code} switched off — every call using its keys is now refused`);
     },
-    onError: () => toast.error("That application could not be switched."),
+    onError: () => toast.error("Could not turn this app on or off. Try again."),
   });
 
   if (client.error) return <ErrorBanner error="This application could not be loaded." />;

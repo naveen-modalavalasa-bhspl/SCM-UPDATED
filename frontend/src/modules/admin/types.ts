@@ -516,6 +516,12 @@ export interface FlowRung {
    *  carry it; it orders the "when raised by" picker and decides which steps a copy
    *  across ranks drops. */
   depth?: number;
+  /** The HCM project the rank belongs to — every project has its own "OE". */
+  project_name?: string | null;
+  /** The rank belongs to another project: it is in this list only because one of
+   *  this project's people sits on that project's post, and a raiser here will not
+   *  climb through it. */
+  other_project?: boolean;
 }
 
 export interface FlowRungs {

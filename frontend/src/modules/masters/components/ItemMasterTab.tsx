@@ -11,6 +11,7 @@ import {
 import { useAuth } from "@/shared/auth/AuthContext";
 import { mastersApi } from "../api";
 import { BulkBar } from "./BulkBar";
+import { MASTER_PAGE_SIZE } from "./MasterCrud";
 import type {
   MasterBrand, MasterBrandManufacturer, MasterCategoryTag, MasterGeneralName,
   MasterItem, MasterItemComponent,
@@ -224,6 +225,8 @@ export function ItemMasterTab() {
   const canManage = can("master.item.manage");
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  useEffect(() => setPage(1), [search]);
   const [editing, setEditing] = useState<MasterItem | null | undefined>(undefined);
   const [form, setForm] = useState<Form>(empty);
   const [tab, setTab] = useState<ItemSection>("Basic");
@@ -240,8 +243,8 @@ export function ItemMasterTab() {
     setForm((current) => ({ ...current, [key]: value }));
 
   const items = useQuery({
-    queryKey: ["masters", "items", search],
-    queryFn: () => mastersApi.items.list({ search, size: 100 }),
+    queryKey: ["masters", "items", search, page],
+    queryFn: () => mastersApi.items.list({ search, page, size: MASTER_PAGE_SIZE }),
   });
   const categories = useQuery({
     queryKey: ["masters", "categories", "all"],
@@ -362,7 +365,7 @@ export function ItemMasterTab() {
   // lock, so the form asks what it would be rather than guessing. `####` only
   // shows while that answer is in flight or when the pair is not picked yet.
   const nextCode = useQuery({
-    queryKey: ["masters", "items", "next-code", form.category_id],
+    queryKey: ["masters", "items", "next-code", form.category_id, form.general_name_id],
     queryFn: () => mastersApi.nextItemCode(
       Number(form.category_id), Number(form.general_name_id) || 0),
     enabled: editing === null && Boolean(form.category_id),
@@ -527,6 +530,8 @@ export function ItemMasterTab() {
       <BulkBar api={mastersApi.items} managePerm="master.item.manage"
                queryKey="items" label="Items" />
       <ResponsiveList data={items.data?.items ?? []} loading={items.isLoading}
+        page={page} onPageChange={setPage}
+        totalPages={Math.ceil((items.data?.total ?? 0) / MASTER_PAGE_SIZE)}
         keyOf={(row) => row.id} columns={columns}
         onRowClick={canManage ? openEdit : undefined}
         empty="No items found." renderCard={(row) => <div><b>{row.code}</b><div>{row.name}</div></div>} />

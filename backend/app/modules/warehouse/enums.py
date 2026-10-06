@@ -128,12 +128,25 @@ class IssueStatus(str, Enum):
     PARTIALLY_RETURNED = "PARTIALLY_RETURNED"
     RETURNED = "RETURNED"
     CANCELLED = "CANCELLED"
+    # A parent broken into per-floor children (`split_issue_by_floor`). Its lines are
+    # carried by the children from then on, so it can be neither posted, edited nor
+    # cancelled. ROLLED UP from the children, never set by hand: SPLIT while any child
+    # is still open, CLOSED once every live child has posted, and back to APPROVED if
+    # every child is cancelled or rejected (`_sync_split_parent`).
+    SPLIT = "SPLIT"
+    CLOSED = "CLOSED"
 
 
-# An issue in one of these is over: it holds no stock and blocks nothing, so the
-# indent behind it is free to be issued again. Every other status is LIVE and is
-# what the one-issue-per-indent rule counts.
-DEAD_ISSUE_STATUSES = (IssueStatus.CANCELLED.value, IssueStatus.REJECTED.value)
+# The statuses a CHILD of a split can end in without having served anything.
+UNSERVED_ISSUE_STATUSES = (IssueStatus.CANCELLED.value, IssueStatus.REJECTED.value)
+
+# An issue in one of these holds no quantity of its own: it holds no stock and blocks
+# nothing, so the indent behind it is free to be issued again. Every other status is
+# LIVE and is what the indent caps and the one-issue-per-indent rule count. A split
+# parent is here because its children carry its quantity — counting both is the
+# same goods twice against the indent.
+DEAD_ISSUE_STATUSES = (*UNSERVED_ISSUE_STATUSES,
+                       IssueStatus.SPLIT.value, IssueStatus.CLOSED.value)
 
 # Issues that have left the warehouse — stock posted AND acknowledged as dispatched.
 # A return (PARTIALLY_RETURNED / RETURNED) only happens to something that left, so

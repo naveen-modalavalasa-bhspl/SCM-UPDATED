@@ -186,7 +186,7 @@ export function RFQDetailPage() {
   const copyInvite = async (vendorId: number, path: string) => {
     const copied = await writeToClipboard(`${location.origin}${path}`);
     if (!copied) {
-      toast.error("Could not copy the link. Open it and copy the address instead.");
+      toast.error("Copy did not work. Select the text with your mouse and press Ctrl+C.");
       return;
     }
     setCopied(vendorId);

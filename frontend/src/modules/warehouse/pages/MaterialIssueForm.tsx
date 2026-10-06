@@ -38,7 +38,7 @@ import type {
   TrackingType, UnitMode, UnitSupply,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
-import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 
 /**
  * Raise, approve and post a material issue.
@@ -429,8 +429,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     [form.items],
   );
   const { data: sources = [], isSuccess: sourcesReady } = useQuery({
-    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, itemIds],
-    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id),
+    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, form.project_id ?? 0, itemIds],
+    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id, form.project_id),
     // Only while the picks are still open. Once the stock is posted the balances
     // have already moved, and drawing "available" against a document that has gone
     // out would report every split as over-issued.
@@ -677,7 +677,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // quantities, but which physical units go out is decided at the shelf, and
   // "Issue from stock" refuses an incomplete set. Saved straight away through the
   // serials endpoint, because the document itself is no longer editable.
-  const serialsLocked = locked && !(doc?.status === "APPROVED" && !doc?.is_stock_posted);
+  // Only once APPROVED, and only for the person it is with (or their reporting line):
+  // picking units on a draft or during approval is what got lost on the way through.
+  const awaitingIssue = doc?.status === "APPROVED" && !doc?.is_stock_posted;
+  const unitsHidden = direction === "OUT"
+    && (!doc || doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL");
+  const serialsLocked = unitsHidden || (locked && !(awaitingIssue && doc?.can_issue_from_stock));
   const payload = (): IssueWrite => ({
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
@@ -884,6 +889,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     <ItemPicker
       warehouseId={form.warehouse_id}
       indentId={form.indent_id}
+      projectId={form.project_id}
       value={split.line.item_id || ""}
       isDisabled={locked}
       // A saved line whose item the point no longer stocks still has to render as
@@ -1019,8 +1025,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               <Can do="issue.issue">
                 <Button
                   onClick={() => setConfirming("post")}
-                  disabled={problems.length > 0}
-                  title={problems.length > 0 ? problems[0].message : undefined}
+                  disabled={problems.length > 0 || !doc?.can_issue_from_stock}
+                  title={!doc?.can_issue_from_stock
+                    ? `With ${doc?.currently_with ?? "another person"} — only they, or someone they report to, can issue it`
+                    : problems.length > 0 ? problems[0].message : undefined}
                 >
                   Issue from stock
                 </Button>
@@ -1032,13 +1040,16 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {editing && doc?.status === "APPROVED" && !doc?.is_stock_posted
               && !doc?.parent_issue_id && (
               <Can do="issue.split">
-                <Button variant="ghost" disabled={split.isPending}
+                <Button className={TONE_BLUE} disabled={split.isPending}
                         onClick={() => setConfirming("split")}>
                   {split.isPending ? "Splitting…" : "Split across floors"}
                 </Button>
               </Can>
             )}
-            {editing && doc && !["CANCELLED", "ACKNOWLEDGED"].includes(doc.status) && (
+            {/* Never on a split parent: its floor issues are what get cancelled, and
+                the server refuses it here. */}
+            {editing && doc && !doc.is_stock_posted
+              && !["CANCELLED", "ACKNOWLEDGED", "SPLIT", "CLOSED"].includes(doc.status) && (
               <Can do="issue.create">
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
@@ -1062,6 +1073,34 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           shortfall is the half that matters and it must not scroll away — a quantity
           no floor was holding is a shortage on the indent, and the manager is the
           only person who sees this screen at the moment it is known. */}
+      {/* A split parent is carried by its floor issues: say so, and which of them it is
+          still waiting on, since its own status is rolled up from theirs. Hidden while
+          the just-split result is up — that card already lists the same children. */}
+      {!splitResult && doc && (doc.child_issues?.length ?? 0) > 0 && (
+        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+          <div className="font-semibold">
+            {doc.status === "SPLIT"
+              ? "Split across floors — closes when every floor issue below is posted"
+              : doc.status === "CLOSED"
+                ? "Split across floors — every floor issue has been posted"
+                : "Split across floors — every floor issue was cancelled, so this one is back in your hands"}
+          </div>
+          <ul className="mt-2 space-y-1">
+            {doc.child_issues!.map((child) => (
+              <li key={child.id} className="flex flex-wrap items-center gap-2">
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`${listPath}/${child.id}`)}>
+                  {child.issue_no}
+                </button>
+                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>· {fmtQty(Number(child.total_qty))}</span>
+                <StatusPill status={child.status} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {splitResult && (
         <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
           <div className="flex items-center justify-between gap-3">
@@ -1079,6 +1118,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   {child.issue_no}
                 </button>
                 <span className="text-muted">{child.floor_location_name ?? "—"}</span>
+                <span>
+                  → {child.in_charge_names.length
+                    ? <span className="font-medium">{child.in_charge_names.join(", ")}</span>
+                    : <span className="text-warn">no floor in-charge assigned</span>}
+                </span>
                 <span>· {child.total_items} line{child.total_items === 1 ? "" : "s"}</span>
                 <span>· {fmtQty(Number(child.total_qty))}</span>
               </li>
@@ -1115,17 +1159,54 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         <MetaCard title="Document">
           <MetaRow label="Number" value={<span className="font-mono">{doc.issue_no}</span>} />
           <MetaRow label="Status" value={<StatusPill status={doc.status} />} />
+          <MetaRow
+            label="Currently with"
+            value={doc.currently_with
+              ? `${doc.currently_with}${awaitingIssue ? " — to issue from stock" : ""}`
+              : "—"}
+          />
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
           <MetaRow label="Against indent" value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
-          <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no ?? "—"}</span>} />
-          {/* `issued_by` is only stamped when stock is posted; before that the row
-            * still has an author, and a blank field read as missing data. */}
-          <MetaRow label="Issued by" value={doc.issued_by_name || doc.created_by_name || "—"} />
+          {doc.pick_no && (
+            <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no}</span>} />
+          )}
+          {/* `issued_by` is stamped only when stock is posted — whoever pressed Issue
+            * from stock. Before that the field is the SUBMITTER, never the creator: an
+            * allocation drafts the issue under its approver's name (SCM_0010). */}
+          {doc.is_stock_posted ? (
+            <MetaRow label="Issued by" value={doc.issued_by_name || "—"} />
+          ) : (
+            <MetaRow label="Submitted by"
+                     value={doc.submitted_by_name || doc.created_by_name || "—"} />
+          )}
           <MetaRow label="Acknowledged by" value={doc.acknowledged_by_name || "—"} />
-          <MetaRow
-            label="Reverses"
-            value={doc.original_issue_no ? <span className="font-mono">{doc.original_issue_no}</span> : "—"}
-          />
+          {doc.parent_issue_id && (
+            <MetaRow
+              label="Split of"
+              value={
+                <button type="button" className="font-mono underline"
+                        onClick={() => nav(`${listPath}/${doc.parent_issue_id}`)}>
+                  {doc.parent_issue_no}
+                </button>
+              }
+            />
+          )}
+          {doc.floor_location_name && (
+            <MetaRow
+              label="Handed to"
+              value={
+                <span>
+                  {doc.floor_location_name} ·{" "}
+                  {doc.floor_in_charge_names?.length
+                    ? doc.floor_in_charge_names.join(", ")
+                    : <span className="text-warn">no floor in-charge assigned</span>}
+                </span>
+              }
+            />
+          )}
+          {doc.original_issue_no && (
+            <MetaRow label="Reverses" value={<span className="font-mono">{doc.original_issue_no}</span>} />
+          )}
         </MetaCard>
       )}
 
@@ -1299,6 +1380,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           binManaged={isBinManaged}
           locked={locked}
           unitsLocked={serialsLocked}
+          unitsHidden={unitsHidden}
           onPickUnits={setSerialLine}
           meta={trackingMeta}
           problemAt={problemAt}

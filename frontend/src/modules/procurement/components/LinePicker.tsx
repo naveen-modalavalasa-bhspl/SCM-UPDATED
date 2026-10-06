@@ -145,12 +145,12 @@ export function LinePicker({
                 isDisabled={disabled || !!line.id}
                 // Pressing a greyed-out row says why rather than doing nothing at all.
                 onDisabledSelect={() =>
-                  toast.error("Item already exists, just update the quantity.")}
+                  toast.error("This item is already in the list. Change its quantity instead of adding it again.")}
                 onChange={(value) => {
                   // Kept as the backstop: the greying is computed from `lines`, and a
                   // duplicate could still arrive from a prefill or a stale render.
                   if (lines.some((l, i) => i !== index && l.item_id === value)) {
-                    toast.error("Item already exists, just update the quantity.");
+                    toast.error("This item is already in the list. Change its quantity instead of adding it again.");
                     return;
                   }
                   const chosen = items.find((item) => item.id === value);
