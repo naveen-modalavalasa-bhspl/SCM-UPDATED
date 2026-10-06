@@ -222,6 +222,24 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             if entry is not None:
                 entry["available_qty"] = max(entry["available_qty"] - qty, ZERO)
 
+        # Lots set aside for THIS line's project are free to it, and to nobody else.
+        # Added after the netting: a pledge is against the shared pool, never a hold.
+        held = await allocation.held_for(
+            db, line.get("project_id"), {line["item_id"]}, warehouse_ids)
+        for (_item, warehouse_id), qty in held.items():
+            entry = by_warehouse.get(warehouse_id)
+            if entry is None:
+                warehouse = await db.get(Warehouse, warehouse_id)
+                if warehouse is None or (warehouse_types
+                                         and warehouse.warehouse_type not in warehouse_types):
+                    continue
+                entry = by_warehouse.setdefault(warehouse_id, {
+                    "warehouse_id": warehouse_id, "warehouse_name": warehouse.name,
+                    "warehouse_type": warehouse.warehouse_type, "available_qty": ZERO,
+                })
+            entry["available_qty"] += qty
+            entry["project_held_qty"] = qty
+
         out.append({
             **line,
             "available_total": sum(
@@ -421,8 +439,20 @@ async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
                 for item_id, warehouse_id, qty in (await db.execute(stmt)).all()}
     pledged = await pledged_by_point(
         db, item_ids, warehouse_ids, exclude_allocation_id=exclude_allocation_id)
-    return {pair: max(on_shelf.get(pair, ZERO) - pledged.get(pair, ZERO), ZERO)
+    free = {pair: max(on_shelf.get(pair, ZERO) - pledged.get(pair, ZERO), ZERO)
             for pair in pairs}
+    # Each line's own project's held lots. One allocation serves one indent, so its
+    # lines share a project; grouped anyway rather than assumed.
+    by_project: dict[int, set[int]] = {}
+    for line in lines:
+        if line.warehouse_id and getattr(line, "project_id", None):
+            by_project.setdefault(int(line.project_id), set()).add(int(line.item_id))
+    for project_id, project_items in by_project.items():
+        for pair, qty in (await allocation.held_for(
+                db, project_id, project_items, warehouse_ids)).items():
+            if pair in free:
+                free[pair] += qty
+    return free
 
 
 async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
@@ -702,6 +732,9 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
             pledged = await pledged_by_point(
                 db, {d["item_id"]}, {d["warehouse_id"]})
             free = on_shelf - pledged.get((d["item_id"], d["warehouse_id"]), ZERO)
+            free += (await allocation.held_for(
+                db, d.get("project_id"), {d["item_id"]}, {d["warehouse_id"]}
+            )).get((d["item_id"], d["warehouse_id"]), ZERO)
             if quantity > free:
                 raise ValidationError(
                     f"{d.get('item_name') or d['item_id']}: cannot allocate "

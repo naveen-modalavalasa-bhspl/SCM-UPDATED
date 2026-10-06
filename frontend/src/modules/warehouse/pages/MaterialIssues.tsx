@@ -22,9 +22,9 @@ import type { Issue } from "../types";
  * rows, and pairing them in one table is what lets a return point at the issue it
  * reverses (`original_issue_id`) instead of floating free.
  *
- * The approver column is filled from `current_approver_name` on the row — a snapshot
- * written when the workflow moved, so the list does not have to ask the workflow
- * engine who is holding each of two hundred documents.
+ * The "With" column is `currently_with`, served per row: the raiser on a draft, the
+ * approver snapshot while in approval, the person who issues it once approved, and
+ * nobody once stock has moved.
  */
 
 const STATUSES = [
@@ -136,7 +136,7 @@ export default function MaterialIssues({
       hideOnNarrow: true,
       render: (r) => (
         <span className="text-sm text-muted">
-          {r.status === "PENDING_APPROVAL" ? r.current_approver_name ?? "unassigned" : r.approved_by_name ?? "—"}
+          {r.currently_with ?? "—"}
         </span>
       ),
     },

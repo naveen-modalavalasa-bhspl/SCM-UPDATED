@@ -23,6 +23,7 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
   STOCK_MOVEMENT_ORDER: "Stock movement order",
   STOCK_ADJUSTMENT: "Stock audit",
   STOCK_EDIT: "Stock correction",
+  VENDOR_PAYMENT: "Vendor payment",
   STOCK_TRANSFER: "Stock transfer order", STOCK_TRANSFER_REQUEST: "Stock transfer request",
 };
 

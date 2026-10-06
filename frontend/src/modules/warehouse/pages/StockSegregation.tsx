@@ -12,6 +12,8 @@ import type { Batch, SerialNumber } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { ScanLine } from "lucide-react";
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
+import { ProjectLotsTab } from "../components/ProjectLotsTab";
+import { useAuth } from "@/shared/auth/AuthContext";
 
 /** One lot whose units are on screen: an item, at one location, in one batch. */
 interface UnitsView {
@@ -50,6 +52,7 @@ const TABS = [
   { key: "locations", label: "Locations" },
   { key: "batches", label: "Batches" },
   { key: "serials", label: "Serial numbers" },
+  { key: "project-lots", label: "Project Lots" },
 ];
 
 const EXPIRY_BUCKETS = [
@@ -418,6 +421,7 @@ function LocationsTab() {
 export default function StockSegregation() {
   const pointLabel = usePointLabel();
   const [tab, setTab] = useState("locations");
+  const { can } = useAuth();
   const [search, setSearch] = useState("");
   const [bucket, setBucket] = useState("");
   const [serialStatus, setSerialStatus] = useState("");
@@ -586,9 +590,13 @@ export default function StockSegregation() {
     <div>
       <PageHeader eyebrow={pointLabel} title="Stock segregation" />
 
-      <SubNav label="Stock segregation" items={TABS} value={tab} onChange={setTab} />
+      <SubNav label="Stock segregation"
+              items={TABS.filter((t) => t.key !== "project-lots" || can("stock.project_hold.view"))}
+              value={tab} onChange={setTab} />
 
-      {tab === "locations" ? (
+      {tab === "project-lots" && can("stock.project_hold.view") ? (
+        <ProjectLotsTab />
+      ) : tab === "locations" ? (
         <LocationsTab />
       ) : tab === "batches" ? (
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">

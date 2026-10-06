@@ -83,7 +83,7 @@ from app.shared.scope import scope_condition
 from app.shared.enums import (
     ApprovalAction, AuditAction, DespatchNoteStatus, DocType, IndentStatus,
     InstanceStatus, MRStatus, POStatus,
-    ReservationStatus,
+    ProjectHoldStatus, ReservationStatus,
     RefType as InventoryRefType, StockDirection, UomClass,
 )
 from app.shared.models.base import utcnow
@@ -3573,6 +3573,7 @@ async def despatch_note_prefill(db: AsyncSession, note_id: int,
             select(PurchaseOrder.total_amount).where(PurchaseOrder.id == note.po_id)
         )).scalar_one_or_none()
 
+    taken = dict(already)   # consumed line by line — see _despatch_prefill_line
     return s.DespatchPrefill(
         despatch_note_id=note.id, despatch_note_no=note.dn_no,
         po_id=note.po_id, po_no=note.po_no,
@@ -3582,7 +3583,7 @@ async def despatch_note_prefill(db: AsyncSession, note_id: int,
         vehicle_no=note.vehicle_no, transporter_name=note.transporter_name,
         lr_no=note.lr_no,
         lines=[row for row in (_despatch_prefill_line(
-            line, ordered=ordered, rates=rates, already=already) for line in lines)
+            line, ordered=ordered, rates=rates, already=taken) for line in lines)
             if row is not None],
     )
 
@@ -3595,6 +3596,10 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
     receipt, and offering them again — prefilled, as a complete delivery — is how the
     same order gets received twice. A note line with no PO line behind it is not capped
     by anything, because there is no order to measure it against.
+
+    `already` is CONSUMED as lines are taken (REQ_111): one PO line sent in several
+    batches is several note lines, and capping each against the same remainder would
+    prefill the order's balance once per batch.
     """
     key = line.po_item_id or 0
     sent = _d(line.despatched_qty)
@@ -3603,6 +3608,7 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
         if outstanding <= ZERO:
             return None
         sent = min(sent, outstanding)
+        already[key] = already.get(key, ZERO) + sent
     return s.DespatchPrefillLine(
         po_item_id=line.po_item_id, item_id=line.item_id,
         item_code=line.item_code, item_name=line.item_name,
@@ -5450,8 +5456,12 @@ async def _movement_units(
     quantity,
     code_config: dict | None = None,
     doc_no: str | None = None,
+    allow_remark: str | None = None,
 ) -> tuple[list[str], list[m.SerialNumber]]:
     """The units one movement line takes, validated against the ITEM MASTER.
+
+    `allow_remark`: units carrying exactly this stamp are this order's to move — the
+    project hold a release order is releasing.
 
     The one check behind every door a movement goes through — the single move, the
     order on the press, and the order on approval — so the three can never disagree
@@ -5552,8 +5562,9 @@ async def _movement_units(
         raise ValidationError(
             f"{label}: no longer available — {', '.join(gone[:5])}")
     held = [v for v, row in zip(names, chosen)
-            if any((row.remarks or "").startswith(prefix)
-                   for prefix in _CLAIMED_REMARK_PREFIXES)]
+            if (row.remarks or "") != (allow_remark or "\0")
+            and any((row.remarks or "").startswith(prefix)
+                    for prefix in _CLAIMED_REMARK_PREFIXES)]
     if held:
         raise ValidationError(
             f"{label}: reserved for a material issue — {', '.join(held[:5])}")
@@ -6009,7 +6020,8 @@ class MovementOrderStatus(str, Enum):
 
 
 async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
-                              batch_id, quantity, serial_rows, serial_numbers, order_no, user) -> None:
+                              batch_id, quantity, serial_rows, serial_numbers, order_no, user,
+                              project_id: int = 0) -> None:
     """Move ONE line out of its source bin and into its destination bin.
 
     The physical half of a movement, in one place for the final completion action.
@@ -6024,8 +6036,8 @@ async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
             db, item_id=item.id, qty=quantity, direction=direction,
             ref_type=InventoryRefType.STOCK_MOVEMENT.value,
             ref_id=0, ref_no=order_no, user=user,
-            warehouse_id=wh.id, bin_id=bin_row.id, batch_id=batch_id, project_id=0,
-            serial_numbers=serial_numbers,
+            warehouse_id=wh.id, bin_id=bin_row.id, batch_id=batch_id,
+            project_id=project_id, serial_numbers=serial_numbers,
         )
     # One statement for the units this order carries, whatever its size.
     await _set_unit_fields(db, [row.id for row in serial_rows],
@@ -6059,19 +6071,23 @@ async def _validate_movement_order(db: AsyncSession, order) -> None:
 
     wh = await _warehouse(db, order.from_warehouse_id)
     code_config = await codeformat.code_settings(db)
+    hold, hold_stock = await _release_hold_of(db, order)
     for line in order.items:
         item = await _item_snapshot(db, line.item_id)
         source = await _get(db, Bin, line.source_bin_id, "Source bin")
         await _get(db, Bin, line.destination_bin_id, "Destination bin")
         batch_id = line.batch_id or m.NO_BATCH
+        releasing = _is_release_line(line, hold)
         stock = (await db.execute(
             select(Stock).where(
                 Stock.warehouse_id == wh.id, Stock.bin_id == source.id,
                 Stock.item_id == item.id, Stock.batch_id == batch_id,
-                Stock.project_id == 0,
+                Stock.project_id == (hold_stock.project_id if releasing else 0),
             ).with_for_update()
         )).scalar_one_or_none()
         available = _d(stock.available_qty) if stock else ZERO
+        if releasing:
+            available += _d(hold.release_qty)
         if available < _d(line.requested_qty):
             raise ValidationError(
                 f"{order.sto_no}: only {available} of {item.code} remains in "
@@ -6080,7 +6096,83 @@ async def _validate_movement_order(db: AsyncSession, order) -> None:
             db, item=item, warehouse_id=wh.id, bin_id=source.id,
             batch_id=line.batch_id or None, values=line.serial_numbers or [],
             quantity=line.requested_qty, code_config=code_config,
-            doc_no=order.sto_no)
+            doc_no=order.sto_no,
+            allow_remark=_hold_stamp(hold) if releasing else None)
+
+
+async def _release_hold_of(db: AsyncSession, order):
+    """The project hold this movement order is releasing, if any, and its lot."""
+    from app.modules.inventory.models import ProjectHold, Stock
+
+    hold = (await db.execute(
+        select(ProjectHold).where(ProjectHold.release_order_id == order.id,
+                                  ProjectHold.status == ProjectHoldStatus.ACTIVE.value)
+        .with_for_update()
+    )).scalar_one_or_none()
+    if hold is None:
+        return None, None
+    return hold, await db.get(Stock, hold.stock_id)
+
+
+def _is_release_line(line, hold) -> bool:
+    return hold is not None and line.item_id == hold.item_id \
+        and (line.source_bin_id or 0) == (hold.bin_id or 0) \
+        and (line.batch_id or 0) == (hold.batch_id or 0)
+
+
+def _hold_stamp(hold) -> str | None:
+    return project_hold_unit_marker(hold.project_id, hold.id) if hold else None
+
+
+async def _apply_hold_release(db: AsyncSession, hold, user) -> None:
+    """The release order is completing: give the held quantity back to the shelf so
+    the movement can take it, and settle the hold. Runs inside the same transaction
+    as the move, so the units are never free AND unmoved."""
+    qty = _d(hold.release_qty)
+    returned = await stock_allocation.unhold(db, hold.id, qty, user)
+    if returned < qty:
+        raise ValidationError(
+            f"{hold.hold_no}: only {returned} of {qty} is still held on the shelf")
+    released = list(hold.release_serials or [])
+    if released:
+        gone = set(released)
+        hold.serial_numbers = [v for v in (hold.serial_numbers or []) if v not in gone] or None
+    hold.quantity = _d(hold.quantity) - qty
+    hold.release_reason = hold.pending_release_reason
+    hold.released_by_id = getattr(user, "id", None)
+    hold.released_by_name = _name(user)
+    hold.released_at = utcnow()
+    if hold.pending_lend_project_id:
+        hold.released_for_project_id = hold.pending_lend_project_id
+        hold.released_for_project_name = hold.pending_lend_project_name
+    if hold.quantity <= ZERO:
+        hold.quantity = ZERO
+        hold.status = ProjectHoldStatus.RELEASED.value
+    await write_audit(db, entity="stk_project_holds", entity_id=hold.id,
+                      entity_no=hold.hold_no, action=AuditAction.UPDATE, actor=user,
+                      after={"released": str(qty), "via": hold.release_order_no,
+                             "to": hold.release_destination,
+                             "lent_to": hold.pending_lend_project_name,
+                             "remaining": str(hold.quantity)})
+    _clear_pending_release(hold)
+
+
+def _clear_pending_release(hold) -> None:
+    hold.release_order_id = None
+    hold.release_order_no = None
+    hold.release_qty = None
+    hold.release_serials = None
+    hold.release_destination = None
+    hold.pending_release_reason = None
+    hold.pending_lend_project_id = None
+    hold.pending_lend_project_name = None
+
+
+async def _unwind_hold_release(db: AsyncSession, order) -> None:
+    """A rejected release order leaves the hold exactly as it was."""
+    hold, _stock = await _release_hold_of(db, order)
+    if hold is not None:
+        _clear_pending_release(hold)
 
 
 async def _perform_movement_order(db: AsyncSession, order, user) -> None:
@@ -6096,16 +6188,24 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
 
     wh = await _warehouse(db, order.from_warehouse_id)
     code_config = await codeformat.code_settings(db)
+    hold, hold_stock = await _release_hold_of(db, order)
+    stamp = _hold_stamp(hold)
+    if hold is not None:
+        await _apply_hold_release(db, hold, user)
     for line in order.items:
         item = await _item_snapshot(db, line.item_id)
         source = await _get(db, Bin, line.source_bin_id, "Source bin")
         destination = await _get(db, Bin, line.destination_bin_id, "Destination bin")
         batch_id = line.batch_id or m.NO_BATCH
+        releasing = hold is not None and line.item_id == hold.item_id \
+            and (line.source_bin_id or 0) == (hold_stock.bin_id or 0) \
+            and (line.batch_id or 0) == (hold_stock.batch_id or 0)
+        line_project = hold_stock.project_id if releasing else 0
         stock = (await db.execute(
             select(Stock).where(
                 Stock.warehouse_id == wh.id, Stock.bin_id == source.id,
                 Stock.item_id == item.id, Stock.batch_id == batch_id,
-                Stock.project_id == 0,
+                Stock.project_id == line_project,
             ).with_for_update()
         )).scalar_one_or_none()
         available = _d(stock.available_qty) if stock else ZERO
@@ -6121,10 +6221,11 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
             db, item=item, warehouse_id=wh.id, bin_id=source.id,
             batch_id=line.batch_id or None, values=line.serial_numbers or [],
             quantity=line.requested_qty, code_config=code_config,
-            doc_no=order.sto_no)
+            doc_no=order.sto_no, allow_remark=stamp if releasing else None)
         await _move_movement_line(
             db, wh, item, source, destination, batch_id,
-            line.requested_qty, serial_rows, serial_numbers, order.sto_no, user)
+            line.requested_qty, serial_rows, serial_numbers, order.sto_no, user,
+            project_id=line_project)
 
     order.status = MovementOrderStatus.COMPLETED.value
 
@@ -6157,6 +6258,7 @@ async def act_on_stock_movement_order(db: AsyncSession, order_id: int, action: s
         _approve_movement_order(order, user)
     elif instance.status == InstanceStatus.REJECTED.value:
         order.status = MovementOrderStatus.REJECTED.value
+        await _unwind_hold_release(db, order)
     # Otherwise more rungs to climb; the next approver is read, never stored.
 
     await write_audit(
@@ -6342,6 +6444,84 @@ async def create_stock_movement_order(
     return await _smo_read(db, order)
 
 
+async def raise_hold_release_order(db: AsyncSession, hold, *, quantity, serial_numbers,
+                                   destination_bin_id: int, reason: str, user) -> dict:
+    """Release part or all of a project hold BY MOVING IT: one SMO line from the held
+    lot to a location the storekeeper names, run through the SMO's own ladder,
+    inspection and completion. Putting it down somewhere new is what gives the freed
+    stock its own lot; the hold is reduced only when that order completes
+    (`_apply_hold_release`), so a rejected order leaves it exactly as it was."""
+    from app.modules.inventory.models import (
+        Stock, StockTransferOrder, StockTransferOrderItem, STO_KIND_MOVEMENT,
+    )
+
+    stock = await db.get(Stock, hold.stock_id)
+    if stock is None:
+        raise NotFoundError("The held lot is no longer on the shelf")
+    wh = await _warehouse(db, hold.warehouse_id)
+    if not hold.bin_id:
+        raise ValidationError(
+            f"{hold.hold_no} is held in bulk storage with no location, so there is "
+            "nothing to move it off. Put it away to a location first.")
+    source = await _get(db, Bin, hold.bin_id, "Source location")
+    destination = await _get(db, Bin, destination_bin_id, "Destination location")
+    if destination.id == source.id:
+        raise ValidationError("Move it to a different location than the held lot")
+    if destination.warehouse_id != wh.id or not destination.is_active:
+        raise ValidationError("The destination must be an active location in this warehouse")
+    allowed = await floor_scope_ids(db, user)
+    if allowed is not None and (source.id not in allowed or destination.id not in allowed):
+        raise ValidationError("You can only move stock within your assigned floors")
+
+    item = await _item_snapshot(db, hold.item_id)
+    qty = _d(quantity)
+    stamp = project_hold_unit_marker(hold.project_id, hold.id)
+    names = [v for v in (serial_numbers or []) if v and v.strip()]
+    if not names and hold.serial_numbers and qty == _d(hold.quantity):
+        names = list(hold.serial_numbers)
+    # The same unit rule the order will be held to at inspection and completion.
+    names, rows = await _movement_units(
+        db, item=item, warehouse_id=wh.id, bin_id=source.id,
+        batch_id=hold.batch_id or None, values=names, quantity=qty,
+        code_config=await codeformat.code_settings(db),
+        doc_no=hold.hold_no, allow_remark=stamp)
+    if hold.serial_numbers:
+        foreign = [r.serial_number for r in rows if r.remarks != stamp]
+        if foreign:
+            raise ValidationError(
+                f"{hold.hold_no} names its units; these are not among them: "
+                + ", ".join(foreign[:5]))
+
+    order = StockTransferOrder(
+        sto_no=await next_number(db, WarehouseDocType.STOCK_MOVEMENT_ORDER.value),
+        doc_kind=STO_KIND_MOVEMENT,
+        from_warehouse_id=wh.id, from_warehouse_name=wh.name,
+        to_warehouse_id=wh.id, to_warehouse_name=wh.name,
+        status=MovementOrderStatus.DRAFT.value,
+        requested_by_id=getattr(user, "id", None), requested_by_name=_name(user),
+        remarks=f"Release of {hold.hold_no} ({hold.project_name}): {reason}"[:500],
+        items=[StockTransferOrderItem(
+            item_id=item.id, item_code=item.code, item_name=item.name,
+            uom_code=item.uom_code, requested_qty=qty,
+            source_bin_id=source.id, destination_bin_id=destination.id,
+            batch_id=hold.batch_id or None, serial_numbers=names or None,
+        )],
+    )
+    db.add(order)
+    await db.flush()
+    hold.release_order_id = order.id
+    hold.release_order_no = order.sto_no
+    hold.release_qty = qty
+    hold.release_serials = [r.serial_number for r in rows] or None
+    hold.release_destination = destination.code
+    await write_audit(db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
+                      action=AuditAction.CREATE, actor=user,
+                      after={"release_of": hold.hold_no, "quantity": str(qty),
+                             "to": destination.code, "reason": reason})
+    await db.flush()
+    return await submit_stock_movement_order(db, order.id, user)
+
+
 async def submit_stock_movement_order(db: AsyncSession, order_id: int, user) -> dict:
     """Send a DRAFT movement into its approval ladder.
 
@@ -6395,6 +6575,7 @@ async def submit_stock_movement_order(db: AsyncSession, order_id: int, user) -> 
             await _perform_movement_order(db, order, user)
         elif instance.status == InstanceStatus.REJECTED.value:
             order.status = MovementOrderStatus.REJECTED.value
+            await _unwind_hold_release(db, order)
 
     await write_audit(
         db, entity="inv_sto", entity_id=order.id, entity_no=order.sto_no,
@@ -7721,6 +7902,12 @@ async def _reserve_issue_serials(
                 raise ValidationError(f"{value} is not in the selected source bin")
             if line.batch_id and row.batch_id != line.batch_id:
                 raise ValidationError(f"{value} is not in the selected batch")
+            if row.remarks and row.remarks.startswith(PROJECT_HOLD_UNIT_PREFIX) \
+                    and not row.remarks.startswith(
+                        f"{PROJECT_HOLD_UNIT_PREFIX}{issue.project_id or 0} "):
+                raise ValidationError(
+                    f"{value} is held for another project. Release that hold on "
+                    "Stock Segregation > Project Lots first.")
             if row.remarks and row.remarks.startswith("Reserved for issue ") \
                     and row.remarks != marker:
                 # Naming WHICH line already holds it when it is this document own
@@ -8155,9 +8342,13 @@ async def issue_stock_sources(
     warehouse_id: int,
     item_ids: list[int],
     indent_id: int | None = None,
+    project_id: int | None = None,
     user=None,
 ) -> list[dict]:
     """Every (batch, bin) an item can actually be drawn from here, oldest first.
+
+    `project_id`: lots set aside for that project (`stk_project_holds`) count as this
+    document's own, exactly like the indent's reservation. Nobody else sees them.
 
     The screen needs this because a line has ONE bin and ONE batch and the shelf
     frequently does not: fifteen monitors sitting five in one bay and ten in another
@@ -8202,12 +8393,11 @@ async def issue_stock_sources(
     # What THIS indent is already holding on each balance row. Aggregated in a
     # subquery rather than joined directly: a balance row can carry several
     # reservation rows, and joining them would multiply the quantity sums.
-    if indent_id:
+    if indent_id or project_id:
         mine = (
             select(Reservation.stock_id.label("stock_id"),
                    func.sum(Reservation.quantity).label("qty"))
-            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
-                   Reservation.ref_id == indent_id,
+            .where(_own_hold_clause(indent_id, project_id),
                    Reservation.status == ReservationStatus.ACTIVE.value)
             .group_by(Reservation.stock_id)
             .subquery()
@@ -8242,7 +8432,7 @@ async def issue_stock_sources(
         stmt
         .where(Stock.warehouse_id == warehouse_id,
                Stock.item_id.in_(ids),
-               _stock_offerable(indent_id))
+               _stock_offerable(indent_id, project_id))
         .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
                   Bin.code, Bin.name, m.Batch.batch_no,
                   m.Batch.expiry_date, m.Batch.mfg_date)
@@ -8389,6 +8579,9 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
         # place.
         if all(slot == (0, 0) for slot in slots):
             continue
+        if issue.project_id:
+            await _free_project_holds_for_slots(
+                db, issue, indent_id, indent_item_id, item_id, slots, user)
         for move in await stock_allocation.relocate(
             db,
             InventoryRefType.RESERVATION.value,
@@ -8420,6 +8613,44 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
             after={"moves": moved},
         )
     return moved
+
+
+async def _free_project_holds_for_slots(db: AsyncSession, issue: m.MaterialIssue,
+                                        indent_id: int, indent_item_id: int,
+                                        item_id: int,
+                                        slots: dict[tuple[int, int], Decimal],
+                                        user) -> None:
+    """A pick moved onto a location whose stock is held for THIS issue's project.
+
+    `relocate` takes the new location's quantity out of `available_qty`, and a held
+    lot is not in it — so the move was refused although the stock is this project's
+    own. Hand back exactly the part the free stock and the indent's own hold there
+    cannot cover, and no more: anything handed back and not taken is free to all."""
+    from app.modules.inventory.models import Reservation, Stock
+
+    held_here: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    for bin_id, batch_id, qty in (await db.execute(
+        select(Reservation.bin_id, Reservation.batch_id, func.sum(Reservation.quantity))
+        .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+               Reservation.ref_id == indent_id,
+               Reservation.ref_line_id == indent_item_id,
+               Reservation.item_id == item_id,
+               Reservation.warehouse_id == issue.warehouse_id,
+               Reservation.status == ReservationStatus.ACTIVE.value)
+        .group_by(Reservation.bin_id, Reservation.batch_id)
+    )).all():
+        held_here[(int(bin_id or 0), int(batch_id or 0))] += _d(qty)
+    for (bin_id, batch_id), qty in slots.items():
+        free = _d(await db.scalar(
+            select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+                Stock.item_id == item_id, Stock.warehouse_id == issue.warehouse_id,
+                Stock.bin_id == bin_id, Stock.batch_id == batch_id)))
+        need = _d(qty) - held_here.get((bin_id, batch_id), ZERO) - free
+        if need > ZERO:
+            await stock_allocation.take_from_holds(
+                db, item_id=item_id, project_id=issue.project_id, qty=need,
+                ref_type=None, ref_id=None, ref_no=None, ref_line_id=None, user=user,
+                warehouse_ids=[issue.warehouse_id], bin_id=bin_id, batch_id=batch_id)
 
 
 #: What a write line actually issues. `issued_qty` omitted means "all of it" — the
@@ -8570,6 +8801,20 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             if batch_id:
                 allocated_batches.setdefault(
                     (int(ref_line_id or 0), int(item_id)), set()).add(int(batch_id))
+
+    # Lots held for this document's project are its own too (stk_project_holds).
+    if issue.project_id:
+        for item_id, bin_id, batch_id, qty in (await db.execute(
+            select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                   func.sum(Reservation.quantity))
+            .where(_own_hold_clause(None, issue.project_id),
+                   Reservation.status == ReservationStatus.ACTIVE.value,
+                   Reservation.warehouse_id == issue.warehouse_id,
+                   Reservation.item_id.in_(item_ids))
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id)
+        )).all():
+            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+            own[slot] = own.get(slot, ZERO) + _d(qty)
 
     # Every batch either named or allocated, read once: expiry is the whole of the
     # FEFO question.
@@ -8779,7 +9024,11 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
         stmt = stmt.where(or_(
             m.MaterialIssue.issue_no.ilike(like), m.MaterialIssue.indent_no.ilike(like),
             m.MaterialIssue.issued_to_name.ilike(like), m.MaterialIssue.department_name.ilike(like)))
-    return await paginate(db, stmt.order_by(m.MaterialIssue.id.desc()), params)
+    page = await paginate(db, stmt.order_by(m.MaterialIssue.id.desc()), params)
+    holders = await _issue_holders_bulk(db, list(page["items"]))
+    for row in page["items"]:
+        setattr(row, "currently_with", _currently_with(row, holders.get(row.id)))
+    return page
 
 
 async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
@@ -8812,6 +9061,18 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
     # Approve button from the very person it is waiting on.
     issue = await _decorate_can_approve(
         db, issue, await _issue_doc_type_of(db, issue.id), user)
+    holders = (await _issue_holders_bulk(db, [issue])).get(issue.id, [])
+    setattr(issue, "currently_with", _currently_with(issue, holders))
+    # Who SUBMITTED it — the person who initiated it, which is not `created_by` when
+    # an approved allocation drafted the document under the approver's name.
+    setattr(issue, "submitted_by_name", (await db.execute(
+        select(WfInstance.started_by_name)
+        .where(WfInstance.doc_id == issue.id, WfInstance.doc_type.in_(ISSUE_DOC_TYPES))
+        .order_by(WfInstance.id.desc()).limit(1)
+    )).scalar_one_or_none())
+    setattr(issue, "can_issue_from_stock",
+            issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
+            and user is not None and await _may_act_as_issue_holder(db, user, holders))
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
     if issue.floor_location_id:
@@ -9214,6 +9475,20 @@ async def _decorate_dispatch_page_destinations(db: AsyncSession, page: dict) -> 
     return page
 
 
+def _fill_from_indent(data: s.IssueWrite, indent) -> s.IssueWrite:
+    """An issue against an indent IS indent-based, and takes the indent's project and
+    department where the caller left them blank. Every door that builds an issue —
+    the form, the allocation drafts, forwarding, STR — passes through here, so none of
+    them can save "Direct" with an empty project for an indent's goods again."""
+    if indent is None:
+        return data
+    return data.model_copy(update={
+        "issue_type": IssueType.INDENT_BASED,
+        "department_id": data.department_id or getattr(indent, "department_id", None),
+        "project_id": data.project_id or getattr(indent, "project_id", None),
+    })
+
+
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                        for_sto: bool = False) -> m.MaterialIssue:
     """Build one material issue draft without committing it.
@@ -9287,6 +9562,7 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
             raise ValidationError(
                 f"{picking.pick_no} already has material issue {existing}"
             )
+    data = _fill_from_indent(data, indent)
     snapshots = await _issue_snapshot_values(
         db,
         department_id=data.department_id,
@@ -9691,6 +9967,9 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
 
     before = {"total_qty": str(issue.total_qty)}
     wh = await _warehouse(db, data.warehouse_id)
+    if data.indent_id:
+        from app.modules.indents.models import Indent
+        data = _fill_from_indent(data, await db.get(Indent, data.indent_id))
     snapshots = await _issue_snapshot_values(
         db,
         department_id=data.department_id,
@@ -9879,6 +10158,109 @@ async def _issue_doc_type_of(db: AsyncSession, issue_id: int) -> str:
         .order_by(WfInstance.id.desc()).limit(1)
     )).scalar_one_or_none()
     return found or DocType.WH_ISSUE.value
+
+
+async def _issue_holders_bulk(db: AsyncSession,
+                              issues: list) -> dict[int, list[tuple[int, str]]]:
+    """Who holds each APPROVED, unposted issue — the people who issue it from stock.
+
+    A floor piece of a split belongs to that floor's in-charge(s). Anything else goes
+    back to whoever SUBMITTED it (the workflow instance's starter), falling back to
+    whoever raised it. Read, never stored: reassigning a floor or a post changes the
+    answer by existing. Issues in any other state are left out.
+    """
+    waiting = [issue for issue in issues
+               if issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted]
+    if not waiting:
+        return {}
+    out: dict[int, list[tuple[int, str]]] = {}
+    floors = {issue.floor_location_id for issue in waiting if issue.floor_location_id}
+    floor_people = await stock_locations.floor_incharge_people(db, floors) if floors else {}
+    starters: dict[int, tuple[int, str]] = {}
+    for doc_id, emp_id, name in (await db.execute(
+        select(WfInstance.doc_id, WfInstance.started_by_id, WfInstance.started_by_name)
+        .where(WfInstance.doc_id.in_([issue.id for issue in waiting]),
+               WfInstance.doc_type.in_(ISSUE_DOC_TYPES),
+               WfInstance.started_by_id.is_not(None))
+        .order_by(WfInstance.id)
+    )).all():
+        starters[int(doc_id)] = (int(emp_id), name or "")   # latest instance wins
+    for issue in waiting:
+        people = floor_people.get(issue.floor_location_id) or []
+        if not people and issue.id in starters:
+            people = [starters[issue.id]]
+        if not people and issue.created_by_id:
+            people = [(int(issue.created_by_id), issue.created_by_name or "")]
+        out[issue.id] = people
+    return out
+
+
+def _holder_label(people: list[tuple[int, str]]) -> str | None:
+    names = list(dict.fromkeys(name for _id, name in people if name))
+    if not names:
+        return None
+    return names[0] if len(names) == 1 else f"{names[0]} +{len(names) - 1}"
+
+
+def _currently_with(issue, holders: list[tuple[int, str]] | None) -> str | None:
+    """Where the document is RIGHT NOW — one answer for the list and the detail."""
+    status = issue.status
+    if status == IssueStatus.DRAFT.value:
+        return getattr(issue, "created_by_name", None)
+    if status == IssueStatus.PENDING_APPROVAL.value:
+        return issue.current_approver_name or "unassigned"
+    if status == IssueStatus.APPROVED.value and not issue.is_stock_posted:
+        return _holder_label(holders or [])
+    return None
+
+
+async def _may_act_as_issue_holder(db: AsyncSession, user,
+                                   holders: list[tuple[int, str]]) -> bool:
+    """The holder, or anyone above them on the HCM reporting line, or an admin."""
+    if user is None:
+        return False
+    if not holders or user.id in {emp_id for emp_id, _name in holders}:
+        return True       # nobody resolvable must never strand the document (rule 8)
+    from app.platform.hcm.models import HcmPosition, HcmPositionAssignment
+    from app.platform.rbac.permissions import ADMIN_SETTINGS_MANAGE
+    from app.platform.rbac.service import get_user_permissions
+    if ADMIN_SETTINGS_MANAGE in await get_user_permissions(
+            db, user, getattr(user, "active_position_id", None)):
+        return True
+    mine = await stock_locations.active_positions_of(db, user)
+    if not mine:
+        return False
+    frontier = set((await db.execute(
+        select(HcmPositionAssignment.position_id)
+        .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+        .where(HcmPositionAssignment.employee_id.in_({e for e, _n in holders}),
+               HcmPositionAssignment.is_active.is_(True),
+               HcmPosition.is_active.is_(True))
+    )).scalars().all())
+    seen: set[int] = set(frontier)
+    for _depth in range(15):           # bounded: a cycle in HCM must not spin
+        parents = set((await db.execute(
+            select(HcmPosition.parent_position_id)
+            .where(HcmPosition.id.in_(frontier),
+                   HcmPosition.parent_position_id.is_not(None))
+        )).scalars().all()) - seen
+        if not parents:
+            return False
+        if parents & mine:
+            return True
+        seen |= parents
+        frontier = parents
+    return False
+
+
+async def _assert_issue_holder(db: AsyncSession, issue, user) -> None:
+    """Only the person an approved issue is WITH (or their reporting line) works it."""
+    holders = (await _issue_holders_bulk(db, [issue])).get(issue.id, [])
+    if not await _may_act_as_issue_holder(db, user, holders):
+        raise PermissionError_(
+            f"{issue.issue_no} is with {_holder_label(holders) or 'another person'}. "
+            "Only they, or someone they report to, can pick its serials and issue "
+            "it from stock.")
 
 
 async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
@@ -10448,6 +10830,8 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
            "capture serials on", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
+    if issue.status == IssueStatus.APPROVED.value:
+        await _assert_issue_holder(db, issue, user)
 
     by_line = {row.id: row.serial_numbers for row in data.lines}
     unknown = set(by_line) - {line.id for line in issue.items}
@@ -10621,6 +11005,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     _guard(issue.status, {IssueStatus.APPROVED.value}, "issue stock against", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
+    await _assert_issue_holder(db, issue, user)
     # A parent split before SPLIT existed still reads APPROVED. Its children carry
     # its goods, so posting it as well would take the same stock off the shelf twice.
     live_children = (await db.execute(
@@ -10793,6 +11178,15 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     )
                 continue
 
+        if outward and issue.project_id:
+            # A line with no indent reservation draws off `available_qty`; a lot held
+            # for this issue's project is set aside FOR it, so hand that back first.
+            await stock_allocation.take_from_holds(
+                db, item_id=line.item_id, project_id=issue.project_id, qty=qty,
+                ref_type=None, ref_id=None, ref_no=None, ref_line_id=None, user=user,
+                warehouse_ids=[issue.warehouse_id],
+                bin_id=line.bin_id if line.bin_id else None,
+                batch_id=line.batch_id if line.batch_id else None)
         if outward:
             # Where this line's goods actually sit, not where the line says they do.
             # A forwarded consignment has no reservation at THIS point (the hold was
@@ -10823,6 +11217,10 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
             )
 
     await _mark_serials(db, issue, outward)
+    if outward and issue.project_id:
+        from app.modules.warehouse.project_holds import clear_spent_unit_stamps
+        await clear_spent_unit_stamps(
+            db, issue.project_id, {line.item_id for line in issue.items})
     if not outward and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
         _apply_issue_return(issue, original)
@@ -10929,7 +11327,16 @@ def _shipped_unit_marker(doc: str, doc_id: int) -> str:
 
 #: Remarks that mean "this unit is already spoken for by another document". A unit
 #: carrying one of these must never be auto-picked for a second one.
-_CLAIMED_REMARK_PREFIXES = ("Reserved for issue ", "Issued by ")
+#: The stamp a project hold puts on the exact units it names. Claimed, so every
+#: picker and auto-claim skips them; only that project's issue may name them.
+PROJECT_HOLD_UNIT_PREFIX = "Held for project "
+
+
+def project_hold_unit_marker(project_id: int, hold_id: int) -> str:
+    return f"{PROJECT_HOLD_UNIT_PREFIX}{project_id} by hold {hold_id}"
+
+
+_CLAIMED_REMARK_PREFIXES = ("Reserved for issue ", "Issued by ", PROJECT_HOLD_UNIT_PREFIX)
 
 
 async def _claim_units(
@@ -11933,16 +12340,29 @@ async def _issue_available_qty_and_serials(
             accepted_qty: dict[tuple[int, int], Decimal] = {}
             accepted_serials: set[str] = set()
             
-            items = (await db.execute(
-                select(m.OutboundInspectionItem, m.MaterialIssueLine.batch_id)
-                .join(m.MaterialIssueLine, m.OutboundInspectionItem.issue_item_id == m.MaterialIssueLine.id)
-                .where(m.OutboundInspectionItem.inspection_id == inspection.id)
-            )).all()
-            
-            for insp_item, batch_id in items:
-                key = (insp_item.item_id, batch_id or m.NO_BATCH)
+            insp_by_line = {
+                row.issue_item_id: row
+                for row in (await db.execute(
+                    select(m.OutboundInspectionItem)
+                    .where(m.OutboundInspectionItem.inspection_id == inspection.id)
+                )).scalars().all()
+            }
+
+            for line in issue.items:
+                batch_id = line.batch_id
+                key = (line.item_id, batch_id or m.NO_BATCH)
+                insp_item = insp_by_line.get(line.id)
+                # A line the inspection does not cover counts at its issued quantity —
+                # the same fallback `issue_dispatch_source` offers the packer, or the
+                # screen offers a line the save then refuses as "0 issued".
+                if insp_item is None:
+                    accepted_qty[key] = accepted_qty.get(key, ZERO) + _d(line.issued_qty)
+                    for s_key, s_row in issued_serials.items():
+                        if s_row.item_id == line.item_id and (not batch_id or s_row.batch_id == batch_id):
+                            accepted_serials.add(s_key.lower())
+                    continue
                 accepted_qty[key] = accepted_qty.get(key, ZERO) + _d(insp_item.accepted_qty)
-                
+
                 serials_data = insp_item.serial_numbers
                 if serials_data:
                     if isinstance(serials_data, dict):
@@ -19879,8 +20299,15 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     """
     stmt = select(m.SerialNumber)
     if issue_id:
-        stmt = stmt.where(_unit_claim_free_clause(
-            _issue_line_serial_marker(issue_id, issue_line_id)))
+        claim_free = _unit_claim_free_clause(
+            _issue_line_serial_marker(issue_id, issue_line_id))
+        # The units held for this issue's own project are its to name.
+        issue_project = await db.scalar(
+            select(m.MaterialIssue.project_id).where(m.MaterialIssue.id == issue_id))
+        if issue_project:
+            claim_free = or_(claim_free, m.SerialNumber.remarks.like(
+                f"{PROJECT_HOLD_UNIT_PREFIX}{issue_project} %"))
+        stmt = stmt.where(claim_free)
     if user is not None:
         stmt = stmt.where(await scope_condition(
             db, user,
@@ -21620,8 +22047,11 @@ async def item_options(db: AsyncSession, search: str | None = None, *,
                        warehouse_id: int | None = None,
                        in_stock: bool = False,
                        indent_id: int | None = None,
+                       project_id: int | None = None,
                        user=None) -> list[dict]:
     """Items for a picker — and, when a point is named, what that point actually holds.
+
+    `project_id`: lots held for that project count as drawable, as on stock-sources.
 
     The plain catalogue is right for a GRN (goods arrive for items the shelf has never
     seen) and wrong for an ISSUE. A material issue raised without an indent asked the
@@ -21654,12 +22084,11 @@ async def item_options(db: AsyncSession, search: str | None = None, *,
         # What this warehouse can give of each item, and how far it is spread. Read
         # once for the whole list rather than per row — `stk_balance` is one row per
         # (item, bin, batch) and a well-stocked point has thousands.
-        if indent_id:
+        if indent_id or project_id:
             mine = (
                 select(Reservation.stock_id.label("stock_id"),
                        func.sum(Reservation.quantity).label("qty"))
-                .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
-                       Reservation.ref_id == indent_id,
+                .where(_own_hold_clause(indent_id, project_id),
                        Reservation.status == ReservationStatus.ACTIVE.value)
                 .group_by(Reservation.stock_id)
                 .subquery()
@@ -21680,7 +22109,7 @@ async def item_options(db: AsyncSession, search: str | None = None, *,
         if mine is not None:
             counts = counts.outerjoin(mine, mine.c.stock_id == Stock.id)
         counts = counts.where(Stock.warehouse_id == warehouse_id,
-                              _stock_offerable(indent_id)).group_by(Stock.item_id)
+                              _stock_offerable(indent_id, project_id)).group_by(Stock.item_id)
         if user is not None:
             counts = counts.where(await scope_condition(
                 db, user,
@@ -21774,7 +22203,25 @@ async def warehouse_options(db: AsyncSession, *, search: str | None = None, mine
              "warehouse_type": r.warehouse_type} for r in rows]
 
 
-def _stock_offerable(indent_id: int | None):
+def _own_hold_clause(indent_id: int | None, project_id: int | None = None):
+    """Which `inv_reservations` rows a document may draw on as its own: its indent's
+    reservation, and the lots held for its project. Everybody else's stay hidden."""
+    from app.modules.inventory.models import ProjectHold, Reservation
+
+    clauses = []
+    if indent_id:
+        clauses.append(and_(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                            Reservation.ref_id == indent_id))
+    if project_id:
+        clauses.append(and_(
+            Reservation.ref_type == InventoryRefType.PROJECT_HOLD.value,
+            Reservation.ref_id.in_(select(ProjectHold.id).where(
+                ProjectHold.project_id == project_id,
+                ProjectHold.status == ProjectHoldStatus.ACTIVE.value))))
+    return or_(*clauses) if clauses else false()
+
+
+def _stock_offerable(indent_id: int | None, project_id: int | None = None):
     """Stock a picker may still choose: what is free, plus what THIS indent is holding.
 
     FIXED 2026-08-21 — both option lists filtered on `available_qty > 0` alone, and an
@@ -21791,12 +22238,11 @@ def _stock_offerable(indent_id: int | None):
     from app.modules.inventory.models import Reservation, Stock
 
     free = Stock.available_qty > ZERO
-    if not indent_id:
+    if not indent_id and not project_id:
         return free
     mine = Stock.id.in_(
         select(Reservation.stock_id).where(
-            Reservation.ref_type == InventoryRefType.RESERVATION.value,
-            Reservation.ref_id == indent_id,
+            _own_hold_clause(indent_id, project_id),
             Reservation.status == ReservationStatus.ACTIVE.value,
         )
     )

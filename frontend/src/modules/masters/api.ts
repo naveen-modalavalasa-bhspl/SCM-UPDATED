@@ -1,7 +1,7 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
-  MasterVendorCategory,
+  MasterVendorCategory, MasterPaymentTerm,
   MasterItemEligibility,
   ItemEligibilityScopes,
   JobProfileOption,
@@ -228,6 +228,7 @@ export const mastersApi = {
   uomClasses: crud<NamedMaster>("/api/uom-classes"),
   /** How suppliers are grouped (Glassware, Reagents ...). */
   vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
+  paymentTerms: crud<MasterPaymentTerm>("/api/payment-terms"),
   vendorMapping: {
     sources: () => api.get<VendorMappingSources>("/api/vendor-items/mapping-sources")
       .then((r) => r.data),

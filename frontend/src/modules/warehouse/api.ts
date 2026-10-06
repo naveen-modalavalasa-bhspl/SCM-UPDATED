@@ -426,11 +426,14 @@ export const issueStockSources = (
   warehouse_id: number,
   item_ids: number[],
   indent_id?: number | null,
+  // Lots held for this project (Stock Segregation > Project Lots) are offered too.
+  project_id?: number | null,
 ) =>
   post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
     warehouse_id,
     item_ids,
     indent_id,
+    project_id,
   });
 
 /**
@@ -915,9 +918,10 @@ export const itemOptions = (
   warehouse_id?: number | null,
   in_stock?: boolean,
   indent_id?: number | null,
+  project_id?: number | null,
 ) =>
   get<ItemOption[]>(`${BASE}/options/items`, {
-    search, warehouse_id, in_stock, indent_id,
+    search, warehouse_id, in_stock, indent_id, project_id,
   });
 
 export const vendorOptions = (search?: string) => get<Option[]>(`${BASE}/options/vendors`, { search });
@@ -1156,3 +1160,24 @@ export const warehouseDemandPoolKeys = {
   pool: (params: Record<string, unknown> = {}) =>
     ['warehouse', 'demand-pool', params] as const,
 };
+
+// --- Project lots (Stock Segregation > Project Lots) -------------------------
+
+export const listProjectLots = (
+  params: ListParams & { warehouse_id?: number; item_id?: number; held?: "held" | "free" } = {},
+) => get<Page<import("./types").ProjectLot>>(`${BASE}/project-lots`, params);
+
+export const listProjectHolds = (
+  params: ListParams & { status?: string; project_id?: number; warehouse_id?: number } = {},
+) => get<Page<import("./types").ProjectHold>>(`${BASE}/project-holds`, params);
+
+export const createProjectHold = (body: import("./types").ProjectHoldCreate) =>
+  post<import("./types").ProjectHold>(`${BASE}/project-holds`, body);
+
+/** Raises a Stock Movement Order moving the released stock to another location. */
+export const releaseProjectHold = (id: number, body: import("./types").ProjectHoldRelease) =>
+  post<import("./types").ProjectHoldReleaseResult>(`${BASE}/project-holds/${id}/release`, body);
+
+/** Another project's urgent need — the lot is released TO it, with a reason. */
+export const lendProjectHold = (id: number, body: import("./types").ProjectHoldRelease) =>
+  post<import("./types").ProjectHoldReleaseResult>(`${BASE}/project-holds/${id}/lend`, body);

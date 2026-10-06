@@ -365,7 +365,7 @@ export function ItemMasterTab() {
   // lock, so the form asks what it would be rather than guessing. `####` only
   // shows while that answer is in flight or when the pair is not picked yet.
   const nextCode = useQuery({
-    queryKey: ["masters", "items", "next-code", form.category_id],
+    queryKey: ["masters", "items", "next-code", form.category_id, form.general_name_id],
     queryFn: () => mastersApi.nextItemCode(
       Number(form.category_id), Number(form.general_name_id) || 0),
     enabled: editing === null && Boolean(form.category_id),

@@ -12,7 +12,9 @@ import {
   ItemSubClassesTab, ItemsTab,
 } from "../tabs/itemTabs";
 import { ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
-import { VendorCategoriesTab, VendorItemsTab, VendorsTab } from "../tabs/vendorTabs";
+import {
+  PaymentTermsTab, VendorCategoriesTab, VendorItemsTab, VendorsTab,
+} from "../tabs/vendorTabs";
 import { VendorMappingPanel } from "../components/VendorMappingPanel";
 import { ConversionsTab, UomTab } from "../tabs/uomTabs";
 import {
@@ -27,7 +29,7 @@ const TABS = [
   "attributes", "specs", "category-tags",
   "uom", "uom-classes", "conversions", "warehouses",
   "projects", "vendors", "vendor-categories", "vendor-items", "boms", "bom-groups",
-  "departments", "facilities", "item-eligibility",
+  "departments", "facilities", "item-eligibility", "payment-terms",
 ] as const;
 
 /** The masters, grouped the way somebody looking for one thinks about them.
@@ -48,7 +50,7 @@ const GROUPS: MasterGroup[] = [
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
   { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
-  { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items"] },
+  { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items", "payment-terms"] },
   { label: "BOM", tabs: ["boms", "bom-groups"] },
   { label: "Locations", tabs: ["warehouses", "facilities", "projects", "departments"] },
 ];
@@ -82,6 +84,7 @@ export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
 export const PROCUREMENT_MASTER_GROUPS: MasterGroup[] = [
   { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items"] },
   { label: "Tax", tabs: ["hsn-codes"] },
+  { label: "Payment", tabs: ["payment-terms"] },
 ];
 
 /** Both of these are rules about RAISING a request: a BOM is what an indent is built
@@ -111,6 +114,7 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   boms: "BOM", "bom-groups": "BOM Groups",
   departments: "Departments", facilities: "Facilities",
   "item-eligibility": "Item Eligibility",
+  "payment-terms": "Payment Terms",
 };
 
 /** Which tabs actually need each shared dropdown source. Without this the screen
@@ -291,6 +295,7 @@ export function MastersShell({
       {tab === "general-names" && <GeneralNamesTab />}
       {tab === "item-classes" && <ItemClassesTab />}
       {tab === "hsn-codes" && <HsnCodesTab />}
+      {tab === "payment-terms" && <PaymentTermsTab />}
       {tab === "item-sub-classes" && <ItemSubClassesTab />}
       {tab === "brands" && <BrandsTab />}
       {tab === "manufacturers" && <NamedLookupTab title="Manufacturer" queryKey="manufacturers" api={mastersApi.manufacturers} managePerm="master.brand.manage" />}

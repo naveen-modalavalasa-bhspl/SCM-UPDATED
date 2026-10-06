@@ -11,6 +11,8 @@ import { load, money } from "../components/modeCopy";
 import { ManifestTable } from "../components/ManifestTable";
 import { safeHref } from "../components/tripLoad";
 import { CarrierTripStops } from "./CarrierTripStops";
+import { carrierInvoiceDocs } from "@/modules/accounts/api";
+import { DocumentFiles } from "@/modules/accounts/components/DocumentFiles";
 
 const SCANS = [
   { value: "", label: "No scan, just save the numbers" },
@@ -480,6 +482,20 @@ export function CarrierJobPage() {
               ? ` The site signed for it on ${fmtDateTime(job.acknowledged_at)}.`
               : " Waiting for the site to sign for it."}
           </p>
+        </Card>
+      )}
+
+      {/* The freight invoice — only the carrier the job was awarded to bills for it,
+          and only once they have taken it on. No DC: that is the supplier's paper. */}
+      {!lost && ["READY", "IN_TRANSIT", "DELIVERED", "ACKNOWLEDGED", "CLOSED"].includes(job.status) && (
+        <Card className="space-y-3 p-5">
+          <div>
+            <h2 className="font-display text-lg font-semibold text-ink">Your invoice</h2>
+            <p className="text-sm text-body">Upload the freight invoice for this shipment. PDF or a clear photo.</p>
+          </div>
+          <DocumentFiles queryKey={["carrier-invoices", job.id]}
+            endpoints={carrierInvoiceDocs(job.id)} categories={["INVOICE"]}
+            emptyText="No invoice uploaded yet." />
         </Card>
       )}
 

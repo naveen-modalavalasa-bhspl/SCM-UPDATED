@@ -1128,10 +1128,14 @@ export interface BatchDemandLine {
   indent_item_id: number;
   requested_by_name?: string | null;
   office_name?: string | null;
+  project_id?: number | null;
   project_name?: string | null;
   priority?: string | null;
   pending_qty: number;
   raised_at?: string | null;
+  /** Stock held for THIS line's project (Stock Segregation > Project Lots). Only lines
+   *  of that project may take it; the split gives it to them first. */
+  project_held_qty?: number;
 }
 
 /** One ITEM across every indent still waiting for it. `shortfall` is what has to be
@@ -1167,6 +1171,16 @@ export interface BatchDemandItem {
     warehouse_name: string;
     available_qty: number;
     warehouse_type?: string | null;
+    /** Of `available_qty`, how much is held for a project with demand in this row. */
+    held_qty?: number;
+  }[];
+  /** Lots held for a project, per point — not in the free figures from the server. */
+  project_holds?: {
+    project_id: number;
+    project_name?: string | null;
+    warehouse_id: number;
+    warehouse_name: string;
+    quantity: number;
   }[];
   demand: BatchDemandLine[];
 }

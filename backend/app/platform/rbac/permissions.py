@@ -68,6 +68,12 @@ STOCK_EDIT_VIEW = "stock.edit.view"
 STOCK_EDIT_CREATE = "stock.edit.create"
 STOCK_EDIT_APPROVE = "stock.edit.approve"
 STOCK_RESERVE = "stock.reserve"
+# Project Lots (Stock Segregation tab, 2026-10-06): set a lot aside for one project.
+# VIEW inherits stock.view; MANAGE (reserve / release) and OVERRIDE (lend a held lot
+# to another project's urgent need) are new capabilities, fail-closed to Admin.
+STOCK_PROJECT_HOLD_VIEW = "stock.project_hold.view"
+STOCK_PROJECT_HOLD_MANAGE = "stock.project_hold.manage"
+STOCK_PROJECT_HOLD_OVERRIDE = "stock.project_hold.override"
 # Valuation exposes purchase cost, so it is separate from plain stock visibility.
 STOCK_VALUATION_VIEW = "stock.valuation.view"
 STOCK_TRANSFER = "stock.transfer"
@@ -198,6 +204,13 @@ MASTER_PRICE_MANAGE = "master.price.manage"
 MASTER_BOM_MANAGE = "master.bom.manage"
 MASTER_SPEC_MANAGE = "master.spec.manage"
 MASTER_HSN_MANAGE = "master.hsn.manage"
+MASTER_PAYMENT_TERM_MANAGE = "master.payment_term.manage"
+
+# --- Accounts (vendor payments against PO milestones). New capability, fail-closed:
+# Admin holds them until a job profile is ticked.
+ACCOUNTS_VIEW = "accounts.view"
+ACCOUNTS_PAY = "accounts.pay"
+ACCOUNTS_APPROVE = "accounts.approve"
 
 # --- Reports (cross-module read-only ledgers) ---
 REPORT_VIEW = "report.view"
@@ -363,6 +376,12 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(STOCK_EDIT_APPROVE, "inventory", "stock_edit", "approve",
          "Approve or reject a stock correction"),
     Perm(STOCK_RESERVE, "inventory", "stock", "reserve", "Reserve stock for a document"),
+    Perm(STOCK_PROJECT_HOLD_VIEW, "inventory", "project_hold", "view",
+         "View project lots and the holds on them"),
+    Perm(STOCK_PROJECT_HOLD_MANAGE, "inventory", "project_hold", "manage",
+         "Reserve a lot for a project, and release it"),
+    Perm(STOCK_PROJECT_HOLD_OVERRIDE, "inventory", "project_hold", "override",
+         "Lend a project's held lot to another project's urgent need"),
     Perm(STOCK_VALUATION_VIEW, "inventory", "stock_valuation", "view",
          "View stock valuation and cost"),
     Perm(STOCK_TRANSFER, "inventory", "stock", "transfer",
@@ -483,6 +502,14 @@ ALL_PERMISSIONS: list[Perm] = [
     Perm(MASTER_BOM_MANAGE, "masters", "bom", "manage", "Manage bills of material"),
     Perm(MASTER_SPEC_MANAGE, "masters", "spec", "manage", "Manage item specifications"),
     Perm(MASTER_HSN_MANAGE, "masters", "hsn", "manage", "Manage HSN codes and tax rates"),
+    Perm(MASTER_PAYMENT_TERM_MANAGE, "masters", "payment_term", "manage",
+         "Manage payment terms (advance / delivery / installation / warranty split)"),
+    Perm(ACCOUNTS_VIEW, "accounts", "payment", "view",
+         "View what is due and paid against purchase orders"),
+    Perm(ACCOUNTS_PAY, "accounts", "payment", "create",
+         "Record a vendor payment against a PO milestone"),
+    Perm(ACCOUNTS_APPROVE, "accounts", "payment", "approve",
+         "Approve or reject a recorded vendor payment"),
     Perm(ADMIN_ROLES_MANAGE, "admin", "roles", "manage", "Manage roles & permissions"),
     Perm(ADMIN_WORKFLOW_MANAGE, "admin", "workflow", "manage", "Manage approval workflows"),
     Perm(ADMIN_USERS_MANAGE, "admin", "users", "manage", "Manage users & HCM sync"),
@@ -595,6 +622,7 @@ INHERITS_GRANTS_FROM: dict[str, str] = {
     # Inventory, so unticking Movements on a job profile took a transfer away with it.
     # Carved out on 2026-08-20; everybody who could work the screen yesterday keeps it.
     MOVEMENT_VIEW: STOCK_VIEW,
+    STOCK_PROJECT_HOLD_VIEW: STOCK_VIEW,
     MOVEMENT_CREATE: STOCK_TRANSFER,
     MONTHLY_INDENT_MANAGE: ADMIN_SETTINGS_MANAGE,
     # Everyone who could raise a transfer yesterday can request one today.
@@ -768,6 +796,9 @@ PAGE_VIEW_CODES: list[tuple[str, str, str]] = [
     ("logistics_tracking", "logistics", "Logistics · Shipment Tracking"),
     ("logistics_acknowledgements", "logistics", "Logistics · Acknowledgements"),
     ("logistics_exceptions", "logistics", "Logistics · Exceptions"),
+    # Accounts (2026-10-06): what is due and paid against PO payment milestones.
+    ("grp_accounts", "accounts", "Accounts"),
+    ("acc_payments", "accounts", "Accounts · Vendor Payments"),
     ("masters", "masters", "Masters"),
     # The same masters, on the module that owns them (2026-09-18). `/masters` keeps
     # its own code above and stays whole — these are a second door, catalogued here

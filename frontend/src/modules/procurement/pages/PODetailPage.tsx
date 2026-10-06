@@ -11,6 +11,7 @@ import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
 import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
+import { POPaymentsPanel } from "../components/POPaymentsPanel";
 import { POApprovalChat } from "../components/POApprovalChat";
 import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
@@ -566,6 +567,8 @@ export function PODetailPage() {
           </div>
         </div>
       </div>
+
+      {!isDraft && <POPaymentsPanel poId={poId} />}
 
       {isDraft && (
         <Can do="po.edit">

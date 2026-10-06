@@ -17,7 +17,7 @@ from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
     MASTERS, UOM_SUGGESTIONS, VendorMappingIn, build_item_code, build_item_prefix,
     save_vendor_mapping, vendor_mapping_sources,
-    check_hsn_code, hsn_out, packaging_breakdown, peek_item_serial,
+    check_hsn_code, hsn_out, packaging_breakdown, peek_item_serial, sibling_item,
 )
 from app.shared.models.master import GeneralName, HsnCode, Item, ItemCategory, ItemSpec, Uom
 
@@ -336,6 +336,10 @@ async def next_item_code(category_id: int, general_name_id: int | None = None,
     if category is None or category.level != 3:
         raise ValidationError("Select a Level 3 category first")
     prefix = build_item_prefix(category.path)
+    sibling = await sibling_item(db, prefix, category.id, general_name_id)
+    if sibling is not None:
+        return {"prefix": prefix, "next_serial": sibling.serial_no,
+                "preview": sibling.code}
     serial = await peek_item_serial(db, prefix)
     return {"prefix": prefix, "next_serial": serial,
             "preview": build_item_code(category.path, serial)}

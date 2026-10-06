@@ -134,6 +134,9 @@ interface Props {
   locked: boolean;
   /** Even the units are settled — posted, cancelled, or somebody else's to name. */
   unitsLocked: boolean;
+  /** Identifiers are not picked yet at all — drafts and documents in approval. The
+   *  units are chosen at the shelf by whoever issues it, once it is approved. */
+  unitsHidden?: boolean;
   /** Opens the identifier picker for one pick, by its flat index. */
   onPickUnits: (index: number) => void;
   meta: (code?: TrackingType | null) => TrackingTypeMeta | null;
@@ -159,8 +162,8 @@ interface Props {
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
-  locked, unitsLocked, onPickUnits, meta, problemAt, unitSupply, sourcesReady,
-  onAddItem, renderItemPicker, onRemoveGroup, renderRate,
+  locked, unitsLocked, unitsHidden = false, onPickUnits, meta, problemAt, unitSupply,
+  sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate,
 }: Props) {
   const patch = (index: number, change: Partial<IssueItemWrite>) =>
     onChange(lines.map((line, i) => (i === index ? { ...line, ...change } : line)));
@@ -306,6 +309,7 @@ export function IssueSplitEditor({
           indentId={indentId}
           locked={locked}
           unitsLocked={unitsLocked}
+          unitsHidden={unitsHidden}
           unitMeta={meta(group.trackingType)}
           problemAt={problemAt}
           unitSupply={unitSupply}
@@ -354,6 +358,7 @@ interface ItemProps {
   indentId?: number | null;
   locked: boolean;
   unitsLocked: boolean;
+  unitsHidden: boolean;
   unitMeta: TrackingTypeMeta | null;
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
   unitSupply?: Record<string, UnitSupply>;
@@ -683,7 +688,7 @@ interface PickProps extends ItemProps {
 function PickRow(props: PickProps) {
   const {
     group, split, position, sources, batches, fefoHint, binManaged, locked,
-    unitsLocked, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
+    unitsLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
     renderRate,
   } = props;
 
@@ -931,6 +936,10 @@ function PickRow(props: PickProps) {
           <CellLabel>{unitMeta?.label ?? "Identifiers"}</CellLabel>
           {!tracked ? (
             <span className="inline-block text-[11px] text-muted lg:pt-2.5">Not tracked</span>
+          ) : unitsHidden ? (
+            <span className="inline-block text-[11px] text-muted lg:pt-2.5">
+              Picked after approval
+            </span>
           ) : (
             <>
               <Button

@@ -37,6 +37,8 @@ interface Props {
   /** An indent-linked document may draw on its own reservation, so its stock counts
    *  as available to it — the same reason every other source list takes this. */
   indentId?: number | null;
+  /** Lots held for this project count as on hand. */
+  projectId?: number | null;
   isDisabled?: boolean;
   /** Keeps a chosen item visible before the list resolves, or when it has dropped
    *  out of it — a saved line whose item the point no longer stocks. */
@@ -44,15 +46,15 @@ interface Props {
 }
 
 export function ItemPicker({
-  value, onChange, warehouseId, indentId, isDisabled, fallback,
+  value, onChange, warehouseId, indentId, projectId, isDisabled, fallback,
 }: Props) {
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
   const [onlyHere, setOnlyHere] = useState(true);
 
   const { data = [], isFetching } = useQuery({
-    queryKey: ["wh-issue-items", warehouseId, indentId ?? 0, search, onlyHere],
-    queryFn: () => itemOptions(search || undefined, warehouseId, onlyHere, indentId),
+    queryKey: ["wh-issue-items", warehouseId, indentId ?? 0, projectId ?? 0, search, onlyHere],
+    queryFn: () => itemOptions(search || undefined, warehouseId, onlyHere, indentId, projectId),
     enabled: !!warehouseId,
     staleTime: 60_000,
     placeholderData: (previous) => previous,

@@ -50,6 +50,38 @@ interface ItemPlan {
 }
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+/** Fold the lots held for the row's OWN projects into its shelves.
+ *
+ *  A held lot is out of `available_qty` on the server, so it is missing from every
+ *  figure on this row — but a line of the project it is held for may take it, and
+ *  the split below gives it to exactly those lines first. Holds for a project with no
+ *  line in this row stay out: nobody here may draw them. */
+function withHeld(item: BatchDemandItem): BatchDemandItem {
+  const asking = new Set(item.demand.map((l) => l.project_id).filter(Boolean));
+  const usable = (item.project_holds ?? []).filter((h) => asking.has(h.project_id));
+  if (!usable.length) return item;
+  const warehouses = item.warehouses.map((w) => ({ ...w }));
+  let extra = 0;
+  for (const h of usable) {
+    let point = warehouses.find((w) => w.warehouse_id === h.warehouse_id);
+    if (!point) {
+      point = { warehouse_id: h.warehouse_id, warehouse_name: h.warehouse_name, available_qty: 0 };
+      warehouses.push(point);
+    }
+    point.available_qty = round3(point.available_qty + h.quantity);
+    point.held_qty = round3((point.held_qty ?? 0) + h.quantity);
+    extra += h.quantity;
+  }
+  return {
+    ...item,
+    warehouses,
+    available_total: round3(item.available_total + extra),
+    main_available_qty: item.main_available_qty === undefined
+      ? undefined : round3(item.main_available_qty + extra),
+    shortfall: round3(Math.max(0, item.total_demand - (item.available_total + extra))),
+  };
+}
 const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(3).replace(/0+$/, ""));
 
 /** Mirror of `split_demand` in backend/app/modules/indents/service.py.
@@ -81,22 +113,43 @@ function splitPreview(
   }
   left = step(Math.max(0, left));
 
-  for (const line of open.filter((l) => l.priority === "URGENT")) {
-    const take = Math.min(step(line.pending_qty), left);
+  // A project's held lots go to that project's own lines before anything else: they
+  // are the only lines allowed them, and spending free stock there instead would
+  // leave the hold untouched and the other projects short.
+  const heldLeft = new Map<number, number>();
+  for (const line of open) {
+    if (line.project_id && (line.project_held_qty ?? 0) > 0 && !heldLeft.has(line.project_id)) {
+      heldLeft.set(line.project_id, line.project_held_qty ?? 0);
+    }
+  }
+  const owed = (l: BatchDemandLine) => round3(l.pending_qty - (out.get(l.indent_item_id) ?? 0));
+  for (const line of open) {
+    const pool = line.project_id ? heldLeft.get(line.project_id) ?? 0 : 0;
+    if (pool <= 0) continue;
+    const take = step(Math.min(line.pending_qty, pool, left));
+    if (take <= 0) continue;
     out.set(line.indent_item_id, take);
+    heldLeft.set(line.project_id!, round3(pool - take));
     left = round3(left - take);
   }
 
-  const rest = open.filter((l) => l.priority !== "URGENT");
-  const wanted = rest.reduce((sum, l) => sum + l.pending_qty, 0);
+  for (const line of open.filter((l) => l.priority === "URGENT")) {
+    const take = Math.min(step(owed(line)), left);
+    out.set(line.indent_item_id, round3((out.get(line.indent_item_id) ?? 0) + take));
+    left = round3(left - take);
+  }
+
+  const rest = open.filter((l) => l.priority !== "URGENT" && owed(l) > 0);
+  const wanted = rest.reduce((sum, l) => sum + owed(l), 0);
   if (left > 0 && wanted > 0) {
     // Largest remainder in whole steps of the unit, capped at what each line still
     // needs — the same rule `share_out` applies on the backend, so the proposal shown
     // here is exactly what gets reserved.
     const shares = splitQuantity(
-      left, rest.map((l) => l.pending_qty), rest.map((l) => l.pending_qty), decimals,
+      left, rest.map(owed), rest.map(owed), decimals,
     );
-    rest.forEach((line, index) => out.set(line.indent_item_id, shares[index]));
+    rest.forEach((line, index) => out.set(
+      line.indent_item_id, round3((out.get(line.indent_item_id) ?? 0) + shares[index])));
   }
   return out;
 }
@@ -154,13 +207,70 @@ const fixedShares = (item: BatchDemandItem, plan: ItemPlan) => {
 function buildDecisions(
   item: BatchDemandItem, plan: ItemPlan, shares: Map<number, number>,
 ): AllocationDecision[] {
+  // Each chosen point carries three budgets: what was typed for it (`left`), what of
+  // that is genuinely free to anybody (`free`), and what is held per project
+  // (`held`). A held lot may go only to its own project's lines, and the server
+  // refuses anything else — so a line takes its project's held stock first, at
+  // whichever point holds it, and only then free stock. Drawing points in the order
+  // typed let a project's line spend free stock at the first point while its own
+  // held lot sat at the second, and the other lines then reached for the hold.
+  const holdsAt = (wh: number) => {
+    const map = new Map<number, number>();
+    for (const h of item.project_holds ?? []) {
+      if (h.warehouse_id === wh) map.set(h.project_id, (map.get(h.project_id) ?? 0) + h.quantity);
+    }
+    return map;
+  };
   const pools = plan.splits
-    .map((s) => ({ wh: Number(s.wh) || 0, left: Number(s.qty) || 0 }))
+    .map((s) => {
+      const wh = Number(s.wh) || 0;
+      const shelf = item.warehouses.find((w) => w.warehouse_id === wh);
+      return {
+        wh,
+        left: Number(s.qty) || 0,
+        free: shelf ? round3(shelf.available_qty - (shelf.held_qty ?? 0)) : 0,
+        held: holdsAt(wh),
+      };
+    })
     .filter((p) => p.wh > 0 && p.left > 0);
+
+  // {line: {warehouse: quantity}}, filled in two passes so held stock is spoken for
+  // before any free stock is handed out.
+  const taken = new Map<number, Map<number, number>>();
+  const need = new Map<number, number>(
+    item.demand.map((l) => [l.indent_item_id, shares.get(l.indent_item_id) ?? 0]));
+  const give = (lineId: number, wh: number, qty: number) => {
+    const row = taken.get(lineId) ?? new Map<number, number>();
+    row.set(wh, round3((row.get(wh) ?? 0) + qty));
+    taken.set(lineId, row);
+    need.set(lineId, round3((need.get(lineId) ?? 0) - qty));
+  };
+
+  for (const line of item.demand) {
+    if (!line.project_id) continue;
+    for (const pool of pools) {
+      const want = need.get(line.indent_item_id) ?? 0;
+      const held = pool.held.get(line.project_id) ?? 0;
+      const take = round3(Math.min(want, held, pool.left));
+      if (take <= 0) continue;
+      give(line.indent_item_id, pool.wh, take);
+      pool.held.set(line.project_id, round3(held - take));
+      pool.left = round3(pool.left - take);
+    }
+  }
+  for (const line of item.demand) {
+    for (const pool of pools) {
+      const want = need.get(line.indent_item_id) ?? 0;
+      const take = round3(Math.min(want, pool.free, pool.left));
+      if (take <= 0) continue;
+      give(line.indent_item_id, pool.wh, take);
+      pool.free = round3(pool.free - take);
+      pool.left = round3(pool.left - take);
+    }
+  }
 
   const out: AllocationDecision[] = [];
   for (const line of item.demand) {
-    let need = shares.get(line.indent_item_id) ?? 0;
     // The line's requested quantity belongs to the LINE, not to each split. Repeating
     // it on every row made the backend read one line asking 10 and served 6+4 as two
     // lines each 4 and 6 short — a material request for goods that were handed over.
@@ -176,12 +286,14 @@ function buildDecisions(
         requested_qty: first ? line.pending_qty : 0,
         quantity,
         warehouse_id: warehouse,
+        // The server sets the indent's own project; 0 here is never trusted.
         project_id: 0,
       });
       first = false;
     };
-
-    if (need <= 0) {
+    const rows = [...(taken.get(line.indent_item_id) ?? new Map()).entries()]
+      .filter(([, qty]) => qty > 0);
+    if (!rows.length) {
       // "Give nothing" is a decision, and the ONLY way this line reaches procurement:
       // the backend works the shortfall out of `requested_qty - quantity` and raises
       // one material request for the indent. Skipped, the line was dropped from the
@@ -192,14 +304,7 @@ function buildDecisions(
       if (plan.procure) push(0, null);
       continue;
     }
-    for (const pool of pools) {
-      if (need <= 0) break;
-      const take = round3(Math.min(pool.left, need));
-      if (take <= 0) continue;
-      push(take, pool.wh);
-      pool.left = round3(pool.left - take);
-      need = round3(need - take);
-    }
+    for (const [wh, qty] of rows) push(qty, wh);
   }
   return out;
 }
@@ -377,7 +482,8 @@ function ItemRow({ item, plan, onChange }: {
                         let it happen by accident. */}
                     {orderPoints(item.warehouses).map((w) => (
                       <option key={w.warehouse_id} value={String(w.warehouse_id)}>
-                        {w.warehouse_name} ({fmt(w.available_qty)} free)
+                        {w.warehouse_name} ({fmt(w.available_qty)} free
+                        {w.held_qty ? `, incl. ${fmt(w.held_qty)} held for these projects` : ""})
                         {isChainPoint(w) ? " · distribution point" : ""}
                       </option>
                     ))}
@@ -503,6 +609,11 @@ function ItemRow({ item, plan, onChange }: {
                       <td className="px-2 py-2">{line.requested_by_name ?? "—"}</td>
                       <td className="px-2 py-2 text-muted">
                         {line.office_name ?? line.project_name ?? "—"}
+                        {(line.project_held_qty ?? 0) > 0 && (
+                          <div className="text-[11px] text-secondary">
+                            {fmt(line.project_held_qty ?? 0)} held for {line.project_name ?? "this project"}
+                          </div>
+                        )}
                       </td>
                       <td className="px-2 py-2 text-right">{fmt(line.pending_qty)}</td>
                       <td className="px-2 py-2 text-right">
@@ -569,7 +680,7 @@ export function BatchDemandView({ cycle }: { cycle?: string }) {
     queryKey: ["batch-demand", cycle ?? "all"],
     queryFn: () => getBatchDemand(cycle),
   });
-  const items = batch.data?.items ?? [];
+  const items = useMemo(() => (batch.data?.items ?? []).map(withHeld), [batch.data]);
 
   const planFor = (item: BatchDemandItem) => plans[item.item_id] ?? defaultPlan(item);
 

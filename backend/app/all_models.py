@@ -21,6 +21,7 @@ for _mod in (
     "app.modules.procurement.models",
     "app.modules.logistics.models",
     "app.modules.warehouse.models",
+    "app.modules.accounts.models",
 ):
     try:
         __import__(_mod)

@@ -31,11 +31,13 @@ from app.modules.indents import service as indent_service
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import service
+from app.modules.warehouse import project_holds
 from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
+    STOCK_PROJECT_HOLD_MANAGE, STOCK_PROJECT_HOLD_OVERRIDE, STOCK_PROJECT_HOLD_VIEW,
     INDENT_ACKNOWLEDGE, INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
     ADMIN_SETTINGS_MANAGE, TRANSPORT_CREATE, TRANSPORT_TRACK, TRANSPORT_VIEW,
@@ -630,6 +632,7 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
         warehouse_id=body.warehouse_id,
         item_ids=body.item_ids,
         indent_id=body.indent_id,
+        project_id=body.project_id,
         user=user,
     )
 
@@ -1291,6 +1294,48 @@ async def serial_codes(payload: s.UnitCodeQuery, db: AsyncSession = Depends(get_
     return {"items": await service.unit_codes(db, payload.codes, user=user)}
 
 
+# --- Project Lots (Stock Segregation tab): set a lot aside for one project ---------
+
+@router.get("/project-lots", response_model=Page[s.ProjectLotRead])
+async def list_project_lots(params: PageParams = Depends(), warehouse_id: int | None = None,
+                            item_id: int | None = None, search: str | None = None,
+                            held: str | None = None, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_PROJECT_HOLD_VIEW))):
+    return await project_holds.list_lots(db, params, user, warehouse_id=warehouse_id,
+                                         item_id=item_id, search=search, held=held)
+
+
+@router.get("/project-holds", response_model=Page[s.ProjectHoldRead])
+async def list_project_holds(params: PageParams = Depends(), status: str | None = None,
+                             project_id: int | None = None, warehouse_id: int | None = None,
+                             search: str | None = None, db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(STOCK_PROJECT_HOLD_VIEW))):
+    return await project_holds.list_holds(db, params, user, status=status,
+                                          project_id=project_id,
+                                          warehouse_id=warehouse_id, search=search)
+
+
+@router.post("/project-holds", response_model=s.ProjectHoldRead, status_code=201)
+async def create_project_hold(body: s.ProjectHoldCreate, db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_PROJECT_HOLD_MANAGE))):
+    return await project_holds.create_hold(db, body, user)
+
+
+@router.post("/project-holds/{hold_id}/release", response_model=s.ProjectHoldReleaseResult)
+async def release_project_hold(hold_id: int, body: s.ProjectHoldRelease,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(STOCK_PROJECT_HOLD_MANAGE))):
+    return await project_holds.release_hold(db, hold_id, body, user)
+
+
+@router.post("/project-holds/{hold_id}/lend", response_model=s.ProjectHoldReleaseResult)
+async def lend_project_hold(hold_id: int, body: s.ProjectHoldRelease,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(STOCK_PROJECT_HOLD_OVERRIDE))):
+    """Another project's urgent need: release the lot TO it, with a reason."""
+    return await project_holds.release_hold(db, hold_id, body, user, lend=True)
+
+
 @router.get("/stock-segregation/item-locations", response_model=list[s.ItemLocationsOut])
 async def item_locations(warehouse_id: int, item_id: int | None = None, location_id: int | None = None,
                          db: AsyncSession = Depends(get_db),
@@ -1490,6 +1535,7 @@ async def run_report(key: str, warehouse_id: int | None = None, date_from: date 
 @router.get("/options/items", response_model=list[s.ItemOption])
 async def item_options(search: str | None = None, warehouse_id: int | None = None,
                        in_stock: bool = False, indent_id: int | None = None,
+                       project_id: int | None = None,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     """The item catalogue, and — when a point is named — what that point holds of each.
@@ -1498,6 +1544,7 @@ async def item_options(search: str | None = None, warehouse_id: int | None = Non
     that offers the whole master on an outward document sends the storekeeper down two
     more dropdowns before telling him the shelf is empty."""
     return await service.item_options(db, search, warehouse_id=warehouse_id,
+                                      project_id=project_id,
                                       in_stock=in_stock, indent_id=indent_id,
                                       user=user)
 
