@@ -53,7 +53,7 @@ export function MaterialIssuePrintPage() {
       metadata={[
         { label: "Warehouse", value: issue.warehouse_id ? warehouseName : "—" },
         { label: "Issued to", value: issue.issued_to_name || "—" },
-        { label: "Indent", value: issue.indent_no || "—", mono: true },
+        { label: issue.indent_type === "STR" ? "STR" : "Indent", value: issue.indent_no || "—", mono: true },
         { label: "Department", value: issue.department_id ? `DEPT-${issue.department_id}` : "—", mono: true },
         { label: "Destination", value: issue.destination_office_name || "—", fullWidth: true },
       ]}

@@ -1723,6 +1723,7 @@ class IssueRead(_Read):
     issue_date: date
     indent_id: int | None = None
     indent_no: str | None = None
+    indent_type: str | None = None
     picking_id: int | None = None
     pick_no: str | None = None
     warehouse_id: int
@@ -3829,6 +3830,10 @@ class EmployeeDestination(BaseModel):
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
     vehicle_number: str | None = None
+    department_id: int | None = None
+    department_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
 
 
 class PickingIssueSource(BaseModel):

@@ -7125,7 +7125,9 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
         if not outstanding:
             continue
         lines = outstanding
-        project_id = next(
+        # The CONSUMING project is the indent's (an STR's own project); the stock's
+        # project is only the fallback for an indent that carries none.
+        project_id = getattr(indent, "project_id", None) or next(
             (v["project_id"] for v in lines.values() if v["project_id"]), None
         )
         items: list[s.IssueItemWrite] = []
@@ -7224,10 +7226,20 @@ async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
 
     if sto.doc_kind != STO_KIND_TRANSFER or sto.issue_id or sto.str_id:
         return
+    # Project: the STO's own, else the source point's tag. Department: the raiser's
+    # HCM department — an STO carries none of its own, and a blank here is copied onto
+    # every floor piece of a split.
+    from app.platform.hcm.models import HcmEmployee
+    raiser = (await db.get(HcmEmployee, sto.requested_by_id)
+              if getattr(sto, "requested_by_id", None) else None)
+    project_id = (sto.from_project_id
+                  or await stock_locations.project_of_location(db, sto.from_warehouse_id)
+                  or getattr(raiser, "project_id", None) or None)
     data = s.IssueWrite(
         issue_date=ist_today(),
         warehouse_id=sto.from_warehouse_id,
-        project_id=sto.from_project_id or None,
+        project_id=project_id,
+        department_id=getattr(raiser, "department_id", None),
         remarks=f"STO {sto.sto_no} to {sto.to_warehouse_name}",
         items=[s.IssueItemWrite(item_id=line.item_id, requested_qty=_d(line.requested_qty))
                for line in sto.items],
@@ -9028,7 +9040,20 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
     holders = await _issue_holders_bulk(db, list(page["items"]))
     for row in page["items"]:
         setattr(row, "currently_with", _currently_with(row, holders.get(row.id)))
+    await _decorate_indent_types(db, list(page["items"]))
     return page
+
+
+async def _decorate_indent_types(db: AsyncSession, issues: list) -> None:
+    """Stamp `indent_type` so a screen can say "STR" rather than "Indent" for an issue
+    serving a stock transfer request. One query for the page."""
+    from app.modules.indents.models import Indent
+    ids = {i.indent_id for i in issues if i.indent_id}
+    types = dict((await db.execute(
+        select(Indent.id, Indent.indent_type).where(Indent.id.in_(ids))
+    )).all()) if ids else {}
+    for issue in issues:
+        setattr(issue, "indent_type", types.get(issue.indent_id))
 
 
 async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
@@ -9086,6 +9111,7 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         .where(m.MaterialIssue.parent_issue_id == issue.id)
         .order_by(m.MaterialIssue.id)
     )).all()] if not issue.parent_issue_id else [])
+    await _decorate_indent_types(db, [issue])
     return await _decorate_issue_destination(db, issue)
 
 
@@ -9492,6 +9518,21 @@ def _fill_from_indent(data: s.IssueWrite, indent) -> s.IssueWrite:
     })
 
 
+async def _fill_from_employee(db: AsyncSession, data: s.IssueWrite) -> s.IssueWrite:
+    """No indent: a blank department/project comes from the person it is issued TO
+    (their HCM record), never overwriting what the form chose."""
+    if not data.issued_to_id or (data.department_id and data.project_id):
+        return data
+    from app.platform.hcm.models import HcmEmployee
+    employee = await db.get(HcmEmployee, data.issued_to_id)
+    if employee is None:
+        return data
+    return data.model_copy(update={
+        "department_id": data.department_id or employee.department_id,
+        "project_id": data.project_id or employee.project_id,
+    })
+
+
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                        for_sto: bool = False) -> m.MaterialIssue:
     """Build one material issue draft without committing it.
@@ -9566,6 +9607,8 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                 f"{picking.pick_no} already has material issue {existing}"
             )
     data = _fill_from_indent(data, indent)
+    if indent is None:
+        data = await _fill_from_employee(db, data)
     snapshots = await _issue_snapshot_values(
         db,
         department_id=data.department_id,
@@ -10573,6 +10616,16 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         created.append(child)
 
     await db.flush()
+    # The pieces start APPROVED and are never edited, so the realign that runs on an
+    # edit never runs for them: the holds would stay where the allocation put them and
+    # posting floor A's piece could consume a reservation sitting on floor B. Realigned
+    # ONCE over every piece together — per piece, each would read the others' bays as
+    # abandoned and release their holds.
+    await _realign_issue_reservations(db, SimpleNamespace(
+        id=parent.id, issue_no=parent.issue_no, direction=parent.direction,
+        indent_id=parent.indent_id, project_id=parent.project_id,
+        warehouse_id=parent.warehouse_id,
+        items=[line for child in created for line in child.items]), user)
     for child in created:
         await write_audit(db, entity="out_issues", entity_id=child.id,
                           action=AuditAction.CREATE, actor=user,
@@ -10588,6 +10641,18 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                       before={"status": IssueStatus.APPROVED.value},
                       after={"status": parent.status,
                              "children": [c.issue_no for c in created]})
+    # The pieces land APPROVED in the in-charge's queue; say so, or it waits unseen.
+    from app.platform.notifications import service as notifications
+    people = await stock_locations.floor_incharge_people(
+        db, {c.floor_location_id for c in created if c.floor_location_id})
+    for child in created:
+        await notifications.notify(
+            db, [emp_id for emp_id, _name in people.get(child.floor_location_id, [])],
+            title=f"{child.issue_no} is ready to issue",
+            body=(f"Split from {parent.issue_no} for {child.floor_location_name}: "
+                  f"{child.total_items} item(s), {child.total_qty} unit(s)."),
+            deep_link=notifications.link_for("WH_ISSUE", child.id),
+            entity_type="WH_ISSUE", entity_id=child.id)
     await db.commit()
 
     # Who each piece went to. A floor name alone left the manager guessing whose
@@ -11777,8 +11842,14 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
 
 async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
                                        by_name: str | None, remarks: str | None,
-                                       user) -> None:
+                                       user, *,
+                                       received_by_item: dict[int, Decimal] | None = None,
+                                       ) -> None:
     """Sign the issue off and carry the signature onto what it was attached to.
+
+    `received_by_item` is what the receiver COUNTED, per item. Without it every line is
+    taken as delivered in full; with it the consignment lines are stamped with the
+    count, so `credit_arrival` books 6 on the shelf when 6 of 10 arrived (SCM_0013).
 
     Does not commit and writes no audit row: both callers are mid-transaction and own
     their own audit trail.
@@ -11806,8 +11877,15 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
         # Journey's Delivery phase sits PENDING on an indent that is already closed.
         # Only THIS issue's lines: on a grouped consignment the other issues' goods are
         # somebody else's confirmation, still to come.
+        budget = ({k: _d(v) for k, v in received_by_item.items()}
+                  if received_by_item is not None else None)
         for line in _lines_for_issue(dispatch, issue.id, grouped=grouped):
-            line.delivered_qty = _d(line.quantity)
+            if budget is None:
+                line.delivered_qty = _d(line.quantity)
+            else:
+                got = max(ZERO, min(_d(line.quantity), budget.get(line.item_id, ZERO)))
+                budget[line.item_id] = budget.get(line.item_id, ZERO) - got
+                line.delivered_qty = got
         others_open = grouped and bool(await db.scalar(
             select(func.count(m.MaterialIssue.id)).where(
                 m.MaterialIssue.id.in_([issue_id for issue_id in carried
@@ -12231,14 +12309,27 @@ def _direct_issue_for(user, points: set[int]):
     not_left = (select(m.Dispatch.id)
                 .where(_carries_issue(m.MaterialIssue.id),
                        m.Dispatch.status.in_(_DISPATCH_NOT_LEFT)))
+    # Handed over without a consignment: only once outward QC has let it go — a
+    # posted issue sits in QC in the store, and signing it there closes it unseen.
     receivers = [and_(m.MaterialIssue.issued_to_id == getattr(user, "id", 0),
-                      ~not_left.correlate(m.MaterialIssue).exists())]
+                      ~not_left.correlate(m.MaterialIssue).exists(),
+                      or_(m.MaterialIssue.qc_status.is_(None),
+                          m.MaterialIssue.qc_status.in_(
+                              (*CONSIGNABLE_QC, QcStatus.NOT_REQUIRED.value))))]
     if points:
         receivers.append(consigned.where(m.Dispatch.to_warehouse_id.in_(points))
                          .correlate(m.MaterialIssue).exists())
+    from app.modules.inventory.models import StockTransferOrder
+    sto_issues = (select(StockTransferOrder.issue_id)
+                  .where(StockTransferOrder.issue_id.is_not(None)))
     return and_(m.MaterialIssue.indent_id.is_(None),
                 m.MaterialIssue.direction == IssueDirection.OUT.value,
                 m.MaterialIssue.is_stock_posted.is_(True),
+                # An STO's issue (or a floor piece of one) is received on the Stock
+                # Transfer screen, not here.
+                m.MaterialIssue.id.notin_(sto_issues),
+                or_(m.MaterialIssue.parent_issue_id.is_(None),
+                    m.MaterialIssue.parent_issue_id.notin_(sto_issues)),
                 or_(*receivers))
 
 
@@ -12288,12 +12379,17 @@ async def _direct_issue_of(db: AsyncSession, issue_id: int, user, *,
         raise ValidationError(
             f"{issue.issue_no} was issued against {issue.indent_no or 'an indent'} — "
             "acknowledge it on that indent.")
-    if issue.issued_to_id != getattr(user, "id", None):
-        raise PermissionError_(
-            f"Only {issue.issued_to_name or 'the person it was issued to'} can "
-            f"acknowledge {issue.issue_no}")
     if not issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has not left the store yet")
+    # The SAME predicate the list uses, so a row on the list always opens, and hiding
+    # the row is never the control (rule 6): the receiving point, or the issued-to
+    # person once nothing is waiting at the gate.
+    if not await db.scalar(select(func.count()).select_from(m.MaterialIssue).where(
+            m.MaterialIssue.id == issue.id,
+            _direct_issue_for(user, await _own_points(db, user)))):
+        raise PermissionError_(
+            f"{issue.issue_no} is signed for by the point it was dispatched to, or by "
+            f"{issue.issued_to_name or 'the person it was issued to'}")
     if open_only:
         _guard(issue.status, set(_DIRECT_ACK_OPEN), "acknowledge", "issue")
     return issue
@@ -12523,8 +12619,12 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
         (remarks or "").strip() or None,
     ])) or None
 
+    received_by_item: dict[int, Decimal] = defaultdict(Decimal)
+    for line_id, got in lines.items():
+        received_by_item[by_id[line_id].item_id] += _d(got)
     before_status = issue.status
-    await _apply_issue_acknowledgement(db, issue, _name(user), note, user)
+    await _apply_issue_acknowledgement(db, issue, _name(user), note, user,
+                                       received_by_item=received_by_item)
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},
@@ -23108,8 +23208,10 @@ async def indent_options(
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
     rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+    # An STR says so in the picker — its number alone reads like any indent's.
     return [{"id": r.id, "code": r.indent_no,
-             "name": getattr(r, "department_name", None) or r.indent_no} for r in rows]
+             "name": ("STR · " if r.indent_type == _STR_INDENT_TYPE else "")
+             + (getattr(r, "department_name", None) or r.indent_no)} for r in rows]
 
 
 async def indent_issue_source(
@@ -23839,6 +23941,11 @@ async def employee_destination(db: AsyncSession, employee_id: int) -> dict:
         "destination_office_name": office_name,
         "destination_office_sac": await _office_sac(db, employee.office_id),
         "vehicle_number": _vehicle_from_office_name(office_name),
+        # So Project / Department fill on Issued-to too, not only from an indent.
+        "department_id": employee.department_id,
+        "department_name": employee.department_name,
+        "project_id": employee.project_id,
+        "project_name": employee.project_name,
     }
 
 

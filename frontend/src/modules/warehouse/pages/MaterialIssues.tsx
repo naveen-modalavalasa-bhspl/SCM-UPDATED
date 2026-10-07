@@ -56,7 +56,7 @@ export default function MaterialIssues({
      no project or vehicle to crowd it out. So an issue against IND0011 showed
      "AP39TL9499" and the indent number appeared nowhere on the screen. */
   const sourceOf = (r: Issue): SourceRefCandidate[] => [
-    { label: "Indent", no: r.indent_no, to: r.indent_id ? `/indents/${r.indent_id}` : null },
+    { label: r.indent_type === "STR" ? "STR" : "Indent", no: r.indent_no, to: r.indent_id ? `/indents/${r.indent_id}` : null },
     // No detail screen for a picklist yet, so this one reads as text.
     { label: "Picklist", no: r.pick_no },
     {

@@ -505,7 +505,8 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
         title={row.indent_no}
         back={parentStop
           ? { to: `?stop=${encodeURIComponent(parentStop.key)}`, label: `Back to ${parentStop.plain.toLowerCase()}` }
-          : { to: "/indents/acknowledgements", label: "Back to Acknowledgements" }}
+          : { to: kind === "issue" ? "/indents/acknowledgements?view=direct" : "/indents/acknowledgements",
+              label: "Back to Acknowledgements" }}
       />
 
       <ErrorBanner error={confirm.error ?? upload.error ?? remove.error} />

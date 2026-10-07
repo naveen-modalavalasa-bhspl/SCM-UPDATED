@@ -15,7 +15,7 @@ import {
 import { fmtDate, fmtDateTime, fmtRelative, parseIst } from "@/shared/datetime";
 import { approvalsApi } from "../api";
 import { approvalDocumentPath } from "../documentRoutes";
-import { docTypeLabel } from "../docTypes";
+import { displayDocType, docTypeLabel } from "../docTypes";
 import { Kpi } from "../components/ApprovalPulse";
 import { approvalTypeCounts, raisedWindow, type RaisedRange } from "../filters";
 import { ApprovalCorrectionPage } from "./CorrectionPage";
@@ -238,7 +238,7 @@ export function ApprovalsPage() {
     const term = search.trim().toLowerCase();
     const window = raisedWindow(raisedRange, dateFrom, dateTo);
     return all.filter((row) => {
-      if (docType && row.doc_type !== docType) return false;
+      if (docType && displayDocType(row) !== docType) return false;
       if (pastDueOnly && !overdue(row)) return false;
       const waiting = msOf(row.waiting_since);
       if (window && (Number.isNaN(waiting) || waiting < window[0] || waiting >= window[1])) return false;
@@ -322,7 +322,7 @@ export function ApprovalsPage() {
           <strong className="block truncate font-mono text-[13px] font-semibold text-ink">
             {row.doc_no ?? `#${row.doc_id}`}
           </strong>
-          <span className="text-xs text-muted">{label(row.doc_type)}</span>
+          <span className="text-xs text-muted">{label(displayDocType(row))}</span>
         </div>
       </div>
     );

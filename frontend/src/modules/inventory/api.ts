@@ -160,14 +160,6 @@ export const getWarehouses = () =>
     .get<WarehouseOption[]>("/api/warehouse/options/warehouses")
     .then((r) => r.data);
 
-/** Every active point in the network — for a DESTINATION picker only (SCM_0014). A
- *  transfer goes TO a point you do not hold: LIP→LIP, MDP→MDP, WH→WH are peers, which
- *  the scoped list above never contains. `create_sto` still checks the FROM side. */
-export const getAllWarehouses = () =>
-  api
-    .get<WarehouseOption[]>("/api/warehouse/options/warehouses", { params: { all_points: true } })
-    .then((r) => r.data);
-
 /**
  * Serial / IMEI and asset-or-consumable codes for the rows on screen, grouped by item
  * and stocking point.

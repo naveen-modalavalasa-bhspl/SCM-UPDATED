@@ -1340,7 +1340,14 @@ async def move_to_workflow(db, instance_id: int, workflow_id: int, user,
         raise ValidationError("This document is already on that version")
 
     wf = await db.get(Workflow, workflow_id)
-    if wf is None or wf.doc_type != instance.doc_type:
+    # The target must be the SAME chain family as the one the document rides today.
+    # An STR's instance is keyed INDENT while its ladder is STOCK_TRANSFER_REQUEST
+    # (`LADDER_DOC_TYPE_KEY`), so the instance's own type alone refused every move of
+    # an STR onto a newer STR version.
+    current = (await db.get(Workflow, instance.workflow_id)
+               if instance.workflow_id else None)
+    family = {instance.doc_type, getattr(current, "doc_type", None)}
+    if wf is None or wf.doc_type not in family:
         raise ValidationError(f"No {instance.doc_type} chain with id {workflow_id}")
 
     stages = await _stages(db, wf.id)

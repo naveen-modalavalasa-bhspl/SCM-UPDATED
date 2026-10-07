@@ -1451,7 +1451,8 @@ async def my_direct_issue_acknowledgements(search: str | None = None,
 @router.get("/acknowledgements/direct-issues/{issue_id:int}",
             response_model=IndentAcknowledgementRow)
 async def direct_issue_receipt(issue_id: int, db: AsyncSession = Depends(get_db),
-                               user=Depends(require_permission(INDENT_VIEW))):
+                               user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     return await service.direct_issue_receipt(db, issue_id, user)
 
 
@@ -1459,7 +1460,8 @@ async def direct_issue_receipt(issue_id: int, db: AsyncSession = Depends(get_db)
              response_model=IndentAcknowledgementRow)
 async def acknowledge_direct_issue(issue_id: int, body: IndentAcknowledgeIn,
                                    db: AsyncSession = Depends(get_db),
-                                   user=Depends(require_permission(INDENT_ACKNOWLEDGE))):
+                                   user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     lines = {line.indent_item_id: Decimal(str(line.received_quantity)) for line in body.lines}
     return await service.acknowledge_direct_issue(
         db, issue_id, lines, user, condition=body.condition, remarks=body.remarks)
@@ -1468,7 +1470,8 @@ async def acknowledge_direct_issue(issue_id: int, body: IndentAcknowledgeIn,
 @router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments",
             response_model=list[s.AttachmentRead])
 async def direct_issue_attachments(issue_id: int, db: AsyncSession = Depends(get_db),
-                                   user=Depends(require_permission(INDENT_VIEW))):
+                                   user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     return await service.direct_issue_attachments(db, issue_id, user)
 
 
@@ -1477,7 +1480,8 @@ async def direct_issue_attachments(issue_id: int, db: AsyncSession = Depends(get
 async def add_direct_issue_attachment(issue_id: int, file: UploadFile = File(...),
                                       doc_category: str = Query("RECEIPT_PHOTO"),
                                       db: AsyncSession = Depends(get_db),
-                                      user=Depends(require_permission(INDENT_ACKNOWLEDGE))):
+                                      user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     return await service.add_direct_issue_attachment(
         db, issue_id, file, doc_category=doc_category, user=user)
 
@@ -1485,7 +1489,8 @@ async def add_direct_issue_attachment(issue_id: int, file: UploadFile = File(...
 @router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments/{attachment_id:int}/download")
 async def download_direct_issue_attachment(issue_id: int, attachment_id: int,
                                            db: AsyncSession = Depends(get_db),
-                                           user=Depends(require_permission(INDENT_VIEW))):
+                                           user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     path, file_name, mime_type = await service.direct_issue_attachment_file(
         db, issue_id, attachment_id, user)
     return FileResponse(path, filename=file_name, media_type=mime_type)
@@ -1494,7 +1499,8 @@ async def download_direct_issue_attachment(issue_id: int, attachment_id: int,
 @router.delete("/acknowledgements/direct-issues/attachments/{attachment_id:int}",
                status_code=204)
 async def delete_direct_issue_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
-                                         user=Depends(require_permission(INDENT_ACKNOWLEDGE))):
+                                         user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     await service.delete_direct_issue_attachment(db, attachment_id, user)
 
 

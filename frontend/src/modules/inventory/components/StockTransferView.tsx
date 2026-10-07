@@ -17,7 +17,7 @@ import { ErrorNote } from "./PageStates";
 import { FulfillmentQueuePage } from "../pages/FulfillmentQueuePage";
 import QualityInspection from "@/modules/warehouse/pages/QualityInspection";
 import {
-  approveSTO, createSTO, getSTO, getAllWarehouses, getStockBalances, getWarehouses, listSTOs, listSTRs,
+  approveSTO, createSTO, getSTO, getStockBalances, getWarehouses, listSTOs, listSTRs,
   rejectSTO,
 } from "../api";
 
@@ -222,7 +222,7 @@ function RequestsTab() {
         <FilterMenu label="Raised" value={raised} onChange={reset(setRaised)}
                     options={DATE_OPTIONS} icon={<Calendar className="h-4 w-4 opacity-70" />} />
         <Can do="stock.transfer.request">
-          <Button variant="primary" onClick={() => nav("/indents/new?type=STR")}>
+          <Button variant="primary" onClick={() => nav("/inventory/transfers/new")}>
             <Plus className="h-4 w-4" /> New STR
           </Button>
         </Can>
@@ -234,7 +234,7 @@ function RequestsTab() {
           columns={columns}
           keyOf={(r) => r.id}
           loading={isLoading}
-          onRowClick={(r) => nav(`/indents/${r.id}`)}
+          onRowClick={(r) => nav(`/inventory/transfers/requests/${r.id}`)}
           empty={filtersOn
             ? "No requests match these filters."
             : "No stock transfer requests yet. Raise one with New STR — orders raised directly are on the Orders tab."}
@@ -545,7 +545,6 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [error, setError] = useState("");
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
-  const { data: destinations = [] } = useQuery({ queryKey: ["warehouses", "all-points"], queryFn: getAllWarehouses });
   const stock = useQuery({
     queryKey: ["stock-transfer", "source-stock", fromId],
     queryFn: () => getStockBalances({ warehouse_id: Number(fromId), size: 500 } as any),
@@ -567,7 +566,18 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   }, [stock.data]);
 
   const whOptions = (warehouses as any[]).map((w) => ({ value: String(w.id), label: w.name }));
-  const toOptions = (destinations as any[]).map((w) => ({ value: String(w.id), label: w.name }));
+  // A transfer is sideways on ONE level — LIP to LIP, MDP to MDP, warehouse to
+  // warehouse — and both ends come from the same data-scoped list (own points and the
+  // reporting line's). `create_sto` refuses anything else; this only offers what it
+  // would accept.
+  const tierOf = (type?: string | null) =>
+    type === "LIP" || type === "MDP" ? type : "WAREHOUSE";
+  const fromTier = tierOf((warehouses as any[]).find((w) => String(w.id) === fromId)?.warehouse_type);
+  const toOptions = fromId
+    ? (warehouses as any[])
+        .filter((w) => String(w.id) !== fromId && tierOf(w.warehouse_type) === fromTier)
+        .map((w) => ({ value: String(w.id), label: w.name }))
+    : [];
 
   const create = useMutation({
     mutationFn: () => createSTO({
@@ -611,9 +621,9 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
         <div className="space-y-3">
           <Field label="From (your point)">
             <Select ariaLabel="From" value={fromId} options={whOptions}
-                    onChange={(v) => { setFromId(v || ""); setLines([{ item_id: "", qty: "" }]); }} />
+                    onChange={(v) => { setFromId(v || ""); setToId(""); setLines([{ item_id: "", qty: "" }]); }} />
           </Field>
-          <Field label="To">
+          <Field label="To (same level, within your scope)">
             <Select ariaLabel="To" value={toId} options={toOptions.filter((o) => o.value !== fromId)}
                     onChange={(v) => setToId(v || "")} />
           </Field>

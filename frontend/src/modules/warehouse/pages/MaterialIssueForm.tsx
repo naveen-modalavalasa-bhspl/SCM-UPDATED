@@ -768,6 +768,19 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       if (source.vehicle_number) {
         setForm((current) => ({ ...current, vehicle_number: source.vehicle_number ?? current.vehicle_number }));
       }
+      // Department / Project from the person's HCM record — only into a BLANK field:
+      // an indent's own (or a hand-picked) value always wins.
+      setForm((current) => {
+        const fillDept = !current.department_id && source.department_id;
+        const fillProject = !current.project_id && source.project_id;
+        if (fillDept) setDepartmentName(source.department_name ?? null);
+        if (fillProject) setProjectName(source.project_name ?? null);
+        return {
+          ...current,
+          department_id: fillDept ? source.department_id! : current.department_id,
+          project_id: fillProject ? source.project_id! : current.project_id,
+        };
+      });
     },
   });
 
@@ -1161,7 +1174,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               : "—"}
           />
           <MetaRow label="Stock" value={doc.is_stock_posted ? `Posted ${fmtDateTime(doc.posted_at)}` : "Not posted"} />
-          <MetaRow label="Against indent" value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
+          <MetaRow label={doc.indent_type === "STR" ? "Against STR" : "Against indent"} value={<span className="font-mono">{doc.indent_no ?? "—"}</span>} />
           {doc.pick_no && (
             <MetaRow label="Fulfilment" value={<span className="font-mono">{doc.pick_no}</span>} />
           )}
@@ -1212,7 +1225,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                    onChange={(e) => set("issue_date", e.target.value)} />
           </Field>
           <Field label="Type">
-            <Select value={form.issue_type} onChange={(v) => set("issue_type", v)} options={TYPES}
+            <Select value={form.issue_type} onChange={(v) => set("issue_type", v)}
+                    options={doc?.indent_type === "STR"
+                      ? TYPES.map((t) => (t.value === "INDENT_BASED" ? { ...t, label: "Stock transfer (STR)" } : t))
+                      : TYPES}
                     isDisabled={locked} ariaLabel="Issue type" />
           </Field>
           <Field label="From warehouse">
@@ -1224,7 +1240,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                     }}
                     placeholder="Warehouse" />
           </Field>
-          <Field label="Against indent" hint="Loads the approved stock reservation.">
+          <Field label="Against indent / STR" hint="Loads the approved stock reservation.">
             <Lookup name={`indents-${form.warehouse_id}`}
                     load={(search) => indentOptions(search, form.warehouse_id || undefined)}
                     // The loader lists indents still open to be issued, so once this
@@ -1243,7 +1259,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 }));
                 if (!indentId) { setDestination(""); setDestinationSac(null); }
                 if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
-              }} placeholder={form.warehouse_id ? "Indent" : "Pick warehouse first"} />
+              }} placeholder={form.warehouse_id ? "Indent / STR" : "Pick warehouse first"} />
           </Field>
           <Field label="Department">
             <Lookup name="departments" load={departmentOptions} value={form.department_id ?? ""}

@@ -80,7 +80,7 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
   const columns: Column<Acknowledgement>[] = [
     {
       key: "indent",
-      header: "Indent",
+      header: indentTypes.length === 1 && indentTypes[0] === "STR" ? "STR" : "Indent",
       render: (row) => (
         <div>
           <div className="font-mono text-xs font-semibold text-ink">{row.indent_no}</div>
@@ -157,7 +157,7 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
 
       {!embedded && (
         <div role="tablist" aria-label="What to acknowledge" className="inline-flex rounded-xl border border-line bg-content1 p-1">
-          {([["indent", "Against indent"], ["direct", "Direct issues"]] as const).map(([key, label]) => (
+          {([["indent", "Against document"], ["direct", "Direct issues"]] as const).map(([key, label]) => (
             <button
               key={key}
               type="button"

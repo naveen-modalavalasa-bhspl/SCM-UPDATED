@@ -25,6 +25,7 @@ export function buildReportRows(
     return {
       key: `pending-${row.instance_id}-${row.stage_sequence}`,
       doc_type: row.doc_type,
+      indent_type: row.indent_type,
       doc_id: row.doc_id,
       doc_no: row.doc_no,
       requester: row.requested_by_name,
@@ -41,6 +42,7 @@ export function buildReportRows(
   const completed = decisions.map((row): ApprovalReportRow => ({
     key: `decision-${row.id}`,
     doc_type: row.doc_type,
+    indent_type: row.indent_type,
     doc_id: row.doc_id,
     doc_no: row.doc_no,
     requester: row.requester,
