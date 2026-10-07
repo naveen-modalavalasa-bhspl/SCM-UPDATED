@@ -50,13 +50,29 @@ class PaymentTerm(Base):
     advance_days = Column(Integer, nullable=False, default=0)
     delivery_pct = Column(Numeric(5, 2), nullable=False, default=0)
     delivery_days = Column(Integer, nullable=False, default=0)
-    # "30,60,90": the delivery share paid in equal instalments, each that many days
-    # after delivery. Blank = one payment at `delivery_days`.
-    delivery_schedule = Column(String(60), nullable=True)
     installation_pct = Column(Numeric(5, 2), nullable=False, default=0)
     installation_days = Column(Integer, nullable=False, default=0)
     warranty_pct = Column(Numeric(5, 2), nullable=False, default=0)
     warranty_days = Column(Integer, nullable=False, default=0)
+    # How each stage's share is paid (PaymentSplitMode): ONE payment at `<stage>_days`,
+    # or N instalments. `<stage>_instalment_days` is "30,60,90,120" -- one day count
+    # per instalment, after that stage's trigger. `<stage>_instalment_pcts` is
+    # "30,40,10,20" -- each instalment's percent OF THE STAGE, CUSTOM only (EQUAL
+    # divides the stage evenly). Plain text, not JSON: this master lists ordered by
+    # name, and a JSON column makes that sort fail (CLAUDE.md, MySQL 1038), and a
+    # comma list is what an import sheet can carry in one cell (2026-10-06).
+    advance_split = Column(String(10), nullable=False, default="ONE")
+    advance_instalment_days = Column(String(120), nullable=True)
+    advance_instalment_pcts = Column(String(120), nullable=True)
+    delivery_split = Column(String(10), nullable=False, default="ONE")
+    delivery_instalment_days = Column(String(120), nullable=True)
+    delivery_instalment_pcts = Column(String(120), nullable=True)
+    installation_split = Column(String(10), nullable=False, default="ONE")
+    installation_instalment_days = Column(String(120), nullable=True)
+    installation_instalment_pcts = Column(String(120), nullable=True)
+    warranty_split = Column(String(10), nullable=False, default="ONE")
+    warranty_instalment_days = Column(String(120), nullable=True)
+    warranty_instalment_pcts = Column(String(120), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
     updated_at = updated_at_col()

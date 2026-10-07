@@ -1158,14 +1158,18 @@ export interface Issue {
    * unlocks once those 4 are confirmed. Gate the Acknowledge button on this.
    */
   can_acknowledge?: boolean;
-  /** On a split parent: the floor issues carrying its goods. */
+  /** The split family: on a parent its floor issues (`-001`, `-002` …), on a floor
+   *  issue its siblings, itself included. */
   child_issues?: {
     id: number;
     issue_no: string;
     status: IssueStatus;
+    floor_location_id?: number | null;
     floor_location_name?: string | null;
     is_stock_posted: boolean;
     total_qty: number;
+    total_items?: number;
+    in_charge_names?: string[];
   }[];
 }
 
@@ -1229,6 +1233,9 @@ export interface IssueItem {
    * cannot serve has to be visible while it is still editable.
    */
   units_available?: number | null;
+  /** The item's `requires_qi`: this line goes on the outward QC sheet. A line that
+   *  does not goes to logistics at its issued quantity. */
+  requires_qc?: boolean;
 }
 
 export type UnitMode = "SERIAL" | "IMEI" | "CODE";
@@ -1271,6 +1278,9 @@ export interface IssueStockSource {
    *  exactly what was reserved for it sees `available_qty` at zero over goods that
    *  are on the shelf and spoken for by itself. */
   own_reserved_qty: number;
+  /** What THIS direct issue reserved for itself when saved. Drawable by it, but not an
+   *  allocation — never read as one. */
+  issue_hold_qty?: number;
   total_qty: number;
   /** `available_qty + own_reserved_qty` — what a line here may actually take. */
   drawable_qty: number;
@@ -1288,6 +1298,12 @@ export interface IssueStockSource {
   item_total_qty: number;
   /** The free part of it. */
   item_available_qty: number;
+  /** Must this item leave with one serial / IMEI / asset or consumable code per unit? */
+  codes_required?: boolean;
+  /** Does this (batch, location) hold at least one free coded unit? Drives the one
+   *  FEFO swap past the same-day rule: an allocated batch with no codes may give way
+   *  to the oldest batch that has them. */
+  has_unit_codes?: boolean;
 }
 
 /**
@@ -1477,6 +1493,8 @@ export interface DispatchItem {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  issue_item_id?: number | null;
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1541,6 +1559,10 @@ export interface DispatchItemWrite {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1594,6 +1616,8 @@ export interface PackageWrite {
 export interface ConsignmentPackageItemWrite {
   issue_id?: number | null;
   issue_no?: string | null;
+  issue_item_id?: number | null;
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1670,6 +1694,10 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
   expiry_date?: string | null;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
+  /** What the codes on this row are — serial, IMEI, asset tag or consumable code. */
+  tracking_type?: TrackingType | null;
+  /** Went through outward QC (true) or out without needing it (false). */
+  requires_qc?: boolean;
   serial_numbers?: string[];
   /** serial -> IMEI, so a handset's number shows beside the unit it belongs to. */
   imei_by_serial?: Record<string, string>;

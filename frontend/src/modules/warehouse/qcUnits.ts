@@ -26,3 +26,32 @@ export function resolveAcceptedUnits(
   if (total > 0 && acceptedQty >= total) return [...(available ?? [])];
   return stored ?? [];
 }
+
+/**
+ * The units a QC line keeps after its accepted quantity changes.
+ *
+ * Every unit is accepted by default, and moving the numbers never decides WHICH units
+ * failed — only the inspector holding them can. So: accepting the whole line again
+ * accepts every unit; rejecting fewer than are already ticked re-accepts the most
+ * recently rejected ones; rejecting MORE leaves the set as it is, and the screen asks
+ * for the rest to be ticked (see `unitsStillToReject`). Always in offered order.
+ */
+export function unitsForAccepted(
+  stored: string[] | null | undefined,
+  offered: string[],
+  previousAccepted: number,
+  nextAccepted: number,
+): string[] {
+  const target = Math.floor(nextAccepted);
+  if (target >= offered.length) return [...offered];
+  const kept = new Set(resolveAcceptedUnits(stored, offered, previousAccepted));
+  if (kept.size > target) return offered.filter((unit) => kept.has(unit));
+  const rejected = offered.filter((unit) => !kept.has(unit));
+  rejected.slice(rejected.length - (target - kept.size)).forEach((unit) => kept.add(unit));
+  return offered.filter((unit) => kept.has(unit));
+}
+
+/** How many more units the inspector has to tick as rejected on a line. */
+export function unitsStillToReject(kept: number, accepted: number): number {
+  return Math.max(kept - Math.floor(accepted), 0);
+}

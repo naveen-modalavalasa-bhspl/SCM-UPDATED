@@ -324,6 +324,73 @@ The picker is scoped to one pick's own batch and bin (it always was) and now SAY
 because a correctly short list reads as missing stock otherwise. Parity is checked per
 PICK: ten units over two bins with all ten codes on the first used to look complete.
 
+### Material issues: floor pieces, holds, and one indent never issued twice (2026-10-07)
+
+**A floor split numbers its children off the parent** — `…/WHI0013-001`, `-002` — via
+`_next_child_issue_no`, counted over every child ever cut (cancelled ones included) so a
+re-split never reprints a number. The screen draws the family (`SplitFamilyCard`) on the
+parent AND on every child (`child_issues` serves siblings on a child).
+
+**Double issue is refused at four doors, and each fails SILENTLY if narrowed:**
+- `_guard_issue_indent_caps` — per TIER, approved quantity (chain legs are the same units).
+- `_guard_point_reservation` — an indent line with a hold anywhere may take at most what
+  is reserved AT THIS POINT minus other UNPOSTED issues' claims (`_unposted_claims`). This
+  is what stops a second draft for the same three units; `indent_options` and
+  `indent_issue_source` net the same claims, so the dropdown offers exactly what the save
+  accepts. Skipped at a forwarding point (`_forwarding_point`).
+- `_guard_network_own_stock` — across EVERY point, `issued − arrived on a DISPATCH
+  receipt for the indent` (own stock, not pass-through) may not pass approved. The
+  per-tier cap alone let the main warehouse re-serve an indent the LIP had already served.
+- `post_issue` re-runs the cap and the network check against every OTHER live issue.
+
+A split parent whose children are all cancelled returns to APPROVED **only if the indent
+still has room for it**; otherwise it CLOSES having served nothing (`_sync_split_parent`) —
+a fresh issue raised while it was split must not be doubled by the parent coming back.
+
+**A direct issue (no indent) holds its own stock** under `RefType.ISSUE_HOLD`
+(`_hold_direct_issue_stock`): taken on every save (released first), released on cancel and
+reject, consumed by `post_issue`, handed piece by piece to floor children on a split.
+`allocation.reserve_at` is the exact-spot reserve it uses (rule 7). `issue_stock_sources`
+serves it as `issue_hold_qty`, apart from `own_reserved_qty`, so a manual issue's own hold
+is never read as an allocation (which would switch the FEFO lock on). Open direct issues
+saved before this: `scripts.hold_open_direct_issues` (`--apply`).
+
+**The one FEFO swap past the same-day rule** (`_coded_swap_verdict`, mirrored by
+`issueSplits.codedSwapBatches`): an item that must leave with a code per unit, allocated
+out of a batch with NO free coded units, may move to the OLDEST batch here that has them —
+never a later one. The hold relocates with it on save. `stock-sources` serves
+`codes_required` / `has_unit_codes` (bounded EXISTS probes, never a COUNT).
+
+`_realign_issue_reservations` reads a line naming a batch but no bay as "that batch,
+wherever it stands" — it used to try relocating the hold onto bay 0, which does not exist.
+
+Scenario tests: `warehouse/tests/test_issue_split_and_holds.py` (DB-backed).
+
+### Codes, QC and packing follow the issue LINE, not the batch (2026-10-07)
+
+**Asset/consumable codes are auto-assigned on every save** (`_auto_fill_codes`, from
+`_reserve_issue_serials`): a CODE-mode line (`_unit_mode` — never SERIAL or IMEI) is
+topped up FIFO from its OWN batch and bay via `_claim_units`, and the codes are held on
+the units under the line's stamp, so they survive submit and approval. Codes the
+storekeeper named stand. Serial and IMEI lines are untouched and still "picked after
+approval". Project-held units are not auto-claimed (`_CLAIMED_REMARK_PREFIXES`).
+
+**One batch from two bays is two lines all the way down.** After posting, units are
+stamped per DOCUMENT; `_attribute_units_to_lines` hands them back by exact (batch, bay),
+then batch, then item — plain line order gave the first line every unit of the batch.
+`issue_dispatch_source`, the outward QC seed and `_apply_outbound_inspection_lines` all
+read `_issue_units_by_line`; never group a posted issue's units by (item, batch).
+`out_dispatch_items.issue_item_id` (+ `bin_code`, `c2e4a6b8d0f1`) carries the line onto
+the consignment; `_apply_consignment_packages` holds a named line to its own accepted
+quantity and its own codes, and `ConsignmentForm.lineKey` keys rows on it.
+
+**Outward QC follows the item's `requires_qi`.** Only those lines go on the sheet
+(`_line_needs_outward_qc`); an issue with none is NOT_REQUIRED and consignable at once.
+`CONSIGNABLE_QC` and `INSPECTABLE_QC` are disjoint — an issue is offered to exactly one
+desk. A sheet that failed everything still leaves unchecked lines packable
+(`_outbound_qc_verdict` → PARTIAL). Tests: `test_issue_line_units.py` (pure),
+`test_issue_auto_codes.py` (DB).
+
 ### A pick may move; FEFO decides how far (2026-09-08)
 
 An issue drafted from an approved allocation names the batch and the bay inventory

@@ -428,12 +428,16 @@ export const issueStockSources = (
   indent_id?: number | null,
   // Lots held for this project (Stock Segregation > Project Lots) are offered too.
   project_id?: number | null,
+  // The issue being edited: a direct issue reserves its own picks, and that hold is
+  // stock it may still draw.
+  issue_id?: number | null,
 ) =>
   post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
     warehouse_id,
     item_ids,
     indent_id,
     project_id,
+    issue_id,
   });
 
 /**

@@ -46,6 +46,11 @@ export function MilestoneTable({
         <div key={m.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-line/70 bg-content1 p-3">
           <div className="min-w-[12rem] flex-1">
             <div className="flex items-center gap-2">
+              {m.code && (
+                <span className="rounded-md bg-brand px-1.5 py-0.5 font-mono text-[11px] font-bold text-white">
+                  {m.code}
+                </span>
+              )}
               <span className="text-sm font-semibold text-ink">{m.label}</span>
               <span className="text-xs text-muted">{m.percent}%</span>
             </div>

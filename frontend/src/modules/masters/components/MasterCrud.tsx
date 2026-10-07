@@ -14,7 +14,7 @@ import { alerts } from "@/modules/alerts";
 import type { BulkApi, MasterUsage } from "../api";
 
 export type FieldType =
-  "text" | "number" | "date" | "select" | "switch" | "multiselect";
+  "text" | "number" | "date" | "select" | "switch" | "multiselect" | "custom";
 export interface Option { value: string | number; label: string }
 
 export interface FormField {
@@ -46,10 +46,15 @@ export interface FormField {
   onChange?: (value: Values[string], all: Values) => void;
   /** Clears dependent fields when this field changes. */
   clearOnChange?: string[];
+  /** `custom` only: draws an editor that may own several form keys at once (a
+   *  payment plan edits sixteen). `patch` merges into the form values. */
+  render?: (ctx: { values: Values; patch: (next: Values) => void; error?: string }) => ReactNode;
+  /** `custom` only: what the editor contributes to the saved payload. */
+  payload?: (all: Values) => Values;
 }
 
 /** A multiselect holds an array; every other field holds a scalar. */
-type Values = Record<string, string | number | boolean | null | (string | number)[]>;
+export type Values = Record<string, string | number | boolean | null | (string | number)[]>;
 
 /** Searchable checkbox list. A plain dropdown hides what is already ticked, which
  *  is the one thing that matters when a brand carries several manufacturers. */
@@ -107,6 +112,11 @@ export function validateForm(fields: FormField[], values: Values): Record<string
   for (const f of fields) {
     if (f.type === "switch") continue;
     const raw = values[f.key];
+    if (f.type === "custom") {
+      const message = f.validate?.(raw, values);
+      if (message) errors[f.key] = message;
+      continue;
+    }
     if (f.type === "multiselect") {
       const picked = Array.isArray(raw) ? raw : [];
       if (f.required && picked.length === 0) errors[f.key] = `${f.label} is required`;
@@ -168,12 +178,18 @@ interface Props<T extends { id: number }> {
   bulk?: BulkApi;
   /** Supplying it shows what points at a row before it can be deactivated. */
   usage?: (id: number) => Promise<MasterUsage>;
+  /** A wider form, for a master whose editor needs the room. */
+  modalSize?: "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl";
 }
 
 function buildPayload(fields: FormField[], values: Values): Values {
   const out: Values = {};
   for (const f of fields) {
     let v = values[f.key];
+    if (f.type === "custom") {
+      Object.assign(out, f.payload?.(values) ?? {});
+      continue;
+    }
     if (f.type === "multiselect") {
       // An empty array, not null: the backend reads it as "no manufacturers", which
       // is a real answer, whereas null would be a missing one.
@@ -343,12 +359,31 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     });
   };
 
+  /** A custom editor's edit: several keys at once. Its own error clears, since the
+   *  edit is the user answering it. */
+  const patchMany = (f: FormField, next: Values) => {
+    setValues((v) => ({ ...v, ...next }));
+    setFieldErrors((e) => {
+      if (!e[f.key]) return e;
+      const copy = { ...e };
+      delete copy[f.key];
+      return copy;
+    });
+  };
+
   /** One field of the form. `bare` drops the hint: on a paired row the wrapper below
    *  prints the hints once, full width, instead of wrapping them under half a field. */
   const renderField = (f: FormField, bare = false) => {
     const val = values[f.key];
     const fieldError = fieldErrors[f.key] || undefined;
     const hint = bare ? undefined : f.hint;
+    if (f.type === "custom") {
+      return (
+        <div key={f.key}>
+          {f.render?.({ values, patch: (next) => patchMany(f, next), error: fieldError })}
+        </div>
+      );
+    }
     if (f.type === "switch") {
       return (
         <div key={f.key} className="py-1">
@@ -507,7 +542,8 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         />
       )}
 
-      <Modal isOpen={open} onOpenChange={setOpen} placement="center" scrollBehavior="inside">
+      <Modal isOpen={open} onOpenChange={setOpen} placement="center" scrollBehavior="inside"
+             size={p.modalSize ?? "md"}>
         <ModalContent>
           {(onClose) => (
             <>

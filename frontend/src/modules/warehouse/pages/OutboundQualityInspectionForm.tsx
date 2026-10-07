@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Info, Plus, ScanLine, Trash2 } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -16,7 +16,7 @@ import {
   updateOutboundInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
-import { resolveAcceptedUnits } from "../qcUnits";
+import { resolveAcceptedUnits, unitsForAccepted, unitsStillToReject } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import type {
   OutboundInspection as Inspection, OutboundInspectionItemWrite as InspectionItemWrite, InspectionParameter, OutboundInspectionWrite as InspectionWrite, Issue as Receipt,
@@ -204,15 +204,18 @@ export default function OutboundQualityInspectionForm({
     return deliveryMeta.get(issueItemId)?.is_serial_tracked ?? false;
   };
 
-  /** The Material Issue serials behind an inspection line. Serial-tracked items must already have
-   *  these from material issue, so QC selects accepted units from this list. */
-  const availableSerials = (index: number | null) => {
-    if (index === null) return null;
-    const issueItemId = form.items[index]?.issue_item_id;
+  /** The units the issue LINE sent out — its own batch and its own storage location,
+   *  never the whole batch. Two lines of one batch in two bays are two lists. */
+  const unitsOfLine = (line?: InspectionItemWrite | null) => {
+    const issueItemId = line?.issue_item_id;
     if (!issueItemId) return null;
     const meta = deliveryMeta.get(issueItemId);
     return meta?.serials?.length ? meta.serials : null;
   };
+  /** The Material Issue serials behind an inspection line. Serial-tracked items must already have
+   *  these from material issue, so QC selects accepted units from this list. */
+  const availableSerials = (index: number | null) =>
+    index === null ? null : unitsOfLine(form.items[index]);
 
   /** What the line is keeping, with pre-seed rows repaired: a line raised before
    *  every kind was seeded carries nothing stored while accepting the whole
@@ -231,10 +234,15 @@ export default function OutboundQualityInspectionForm({
     mutationFn: (issueId: number) => getIssue(issueId),
     onSuccess: (receipt) => {
       setPulled(receipt);
+      // Only the lines whose item asks for outward QC. The rest go to packing at
+      // their issued quantity; an issue raised before the flag was served carries
+      // none, and is inspected whole as it always was.
+      const all = receipt.items ?? [];
+      const flagged = all.filter((l) => l.requires_qc);
       setForm((f) => ({
         ...f,
         warehouse_id: receipt.warehouse_id,
-        items: (receipt.items ?? []).map((l) => ({
+        items: (flagged.length > 0 ? flagged : all).map((l) => ({
           issue_item_id: l.id,
           item_id: l.item_id,
           // Carried through so the line can name itself before the first save.
@@ -259,6 +267,19 @@ export default function OutboundQualityInspectionForm({
 
   const set = <K extends keyof InspectionWrite>(key: K, value: InspectionWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
+
+  /** The line's units after its accepted quantity moves — see `unitsForAccepted`. */
+  const keepUnitsInStep = (line: InspectionItemWrite, accepted: number) => {
+    const offered = unitsOfLine(line);
+    return offered
+      ? unitsForAccepted(line.serial_numbers, offered, num(line.accepted_qty), accepted)
+      : line.serial_numbers;
+  };
+
+  /** How many more units the inspector still has to tick as rejected on a line. */
+  const unitsToReject = (index: number) => availableSerials(index)
+    ? unitsStillToReject(resolvedSerials(index).length, num(form.items[index]?.accepted_qty))
+    : 0;
 
   const patchLine = (index: number, patch: Partial<InspectionItemWrite>) =>
     setForm((f) => ({
@@ -285,6 +306,9 @@ export default function OutboundQualityInspectionForm({
           rejected_qty: rejected,
           // An explicitly chosen result wins; otherwise it follows the split.
           result: patch.result ?? deriveResult(inspected, accepted),
+          serial_numbers: patch.serial_numbers !== undefined
+            ? patch.serial_numbers
+            : keepUnitsInStep(l, accepted),
         };
       }),
     }));
@@ -334,7 +358,10 @@ export default function OutboundQualityInspectionForm({
       const actual = resolvedSerials(index).length;
       if (actual !== required) {
         const rejectedQty = num(line.inspected_qty) - required;
-        throw new Error(`${label}: You rejected ${rejectedQty} pieces. Pick those ${rejectedQty} units from the list.`);
+        const left = actual - required;
+        throw new Error(left > 0
+          ? `${label}: ${rejectedQty} rejected — tick ${left} more rejected ${left === 1 ? "unit" : "units"} in Accepted units.`
+          : `${label}: ${required} accepted but only ${actual} units are kept. Open Accepted units and accept ${required - actual} more.`);
       }
     }
   };
@@ -513,7 +540,7 @@ export default function OutboundQualityInspectionForm({
       // Serials, IMEIs, asset tags and consumable codes alike: whatever named the
       // units this issue line sent out. Only serial-tracked lines used to get it.
       header: "Accepted units",
-      width: "w-32",
+      width: "w-40",
       hideOnNarrow: true,
       render: (_line, index) => {
         const available = availableSerials(index);
@@ -522,9 +549,22 @@ export default function OutboundQualityInspectionForm({
         // as all accepted rather than as zero. `resolvedSerials` additionally repairs
         // pre-seed rows (nothing stored, whole set accepted) back to the offered set.
         const accepted = resolvedSerials(index).length;
+        const toPick = unitsToReject(index);
+        if (toPick > 0 && !locked) {
+          return (
+            <Button variant="soft" onClick={() => setSerialsFor(index)}
+                    title="Tick the units that failed — only the rejected ones">
+              <ScanLine className="h-4 w-4 text-warn" />
+              <span className="text-warn">Pick {toPick} rejected</span>
+            </Button>
+          );
+        }
         return (
-          <Button variant="ghost" onClick={() => setSerialsFor(index)} disabled={locked}>
-            <ScanLine className="h-4 w-4" />
+          <Button variant="ghost" onClick={() => setSerialsFor(index)}
+                  title={locked ? "View the accepted units" : "All units are accepted. Open to change which are rejected."}>
+            {available && accepted === available.length
+              ? <CheckCircle2 className="h-4 w-4 text-ok" />
+              : <ScanLine className="h-4 w-4" />}
             {available ? `${accepted}/${available.length}` : accepted}
           </Button>
         );
@@ -663,7 +703,28 @@ export default function OutboundQualityInspectionForm({
         </div>
       </Section>
 
-      <Section title="Lines" hint="Result follows the accepted/rejected split unless you override it.">
+      {(() => {
+        const covered = new Set(form.items.map((line) => line.issue_item_id));
+        const skipped = (delivery?.items ?? []).filter(
+          (line) => !line.requires_qc && !covered.has(line.id) && num(line.issued_qty) > 0);
+        if (skipped.length === 0) return null;
+        return (
+          <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-line bg-content2/50 px-4 py-3 text-sm">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
+            <div>
+              <p className="font-semibold text-ink">
+                {skipped.length} {skipped.length === 1 ? "line needs" : "lines need"} no outward QC
+              </p>
+              <p className="mt-0.5 text-xs text-muted">
+                {skipped.map((line) => `${line.item_code ?? line.item_id}${line.batch_no ? ` / ${line.batch_no}` : ""}`).join(", ")}
+                {" "}— not inspected here, and packed at the full issued quantity.
+              </p>
+            </div>
+          </div>
+        );
+      })()}
+
+      <Section title="Lines" hint="Every unit is accepted by default. Enter a rejected quantity, then tick only the rejected units.">
         <LinesEditor
           rows={form.items}
           columns={columns}
@@ -776,6 +837,7 @@ export default function OutboundQualityInspectionForm({
         quantity={serialsFor === null ? 0 : num(form.items[serialsFor]?.accepted_qty)}
         initial={serialsFor === null ? null : resolvedSerials(serialsFor)}
         available={availableSerials(serialsFor)}
+        enforceCount
         itemLabel={
           serialsFor === null
             ? ""

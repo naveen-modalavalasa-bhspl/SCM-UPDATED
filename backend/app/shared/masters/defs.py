@@ -21,7 +21,7 @@ from app.shared.enums import (
     ItemScope,
     AuditAction, CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AttributeDataType, CategoryTagType, UomClass,
-    WarehouseType, PAYMENT_MILESTONE_META,
+    WarehouseType, PAYMENT_MILESTONE_META, MAX_PAYMENT_INSTALMENTS, PaymentSplitMode,
 )
 from app.shared.masters.crud import Lookup, MasterDef
 from app.platform.rbac.models import Role
@@ -1039,63 +1039,251 @@ def vendor_category_out(row) -> dict:
             "vendor_ids": getattr(row, "_vendor_ids", [])}
 
 
-def parse_schedule(value: str | None) -> list[int]:
-    """"30, 60/90" -> [30, 60, 90]: the days after delivery each instalment is due."""
-    parts = [p for p in re.split(r"[\s,/;]+", (value or "").strip()) if p]
-    if not parts:
+# --------------------------------------------------------------------------- #
+#  Payment terms: stages and their instalments (2026-10-06)
+# --------------------------------------------------------------------------- #
+_TWO_PLACES = Decimal("0.01")
+
+
+def _number_list(value) -> list[str]:
+    """"30, 60/90" or [30, 60, 90] -> ["30", "60", "90"]. Blank -> []."""
+    if value is None:
         return []
-    if len(parts) > 12 or not all(p.isdigit() and int(p) <= 3650 for p in parts):
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [p for p in re.split(r"[\s,/;]+", str(value).strip()) if p]
+
+
+def parse_schedule(value, *, stage: str = "Instalment") -> list[int]:
+    """The day counts of a stage's instalments, in the order they fall due.
+
+    Strictly increasing: two instalments on the same day are one payment, and a list
+    typed out of order is far more often a slip than a plan."""
+    parts = _number_list(value)
+    if len(parts) > MAX_PAYMENT_INSTALMENTS or not all(
+            p.isdigit() and int(p) <= 3650 for p in parts):
         raise PydanticCustomError(
             "payment_schedule",
-            "Delivery instalments: list the days after delivery, e.g. 30,60,90 "
-            "(at most 12, each 0–3650).")
-    return sorted(int(p) for p in parts)
+            "{stage}: each instalment needs a whole number of days between 0 and 3650 "
+            "(at most {max} instalments).",
+            {"stage": stage, "max": MAX_PAYMENT_INSTALMENTS})
+    days = [int(p) for p in parts]
+    for i in range(1, len(days)):
+        if days[i] <= days[i - 1]:
+            raise PydanticCustomError(
+                "payment_schedule",
+                "{stage}: instalment {n} ({later} days) must fall after instalment "
+                "{prev} ({earlier} days).",
+                {"stage": stage, "n": i + 1, "later": days[i], "prev": i,
+                 "earlier": days[i - 1]})
+    return days
+
+
+def parse_shares(value, *, stage: str = "Instalment") -> list[Decimal]:
+    """Each custom instalment's percent of its stage, e.g. "30,40,10,20"."""
+    out = []
+    for p in _number_list(value):
+        try:
+            share = Decimal(p)
+        except Exception:
+            share = Decimal(-1)
+        if not share.is_finite() or share <= 0 or share > 100:
+            raise PydanticCustomError(
+                "payment_shares",
+                "{stage}: every instalment needs a share above 0% and up to 100% "
+                "(got \"{value}\").", {"stage": stage, "value": p})
+        out.append(share.quantize(_TWO_PLACES))
+    return out
+
+
+def fmt_pct(value) -> str:
+    """33.30 -> "33.3", 25.00 -> "25"."""
+    text = format(Decimal(str(value)).quantize(_TWO_PLACES), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def term_instalments(term, field: str) -> list[dict]:
+    """One stage of a payment term as the payments it becomes, in order.
+
+    Each entry: `stage_pct` (its share of the STAGE), `order_pct` (its share of the
+    ORDER, two places) and `days` after the stage's trigger. The last instalment takes
+    the rounding, so the order shares add up to the stage's exactly -- a 50% stage in
+    three equal parts is 16.67 + 16.67 + 16.66, never 50.01. Reads attribute names
+    only, so it serves the ORM row and the incoming schema alike. A stage at 0% is no
+    payment at all."""
+    pct = Decimal(str(getattr(term, f"{field}_pct") or 0))
+    if pct <= 0:
+        return []
+    mode = getattr(term, f"{field}_split", None) or PaymentSplitMode.ONE.value
+    mode = getattr(mode, "value", mode)
+    days = parse_schedule(getattr(term, f"{field}_instalment_days", None))
+    if mode == PaymentSplitMode.ONE.value or len(days) < 2:
+        return [{"stage_pct": Decimal(100), "order_pct": pct.quantize(_TWO_PLACES),
+                 "days": int(getattr(term, f"{field}_days") or 0)}]
+    if mode == PaymentSplitMode.CUSTOM.value:
+        shares = parse_shares(getattr(term, f"{field}_instalment_pcts", None))
+        order = [(pct * s / 100).quantize(_TWO_PLACES) for s in shares]
+    else:
+        # Divide the ORDER share, not the stage: 50% in three is 16.67/16.67/16.66,
+        # where a third of the stage each (33.33%) rounds to 16.66/16.66/16.68.
+        even = (pct / len(days)).quantize(_TWO_PLACES)
+        order = [even] * len(days)
+        shares = [(even * 100 / pct).quantize(_TWO_PLACES)] * len(days)
+        shares[-1] = Decimal(100) - sum(shares[:-1])
+    order[-1] = pct - sum(order[:-1])
+    return [{"stage_pct": s, "order_pct": o, "days": d}
+            for s, o, d in zip(shares, order, days)]
+
+
+def _stage_sentence(meta: dict, term) -> str | None:
+    parts = term_instalments(term, meta["field"])
+    if not parts:
+        return None
+    pct = fmt_pct(getattr(term, f"{meta['field']}_pct"))
+    if len(parts) == 1:
+        days = parts[0]["days"]
+        trigger = meta["trigger"][:1].lower() + meta["trigger"][1:]
+        when = f"within {days} days {meta['after']}" if days else trigger
+        return f"{pct}% {meta['label'].lower()}, {when}"
+    mode = getattr(term, f"{meta['field']}_split")
+    mode = getattr(mode, "value", mode)
+    kind = "equal" if mode == PaymentSplitMode.EQUAL.value else "custom"
+    each = ", ".join(f"{fmt_pct(p['order_pct'])}% at {p['days']}d" for p in parts)
+    return (f"{pct}% {meta['label'].lower()} in {len(parts)} {kind} instalments "
+            f"({each} {meta['after']})")
+
+
+def term_summary(term) -> str:
+    """One line, for a dropdown or a list."""
+    return " · ".join(filter(None, (_stage_sentence(m, term)
+                                    for m in PAYMENT_MILESTONE_META))) or "—"
+
+
+def term_wording(term) -> str:
+    """What a purchase order prints for a term: the term's CODE first, so anybody
+    holding the paper can find the master it came from, then one line per stage,
+    each led by the milestone code accounts pays against (ADV, DLV, INS, WAR)."""
+    lines = [f"[{term.code}] {term.name}"]
+    for meta in PAYMENT_MILESTONE_META:
+        sentence = _stage_sentence(meta, term)
+        if sentence:
+            lines.append(f"• {meta['short']}: {sentence}")
+    return "\n".join(lines)
 
 
 class PaymentTermIn(BaseModel):
-    """A payment term: the four milestones' share of the order value, and how many days
-    after its trigger each one is payable. The shares must add up to 100."""
+    """A payment term: the four milestones' share of the order value, and when each is
+    payable -- in one payment, or split into instalments. The shares add up to 100."""
     code: str = Field(min_length=1, max_length=20)
     name: str = Field(min_length=1, max_length=150)
     description: str | None = Field(None, max_length=300)
     advance_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     advance_days: int = Field(default=0, ge=0, le=3650)
+    advance_split: PaymentSplitMode = PaymentSplitMode.ONE
+    advance_instalment_days: str | None = Field(None, max_length=120)
+    advance_instalment_pcts: str | None = Field(None, max_length=120)
     delivery_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     delivery_days: int = Field(default=0, ge=0, le=3650)
-    # Equal instalments of the delivery share, e.g. "30,60,90" days after delivery.
-    delivery_schedule: str | None = Field(None, max_length=60)
+    delivery_split: PaymentSplitMode = PaymentSplitMode.ONE
+    delivery_instalment_days: str | None = Field(None, max_length=120)
+    delivery_instalment_pcts: str | None = Field(None, max_length=120)
     installation_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     installation_days: int = Field(default=0, ge=0, le=3650)
+    installation_split: PaymentSplitMode = PaymentSplitMode.ONE
+    installation_instalment_days: str | None = Field(None, max_length=120)
+    installation_instalment_pcts: str | None = Field(None, max_length=120)
     warranty_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     warranty_days: int = Field(default=0, ge=0, le=3650)
+    warranty_split: PaymentSplitMode = PaymentSplitMode.ONE
+    warranty_instalment_days: str | None = Field(None, max_length=120)
+    warranty_instalment_pcts: str | None = Field(None, max_length=120)
     is_active: bool = True
 
-    @field_validator("delivery_schedule")
+    @field_validator("advance_split", "delivery_split", "installation_split",
+                     "warranty_split", mode="before")
     @classmethod
-    def _schedule(cls, value: str | None) -> str | None:
-        days = parse_schedule(value)
-        return ",".join(str(d) for d in days) or None
+    def _split(cls, value):
+        # An import sheet cell left blank, or typed in lower case.
+        text = str(value).strip().upper() if value is not None else ""
+        return text or PaymentSplitMode.ONE.value
+
+    @field_validator("advance_instalment_days", "advance_instalment_pcts",
+                     "delivery_instalment_days", "delivery_instalment_pcts",
+                     "installation_instalment_days", "installation_instalment_pcts",
+                     "warranty_instalment_days", "warranty_instalment_pcts",
+                     mode="before")
+    @classmethod
+    def _list(cls, value):
+        # A JSON client may send a real list; store the same comma text either way.
+        return ",".join(_number_list(value)) or None
 
     @model_validator(mode="after")
-    def _adds_to_hundred(self):
+    def _plan(self):
         total = (self.advance_pct + self.delivery_pct + self.installation_pct
                  + self.warranty_pct)
         if total != 100:
             raise PydanticCustomError(
                 "payment_split",
                 "Advance + delivery + installation + warranty must add up to 100% "
-                "(they add up to {total}%).", {"total": f"{total:g}"})
+                "(they add up to {total}%).", {"total": fmt_pct(total)})
+        for meta in PAYMENT_MILESTONE_META:
+            self._check_stage(meta)
         return self
+
+    def _check_stage(self, meta: dict) -> None:
+        f, label = meta["field"], meta["label"]
+        mode = getattr(self, f"{f}_split")
+        if getattr(self, f"{f}_pct") <= 0 or mode == PaymentSplitMode.ONE:
+            # Nothing to split: a stage at 0% pays nothing, and ONE ignores the lists.
+            setattr(self, f"{f}_split", PaymentSplitMode.ONE)
+            setattr(self, f"{f}_instalment_days", None)
+            setattr(self, f"{f}_instalment_pcts", None)
+            return
+        days = parse_schedule(getattr(self, f"{f}_instalment_days"), stage=label)
+        if len(days) < 2:
+            raise PydanticCustomError(
+                "payment_instalments",
+                "{stage}: instalments need at least 2 payments, each with its days. "
+                "For a single payment, untick the instalment box.", {"stage": label})
+        if mode == PaymentSplitMode.CUSTOM:
+            shares = parse_shares(getattr(self, f"{f}_instalment_pcts"), stage=label)
+            if len(shares) != len(days):
+                raise PydanticCustomError(
+                    "payment_instalments",
+                    "{stage}: every instalment needs both a share and a day count "
+                    "(got {s} shares and {d} day counts).",
+                    {"stage": label, "s": len(shares), "d": len(days)})
+            if sum(shares) != 100:
+                raise PydanticCustomError(
+                    "payment_instalments",
+                    "{stage}: the instalment shares must add up to 100% of the stage "
+                    "(they add up to {total}%).",
+                    {"stage": label, "total": fmt_pct(sum(shares))})
+        else:
+            setattr(self, f"{f}_instalment_pcts", None)
+        if any(p["order_pct"] <= 0 for p in term_instalments(self, f)):
+            raise PydanticCustomError(
+                "payment_instalments",
+                "{stage}: {pct}% is too small to split into {n} payments -- each "
+                "would round to 0% of the order.",
+                {"stage": label, "pct": fmt_pct(getattr(self, f"{f}_pct")),
+                 "n": len(days)})
+        # The single-payment day count mirrors the first instalment, so anything that
+        # still reads `<stage>_days` alone reads when the stage STARTS paying.
+        setattr(self, f"{f}_days", days[0])
 
 
 def payment_term_out(row) -> dict:
     out = {"id": row.id, "code": row.code, "name": row.name,
-           "description": row.description, "is_active": row.is_active}
+           "description": row.description, "is_active": row.is_active,
+           "summary": term_summary(row), "wording": term_wording(row)}
     for stage in PAYMENT_MILESTONE_META:
         f = stage["field"]
         out[f"{f}_pct"] = float(getattr(row, f"{f}_pct") or 0)
         out[f"{f}_days"] = getattr(row, f"{f}_days") or 0
-    out["delivery_schedule"] = row.delivery_schedule
+        out[f"{f}_split"] = getattr(row, f"{f}_split") or PaymentSplitMode.ONE.value
+        out[f"{f}_instalment_days"] = getattr(row, f"{f}_instalment_days")
+        out[f"{f}_instalment_pcts"] = getattr(row, f"{f}_instalment_pcts")
     return out
 
 
@@ -1103,7 +1291,7 @@ async def apply_payment_term(db: AsyncSession, row, data: PaymentTermIn) -> None
     await require_unique(db, PaymentTerm, "name", data.name, row, "A payment term named")
     await require_unique(db, PaymentTerm, "code", data.code, row, "Payment term code")
     for key, value in data.model_dump().items():
-        setattr(row, key, value)
+        setattr(row, key, value.value if isinstance(value, PaymentSplitMode) else value)
 
 
 async def prepare_vendor_categories(db: AsyncSession, rows: list) -> None:

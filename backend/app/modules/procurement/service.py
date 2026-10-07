@@ -185,33 +185,19 @@ async def _apply_payment_term(db: AsyncSession, po: PurchaseOrder, term_id: int)
     if term is None or not term.is_active:
         raise ValidationError("Payment terms: pick an active payment term from the list.")
     po.payment_term_id = term.id
-    from app.shared.masters.defs import parse_schedule
+    from app.shared.masters.defs import term_instalments, term_wording
 
-    parts, rows = [], []
+    # One milestone per instalment: a stage paid in four parts is four rows accounts
+    # pays against, each on its own day. `term_instalments` is the same arithmetic the
+    # master form previews, so the order holds exactly what the term promised.
+    rows = []
     for stage in PAYMENT_MILESTONE_META:
-        pct = _d(getattr(term, f"{stage['field']}_pct") or 0)
-        if pct <= 0:
-            continue
-        days = getattr(term, f"{stage['field']}_days") or 0
-        schedule = parse_schedule(term.delivery_schedule) \
-            if stage["field"] == "delivery" else []
-        if len(schedule) > 1:
-            # Equal instalments; the last takes the rounding so they add up to `pct`.
-            share = (pct / len(schedule)).quantize(Decimal("0.01"))
-            shares = [share] * (len(schedule) - 1) + [pct - share * (len(schedule) - 1)]
-            parts.append(f"{float(pct):g}% {stage['label'].lower()} in {len(schedule)} "
-                         f"instalments ({'/'.join(map(str, schedule))} days)")
-            for when, piece in zip(schedule, shares):
-                rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
-                                               percent=piece, due_days=when))
-            continue
-        days = schedule[0] if schedule else days
-        parts.append(f"{float(pct):g}% {stage['label'].lower()}"
-                     + (f" ({days} days)" if days else ""))
-        rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
-                                       percent=pct, due_days=days))
+        for part in term_instalments(term, stage["field"]):
+            rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                           percent=part["order_pct"],
+                                           due_days=part["days"]))
     po.payment_milestones = rows
-    po.payment_terms = f"{term.name}: {', '.join(parts)}"
+    po.payment_terms = term_wording(term)
 
 
 def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:

@@ -93,14 +93,24 @@ export interface MasterItemSubClass extends NamedMaster {
   item_class_name?: string | null;
 }
 
-export interface MasterPaymentTerm {
+/** How one stage of a payment term is paid: in one go, or in N instalments. */
+export type PaymentSplit = "ONE" | "EQUAL" | "CUSTOM";
+export type PaymentStageKey = "advance" | "delivery" | "installation" | "warranty";
+
+export type MasterPaymentTerm = {
   id: number; code: string; name: string; description: string | null; is_active: boolean;
-  advance_pct: number; advance_days: number; delivery_pct: number; delivery_days: number;
-  installation_pct: number; installation_days: number;
-  warranty_pct: number; warranty_days: number;
-  /** "30,60,90": the delivery share in equal instalments. */
-  delivery_schedule: string | null;
-}
+  /** One line for a dropdown or a list, written by the server. */
+  summary: string;
+  /** What a PO prints: "[CODE] Name" then one line per stage. */
+  wording: string;
+} & {
+  [K in PaymentStageKey as `${K}_pct`]: number } & {
+  [K in PaymentStageKey as `${K}_days`]: number } & {
+  [K in PaymentStageKey as `${K}_split`]: PaymentSplit } & {
+  /** "30,60,90,120": days after the stage's trigger, one per instalment. */
+  [K in PaymentStageKey as `${K}_instalment_days`]: string | null } & {
+  /** "30,40,10,20": each instalment's % of the stage. CUSTOM only. */
+  [K in PaymentStageKey as `${K}_instalment_pcts`]: string | null };
 
 export interface MasterVendorCategory {
   id: number; code: string; name: string; description: string | null;

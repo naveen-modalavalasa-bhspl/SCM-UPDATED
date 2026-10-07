@@ -171,6 +171,7 @@ export function POFormPage() {
         <div className="border-t border-line pt-4">
           <POHeaderFields
             value={header}
+            orderTotal={totals.grand}
             onChange={(patch) => setHeader({ ...header, ...patch })}
           />
         </div>

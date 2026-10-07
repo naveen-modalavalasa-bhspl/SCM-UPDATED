@@ -98,6 +98,52 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
     return reserved_total, remaining
 
 
+async def reserve_at(db: AsyncSession, *, item_id: int, qty, warehouse_id: int,
+                     bin_id: int | None, batch_id: int | None, ref_type: str,
+                     ref_id: int, ref_no: str | None, ref_line_id: int | None,
+                     user) -> Decimal:
+    """Reserve `qty` at the exact (bin, batch) a document line names. Returns what
+    could be reserved; the caller decides whether a shortfall is an error.
+
+    `reserve` above walks the warehouse by pick strategy — right for an allocation,
+    which decides WHERE the goods come from. A document line has already decided, so
+    this takes its stock from that spot alone. 0/None on bin or batch means "the line
+    names none": every balance row under the other heading is eligible, freest first.
+    Row-locked, so two drafts saved at once cannot both claim the same units.
+    """
+    want = _d(qty)
+    if want <= ZERO:
+        return ZERO
+    stmt = select(Stock).where(Stock.item_id == item_id,
+                               Stock.warehouse_id == warehouse_id,
+                               Stock.available_qty > 0)
+    if bin_id:
+        stmt = stmt.where(Stock.bin_id == bin_id)
+    if batch_id:
+        stmt = stmt.where(Stock.batch_id == batch_id)
+    rows = (await db.execute(stmt.order_by(Stock.id).with_for_update())).scalars().all()
+    taken = ZERO
+    for stock in sorted(rows, key=lambda row: -(row.available_qty or ZERO)):
+        if taken >= want:
+            break
+        part = min(want - taken, stock.available_qty or ZERO)
+        if part <= ZERO:
+            continue
+        stock.available_qty = (stock.available_qty or ZERO) - part
+        stock.reserved_qty = (stock.reserved_qty or ZERO) + part
+        db.add(Reservation(
+            stock_id=stock.id, item_id=item_id, warehouse_id=stock.warehouse_id,
+            bin_id=stock.bin_id, batch_id=stock.batch_id, project_id=stock.project_id,
+            quantity=part, ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
+            ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
+            created_by_id=getattr(user, "id", None),
+            created_by_name=getattr(user, "full_name", None),
+        ))
+        taken += part
+    await db.flush()
+    return taken
+
+
 # ---------------- project holds ----------------
 
 async def held_for(db: AsyncSession, project_id: int | None, item_ids,

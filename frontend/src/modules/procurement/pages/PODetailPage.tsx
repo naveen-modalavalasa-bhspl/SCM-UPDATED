@@ -580,7 +580,7 @@ export function PODetailPage() {
                 <Button variant="subtle" disabled={saveHeader.isPending} onClick={() => saveHeader.mutate()}>{saveHeader.isPending ? "Saving…" : "Save details"}</Button>
               </div>
               {saveHeader.error && <p className="mb-2 text-sm font-semibold text-red-600">{(saveHeader.error as Error).message}</p>}
-              <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100"><POHeaderFields value={header} onChange={(patch) => setHeader({ ...header, ...patch })} /></div>
+              <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100"><POHeaderFields value={header} orderTotal={Number(po.data.total_amount) || 0} onChange={(patch) => setHeader({ ...header, ...patch })} /></div>
             </div>
           </div>
         </Can>

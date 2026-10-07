@@ -633,6 +633,7 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
         item_ids=body.item_ids,
         indent_id=body.indent_id,
         project_id=body.project_id,
+        issue_id=body.issue_id,
         user=user,
     )
 

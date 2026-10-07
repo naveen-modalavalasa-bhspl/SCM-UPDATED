@@ -1618,6 +1618,9 @@ class IssueItemRead(_Read):
     # that could never be posted while the batch is still editable — after approval
     # the batch is frozen. See `_issue_unit_supply`.
     units_available: int | None = None
+    # The item's `requires_qi`: does this line go on the outward QC sheet. A line that
+    # does not goes to logistics at its issued quantity — see `post_issue`.
+    requires_qc: bool = False
 
 
 class UnitSupplyPick(BaseModel):
@@ -1667,6 +1670,8 @@ class IssueStockSourceFetchIn(BaseModel):
     indent_id: int | None = None
     # Lots held for this project are offered as the document's own.
     project_id: int | None = None
+    # The issue being edited: a direct issue's own hold is stock it may draw.
+    issue_id: int | None = None
 
 
 class IssueStockSource(_Read):
@@ -1695,6 +1700,9 @@ class IssueStockSource(_Read):
     available_qty: Decimal
     reserved_qty: Decimal = Decimal("0")
     own_reserved_qty: Decimal = Decimal("0")
+    # What THIS direct issue reserved for itself on save (ISSUE_HOLD). Drawable by it,
+    # but not an allocation.
+    issue_hold_qty: Decimal = Decimal("0")
     total_qty: Decimal = Decimal("0")
     drawable_qty: Decimal
     # The two OUTER quantities this location's numbers sit inside: what the whole
@@ -1706,6 +1714,10 @@ class IssueStockSource(_Read):
     batch_available_qty: Decimal = Decimal("0")
     item_total_qty: Decimal = Decimal("0")
     item_available_qty: Decimal = Decimal("0")
+    # Must this item leave with one serial / IMEI / code per unit, and does this spot
+    # hold any free coded unit? Drives the one FEFO swap past the same-day rule.
+    codes_required: bool = False
+    has_unit_codes: bool = False
 
 
 class TrackingTypeRead(_Read):
@@ -1796,12 +1808,16 @@ class IssueDetail(IssueRead):
 
 
 class IssueChildRead(BaseModel):
+    """One floor issue of a split — on a parent its children, on a child its siblings."""
     id: int
     issue_no: str
     status: str
+    floor_location_id: int | None = None
     floor_location_name: str | None = None
     is_stock_posted: bool = False
     total_qty: Decimal = Decimal(0)
+    total_items: int = 0
+    in_charge_names: list[str] = []
 
 
 IssueDetail.model_rebuild()
@@ -1816,6 +1832,10 @@ class DispatchItemWrite(BaseModel):
     package_id: int | None = None
     issue_id: int | None = None
     issue_no: str | None = None
+    # The issue LINE, so one batch drawn from two bays stays two rows. See
+    # `out_dispatch_items.issue_item_id`.
+    issue_item_id: int | None = None
+    bin_code: str | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1869,6 +1889,7 @@ class PackageWrite(BaseModel):
 class ConsignmentPackageItemWrite(BaseModel):
     issue_id: int | None = None
     issue_no: str | None = None
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1965,6 +1986,7 @@ class DispatchItemRead(_Read):
     package_id: int | None = None
     issue_id: int | None = None
     issue_no: str | None = None
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1975,6 +1997,7 @@ class DispatchItemRead(_Read):
     uom_code: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    bin_code: str | None = None
     mfg_date: date | None = None
     expiry_date: date | None = None
     serial_no: str | None = None
@@ -3859,6 +3882,10 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     expiry_date: date | None = None
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
+    # SERIAL / IMEI / ASSET / CONSUMABLE / NONE — what the codes on this row are.
+    tracking_type: str | None = None
+    # Whether this line went through outward QC, or out without needing it.
+    requires_qc: bool = False
     serial_numbers: list[str] = []
     # serial -> IMEI, so the packing screen shows the handset's number beside the
     # unit it belongs to rather than making the receiving point retype it.

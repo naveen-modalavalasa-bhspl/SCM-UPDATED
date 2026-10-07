@@ -2,6 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Field, Input, Select } from "@/shared/components";
 import { api } from "@/shared/api/client";
 import type { POHeader, PurchaseOrder } from "../types";
+import type { MasterPaymentTerm } from "@/modules/masters/types";
+import { PaymentPlanPreview } from "@/modules/masters/components/PaymentPlanEditor";
+import { planInstalments } from "@/modules/masters/paymentPlan";
+import { CalendarClock } from "lucide-react";
 
 /**
  * Everything a purchase order says beyond its lines: what it is booked against, what
@@ -16,33 +20,10 @@ import type { POHeader, PurchaseOrder } from "../types";
 
 interface NamedRow { id: number; code?: string | null; name: string }
 
-interface PaymentTermRow extends NamedRow {
-  is_active: boolean;
-  advance_pct: number; advance_days: number; delivery_pct: number; delivery_days: number;
-  installation_pct: number; installation_days: number;
-  warranty_pct: number; warranty_days: number;
-  delivery_schedule?: string | null;
-}
-
-const TERM_STAGES = [
-  ["advance", "advance"], ["delivery", "against delivery"],
-  ["installation", "post installation"], ["warranty", "post warranty"],
-] as const;
-
-/** The wording the server writes onto the order for a term, shown at once. */
-function termWording(t: PaymentTermRow): string {
-  const parts = TERM_STAGES
-    .filter(([k]) => Number(t[`${k}_pct`]) > 0)
-    .map(([k, label]) => {
-      const days = Number(t[`${k}_days`]) || 0;
-      if (k === "delivery" && t.delivery_schedule) {
-        const parts = t.delivery_schedule.split(",");
-        return `${Number(t[`${k}_pct`])}% ${label} in ${parts.length} instalments (${parts.join("/")} days)`;
-      }
-      return `${Number(t[`${k}_pct`])}% ${label}` + (days ? ` (${days} days)` : "");
-    });
-  return `${t.name}: ${parts.join(", ")}`;
-}
+/** A payment-term master row. Its `wording` ("[CODE] Name" then a line per stage,
+ *  each led by its milestone code) is written by the server — the same text the
+ *  order stores — so the screen never composes its own version of a term. */
+type PaymentTermRow = MasterPaymentTerm;
 
 export interface POHeaderValue {
   projectId: number | "";
@@ -141,12 +122,14 @@ export function LongText({
 }
 
 export function POHeaderFields({
-  value, onChange, disabled = false, showProject = true,
+  value, onChange, disabled = false, showProject = true, orderTotal,
 }: {
   value: POHeaderValue;
   onChange: (patch: Partial<POHeaderValue>) => void;
   disabled?: boolean;
   showProject?: boolean;
+  /** The order's grand total, when the page knows it — the timeline then shows rupees. */
+  orderTotal?: number;
 }) {
   const { data: projects = [] } = useQuery({
     queryKey: ["po-projects"],
@@ -164,6 +147,7 @@ export function POHeaderFields({
   });
 
   const set = (key: keyof POHeaderValue) => (v: string) => onChange({ [key]: v });
+  const pickedTerm = terms.find((t) => String(t.id) === String(value.paymentTermId));
 
   return (
     <div className="space-y-5">
@@ -202,21 +186,43 @@ export function POHeaderFields({
         <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>
         <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field label="Payment term"
-            hint="Splits the order value into advance / delivery / installation / warranty. Accounts pays against it.">
+            hint="Splits the order value into advance / delivery / installation / warranty, each paid at once or in instalments. Accounts pays against it.">
             <Select
               value={value.paymentTermId === "" ? "" : String(value.paymentTermId)}
               placeholder="Pick a payment term"
               isDisabled={disabled}
-              options={terms.map((t) => ({ value: String(t.id), label: termWording(t) }))}
+              options={terms.map((t) => ({ value: String(t.id), label: `${t.code} — ${t.name}` }))}
               onChange={(v) => {
                 const term = terms.find((t) => String(t.id) === v);
                 onChange(term
-                  ? { paymentTermId: term.id, payment_terms: termWording(term) }
+                  ? { paymentTermId: term.id, payment_terms: term.wording }
                   : { paymentTermId: "" });
               }}
             />
           </Field>
+          {pickedTerm && (
+            <p className="self-end pb-1 text-xs leading-relaxed text-muted">{pickedTerm.summary}</p>
+          )}
         </div>
+        {pickedTerm && (
+          <div className="mb-4 rounded-2xl border border-line bg-content1 p-4">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <CalendarClock className="h-4 w-4 text-brand" />
+              <h3 className="text-sm font-semibold text-ink">How this order will be paid</h3>
+              <span className="rounded-md bg-content2 px-2 py-0.5 font-mono text-xs font-bold text-ink">
+                {pickedTerm.code}
+              </span>
+            </div>
+            <PaymentPlanPreview instalments={planInstalments(pickedTerm)}
+                                amount={orderTotal && orderTotal > 0 ? orderTotal : 0} />
+            <p className="mt-3 text-xs leading-relaxed text-muted">
+              Each payment carries its code on the PO and on the accounts desk
+              (<b>ADV</b> advance, <b>DLV</b> delivery, <b>INS</b> installation, <b>WAR</b> warranty;
+              DLV 2/4 = 2nd of 4 delivery payments). Days count from that stage's event. The plan is
+              copied onto the order when it is saved and is fixed once the PO is approved.
+            </p>
+          </div>
+        )}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <LongText label="Payment terms" disabled={disabled}
             value={value.payment_terms} onChange={set("payment_terms")} />
