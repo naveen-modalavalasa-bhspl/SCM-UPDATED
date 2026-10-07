@@ -2546,7 +2546,9 @@ MASTERS: list[MasterDef] = [
               manage_perm=perms.MASTER_UOM_MANAGE, serialize=uom_out,
               search_cols=("name", "code"), order_col="code", paginated=False,
               apply=apply_uom, filters=("uom_class",),
-              usage=((*USED_BY_ITEMS, "uom_id"), ("Indent lines", "ind_indent_items", "uom_id"), ("Packages", "mst_packaging", "uom_id"),)),
+              # Indent lines are not listed: they snapshot `uom_code`, not an id, so a
+              # count by id could only ever fail (1054), and a snapshot never breaks.
+              usage=((*USED_BY_ITEMS, "uom_id"), ("Packages", "mst_packaging", "uom_id"),)),
 
     # mst_uom_conversions has no is_active column, so this master cannot be
     # deactivated; the DELETE route still registers and returns a clear 400.

@@ -25,7 +25,7 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import po_documents, quote_otp, service, stats, suppliers
 from app.modules.procurement.schemas import (
-    ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
+    ActionIn, ApprovalEventRow, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     ConsolidationStatsOut, DemandPoolRow, LedgerStatsOut, POStatsOut, QuoteStatsOut,
     ReqStatsOut, RFQStatsOut,
@@ -1049,7 +1049,7 @@ async def consolidation_sources(cons_id: int, db: AsyncSession = Depends(get_db)
     return await service.consolidation_sources(db, cons_id, user=user)
 
 
-@consolidations.get("/{cons_id}/history", response_model=list)
+@consolidations.get("/{cons_id}/history", response_model=list[ApprovalEventRow])
 async def consolidation_history(cons_id: int, db: AsyncSession = Depends(get_db),
                                 user=Depends(require_permission(perms.CONSOLIDATION_VIEW))):
     return await service.consolidation_history(db, cons_id, user=user)

@@ -20,7 +20,7 @@ from app.modules.logistics import carrier_invoices, partners, service
 from app.modules.logistics.schemas import (
     AcceptQuoteIn, ActionIn, ActivityRow, AwardIn, CarrierAcceptIn, CarrierAckIn,
     CarrierConfirmIn, CarrierDeclineIn, CarrierTrackIn, ConsignmentLink, DeliverIn, DispatchIn, EventIn,
-    EventOut, GRNCreate, GRNListRow, GRNOut, InviteIn, IssueCreate, IssueOut, Option,
+    EventOut, GRNCreate, GRNListRow, GRNOut, HistoryOut, InviteIn, IssueCreate, IssueOut, Option,
     PartnerCreate, PartnerLoginIn, PartnerOut, PartnerUpdate, ProviderBoardRow,
     ProviderIn, QuickDispatchIn, QuoteIn, QuoteOut, ResolveIn, ReviseQuoteIn, TRCreate,
     TRListRow, TROut, TRUpdate,
@@ -502,7 +502,7 @@ async def transport_carrier_invoice_download(
     return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
-@transport_router.get("/{tr_id}/history", response_model=list)
+@transport_router.get("/{tr_id}/history", response_model=list[HistoryOut])
 async def transport_history(tr_id: int, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.TRANSPORT_VIEW))):
     return await service.history(db, tr_id)

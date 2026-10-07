@@ -267,6 +267,20 @@ class QuoteOut(BaseModel):
     rank: int | None = None
 
 
+class HistoryOut(BaseModel):
+    """One approval action off `wf_actions`, for `/transport/{id}/history`."""
+    model_config = ConfigDict(from_attributes=True)
+
+    stage_sequence: int | None = None
+    stage_name: str | None = None
+    actor_id: int | None = None
+    actor_name: str | None = None
+    actor_position: str | None = None
+    action: str
+    comments: str | None = None
+    acted_at: datetime | None = None
+
+
 class EventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

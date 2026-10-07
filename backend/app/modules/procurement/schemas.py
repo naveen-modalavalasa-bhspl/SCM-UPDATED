@@ -185,6 +185,9 @@ class ApprovalEventRow(BaseModel):
     it at the time — never mapped, abbreviated or re-titled here, because the rungs
     are configured per project on Settings > Approvals Config and a lookup in code
     would go stale the moment somebody renames one."""
+    # Read straight off `wf_actions` rows too (`/consolidations/{id}/history`).
+    model_config = ConfigDict(from_attributes=True)
+
     stage_sequence: int | None = None
     stage_name: str | None = None
     actor_id: int | None = None
