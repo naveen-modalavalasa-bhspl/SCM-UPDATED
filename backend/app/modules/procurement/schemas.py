@@ -30,6 +30,9 @@ class POHeaderIn(BaseModel):
     project_id: int | None = None
     remarks: str | None = None
     payment_terms: str | None = None
+    # The payment-term master (2026-10-06). Picking one copies its milestones onto the
+    # order and its wording into `payment_terms`; None leaves the order's as they are.
+    payment_term_id: int | None = None
     delivery_terms: str | None = None
     material_terms: str | None = None
     logistics_terms: str | None = None
@@ -218,6 +221,28 @@ class POItemOut(BaseModel):
     received_quantity: float
 
 
+class PODocumentOut(BaseModel):
+    """A supplier's invoice or delivery challan filed against the order."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    file_name: str
+    file_size: int | None = None
+    doc_category: str | None = None
+    uploaded_by_name: str | None = None
+    created_at: datetime | None = None
+
+
+class POMilestoneOut(BaseModel):
+    """One frozen stage of the order's payment terms. The amount is the share of the
+    order value; what has been paid against it is served by the accounts module."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    seq: int
+    stage: str
+    percent: float
+    due_days: int = 0
+
+
 class POOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -248,6 +273,8 @@ class POOut(BaseModel):
     total_amount: float
     remarks: str | None = None
     payment_terms: str | None = None
+    payment_term_id: int | None = None
+    payment_milestones: list[POMilestoneOut] = []
     delivery_terms: str | None = None
     material_terms: str | None = None
     logistics_terms: str | None = None

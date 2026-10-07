@@ -63,7 +63,7 @@ POSTING = {
 async def _item_id(db: AsyncSession, item_code: str | None) -> int | None:
     if not item_code:
         return None
-    return await db.scalar(select(Item.id).where(Item.code == item_code))
+    return await db.scalar(select(Item.id).where(Item.code == item_code).order_by(Item.id).limit(1))
 
 
 async def apply_event(db: AsyncSession, event: str, payload, event_id: str) -> dict:

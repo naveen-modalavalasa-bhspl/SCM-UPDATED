@@ -265,6 +265,8 @@ def _include_routers() -> None:
         # After warehouse: a return reuses inv_sto and reads pro_returns, so it sits
         # at the end of the module chain (rule 5) and nothing imports it back.
         "app.modules.returns.router",
+        # Accounts reads procurement, warehouse and logistics, so it closes the chain.
+        "app.modules.accounts.router",
         # The API console. Reads every module's tables and is read by none, so it
         # registers late, beside reports.
         "app.modules.integrations.router",

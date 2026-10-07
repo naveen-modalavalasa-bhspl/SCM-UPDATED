@@ -14,8 +14,8 @@ per module:
                               token — never one from the request.
 """
 from datetime import date
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import throttle
@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
-from app.modules.procurement import quote_otp, service, stats, suppliers
+from app.modules.procurement import po_documents, quote_otp, service, stats, suppliers
 from app.modules.procurement.schemas import (
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
@@ -31,7 +31,7 @@ from app.modules.procurement.schemas import (
     ReqStatsOut, RFQStatsOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
     POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
-    PORevisionOut, POVendorResponseIn, QuoteChangeDecisionIn, QuoteChangeRequestIn,
+    PODocumentOut, PORevisionOut, POVendorResponseIn, QuoteChangeDecisionIn, QuoteChangeRequestIn,
     QuoteChangeRequestOut, QuoteCommentIn, QuoteCommentOut, QuoteListRow,
     QuoteOtpOut, QuoteOut, QuoteSubmit, QuoteUnfreezeIn, ReqCreate, ReqFromMRsIn, ReqListRow,
     ReqOut, RFQCreate, RFQListRow, RFQOut, RFQQuantitiesIn, RFQUpdate,
@@ -140,6 +140,22 @@ async def create_from_quotation(quotation_id: int,
 async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.PO_VIEW))):
     return await service.get_po_detail(db, po_id, user=user)
+
+
+@pos.get("/{po_id}/documents", response_model=list[PODocumentOut])
+async def po_documents_list(po_id: int, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.PO_VIEW))):
+    """The supplier's invoices and delivery challans filed against this order."""
+    return await po_documents.list_for_user(db, po_id, user)
+
+
+@pos.get("/{po_id}/documents/{attachment_id}/download")
+async def po_document_download(po_id: int, attachment_id: int,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.PO_VIEW))):
+    path, file_name, mime_type = await po_documents.file_for_user(
+        db, po_id, attachment_id, user)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @pos.put("/{po_id}", response_model=POOut)
@@ -796,6 +812,42 @@ async def vendor_respond_to_po(po_id: int, body: POVendorResponseIn,
     await service.vendor_respond_to_po(
         db, account.vendor_id, po_id, body.accept, body.note)
     return await service.vendor_get_po(db, account.vendor_id, po_id)
+
+
+@supplier.get("/pos/{po_id}/documents", response_model=list[PODocumentOut])
+async def vendor_po_documents(po_id: int, db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    """The invoices and delivery challans filed against this order."""
+    return await po_documents.vendor_list_documents(db, account.vendor_id, po_id)
+
+
+@supplier.post("/pos/{po_id}/documents", response_model=list[PODocumentOut],
+               status_code=201)
+async def vendor_upload_po_document(po_id: int, doc_category: str = Form(...),
+                                    file: UploadFile = File(...),
+                                    db: AsyncSession = Depends(get_db),
+                                    account=Depends(get_current_vendor)):
+    """Attach an INVOICE or a DC. Several of each are allowed — one per delivery."""
+    return await po_documents.vendor_upload_document(
+        db, account.vendor_id, po_id, doc_category=doc_category, upload=file)
+
+
+@supplier.delete("/pos/{po_id}/documents/{attachment_id}",
+                 response_model=list[PODocumentOut])
+async def vendor_delete_po_document(po_id: int, attachment_id: int,
+                                    db: AsyncSession = Depends(get_db),
+                                    account=Depends(get_current_vendor)):
+    return await po_documents.vendor_delete_document(
+        db, account.vendor_id, po_id, attachment_id)
+
+
+@supplier.get("/pos/{po_id}/documents/{attachment_id}/download")
+async def vendor_download_po_document(po_id: int, attachment_id: int,
+                                      db: AsyncSession = Depends(get_db),
+                                      account=Depends(get_current_vendor)):
+    path, file_name, mime_type = await po_documents.vendor_document_file(
+        db, account.vendor_id, po_id, attachment_id)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
 
 
 @supplier.post("/pos/{po_id}/despatch-notes", response_model=DespatchNoteOut,

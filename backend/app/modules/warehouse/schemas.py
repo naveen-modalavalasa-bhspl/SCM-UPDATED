@@ -1666,6 +1666,8 @@ class IssueStockSourceFetchIn(BaseModel):
     warehouse_id: int
     item_ids: list[int]
     indent_id: int | None = None
+    # Lots held for this project are offered as the document's own.
+    project_id: int | None = None
 
 
 class IssueStockSource(_Read):
@@ -1755,6 +1757,9 @@ class IssueRead(_Read):
     is_stock_posted: bool
     posted_at: datetime | None = None
     current_approver_name: str | None = None
+    # Who the document is with RIGHT NOW: the raiser on a draft, the approver while in
+    # approval, the person who issues it from stock once approved. None once posted.
+    currently_with: str | None = None
     approved_by_name: str | None = None
     approved_at: datetime | None = None
     acknowledged_by_name: str | None = None
@@ -1777,6 +1782,12 @@ class IssueDetail(IssueRead):
     # eleven of them hold `issue.issue` and a permission-gated button appeared for
     # all eleven on a document only one of them could act on.
     can_approve: bool = False
+    # True only for the person an approved issue is with, or someone above them on the
+    # HCM reporting line. `post_issue` and `set_issue_serials` enforce the same rule.
+    can_issue_from_stock: bool = False
+    # Whoever submitted it for approval (the workflow's starter), shown as "Submitted
+    # by" until stock is posted and `issued_by_name` is stamped.
+    submitted_by_name: str | None = None
     # False until the indent raiser has confirmed this issue's quantities in My
     # Deliveries. The sending store must not be able to certify its own delivery.
     can_acknowledge: bool = False
@@ -4262,3 +4273,102 @@ class StockEditRead(StockEditListRow):
     remarks: str | None = None
     items: list[StockEditItemRead] = Field(default_factory=list)
     can_act: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Project lots (Stock Segregation > Project Lots)
+# ---------------------------------------------------------------------------
+
+class ProjectHoldCreate(BaseModel):
+    stock_id: int
+    project_id: int
+    quantity: Decimal = Field(gt=0)
+    # Optional: the exact units being held. One per unit held when given.
+    serial_numbers: list[str] = Field(default_factory=list, max_length=1000)
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ProjectHoldRelease(BaseModel):
+    # None releases everything still held.
+    quantity: Decimal | None = Field(default=None, gt=0)
+    serial_numbers: list[str] = Field(default_factory=list, max_length=1000)
+    reason: str = Field(min_length=3, max_length=500)
+    # Lend only: the project whose urgent need this lot now serves.
+    for_project_id: int | None = None
+    # Where the released stock is moved to — a release is a Stock Movement Order.
+    destination_bin_id: int
+
+
+class ProjectHoldRead(_Read):
+    id: int
+    hold_no: str
+    stock_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    bin_id: int | None = None
+    bin_code: str | None = None
+    batch_id: int | None = None
+    batch_no: str | None = None
+    project_id: int
+    project_name: str | None = None
+    held_qty: Decimal
+    quantity: Decimal
+    serial_numbers: list[str] | None = None
+    reason: str | None = None
+    status: str
+    created_by_name: str | None = None
+    created_at: datetime | None = None
+    released_by_name: str | None = None
+    released_at: datetime | None = None
+    release_reason: str | None = None
+    released_for_project_name: str | None = None
+    # A release in flight: the movement order carrying it, and what it moves where.
+    release_order_no: str | None = None
+    release_qty: Decimal | None = None
+    release_destination: str | None = None
+    pending_lend_project_name: str | None = None
+    is_unit_tracked: bool = False
+
+
+class ProjectHoldReleaseResult(BaseModel):
+    hold: ProjectHoldRead
+    order_no: str | None = None
+    order_status: str | None = None
+
+
+class ProjectLotHold(BaseModel):
+    id: int
+    hold_no: str
+    project_id: int
+    project_name: str | None = None
+    quantity: Decimal
+    serial_count: int = 0
+
+
+class ProjectLotRead(BaseModel):
+    stock_id: int
+    # Every put-away lot that landed on this row (LOT/WH10/<path>/2026-27/00001).
+    lot_nos: list[str] = []
+    # Warehouse / floor / lane / rack / bin, walked up the location tree.
+    location_path: str | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    bin_id: int | None = None
+    bin_code: str | None = None
+    batch_id: int | None = None
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    received_for_project: str | None = None
+    total_qty: Decimal
+    available_qty: Decimal
+    reserved_qty: Decimal
+    held_qty: Decimal
+    holds: list[ProjectLotHold] = []
+    is_unit_tracked: bool = False

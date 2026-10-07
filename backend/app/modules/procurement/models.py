@@ -63,6 +63,10 @@ class PurchaseOrder(Base):
     # agreed with THIS vendor for THIS order, and every attempt to code them into a
     # picklist ends with somebody typing the real one into remarks anyway.
     payment_terms = Column(Text, nullable=True)
+    # The payment-term MASTER picked for this order (2026-10-06). Its milestones are
+    # copied onto `pro_po_payment_milestones` at that moment, so editing the master
+    # never moves an order already raised; `payment_terms` above carries its wording.
+    payment_term_id = soft_fk()
     delivery_terms = Column(Text, nullable=True)
     material_terms = Column(Text, nullable=True)
     logistics_terms = Column(Text, nullable=True)
@@ -105,6 +109,28 @@ class PurchaseOrder(Base):
         "POItem", back_populates="po",
         cascade="all, delete-orphan", lazy="selectin",
     )
+    payment_milestones = relationship(
+        "POPaymentMilestone", cascade="all, delete-orphan", lazy="selectin",
+        order_by="POPaymentMilestone.seq",
+    )
+
+
+class POPaymentMilestone(Base):
+    """`pro_po_payment_milestones` — one stage of the order's payment terms, frozen.
+
+    Only the SHARE is stored. The amount is read as `percent x total_amount`, so an
+    amendment that changes the order value moves what is due without anybody having to
+    rewrite these rows. What has been PAID against a milestone is the accounts module's
+    (`acc_vendor_payments.milestone_id`), never written here.
+    """
+    __tablename__ = "pro_po_payment_milestones"
+    id = pk()
+    po_id = Column(ForeignKey("pro_purchase_orders.id", ondelete="CASCADE"),
+                   index=True, nullable=False)
+    seq = Column(Integer, nullable=False, default=1)
+    stage = Column(String(30), nullable=False)          # PaymentMilestoneStage
+    percent = Column(Numeric(5, 2), nullable=False)
+    due_days = Column(Integer, nullable=False, default=0)
 
 
 class PORevision(Base):

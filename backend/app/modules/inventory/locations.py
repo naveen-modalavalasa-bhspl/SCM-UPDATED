@@ -313,6 +313,14 @@ async def floor_ids_for_user(db: AsyncSession, user) -> set[int] | None:
 
 async def floor_incharge_names(db: AsyncSession,
                                floor_ids: set[int]) -> dict[int, list[str]]:
+    """Names only — see `floor_incharge_people`."""
+    people = await floor_incharge_people(db, floor_ids)
+    return {floor_id: list(dict.fromkeys(name for _id, name in rows))
+            for floor_id, rows in people.items()}
+
+
+async def floor_incharge_people(db: AsyncSession,
+                                floor_ids: set[int]) -> dict[int, list[tuple[int, str]]]:
     """Who is in charge of each floor — `floor_ids_for_user` read the other way round.
 
     Same three links, so the names a split shows are exactly the people who will see
@@ -320,7 +328,7 @@ async def floor_incharge_names(db: AsyncSession,
     admin grant on top, and the one-floor-building fallback for a tag that names only
     the warehouse. A floor nobody holds comes back with an empty list, never missing.
     """
-    out: dict[int, list[str]] = {floor_id: [] for floor_id in floor_ids}
+    out: dict[int, list[tuple[int, str]]] = {floor_id: [] for floor_id in floor_ids}
     if not floor_ids:
         return out
     floor_posts = select(HcmPosition.id).where(
@@ -369,18 +377,18 @@ async def floor_incharge_names(db: AsyncSession,
     if not links:
         return out
 
-    holders: dict[int, list[str]] = {}
-    for position_id, name in (await db.execute(
-        select(HcmPositionAssignment.position_id, HcmEmployee.full_name)
+    holders: dict[int, list[tuple[int, str]]] = {}
+    for position_id, employee_id, name in (await db.execute(
+        select(HcmPositionAssignment.position_id, HcmEmployee.id, HcmEmployee.full_name)
         .join(HcmEmployee, HcmEmployee.id == HcmPositionAssignment.employee_id)
         .where(HcmPositionAssignment.position_id.in_({p for _f, p in links}),
                HcmPositionAssignment.is_active.is_(True),
                HcmEmployee.is_active.is_(True)))).all():
-        holders.setdefault(int(position_id), []).append(name)
+        holders.setdefault(int(position_id), []).append((int(employee_id), name))
     for floor_id, position_id in sorted(links):
-        for name in holders.get(position_id, []):
-            if name and name not in out[floor_id]:
-                out[floor_id].append(name)
+        for person in holders.get(position_id, []):
+            if person[1] and person not in out[floor_id]:
+                out[floor_id].append(person)
     return out
 
 

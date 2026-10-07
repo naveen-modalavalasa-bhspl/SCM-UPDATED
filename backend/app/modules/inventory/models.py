@@ -17,7 +17,7 @@ from sqlalchemy.orm import relationship
 from app.core.database import Base
 from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
-from app.shared.enums import Priority, ReservationStatus
+from app.shared.enums import Priority, ProjectHoldStatus, ReservationStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col, utcnow
 
 """0 rather than NULL means "not set" for bin, batch and project.
@@ -173,6 +173,71 @@ class Reservation(Base):
 
 Index("ix_inv_reservations_ref", Reservation.ref_type, Reservation.ref_id)
 Index("ix_inv_reservations_active", Reservation.status, Reservation.item_id)
+
+
+class ProjectHold(Base):
+    """A lot set aside for ONE project (2026-10-06).
+
+    Stock bought for a project lands in the shared pool like everything else; a hold
+    is a person deciding that some of it must not be given to anybody else. The
+    quantity is moved into `reserved_qty` through `allocation.hold` with an
+    `inv_reservations` row (ref_type PROJECT_HOLD), so every screen that reads
+    `available_qty` — the fulfilment desk, the issue pickers, every "free" figure —
+    stops offering it with no change of its own. Only the project's OWN indents and
+    issues read it back (`project_holds.held_for`), and drawing it moves the hold onto
+    their reservation (`allocation.reserve`) or frees it at posting.
+
+    `quantity` is what is still held; `serial_numbers`, when given, names the exact
+    units, and the issue unit picker keeps them away from every other project.
+    """
+    __tablename__ = "stk_project_holds"
+    id = pk()
+    hold_no = Column(String(30), nullable=False, index=True)
+    stock_id = Column(ForeignKey("stk_balance.id", ondelete="CASCADE"),
+                      index=True, nullable=False)
+    item_id = Column(ForeignKey("mst_items.id"), index=True, nullable=False)
+    item_code = Column(String(50), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_name = Column(String(200), nullable=True)
+    bin_id = Column(BigInteger, nullable=False, default=NO_BIN)
+    bin_code = Column(String(50), nullable=True)
+    batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
+    batch_no = Column(String(50), nullable=True)
+    project_id = Column(BigInteger, index=True, nullable=False)
+    project_name = Column(String(200), nullable=True)
+    held_qty = Column(Numeric(16, 3), nullable=False)       # as first held
+    quantity = Column(Numeric(16, 3), nullable=False)       # still held
+    serial_numbers = Column(JSON, nullable=True)
+    reason = Column(String(500), nullable=True)
+    status = Column(String(20), nullable=False, index=True,
+                    default=ProjectHoldStatus.ACTIVE.value)
+    created_by_id = soft_fk()
+    created_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
+    released_by_id = soft_fk()
+    released_by_name = Column(String(200), nullable=True)
+    released_at = Column(DateTime, nullable=True)
+    release_reason = Column(String(500), nullable=True)
+    # Set when the release lent the stock to another project's need.
+    released_for_project_id = Column(BigInteger, nullable=True)
+    released_for_project_name = Column(String(200), nullable=True)
+    # A release is a STOCK MOVEMENT ORDER (2026-10-06): the released quantity is moved
+    # off this lot into another location, through the SMO's own ladder and
+    # inspection. These say what is in flight; the hold is reduced only when that
+    # order completes, and the fields clear if it is rejected.
+    release_order_id = Column(BigInteger, nullable=True, index=True)
+    release_order_no = Column(String(50), nullable=True)
+    release_qty = Column(Numeric(16, 3), nullable=True)
+    release_serials = Column(JSON, nullable=True)
+    release_destination = Column(String(100), nullable=True)
+    pending_release_reason = Column(String(500), nullable=True)
+    pending_lend_project_id = Column(BigInteger, nullable=True)
+    pending_lend_project_name = Column(String(200), nullable=True)
+
+
+Index("ix_stk_project_holds_lookup", ProjectHold.status, ProjectHold.project_id,
+      ProjectHold.item_id)
 
 
 class Allocation(Base):

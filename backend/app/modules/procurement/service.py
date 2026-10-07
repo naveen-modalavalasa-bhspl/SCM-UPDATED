@@ -32,7 +32,7 @@ from app.modules.procurement.models import (
     DespatchNote, DespatchNoteItem, POComment, POItem, PurchaseConsolidation,
     PurchaseConsolidationItem, PurchaseConsolidationSource, PurchaseOrder, Quotation,
     QuotationComment, QuotationItem, QuoteChangeRequest, Requisition,
-    PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
+    POPaymentMilestone, PORevision, RequisitionItem, RequisitionSource, RFQ, RFQItem, RFQVendor,
     VendorNotification, VendorUser,
 )
 from app.modules.procurement.schemas import (
@@ -149,12 +149,69 @@ async def _apply_po_header(db: AsyncSession, po: PurchaseOrder, data) -> None:
         if value is None:
             continue
         setattr(po, field, value.strip() or None)
+    term_id = getattr(data, "payment_term_id", None)
+    if term_id is not None and term_id != po.payment_term_id:
+        await _apply_payment_term(db, po, term_id)
     # Both columns are NOT NULL, so these are assigned only when the caller named a
     # number. Omitted, the order keeps what it had (or the column default on create).
     if getattr(data, "discount_amount", None) is not None:
         po.discount_amount = _d(data.discount_amount)
     if getattr(data, "freight_amount", None) is not None:
         po.freight_amount = _d(data.freight_amount)
+
+
+async def _apply_payment_term(db: AsyncSession, po: PurchaseOrder, term_id: int) -> None:
+    """Copy a payment-term master onto the order: its wording into `payment_terms` and
+    its non-zero milestones into `pro_po_payment_milestones` (2026-10-06).
+
+    Only before the order is approved. From then on accounts may have paid against
+    those milestones, and swapping them would leave a payment pointing at a stage the
+    order no longer has. A change after approval is an amendment conversation, not a
+    dropdown.
+    """
+    from app.shared.enums import PAYMENT_MILESTONE_META
+    from app.shared.models.master import PaymentTerm
+
+    if po.id is not None:
+        # Loaded explicitly: touching an unloaded collection is an implicit await
+        # under asyncio, and replacing it needs the old rows to delete them.
+        await db.refresh(po, attribute_names=["payment_milestones"])
+    if po.status not in (None, POStatus.DRAFT.value, POStatus.REJECTED.value) \
+            and po.payment_milestones:
+        raise ValidationError(
+            "Payment terms are fixed once the order is approved — accounts pays "
+            "against them. Keep the current terms.")
+    term = await db.get(PaymentTerm, term_id)
+    if term is None or not term.is_active:
+        raise ValidationError("Payment terms: pick an active payment term from the list.")
+    po.payment_term_id = term.id
+    from app.shared.masters.defs import parse_schedule
+
+    parts, rows = [], []
+    for stage in PAYMENT_MILESTONE_META:
+        pct = _d(getattr(term, f"{stage['field']}_pct") or 0)
+        if pct <= 0:
+            continue
+        days = getattr(term, f"{stage['field']}_days") or 0
+        schedule = parse_schedule(term.delivery_schedule) \
+            if stage["field"] == "delivery" else []
+        if len(schedule) > 1:
+            # Equal instalments; the last takes the rounding so they add up to `pct`.
+            share = (pct / len(schedule)).quantize(Decimal("0.01"))
+            shares = [share] * (len(schedule) - 1) + [pct - share * (len(schedule) - 1)]
+            parts.append(f"{float(pct):g}% {stage['label'].lower()} in {len(schedule)} "
+                         f"instalments ({'/'.join(map(str, schedule))} days)")
+            for when, piece in zip(schedule, shares):
+                rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                               percent=piece, due_days=when))
+            continue
+        days = schedule[0] if schedule else days
+        parts.append(f"{float(pct):g}% {stage['label'].lower()}"
+                     + (f" ({days} days)" if days else ""))
+        rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                       percent=pct, due_days=days))
+    po.payment_milestones = rows
+    po.payment_terms = f"{term.name}: {', '.join(parts)}"
 
 
 def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:
@@ -5561,15 +5618,21 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
     if data.invoice_date and data.invoice_date > today:
         raise ValidationError(f"Invoice date {data.invoice_date} is in the future")
 
+    # REQ_111 — one PO line may be sent in several batches, one note line per batch.
+    # The ceiling is therefore checked on the SUM of this note's lines per PO line:
+    # two batches each under the remainder can still add up to more than is owed.
+    claimed: dict[int, Decimal] = {}
     for line in lines:
         po_line = po_items.get(line.po_item_id)
         if po_line is None:
             raise ValidationError(f"Line {line.po_item_id} is not on {po.po_no}")
         pending = _d(po_line.quantity) - already.get(line.po_item_id, Decimal(0))
-        if _d(line.despatched_qty) > pending:
+        claimed[line.po_item_id] = claimed.get(line.po_item_id, Decimal(0)) \
+            + _d(line.despatched_qty)
+        if claimed[line.po_item_id] > pending:
             raise ValidationError(
-                f"{po_line.item_code or po_line.item_name}: {line.despatched_qty} "
-                f"exceeds the {pending} still owed on {po.po_no}")
+                f"{po_line.item_code or po_line.item_name}: {claimed[line.po_item_id]} "
+                f"across its batches exceeds the {pending} still owed on {po.po_no}")
         if line.expiry_date and line.mfg_date and line.expiry_date <= line.mfg_date:
             raise ValidationError(
                 f"{po_line.item_code or po_line.item_name}: expiry must be after "
@@ -5691,6 +5754,20 @@ async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
         raise ValidationError(
             "Say how this consignment travels before despatching it: an e-way bill "
             "number, or a vehicle number, LR number or transporter name.")
+
+    # The invoice and the delivery challan must be ON FILE, not just quoted: accounts
+    # pays against the invoice and the gate checks the vehicle against the DC. They
+    # are filed per order (po_documents), so the order must hold at least one of each.
+    from app.modules.procurement.po_documents import list_po_documents
+    filed = {(a.doc_category or "").upper()
+             for a in await list_po_documents(db, note.po_id)}
+    missing = [label for code, label in (("INVOICE", "invoice"),
+                                         ("DC", "delivery challan (DC)"))
+               if code not in filed]
+    if missing:
+        raise ValidationError(
+            f"Upload the {' and the '.join(missing)} under Invoices & delivery "
+            "challans before submitting this dispatch note.")
 
     note.status = DespatchNoteStatus.SUBMITTED.value
     note.submitted_at = utcnow()

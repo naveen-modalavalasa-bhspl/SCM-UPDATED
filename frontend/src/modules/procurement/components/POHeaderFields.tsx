@@ -16,9 +16,39 @@ import type { POHeader, PurchaseOrder } from "../types";
 
 interface NamedRow { id: number; code?: string | null; name: string }
 
+interface PaymentTermRow extends NamedRow {
+  is_active: boolean;
+  advance_pct: number; advance_days: number; delivery_pct: number; delivery_days: number;
+  installation_pct: number; installation_days: number;
+  warranty_pct: number; warranty_days: number;
+  delivery_schedule?: string | null;
+}
+
+const TERM_STAGES = [
+  ["advance", "advance"], ["delivery", "against delivery"],
+  ["installation", "post installation"], ["warranty", "post warranty"],
+] as const;
+
+/** The wording the server writes onto the order for a term, shown at once. */
+function termWording(t: PaymentTermRow): string {
+  const parts = TERM_STAGES
+    .filter(([k]) => Number(t[`${k}_pct`]) > 0)
+    .map(([k, label]) => {
+      const days = Number(t[`${k}_days`]) || 0;
+      if (k === "delivery" && t.delivery_schedule) {
+        const parts = t.delivery_schedule.split(",");
+        return `${Number(t[`${k}_pct`])}% ${label} in ${parts.length} instalments (${parts.join("/")} days)`;
+      }
+      return `${Number(t[`${k}_pct`])}% ${label}` + (days ? ` (${days} days)` : "");
+    });
+  return `${t.name}: ${parts.join(", ")}`;
+}
+
 export interface POHeaderValue {
   projectId: number | "";
   remarks: string;
+  /** The payment-term master picked, or "" for none. */
+  paymentTermId: number | "";
   payment_terms: string;
   delivery_terms: string;
   material_terms: string;
@@ -30,7 +60,7 @@ export interface POHeaderValue {
 }
 
 export const blankPOHeader = (): POHeaderValue => ({
-  projectId: "", remarks: "",
+  projectId: "", remarks: "", paymentTermId: "",
   payment_terms: "", delivery_terms: "", material_terms: "", logistics_terms: "",
   billing_address: "", shipping_address: "",
   discount: "", freight: "",
@@ -40,6 +70,7 @@ export const blankPOHeader = (): POHeaderValue => ({
 export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
   projectId: po.project_id ?? "",
   remarks: po.remarks ?? "",
+  paymentTermId: po.payment_term_id ?? "",
   payment_terms: po.payment_terms ?? "",
   delivery_terms: po.delivery_terms ?? "",
   material_terms: po.material_terms ?? "",
@@ -66,6 +97,7 @@ export const poHeaderFrom = (po: PurchaseOrder): POHeaderValue => ({
 export const poHeaderPayload = (v: POHeaderValue): POHeader => ({
   project_id: v.projectId === "" ? null : Number(v.projectId),
   remarks: v.remarks || null,
+  payment_term_id: v.paymentTermId === "" ? null : Number(v.paymentTermId),
   payment_terms: v.payment_terms ?? "",
   delivery_terms: v.delivery_terms ?? "",
   material_terms: v.material_terms ?? "",
@@ -124,6 +156,13 @@ export function POHeaderFields({
       }).then((r) => r.data.items),
   });
 
+  const { data: terms = [] } = useQuery({
+    queryKey: ["po-payment-terms"],
+    queryFn: () =>
+      api.get<{ items: PaymentTermRow[] }>("/api/payment-terms", { params: { size: 300 } })
+        .then((r) => r.data.items.filter((t) => t.is_active)),
+  });
+
   const set = (key: keyof POHeaderValue) => (v: string) => onChange({ [key]: v });
 
   return (
@@ -161,6 +200,23 @@ export function POHeaderFields({
 
       <div>
         <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>
+        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Payment term"
+            hint="Splits the order value into advance / delivery / installation / warranty. Accounts pays against it.">
+            <Select
+              value={value.paymentTermId === "" ? "" : String(value.paymentTermId)}
+              placeholder="Pick a payment term"
+              isDisabled={disabled}
+              options={terms.map((t) => ({ value: String(t.id), label: termWording(t) }))}
+              onChange={(v) => {
+                const term = terms.find((t) => String(t.id) === v);
+                onChange(term
+                  ? { paymentTermId: term.id, payment_terms: termWording(term) }
+                  : { paymentTermId: "" });
+              }}
+            />
+          </Field>
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <LongText label="Payment terms" disabled={disabled}
             value={value.payment_terms} onChange={set("payment_terms")} />

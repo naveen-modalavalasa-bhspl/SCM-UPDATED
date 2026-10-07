@@ -14,6 +14,11 @@ export interface POItem {
   received_quantity: number;
 }
 
+/** One frozen stage of a PO's payment terms (advance, against delivery, ...). */
+export interface POMilestone {
+  id: number; seq: number; stage: string; percent: number; due_days: number;
+}
+
 export interface PurchaseOrder {
   id: number;
   po_no: string;
@@ -43,6 +48,8 @@ export interface PurchaseOrder {
   total_amount: number;
   remarks?: string | null;
   payment_terms?: string | null;
+  payment_term_id?: number | null;
+  payment_milestones?: POMilestone[];
   delivery_terms?: string | null;
   material_terms?: string | null;
   logistics_terms?: string | null;
@@ -139,6 +146,8 @@ export interface POHeader {
   project_id?: number | null;
   remarks?: string | null;
   payment_terms?: string | null;
+  /** The payment-term master; picking one freezes its milestones on the order. */
+  payment_term_id?: number | null;
   delivery_terms?: string | null;
   material_terms?: string | null;
   logistics_terms?: string | null;

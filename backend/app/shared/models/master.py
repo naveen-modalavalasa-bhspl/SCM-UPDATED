@@ -35,6 +35,33 @@ class VendorCategory(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class PaymentTerm(Base):
+    """`mst_payment_terms` — how a PO's value falls due, split over the four milestones
+    (advance, against delivery, post installation, post warranty). Each stage carries a
+    percent of the order value and the days after its trigger that it is payable in.
+    The percents add up to 100; a PO copies them when the term is picked, so editing a
+    term never moves an order already raised (2026-10-06)."""
+    __tablename__ = "mst_payment_terms"
+    id = pk()
+    code = Column(String(20), unique=True, nullable=False)
+    name = Column(String(150), nullable=False)
+    description = Column(String(300), nullable=True)
+    advance_pct = Column(Numeric(5, 2), nullable=False, default=0)
+    advance_days = Column(Integer, nullable=False, default=0)
+    delivery_pct = Column(Numeric(5, 2), nullable=False, default=0)
+    delivery_days = Column(Integer, nullable=False, default=0)
+    # "30,60,90": the delivery share paid in equal instalments, each that many days
+    # after delivery. Blank = one payment at `delivery_days`.
+    delivery_schedule = Column(String(60), nullable=True)
+    installation_pct = Column(Numeric(5, 2), nullable=False, default=0)
+    installation_days = Column(Integer, nullable=False, default=0)
+    warranty_pct = Column(Numeric(5, 2), nullable=False, default=0)
+    warranty_days = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+
 class VendorCategoryMember(Base):
     """A vendor in a category. Many-to-many: Borosil can be Glassware AND Lab
     Consumables. Edited from either side — the category form or the vendor form."""
@@ -160,7 +187,8 @@ class Item(Base):
     # fail with "Unknown column", which empties the /api/items dropdown.
     __tablename__ = "mst_items"
     id = pk()
-    code = Column(String(50), unique=True, nullable=False)
+    # NOT unique: brand variants of one general name share a code (2026-10-06).
+    code = Column(String(50), index=True, nullable=False)
     name = Column(String(300), nullable=False)
     short_name = Column(String(100), nullable=True)
     category_id = Column(ForeignKey("mst_item_categories.id"), index=True, nullable=True)

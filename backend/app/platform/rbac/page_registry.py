@@ -119,6 +119,13 @@ PAGES: list[PageDef] = [
     PageDef("returns_receiving_config", "/returns/settings/receiving",
             "Receiving Points", parent="grp_returns", module="returns",
             icon="map-pin", sort_order=8),
+    # Accounts (2026-10-06) — a module of its own: what each PO owes its vendor by
+    # payment milestone, and the payments recorded against them.
+    PageDef("grp_accounts", "/accounts", "Accounts", module="accounts",
+            icon="indian-rupee", sort_order=65),
+    PageDef("acc_payments", "/accounts/payments", "Vendor Payments",
+            parent="grp_accounts", module="accounts", icon="receipt",
+            sort_order=1),
     # The module row itself, listed only to rename it: the menu said "Purchasing"
     # while the permission catalogue, the backend package and the table prefix all
     # said procurement, and the RBAC screen needed a hard-coded alias to reconcile

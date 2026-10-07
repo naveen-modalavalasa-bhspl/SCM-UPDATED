@@ -612,6 +612,7 @@ RETURN_PERMISSION_BY_DOC_TYPE: dict[str, str] = {
     DocType.STOCK_TRANSFER_REQUEST.value: perms.INDENT_APPROVE,
     DocType.STOCK_ADJUSTMENT.value: perms.STOCK_ADJUST_APPROVE,
     DocType.STOCK_EDIT.value: perms.STOCK_EDIT_APPROVE,
+    DocType.VENDOR_PAYMENT.value: perms.ACCOUNTS_APPROVE,
     # All three returns share `return.approve` — the code is one resource used by
     # both the purchase and the stock-return chains.
     DocType.PURCHASE_RETURN.value: perms.RETURN_APPROVE,

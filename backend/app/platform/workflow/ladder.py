@@ -93,6 +93,7 @@ MODULE_BY_DOC_TYPE: dict[str, str] = {
     DocType.PO.value: "Procurement",
     DocType.TRANSPORT_REQUEST.value: "Logistics",
     DocType.CARRIER_AWARD.value: "Logistics",
+    DocType.VENDOR_PAYMENT.value: "Accounts",
 }
 
 DOC_TYPE_LABEL: dict[str, str] = {
@@ -110,6 +111,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
     DocType.STOCK_MOVEMENT_ORDER.value: "Stock Movement (bin to bin)",
     DocType.STOCK_ADJUSTMENT.value: "Stock Audit (physical count correction)",
     DocType.STOCK_EDIT.value: "Stock Correction (batch / expiry / serial / IMEI)",
+    DocType.VENDOR_PAYMENT.value: "Vendor Payment (against a PO payment milestone)",
     DocType.STOCK_RETURN.value: "Indent Return",
     DocType.STOCK_RETURN_RECEIPT.value: "Decision Desk",
     DocType.STOCK_RETURN_LOGISTICS.value: "Return Logistics",
@@ -131,7 +133,7 @@ DOC_TYPE_LABEL: dict[str, str] = {
 
 # The order the modules are listed in on the config screen.
 MODULE_ORDER = ["Indents", "Inventory", "Warehouse", "Returns", "Procurement",
-                "Logistics"]
+                "Logistics", "Accounts"]
 
 # Document types nothing OPENS an instance for any more. They keep their label and
 # their module — an instance raised before the retirement still has to render with a

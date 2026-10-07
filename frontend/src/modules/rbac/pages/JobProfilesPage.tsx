@@ -339,6 +339,11 @@ const PLAIN_PAGE_HELP: Record<string, { label?: string; hint: string }> = {
   inv_labels: {
     hint: "Create and print labels for stock items.",
   },
+  acc_payments: {
+    label: "Vendor Payments",
+    hint: "What each PO owes by payment milestone (advance, delivery, installation, warranty), "
+      + "the supplier's invoices, and recording payments. Every payment goes through the Vendor Payment approval ladder.",
+  },
   inv_stock_edits: {
     label: "Stock Corrections",
     hint: "Correct a held batch (batch no., mfg / expiry date) or unit (serial, IMEI, asset / "
