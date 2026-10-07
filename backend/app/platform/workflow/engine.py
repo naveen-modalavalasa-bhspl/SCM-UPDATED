@@ -86,7 +86,7 @@ async def _active_workflow(db: AsyncSession, doc_type: str) -> tuple[Workflow, b
     Returns (workflow, was_fallback). Missing configuration must never stop a document
     being submitted — see platform/workflow/fallback.py.
     """
-    wf = (await db.execute(
+    rows = (await db.execute(
         select(Workflow).where(
             Workflow.doc_type == doc_type,
             # Project ladders are chosen by start(); this is the company-wide path, so
@@ -94,10 +94,20 @@ async def _active_workflow(db: AsyncSession, doc_type: str) -> tuple[Workflow, b
             Workflow.project_id.is_(None),
             Workflow.is_active.is_(True),
         ).order_by(Workflow.id.desc())
-    )).scalars().first()
-    if wf is None:
-        return await fallback.ensure_workflow(db, doc_type), True
-    return wf, False
+    )).scalars().all()
+    for wf in rows:
+        # A rank ladder (or a hand-built / per-rank one) is NOT a stage workflow.
+        # `ladder.find_ladder` already declined it for this raiser; running it here as
+        # plain stages named the first rung ("District Manager") while its rank stages
+        # resolved to nobody and fell to the raiser's own manager (SCM_0016).
+        if wf.raiser_role_id is not None or ladder.is_custom_ladder(wf):
+            continue
+        stages = (await db.execute(
+            select(Stage).where(Stage.workflow_id == wf.id))).scalars().all()
+        if ladder.is_ladder(list(stages)):
+            continue
+        return wf, False
+    return await fallback.ensure_workflow(db, doc_type), True
 
 
 async def _stages(db: AsyncSession, workflow_id: int) -> list[Stage]:
@@ -1024,7 +1034,10 @@ async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance
             return await _start_resolved(db, doc_type, doc_id, chain, context, user,
                                          project_id)
 
-    wf, used_fallback = await _active_workflow(db, doc_type)
+    # The same type the ladder was looked up under: an STR (an INDENT row) with no STR
+    # ladder must fall back to the STR policy, never borrow the INDENT workflow
+    # (SCM_0015). Without an override the two are the same type.
+    wf, used_fallback = await _active_workflow(db, _ladder_doc_type(doc_type, context))
     applicable = await _applicable_stages(db, wf.id, context)
 
     instance = await _open_instance(

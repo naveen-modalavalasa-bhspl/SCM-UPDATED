@@ -3941,6 +3941,35 @@ class AcknowledgeIssueIn(BaseModel):
     remarks: str | None = None
 
 
+class DirectIssueAckLine(BaseModel):
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    issued_qty: Decimal = Decimal("0")
+
+
+class DirectIssueAckRow(BaseModel):
+    """A material issue raised against no indent, as its recipient sees it.
+
+    Indent-linked issues are confirmed through the indent's own acknowledgement; a
+    direct issue has no indent, so the person it was issued TO signs the issue itself.
+    """
+    issue_id: int
+    issue_no: str
+    issue_date: date | None = None
+    status: str
+    warehouse_name: str | None = None
+    department_name: str | None = None
+    project_name: str | None = None
+    issued_by_name: str | None = None
+    total_qty: Decimal = Decimal("0")
+    acknowledged_by_name: str | None = None
+    acknowledged_at: datetime | None = None
+    can_acknowledge: bool = False
+    lines: list[DirectIssueAckLine] = []
+
+
 class IssueSerialLineIn(BaseModel):
     """One line's physical units, named after approval."""
     id: int

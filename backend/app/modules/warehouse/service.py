@@ -9372,7 +9372,10 @@ async def _issue_destination(
 
         to_warehouse_id = await db.scalar(
             select(StockTransferOrder.to_warehouse_id)
-            .where(StockTransferOrder.issue_id == issue.id).limit(1))
+            # A floor piece of a split names its parent, which is what the STO
+            # points at (SCM_0012) — looked up by its own id it found nothing.
+            .where(StockTransferOrder.issue_id == (issue.parent_issue_id or issue.id))
+            .limit(1))
         point = await db.get(Warehouse, to_warehouse_id) if to_warehouse_id else None
         if point is not None and point.office_id:
             return point.office_id, await db.scalar(
@@ -10530,11 +10533,16 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             direction=parent.direction,
             parent_issue_id=parent.id, parent_issue_no=parent.issue_no,
             floor_location_id=floor_id, floor_location_name=bucket["name"],
-            # A child starts where a hand-written issue starts. It does NOT inherit the
-            # parent's approval: the parent said this stock may leave, and the ladder
-            # still decides who signs each piece. Copying APPROVED down here would be a
-            # way of approving a document nobody has looked at (rule 8).
-            status=IssueStatus.DRAFT.value,
+            # A child CARRIES the parent's approval (SCM_0011). It is not a new ask:
+            # its lines are a slice of exactly what the parent's ladder signed —
+            # quantities distributed, never added — and the parent is locked SPLIT the
+            # moment the children exist. Starting each piece at DRAFT sent the floor
+            # in-charge back up a second ladder for stock already approved to leave,
+            # so the piece could be seen and never issued. Who WORKS it is still the
+            # floor's in-charge (`_issue_holders_bulk`), checked at post time.
+            status=IssueStatus.APPROVED.value,
+            approved_by_name=parent.approved_by_name,
+            approved_at=parent.approved_at,
             created_by_id=getattr(user, "id", None),
             created_by_name=getattr(user, "full_name", None),
         )
@@ -12187,6 +12195,343 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
                       after={"status": issue.status})
     await db.commit()
     return await get_issue(db, issue_id)
+
+
+_DIRECT_ACK_OPEN = (IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value)
+
+
+async def _own_points(db: AsyncSession, user) -> set[int]:
+    """The stocking points whose SHELF this login holds — never its reportees'.
+    Acknowledging is "it reached MY shelf"; a DM must not sign for an LIP under him."""
+    points: set[int] = set()
+    for position_id in await stock_locations.active_positions_of(db, user):
+        points |= await stock_locations.held_location_ids(db, position_id, subtree=False)
+    return points
+
+
+#: A consignment still being built or approved: the goods have not left the gate.
+_DISPATCH_NOT_LEFT = (DispatchStatus.DRAFT.value, DispatchStatus.PENDING_APPROVAL.value,
+                      DispatchStatus.APPROVED.value, DispatchStatus.PACKED.value)
+
+
+def _direct_issue_for(user, points: set[int]):
+    """A posted outward issue raised against no indent that THIS login receives.
+
+    An indent-linked issue is confirmed by the indent's raiser on the indent's own
+    acknowledgement. A direct issue has no raiser, so it is the RECEIVER's (SCM_0013):
+    - the point it was consigned to — a consignment out of the gate (`_ON_THE_ROAD`)
+      whose `to_warehouse_id` is a shelf this login holds. A relay leg is addressed to
+      the MDP, so only the MDP sees it; the LIP sees its own leg;
+    - or the employee it was issued TO, provided nothing is still waiting at the gate:
+      acknowledging before gate-out would close the issue with the goods in the store.
+    """
+    consigned = (select(m.Dispatch.id)
+                 .where(_carries_issue(m.MaterialIssue.id),
+                        m.Dispatch.status.in_(_ON_THE_ROAD)))
+    not_left = (select(m.Dispatch.id)
+                .where(_carries_issue(m.MaterialIssue.id),
+                       m.Dispatch.status.in_(_DISPATCH_NOT_LEFT)))
+    receivers = [and_(m.MaterialIssue.issued_to_id == getattr(user, "id", 0),
+                      ~not_left.correlate(m.MaterialIssue).exists())]
+    if points:
+        receivers.append(consigned.where(m.Dispatch.to_warehouse_id.in_(points))
+                         .correlate(m.MaterialIssue).exists())
+    return and_(m.MaterialIssue.indent_id.is_(None),
+                m.MaterialIssue.direction == IssueDirection.OUT.value,
+                m.MaterialIssue.is_stock_posted.is_(True),
+                or_(*receivers))
+
+
+async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | None = None,
+                                      only_actionable: bool = False) -> list[dict]:
+    statuses = _DIRECT_ACK_OPEN if only_actionable else (
+        *_DIRECT_ACK_OPEN, IssueStatus.ACKNOWLEDGED.value)
+    stmt = (select(m.MaterialIssue).options(selectinload(m.MaterialIssue.items))
+            .where(_direct_issue_for(user, await _own_points(db, user)),
+                   m.MaterialIssue.status.in_(statuses)))
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            m.MaterialIssue.issue_no.ilike(like),
+            m.MaterialIssue.warehouse_name.ilike(like),
+            select(m.MaterialIssueLine.id).where(
+                m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+                or_(m.MaterialIssueLine.item_code.ilike(like),
+                    m.MaterialIssueLine.item_name.ilike(like)),
+            ).correlate(m.MaterialIssue).exists(),
+        ))
+    issues = (await db.execute(stmt.order_by(m.MaterialIssue.id.desc()).limit(200))).scalars().all()
+    return [{
+        "issue_id": issue.id, "issue_no": issue.issue_no, "issue_date": issue.issue_date,
+        "status": issue.status, "warehouse_name": issue.warehouse_name,
+        "department_name": issue.department_name, "project_name": issue.project_name,
+        "issued_by_name": issue.issued_by_name or issue.created_by_name,
+        "total_qty": issue.total_qty,
+        "acknowledged_by_name": issue.acknowledged_by_name,
+        "acknowledged_at": issue.acknowledged_at,
+        "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
+        "lines": [{"item_code": line.item_code, "item_name": line.item_name,
+                   "uom_code": line.uom_code, "batch_no": line.batch_no,
+                   "issued_qty": line.issued_qty}
+                  for line in issue.items if _d(line.issued_qty) > 0],
+    } for issue in issues]
+
+
+ISSUE_ACK_ENTITY_TYPE = "ISSUE_RECEIPT"
+
+
+async def _direct_issue_of(db: AsyncSession, issue_id: int, user, *,
+                           open_only: bool = False) -> m.MaterialIssue:
+    """A direct issue handed to THIS person — the only one who may receive it."""
+    issue = await get_issue(db, issue_id)
+    if issue.indent_id is not None:
+        raise ValidationError(
+            f"{issue.issue_no} was issued against {issue.indent_no or 'an indent'} — "
+            "acknowledge it on that indent.")
+    if issue.issued_to_id != getattr(user, "id", None):
+        raise PermissionError_(
+            f"Only {issue.issued_to_name or 'the person it was issued to'} can "
+            f"acknowledge {issue.issue_no}")
+    if not issue.is_stock_posted:
+        raise ValidationError(f"{issue.issue_no} has not left the store yet")
+    if open_only:
+        _guard(issue.status, set(_DIRECT_ACK_OPEN), "acknowledge", "issue")
+    return issue
+
+
+async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
+    """A direct issue in the SAME shape as an indent's acknowledgement row.
+
+    So the indent receipt journey — consignment, packages, unit codes, photos — runs
+    over it unchanged: `indent_id` carries the issue id, `indent_no` the issue number
+    and each line's `indent_item_id` the ISSUE LINE id.
+    """
+    from app.modules.logistics.models import TransportRequest
+
+    issue = await _direct_issue_of(db, issue_id, user)
+    lines = [line for line in issue.items
+             if _d(line.issued_qty) - _d(line.returned_qty) > 0]
+    signed = issue.status == IssueStatus.ACKNOWLEDGED.value
+
+    dispatches = list((await db.execute(
+        select(m.Dispatch).where(_carries_issue(issue.id),
+                                 m.Dispatch.status != DispatchStatus.CANCELLED.value)
+        .order_by(m.Dispatch.id)
+    )).scalars().all())
+    dispatch_ids = [d.id for d in dispatches]
+
+    # Package split: the consignment lines packed from this issue, per item.
+    packages_by_item: dict[int, list[dict]] = defaultdict(list)
+    if dispatch_ids:
+        for (item_id, dispatch_id, dispatch_no, package_id, packed_qty, pack) in (await db.execute(
+            select(m.DispatchItem.item_id, m.Dispatch.id, m.Dispatch.dispatch_no,
+                   m.DispatchItem.package_id, func.sum(m.DispatchItem.quantity),
+                   m.DispatchPackage)
+            .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
+            .join(m.DispatchPackage, m.DispatchPackage.id == m.DispatchItem.package_id)
+            .where(m.Dispatch.id.in_(dispatch_ids),
+                   or_(m.DispatchItem.issue_id.is_(None),
+                       m.DispatchItem.issue_id == issue.id))
+            .group_by(m.DispatchItem.item_id, m.Dispatch.id, m.Dispatch.dispatch_no,
+                      m.DispatchItem.package_id, m.DispatchPackage.id)
+            .order_by(m.Dispatch.id, m.DispatchPackage.id)
+        )).all():
+            packages_by_item[item_id].append({
+                "dispatch_id": dispatch_id, "dispatch_no": dispatch_no,
+                "package_id": package_id, "package_no": pack.package_no,
+                "quantity": float(_d(packed_qty)), "package_type": pack.package_type,
+                "barcode": pack.barcode,
+                "weight_kg": float(_d(pack.weight_kg)) if pack.weight_kg is not None else None,
+                "length_cm": float(_d(pack.length_cm)) if pack.length_cm is not None else None,
+                "width_cm": float(_d(pack.width_cm)) if pack.width_cm is not None else None,
+                "height_cm": float(_d(pack.height_cm)) if pack.height_cm is not None else None,
+                "is_fragile": bool(pack.is_fragile),
+                "is_temp_controlled": bool(pack.is_temp_controlled),
+                "packed_by_name": pack.packed_by_name, "packed_at": pack.packed_at,
+            })
+
+    # Which units left, by every stamp a unit of this issue may be wearing now —
+    # the same markers `_delivery_rows` reads for an indent.
+    line_markers = {_issue_line_serial_marker(issue.id, line.id): line.id for line in lines}
+    shared = {*_issue_serial_markers(issue.id), _shipped_unit_marker("issue", issue.id)}
+    for d in dispatches:
+        shared.add(_shipped_unit_marker("dispatch", d.id))
+        if d.dispatch_no:
+            shared.add(f"Received by {d.dispatch_no}")
+    line_of_item: dict[int, int] = {}
+    for line in lines:
+        line_of_item.setdefault(line.item_id, line.id)
+    item_rows = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_({line.item_id for line in lines} or {0}))
+    )).scalars().all()}
+    serials: dict[int, list[str]] = defaultdict(list)
+    for unit in (await db.execute(
+        select(m.SerialNumber)
+        .where(m.SerialNumber.remarks.in_([*line_markers, *shared]),
+               m.SerialNumber.is_active.is_(True))
+        .order_by(m.SerialNumber.id)
+    )).scalars().all():
+        line_id = line_markers.get(unit.remarks or "") or line_of_item.get(unit.item_id)
+        if line_id is None:
+            continue
+        keys = _unit_keys(unit, _unit_mode(item_rows.get(unit.item_id)))
+        code = keys[0] if keys else (unit.serial_number or unit.asset_code
+                                     or unit.consumable_code or unit.imei)
+        if code and code not in serials[line_id]:
+            serials[line_id].append(code)
+
+    legs = list((await db.execute(
+        select(TransportRequest).where(TransportRequest.dispatch_id.in_(dispatch_ids or [0]))
+        .order_by(TransportRequest.id.desc())
+    )).scalars().all())
+
+    out_lines = []
+    for line in lines:
+        sent = _d(line.issued_qty) - _d(line.returned_qty)
+        item = item_rows.get(line.item_id)
+        out_lines.append({
+            "indent_item_id": line.id,
+            "item_code": line.item_code, "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "approved_quantity": float(sent),
+            "issued_quantity": float(sent),
+            # Handed over at the counter or on a consignment — either way it has left.
+            "dispatched_quantity": float(sent),
+            "received_quantity": float(sent) if signed else 0.0,
+            "is_serial_tracked": bool(getattr(item, "is_serial_tracked", False)),
+            "tracking_type": _tracking_type(item, has_units=bool(serials.get(line.id)))
+            if item is not None else TrackingType.NONE.value,
+            "serial_numbers": serials.get(line.id, []),
+            "on_order_quantity": 0.0,
+            "package_quantities": [
+                {**pack, "quantity": min(pack["quantity"], float(sent))}
+                for pack in packages_by_item.get(line.item_id, [])],
+            "pending_with": None,
+        })
+    return {
+        "indent_id": issue.id,
+        "indent_no": issue.issue_no,
+        "indent_date": issue.issue_date,
+        "required_date": None,
+        "status": issue.status,
+        "priority": None,
+        "project_name": issue.warehouse_name,
+        "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
+        "lines": out_lines,
+        "shipments": [_shipment_row(leg) for leg in legs],
+    }
+
+
+async def direct_issue_attachments(db: AsyncSession, issue_id: int, user) -> list:
+    await _direct_issue_of(db, issue_id, user)
+    return await attachments.list_attachments(db, ISSUE_ACK_ENTITY_TYPE, issue_id)
+
+
+async def add_direct_issue_attachment(db: AsyncSession, issue_id: int, upload, *,
+                                      doc_category: str, user):
+    """Same rules as an indent receipt photo (`indents.add_receipt_attachment`)."""
+    from app.modules.indents import service as ind
+
+    issue = await _direct_issue_of(db, issue_id, user, open_only=True)
+    if ind.ack_category_base(doc_category) not in {ind.ACK_PHOTO_CATEGORY,
+                                                   ind.ACK_BILL_CATEGORY}:
+        raise ValidationError("A delivery attachment is either a photo or a bill")
+    scope = ind.ack_category_scope(doc_category)
+    if scope and (len(scope) > ind.ACK_SCOPE_MAX or not ind._ACK_SCOPE_OK.match(scope)):
+        raise ValidationError("That is not a package this delivery was sent in")
+    line_id = ind.ack_category_item(doc_category)
+    if line_id is not None and line_id not in {line.id for line in issue.items}:
+        raise ValidationError("That is not an item on this issue")
+    return await attachments.add_attachment(
+        db, entity_type=ISSUE_ACK_ENTITY_TYPE, entity_id=issue.id,
+        upload=upload, doc_category=doc_category, user=user)
+
+
+async def direct_issue_attachment_file(db: AsyncSession, issue_id: int,
+                                       attachment_id: int, user):
+    await _direct_issue_of(db, issue_id, user)
+    row = await db.get(attachments.Attachment, attachment_id)
+    if (row is None or row.entity_type != ISSUE_ACK_ENTITY_TYPE
+            or int(row.entity_id) != issue_id):
+        raise NotFoundError(f"Attachment {attachment_id} not found")
+    return await attachments.attachment_file(db, attachment_id)
+
+
+async def delete_direct_issue_attachment(db: AsyncSession, attachment_id: int, user) -> None:
+    row = await attachments.require_attachment(
+        db, attachment_id, entity_type=ISSUE_ACK_ENTITY_TYPE)
+    issue = await _direct_issue_of(db, int(row.entity_id), user, open_only=True)
+    await attachments.delete_attachment(
+        db, attachment_id, user, entity_type=ISSUE_ACK_ENTITY_TYPE, entity_id=issue.id)
+
+
+async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
+                                   lines: dict[int, Decimal], user, *,
+                                   condition: str | None = None,
+                                   remarks: str | None = None) -> dict:
+    """The recipient of a direct issue confirms what reached them.
+
+    Held to the indent receipt's proof rules: a consignment photo and a photo of every
+    item being confirmed. The issue has no received column, so what was counted goes on
+    the remarks and the audit row; the issue is signed either way, because a shortfall
+    on a direct issue is a return to raise, not a delivery still coming.
+    """
+    from app.modules.indents import service as ind
+
+    issue = await _direct_issue_of(db, issue_id, user, open_only=True)
+    if not lines:
+        raise ValidationError("Enter what you received on at least one line")
+    photos = [row for row in await attachments.list_attachments(
+        db, ISSUE_ACK_ENTITY_TYPE, issue.id)
+        if ind.ack_category_base(row.doc_category) == ind.ACK_PHOTO_CATEGORY]
+    if not any((scope := ind.ack_category_scope(row.doc_category)) == ""
+               or scope.startswith("C-") for row in photos):
+        raise ValidationError(
+            "Attach a photo of the consignment (the load, the seal, the number plate) "
+            "before acknowledging")
+    by_id = {line.id: line for line in issue.items}
+    photographed = {ind.ack_category_item(row.doc_category) for row in photos}
+    unproven = [by_id[i] for i in lines if i in by_id and i not in photographed]
+    if unproven:
+        named = ", ".join(l.item_name or l.item_code or f"line {l.id}" for l in unproven[:4])
+        more = len(unproven) - 4
+        raise ValidationError(
+            "Take a photo of each item you are confirming. Still without one: "
+            f"{named}{f' and {more} more' if more > 0 else ''}.")
+    counted: dict[str, float] = {}
+    short: list[str] = []
+    for line_id, got in lines.items():
+        line = by_id.get(line_id)
+        if line is None:
+            raise ValidationError(f"Line {line_id} is not on {issue.issue_no}")
+        sent = _d(line.issued_qty) - _d(line.returned_qty)
+        got = _d(got)
+        if got <= 0 or got > sent:
+            raise ValidationError(
+                f"{line.item_name or line.item_code}: enter between 1 and {sent:g}")
+        counted[str(line.id)] = float(got)
+        if got < sent:
+            short.append(f"{line.item_name or line.item_code} {got:g} of {sent:g}")
+    for line in issue.items:
+        sent = _d(line.issued_qty) - _d(line.returned_qty)
+        if line.id not in lines and sent > 0:
+            short.append(f"{line.item_name or line.item_code} 0 of {sent:g}")
+    ack_condition = ind._delivery_condition(condition, remarks)
+    note = "; ".join(filter(None, [
+        f"Condition {ack_condition}" if ack_condition != ind.ACK_CONDITION_GOOD else None,
+        f"Short: {', '.join(short)}" if short else None,
+        (remarks or "").strip() or None,
+    ])) or None
+
+    before_status = issue.status
+    await _apply_issue_acknowledgement(db, issue, _name(user), note, user)
+    await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      before={"status": before_status},
+                      after={"status": issue.status, "received": counted,
+                             "condition": ack_condition, "remarks": note})
+    await db.commit()
+    return await direct_issue_receipt(db, issue.id, user)
 
 
 async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user) -> m.MaterialIssue:
@@ -20322,7 +20667,9 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
         stmt = stmt.where(m.SerialNumber.batch_id == batch_id)
     elif unbatched:
         stmt = stmt.where(m.SerialNumber.batch_id.is_(None))
-    if claim_free and not issue_id:
+    # `issue_id` first: with an issue, `claim_free` was rebound to a SQL clause above,
+    # and asking a clause for its truth raises TypeError.
+    if not issue_id and claim_free:
         stmt = stmt.where(_unit_claim_free_clause(None))
     if warehouse_id:
         stmt = stmt.where(m.SerialNumber.warehouse_id == warehouse_id)
@@ -24654,6 +25001,10 @@ def _stock_transfer_issue_ids():
     return select(m.MaterialIssue.id).where(or_(
         m.MaterialIssue.id.in_(select(StockTransferOrder.issue_id)
                                .where(StockTransferOrder.issue_id.is_not(None))),
+        # A floor piece of a split STO issue executes the same transfer (SCM_0011).
+        m.MaterialIssue.parent_issue_id.in_(
+            select(StockTransferOrder.issue_id)
+            .where(StockTransferOrder.issue_id.is_not(None))),
         m.MaterialIssue.indent_id.in_(str_indents),
         m.MaterialIssue.id.in_(
             select(m.MaterialIssueLine.issue_id)

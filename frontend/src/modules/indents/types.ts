@@ -473,3 +473,21 @@ export interface IndentJourney {
   history: IndentJourneyHistoryEvent[];
   missing_sources: string[];
 }
+
+/** A material issue raised against no indent, as the person it was issued to sees it. */
+export interface DirectIssueAck {
+  issue_id: number;
+  issue_no: string;
+  issue_date: string | null;
+  status: string;
+  warehouse_name: string | null;
+  department_name: string | null;
+  project_name: string | null;
+  issued_by_name: string | null;
+  total_qty: number | string;
+  acknowledged_by_name: string | null;
+  acknowledged_at: string | null;
+  can_acknowledge: boolean;
+  lines: { item_code: string | null; item_name: string | null; uom_code: string | null;
+           batch_no: string | null; issued_qty: number | string }[];
+}

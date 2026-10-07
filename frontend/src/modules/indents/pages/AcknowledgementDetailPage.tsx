@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
@@ -15,10 +15,10 @@ import { alerts } from "@/modules/alerts";
 import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
 import { TrackingBadge, useTrackingMeta } from "@/modules/warehouse/components/TrackingBadge";
 import type { TrackingType } from "@/modules/warehouse/types";
-import { indentApi, indentKeys, useIndentAccountScope } from "../api";
+import { indentApi, indentKeys, receiptApi, useIndentAccountScope, type ReceiptKind } from "../api";
 import { cancelIndentReceiptReads, commitConfirmedIndentReceipt } from "../receiptRefresh";
 import type {
-  Acknowledgement, AcknowledgementLine, AcknowledgementPackageQuantity,
+  Acknowledgement, AcknowledgementLine, AcknowledgementPackageQuantity, Indent,
   RaiserTracking, ReceiptAttachment, ShipmentTrack,
 } from "../types";
 import {
@@ -55,26 +55,41 @@ import {
  * bars, viewfinder corners and three accent colours of its own; each was decoration
  * the eye had to learn to skip before it reached the number it came for.
  */
-export default function AcknowledgementDetailPage() {
+/** Which receipt the page is showing: an indent's, or a DIRECT material issue's
+ *  (`/indents/acknowledgements/issue/:issueId`). Read by the photo tiles, which fetch
+ *  their own bytes. */
+const ReceiptKindContext = createContext<ReceiptKind>("indent");
+
+export default function AcknowledgementDetailPage({ kind = "indent" }: { kind?: ReceiptKind } = {}) {
   const params = useParams();
   const nav = useNavigate();
-  const indentId = Number(params.indentId);
+  const indentId = Number(kind === "issue" ? params.issueId : params.indentId);
   const qc = useQueryClient();
   const accountScope = useIndentAccountScope();
 
   const acknowledgements = useQuery({
     queryKey: ["indent-acknowledgements", {}],
     queryFn: () => indentApi.myAcknowledgements({}),
+    enabled: kind === "indent",
   });
+  const directIssue = useQuery({
+    queryKey: ["direct-issue-receipt", indentId],
+    queryFn: () => indentApi.directIssueReceipt(indentId),
+    enabled: kind === "issue",
+  });
+  const source = kind === "issue" ? directIssue : acknowledgements;
 
   const row = useMemo<Acknowledgement | undefined>(
-    () => (acknowledgements.data ?? []).find((item) => item.indent_id === indentId),
-    [acknowledgements.data, indentId],
+    () => (kind === "issue"
+      ? directIssue.data
+      : (acknowledgements.data ?? []).find((item) => item.indent_id === indentId)),
+    [kind, directIssue.data, acknowledgements.data, indentId],
   );
 
-  const back = { to: "/indents/acknowledgements", label: "Back to Acknowledgements" };
+  const back = { to: kind === "issue" ? "/indents/acknowledgements?view=direct" : "/indents/acknowledgements",
+                 label: "Back to Acknowledgements" };
 
-  if (acknowledgements.isLoading) {
+  if (source.isLoading) {
     return (
       <div className="space-y-4" aria-busy="true">
         <PageHeader title="Acknowledgement" back={back} />
@@ -99,10 +114,10 @@ export default function AcknowledgementDetailPage() {
     return (
       <div className="space-y-4">
         <PageHeader title="Acknowledgement" back={back} />
-        <ErrorBanner error={acknowledgements.error} />
+        <ErrorBanner error={source.error} />
         <Card className="p-4">
           <EmptyState
-            title="This indent is not on your acknowledgements list"
+            title={kind === "issue" ? "This issue is not yours to acknowledge" : "This indent is not on your acknowledgements list"}
             hint="It may belong to someone else, or it has not reached the delivery stage yet."
           />
         </Card>
@@ -111,12 +126,15 @@ export default function AcknowledgementDetailPage() {
   }
 
   return (
-    <AcknowledgementDetail
-      row={row}
-      qc={qc}
-      accountScope={accountScope}
-      onDone={() => nav("/indents/acknowledgements")}
-    />
+    <ReceiptKindContext.Provider value={kind}>
+      <AcknowledgementDetail
+        row={row}
+        kind={kind}
+        qc={qc}
+        accountScope={accountScope}
+        onDone={() => nav(back.to)}
+      />
+    </ReceiptKindContext.Provider>
   );
 }
 
@@ -202,8 +220,9 @@ interface StepTask {
  */
 type StopState = "done" | "optional" | "todo";
 
-function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
+function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
   row: Acknowledgement;
+  kind: ReceiptKind;
   onDone: () => void;
   accountScope: ReturnType<typeof useIndentAccountScope>;
   qc: QueryClient;
@@ -223,38 +242,46 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
     { files: ReceiptAttachment[]; index: number } | null>(null);
 
   const trackingMeta = useTrackingMeta();
+  const server = receiptApi(kind);
 
   const attachments = useQuery({
-    queryKey: ["indent-receipt-attachments", row.indent_id],
-    queryFn: () => indentApi.receiptAttachments(row.indent_id),
+    queryKey: [kind === "issue" ? "direct-issue-receipt-attachments" : "indent-receipt-attachments", row.indent_id],
+    queryFn: () => server.attachments(row.indent_id),
   });
 
+  // A direct issue has no indent to ask logistics about; its legs are on the row.
   const tracking = useQuery({
     queryKey: indentKeys.shipments(accountScope, row.indent_id),
     queryFn: ({ signal }) => indentApi.shipmentsForIndent(row.indent_id, signal),
     refetchOnWindowFocus: true,
+    enabled: kind === "indent",
   });
 
   const upload = useMutation({
     mutationFn: ({ file, category }: { file: File; category: string }) =>
-      indentApi.uploadReceiptAttachment(row.indent_id, file, category),
+      server.upload(row.indent_id, file, category),
     onSuccess: () => attachments.refetch(),
   });
 
   const remove = useMutation({
-    mutationFn: (attachmentId: number) => indentApi.deleteReceiptAttachment(attachmentId),
+    mutationFn: (attachmentId: number) => server.remove(attachmentId),
     onSuccess: () => attachments.refetch(),
   });
 
   const confirm = useMutation({
     mutationFn: () =>
-      indentApi.acknowledge(
+      server.acknowledge(
         row.indent_id,
         acknowledgementPayload(row.lines, received),
       ),
-    onMutate: () => cancelIndentReceiptReads(qc, accountScope, row.indent_id),
+    onMutate: () => (kind === "indent"
+      ? cancelIndentReceiptReads(qc, accountScope, row.indent_id) : undefined),
     onSuccess: async (updated) => {
-      await commitConfirmedIndentReceipt(qc, accountScope, updated);
+      if (kind === "indent") {
+        await commitConfirmedIndentReceipt(qc, accountScope, updated as Indent);
+      }
+      qc.invalidateQueries({ queryKey: ["direct-issue-acknowledgements"] });
+      qc.invalidateQueries({ queryKey: ["direct-issue-receipt"] });
       qc.invalidateQueries({ queryKey: ["indent-acknowledgements"] });
       qc.invalidateQueries({ queryKey: ["indent-fulfilment"] });
       // Said out loud. The press used to drop the person back on the list with
@@ -606,7 +633,7 @@ function AcknowledgementDetail({ row, onDone, accountScope, qc }: {
           initialIndex={viewing.index}
           onClose={() => setViewing(null)}
           onDownload={(file) =>
-            indentApi.downloadReceiptAttachment(row.indent_id, file.id)}
+            server.download(row.indent_id, file.id)}
         />
       )}
 
@@ -2587,13 +2614,14 @@ const isImage = (file: ReceiptAttachment) =>
  *  gated route — the files are not public URLs and there is no thumbnail service.
  *  Shared by the tile and by the slip thumbnail, so there is one place that knows. */
 function useReceiptImage(indentId: number, fileId: number) {
+  const kind = useContext(ReceiptKindContext);
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let dropped = false;
     let made = "";
-    indentApi.downloadReceiptAttachment(indentId, fileId)
+    receiptApi(kind).download(indentId, fileId)
       .then((blob) => {
         if (dropped) return;
         made = URL.createObjectURL(blob);
@@ -2604,7 +2632,7 @@ function useReceiptImage(indentId: number, fileId: number) {
       dropped = true;
       if (made) URL.revokeObjectURL(made);
     };
-  }, [indentId, fileId]);
+  }, [kind, indentId, fileId]);
 
   return { url, failed };
 }

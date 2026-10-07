@@ -17,7 +17,7 @@ import { ErrorNote } from "./PageStates";
 import { FulfillmentQueuePage } from "../pages/FulfillmentQueuePage";
 import QualityInspection from "@/modules/warehouse/pages/QualityInspection";
 import {
-  approveSTO, createSTO, getSTO, getStockBalances, getWarehouses, listSTOs, listSTRs,
+  approveSTO, createSTO, getSTO, getAllWarehouses, getStockBalances, getWarehouses, listSTOs, listSTRs,
   rejectSTO,
 } from "../api";
 
@@ -545,6 +545,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [error, setError] = useState("");
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
+  const { data: destinations = [] } = useQuery({ queryKey: ["warehouses", "all-points"], queryFn: getAllWarehouses });
   const stock = useQuery({
     queryKey: ["stock-transfer", "source-stock", fromId],
     queryFn: () => getStockBalances({ warehouse_id: Number(fromId), size: 500 } as any),
@@ -566,6 +567,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
   }, [stock.data]);
 
   const whOptions = (warehouses as any[]).map((w) => ({ value: String(w.id), label: w.name }));
+  const toOptions = (destinations as any[]).map((w) => ({ value: String(w.id), label: w.name }));
 
   const create = useMutation({
     mutationFn: () => createSTO({
@@ -612,7 +614,7 @@ function NewStoSheet({ onClose, onCreated }: { onClose: () => void; onCreated: (
                     onChange={(v) => { setFromId(v || ""); setLines([{ item_id: "", qty: "" }]); }} />
           </Field>
           <Field label="To">
-            <Select ariaLabel="To" value={toId} options={whOptions.filter((o) => o.value !== fromId)}
+            <Select ariaLabel="To" value={toId} options={toOptions.filter((o) => o.value !== fromId)}
                     onChange={(v) => setToId(v || "")} />
           </Field>
           <Field label="Remarks">

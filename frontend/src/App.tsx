@@ -393,6 +393,7 @@ function AppRoutes() {
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
         <Route path="indents/acknowledgements" element={<AcknowledgementsPage />} />
+        <Route path="indents/acknowledgements/issue/:issueId" element={<AcknowledgementDetailPage kind="issue" />} />
         <Route path="indents/acknowledgements/:indentId" element={<AcknowledgementDetailPage />} />
         {/* The two addresses this screen used to answer on. `/indents/deliveries` was
             its own route; `/indents/acknowledgments` belonged to a duplicate page that
