@@ -20307,15 +20307,17 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     """
     stmt = select(m.SerialNumber)
     if issue_id:
-        claim_free = _unit_claim_free_clause(
+        # Its own name, never `claim_free`: that is the bool flag tested below, and a
+        # clause in its place raises "Boolean value of this clause is not defined".
+        pickable = _unit_claim_free_clause(
             _issue_line_serial_marker(issue_id, issue_line_id))
         # The units held for this issue's own project are its to name.
         issue_project = await db.scalar(
             select(m.MaterialIssue.project_id).where(m.MaterialIssue.id == issue_id))
         if issue_project:
-            claim_free = or_(claim_free, m.SerialNumber.remarks.like(
+            pickable = or_(pickable, m.SerialNumber.remarks.like(
                 f"{PROJECT_HOLD_UNIT_PREFIX}{issue_project} %"))
-        stmt = stmt.where(claim_free)
+        stmt = stmt.where(pickable)
     if user is not None:
         stmt = stmt.where(await scope_condition(
             db, user,

@@ -87,6 +87,7 @@ export function SerialNumbersModal({
   paging = null,
   displayValue,
   serialNoOf,
+  selectedTone = "brand",
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -168,8 +169,15 @@ export function SerialNumbersModal({
    *  `unitSerialNo`), drawn large with the full code under it. Null for a value that
    *  has none, which is then drawn as it is. Display only, like `displayValue`. */
   serialNoOf?: (value: string) => string | null;
+  /** The colour a picked unit is drawn in, select mode only. `ok` (green) on a
+   *  consignment, where picking a unit is packing it; the brand colour elsewhere. */
+  selectedTone?: "brand" | "ok";
 }) {
   const show = (value: string) => displayValue?.(value) ?? value;
+  // Literal class names, so Tailwind sees every one of them.
+  const pickTone = selectedTone === "ok"
+    ? { row: "bg-ok/5", text: "text-ok", chip: "bg-ok/10 text-ok" }
+    : { row: "bg-brand/5", text: "text-brand", chip: "bg-brand/10 text-brand" };
   const [serials, setSerials] = useState<string[]>([]);
   // "a serial" but "an IMEI": the article follows the sound, not the spelling.
   const article = /^[aeiou]/i.test(noun) ? "an" : "a";
@@ -572,7 +580,7 @@ export function SerialNumbersModal({
                         style={style}
                         onClick={() => !readOnly && !full && toggle(value)}
                         className={`flex items-center border-b border-line/70 last:border-b-0 transition-colors ${
-                          isSelected ? "bg-brand/5" : full ? "opacity-50" : "hover:bg-content2/60"
+                          isSelected ? pickTone.row : full ? "opacity-50" : "hover:bg-content2/60"
                         } ${readOnly || full ? "" : "cursor-pointer"}`}
                       >
                         <div className="w-10 px-3 py-2">
@@ -583,7 +591,7 @@ export function SerialNumbersModal({
                             onChange={() => toggle(value)}
                             onClick={(e) => e.stopPropagation()}
                             aria-label={`${selectMode ? "Select" : "Reject"} ${value}`}
-                            className="h-4 w-4 accent-current text-brand"
+                            className={`h-4 w-4 accent-current ${pickTone.text}`}
                           />
                         </div>
                         <div className="w-8 px-1 py-2 text-[11px] text-muted tabular">{index + 1}</div>
@@ -644,7 +652,7 @@ export function SerialNumbersModal({
                           title={s}
                           className={`flex cursor-pointer items-center gap-3 border-b border-line/50 px-3 transition-colors ${
                             selectMode
-                              ? isSelected ? "bg-brand/5" : "bg-content1 hover:bg-content2/50"
+                              ? isSelected ? pickTone.row : "bg-content1 hover:bg-content2/50"
                               : isRejected ? "bg-bad-bg/40" : "bg-content1 hover:bg-content2/50"
                           }`}
                         >
@@ -654,11 +662,11 @@ export function SerialNumbersModal({
                             disabled={readOnly}
                             onChange={() => toggle(s)}
                             aria-label={`${selectMode ? "Select" : "Reject"} ${s}`}
-                            className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
+                            className={`h-4 w-4 shrink-0 accent-current ${selectMode ? pickTone.text : "text-bad"}`}
                           />
                           <span className="w-6 shrink-0 text-[11px] text-muted/70 tabular">{index + 1}</span>
                           <span className={`shrink-0 font-mono text-[15px] font-semibold tabular ${
-                            isSelected && selectMode ? "text-brand" : "text-ink"
+                            isSelected && selectMode ? pickTone.text : "text-ink"
                           }`}>
                             {serialNo}
                           </span>
@@ -668,7 +676,7 @@ export function SerialNumbersModal({
                           <span className="ml-auto shrink-0">
                             {selectMode ? (
                               isSelected && (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-brand/10 px-2 py-0.5 text-[11px] font-semibold text-brand">
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${pickTone.chip}`}>
                                   <Check className="h-3 w-3" aria-hidden /> Selected
                                 </span>
                               )
@@ -686,7 +694,7 @@ export function SerialNumbersModal({
                         style={style}
                         className={`flex cursor-pointer items-center gap-3 border-b border-line/50 last:border-0 px-3 transition-colors ${
                           selectMode
-                            ? isSelected ? "bg-brand/5" : "bg-content1 hover:bg-content2/50"
+                            ? isSelected ? pickTone.row : "bg-content1 hover:bg-content2/50"
                             : isRejected ? "bg-bad-bg/40" : "bg-content1 hover:bg-content2/50"
                         }`}
                       >
@@ -696,7 +704,7 @@ export function SerialNumbersModal({
                           disabled={readOnly}
                           onChange={() => toggle(s)}
                           aria-label={`${selectMode ? "Select" : "Reject"} ${s}`}
-                          className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
+                          className={`h-4 w-4 shrink-0 accent-current ${selectMode ? pickTone.text : "text-bad"}`}
                         />
                         <span className="w-6 shrink-0 text-[11px] text-muted tabular">{index + 1}</span>
                         <span className="min-w-0 flex flex-col justify-center">
@@ -711,7 +719,7 @@ export function SerialNumbersModal({
                           )}
                         </span>
                         <span className={`ml-auto text-[11px] font-semibold uppercase ${selectMode ? (
-                          isSelected ? "text-brand" : "text-muted"
+                          isSelected ? pickTone.text : "text-muted"
                         ) : (
                           isRejected ? "text-bad" : "text-ok"
                         )}`}>

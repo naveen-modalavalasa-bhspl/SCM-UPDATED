@@ -1697,6 +1697,7 @@ export default function ConsignmentForm() {
           ? (value) => unitSerialNo(value, serialTarget?.line.item_code)
           : undefined}
         pickMode="select"
+        selectedTone="ok"
         initial={
           serialTarget
             ? (packageLine(packages[serialTarget.packageIndex], serialTarget.line)?.serial_numbers ?? [])
