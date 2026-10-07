@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Skeleton } from "@heroui/react";
 import { FixedSizeList } from "react-window";
-import { Boxes, MapPin, ScanLine, Trash2 } from "lucide-react";
+import { Boxes, Check, MapPin, ScanLine, Trash2 } from "lucide-react";
 import { Button, ErrorBanner } from "@/shared/components";
 import { TrackingBadge } from "./TrackingBadge";
+import { unitCodePrefix } from "./unitSerial";
 import type { TrackingType, TrackingTypeMeta } from "../types";
 
 /**
@@ -85,6 +86,7 @@ export function SerialNumbersModal({
   noun = "serial",
   paging = null,
   displayValue,
+  serialNoOf,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -162,6 +164,10 @@ export function SerialNumbersModal({
    *  The acknowledgement screen passes the short tail of a long generated code; the
    *  full code stays on hover. Absent = drawn as it is. */
   displayValue?: (value: string) => string;
+  /** The unit's running number when the code is one the system minted (see
+   *  `unitSerialNo`), drawn large with the full code under it. Null for a value that
+   *  has none, which is then drawn as it is. Display only, like `displayValue`. */
+  serialNoOf?: (value: string) => string | null;
 }) {
   const show = (value: string) => displayValue?.(value) ?? value;
   const [serials, setSerials] = useState<string[]>([]);
@@ -375,6 +381,24 @@ export function SerialNumbersModal({
     };
 
     const typed = !!unitByValue;
+    // The prefix most of the offered codes share, read off the whole pool (not the
+    // search result) so the header does not flicker while typing. Null = no minted
+    // codes here, and the list draws every value in full as it always did.
+    const codePrefix = (() => {
+      if (!serialNoOf) return null;
+      const counts = new Map<string, number>();
+      for (const value of available ?? []) {
+        if (!serialNoOf(value)) continue;
+        const prefix = unitCodePrefix(value);
+        counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+      }
+      let best: string | null = null;
+      let bestCount = 0;
+      for (const [prefix, count] of counts) {
+        if (count > bestCount) { best = prefix; bestCount = count; }
+      }
+      return best;
+    })();
     const unitNoun = trackingMeta?.unit ?? noun;
     const plural = (count: number) => `${unitNoun}${count === 1 ? "" : "s"}`;
 
@@ -583,6 +607,17 @@ export function SerialNumbersModal({
               </div>
             ) : (
               <div className="rounded-xl border border-line/70 overflow-hidden">
+                {/* The part every code shares, said ONCE. Each row then carries only
+                  * the number that tells one unit from the next. */}
+                {codePrefix && (
+                  <div className="flex items-center gap-3 border-b border-line/70 bg-content2/60 px-3 py-2 text-[11px]">
+                    <span className="font-semibold uppercase tracking-wider text-muted">Serial no.</span>
+                    <span className="ml-auto min-w-0 truncate text-muted" title={codePrefix}>
+                      Full code <span className="font-mono text-body">{codePrefix}</span>
+                      <span className="font-mono text-brand">####</span>
+                    </span>
+                  </div>
+                )}
                 <FixedSizeList
                   height={listHeight}
                   itemCount={visible.length}
@@ -593,6 +628,59 @@ export function SerialNumbersModal({
                     const s = visible[index];
                     const isSelected = selected.has(s);
                     const isRejected = !isSelected;
+                    const serialNo = codePrefix ? serialNoOf?.(s) ?? null : null;
+                    if (serialNo) {
+                      // Compact row: the number, plus the full code only when this one
+                      // does not share the prefix in the header, and any IMEI.
+                      const own = unitCodePrefix(s) === codePrefix ? null : s;
+                      const extra = [
+                        own,
+                        imeiBySerial?.[s] ? `IMEI ${imeiBySerial[s]}` : null,
+                        metaByValue?.[s],
+                      ].filter(Boolean).join(" · ");
+                      return (
+                        <label
+                          style={style}
+                          title={s}
+                          className={`flex cursor-pointer items-center gap-3 border-b border-line/50 px-3 transition-colors ${
+                            selectMode
+                              ? isSelected ? "bg-brand/5" : "bg-content1 hover:bg-content2/50"
+                              : isRejected ? "bg-bad-bg/40" : "bg-content1 hover:bg-content2/50"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectMode ? isSelected : isRejected}
+                            disabled={readOnly}
+                            onChange={() => toggle(s)}
+                            aria-label={`${selectMode ? "Select" : "Reject"} ${s}`}
+                            className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
+                          />
+                          <span className="w-6 shrink-0 text-[11px] text-muted/70 tabular">{index + 1}</span>
+                          <span className={`shrink-0 font-mono text-[15px] font-semibold tabular ${
+                            isSelected && selectMode ? "text-brand" : "text-ink"
+                          }`}>
+                            {serialNo}
+                          </span>
+                          {extra && (
+                            <span className="min-w-0 truncate font-mono text-[11px] text-muted">{extra}</span>
+                          )}
+                          <span className="ml-auto shrink-0">
+                            {selectMode ? (
+                              isSelected && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-brand/10 px-2 py-0.5 text-[11px] font-semibold text-brand">
+                                  <Check className="h-3 w-3" aria-hidden /> Selected
+                                </span>
+                              )
+                            ) : (
+                              <span className={`text-[11px] font-semibold uppercase ${isRejected ? "text-bad" : "text-ok"}`}>
+                                {isRejected ? "Rejected" : "Accepted"}
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      );
+                    }
                     return (
                       <label
                         style={style}

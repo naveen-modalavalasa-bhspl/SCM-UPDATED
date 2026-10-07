@@ -161,11 +161,15 @@ function JourneyStageRow({
               </p>
             )}
           </div>
-          <span className={`w-fit shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold ${
-            current ? "border-brand/30 bg-brand/10 text-brand" : "border-line bg-content2 text-muted"
-          }`}>
-            {statusLabel(stage)}
-          </span>
+          {/* A stage still to come carries no pill: the dashed card already says it has
+              not been reached, and a column of "Pending" repeated it once per rung. */}
+          {!(awaited && (status === "PENDING" || !status)) && (
+            <span className={`w-fit shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold ${
+              current ? "border-brand/30 bg-brand/10 text-brand" : "border-line bg-content2 text-muted"
+            }`}>
+              {statusLabel(stage)}
+            </span>
+          )}
         </div>
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
           {when && <span>{when}</span>}

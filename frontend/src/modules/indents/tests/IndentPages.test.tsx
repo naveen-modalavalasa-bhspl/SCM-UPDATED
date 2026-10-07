@@ -4244,7 +4244,8 @@ describe("indent UI shell", () => {
     expect(within(remaining).getByRole("heading", { name: "DM Review" })).toBeInTheDocument();
     expect(within(remaining).getByRole("heading", { name: "RM Review" })).toBeInTheDocument();
     expect(within(remaining).getByText("Current")).toBeInTheDocument();
-    expect(within(remaining).getByText("Pending")).toBeInTheDocument();
+    // A rung not yet reached carries no status pill.
+    expect(within(remaining).queryByText("Pending")).not.toBeInTheDocument();
     expect(within(remaining).getByText("A Raveendra Prasad")).toBeInTheDocument();
   });
 

@@ -12,6 +12,7 @@ import { PrintPortal } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
 import { MultiIssuePanel, type IssueRoute, type SelectedIssue } from "../components/MultiIssuePanel";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
+import { unitSerialNo } from "../components/unitSerial";
 import {
   carrierOptions,
   createConsignment,
@@ -1692,6 +1693,9 @@ export default function ConsignmentForm() {
         }
         available={availableSerials(serialTarget)}
         imeiBySerial={serialTarget?.line.imei_by_serial}
+        serialNoOf={inLogistics
+          ? (value) => unitSerialNo(value, serialTarget?.line.item_code)
+          : undefined}
         pickMode="select"
         initial={
           serialTarget
