@@ -1,10 +1,17 @@
+import { displayDocType } from "./docTypes";
+
 export type RaisedRange = "" | "24h" | "7d" | "30d" | "custom";
 
 export const PRIMARY_APPROVAL_TYPES = ["INDENT", "MR", "ALLOCATION"] as const;
 
-export function approvalTypeCounts(rows: Array<{ doc_type: string }>): Array<[string, number]> {
+export function approvalTypeCounts(
+  rows: Array<{ doc_type: string; display_doc_type?: string | null; indent_type?: string | null }>,
+): Array<[string, number]> {
   const counts = new Map<string, number>();
-  rows.forEach((row) => counts.set(row.doc_type, (counts.get(row.doc_type) ?? 0) + 1));
+  rows.forEach((row) => {
+    const type = displayDocType(row);
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  });
 
   const ordered = new Set<string>(PRIMARY_APPROVAL_TYPES);
   [...counts.keys()].sort().forEach((type) => ordered.add(type));

@@ -1089,6 +1089,8 @@ export interface Issue {
   issue_date: string;
   indent_id?: number | null;
   indent_no?: string | null;
+  /** "STR" when the issue serves a stock transfer request. */
+  indent_type?: string | null;
   picking_id?: number | null;
   pick_no?: string | null;
   warehouse_id: number;

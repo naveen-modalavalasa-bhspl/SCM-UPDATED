@@ -75,7 +75,14 @@ CREATE_PERMISSION = {
 # that genuinely does: a Store Keeper's climbs the whole field line, an RM's has almost
 # nobody above it — and a monthly indent is raised by the same ranks. Every other type has one chain for everybody, and offering a rank
 # selector on all of them would be twenty ways to configure something nobody wanted.
-RAISER_SCOPED_DOC_TYPES = frozenset({DocType.INDENT.value, DocType.MONTHLY_INDENT.value})
+# STR and STO are raised up and down the same field line (a Store Keeper's STR climbs
+# to his OE, a DM's barely climbs at all), and both already look their ladder up by
+# the raiser's rank — the STR through `engine.start`, the STO through
+# `inventory._sto_ladder` — so the editor only had to stop hiding the selector.
+RAISER_SCOPED_DOC_TYPES = frozenset({
+    DocType.INDENT.value, DocType.MONTHLY_INDENT.value,
+    DocType.STOCK_TRANSFER_REQUEST.value, DocType.STOCK_TRANSFER.value,
+})
 
 
 async def _raiser_chains(db: AsyncSession, project_id: int | None,

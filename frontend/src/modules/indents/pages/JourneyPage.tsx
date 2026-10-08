@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, ArrowLeft, Ban, Check, Circle, Clock, Loader2, Minus, RefreshCw, Undo2, X,
@@ -11,7 +11,7 @@ import {
   INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
   isIndentUnavailableError, useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
-import { INDENT_STATUS } from "../constants";
+import { INDENT_STATUS, STR_BASE, STR_HOME } from "../constants";
 import { formatIndentDate, formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
 import {
   buildJourneyTracks, isOccurredJourneyStage, isResubmissionStage, isUpcomingJourneyStage,
@@ -233,6 +233,8 @@ export function IndentJourneyPage() {
   const { id } = useParams();
   const indentId = Number(id);
   const nav = useNavigate();
+  const strRoute = useLocation().pathname.startsWith(STR_BASE);
+  const base = strRoute ? STR_BASE : "/indents";
   const qc = useQueryClient();
   const accountScope = useIndentAccountScope();
   useIndentAccountCacheIsolation(accountScope);
@@ -272,7 +274,7 @@ export function IndentJourneyPage() {
     return (
       <div className="space-y-4 rounded-xl border border-line bg-content1 p-5">
         <p className="text-sm font-semibold text-body">This indent is not available to your current account</p>
-        <Button variant="secondary" onClick={() => nav("/indents")}>
+        <Button variant="secondary" onClick={() => nav(strRoute ? STR_HOME : "/indents")}>
           <ArrowLeft className="h-4 w-4" /> Back to All requests
         </Button>
       </div>
@@ -283,7 +285,7 @@ export function IndentJourneyPage() {
   if (error && !data) {
     return (
       <div className="space-y-4 rounded-xl border border-bad/30 bg-content1 p-5">
-        <p className="text-sm font-semibold text-body">The indent journey could not be loaded</p>
+        <p className="text-sm font-semibold text-body">The {strRoute ? "request" : "indent"} journey could not be loaded</p>
         <p className="break-words text-sm text-muted">{error.message}</p>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => refetch()} disabled={isFetching}>
@@ -292,7 +294,7 @@ export function IndentJourneyPage() {
               : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
             {isFetching ? "Retrying..." : "Try again"}
           </Button>
-          <Button variant="secondary" onClick={() => nav(`/indents/${indentId}`)}>
+          <Button variant="secondary" onClick={() => nav(`${base}/${indentId}`)}>
             <ArrowLeft className="h-4 w-4" /> Back to indent details
           </Button>
         </div>
@@ -319,7 +321,7 @@ export function IndentJourneyPage() {
     <div className="min-w-0 space-y-5">
       <button
         type="button"
-        onClick={() => nav(`/indents/${indentId}`)}
+        onClick={() => nav(`${base}/${indentId}`)}
         className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-muted hover:text-body"
       >
         <ArrowLeft className="h-4 w-4" /> Back to indent details
@@ -327,7 +329,7 @@ export function IndentJourneyPage() {
 
       <header className="flex flex-col gap-4 rounded-xl border border-line bg-content1 p-5 shadow-sm lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted">Complete indent journey</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted">Complete {strRoute ? "request" : "indent"} journey</p>
           <h1 className="mt-1 break-words text-2xl font-semibold text-ink">{data.indent_no}</h1>
           <p className="mt-2 break-words text-sm text-muted">{data.current_stage_message}</p>
           {data.final_any_one_outcome && (
@@ -374,7 +376,7 @@ export function IndentJourneyPage() {
       <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
         <Card>
           <CardBody className="p-5">
-            <h2 className="mb-5 text-sm font-semibold uppercase tracking-wider text-muted">Complete indent journey</h2>
+            <h2 className="mb-5 text-sm font-semibold uppercase tracking-wider text-muted">Complete {strRoute ? "request" : "indent"} journey</h2>
             {steps.occurred.length > 0 ? (
               <ol className="space-y-0" aria-label="Complete indent journey timeline">
                 {timelineTracks.map((track, trackIndex) => (

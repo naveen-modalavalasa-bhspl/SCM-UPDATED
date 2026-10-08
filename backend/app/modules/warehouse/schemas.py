@@ -1735,6 +1735,7 @@ class IssueRead(_Read):
     issue_date: date
     indent_id: int | None = None
     indent_no: str | None = None
+    indent_type: str | None = None
     picking_id: int | None = None
     pick_no: str | None = None
     warehouse_id: int
@@ -3852,6 +3853,10 @@ class EmployeeDestination(BaseModel):
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
     vehicle_number: str | None = None
+    department_id: int | None = None
+    department_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
 
 
 class PickingIssueSource(BaseModel):
@@ -3966,6 +3971,35 @@ class CreditNoteIn(BaseModel):
 
 class AcknowledgeIssueIn(BaseModel):
     remarks: str | None = None
+
+
+class DirectIssueAckLine(BaseModel):
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    issued_qty: Decimal = Decimal("0")
+
+
+class DirectIssueAckRow(BaseModel):
+    """A material issue raised against no indent, as its recipient sees it.
+
+    Indent-linked issues are confirmed through the indent's own acknowledgement; a
+    direct issue has no indent, so the person it was issued TO signs the issue itself.
+    """
+    issue_id: int
+    issue_no: str
+    issue_date: date | None = None
+    status: str
+    warehouse_name: str | None = None
+    department_name: str | None = None
+    project_name: str | None = None
+    issued_by_name: str | None = None
+    total_qty: Decimal = Decimal("0")
+    acknowledged_by_name: str | None = None
+    acknowledged_at: datetime | None = None
+    can_acknowledge: bool = False
+    lines: list[DirectIssueAckLine] = []
 
 
 class IssueSerialLineIn(BaseModel):

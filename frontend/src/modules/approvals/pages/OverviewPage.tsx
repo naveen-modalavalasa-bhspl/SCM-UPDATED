@@ -7,7 +7,7 @@ import {
 import { Can, Card, ErrorBanner, PageHeader, StatusPill } from "@/shared/components";
 import { approvalsApi } from "../api";
 import { BreakdownDonut, CardTitle, Kpi, foldSlices } from "../components/ApprovalPulse";
-import { docTypeLabel } from "../docTypes";
+import { docTypeLabel, rowDocTypeLabel } from "../docTypes";
 import { approvalDocumentPath } from "../documentRoutes";
 
 /**
@@ -183,7 +183,7 @@ export function ApprovalOverviewPage() {
                         {row.doc_no ?? `#${row.doc_id}`}
                       </span>
                       <span className="block truncate text-xs text-muted">
-                        {docTypeLabel(row.doc_type)}
+                        {rowDocTypeLabel(row)}
                       </span>
                     </span>
                     <StatusPill status={row.decision} />

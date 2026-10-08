@@ -121,6 +121,14 @@ const MODULE_ALIAS: Record<string, string> = {
   // Two module rows in the rail are two cards here; neither side needs an alias now.
 };
 
+/** An action whose buttons live in a different module's screens than its catalogue
+ *  module says. `master.location.manage` is catalogued under masters, but every
+ *  button it gates is on Warehouse > Masters — filed under the Masters card, an admin
+ *  granting the Warehouse screen never found it. */
+const FEATURE_SECTION: Record<string, string> = {
+  "master.location.manage": "warehouse",
+};
+
 const moduleKey = (name: string) => {
   const key = letters(name);
   return MODULE_ALIAS[key] ?? key;
@@ -177,7 +185,7 @@ export function buildAccessSections(
     section(parent ? parent.name : page.name).pages.push(page);
   }
   for (const feature of features) {
-    const key = moduleKey(feature.module);
+    const key = FEATURE_SECTION[feature.code] ?? moduleKey(feature.module);
     const target = index.get(key)
       ?? section(feature.module.charAt(0).toUpperCase() + feature.module.slice(1));
     target.features.push(feature);
@@ -772,6 +780,7 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "stock.transfer.qc": { button: "New inspection / Outward QC", where: "Inventory > Stock Transfer > Outward QC (or an order's Outward QC button)" },
   "stock.transfer.issue": { button: "Open material issue", where: "Inventory > Stock Transfer > Orders > Open an order" },
   "stock.transfer.receive": { button: "Confirm receipt", where: "Inventory > Stock Transfer > Acknowledgements" },
+  "master.location.manage": { button: "New warehouse / Edit / Add location / Storage types", where: "Warehouse > Masters" },
   "movement.view": { button: "View Stock Movements", where: "Warehouse > Stock Movements" },
   "movement.create": { button: "New order / Save draft", where: "Warehouse > Stock Movements" },
   "movement.approve": { button: "Approve", where: "Warehouse > Stock Movements > Open a pending order" },

@@ -1091,6 +1091,10 @@ export const getEmployeeDestination = (employee_id: number) =>
     destination_office_name?: string | null;
     destination_office_sac?: string | null;
     vehicle_number?: string | null;
+    department_id?: number | null;
+    department_name?: string | null;
+    project_id?: number | null;
+    project_name?: string | null;
   }>(`${BASE}/options/employee-destination`, { employee_id });
 
 export const projectOptions = (search?: string) => get<Option[]>(`${BASE}/options/projects`, { search });

@@ -77,6 +77,17 @@ const INDENT_TYPE_LABELS: Record<string, string> = {
   [INDENT_TYPE.STR]: "Stock transfer request",
 };
 
+/**
+ * An STR is an indent underneath but is worked from Inventory > Stock Transfer, so its
+ * screens live under that path — the rail, the tab strip and every label follow the URL.
+ */
+export const STR_HOME = "/inventory/transfers?tab=requests";
+export const STR_BASE = "/inventory/transfers/requests";
+export const isStrType = (value?: string | null) => value === INDENT_TYPE.STR;
+export const indentBase = (type?: string | null) => (isStrType(type) ? STR_BASE : "/indents");
+export const indentFormPath = (type?: string | null) =>
+  (isStrType(type) ? "/inventory/transfers/new" : "/indents/new");
+
 /** Falls back to the raw value so an unknown type still reads as something. */
 export function indentTypeLabel(value?: string | null) {
   if (!value) return null;

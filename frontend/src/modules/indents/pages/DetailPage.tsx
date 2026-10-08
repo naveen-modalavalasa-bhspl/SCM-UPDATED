@@ -23,7 +23,9 @@ import {
   useIndentAccountScope,
 } from "../api";
 import { cancelIndentDecisionReads } from "../approvalRefresh";
-import { INDENT_STATUS, indentTypeLabel } from "../constants";
+import {
+  INDENT_STATUS, STR_BASE, STR_HOME, indentFormPath, indentTypeLabel, isStrType,
+} from "../constants";
 import { displayUom, splitDeliveryOffice } from "../displayFormat";
 import type { Indent } from "../types";
 import { TONE_MINT, TONE_RED, TONE_YELLOW } from "../buttonTones";
@@ -63,19 +65,26 @@ export function IndentDetailPage() {
   const allRequestsReturnUrl = allRequestsReturnUrlFromState(location.state);
   const activityLedgerReturnUrl = activityLedgerReturnUrlFromState(location.state);
   const notificationsReturnUrl = notificationsReturnUrlFromState(location.state);
+  // An STR is served under Inventory > Stock Transfer (see STR_BASE), so the rail,
+  // the tab strip and every label here read as a transfer, not an indent.
+  const strRoute = location.pathname.startsWith(STR_BASE);
+  const base = strRoute ? STR_BASE : "/indents";
+  const docLabel = strRoute ? "request" : "indent";
   const returnUrl = decisionView
     ? "/approvals/decisions"
-    : notificationsReturnUrl ?? activityLedgerReturnUrl ?? allRequestsReturnUrl;
+    : notificationsReturnUrl ?? activityLedgerReturnUrl
+      ?? (strRoute ? STR_HOME : allRequestsReturnUrl);
   const returnLabel = decisionView
     ? "My Decisions"
     : notificationsReturnUrl
     ? "Alert & Notification"
-    : activityLedgerReturnUrl ? "Activity ledger" : "All indents";
+    : activityLedgerReturnUrl ? "Activity ledger" : strRoute ? "Stock transfer" : "All indents";
   const unavailableReturnLabel = decisionView
     ? "Back to My Decisions"
     : notificationsReturnUrl
     ? "Back to Alert & Notification"
-    : activityLedgerReturnUrl ? "Back to Activity ledger" : "Back to All requests";
+    : activityLedgerReturnUrl ? "Back to Activity ledger"
+    : strRoute ? "Back to Stock transfer" : "Back to All requests";
   const qc = useQueryClient();
   const { can, me } = useAuth();
   const accountScope = useIndentAccountScope();
@@ -164,7 +173,7 @@ export function IndentDetailPage() {
       qc.removeQueries({ queryKey: indentKeys.detail(accountScope, indentId) });
       qc.removeQueries({ queryKey: indentKeys.journey(accountScope, indentId) });
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
-      nav("/indents");
+      nav(strRoute ? STR_HOME : "/indents");
       // After the navigation on purpose: the toast outlives this screen, so it is
       // still on the list page the user lands on — which is the only place left to
       // tell them the draft is actually gone.
@@ -188,6 +197,15 @@ export function IndentDetailPage() {
     onError: onErr,
   });
 
+  // Old links (notifications, approvals) still point at /indents/:id — move an STR
+  // onto its own path, keeping the query and the return state.
+  const misplacedStr = Boolean(indent && isStrType(indent.indent_type) && !strRoute);
+  useEffect(() => {
+    if (misplacedStr) {
+      nav(`${STR_BASE}/${indentId}${location.search}`, { replace: true, state: location.state });
+    }
+  }, [indentId, location.search, location.state, misplacedStr, nav]);
+
   const unavailable = isIndentUnavailableError(loadError);
   useEffect(() => {
     if (unavailable) {
@@ -199,7 +217,7 @@ export function IndentDetailPage() {
   if (unavailable) {
     return (
       <div className="space-y-4 rounded-xl border border-line bg-content1 p-5">
-        <p className="text-sm font-semibold text-body">This indent is not available to your current account</p>
+        <p className="text-sm font-semibold text-body">This {docLabel} is not available to your current account</p>
         <Button variant="secondary" onClick={() => nav(returnUrl)}>
           <ArrowLeft className="h-4 w-4" /> {unavailableReturnLabel}
         </Button>
@@ -211,7 +229,7 @@ export function IndentDetailPage() {
   if (loadError && !indent) {
     return (
       <div className="space-y-4 rounded-xl border border-bad/30 bg-content1 p-5">
-        <p className="text-sm font-semibold text-body">This indent could not be loaded</p>
+        <p className="text-sm font-semibold text-body">This {docLabel} could not be loaded</p>
         <p className="break-words text-sm text-muted">{loadError.message}</p>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => refetchIndent()} disabled={isFetching}>
@@ -226,7 +244,7 @@ export function IndentDetailPage() {
     );
   }
 
-  if (isLoading || !indent) return <Skeleton className="h-40 rounded-2xl" />;
+  if (isLoading || !indent || misplacedStr) return <Skeleton className="h-40 rounded-2xl" />;
 
   const isDraft = indent.status === INDENT_STATUS.DRAFT;
   const isReturnedForCorrection = indent.status === INDENT_STATUS.RETURNED_FOR_CORRECTION;
@@ -264,7 +282,7 @@ export function IndentDetailPage() {
       </button>
 
       <PageHeader
-        eyebrow="Indent"
+        eyebrow={strRoute || isStrType(indent.indent_type) ? "Stock transfer request" : "Indent"}
         title={indent.indent_no}
         actions={(
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -287,9 +305,9 @@ export function IndentDetailPage() {
                   variant="primary"
                   className={TONE_MINT}
                   disabled={actionPending}
-                  onClick={() => nav(`/indents/new?edit=${indent.id}`)}
+                  onClick={() => nav(`${indentFormPath(indent.indent_type)}?edit=${indent.id}`)}
                 >
-                  <Pencil className="h-4 w-4" /> Edit Indent
+                  <Pencil className="h-4 w-4" /> {strRoute ? "Edit request" : "Edit Indent"}
                 </Button>
               </Can>
             )}
@@ -298,7 +316,7 @@ export function IndentDetailPage() {
                 variant="primary"
                 className={TONE_MINT}
                 disabled={actionPending}
-                onClick={() => nav(`/indents/new?edit=${indent.id}`)}
+                onClick={() => nav(`${indentFormPath(indent.indent_type)}?edit=${indent.id}`)}
               >
                 <Pencil className="h-4 w-4" /> Edit correction
               </Button>
@@ -349,8 +367,8 @@ export function IndentDetailPage() {
 
       <button
         type="button"
-        aria-label={`View complete indent journey for ${indent.indent_no}`}
-        onClick={() => nav(`/indents/${indent.id}/journey`)}
+        aria-label={`View complete ${docLabel} journey for ${indent.indent_no}`}
+        onClick={() => nav(`${base}/${indent.id}/journey`)}
         onPointerEnter={prefetchJourney}
         onPointerDown={prefetchJourney}
         onFocus={prefetchJourney}
@@ -359,7 +377,7 @@ export function IndentDetailPage() {
           // navigate exactly once here rather than twice.
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            nav(`/indents/${indent.id}/journey`);
+            nav(`${base}/${indent.id}/journey`);
           }
         }}
         className="group mb-5 block w-full cursor-pointer rounded-2xl text-left outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
@@ -373,7 +391,7 @@ export function IndentDetailPage() {
               isLoading={isJourneyLoading}
             />
             <div className="mt-4 flex min-h-11 items-center justify-between gap-3 border-t border-line pt-3 text-sm font-semibold text-brand">
-              <span>View complete indent journey</span>
+              <span>View complete {docLabel} journey</span>
               <ChevronRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
             </div>
           </CardBody>

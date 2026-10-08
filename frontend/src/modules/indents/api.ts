@@ -5,7 +5,7 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
 import type {
-  Acknowledgement, AcknowledgeLine, ActivityRow,
+  Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
   IndentNotification, IndentStats, IndentUpdate, RaiserTracking, ReceiptAttachment,
 } from "./types";
@@ -275,6 +275,17 @@ export const indentApi = {
                                { params: toSearchParams(params) })
       .then((r) => r.data),
 
+  /** Direct (no-indent) material issues handed to me, to confirm I got them. */
+  myDirectIssues: (params: { search?: string; only_actionable?: boolean } = {}) =>
+    api.get<DirectIssueAck[]>("/api/warehouse/acknowledgements/direct-issues", { params })
+      .then((r) => r.data),
+
+  /** One direct issue in the indent acknowledgement's own shape, so the same
+   *  receipt journey (consignment, packages, codes, photos) runs over it. */
+  directIssueReceipt: (issueId: number) =>
+    api.get<Acknowledgement>(`/api/warehouse/acknowledgements/direct-issues/${issueId}`)
+      .then((r) => r.data),
+
   /** The issued / dispatched / delivered stages for one indent's stepper. */
   fulfilment: (id: number) =>
     api.get<FulfilmentStep[]>(`/api/warehouse/indents/${id}/fulfilment`).then((r) => r.data),
@@ -338,3 +349,46 @@ export const masterApi = {
     api.get<BomChoiceItem[]>("/api/indents/eligible-bom-items", { params: { bom_id: bomId } })
       .then((r) => r.data),
 };
+
+/**
+ * The receipt journey's server, for an indent or a DIRECT material issue. The screen
+ * is the same; only where the photos are filed and what the press signs differ.
+ */
+export type ReceiptKind = "indent" | "issue";
+
+const DIRECT = "/api/warehouse/acknowledgements/direct-issues";
+
+export function receiptApi(kind: ReceiptKind) {
+  if (kind === "indent") {
+    return {
+      attachments: indentApi.receiptAttachments,
+      upload: indentApi.uploadReceiptAttachment,
+      download: indentApi.downloadReceiptAttachment,
+      remove: indentApi.deleteReceiptAttachment,
+      acknowledge: (id: number, lines: AcknowledgeLine[]) =>
+        indentApi.acknowledge(id, lines) as Promise<unknown>,
+    };
+  }
+  return {
+    attachments: (id: number) =>
+      api.get<ReceiptAttachment[]>(`${DIRECT}/${id}/attachments`).then((r) => r.data),
+    upload: (id: number, file: File, docCategory: string) => {
+      const body = new FormData();
+      body.append("file", file);
+      return api
+        .post<ReceiptAttachment>(
+          `${DIRECT}/${id}/attachments?doc_category=${encodeURIComponent(docCategory)}`,
+          body,
+        )
+        .then((r) => r.data);
+    },
+    download: (id: number, attachmentId: number) =>
+      api.get(`${DIRECT}/${id}/attachments/${attachmentId}/download`, { responseType: "blob" })
+        .then((r) => r.data as Blob),
+    remove: (attachmentId: number) =>
+      api.delete<void>(`${DIRECT}/attachments/${attachmentId}`).then((r) => r.data),
+    acknowledge: (id: number, lines: AcknowledgeLine[]) =>
+      api.post<Acknowledgement>(`${DIRECT}/${id}/acknowledge`, { lines })
+        .then((r) => r.data) as Promise<unknown>,
+  };
+}

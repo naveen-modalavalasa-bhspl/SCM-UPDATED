@@ -857,7 +857,8 @@ async def stock_pipeline(db: AsyncSession, *, warehouse_ids=None, item_ids=None
     from sqlalchemy import column, table
 
     issues = table("out_issues", column("id"), column("warehouse_id"), column("status"),
-                   column("direction"), column("is_stock_posted"), column("indent_id"))
+                   column("direction"), column("is_stock_posted"), column("indent_id"),
+                   column("parent_issue_id"))
     issue_lines = table("out_issue_items", column("issue_id"), column("item_id"),
                         column("issued_qty"), column("indent_item_id"))
     dispatches = table("out_dispatches", column("id"), column("warehouse_id"),
@@ -896,7 +897,11 @@ async def stock_pipeline(db: AsyncSession, *, warehouse_ids=None, item_ids=None
                or_(issues.c.indent_id.is_not(None),
                    issue_lines.c.indent_item_id.is_not(None),
                    issues.c.id.in_(select(StockTransferOrder.issue_id)
-                                   .where(StockTransferOrder.issue_id.is_not(None))))),
+                                   .where(StockTransferOrder.issue_id.is_not(None))),
+                   # ...or a floor piece of a split STO issue.
+                   issues.c.parent_issue_id.in_(
+                       select(StockTransferOrder.issue_id)
+                       .where(StockTransferOrder.issue_id.is_not(None))))),
         issues.c.warehouse_id, issue_lines.c.item_id,
     ).group_by(issues.c.warehouse_id, issue_lines.c.item_id)
     add((await db.execute(pending)).all(), "issued_pending_qty")
@@ -3003,6 +3008,18 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
         raise PermissionError_(
             f"{from_wh.name} is not a stocking point you hold — a transfer can only be "
             "sent from your own point or one under you")
+    # And TO a point inside the same data scope (the job profile's rung): an OE moves
+    # stock between his own and his reportees' points, never into somebody else's.
+    if visible is not None and to_wh.id not in visible:
+        raise PermissionError_(
+            f"{to_wh.name} is outside your data scope — a transfer can only go to a "
+            "point you or your reporting line hold")
+    # A transfer is a SIDEWAYS move on one level — LIP to LIP, MDP to MDP, warehouse to
+    # warehouse. Up and down the chain is an indent / issue, not a transfer.
+    if locations.tier_of(from_wh.warehouse_type) != locations.tier_of(to_wh.warehouse_type):
+        raise ValidationError(
+            f"{from_wh.name} and {to_wh.name} are on different levels. A transfer stays "
+            "on one level: LIP to LIP, MDP to MDP, warehouse to warehouse.")
 
     # What this move IS comes from the two points, never from the request body, so a
     # cross-project transfer cannot be relabelled into something that skips approval.
@@ -3146,18 +3163,37 @@ async def _decorate_sto_stages(db: AsyncSession, rows) -> None:
     """Stamp `issue_status` and `stage` on each STO, in one query for the page."""
     from sqlalchemy import column, table
 
-    issues = table("out_issues", column("id"), column("status"))
+    issues = table("out_issues", column("id"), column("status"),
+                   column("parent_issue_id"))
     ids = {r.issue_id for r in rows if getattr(r, "issue_id", None)}
     status_by_id = dict((await db.execute(
         select(issues.c.id, issues.c.status).where(issues.c.id.in_(ids))
     )).all()) if ids else {}
+    # A split parent stops moving once its floor pieces carry the goods: it rolls up
+    # to CLOSED when they are posted and never sees DISPATCHED or ACKNOWLEDGED. The
+    # STO is as far along as its LEAST advanced live piece.
+    split = {i for i, st in status_by_id.items() if st in ("SPLIT", "CLOSED")}
+    child_stages: dict[int, list[str]] = {}
+    if split:
+        for parent_id, child_status in (await db.execute(
+            select(issues.c.parent_issue_id, issues.c.status)
+            .where(issues.c.parent_issue_id.in_(split))
+        )).all():
+            stage = _STO_STAGE_BY_ISSUE.get(child_status or "", "TO_ISSUE")
+            if stage != "CANCELLED":
+                child_stages.setdefault(parent_id, []).append(stage)
     for r in rows:
         issue_status = status_by_id.get(r.issue_id) if r.issue_id else None
         r.issue_status = issue_status
         if r.status != STOStatus.APPROVED.value or not r.issue_id:
             r.stage = r.status
+        elif child_stages.get(r.issue_id):
+            r.stage = min(child_stages[r.issue_id], key=_STO_STAGE_ORDER.index)
         else:
             r.stage = _STO_STAGE_BY_ISSUE.get(issue_status or "", "TO_ISSUE")
+
+
+_STO_STAGE_ORDER = ["TO_ISSUE", "ISSUED", "IN_TRANSIT", "RECEIVED"]
 
 
 async def _sto_visibility(db: AsyncSession, user):

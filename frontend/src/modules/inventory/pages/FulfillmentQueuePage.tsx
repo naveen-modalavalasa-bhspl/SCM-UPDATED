@@ -192,7 +192,7 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
   const columns: Column<QueueRow>[] = [
     {
       key: "no",
-      header: "Indent",
+      header: indentType === "STR" ? "STR" : "Indent",
       render: (r) => (
         <div>
           <div className={r.cycle

@@ -13,6 +13,7 @@ import {
 } from "@/shared/components";
 import { fmtDate, fmtRelative, fmtTime } from "@/shared/datetime";
 import { approvalsApi } from "../api";
+import { displayDocType, rowDocTypeLabel } from "../docTypes";
 import { approvalDecisionDocumentPath, approvalDecisionLedgerPath } from "../documentRoutes";
 import type { ApprovalDecisionExclusion, ApprovalDecisionRow } from "../types";
 import { ApprovalPager } from "../components/Pager";
@@ -31,21 +32,6 @@ import { TONE_BLUE } from "@/shared/components/tones";
  * is the same three pieces of state (search, decision, page) over the same
  * `/api/approvals/my-decisions` call, drawn differently.
  * ------------------------------------------------------------------------- */
-
-/** What the document IS, in the words the floor uses for it. */
-const DOC_LABELS: Record<string, string> = {
-  INDENT: "Indent", MR: "Material request", ALLOCATION: "Stock allocation",
-  OWN_STOCK_ALLOCATION: "Allocation from my point",
-  OWN_STOCK_ISSUE: "Issue from my point", ISSUE: "Material issue",
-  WH_ISSUE: "Warehouse issue", PO: "Purchase order", GRN: "Goods receipt",
-  REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
-  RFQ: "Request for quotation", DISPATCH: "Dispatch",
-  QC_OUTWARD: "Outward QC",
-  PURCHASE_RETURN: "Purchase return", TRANSPORT_REQUEST: "Shipment",
-  CARRIER_AWARD: "Carrier award",
-};
-
-const docLabel = (docType: string) => DOC_LABELS[docType] ?? docType.replace(/_/g, " ");
 
 /**
  * One glyph and one tint per document FAMILY — a request, a buying document,
@@ -172,7 +158,7 @@ function dayParts(value?: string | null) {
 function exportExcel(rows: ApprovalDecisionRow[]) {
   const sheet = XLSX.utils.json_to_sheet(rows.map((row) => ({
     "Decision date": row.decision_at ? new Date(row.decision_at).toLocaleString() : "",
-    "Document type": row.doc_type,
+    "Document type": displayDocType(row),
     "Document number": row.doc_no ?? `#${row.doc_id}`,
     "Approval stage": row.stage_name ?? `Stage ${row.stage_sequence}`,
     Decision: row.decision,
@@ -234,7 +220,7 @@ function DocumentCell({ row }: { row: ApprovalDecisionRow }) {
           {row.doc_no ?? `#${row.doc_id}`}
         </p>
         <p className="truncate text-xs text-muted">
-          {docLabel(row.doc_type)}
+          {rowDocTypeLabel(row)}
           {row.requester ? ` · raised by ${row.requester}` : ""}
         </p>
       </div>
@@ -476,7 +462,7 @@ export function MyDecisionsPage() {
               <div className="min-w-0 flex-1">
                 <p className="mono text-[13px] font-semibold text-ink">{row.doc_no ?? `#${row.doc_id}`}</p>
                 <p className="truncate text-xs text-muted">
-                  {docLabel(row.doc_type)}
+                  {rowDocTypeLabel(row)}
                   {row.requester ? ` · raised by ${row.requester}` : ""}
                 </p>
               </div>
@@ -530,7 +516,7 @@ export function MyDecisionsPage() {
             {detail?.doc_no ?? (detail ? `#${detail.doc_id}` : "")}
           </span>
           <span className="text-xs font-normal text-muted">
-            {detail ? docLabel(detail.doc_type) : ""}
+            {detail ? rowDocTypeLabel(detail) : ""}
             {detail?.requester ? ` · raised by ${detail.requester}` : ""}
           </span>
         </ModalHeader>
