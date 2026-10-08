@@ -654,6 +654,11 @@ class DispatchItem(Base):
 
     issue_id = Column(BigInteger, index=True, nullable=True)
     issue_no = Column(String(50), nullable=True)
+    # The issue LINE this carton line was packed from (2026-10-07). One batch drawn
+    # from two bays is two issue lines, and keyed on (issue, item, batch) alone the
+    # packing grid could not tell them apart — typing into one row wrote the other.
+    # Soft (no FK): a consignment outlives edits to the draft issue it came from.
+    issue_item_id = Column(BigInteger, index=True, nullable=True)
     mr_id = Column(BigInteger, index=True, nullable=True)
     mr_no = Column(String(50), nullable=True)
     indent_id = Column(BigInteger, nullable=True)
@@ -665,6 +670,8 @@ class DispatchItem(Base):
     uom_code = Column(String(20), nullable=True)
     batch_id = Column(BigInteger, nullable=True)
     batch_no = Column(String(50), nullable=True)
+    # Where the issue line drew it from — shown so two rows of one batch say which bay.
+    bin_code = Column(String(100), nullable=True)
     # Snapshotted beside the batch id, not re-derived. The receiving point rebuilt
     # both from stk_batches, which only works while batch_id survives — and it does
     # not on an allocation-drafted issue. A consignment states what it carries.

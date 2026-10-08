@@ -998,9 +998,16 @@ function serialPickForQuantity(
   if (required <= 0) return [];
   const allowed = available.filter(Boolean);
   const allowedSet = new Set(allowed);
-  return (selected ?? [])
+  const kept = (selected ?? [])
     .filter((serial) => allowedSet.has(serial))
     .slice(0, required);
+  // Auto-selected against the counted quantity (2026-10-07): the codes this package
+  // carries are listed in the order they were packed, so the first ones not already
+  // matched fill up to the count. The person counting only opens the list to swap a
+  // code that is not actually in the box — they are never made to tick sixty by hand.
+  if (kept.length >= required) return kept;
+  const chosen = new Set(kept);
+  return [...kept, ...allowed.filter((serial) => !chosen.has(serial))].slice(0, required);
 }
 
 function isFullTracking(leg?: ReceiptLeg): leg is RaiserTracking {
@@ -2383,8 +2390,8 @@ function SerialPanel({
             </div>
             <p className="text-[11px] leading-snug text-muted">
               {required > 0
-                ? `Check the ${unit} printed on each one (${sent} sent).`
-                : `Count first, then check the ${unit} on each one.`}
+                ? `Auto-selected for the ${required} counted (${sent} sent). Change any ${unit} that is not in the box.`
+                : `Count first — the ${unit}s are then selected for you.`}
             </p>
           </div>
         </div>

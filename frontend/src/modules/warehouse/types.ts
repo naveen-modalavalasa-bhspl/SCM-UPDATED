@@ -1290,6 +1290,12 @@ export interface IssueStockSource {
   item_total_qty: number;
   /** The free part of it. */
   item_available_qty: number;
+  /** Must this item leave with one serial / IMEI / asset or consumable code per unit? */
+  codes_required?: boolean;
+  /** Does this (batch, location) hold at least one free coded unit? Drives the one
+   *  FEFO swap past the same-day rule: an allocated batch with no codes may give way
+   *  to the oldest batch that has them. */
+  has_unit_codes?: boolean;
 }
 
 /**
@@ -1479,6 +1485,10 @@ export interface DispatchItem {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1543,6 +1553,10 @@ export interface DispatchItemWrite {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1596,6 +1610,10 @@ export interface PackageWrite {
 export interface ConsignmentPackageItemWrite {
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1672,6 +1690,8 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
   expiry_date?: string | null;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
+  /** What the codes on this row are — serial, IMEI, asset tag or consumable code. */
+  tracking_type?: TrackingType | null;
   serial_numbers?: string[];
   /** serial -> IMEI, so a handset's number shows beside the unit it belongs to. */
   imei_by_serial?: Record<string, string>;

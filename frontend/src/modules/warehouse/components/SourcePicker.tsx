@@ -1,5 +1,5 @@
 import { Select, SelectItem, Tooltip } from "@heroui/react";
-import { AlertTriangle, CalendarClock, Lock, MapPin, Package } from "lucide-react";
+import { AlertTriangle, Barcode, CalendarClock, Lock, MapPin, Package } from "lucide-react";
 import { LocationTrail } from "./LocationTrail";
 import { fmtQty } from "../format";
 import type { BatchChoice, LocationChoice } from "../issueSplits";
@@ -80,7 +80,7 @@ export function BatchPicker({
   const orphan = !selected && value
     ? { batchId: value, batchNo: fallbackNo ?? null, expiry: null, mfg: null, drawable: 0,
         total: 0, locations: 0, allocated: false, allowed: true,
-        blocked: null } as BatchChoice
+        blocked: null, hasCodes: false, codeException: false } as BatchChoice
     : null;
   const rows = orphan ? [...choices, orphan] : choices;
 
@@ -132,6 +132,16 @@ export function BatchPicker({
                       Allocated
                     </span>
                   )}
+                  {row.hasCodes && (
+                    <span className="inline-flex items-center gap-0.5 rounded bg-info-bg px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-info">
+                      <Barcode className="h-2.5 w-2.5" /> Codes
+                    </span>
+                  )}
+                  {row.codeException && (
+                    <span className="rounded bg-warn-bg px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-warn">
+                      Unlocked
+                    </span>
+                  )}
                   {!row.allowed && <Lock className="h-3 w-3 shrink-0 text-muted" />}
                 </div>
                 <div className={`mt-0.5 flex flex-wrap items-center gap-x-2 ${HINT}`}>
@@ -147,6 +157,12 @@ export function BatchPicker({
                 {row.blocked && (
                   <div className="mt-0.5 text-[11px] leading-tight text-warn">
                     {row.blocked}
+                  </div>
+                )}
+                {row.codeException && (
+                  <div className="mt-0.5 text-[11px] leading-tight text-info">
+                    The allocated batch has no codes, so this — the oldest batch that
+                    does — may be issued instead. Saving moves the reservation here.
                   </div>
                 )}
               </div>

@@ -85,6 +85,7 @@ export function SerialNumbersModal({
   noun = "serial",
   paging = null,
   displayValue,
+  enforceCount = false,
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -162,6 +163,13 @@ export function SerialNumbersModal({
    *  The acknowledgement screen passes the short tail of a long generated code; the
    *  full code stays on hover. Absent = drawn as it is. */
   displayValue?: (value: string) => string;
+  /**
+   * Reject mode only: hold the pick to EXACTLY `quantity` kept, so exactly the rest
+   * is rejected. A unit can be ticked as rejected only while fewer than that are, and
+   * Save refuses any other count — the inspector who entered "2 rejected" picks two,
+   * not one and not three. Outward QC and the acknowledgement both use it.
+   */
+  enforceCount?: boolean;
 }) {
   const show = (value: string) => displayValue?.(value) ?? value;
   const [serials, setSerials] = useState<string[]>([]);
@@ -284,11 +292,29 @@ export function SerialNumbersModal({
       visible.length * 44,
       Math.max(220, viewportHeight - 360),
     );
-    const toggle = (serial: string) =>
+    const selectMode = pickMode === "select";
+    /** How many units this line must reject — the rest of the offered set. */
+    const rejectTarget = Math.max((available ?? []).length - required, 0);
+    const counted = !selectMode && enforceCount;
+    /** In a counted reject pick: may this row change state right now? */
+    const canFlip = (serial: string) => {
+      if (!counted) return true;
+      return selected.has(serial)
+        ? rejected.length < rejectTarget      // accepted -> rejected
+        : selected.size < required;           // rejected -> accepted
+    };
+    const toggle = (serial: string) => {
+      if (!canFlip(serial)) {
+        setError(selected.has(serial)
+          ? `Only ${rejectTarget} ${rejectTarget === 1 ? "unit is" : "units are"} rejected on this line. Un-tick one before rejecting another.`
+          : `${required} accepted is the most this line can keep. Reject another unit first.`);
+        return;
+      }
+      setError(null);
       setSerials((rows) =>
         rows.includes(serial) ? rows.filter((r) => r !== serial) : [...rows, serial],
       );
-    const selectMode = pickMode === "select";
+    };
     const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
     const clearAll = () => {
@@ -466,16 +492,35 @@ export function SerialNumbersModal({
               <span className="text-muted">
                 {selectMode
                   ? trackingMeta?.hint ?? `Choose exactly ${required} ${plural(required)}.`
-                  : `Tick exactly ${available ? available.length - required : 0} units to reject.`}
+                  : rejectTarget === 0
+                    ? "Every unit is accepted. Enter a rejected quantity on the line to reject some."
+                    : `Tick exactly ${rejectTarget} ${rejectTarget === 1 ? "unit" : "units"} to reject — only the rejected ones.`}
               </span>
               <span className="font-semibold text-ink">
                 {selectMode ? (
                   <>{selected.size} / {required} selected</>
                 ) : (
-                  <>{selected.size} accepted · <span className="text-bad">{rejected.length} rejected</span></>
+                  <>
+                    <span className="text-ok">{selected.size} accepted</span>
+                    {" · "}
+                    <span className={counted && rejected.length !== rejectTarget ? "text-warn" : "text-bad"}>
+                      {rejected.length}{counted ? ` / ${rejectTarget}` : ""} rejected
+                    </span>
+                  </>
                 )}
               </span>
             </div>
+
+            {!selectMode && !readOnly && rejected.length > 0 && (
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <Button variant="subtle" onClick={() => { setError(null); setSerials(available ?? []); }}>
+                  Accept all again
+                </Button>
+                {counted && rejected.length === rejectTarget && (
+                  <span className="text-xs text-ok">All {rejectTarget} rejected units are picked.</span>
+                )}
+              </div>
+            )}
 
             {selectMode && !readOnly && (available ?? []).length > 0 && (
               <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -542,7 +587,9 @@ export function SerialNumbersModal({
                     const value = visible[index];
                     const unit = unitByValue?.[value];
                     const isSelected = selected.has(value);
-                    const full = selectMode && !isSelected && selected.size >= required;
+                    const full = selectMode
+                      ? !isSelected && selected.size >= required
+                      : counted && !canFlip(value);
                     return (
                       <div
                         style={style}
@@ -593,10 +640,13 @@ export function SerialNumbersModal({
                     const s = visible[index];
                     const isSelected = selected.has(s);
                     const isRejected = !isSelected;
+                    const frozen = counted && !canFlip(s);
                     return (
                       <label
                         style={style}
-                        className={`flex cursor-pointer items-center gap-3 border-b border-line/50 last:border-0 px-3 transition-colors ${
+                        className={`flex items-center gap-3 border-b border-line/50 last:border-0 px-3 transition-colors ${
+                          frozen ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                        } ${
                           selectMode
                             ? isSelected ? "bg-brand/5" : "bg-content1 hover:bg-content2/50"
                             : isRejected ? "bg-bad-bg/40" : "bg-content1 hover:bg-content2/50"
@@ -605,7 +655,7 @@ export function SerialNumbersModal({
                         <input
                           type="checkbox"
                           checked={selectMode ? isSelected : isRejected}
-                          disabled={readOnly}
+                          disabled={readOnly || frozen}
                           onChange={() => toggle(s)}
                           aria-label={`${selectMode ? "Select" : "Reject"} ${s}`}
                           className={`h-4 w-4 shrink-0 accent-current ${selectMode ? "text-brand" : "text-bad"}`}
@@ -685,6 +735,13 @@ export function SerialNumbersModal({
                   if (selectMode && selected.size !== required) {
                     setError(
                       `This pick is for ${required} ${plural(required)}; ${selected.size} selected.`,
+                    );
+                    return;
+                  }
+                  if (counted && rejected.length !== rejectTarget) {
+                    setError(
+                      `Reject exactly ${rejectTarget} ${rejectTarget === 1 ? "unit" : "units"} — `
+                      + `${rejected.length} ticked. Tick only the rejected ones.`,
                     );
                     return;
                   }

@@ -1706,6 +1706,10 @@ class IssueStockSource(_Read):
     batch_available_qty: Decimal = Decimal("0")
     item_total_qty: Decimal = Decimal("0")
     item_available_qty: Decimal = Decimal("0")
+    # Must this item leave with one serial / IMEI / code per unit, and does this spot
+    # hold any free coded unit? Drives the one FEFO swap past the same-day rule.
+    codes_required: bool = False
+    has_unit_codes: bool = False
 
 
 class TrackingTypeRead(_Read):
@@ -1817,6 +1821,9 @@ class DispatchItemWrite(BaseModel):
     package_id: int | None = None
     issue_id: int | None = None
     issue_no: str | None = None
+    # The issue LINE, so one batch drawn from two bays stays two rows. See
+    # `out_dispatch_items.issue_item_id`.
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1870,6 +1877,7 @@ class PackageWrite(BaseModel):
 class ConsignmentPackageItemWrite(BaseModel):
     issue_id: int | None = None
     issue_no: str | None = None
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1966,6 +1974,7 @@ class DispatchItemRead(_Read):
     package_id: int | None = None
     issue_id: int | None = None
     issue_no: str | None = None
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1976,6 +1985,7 @@ class DispatchItemRead(_Read):
     uom_code: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    bin_code: str | None = None
     mfg_date: date | None = None
     expiry_date: date | None = None
     serial_no: str | None = None
@@ -3864,6 +3874,10 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     expiry_date: date | None = None
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
+    # Where the issue line drew it from, so two rows of one batch say which bay.
+    bin_code: str | None = None
+    # SERIAL / IMEI / ASSET / CONSUMABLE / NONE — what the codes on this row are.
+    tracking_type: str | None = None
     serial_numbers: list[str] = []
     # serial -> IMEI, so the packing screen shows the handset's number beside the
     # unit it belongs to rather than making the receiving point retype it.
