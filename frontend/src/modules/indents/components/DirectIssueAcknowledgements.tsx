@@ -20,7 +20,8 @@ import { FILTER_PILL_ON } from "../buttonTones";
  */
 export function DirectIssueAcknowledgements() {
   const [search, setSearch] = useState("");
-  const [onlyActionable, setOnlyActionable] = useState(true);
+  // Off by default, as on the indent tab: an acknowledged issue must stay findable.
+  const [onlyActionable, setOnlyActionable] = useState(false);
   const nav = useNavigate();
   // The same receipt journey an indent gets: consignment, packages, codes, photos.
   const open = (row: DirectIssueAck) => nav(`/indents/acknowledgements/issue/${row.issue_id}`);

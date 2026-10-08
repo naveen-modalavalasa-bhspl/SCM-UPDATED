@@ -91,7 +91,7 @@ from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
-from app.shared.limits import MAX_UNITS_PER_CODE_MINT, UNIT_MINT_CHUNK
+from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
 logger = logging.getLogger(__name__)
 
@@ -5283,10 +5283,13 @@ async def _place_unit_codes(
     # somebody asked to have coded is a traceability change, and that is a decision
     # for the business, not for a size limit. The way out is a smaller receipt today
     # and a chunked background job once the queue exists.
-    if int(units) > MAX_UNITS_PER_CODE_MINT:
+    # MAX_UNITS_PER_CODE_MINT is now the recommended value; the live cap is
+    # warehouse.max_units_per_code_mint on Settings, 0 = no limit.
+    mint_cap = unit_limit("max_units_per_code_mint")
+    if mint_cap and int(units) > mint_cap:
         raise ValidationError(
             f"This line would give individual codes to {int(units):,} units, and one "
-            f"request may code at most {MAX_UNITS_PER_CODE_MINT:,}. The quantity "
+            f"request may code at most {mint_cap:,}. The quantity "
             "itself is not the problem -- receive it in smaller putaways, or turn "
             "unit coding off for this item if its units are not tracked individually."
         )
@@ -8159,11 +8162,10 @@ async def _auto_fill_codes(
     the line's OWN batch and bay, so a split pick draws each bay's codes for that bay.
 
     Runs on every save — create, update and the approved-issue serials endpoint — so
-    the set is held on the units themselves and survives submit and approval: before,
-    nothing was held until `post_issue` and the screen showed an empty picker after
-    every hand-off. Serial and IMEI lines never come here (`_unit_mode`).
-    Best effort, like `_claim_units`: a bay holding fewer codes than the quantity
-    fills what it can, and `_assert_units_obtainable` says so at submit.
+    the set is held on the units themselves and survives submit and approval. Serial
+    and IMEI lines never come here (`_unit_mode`). Best effort, like `_claim_units`: a
+    bay holding fewer codes than the quantity fills what it can, and
+    `_assert_units_obtainable` says so at submit.
     """
     wanted = int(_d(line.issued_qty))
     if wanted <= 0:
@@ -8506,10 +8508,9 @@ async def issue_unit_supply(
 async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> None:
     """Refuse to submit an issue that could never be posted.
 
-    Only serial-tracked lines: those are the ones `post_issue` and `_mark_serials`
-    hold to one named unit per issued unit. An IMEI- or code-named item tops up from
-    whatever the shelf has and ships regardless — a missing identity row must never
-    stop real goods from moving (see `_claim_units`).
+    Every line whose item must leave with one identifier per unit
+    (`_unit_codes_required`) — the same test `_mark_serials` holds `post_issue` to, so
+    an issue that would be refused at posting is refused here, before approval.
 
     Every failing line is reported at once, naming the batch, so the storekeeper
     fixes the document in one pass instead of one approval cycle per line.
@@ -8812,6 +8813,10 @@ async def issue_stock_sources(
     # One read of the warehouse's tree for the whole answer, so every source can name
     # the floor / lane / rack it sits on rather than a bare bin code.
     index = await _location_index(db, warehouse_id)
+    # Must the item leave with a code per unit, and does this (batch, location) hold a
+    # free coded unit? What the screen needs to offer the one batch swap FEFO allows
+    # past the same-day rule (`_coded_swap_verdict`). A bounded EXISTS per row, never
+    # a COUNT, and only for items that require codes.
     code_config = await codeformat.code_settings(db)
     codes_required = {
         item_id: await _unit_codes_required(
@@ -11602,11 +11607,26 @@ async def _issue_slices(
     if not rows:
         return fallback
 
-    named = [r for r in rows
-             if r.batch_id == line.batch_id and r.bin_id == line.bin_id
-             and r.project_id == (issue.project_id or 0)]
-    if named and _d(named[0].available_qty) >= qty:
-        return fallback
+    # The named (bin, batch) under the issue's project OR unscoped stock (project 0),
+    # the project's own row first. Matching the project alone missed every direct issue
+    # carrying a project over unscoped stock, and FEFO then drew from bays the line
+    # never named — WHI0001 took 4 monitors off F1/batch 48 while their serials left
+    # LANE-1/batch 51, leaving both balances wrong.
+    own_project = issue.project_id or 0
+    named = sorted((r for r in rows
+                    if r.batch_id == line.batch_id and r.bin_id == line.bin_id
+                    and r.project_id in (own_project, 0)),
+                   key=lambda r: r.project_id != own_project)
+    if named and sum((_d(r.available_qty) for r in named), ZERO) >= qty:
+        slices, remaining = [], qty
+        for row in named:
+            take = min(remaining, _d(row.available_qty))
+            if take > ZERO:
+                slices.append((row.bin_id, row.batch_id, row.project_id, take))
+                remaining -= take
+            if remaining <= ZERO:
+                break
+        return slices
 
     slices: list[tuple[int, int, int, object]] = []
     remaining = qty
@@ -24700,6 +24720,9 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "batch_id": line.batch_id,
                 "batch_no": line.batch_no,
                 "bin_code": line.bin_code,
+                # SERIAL / IMEI / ASSET / CONSUMABLE / NONE: what the codes on this
+                # row are, so the packing screen names them and knows which it may
+                # choose itself (asset and consumable codes) and which it may not.
                 "tracking_type": getattr(line, "tracking_type", None),
                 "requires_qc": bool(getattr(line, "requires_qc", False)),
                 # Snapshotted on the issue line at creation, so the packer sees what

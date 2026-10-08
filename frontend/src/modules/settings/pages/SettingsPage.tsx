@@ -10,6 +10,12 @@ import type { AppSettings } from "../types";
 const DATE_FORMATS = ["DD-MM-YYYY", "YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY"]
   .map((value) => ({ value, label: value }));
 const CURRENCIES = ["INR", "USD", "EUR", "GBP"].map((value) => ({ value, label: value }));
+/** The serial/unit caps enforced by backend shared/limits.py. */
+const WAREHOUSE_LIMITS = [
+  ["max_serials_per_line", "Max serials / IMEIs per line"],
+  ["max_serials_per_request", "Max serials / IMEIs per document"],
+  ["max_units_per_code_mint", "Max units coded in one putaway"],
+] as const;
 const RESET_POLICIES = ["NEVER", "YEARLY", "MONTHLY"].map((value) => ({ value, label: value }));
 
 /** The windows an admin may pick for a vendor's one-time code. A list rather than a
@@ -240,6 +246,23 @@ export function SettingsPage() {
             the delivery and the stock is credited immediately. This is only the default
             — a stocking point that has answered for itself on the warehouse master
             overrides it.
+          </p>
+        </Section>
+
+        <Section title="Warehouse limits">
+          {WAREHOUSE_LIMITS.map(([key, label]) => (
+            <Field key={key} label={label} hint="0 = no limit (recommended cap 10,000)">
+              <Input
+                type="number"
+                min={0}
+                value={String(form.warehouse[key] ?? 0)}
+                onChange={(e) => set("warehouse", key, Math.max(0, Number(e.target.value) || 0))}
+              />
+            </Field>
+          ))}
+          <p className="text-xs text-muted md:col-span-2">
+            How many serial-tracked units one save may carry. Very large counts run in a
+            single request and can time out; 0 lets every count through.
           </p>
         </Section>
 

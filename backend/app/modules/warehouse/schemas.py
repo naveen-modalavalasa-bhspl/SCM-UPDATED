@@ -4005,7 +4005,7 @@ class DirectIssueAckRow(BaseModel):
 class IssueSerialLineIn(BaseModel):
     """One line's physical units, named after approval."""
     id: int
-    serial_numbers: list[str] = Field(default_factory=list, max_length=MAX_SERIALS_PER_LINE)
+    serial_numbers: Annotated[list[str], SerialList] = Field(default_factory=list)
 
 
 class IssueSerialsIn(BaseModel):

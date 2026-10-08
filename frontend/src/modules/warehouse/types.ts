@@ -1495,7 +1495,9 @@ export interface DispatchItem {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
   issue_item_id?: number | null;
+  /** Where that line drew it from. */
   bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
@@ -1618,7 +1620,9 @@ export interface PackageWrite {
 export interface ConsignmentPackageItemWrite {
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
   issue_item_id?: number | null;
+  /** Where that line drew it from. */
   bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;

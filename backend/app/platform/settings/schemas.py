@@ -75,6 +75,10 @@ class WarehouseSettings(BaseModel):
     the code did before the policy existed, so it stays the default.
     """
     requires_inward_default: bool = False
+    # Request-size caps on serial-tracked work (shared/limits.py). 0 = no limit.
+    max_serials_per_line: int = Field(default=0, ge=0)
+    max_serials_per_request: int = Field(default=0, ge=0)
+    max_units_per_code_mint: int = Field(default=0, ge=0)
 
 
 class LogisticsSettings(BaseModel):
