@@ -37,6 +37,10 @@ export interface AppSettings {
     /** What a stocking point does with an arriving consignment when it has not
      *  answered for itself. The per-point flag on the warehouse master wins. */
     requires_inward_default: boolean;
+    /** 0 = no limit. */
+    max_serials_per_line: number;
+    max_serials_per_request: number;
+    max_units_per_code_mint: number;
   };
   logistics: {
     /** Let the dispatch desk record a courier name without a logistics-vendor login. */

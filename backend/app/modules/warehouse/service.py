@@ -91,7 +91,7 @@ from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
-from app.shared.limits import MAX_UNITS_PER_CODE_MINT, UNIT_MINT_CHUNK
+from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
 logger = logging.getLogger(__name__)
 
@@ -5283,10 +5283,13 @@ async def _place_unit_codes(
     # somebody asked to have coded is a traceability change, and that is a decision
     # for the business, not for a size limit. The way out is a smaller receipt today
     # and a chunked background job once the queue exists.
-    if int(units) > MAX_UNITS_PER_CODE_MINT:
+    # MAX_UNITS_PER_CODE_MINT is now the recommended value; the live cap is
+    # warehouse.max_units_per_code_mint on Settings, 0 = no limit.
+    mint_cap = unit_limit("max_units_per_code_mint")
+    if mint_cap and int(units) > mint_cap:
         raise ValidationError(
             f"This line would give individual codes to {int(units):,} units, and one "
-            f"request may code at most {MAX_UNITS_PER_CODE_MINT:,}. The quantity "
+            f"request may code at most {mint_cap:,}. The quantity "
             "itself is not the problem -- receive it in smaller putaways, or turn "
             "unit coding off for this item if its units are not tracked individually."
         )

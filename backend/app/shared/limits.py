@@ -26,7 +26,7 @@ moving it without measuring that path is how the timeout comes back.
 """
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import AfterValidator, Field
 
 #: Lines on one document — an indent, a PO, a GRN, an issue, a consignment.
 #: Comfortably above any real document; far below anything that threatens a request.
@@ -93,11 +93,45 @@ UNIT_MINT_CHUNK = 1_000
 #: carrying hundreds is a mistake, not a large site.
 MAX_CONFIG_ENTRIES = 100
 
+#: The three unit caps as the RUNNING process applies them (2026-10-08). Set on
+#: Settings > Company > Warehouse (`warehouse.max_*` in sys_settings) and loaded by
+#: `platform.settings.service.load_unit_limits` at startup and on every settings save.
+#: 0 means NO LIMIT, and that is the default: the business asked for every count to
+#: go through. The constants above stay as the recommended values shown on screen.
+#: Per process: another worker picks a change up on its next restart or settings save.
+RUNTIME_LIMITS: dict[str, int] = {
+    "max_serials_per_line": 0,
+    "max_serials_per_request": 0,
+    "max_units_per_code_mint": 0,
+}
+
+
+def set_runtime_limits(**values: int | None) -> None:
+    for key, value in values.items():
+        if key in RUNTIME_LIMITS:
+            RUNTIME_LIMITS[key] = max(int(value or 0), 0)
+
+
+def limit(key: str) -> int:
+    """The live cap, or 0 for none."""
+    return RUNTIME_LIMITS[key]
+
+
+def _check_serial_line(values: list[str] | None) -> list[str] | None:
+    cap = limit("max_serials_per_line")
+    if cap and values and len(values) > cap:
+        raise ValueError(
+            f"This line names {len(values)} units, and one line may carry at most "
+            f"{cap} (Settings > Company > Warehouse limits)."
+        )
+    return values
+
+
 #: The shorthand used across the schemas.
 DocumentLines = Field(max_length=MAX_DOCUMENT_LINES)
 BatchIds = Field(max_length=MAX_BATCH_IDS)
 BatchDocuments = Field(max_length=MAX_BATCH_DOCUMENTS)
-SerialList = Field(max_length=MAX_SERIALS_PER_LINE)
+SerialList = AfterValidator(_check_serial_line)
 ConfigEntries = Field(max_length=MAX_CONFIG_ENTRIES)
 
 
@@ -133,10 +167,11 @@ def assert_serial_budget(model, *collections: str) -> None:
                 len(getattr(line, field, None) or [])
                 for field in ("serial_numbers", "imei_numbers")
             )
-    if total > MAX_SERIALS_PER_REQUEST:
+    cap = limit("max_serials_per_request")
+    if cap and total > cap:
         raise ValueError(
             f"This document names {total} units, and a single request may carry at "
-            f"most {MAX_SERIALS_PER_REQUEST}. Split it across documents, or upload a "
+            f"most {cap}. Split it across documents, or upload a "
             "manifest so it can be processed in the background."
         )
 
@@ -147,4 +182,5 @@ __all__ = [
     "MAX_UNITS_PER_CODE_MINT", "UNIT_MINT_CHUNK",
     "DocumentLines", "BatchIds", "BatchDocuments", "SerialList", "ConfigEntries",
     "assert_serial_budget", "Annotated",
+    "RUNTIME_LIMITS", "set_runtime_limits", "limit",
 ]

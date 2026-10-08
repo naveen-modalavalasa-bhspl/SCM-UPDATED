@@ -45,6 +45,15 @@ async def lifespan(app: FastAPI):
     # every web worker. A separate container rather than a leader lock or an APScheduler
     # job store: it is simpler to reason about, and it moves the sync's 3,733-position
     # mirror off the loop that is serving user traffic at the same time.
+    # Every process, web workers included: the warehouse unit caps live in
+    # sys_settings and the request schemas read them from memory.
+    try:
+        from app.platform.settings.service import load_unit_limits
+        async with SessionLocal() as db:
+            await load_unit_limits(db)
+    except Exception as exc:  # no caps (the default) is the safe fallback
+        log.warning("Warehouse unit limits not loaded at startup: %s", exc)
+
     if settings.RUN_SCHEDULERS:
         scheduler.start()
         try:

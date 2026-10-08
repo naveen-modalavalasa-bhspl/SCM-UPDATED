@@ -61,6 +61,10 @@ SETTINGS_SPEC = {
         # not answered for itself. Same key name the migration seeds — two spellings
         # of one setting is two settings.
         "requires_inward_default": ("warehouse.requires_inward_default", "bool"),
+        # Loaded into shared.limits.RUNTIME_LIMITS by load_unit_limits. 0 = no limit.
+        "max_serials_per_line": ("warehouse.max_serials_per_line", "int"),
+        "max_serials_per_request": ("warehouse.max_serials_per_request", "int"),
+        "max_units_per_code_mint": ("warehouse.max_units_per_code_mint", "int"),
     }),
     "logistics": (LogisticsSettings, {
         "manual_courier_dispatch": ("logistics.manual_courier_dispatch", "bool"),
@@ -186,7 +190,19 @@ async def update_app_settings(db: AsyncSession, data: SettingsIn, user) -> Setti
         actor=user, before=before, after=after, summary="System settings updated",
     )
     await db.commit()
+    await load_unit_limits(db)
     return await get_app_settings(db)
+
+
+async def load_unit_limits(db: AsyncSession) -> None:
+    """Push the warehouse unit caps into shared.limits for this process."""
+    from app.shared.limits import set_runtime_limits
+    wh = (await get_app_settings(db)).warehouse
+    set_runtime_limits(
+        max_serials_per_line=wh.max_serials_per_line,
+        max_serials_per_request=wh.max_serials_per_request,
+        max_units_per_code_mint=wh.max_units_per_code_mint,
+    )
 
 
 async def get_hcm_schedule(db: AsyncSession) -> tuple[bool, int]:
