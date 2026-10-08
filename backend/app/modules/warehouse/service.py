@@ -11203,11 +11203,26 @@ async def _issue_slices(
     if not rows:
         return fallback
 
-    named = [r for r in rows
-             if r.batch_id == line.batch_id and r.bin_id == line.bin_id
-             and r.project_id == (issue.project_id or 0)]
-    if named and _d(named[0].available_qty) >= qty:
-        return fallback
+    # The named (bin, batch) under the issue's project OR unscoped stock (project 0),
+    # the project's own row first. Matching the project alone missed every direct issue
+    # carrying a project over unscoped stock, and FEFO then drew from bays the line
+    # never named — WHI0001 took 4 monitors off F1/batch 48 while their serials left
+    # LANE-1/batch 51, leaving both balances wrong.
+    own_project = issue.project_id or 0
+    named = sorted((r for r in rows
+                    if r.batch_id == line.batch_id and r.bin_id == line.bin_id
+                    and r.project_id in (own_project, 0)),
+                   key=lambda r: r.project_id != own_project)
+    if named and sum((_d(r.available_qty) for r in named), ZERO) >= qty:
+        slices, remaining = [], qty
+        for row in named:
+            take = min(remaining, _d(row.available_qty))
+            if take > ZERO:
+                slices.append((row.bin_id, row.batch_id, row.project_id, take))
+                remaining -= take
+            if remaining <= ZERO:
+                break
+        return slices
 
     slices: list[tuple[int, int, int, object]] = []
     remaining = qty
