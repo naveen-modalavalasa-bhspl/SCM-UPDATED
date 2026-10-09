@@ -1,0 +1,185 @@
+"""Put the database on the new HCM org and nothing else. DESTRUCTIVE. Idempotent.
+
+Run:  .venv/Scripts/python -m scripts.hcm_clean_slate
+
+`hcm_cutover` switches the mirror over but leaves both generations in place — the old
+positions merely deactivated, and every indent, approval and stock movement still
+hanging off people HCM has re-keyed. That is fine for a migration and useless for a
+test: half the screens read a name that no longer resolves.
+
+This goes further. It DELETES:
+
+* every transactional document — indents, approvals, allocations, stock, receipts,
+  issues, dispatches, notifications, audit rows. All of it is tagged to an employee
+  or a warehouse from the old org.
+* the workflow CONFIG as well (`wf_workflows`/`wf_stages`), because a ladder rung is
+  an HCM role id and every one of those is dead. The engine's fallback covers a
+  missing workflow (rule 8), so documents still route while the ladders are rebuilt.
+* the mirror rows the current feed does not serve.
+
+It KEEPS masters (`mst_`), RBAC, the rule engine's definitions and settings: none of
+them name an employee.
+
+Then it rebuilds what the app needs to be usable:
+
+* one warehouse per office that holds an LIP or MDP position — the stocking points
+  the new feed describes and the old one could not.
+* `inv_position_locations` joining each of those positions to its warehouse.
+* a credential for every active employee, all on the same password. This is a TEST
+  password on a test database; do not run this against anything real.
+"""
+import asyncio
+
+from sqlalchemy import delete, func, select, text
+
+from app.core.database import SessionLocal
+from app.core.security import hash_password
+from app.modules.inventory.locations import rebuild_stocking_points
+from app.platform.hcm.client import HcmClient
+from app.platform.hcm.models import (
+    HcmDepartment, HcmEmployee, HcmOffice, HcmPosition, HcmPositionAssignment,
+)
+from app.platform.settings.models import UserCredential
+from app.shared.enums import WarehouseType
+from app.shared.models.warehouse import Warehouse
+
+TEST_PASSWORD = "Bavya@123"
+
+# Employee ids at or above this are minted locally, not mirrored from HCM, and the
+# prune below leaves them alone. See scripts.create_admin_login.
+LOCAL_ID_FLOOR = 900000
+
+# Ordered children-first so the FKs inside a module never block the delete. Everything
+# here is a document or a log; nothing here is configuration a human typed.
+WIPE = [
+    # approvals
+    "wf_pending", "wf_actions", "wf_instances", "wf_delegations",
+    "wf_stage_conditions", "wf_stages", "wf_workflows",
+    # indents
+    "ind_indent_items", "ind_indents",
+    # inventory documents
+    "inv_allocation_items", "inv_allocations", "inv_reservations",
+    "inv_material_request_items", "inv_material_requests",
+    "inv_adjustment_items", "inv_adjustments", "inv_sto_items", "inv_sto",
+    "inv_cycle_count_items", "inv_cycle_counts", "inv_position_locations",
+    # stock itself — every balance and ledger row points at a warehouse that is
+    # about to be replaced, and stk_ledger is append-only, so it cannot be corrected
+    "stk_audit_items", "stk_audits", "stk_transfer_items", "stk_transfers",
+    "stk_reservations", "stk_ledger", "stk_batches", "stk_balance",
+    # warehouse documents
+    "inb_inspection_items", "inb_inspections", "inb_receipt_items", "inb_receipts",
+    "out_dispatch_events", "out_dispatch_items", "out_dispatch_packages",
+    "out_dispatches", "out_picking_items", "out_picking", "out_issue_items",
+    "out_issues",
+    "whs_serial_numbers", "whs_warehouse_items", "whs_warehouse_storage_types",
+    "whs_warehouse_locations", "whs_warehouses",
+    # procurement / logistics are already empty, but a rerun must not leave a stray
+    "pro_po_items", "pro_purchase_orders", "pro_return_items", "pro_returns",
+    "pro_quotation_items", "pro_quotations", "pro_rfq_vendors", "pro_rfq_items",
+    "pro_rfqs", "pro_requisition_items", "pro_requisitions",
+    "trn_trip_stops", "trn_trips",
+    "fin_invoice_items", "fin_invoices", "fin_ledger",
+    # trails and noise
+    "rule_executions", "sys_notifications", "sys_audit_log", "sys_app_logs",
+    "sys_attachments", "sys_sessions",
+]
+
+# Section name -> the kind of stocking point that section's positions serve. HCM keeps
+# exactly one section per rung; anything else ("104 sec") is ordinary org structure.
+#
+# Matched on letters only. HCM types these by hand and has already shipped both "M.D.P"
+# and "M.D.P." — a lookup on the exact string silently found zero MDP positions the day
+# a full stop appeared, and built no MDP stocking points at all.
+SECTION_TIER = {
+    "LIP": WarehouseType.LIP.value,
+    "MDP": WarehouseType.MDP.value,
+}
+
+# HCM's own `office_type`, likewise hand-typed ("ware house"), for offices that ARE a
+# store rather than a rung on the distribution chain.
+WAREHOUSE_OFFICE_TYPE = "WAREHOUSE"
+
+
+def _letters(value: str | None) -> str:
+    return "".join(ch for ch in (value or "").upper() if ch.isalpha())
+
+
+async def wipe_documents(db) -> None:
+    await db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+    for table in WIPE:
+        await db.execute(text(f"DELETE FROM {table}"))
+    await db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+    await db.commit()
+    print(f"wiped {len(WIPE)} document tables")
+
+
+async def prune_mirror(db, live: dict[str, set[int]]) -> None:
+    """Drop mirror rows the current feed does not serve. Nothing points at them any
+    more — the documents that did were deleted above."""
+    for model, key in ((HcmPositionAssignment, "positions"), (HcmPosition, "positions"),
+                       (HcmEmployee, "employees"), (HcmOffice, "offices"),
+                       (HcmDepartment, "departments")):
+        ids = live[key]
+        column = (HcmPositionAssignment.position_id
+                  if model is HcmPositionAssignment else model.id)
+        where = column.notin_(ids)
+        if model is HcmEmployee:
+            # Accounts minted locally live above the HCM id space (scripts.
+            # create_admin_login) and must survive a prune — HCM will never list them.
+            where = where & (column < LOCAL_ID_FLOOR)
+        removed = (await db.execute(
+            delete(model).where(where)
+            .execution_options(synchronize_session=False)
+        )).rowcount
+        print(f"  pruned {removed:>5} from {model.__tablename__}")
+    await db.commit()
+
+
+async def build_stocking_points(db) -> None:
+    """Delegates to the inventory module, which owns stocking points and now rebuilds
+    them on every HCM sync. Kept as a name so the cutover script reads the same."""
+    print(f"  stocking points: {await rebuild_stocking_points(db)}")
+
+
+async def reset_credentials(db) -> None:
+    """One password for every active employee. Test data, stated as such."""
+    await db.execute(delete(UserCredential))
+    digest = hash_password(TEST_PASSWORD)      # hashed once; bcrypt is deliberately slow
+    ids = (await db.execute(
+        select(HcmEmployee.id).where(HcmEmployee.is_active.is_(True))
+    )).scalars().all()
+    db.add_all(UserCredential(employee_id=i, password_hash=digest, must_change=False)
+               for i in ids)
+    await db.commit()
+    print(f"  issued {len(ids)} credentials, all '{TEST_PASSWORD}'")
+
+
+async def main() -> None:
+    client = HcmClient()
+    print(f"HCM: {client.base_url}")
+    # Checked, not plain: this prunes the mirror down to what the feeds list, and
+    # HCM's unordered pagination omits a different slice of a list on every walk.
+    # Pruning on one of those deletes live rows (see `HcmClient.fetch_all_checked`).
+    live, short = {}, []
+    for entity in ("positions", "employees", "offices", "departments"):
+        rows, complete = await client.fetch_all_checked(entity)
+        live[entity] = {r["id"] for r in rows if r.get("id")}
+        if not complete:
+            short.append(entity)
+    if not all(live.values()):
+        raise RuntimeError("HCM returned an empty feed — refusing to prune the mirror")
+    if short:
+        raise RuntimeError(f"HCM served an incomplete feed ({', '.join(short)}) - "
+                           f"refusing to prune the mirror against it")
+    print({k: len(v) for k, v in live.items()})
+
+    async with SessionLocal() as db:
+        await wipe_documents(db)
+        await prune_mirror(db, live)
+        await build_stocking_points(db)
+        await reset_credentials(db)
+    print("\nclean slate ready")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

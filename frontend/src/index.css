@@ -1,0 +1,633 @@
+@import url("https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Manrope:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap");
+@import "tailwindcss";
+@plugin "../hero.ts";
+@source "../node_modules/@heroui/theme/dist/**/*.{js,ts,jsx,tsx}";
+
+/* Class-based dark mode: `html.dark` drives both Tailwind's dark: variant and
+ * HeroUI's dark theme. Tokens flip at runtime below — utilities compile to
+ * var() references, so no component needs a dark: class of its own. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---- Operations-console design tokens (coexist with HeroUI's) ---- */
+@theme {
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --color-ink: #0e1424;
+  --color-ink-700: #1b2438;
+  --color-ink-500: #2c3852;
+  /* The page ground. Warm greige, and deliberately almost colourless.
+     It carries no information: every card on it is white and every status on those
+     cards is a colour that MEANS something, so chroma here competes with the only
+     colour on the page a reader has to act on. The old #f3f4f8 was cool enough to
+     fight an orange-crimson brand; a pastel of the brand itself was worse, because
+     the ground then shared a family with the pills sitting on it. This is warm enough
+     to belong to the mark and quiet enough to disappear. */
+  --color-surface: #F6F4F1;
+
+  /* Chrome — the rail, the sticky header, the mobile bar. Translucent white rather
+     than a colour of its own, so each module's ground reads THROUGH it and the chrome
+     re-tints itself per module with no palette to maintain. That also builds the only
+     hierarchy that matters here: solid white cards on top, chrome a step behind them,
+     the ground furthest back. Three surfaces all at #ffffff is what made the rail read
+     as a lit slab beside a tinted page.
+     `-strong` is for the mobile bar, which has scrolling CONTENT passing under it —
+     the rail and header only ever have the page ground behind them. */
+  --color-chrome: #FFFFFF9E;
+  --color-chrome-strong: #FFFFFFEF;
+  --wash-1: #FDF6F0;
+  --wash-2: #FBF7F3;
+  --color-line: #e5e8ef;
+  --color-body: #141a2a;
+  --color-muted: #697187;
+
+  /* The Bavya sweep. A gradient is an IMAGE, not a colour — it cannot live in
+     --color-brand, because `text-brand`, `border-brand`, `ring-brand` and
+     `bg-brand/25` all need a value a colour function can take. So it is declared
+     separately and painted as a background-image; the solid below is what everything
+     else resolves to, sampled from the sweep's 65% stop so the two read as one brand. */
+  --grad-1: #FABC41;
+  --grad-2: #FB8B00;
+  --grad-3: #CC004C;
+  --grad-4: #4D148C;
+  --brand-gradient: linear-gradient(90deg, var(--grad-1) 0%, var(--grad-2) 30%, var(--grad-3) 65%, var(--grad-4) 100%);
+
+  --color-brand: #CC004C;
+  --color-brand-600: #A80040;
+  --color-brand-050: #fdeef3;
+
+  --color-signal: #f0872b; /* warm accent, used sparingly */
+
+  --color-ok: #0f9d6b;
+  --color-ok-bg: #e5f6ee;
+  --color-warn: #b7791f;
+  --color-warn-bg: #fbf1dc;
+  --color-bad: #d64550;
+  --color-bad-bg: #fce8ea;
+  --color-info: #3a5bd0;
+  --color-info-bg: #e8edfb;
+  --color-neutral: #5a6377;
+  --color-neutral-bg: #eceef3;
+  /* ---- The progress rail (every flow stepper in the product) ----
+     FILLED means done, outlined means not yet. One calm hue per meaning and no
+     gradient: `.bg-brand` carries the four-stop brand sweep as a background IMAGE and
+     the sweep runs ACROSS the row rather than within one dot, so a finished shipment
+     was seven discs each a different colour from its neighbour. Emerald for a leg that
+     is done, indigo for the one in play — analogous cool hues, so the row reads as one
+     track and recedes behind the page's warm brand instead of competing with it.
+     Only an OUTCOME breaks the pair: rejected and cancelled keep the semantic hues,
+     because a stopped document must never wear the colour of one still moving.
+     Every value carries a WHITE glyph and is dark enough to clear 4.5:1 against white.
+     `-rail` is the line between two done dots and is deliberately the ONLY light value
+     here: a rail at full strength turns the row into a bar chart. */
+  --color-step-done: #0f8a62;
+  --color-step-done-rail: #66c09a;
+  --color-step-live: #3e63dd;
+  --color-step-bad: #c93b48;
+  --color-step-hold: #7357a0;
+  --color-step-off: #59616f;
+
+
+  /* Height of the tab strip's horizontal scrollbar. Read twice: once to draw the
+     bar, once to reserve its lane so the header does not change height with it. */
+  --nav-scrollbar-h: 6px;
+
+  /* A third decision outcome that is neither good nor bad. `returned` cannot wear
+     the warn amber: against the reject red it measures ΔE 14.2 to normal vision and
+     5.0 under deutan — below the floor at which two fills are tellable apart at all.
+     This violet clears both (20.3 / 23.0). Verified with the dataviz validator, not
+     by eye. */
+  --color-chart-returned: #7b5ea7;
+  --color-chart-returned-bg: #efe9f7;
+  --color-chart-returned-rail: var(--color-chart-returned);
+
+  /* Categorical slots for a donut whose slices are IDENTITIES (document types), not
+     states. Deliberately NOT the status tokens: reusing ok/bad/warn for "series 4"
+     teaches the eye that green means good in one chart and "purchase orders" in the
+     next. Assigned in fixed order and never cycled — a 7th type folds into "Other".
+     Validated with the dataviz palette script against the #ffffff card surface:
+     lightness band, chroma floor, CVD separation, normal-vision floor and contrast
+     all pass. Do not re-pick these by eye. */
+  --color-cat-1: #3e63dd;
+  --color-cat-2: #0d9488;
+  --color-cat-3: #b45309;
+  --color-cat-4: #7c3aed;
+  --color-cat-5: #be185d;
+  --color-cat-6: #4d7c0f;
+}
+
+/* Dark theme = the same tokens, re-pointed. Only values change; every utility
+ * (text-ink, bg-line, text-ok…) keeps working untouched. */
+.dark {
+  --color-ink: #edf1fa;
+  --color-ink-700: #d6dded;
+  --color-ink-500: #b7c1d8;
+  --color-surface: #0a0e18;
+  --color-chrome: #121828B8;
+  --color-chrome-strong: #121828F2;
+  --wash-1: #171d33;
+  --wash-2: #101a26;
+  --color-line: #272e42;
+  --color-body: #c3ccdf;
+  --color-muted: #808ba7;
+
+  /* Same sweep, lifted off the dark ground: the 65% crimson and the 100% violet both
+     sit below the dark lightness band and turn to mud on #0a0e18. */
+  --grad-1: #FFCE6B;
+  --grad-2: #FFA53D;
+  --grad-3: #F4487F;
+  --grad-4: #8B5BD6;
+
+  --color-brand: #FF7BA8;
+  --color-brand-600: #FF9BBF;
+  --color-brand-050: #2e0f1b;
+
+  --color-ok: #2fc487;
+  --color-ok-bg: #10281f;
+  --color-warn: #e0aa4b;
+  --color-warn-bg: #2b2110;
+  --color-bad: #f07580;
+  --color-bad-bg: #33151c;
+  --color-info: #859dff;
+  --color-info-bg: #171f3d;
+  --color-neutral: #97a1b8;
+  --color-neutral-bg: #232a3d;
+  /* The same six, re-STEPPED for the dark ground rather than auto-lightened: the light
+     emerald and indigo both sit too close to #121828 to read as a filled disc on it,
+     and the check inside them has to stay white in both themes or "done" changes shape
+     between the two. */
+  --color-step-done: #14916a;
+  --color-step-done-rail: #276b56;
+  --color-step-live: #4f74e8;
+  --color-step-bad: #d9505c;
+  --color-step-hold: #8b6bc4;
+  --color-step-off: #6b7488;
+
+
+  /* Re-stepped for the dark surface, not lightened automatically. */
+  --color-chart-returned: #a78bfa;
+  --color-chart-returned-bg: #2a2140;
+
+  /* Re-STEPPED for the dark surface, not auto-lightened: the light steps sit above
+     the dark lightness band. Validated against #121828, same five checks. */
+  --color-cat-1: #6d8cf5;
+  --color-cat-2: #0f9e8f;
+  --color-cat-3: #c07a22;
+  --color-cat-4: #9370e8;
+  --color-cat-5: #e0559b;
+  --color-cat-6: #7a9830;
+}
+
+/* Every solid brand fill wears the sweep.
+ *
+ * One selector rather than 201 edits: `bg-brand` compiles to `background-color`, and
+ * a `background-image` painted over it wins without the colour having to change — so
+ * anything that reads the token for a border or a shadow still matches. The alpha
+ * variants (`bg-brand/25`) compile to their OWN class and are deliberately not caught:
+ * they are progress-bar troughs and hover washes, where a four-colour sweep at 25%
+ * opacity is just a smear.
+ *
+ * KNOWN, and the reason this is a look to judge rather than a finished theme: the
+ * sweep's first third is amber, and white on #FABC41 measures 1.9:1. Any fill here
+ * that carries a white LABEL fails AA on its left edge. Decorative fills — the mark,
+ * icon tiles, bars, the active rail pill — are fine. Fixing it means either starting
+ * text-bearing fills at the crimson stop or setting their labels dark, and that is a
+ * decision about the buttons, not about the gradient. */
+.bg-brand {
+  background-image: var(--brand-gradient);
+}
+
+/* The rail's module list scrolls with no visible bar (see AppLayout). Something has
+ * to say so: a short fade on the bottom edge of the list's box.
+ *
+ * The fade is always ON — CSS cannot ask whether an element overflows. It is
+ * invisible in the normal case anyway: the nav is `flex-1`, so its box runs to the
+ * profile card while the twelve rows end well above that, and a mask over empty space
+ * fades nothing. It only bites when rows reach the bottom edge, which is the same
+ * moment the list starts scrolling. */
+.nav-rail-scroll {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent 100%);
+}
+
+/* Rail module icons, stroked with the brand sweep.
+ *
+ * `background-image` + `background-clip` cannot do this — that paints TEXT, and these
+ * are stroked SVG paths. An SVG paint server can: `stroke: url(#rail-gradient)` points
+ * at the <linearGradient> AppLayout renders once. The gradient uses the default
+ * objectBoundingBox units, so each icon gets the whole sweep across its own 18px
+ * rather than its slice of a rail-length one — twelve icons each amber-to-violet,
+ * not one icon per colour.
+ *
+ * The stops are `var(--grad-*)`, the same four the CSS gradient is built from, so the
+ * icons re-step with the theme instead of staying light-mode orange on a dark rail. */
+.icon-gradient {
+  stroke: url(#rail-gradient);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/*
+ * The page never scrolls sideways.
+ *
+ * On a 390px phone the app measured 426px wide and every screen slid horizontally —
+ * one long document number or a wide table was enough, and the whole layout went with
+ * it. Anything genuinely too wide (a table, a code block, a diagram) has to scroll
+ * inside its own box; `.overflow-x-auto` is exempted below so those keep working.
+ */
+html,
+body,
+#root {
+  overflow-x: clip;
+  max-width: 100%;
+}
+
+/* The page ground is painted by BODY and must reach the bottom of every scroll.
+ * HeroUI's plugin paints `:root, [data-theme]` with its own plain background, and a
+ * root with a background stops body's from propagating to the canvas — so the module
+ * tint ended at body's box (height: 100%, one viewport) and the rest of a long screen
+ * showed HeroUI's flat colour underneath. Transparent here lets body's ground cover
+ * the whole canvas again. `html:root` outranks `:root` and `[data-theme]`. */
+html:root {
+  background-color: transparent;
+}
+
+body {
+  margin: 0;
+  background:
+    /* Variables, not literals: a module re-tints its ground by setting these three
+       together (see the module grounds below). Setting only the base leaves two warm
+       washes glowing over somebody else's hue, which reads as a colour cast rather
+       than as light. */
+    radial-gradient(1200px 480px at 100% -10%, var(--wash-1) 0%, transparent 55%),
+    radial-gradient(900px 420px at -10% 0%, var(--wash-2) 0%, transparent 50%),
+    var(--color-surface);
+  background-attachment: fixed;
+  color: var(--color-body);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.dark body {
+  background:
+    radial-gradient(1100px 460px at 100% -10%, var(--wash-1) 0%, transparent 55%),
+    radial-gradient(900px 420px at -10% 0%, var(--wash-2) 0%, transparent 50%),
+    var(--color-surface);
+}
+
+/* ---- Module grounds ----------------------------------------------------------
+ *
+ * Each module may tint the page it owns. `AppLayout` stamps the active module's code
+ * on <body>; everything else is here, so the palette is one block to read rather than
+ * a colour inlined in the layout.
+ *
+ * Three rules, learned on the ones that did not work:
+ *   1. Barely there. The ground carries NO information — the cards are white and the
+ *      statuses on them are the only colours that mean anything. Every value here
+ *      sits within a couple of percent of the neutral, which is enough to feel on
+ *      arrival and not enough to argue with a pill.
+ *   2. Base and both washes move together, or the glow becomes a second hue.
+ *   3. `html:not(.dark)` on every rule. `--color-surface` is set on `.dark` (the html
+ *      element) and body is its descendant, so an unscoped `body[data-module]` would
+ *      win in dark mode too and paint a near-black page pastel mint.
+ *
+ * Modules with no rule fall through to the warm greige default, which is deliberate:
+ * a module gets a ground when there is a reason for one, not to complete a set. */
+/* NOTE the code: `approvals`, not `grp_approvals`. The menu's top-level codes are not
+ * uniform — `grp_indents`, `grp_purchasing`, `grp_warehouse`, `grp_inventory`,
+ * `grp_logistics`, `grp_returns`, `grp_reports`, `grp_rbac` and `grp_settings` carry
+ * the prefix; `home`, `approvals` and `masters` do not. They come from `PAGE_TREE` in
+ * `scripts/seed.py`, which is the list to check before adding a module here — a
+ * selector that guesses wrong fails SILENTLY, as a page that simply keeps the default
+ * ground. */
+html:not(.dark) body[data-module="approvals"] {
+  /* Approvals   · pastel mint */
+  --color-surface: #EFF8F4;
+  --wash-1: #F5FBF9;
+  --wash-2: #FAFDFC;
+}
+html:not(.dark) body[data-module="grp_purchasing"] {
+  /* Procurement · pastel blue */
+  --color-surface: #EDF3FA;
+  --wash-1: #F4F8FC;
+  --wash-2: #FAFCFE;
+}
+html:not(.dark) body[data-module="grp_inventory"] {
+  /* Inventory   · pastel purple */
+  --color-surface: #F6EDFA;
+  --wash-1: #FAF4FC;
+  --wash-2: #FCFAFE;
+}
+html:not(.dark) body[data-module="grp_warehouse"] {
+  /* Warehouse   · pastel yellow */
+  --color-surface: #FCF7E7;
+  --wash-1: #FDFAF1;
+  --wash-2: #FEFDF8;
+}
+html:not(.dark) body[data-module="grp_logistics"] {
+  /* Logistics   · pastel orange */
+  --color-surface: #FDF0E7;
+  --wash-1: #FEF6F1;
+  --wash-2: #FEFBF8;
+}
+html:not(.dark) body[data-module="grp_reports"] {
+  /* Reports     · pastel violet */
+  --color-surface: #F1EFFA;
+  --wash-1: #F7F5FC;
+  --wash-2: #FBFBFE;
+}
+
+
+
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.02em;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Horizontal navigation strips (the module tab bar, the indents sub-nav).
+   A module with a dozen pages overflows on a laptop, and the browser's default
+   overlay scrollbar never appears for a mouse user, so the last tabs were
+   unreachable without a touchpad. Draw a thin bar on hover — the track keeps its
+   space at all times, so revealing the thumb never shifts the tabs. */
+.nav-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.15s ease;
+  /*
+   * Reserve the scrollbar's lane whether or not this strip overflows.
+   *
+   * The bar is pure layout: it appears only when the tabs are wider than the
+   * header and pushes the strip 6px taller when it does, so Settings (seven
+   * tabs) sat lower in the header than Indents (five) and the header height
+   * tracked tab count. Forcing the box to tab-height + bar makes both cases the
+   * same number — an overflowing strip spends the 6px on the bar, the rest
+   * spend it on nothing. Hiding the bar instead would have been cheaper and
+   * wrong: it is how a mouse drags this strip sideways.
+   */
+  min-height: calc(2.75rem + var(--nav-scrollbar-h));
+}
+
+.nav-scroll:hover,
+.nav-scroll:focus-within {
+  scrollbar-color: var(--color-line) transparent;
+}
+
+.nav-scroll::-webkit-scrollbar {
+  height: var(--nav-scrollbar-h);
+}
+
+.nav-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.nav-scroll::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: transparent;
+}
+
+.nav-scroll:hover::-webkit-scrollbar-thumb,
+.nav-scroll:focus-within::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+}
+
+.nav-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Filter/menu popovers: a 140ms rise-and-settle so a panel reads as opened,
+ * not as having always been there. One class, shared by every popup. */
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.pop-in {
+  animation: pop-in 0.14s cubic-bezier(0.2, 0.8, 0.3, 1);
+  transform-origin: top;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pop-in { animation: none; }
+}
+
+/* ── A long name that scrolls itself on hover ──────────────────────────────────
+   Used by `ScrollingName` (shared/layout/AppLayout.tsx) for position names, which
+   run long — "Assistant District Manager, Krishna (Vijayawada Rural)" — and were
+   simply truncated in a rail nobody wants wider.
+
+   The track holds the name TWICE and slides left by exactly half its own width, so
+   the second copy arrives where the first began and the loop has no seam. Because
+   the shift is a percentage of the track, one animation fits every length: a long
+   name takes the same 9s to pass whether it is 30 characters or 90.
+
+   A name that already fits still "scrolls", but there is nothing past the edge to
+   reveal, so it reads as motionless. Motion is on HOVER and FOCUS only — never
+   ambient — and `prefers-reduced-motion` stops it outright, leaving the `title`
+   tooltip as the way to read the rest. */
+.lt-marquee { display: inline-block; max-width: 100%; vertical-align: bottom; }
+.lt-marquee-track { display: inline-flex; width: max-content; }
+/* The gap between the two copies, and ONLY once there are two. Applied always, the
+   first copy measured 2rem wider than its own text and every short name looked like
+   it overflowed. `ScrollingName` sets [data-scroll] when the name genuinely does not
+   fit; without it there is one copy, no gap and no animation, which is what a name
+   like DIRECTOR should do. */
+.lt-marquee[data-scroll] .lt-marquee-item { padding-right: 2rem; }
+
+.lt-marquee[data-scroll]:hover .lt-marquee-track,
+.lt-marquee[data-scroll]:focus-visible .lt-marquee-track,
+.lt-marquee[data-scroll]:focus-within .lt-marquee-track {
+  animation: lt-marquee-slide 9s linear infinite;
+}
+
+@keyframes lt-marquee-slide {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lt-marquee[data-scroll]:hover .lt-marquee-track,
+  .lt-marquee[data-scroll]:focus-visible .lt-marquee-track,
+  .lt-marquee[data-scroll]:focus-within .lt-marquee-track { animation: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   The cold-open splash (AppSplash).
+
+   Four layers, all of them the SAME four gradient stops the rest of the product
+   is painted with (--grad-1..4 / --brand-gradient), so the wait belongs to the
+   app rather than being a spinner borrowed from somewhere:
+
+     .splash-aurora        a slow warm/violet drift behind everything
+     .splash-stack::before a halo breathing under the mark
+     .splash-mark          the SCM letterforms, masked, with a light passing through
+     .splash-track/-comet  a hairline that says work is still happening
+
+   The mark is a mask so the brand sweep paints THROUGH the letters; that also
+   makes it theme-aware for free, because the dark theme redefines the same stops.
+   Nothing animates layout: transform, opacity and background-position only. */
+.splash {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.splash-aurora {
+  position: absolute;
+  inset: -25%;
+  pointer-events: none;
+  background:
+    radial-gradient(40% 48% at 24% 34%, color-mix(in oklab, var(--grad-2) 17%, transparent) 0%, transparent 72%),
+    radial-gradient(38% 46% at 78% 66%, color-mix(in oklab, var(--grad-4) 14%, transparent) 0%, transparent 74%),
+    radial-gradient(32% 40% at 58% 18%, color-mix(in oklab, var(--grad-3) 9%, transparent) 0%, transparent 72%);
+  filter: blur(60px);
+  will-change: transform, opacity;
+  animation: splash-drift 16s ease-in-out infinite alternate;
+}
+
+@keyframes splash-drift {
+  0%   { transform: translate3d(-2%, -1%, 0) scale(1);    opacity: 0.7; }
+  50%  { transform: translate3d(2%, 1.5%, 0) scale(1.07); opacity: 1; }
+  100% { transform: translate3d(-1%, 2%, 0) scale(1.03);  opacity: 0.8; }
+}
+
+.splash-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.9rem;
+  animation: splash-rise 0.75s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@keyframes splash-rise {
+  from { opacity: 0; transform: translateY(12px) scale(0.965); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* The halo. Sits on the MARK, not on the stack's centre — the progress hairline
+   below would otherwise pull the glow off the letterforms it belongs to. */
+.splash-stack::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 28%;
+  width: clamp(240px, 42vw, 400px);
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle,
+    color-mix(in oklab, var(--grad-2) 17%, transparent) 0%,
+    color-mix(in oklab, var(--grad-3) 7%, transparent) 40%,
+    transparent 72%);
+  filter: blur(36px);
+  will-change: transform, opacity;
+  animation: splash-breathe 3.6s ease-in-out infinite;
+}
+
+@keyframes splash-breathe {
+  0%, 100% { opacity: 0.5;  transform: translate(-50%, -50%) scale(0.93); }
+  50%      { opacity: 0.95; transform: translate(-50%, -50%) scale(1.07); }
+}
+
+/* 255x72 is the artwork's own ratio; hard-coded so the box never reflows while
+   the PNG is still arriving. */
+.splash-mark {
+  position: relative;
+  width: clamp(176px, 32vw, 280px);
+  aspect-ratio: 255 / 72;
+  -webkit-mask-image: var(--splash-mark-src);
+          mask-image: var(--splash-mark-src);
+  -webkit-mask-size: contain;
+          mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+          mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+          mask-position: center;
+  background-image:
+    linear-gradient(100deg, transparent 38%, rgb(255 255 255 / 0.92) 50%, transparent 62%),
+    var(--brand-gradient);
+  background-repeat: no-repeat;
+  background-size: 260% 100%, 100% 100%;
+  background-position: -90% 0, 0 0;
+  filter: drop-shadow(0 8px 22px color-mix(in oklab, var(--grad-3) 24%, transparent));
+  will-change: background-position;
+  animation: splash-sheen 2.8s cubic-bezier(0.45, 0, 0.5, 1) infinite;
+}
+
+/* The light crosses, then waits. A sheen that never rests reads as a loading bar
+   wearing a logo; one that pauses reads as a mark catching the light. */
+@keyframes splash-sheen {
+  0%        { background-position: -90% 0, 0 0; }
+  60%, 100% { background-position: 190% 0, 0 0; }
+}
+
+.splash-track {
+  position: relative;
+  width: clamp(148px, 26vw, 216px);
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--color-body) 12%, transparent);
+}
+
+.splash-comet {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--brand-gradient);
+  transform-origin: left center;
+  will-change: transform;
+  animation: splash-comet 1.6s cubic-bezier(0.65, 0.05, 0.36, 1) infinite;
+}
+
+@keyframes splash-comet {
+  0%   { transform: translateX(-105%) scaleX(0.4); }
+  50%  { transform: translateX(0)     scaleX(0.8); }
+  100% { transform: translateX(105%)  scaleX(0.4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-aurora,
+  .splash-stack,
+  .splash-stack::before,
+  .splash-mark,
+  .splash-comet { animation: none; }
+  /* Park the sheen past the letterforms so the mark reads as its plain self. */
+  .splash-mark  { background-position: 190% 0, 0 0; }
+  .splash-comet { transform: scaleX(0.6); opacity: 0.6; }
+}

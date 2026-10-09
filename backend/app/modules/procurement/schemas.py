@@ -1,0 +1,1407 @@
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.shared.time import not_in_past
+from app.shared.limits import (  # request-size guards, see the module
+    Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
+)
+
+
+class POLineIn(BaseModel):
+    item_id: int
+    indent_item_id: int | None = None
+    quantity: float = Field(gt=0)
+    rate: float = Field(ge=0)
+    tax_percent: float = Field(ge=0, default=0)
+
+
+class POHeaderIn(BaseModel):
+    """What the order says beyond its lines — the same on every way of raising one.
+
+    One base class rather than four copies: a PO typed by hand, one written off an
+    indent and one written off an award are the same document, so a term agreed on one
+    must be enterable on all three or the printed order changes by route.
+
+    Discount and freight are DOCUMENT money: they are applied to the order, never
+    spread across lines, because spreading them would rewrite rates a vendor quoted.
+    """
+    project_id: int | None = None
+    remarks: str | None = None
+    payment_terms: str | None = None
+    # The payment-term master (2026-10-06). Picking one copies its milestones onto the
+    # order and its wording into `payment_terms`; None leaves the order's as they are.
+    payment_term_id: int | None = None
+    delivery_terms: str | None = None
+    material_terms: str | None = None
+    logistics_terms: str | None = None
+    billing_address: str | None = None
+    shipping_address: str | None = None
+    # None means "say nothing about this", not zero. They defaulted to 0, which made
+    # a payload that simply omitted them indistinguishable from one asking for no
+    # discount — so every save that did not carry them reset both to zero. An explicit
+    # 0 still clears them; the columns are NOT NULL, so None is never written through.
+    discount_amount: float | None = Field(ge=0, default=None)
+    freight_amount: float | None = Field(ge=0, default=None)
+
+
+class POCreate(POHeaderIn):
+    vendor_id: int
+    expected_date: date | None = None
+    lines: Annotated[list[POLineIn], DocumentLines]
+
+    _no_past_expected_date = field_validator("expected_date")(
+        lambda cls, v: not_in_past(v, "Expected date"))
+
+
+class POHeaderUpdate(POHeaderIn):
+    """Fill in a DRAFT order's header after it was written for you.
+
+    An order raised from an award arrives complete on the money and empty on
+    everything a buyer negotiates in words — terms, addresses, the project it is
+    booked to. Typing them was only possible on a hand-raised PO, so a PO that came
+    off the chain printed blank. Same fields, same permission, DRAFT only.
+    """
+    expected_date: date | None = None
+
+
+class POAmendLineIn(BaseModel):
+    """One line of an amended order.
+
+    `id` is the EXISTING line being changed. Omit it and the line is new; leave an
+    existing id out of the payload altogether and that line is removed — which the
+    service refuses if anything has already been received against it.
+    """
+    id: int | None = None
+    item_id: int
+    quantity: float = Field(gt=0)
+    rate: float = Field(ge=0)
+    tax_percent: float = Field(ge=0, default=0)
+
+
+class POAmendIn(POHeaderIn):
+    """A revision of an order that has already gone out.
+
+    `reason` is required: an amendment is a change to something somebody has already
+    agreed to, and a revision history with no reasons in it answers no questions.
+
+    `lines` is optional — most amendments move a date or a term and leave the goods
+    alone. Sending it replaces the whole line list.
+    """
+    reason: str
+    expected_date: date | None = None
+    lines: Annotated[list[POAmendLineIn], DocumentLines] | None = None
+
+
+class POVendorResponseIn(BaseModel):
+    """The vendor's answer. A decline must say why; an acceptance need not.
+
+    IT CARRIES NO PRICES. It used to take a `lines` list of rates, which let the
+    supplier accept the order at figures of their own and pushed the rewritten order
+    back up our approval ladder. That is not an acceptance, it is a counter-offer
+    wearing one: the buyer agreed a price, the order says it, and the only two things
+    a supplier may do with it are take it or refuse it. A price that needs to change
+    is the buyer amending the order, where the change is theirs, the reason is
+    recorded and the new total is approved before the supplier ever sees it.
+    """
+    accept: bool
+    note: str = ""
+
+
+class PORevisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    revision_no: int
+    reason: str | None = None
+    status: str | None = None
+    vendor_status: str | None = None
+    snapshot: dict | None = None
+    changed_by_name: str | None = None
+    created_at: datetime
+
+
+class POFromQuotationIn(POHeaderIn):
+    """Everything the awarded quotation does NOT already say.
+
+    No vendor and no lines: both come from the offer being accepted, and letting the
+    caller send them would make it possible to raise a PO that disagrees with the
+    quotation it claims to be for.
+    """
+    expected_date: date | None = None
+
+
+class ActionIn(BaseModel):
+    comments: str = ""
+
+
+# --------------------------------------------------------------------------- #
+#  PO approval discussion — approver <=> raiser chat
+# --------------------------------------------------------------------------- #
+
+class POCommentIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class POCommentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_id: int
+    author_id: int | None = None
+    author_name: str | None = None
+    message: str
+    created_at: datetime
+
+
+class POApprovalQtyLineIn(BaseModel):
+    """One line's approved quantity — may only be DECREASED by the approver."""
+    id: int
+    quantity: float = Field(gt=0)
+
+
+class POApprovalQtyIn(BaseModel):
+    """What the approver is signing: how much may actually be bought.
+
+    Quantities may only go DOWN — an approval can trim a request, never inflate it.
+    The edited numbers are what the vendor receives; the original is in the revision
+    snapshot if it was an amendment.
+    """
+    lines: list[POApprovalQtyLineIn] = Field(min_length=1)
+
+
+# --------------------------------------------------------------------------- #
+#  Approval trail — one shape for every procurement document
+# --------------------------------------------------------------------------- #
+
+class ApprovalPendingRow(BaseModel):
+    """A person the engine is waiting on. A NAME, never a permission: who may press
+    the button is `engine.actionable_doc_ids`, and appearing here grants nothing."""
+    id: int
+    name: str
+
+
+class ApprovalEventRow(BaseModel):
+    """One rung, as it actually happened. `stage_name` is whatever the ladder called
+    it at the time — never mapped, abbreviated or re-titled here, because the rungs
+    are configured per project on Settings > Approvals Config and a lookup in code
+    would go stale the moment somebody renames one."""
+    stage_sequence: int | None = None
+    stage_name: str | None = None
+    actor_id: int | None = None
+    actor_name: str | None = None
+    actor_position: str | None = None
+    action: str
+    comments: str | None = None
+    acted_at: datetime | None = None
+
+
+class ApprovalTrailOut(BaseModel):
+    doc_type: str
+    doc_id: int
+    #: None when the document has never been submitted — no instance exists yet.
+    instance_status: str | None = None
+    stage_name: str | None = None
+    pending_with: list[ApprovalPendingRow] = []
+    history: list[ApprovalEventRow] = []
+
+
+class POItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    rate: float
+    tax_percent: float
+    amount: float
+    # Days the vendor quoted for this line; None on a PO with no quotation behind it.
+    delivery_days: int | None = None
+    received_quantity: float
+
+
+class PODocumentOut(BaseModel):
+    """A supplier's invoice or delivery challan filed against the order."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    file_name: str
+    file_size: int | None = None
+    doc_category: str | None = None
+    uploaded_by_name: str | None = None
+    created_at: datetime | None = None
+
+
+class POMilestoneOut(BaseModel):
+    """One frozen stage of the order's payment terms. The amount is the share of the
+    order value; what has been paid against it is served by the accounts module."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    seq: int
+    stage: str
+    percent: float
+    due_days: int = 0
+
+
+class POOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    po_date: date | None = None
+    expected_date: date | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+    # The buying chain behind this order, when it came off an award rather than an
+    # indent. All optional — a PO raised straight from an indent carries none of them.
+    requisition_id: int | None = None
+    requisition_no: str | None = None
+    rfq_id: int | None = None
+    rfq_no: str | None = None
+    quotation_id: int | None = None
+    quotation_no: str | None = None
+    vendor_id: int
+    vendor_name: str | None = None
+    facility_id: int | None = None
+    facility_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    status: str
+    sub_total: float
+    discount_amount: float = 0
+    tax_amount: float
+    freight_amount: float = 0
+    total_amount: float
+    remarks: str | None = None
+    payment_terms: str | None = None
+    payment_term_id: int | None = None
+    payment_milestones: list[POMilestoneOut] = []
+    delivery_terms: str | None = None
+    material_terms: str | None = None
+    logistics_terms: str | None = None
+    billing_address: str | None = None
+    shipping_address: str | None = None
+    current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
+    # What the vendor said, and which revision they said it about. Both null on an
+    # order that has never been sent, which is how a reader tells "not asked yet" from
+    # "asked and waiting".
+    vendor_status: str | None = None
+    vendor_responded_at: datetime | None = None
+    vendor_response_note: str | None = None
+    # Calculated at read time from the accepted/dispatch state.
+    amendment_allowed: bool = False
+    revision_no: int = 0
+    amended_at: datetime | None = None
+    amendment_reason: str | None = None
+    created_at: datetime
+    items: list[POItemOut] = []
+
+
+class POListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    vendor_name: str | None = None
+    indent_no: str | None = None
+    status: str
+    # Two orders can both read SENT_TO_VENDOR while one is agreed and the other has
+    # been sitting unanswered for a week. The register has to be able to say which.
+    vendor_status: str | None = None
+    revision_no: int = 0
+    total_amount: float
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
+    created_at: datetime
+
+
+# --------------------------------------------------------------------------- #
+#  Requisition
+# --------------------------------------------------------------------------- #
+
+class ReqLineIn(BaseModel):
+    item_id: int
+    quantity: float = Field(gt=0)
+    uom_code: str | None = None
+    estimated_rate: float = Field(ge=0, default=0)
+    required_date: date | None = None
+    indent_id: int | None = None
+    indent_item_id: int | None = None
+
+
+class ReqCreate(BaseModel):
+    warehouse_id: int | None = None
+    project_id: int | None = None
+    # Who is asking and on whose paper. Both were derived from the raiser's HCM record,
+    # which is only right until somebody raises on another department's behalf.
+    department_id: int | None = None
+    company_name: str | None = None
+    # One date for the document. A line may still override it (`ReqLineIn`), but the
+    # form no longer asks for the same date once per item.
+    required_date: date | None = None
+    priority: str | None = None
+    remarks: str | None = None
+    lines: list[ReqLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+
+
+class ReqFromMRsIn(BaseModel):
+    """Fold several approved material requests into one requisition.
+
+    Item-wise: the same item on five requests becomes one line. Every request stays on
+    the requisition's sources, and none of them can be consolidated twice.
+    """
+    mr_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
+    warehouse_id: int | None = None
+    project_id: int | None = None
+    department_id: int | None = None
+    company_name: str | None = None
+    required_date: date | None = None
+    priority: str | None = None
+    remarks: str | None = None
+
+
+class MRCandidateRow(BaseModel):
+    """An approved material request that no requisition has claimed yet."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    mr_no: str
+    indent_id: int | None = None
+    indent_no: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    status: str
+    created_at: datetime
+
+
+class ReqItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    ordered_qty: float
+    estimated_rate: float
+    estimated_amount: float
+    required_date: date | None = None
+    indent_id: int | None = None
+    indent_no: str | None = None
+
+
+class ReqListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    req_no: str
+    req_date: date | None = None
+    warehouse_name: str | None = None
+    project_name: str | None = None
+    status: str
+    priority: str | None = None
+    total_items: int
+    estimated_value: float
+    current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
+    created_by_name: str | None = None
+    created_at: datetime
+
+
+class ReqOut(ReqListRow):
+    warehouse_id: int | None = None
+    project_id: int | None = None
+    remarks: str | None = None
+    approved_by_name: str | None = None
+    approved_at: datetime | None = None
+    # Where this demand came from, when Purchase picked it up rather than raising it.
+    source_mr_id: int | None = None
+    source_mr_no: str | None = None
+    # Stored where the form named them; otherwise read from the raiser's HCM record and
+    # the install settings. See service._fill_header_context.
+    department_id: int | None = None
+    department_name: str | None = None
+    company_name: str | None = None
+    required_date: date | None = None
+    # The indents behind the lines, deduplicated. A requisition consolidated out of the
+    # field serves several, and the header could not say which.
+    source_indent_nos: list[str] = []
+    # Every material request folded in, not just `source_mr_no`.
+    source_mr_nos: list[str] = []
+    has_rfq: bool = False
+    has_consolidation: bool = False
+    items: list[ReqItemOut] = []
+
+
+# --------------------------------------------------------------------------- #
+#  RFQ
+# --------------------------------------------------------------------------- #
+
+class RFQLineIn(BaseModel):
+    item_id: int
+    quantity: float = Field(gt=0)
+    uom_code: str | None = None
+    description: str | None = None
+    required_date: date | None = None
+
+
+class RFQVendorAllocationIn(BaseModel):
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
+class RFQCreate(BaseModel):
+    title: str | None = None
+    requisition_id: int | None = None
+    consolidation_id: int | None = None
+    warehouse_id: int | None = None
+    project_id: int | None = None
+    # Typed only on an RFQ raised cold. Where a requisition or a sheet is named, that
+    # document's own values win and these are left empty.
+    department_id: int | None = None
+    company_name: str | None = None
+    due_date: date | None = None
+    terms: str | None = None
+    # None means "use the default" — see shared/evaluation.method_of. Validated in the
+    # service against the shared catalogue, never against a list kept here.
+    evaluation_method: str | None = None
+    vendor_ids: Annotated[list[int], BatchIds] = []
+    vendor_allocations: list[RFQVendorAllocationIn] = Field(
+        default_factory=list, max_length=MAX_DOCUMENT_LINES * 20)
+    lines: list[RFQLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+
+
+class RFQQuantityIn(BaseModel):
+    """One line's quantity, by RFQ line id. 0 means drop the line."""
+    id: int
+    quantity: float = Field(ge=0)
+
+
+class RFQQuantitiesIn(BaseModel):
+    """What the approver is sending back down: quantities only.
+
+    A separate body from `RFQUpdate` on purpose. An approver holds `rfq.approve`, not
+    `rfq.create`, so they cannot reach the editing route at all — and they should not:
+    the deadline, the vendor list and the item list are the buyer's. The one thing a
+    person signing a tender genuinely needs to change is HOW MUCH, and that is all
+    this carries.
+    """
+    lines: list[RFQQuantityIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+    comments: str = ""
+
+
+class RFQUpdate(BaseModel):
+    """Every field optional: this is a PATCH in a PUT's clothing, because the RFQ
+    form saves the whole header and the caller should not have to resend the lines
+    to move a deadline."""
+    title: str | None = None
+    due_date: date | None = None
+    terms: str | None = None
+    warehouse_id: int | None = None
+    project_id: int | None = None
+    department_id: int | None = None
+    company_name: str | None = None
+    evaluation_method: str | None = None
+    vendor_ids: Annotated[list[int], BatchIds] | None = None
+    vendor_allocations: list[RFQVendorAllocationIn] | None = None
+    lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
+
+
+class RFQItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    description: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    required_date: date | None = None
+
+
+class RFQVendorOut(BaseModel):
+    """No `access_token`. It is a bearer credential — whoever holds it can quote as
+    that vendor — so it leaves the server exactly once, in the invite link."""
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    vendor_id: int
+    vendor_name: str | None = None
+    vendor_email: str | None = None
+    status: str | None = None
+    sent_at: datetime | None = None
+    responded_at: datetime | None = None
+    mapped_item_ids: list[int] | None = None
+    item_quantities: dict[str, float] | None = None
+    #: What this supplier WON, item id -> quantity, once the tender is awarded. Null on
+    #: a whole-quote award, where the winner took every line as quoted. Served so the
+    #: comparison sheet can restate an existing split when a dead purchase order sends
+    #: part of the award back to be re-split — a re-award has to say what everybody
+    #: keeps, not only what is moving.
+    awarded_quantities: dict[str, float] | None = None
+    #: What is currently covered by a live purchase order, item id -> quantity.
+    #: Computed from the PO lines on every RFQ read rather than stored beside the
+    #: award: rejecting or cancelling an order must release its quantity immediately.
+    live_allocated_quantities: dict[str, float] | None = None
+
+
+class RFQListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    rfq_no: str
+    title: str | None = None
+    rfq_date: date | None = None
+    due_date: date | None = None
+    status: str
+    vendor_status: str | None = None
+    total_items: int
+    vendor_count: int
+    response_count: int
+    awarded_vendor_name: str | None = None
+    current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
+    # Freeze Prices (2026-09-26): the lock a buyer closes before comparing and
+    # awarding. On the LIST row so the register can show the lock glyph without
+    # a detail fetch; the detail fields ride `RFQOut` below.
+    is_price_frozen: bool = False
+    created_at: datetime
+
+
+class RFQPurchaseOrderRef(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    status: str
+    quotation_id: int | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    # The original PO quantity for each item. This lets the comparison screen show
+    # exactly what was already sent before the buyer awards an additional balance.
+    item_quantities: dict[str, float] = Field(default_factory=dict)
+
+
+class RFQOut(RFQListRow):
+    requisition_id: int | None = None
+    requisition_no: str | None = None
+    consolidation_id: int | None = None
+    consolidation_no: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    terms: str | None = None
+    evaluation_method: str | None = None
+    awarded_vendor_id: int | None = None
+    created_by_name: str | None = None
+    # The purchase order this award became. Not stored on pro_rfqs — the PO points
+    # backward at the RFQ and this is read from there, so there is one link, not two.
+    po_id: int | None = None
+    po_no: str | None = None
+    po_status: str | None = None
+    purchase_orders: list[RFQPurchaseOrderRef] = []
+    # Carried from the requisition behind it, so a tender reads on its own. Derived at
+    # request time (service.get_rfq) and empty on the vendor-facing routes, which read
+    # the RFQ by a different path — a supplier has no business with our indent numbers.
+    department_id: int | None = None
+    department_name: str | None = None
+    company_name: str | None = None
+    priority: str | None = None
+    requisition_status: str | None = None
+    source_indent_nos: list[str] = []
+    # Freeze Prices detail (2026-09-26): when the door was closed, by whom, and
+    # how many quotations were in at the time. All four null/False on an open
+    # tender; `frozen_at_revision` is what makes "frozen at 4 quotes, 5 came in
+    # later" a checkable sentence instead of a memory.
+    frozen_at: datetime | None = None
+    frozen_by_name: str | None = None
+    frozen_at_revision: int | None = None
+    items: list[RFQItemOut] = []
+    vendors: list[RFQVendorOut] = []
+
+
+# --------------------------------------------------------------------------- #
+#  Consolidated buying sheet
+# --------------------------------------------------------------------------- #
+
+class ConsolidationCreate(BaseModel):
+    requisition_ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
+    title: str | None = None
+    period_label: str | None = None
+    cons_date: date | None = None
+    project_id: int | None = None
+    project_name: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    remarks: str | None = None
+
+
+class ConsolidationLineEdit(BaseModel):
+    line_id: int
+    approved_qty: float = Field(ge=0)
+    remarks: str | None = None
+
+
+class ConsolidationLinesIn(BaseModel):
+    lines: list[ConsolidationLineEdit] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+
+
+class ConsolidationItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    approved_qty: float
+    estimated_rate: float
+    estimated_amount: float
+    required_date: date | None = None
+    sources: str | None = None
+    source_count: int
+    remarks: str | None = None
+    # Buying ceiling served by the backend (`consolidation._attach_caps`): what
+    # was requested plus the replenishment top-up at the shipment warehouses
+    # that asked for the line. The save enforces it; the screen reads it so the
+    # two cannot drift. None on old rows the attach step never visited.
+    max_allowed_qty: float | None = None
+    replenishment_qty: float | None = None
+    replenishment_at: str | None = None
+
+
+class ConsolidationSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    requisition_id: int
+    requisition_no: str | None = None
+    project_name: str | None = None
+    item_count: int
+    estimated_value: float
+
+
+class ConsolidationListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    cons_no: str
+    cons_date: date | None = None
+    title: str | None = None
+    period_label: str | None = None
+    project_name: str | None = None
+    status: str
+    total_items: int
+    source_count: int
+    estimated_value: float
+    current_approver_name: str | None = None
+    # Who the approval engine is ACTUALLY waiting on right now, read live at request
+    # time. `current_approver_name` beside it is a snapshot written at submit and at
+    # each decision, so it goes stale when a ladder is edited, a delegation is added,
+    # or the post under a rung is retired. Both are served: the snapshot stays for
+    # every existing reader, this is the one a screen should trust.
+    pending_with: list[str] = []
+    # Can THIS login sign it right now: on the current stage's pending list, and
+    # wearing a position the ladder named. Served rather than derived in the screen,
+    # because a screen can only see the document's status and its own permission
+    # codes, and neither answers "is it with me". See service._attach_pending_one.
+    awaiting_me: bool = False
+    created_by_name: str | None = None
+    created_at: datetime
+
+
+class ConsolidationOut(ConsolidationListRow):
+    project_id: int | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
+    approved_by_name: str | None = None
+    approved_at: datetime | None = None
+    remarks: str | None = None
+    has_rfq: bool = False
+    items: list[ConsolidationItemOut] = []
+
+
+class VendorInviteOut(BaseModel):
+    """The one response that carries a raw access token, once, per vendor."""
+    vendor_id: int
+    vendor_name: str | None = None
+    vendor_email: str | None = None
+    invite_path: str
+
+
+# --------------------------------------------------------------------------- #
+#  Quotation
+# --------------------------------------------------------------------------- #
+
+class QuoteLineIn(BaseModel):
+    rfq_item_id: int
+    # What the vendor can actually supply. Optional: say nothing and the quantity asked
+    # for stands. It may never be MORE than was asked — a quotation is an answer to a
+    # request, and a vendor cannot enlarge the order they were invited to.
+    quantity: float | None = Field(default=None, gt=0)
+    rate: float = Field(ge=0)
+    discount_percent: float = Field(ge=0, le=100, default=0)
+    # One GST rate. Which half it is charged as is decided by the two GSTINs, not by
+    # the vendor — see `_checked_gst_percent`.
+    tax_percent: float = Field(ge=0, default=0)
+    delivery_days: int | None = None
+
+
+class QuoteOtpOut(BaseModel):
+    """What the vendor's screen may know about the code that was just sent.
+
+    The masked address and the window, never the digits. A response carrying the code
+    would make the email decorative and the whole gate meaningless — anyone holding
+    the portal link could read it straight out of the network tab.
+    """
+    sent_to: str
+    expires_in_seconds: int
+
+
+class QuoteSubmit(BaseModel):
+    #: The six digits emailed by `POST .../quotation/request-otp`. Optional on the
+    #: SCHEMA so a missing code fails with the sentence `quote_otp.verify` writes —
+    #: "Enter the code emailed to you" — rather than a 422 naming a field the vendor
+    #: has never heard of.
+    otp_code: str | None = None
+    vendor_ref_no: str | None = None
+    valid_till: date | None = None
+    expected_delivery_date: date | None = None
+    payment_terms: str | None = None
+    delivery_days: int | None = None
+    freight_amount: float = Field(ge=0, default=0)
+    discount_amount: float = Field(ge=0, default=0)
+    remarks: str | None = None
+    lines: list[QuoteLineIn] = Field(min_length=1)
+
+
+class QuoteItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    rfq_item_id: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    rate: float
+    discount_percent: float
+    tax_percent: float
+    amount: float
+    delivery_days: int | None = None
+    # The classification and the rate it notifies — the ceiling this line may quote up
+    # to. Read at request time off the HSN, never stored: a rate change is a government
+    # notification, not an edit to a quotation. Null when the item has no HSN, which
+    # means no ceiling rather than a ceiling of zero.
+    hsn_code: str | None = None
+    max_gst_rate: float | None = None
+    # What the RFQ line asked for, and when it is wanted. Read off the RFQ at request
+    # time rather than copied: `quantity` above is the vendor's ANSWER and may be
+    # short, so without this the buyer cannot see that the offer covers only part of
+    # what was requested.
+    requested_quantity: float | None = None
+    required_date: date | None = None
+
+
+class QuoteListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    quotation_no: str
+    rfq_id: int
+    rfq_no: str | None = None
+    vendor_id: int
+    vendor_name: str | None = None
+    status: str
+    grand_total: float
+    rank_position: int | None = None
+    revision_count: int
+    submitted_at: datetime | None = None
+    created_at: datetime
+
+
+class QuoteOut(QuoteListRow):
+    vendor_ref_no: str | None = None
+    quotation_date: date | None = None
+    valid_till: date | None = None
+    expected_delivery_date: date | None = None
+    currency: str | None = None
+    sub_total: float
+    discount_amount: float
+    tax_amount: float
+    freight_amount: float
+    payment_terms: str | None = None
+    delivery_days: int | None = None
+    remarks: str | None = None
+    # Which tax applies, decided by the two GSTINs' state codes: INTRA is CGST+SGST,
+    # INTER is IGST. Derived, never stored — see service.tax_region.
+    tax_region: str | None = None
+    company_gstin: str | None = None
+    vendor_gstin: str | None = None
+    # The negotiation overlay (2026-09-26). `under_negotiation` is the amber badge
+    # a buyer sees while their change request sits with the supplier; the two
+    # revision counters tell a first offer from a renegotiated one.
+    under_negotiation: bool = False
+    accepted_revision: int = 0
+    items: list[QuoteItemOut] = []
+
+
+# --------------------------------------------------------------------------- #
+#  Quotation change request — the buyer asks, the supplier decides
+# --------------------------------------------------------------------------- #
+
+class QuoteChangeLineIn(BaseModel):
+    """One line of the buyer's ask. `quotation_item_id` names the supplier's own
+    line; what follows is what the buyer proposes it becomes."""
+    quotation_item_id: int
+    proposed_quantity: float = Field(ge=0)
+    proposed_rate: float = Field(ge=0)
+    proposed_discount_percent: float = Field(ge=0, le=100, default=0)
+    note: str | None = None
+
+
+class QuoteChangeRequestIn(BaseModel):
+    """The buyer's proposal. `reason` is required — a price change with no
+    recorded reason answers no question six months later."""
+    reason: str = Field(min_length=3)
+    lines: list[QuoteChangeLineIn] = Field(min_length=1)
+
+
+class QuoteChangeDecisionIn(BaseModel):
+    """The supplier's answer. A decline may say why; an acceptance need not.
+    If the supplier counter-proposes rates or quantities, counter_lines are sent."""
+    note: str = ""
+    otp_code: str | None = None
+    counter_lines: list[QuoteChangeLineIn] | None = None
+
+
+class QuoteUnfreezeIn(BaseModel):
+    """Reopen bidding. The reason is required — unfreezing after people were
+    told prices are settled is the one freeze action that can surprise a
+    supplier, and the trail has to say why it happened."""
+    reason: str = Field(min_length=3)
+
+
+class QuoteChangeLineOut(BaseModel):
+    quotation_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    # What the supplier had priced, as the trail's "from".
+    current_quantity: float
+    current_rate: float
+    current_discount_percent: float
+    current_amount: float
+    # What the buyer proposes.
+    proposed_quantity: float
+    proposed_rate: float
+    proposed_discount_percent: float
+    note: str | None = None
+
+
+class QuoteChangeRequestOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    quotation_id: int
+    rfq_id: int
+    cr_no: str
+    status: str
+    reason: str
+    proposed_by_name: str | None = None
+    supplier_decision_note: str | None = None
+    supplier_decided_at: datetime | None = None
+    created_at: datetime
+    # The proposed lines, decorated with the "before" figures read off the
+    # snapshot — the diff the screen draws is served, never recomputed there.
+    lines: list[QuoteChangeLineOut] = []
+    supplier_counter_lines: list[dict] | None = None
+
+
+class QuoteCommentIn(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class QuoteCommentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    quotation_id: int
+    author_id: int | None = None
+    author_name: str | None = None
+    author_side: str
+    message: str
+    created_at: datetime
+
+
+class RFQAwardAllocationIn(BaseModel):
+    """One supplier's share of one RFQ item, decided against submitted prices."""
+    item_id: int
+    vendor_id: int
+    quantity: float = Field(gt=0)
+
+
+class AwardIn(BaseModel):
+    """Award one quotation in full, or split items between suppliers."""
+    quotation_id: int | None = None
+    # Compatibility with the earlier UI. The service accepts exactly one id here;
+    # a genuine multi-supplier award must state its per-item quantities.
+    quotation_ids: Annotated[list[int], BatchIds] = []
+    allocations: Annotated[list[RFQAwardAllocationIn], BatchIds] | None = None
+    comments: str = ""
+    generate_pos: bool = True
+
+    @model_validator(mode="after")
+    def _one_shape(self):
+        if sum((bool(self.quotation_id), bool(self.quotation_ids),
+                bool(self.allocations))) != 1:
+            raise ValueError(
+                "Award one quotation or provide item allocations, not both or neither")
+        return self
+
+
+# --------------------------------------------------------------------------- #
+#  Vendor portal
+# --------------------------------------------------------------------------- #
+
+class VendorLoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class VendorTokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    vendor_id: int
+    vendor_name: str | None = None
+    must_change_password: bool
+
+
+class VendorPasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class VendorProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    code: str | None = None
+    name: str
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    city: str | None = None
+    state: str | None = None
+    gstin: str | None = None
+
+
+class VendorAccountOut(BaseModel):
+    """What the buyer sees on the vendor master. Never the hash."""
+    model_config = ConfigDict(from_attributes=True)
+    vendor_id: int
+    username: str
+    is_active: bool
+    must_change_password: bool
+    last_login_at: datetime | None = None
+
+
+class VendorAccountIn(BaseModel):
+    vendor_id: int
+    username: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+#  Despatch note — the vendor's statement of what they sent
+# --------------------------------------------------------------------------- #
+
+class DespatchLineIn(BaseModel):
+    """One line the vendor says is on the vehicle.
+
+    `po_item_id` rather than a free item choice: a despatch note answers an order, and
+    a vendor must not be able to add a line nobody bought. The service rejects any id
+    that is not on the PO.
+    """
+    po_item_id: int
+    despatched_qty: float = Field(ge=0, default=0)
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+    remarks: str | None = None
+
+
+class DespatchNoteIn(BaseModel):
+    """Saved as a draft with anything filled in; the invoice and e-way bill are only
+    required at submit, which is where `submit_despatch_note` checks them."""
+    dn_date: date | None = None
+    invoice_no: str | None = None
+    invoice_date: date | None = None
+    invoice_amount: float | None = Field(ge=0, default=None)
+    eway_bill_no: str | None = None
+    vehicle_no: str | None = None
+    transporter_name: str | None = None
+    lr_no: str | None = None
+    expected_date: date | None = None
+    remarks: str | None = None
+    lines: list[DespatchLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
+
+
+class DespatchItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    line_no: int
+    po_item_id: int | None = None
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    despatched_qty: float
+    batch_no: str | None = None
+    mfg_date: date | None = None
+    expiry_date: date | None = None
+    remarks: str | None = None
+
+
+class DespatchNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    dn_no: str
+    dn_date: date | None = None
+    po_id: int
+    po_no: str | None = None
+    vendor_id: int
+    vendor_name: str | None = None
+    invoice_no: str | None = None
+    invoice_date: date | None = None
+    invoice_amount: float | None = None
+    eway_bill_no: str | None = None
+    vehicle_no: str | None = None
+    transporter_name: str | None = None
+    lr_no: str | None = None
+    expected_date: date | None = None
+    status: str
+    remarks: str | None = None
+    submitted_at: datetime | None = None
+    created_at: datetime
+    items: list[DespatchItemOut] = []
+
+
+class VendorPOLineOut(BaseModel):
+    """A PO line as the VENDOR sees it. `pending_qty` is what is still owed, so a
+    second delivery opens with the remainder rather than the whole order."""
+    model_config = ConfigDict(from_attributes=True)
+    po_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    ordered_qty: float
+    despatched_qty: float
+    pending_qty: float
+    rate: float | None = None
+    amount: float | None = None
+
+
+class VendorPOOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    po_date: date | None = None
+    expected_date: date | None = None
+    status: str
+    total_amount: float
+    remarks: str | None = None
+    # The order's own answer state, so the portal can ask for one rather than
+    # presenting a despatch form for something never agreed to.
+    vendor_status: str | None = None
+    vendor_responded_at: datetime | None = None
+    vendor_response_note: str | None = None
+    revision_no: int = 0
+    amendment_reason: str | None = None
+    # Derived, never stored: the order was issued to this vendor once and has since
+    # been amended, so it is back with the buyer being re-approved. Read-only to them
+    # until it is re-issued — see `_vendor_visible` in service.py.
+    under_revision: bool = False
+    payment_terms: str | None = None
+    delivery_terms: str | None = None
+    material_terms: str | None = None
+    logistics_terms: str | None = None
+    billing_address: str | None = None
+    shipping_address: str | None = None
+    lines: list[VendorPOLineOut] = []
+    despatch_notes: list[DespatchNoteOut] = []
+
+
+class VendorPOListRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    po_no: str
+    vendor_status: str | None = None
+    revision_no: int = 0
+    po_date: date | None = None
+    expected_date: date | None = None
+    status: str
+    total_amount: float
+    despatch_note_count: int = 0
+    under_revision: bool = False
+
+
+class VendorNotificationOut(BaseModel):
+    """One message on the vendor's own bell.
+
+    `deep_link` is a PORTAL path, resolved by the portal — the vendor has no access to
+    an internal screen and must never be handed a link to one.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    body: str | None = None
+    entity_type: str | None = None
+    entity_id: int | None = None
+    deep_link: str | None = None
+    is_read: bool
+    created_at: datetime | None = None
+
+
+class LedgerRow(BaseModel):
+    """One document on the buying trail. See `procurement/ledger.py`."""
+    model_config = ConfigDict(from_attributes=True)
+
+    doc_kind: str
+    doc_id: int
+    doc_no: str
+    doc_date: date | None = None
+    party: str | None = None
+    project_name: str | None = None
+    title: str | None = None
+    status: str | None = None
+    value: Decimal | None = None
+    ref_no: str | None = None
+    with_whom: str | None = None
+
+
+
+# --------------------------------------------------------------------------- #
+# KPI strips. See `procurement/stats.py` — one schema per document family, and
+# deliberately not one composite, so each endpoint can be gated on the view code of
+# the documents it counts.
+#
+# `awaiting_me` is on every document that has a ladder. It is NOT "how many are
+# pending approval" — it is how many are pending on THIS login, straight off
+# `wf_pending`, so the tile can never tell four approvers the same queue is each of
+# theirs.
+# --------------------------------------------------------------------------- #
+
+class ReqStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    approved: int = 0
+    draft: int = 0
+    rejected: int = 0
+    total: int = 0
+    this_month: int = 0
+    open_value: float = 0
+    total_lines: int = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class ConsolidationStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    approved: int = 0
+    draft: int = 0
+    total: int = 0
+    this_month: int = 0
+    requisitions_rolled: int = 0
+    total_items: int = 0
+    estimated_value: float = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class RFQStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    out_to_vendors: int = 0
+    ready_to_award: int = 0
+    draft: int = 0
+    awarded: int = 0
+    total: int = 0
+    closing_soon: int = 0
+    vendors_invited: int = 0
+    quotes_received: int = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class QuoteStatsOut(BaseModel):
+    to_compare: int = 0
+    revised: int = 0
+    accepted: int = 0
+    not_selected: int = 0
+    draft: int = 0
+    total: int = 0
+    this_month: int = 0
+    rfqs_covered: int = 0
+    vendors_quoting: int = 0
+    quoted_value: float = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class POStatsOut(BaseModel):
+    awaiting_me: int = 0
+    pending_approval: int = 0
+    to_send: int = 0
+    at_vendor: int = 0
+    awaiting_vendor: int = 0
+    draft: int = 0
+    received: int = 0
+    total: int = 0
+    this_month: int = 0
+    month_value: float = 0
+    open_commitment: float = 0
+    by_status: dict[str, int] = {}
+    #: What each tile OPENS, keyed by the bucket above it — served so the count and
+    #: the list can never disagree. See `stats.REQ_FILTERS` and friends.
+    filters: dict[str, dict[str, str]] = {}
+
+
+class DemandPoolRow(BaseModel):
+    """One item's sanctioned, unbought demand across every requisition the caller may
+    read. `open_qty` is the remainder — `quantity - ordered_qty` summed — so buying in
+    rounds shrinks it without anything being rewritten."""
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    open_qty: float = 0
+    estimated_value: float = 0
+    requisition_count: int = 0
+    project_count: int = 0
+    earliest_required: date | None = None
+
+
+class LedgerStatsOut(BaseModel):
+    """The buying trail's own strip — one count per document kind, under the same
+    filters the register is showing. See `stats.ledger_stats`."""
+    by_kind: dict[str, int] = {}
+    total: int = 0
+    filters: dict[str, dict[str, str]] = {}
+
+
+# --------------------------------------------------------------------------- #
+#  Supplier register — the material counterpart of logistics' PartnerCreate set
+# --------------------------------------------------------------------------- #
+class SupplierCreate(BaseModel):
+    """Adding a material supplier. Only the name is required — the code is derived and
+    the type defaults to MATERIAL, because a form that demands a vendor code before it
+    will accept "3M India" is why the register stayed half-filled."""
+    name: str = Field(min_length=1, max_length=200)
+    code: str | None = Field(default=None, max_length=50)
+    vendor_type: str = "MATERIAL"
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    #: Name them and let them in, in one press. A supplier with no account cannot
+    #: answer the RFQ they are about to be sent.
+    issue_login: bool = True
+    username: str | None = None
+
+
+class SupplierUpdate(BaseModel):
+    """Every field optional: the screen sends what the row changed. `code` is absent on
+    purpose — RFQs, quotations and orders snapshot the vendor against it."""
+    name: str | None = Field(default=None, max_length=200)
+    vendor_type: str | None = None
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    payment_terms_days: int | None = Field(default=None, ge=0, le=365)
+    is_active: bool | None = None
+    is_blacklisted: bool | None = None
+
+
+class SupplierLoginIn(BaseModel):
+    username: str | None = None
+
+
+class SupplierOut(BaseModel):
+    id: int
+    code: str | None = None
+    name: str
+    vendor_type: str
+    contact_person: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    city: str | None = None
+    state: str | None = None
+    gstin: str | None = None
+    payment_terms_days: int | None = None
+    is_active: bool
+    is_approved: bool
+    is_blacklisted: bool
+    # The portal account, flattened onto the supplier row.
+    has_login: bool
+    username: str | None = None
+    login_is_active: bool | None = None
+    must_change_password: bool | None = None
+    last_login_at: datetime | None = None
+    quotable: bool

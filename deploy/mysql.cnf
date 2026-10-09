@@ -1,0 +1,53 @@
+# MySQL server settings for the deployed database (mounted into the db container).
+#
+# Until 2026-09-03 the compose service passed only the character set, which left every
+# other value at its stock default. Two of those defaults are hard ceilings on how many
+# people this system can serve:
+#
+#   innodb_buffer_pool_size = 128M   the working set does not fit, so ordinary queries
+#                                    become disk I/O
+#   max_connections         = 151    caps scale-out regardless of how many workers or
+#                                    replicas are added, because the pool is per worker
+#
+# Sizing: the buffer pool wants 50-70% of the DB container's memory limit (see
+# `deploy.resources.limits` in compose.yaml — set both together, or the pool will grow
+# into a limit the container cannot honour and be OOM-killed).
+#
+# max_connections must cover  workers x replicas x (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+# plus headroom for the worker container, backups and a DBA session. At 5 workers x 2
+# replicas x 30 that is 300, so 500 leaves real room.
+
+[mysqld]
+character-set-server = utf8mb4
+collation-server     = utf8mb4_unicode_ci
+
+# --- Memory ---
+# Assumes a 4 GB limit on the db container. Change BOTH this and the compose limit.
+innodb_buffer_pool_size = 2G
+innodb_log_file_size    = 512M
+innodb_flush_method     = O_DIRECT
+
+# --- Connections ---
+max_connections     = 500
+# Long enough that a pooled connection is not cut mid-idle; DB_POOL_RECYCLE (1800s)
+# is deliberately shorter, so the app retires a connection before the server does.
+wait_timeout        = 3600
+interactive_timeout = 3600
+
+# --- Durability ---
+# 1 = flush on every commit. Slower than 2, and correct: this is stock and approval
+# data, and losing the last second of it on a power cut is not acceptable.
+innodb_flush_log_at_trx_commit = 1
+
+# --- Visibility ---
+# Nothing measured query time before 2026-09-03. Half a second on an OLTP screen is
+# already a problem worth reading about.
+slow_query_log       = 1
+slow_query_log_file  = /var/lib/mysql/slow.log
+long_query_time      = 0.5
+log_queries_not_using_indexes = 0
+
+# A runaway report can no longer hold a pooled connection open indefinitely and
+# cascade into pool exhaustion, which presents as a total outage rather than as one
+# slow screen. 30s is far above any legitimate interactive query here.
+max_execution_time = 30000

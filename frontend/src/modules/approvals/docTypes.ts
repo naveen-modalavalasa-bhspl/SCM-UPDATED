@@ -1,0 +1,41 @@
+/**
+ * What a document type is CALLED, in one place.
+ *
+ * The inbox carried this table privately, so the dashboard guessed at the codes
+ * and drew "Mr 2" and "Allocation 1" — the raw enum values, prettified. The codes
+ * are short (`MR`, `PO`, `RFQ`), which means a generic underscore-to-space
+ * fallback can never produce the right words; only a table can.
+ */
+export const DOC_TYPE_LABELS: Record<string, string> = {
+  INDENT: "Indent", MONTHLY_INDENT: "Monthly indent",
+  ALLOCATION: "Stock allocation", MR: "Material request",
+  PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
+  WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
+  OWN_STOCK_ALLOCATION: "Allocation from my point",
+  DISPATCH: "Dispatch", PURCHASE_RETURN: "Purchase return",
+  QC_OUTWARD: "Outward QC",
+  REQUISITION: "Purchase requisition", CONSOLIDATION: "Purchase sheet",
+  RFQ: "Request for quotation", CARRIER_AWARD: "Carrier award",
+  TRANSPORT_REQUEST: "Shipment",
+  // FIX 2026-09-07: absent, so the queue printed the raw enum "STOCK RETURN" through
+  // the underscore fallback while every row beside it read as words.
+  STOCK_RETURN: "Stock return", STOCK_RETURN_RECEIPT: "Stock return receipt", STOCK_RETURN_LOGISTICS: "Stock return logistics",
+  STOCK_MOVEMENT_ORDER: "Stock movement order",
+  STOCK_ADJUSTMENT: "Stock audit",
+  STOCK_EDIT: "Stock correction",
+  VENDOR_PAYMENT: "Vendor payment",
+  STOCK_TRANSFER: "Stock transfer order", STOCK_TRANSFER_REQUEST: "Stock transfer request",
+};
+
+export const docTypeLabel = (value: string) =>
+  DOC_TYPE_LABELS[value] ?? value.replace(/_/g, " ");
+
+/** The type a row is SHOWN as. An STR is an indent row whose workflow says INDENT,
+ *  so the server serves `display_doc_type`; `indent_type` covers rows that predate it. */
+export const displayDocType = (row: {
+  doc_type: string; display_doc_type?: string | null; indent_type?: string | null;
+}) => row.display_doc_type
+  ?? (row.doc_type === "INDENT" && row.indent_type === "STR" ? "STOCK_TRANSFER_REQUEST" : row.doc_type);
+
+export const rowDocTypeLabel = (row: Parameters<typeof displayDocType>[0]) =>
+  docTypeLabel(displayDocType(row));

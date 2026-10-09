@@ -1,0 +1,567 @@
+"""RBAC-aware home dashboard read model.
+
+Every section is assembled after resolving the signed-in user's effective
+permissions for their active position. The frontend never receives cards, actions,
+modules, attention items, or activity for a capability the user cannot access.
+"""
+from datetime import date, datetime, time, timedelta, timezone
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.modules.home.schemas import DateRange
+from app.modules.indents import service as indent_service
+from app.shared.scope import rung_for, scope_condition
+from app.modules.indents.models import Indent
+from app.modules.inventory import service as inventory_service
+from app.modules.procurement.models import PurchaseOrder
+from app.modules.warehouse.enums import ReceiptStatus, ReceiptType
+from app.modules.warehouse.models import Receipt
+from app.platform.rbac import permissions as perms
+from app.platform.rbac.service import (
+    get_user_menu, get_user_permissions, warehouse_menu_label,
+)
+from app.platform.settings.models import AuditLog
+from app.platform.workflow import engine
+from app.shared.enums import IndentStatus, POStatus, ScopeRung
+from app.modules.indents.enums import IndentType
+from app.shared.time import now as ist_now, today as ist_today
+
+
+APPROVE_PERMISSIONS = {
+    perms.INDENT_APPROVE,
+    perms.PO_APPROVE,
+    perms.ALLOCATION_APPROVE,
+    perms.MR_APPROVE,
+    perms.DISPATCH_APPROVE,
+    perms.RETURN_APPROVE,
+}
+
+MODULE_DESCRIPTIONS = {
+    "grp_indents": "Raise and track material indents",
+    "approvals": "Review and approve requests",
+    "grp_purchasing": "Manage purchase orders",
+    "grp_warehouse": "Manage warehouse operations",
+    "grp_inventory": "Track stock and item availability",
+    "masters": "Maintain supply chain master data",
+    "grp_rbac": "Manage roles and access",
+    "grp_settings": "Configure the SCM workspace",
+}
+
+
+def _range_bounds(
+    value: DateRange, date_from: date | None = None, date_to: date | None = None,
+) -> tuple[datetime, datetime | None]:
+    """The window a dashboard tile counts over, as (start, end). `None` end means "now".
+
+    Every value but `custom` is anchored to the present, so only `custom` has an end at
+    all — and its end is the LAST MOMENT of `date_to`, not midnight at its start, or
+    picking the same day for both would count nothing.
+    """
+    now = ist_now()
+    if value == "custom":
+        # A half-filled custom range still has to answer something. A missing start
+        # falls back to the calendar month, a missing end runs to now, and reversed
+        # dates are swapped rather than returning an empty dashboard the user cannot
+        # tell apart from "genuinely nothing happened".
+        if date_from and date_to and date_to < date_from:
+            date_from, date_to = date_to, date_from
+        start = (
+            datetime.combine(date_from, time.min).replace(tzinfo=now.tzinfo)
+            if date_from
+            else now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        )
+        end = (
+            datetime.combine(date_to, time.max).replace(tzinfo=now.tzinfo)
+            if date_to else None
+        )
+        return start, end
+    if value == "day":
+        # Rolling 24 hours, deliberately not "since midnight": the tile is read at the
+        # end of a shift as often as the start of one.
+        return now - timedelta(hours=24), None
+    if value == "month":
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), None
+    if value == "quarter":
+        first_month = ((now.month - 1) // 3) * 3 + 1
+        return now.replace(
+            month=first_month, day=1, hour=0, minute=0, second=0, microsecond=0,
+        ), None
+    # The label on the picker says "This Week", so the week is the calendar one —
+    # Monday to now — not a rolling seven days. Month and quarter already read that
+    # way and a mixed reading is what makes a filter feel broken.
+    return (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0), None
+
+
+async def _count(db: AsyncSession, model, *conditions) -> int:
+    stmt = select(func.count()).select_from(model)
+    if conditions:
+        stmt = stmt.where(*conditions)
+    return int(await db.scalar(stmt) or 0)
+
+
+def _kpi(
+    key: str, label: str, value: int, detail: str, href: str, icon: str,
+    *, tone: str = "brand", detail_tone: str = "brand",
+) -> dict:
+    return {
+        "key": key, "label": label, "value": value, "detail": detail,
+        "detail_tone": detail_tone, "href": href, "icon": icon, "tone": tone,
+    }
+
+
+def _action(
+    key: str, label: str, href: str, icon: str, tone: str = "brand",
+) -> dict:
+    return {"key": key, "label": label, "href": href, "icon": icon, "tone": tone}
+
+
+def _attention(
+    key: str, label: str, count: int, href: str, icon: str, tone: str = "brand",
+) -> dict:
+    return {
+        "key": key, "label": label, "count": count, "href": href,
+        "icon": icon, "tone": tone,
+    }
+
+
+async def _stock_counts(db: AsyncSession, user) -> tuple[int, int]:
+    """Low / out-of-stock item counts, read from the same list the Replenishment
+    screen shows. Counting `stk_balance` rows here instead reported a different
+    number than Inventory > Overview ("Items Below Reorder"), because a single item
+    has one row per warehouse/bin/batch and rows are warehouse-scoped per user.
+    low + out is exactly `items_below_reorder`.
+    """
+    rows = await inventory_service.get_stock_replenishment(db, user=user)
+    low = sum(1 for row in rows if float(row["available_qty"] or 0) > 0)
+    return low, len(rows) - low
+
+
+def _visible_modules(menu: list[dict]) -> list[dict]:
+    modules = []
+    for item in menu:
+        if item["code"] == "home":
+            continue
+        modules.append({
+            "code": item["code"],
+            "name": item["name"],
+            "description": MODULE_DESCRIPTIONS.get(
+                item["code"], f"Open {item['name'].lower()}",
+            ),
+            "href": item["path"],
+            "icon": item.get("icon") or "layout-grid",
+        })
+    return modules
+
+
+def _can_see_audit(entity: str, permissions: set[str]) -> bool:
+    if entity.startswith("ind_"):
+        return perms.INDENT_VIEW in permissions
+    if entity.startswith("pro_purchase"):
+        return perms.PO_VIEW in permissions
+    if entity.startswith(("inb_", "lgs_grn")):
+        return bool({perms.RECEIPT_VIEW, perms.GRN_VIEW} & permissions)
+    if entity.startswith(("stk_", "inv_")):
+        return perms.STOCK_VIEW in permissions
+    if entity.startswith(("whs_", "out_")):
+        return bool({
+            perms.RECEIPT_VIEW, perms.ISSUE_VIEW, perms.DISPATCH_VIEW,
+            perms.PICKING_VIEW, perms.RETURN_VIEW,
+        } & permissions)
+    if entity.startswith("mst_"):
+        return any(code.startswith("master.") for code in permissions)
+    if entity.startswith(("rbac_", "sys_", "wf_", "rule_")):
+        return any(code.startswith("admin.") for code in permissions)
+    return False
+
+
+def _activity_meta(entity: str, entity_id: int) -> tuple[str, str, str]:
+    if entity.startswith("ind_"):
+        return "file-text", "brand", f"/indents/{entity_id}"
+    if entity.startswith("pro_purchase"):
+        return "shopping-cart", "purple", "/pos"
+    if entity.startswith(("inb_", "lgs_grn")):
+        return "package-down", "cyan", "/warehouse/grn"
+    if entity.startswith(("stk_", "inv_")):
+        return "package", "cyan", "/inventory"
+    if entity.startswith(("whs_", "out_")):
+        return "warehouse", "orange", "/warehouse"
+    if entity.startswith("mst_"):
+        return "database", "brand", "/masters"
+    return "settings", "neutral", "/admin"
+
+
+# An audit action is something a person did; a status is what the document became.
+# Falling back to the raw action put both in the same slot, so the feed read
+# "IND/2026-27/00576 deactivate" as though DEACTIVATE were an indent status.
+_ACTION_PHRASES = {
+    "CREATE": "created",
+    "UPDATE": "updated",
+    "DELETE": "deleted",
+    "DEACTIVATE": "deactivated",
+    "ACTIVATE": "reactivated",
+    "APPROVE": "approved",
+    "REJECT": "rejected",
+    "CANCEL": "cancelled",
+    "SUBMIT": "submitted",
+}
+
+
+def _activity_verb(row: AuditLog) -> str:
+    changed = row.changed_fields if isinstance(row.changed_fields, dict) else {}
+    status = changed.get("status")
+    if isinstance(status, dict) and status.get("to"):
+        return str(status["to"]).replace("_", " ").lower()
+    action = str(row.action or "").upper()
+    return _ACTION_PHRASES.get(action, action.replace("_", " ").lower() or "changed")
+
+
+def _is_overdue(row: dict) -> bool:
+    value = row.get("due_at")
+    if not value:
+        return False
+    try:
+        due_at = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return False
+    if due_at.tzinfo is None:
+        due_at = due_at.replace(tzinfo=timezone.utc)
+    return due_at < ist_now()
+
+
+async def _recent_activity(
+    db: AsyncSession, user, permissions: set[str], since: datetime,
+    until: datetime | None = None,
+) -> list[dict]:
+    """The feed at the foot of Home, narrowed to what this login may actually know.
+
+    It used to read the last 40 audit rows company-wide and drop only the ones whose
+    entity_type the login held no permission for, so a SELF-scoped lab technician
+    watched other people's indents move through other people's offices.
+
+    Two bounds now apply, in this order:
+
+      * the rung. At ALL nothing is withheld. Below that, an entry has to be either
+        something this login DID, or a change to an indent it may read — those are
+        resolved through `indents._indent_visibility`, the same predicate the list and
+        the ledger use, so the feed cannot show a document the Indents screen hides.
+      * the existing permission check on entity_type, unchanged.
+
+    Rows about other entity types (stock, receipts, masters) survive only when the
+    login is their actor. That is deliberately strict: `sys_audit_log` stores an
+    entity_type and an id, not an office or a project, so there is nothing to scope a
+    warehouse or master row on without loading each one. Showing only your own is the
+    honest answer; widening it needs those columns.
+    """
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.created_at >= since)
+        # Only a custom range closes the top end; every other window runs to now.
+        .where(*( [AuditLog.created_at <= until] if until is not None else [] ))
+        .order_by(AuditLog.created_at.desc())
+        .limit(40)
+    )
+    if await rung_for(db, user) is not ScopeRung.ALL:
+        visible_indent_ids = select(Indent.id).where(
+            await indent_service._indent_visibility(db, user)
+        )
+        stmt = stmt.where(or_(
+            AuditLog.actor_id == user.id,
+            and_(AuditLog.entity_type.startswith("ind_"),
+                 AuditLog.entity_id.in_(visible_indent_ids)),
+        ))
+    rows = (await db.execute(stmt)).scalars().all()
+    visible = []
+    for row in rows:
+        if not _can_see_audit(row.entity_type, permissions):
+            continue
+        icon, tone, href = _activity_meta(row.entity_type, int(row.entity_id))
+        subject = row.entity_no or f"Record {row.entity_id}"
+        visible.append({
+            "id": f"audit:{row.id}",
+            "title": f"{subject} {_activity_verb(row)}",
+            "subtitle": row.actor_name or "System",
+            "occurred_at": row.created_at,
+            "href": href,
+            "icon": icon,
+            "tone": tone,
+        })
+        if len(visible) == 6:
+            break
+    return visible
+
+
+#: How long a built dashboard is reused. A KPI tile is a count of documents, not a
+#: balance anybody transacts against, and it does not need to be accurate to the
+#: second — but it is the most expensive endpoint in the system and it is hit on every
+#: sign-in and every return to Home. Sixty seconds is the trade: a document you just
+#: raised may take up to a minute to appear in your own tile.
+SUMMARY_CACHE_SECONDS = 60
+
+
+def _summary_cache_key(user, date_range: str, date_from=None, date_to=None) -> str:
+    """Everything the answer depends on, and nothing else.
+
+    The employee AND the active position, because both permissions and the visibility
+    scope are derived from the pair — the same key `get_user_permissions` uses. Caching
+    on the employee alone would serve one hat's dashboard to another, which is a
+    permissions leak and not a stale number.
+    """
+    return (f"home:summary:{getattr(user, 'id', 0)}:"
+            f"{getattr(user, 'active_position_id', None)}:{date_range}"
+            # A custom window is part of the answer: without the dates in the key, the
+            # first custom range a user picked would be served for every later one.
+            f":{date_from or ''}:{date_to or ''}")
+
+
+async def summary(db: AsyncSession, user, date_range: DateRange = "week",
+                  date_from: date | None = None, date_to: date | None = None) -> dict:
+    """The Home dashboard. Cached per (employee, position, date range) for a minute.
+
+    ~17 awaited calls, several of them multi-query — per-status counts per module, the
+    visibility-scope predicates, the pending queue, the menu build. Nothing was cached,
+    and every user hit it the moment they signed in.
+    """
+    from app.core import cache as shared_cache
+
+    cache_key = _summary_cache_key(user, date_range, date_from, date_to)
+    cached = await shared_cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
+    payload = await _build_summary(db, user, date_range, date_from, date_to)
+    await shared_cache.set_json(cache_key, payload, SUMMARY_CACHE_SECONDS)
+    return payload
+
+
+async def _build_summary(db: AsyncSession, user, date_range: DateRange = "week",
+                         date_from: date | None = None,
+                         date_to: date | None = None) -> dict:
+    permissions = await get_user_permissions(
+        db, user, getattr(user, "active_position_id", None),
+    )
+    since, until = _range_bounds(date_range, date_from, date_to)
+
+    def _within(column):
+        """The window as a predicate. Only a custom range has an upper bound, so for
+        every other value this is the same single `>= since` it always was."""
+        return and_(column >= since, column <= until) if until else column >= since
+    menu = await get_user_menu(db, permissions, await warehouse_menu_label(
+        db, user, getattr(user, "active_position_id", None)))
+    # Two COUNTs, not every row. The dashboard only ever needed the total and the
+    # overdue total, and materialising a few thousand pending rows to call len()
+    # on them was the most expensive thing on the most frequently hit endpoint.
+    pending_total, pending_overdue = await engine.pending_counts_for_user(db, user)
+
+    kpis: list[dict] = []
+    actions: list[dict] = []
+    attention: list[dict] = []
+
+    if perms.INDENT_VIEW in permissions:
+        # The one predicate list_indents and indent_stats use. Spelled out here once,
+        # it drifted: the tile read 79 while the Indents screen read 2. Sharing the
+        # helper is what stops that happening again.
+        indent_scope = await indent_service._indent_visibility(db, user)
+        # Date-ranged, like every other document tile: the picker at the top of the
+        # screen says "Date range", and a control that changes nothing on the screen
+        # is worse than no control. Scope still comes first — the tile can never
+        # count a document the Indents list would hide.
+        indent_range = and_(indent_scope, _within(Indent.created_at))
+        indent_count = await _count(db, Indent, indent_range)
+        pending_indents = await _count(
+            db, Indent, indent_range,
+            Indent.status == IndentStatus.PENDING_APPROVAL.value,
+        )
+        kpis.append(_kpi(
+            "indents", "INDENTS", indent_count,
+            f"{pending_indents} Pending Approval", "/indents", "file-text",
+        ))
+        if pending_indents:
+            attention.append(_attention(
+                "my_indents", "Your indents pending approval", pending_indents,
+                "/indents", "file-text",
+            ))
+
+        # The monthly cycle, as a number somebody can act on. The rest of this screen
+        # counts documents; a cycle is the unit the business actually plans in, and
+        # with 770 people raising one indent each there was no way to see how the
+        # month was going without opening a report. Same visibility predicate as the
+        # tile above, so it can never claim more than the list would show.
+        cycle = ist_today().strftime("%Y-%m")
+        in_cycle = and_(
+            indent_scope,
+            Indent.indent_type == IndentType.MONTHLY.value,
+            func.date_format(Indent.indent_date, "%Y-%m") == cycle,
+        )
+        cycle_total = await _count(db, Indent, in_cycle)
+        if cycle_total:
+            cycle_done = await _count(
+                db, Indent, in_cycle,
+                Indent.status.in_([IndentStatus.CLOSED.value,
+                                   IndentStatus.PARTIALLY_FULFILLED.value]),
+            )
+            kpis.append(_kpi(
+                "monthly_cycle", "THIS MONTH'S CYCLE", cycle_total,
+                f"{cycle_done} served", "/indents?indent_type=MONTHLY", "calendar-check",
+                tone="purple",
+                detail_tone="green" if cycle_done == cycle_total else "orange",
+            ))
+            if cycle_total - cycle_done:
+                attention.append(_attention(
+                    "monthly_cycle", f"Monthly cycle {cycle} still owed",
+                    cycle_total - cycle_done, "/indents?indent_type=MONTHLY",
+                    "calendar-check", "orange",
+                ))
+
+    # Permission alone, like every other tile here. It used to render whenever the
+    # engine had anything waiting — `pending or ...` — and a pending row belongs to the
+    # PERSON, not the hat they are wearing, so someone holding both an OE post and a
+    # store keeper post carried the OE queue onto the store keeper hat that RBAC had
+    # just taken approvals away from.
+    if APPROVE_PERMISSIONS & permissions:
+        overdue = pending_overdue
+        kpis.append(_kpi(
+            "approvals", "APPROVALS", pending_total, f"{overdue} Overdue",
+            "/approvals", "circle-check", tone="green",
+            detail_tone="orange" if overdue else "green",
+        ))
+        if pending_total:
+            attention.append(_attention(
+                "approvals", "Requests pending your approval", pending_total,
+                "/approvals", "file-text",
+            ))
+
+    if perms.PO_VIEW in permissions:
+        # Scoped exactly as procurement.list_pos scopes the screen this tile links
+        # to. Counting every PO in the company here meant a store keeper's Home read
+        # a number they could not find a single row of on /pos — the same mismatch
+        # already fixed for the indents tile above.
+        po_scope = await scope_condition(
+            db, user,
+            owner_col=PurchaseOrder.created_by_id,
+            office_col=PurchaseOrder.office_id,
+        )
+        po_range = and_(po_scope, _within(PurchaseOrder.created_at))
+        po_count = await _count(db, PurchaseOrder, po_range)
+        awaiting_po = await _count(
+            db, PurchaseOrder, po_range, PurchaseOrder.status.in_([
+                POStatus.APPROVED.value,
+                POStatus.SENT_TO_VENDOR.value,
+                POStatus.ACCEPTED_BY_SUPPLIER.value,
+                POStatus.PARTIALLY_RECEIVED.value,
+            ]),
+        )
+        kpis.append(_kpi(
+            "purchase_orders", "PURCHASE ORDERS", po_count,
+            f"{awaiting_po} Awaiting Delivery", "/pos", "shopping-cart",
+            tone="purple", detail_tone="purple",
+        ))
+        if awaiting_po:
+            attention.append(_attention(
+                "purchase_orders", "Purchase orders awaiting action", awaiting_po,
+                "/pos", "shopping-cart", "purple",
+            ))
+
+    receipt_visible = bool({perms.RECEIPT_VIEW, perms.GRN_VIEW} & permissions)
+    if receipt_visible:
+        # Purchase receipts only, and the same "pending" set the warehouse dashboard
+        # counts under "GRN to raise" — counting every receipt type here made the two
+        # screens disagree.
+        is_purchase = Receipt.receipt_type == ReceiptType.PURCHASE.value
+        # Same warehouse/office scope warehouse.list_receipts applies, for the same
+        # reason as the PO tile: the number has to be one the user can drill into.
+        receipt_scope = and_(is_purchase, await scope_condition(
+            db, user,
+            warehouse_col=Receipt.warehouse_id,
+            warehouse_ids=await inventory_service.warehouse_ids_for_user(db, user),
+            owner_col=Receipt.created_by_id,
+            project_col=Receipt.project_id,
+        ))
+        receipt_range = and_(receipt_scope, _within(Receipt.created_at))
+        receipt_count = await _count(db, Receipt, receipt_range)
+        pending_receipts = await _count(
+            db, Receipt, receipt_range,
+            Receipt.status.in_([
+                ReceiptStatus.DRAFT.value,
+                ReceiptStatus.PENDING_QC.value,
+            ]),
+        )
+        kpis.append(_kpi(
+            "goods_receipt", "GOODS RECEIPT", receipt_count,
+            f"{pending_receipts} Pending GRN", "/warehouse/grn", "package-down",
+            tone="cyan", detail_tone="cyan",
+        ))
+        if pending_receipts:
+            attention.append(_attention(
+                "goods_receipt", "Goods receipts pending", pending_receipts,
+                "/warehouse/grn", "package-down", "cyan",
+            ))
+
+    if perms.STOCK_VIEW in permissions:
+        # Not date-ranged, and deliberately: a stock level is a fact about now, not a
+        # count of things that happened in a period. "Low stock items last quarter"
+        # is not a number anyone can act on. Same for the approvals tile above — a
+        # pending queue is whatever is waiting today.
+        low_stock, out_of_stock = await _stock_counts(db, user)
+        kpis.extend([
+            _kpi(
+                "low_stock", "LOW STOCK ITEMS", low_stock, "Reorder Soon",
+                "/inventory/replenishment", "triangle-alert",
+                tone="orange", detail_tone="orange",
+            ),
+            _kpi(
+                "out_of_stock", "OUT OF STOCK ITEMS", out_of_stock,
+                "Immediate Action", "/inventory/replenishment", "circle-x",
+                tone="red", detail_tone="red",
+            ),
+        ])
+        if low_stock:
+            attention.append(_attention(
+                "low_stock", "Low stock items", low_stock,
+                "/inventory/replenishment", "triangle-alert", "orange",
+            ))
+        if out_of_stock:
+            attention.append(_attention(
+                "out_of_stock", "Items out of stock", out_of_stock,
+                "/inventory/replenishment", "circle-x", "red",
+            ))
+
+    if perms.INDENT_CREATE in permissions:
+        actions.append(_action(
+            "create_indent", "Create Indent", "/indents/new", "file-text",
+        ))
+    if perms.PO_CREATE in permissions:
+        actions.append(_action(
+            "create_po", "New Purchase Order", "/pos", "shopping-cart", "purple",
+        ))
+    if perms.RECEIPT_CREATE in permissions:
+        # The gate entry, NOT the GRN. Both tiles pointed at /warehouse/grn/new, so
+        # Home offered the same screen twice under two names and the first step of the
+        # inbound leg — the lorry at the gate — had no door on the dashboard at all.
+        # Mirrors the warehouse rail, which has run inward -> receipt -> QC -> put-away
+        # since the screens were split (`wh_inward` @42, `wh_grn` @43).
+        actions.append(_action(
+            "goods_receipt", "Material Inward", "/warehouse/material-inward/new",
+            "truck", "cyan",
+        ))
+    if perms.STOCK_TRANSFER in permissions:
+        actions.append(_action(
+            "stock_transfer", "Stock Transfer", "/inventory/transfers",
+            "arrow-left-right", "orange",
+        ))
+    # RECEIPT_CREATE, not GRN_CREATE: /api/warehouse/receipts is gated on receipt.create
+    # throughout, so gating the tile on grn.create offered the button to a profile the
+    # backend then refused. Same mismatch fixed on the two receipt screens themselves.
+    if perms.RECEIPT_CREATE in permissions:
+        actions.append(_action(
+            "create_grn", "Create GRN", "/warehouse/grn/new", "file-plus", "red",
+        ))
+
+    return {
+        "date_range": date_range,
+        "kpis": kpis,
+        "quick_actions": actions,
+        "modules": _visible_modules(menu),
+        "needs_attention": attention,
+        "recent_activity": await _recent_activity(db, user, permissions, since, until),
+    }

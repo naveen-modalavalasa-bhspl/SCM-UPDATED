@@ -1,0 +1,263 @@
+"""B-CAMS routes. No logic here (rule 2) — every route is a feed plus `reads.page`.
+
+Two prefixes, one router:
+
+  * `/api/ext/v1/cams/**` — the 14 read feeds and the 5 write endpoints. API key, no
+    session, no employee.
+  * `/api/apis/cams/**` — the SCM side: see what arrived. JWT + `require_permission`,
+    like every other console route.
+
+The write paths are registered twice, at `/…/cams/consumption` and at
+`/…/cams/cams/consumption`, so the integration works whether B-CAMS is configured with
+`/api/ext/v1` as its base (their §4 paths are `/cams/…`) or with `/api/ext/v1/cams`
+(their §1 paths are bare). Two lines of aliasing beats a support call on cutover day.
+
+Scopes: a key issued for this integration should carry either no scopes (meaning all of
+its application's endpoints) or the scope `cams`.
+"""
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.dependencies import require_permission
+from app.core.exceptions import NotFoundError
+from app.core.pagination import PageParams
+from app.modules.integrations.adapters.cams import docs, ingest, reads
+from app.modules.integrations.adapters.cams.enums import SIGNATURE_HEADER
+from app.modules.integrations.adapters.cams.schemas import ReceiptOut, SecretOut
+from app.modules.integrations.security import Caller, require_api_key
+from app.platform.rbac import permissions as perms
+
+# The shared secret is a credential, so rotating it is the key permission, not the
+# generic console one. Reading what arrived is plain visibility.
+VIEW = perms.INTEGRATION_VIEW
+CONSOLE = perms.INTEGRATION_KEYS_MANAGE
+SCOPE = "cams"
+
+feeds = APIRouter(prefix="/api/ext/v1/cams", tags=["b-cams"])
+console = APIRouter(prefix="/api/apis/cams", tags=["b-cams-console"])
+
+
+def _network(request: Request) -> dict:
+    """Socket details stored with B-CAMS receipts for the activity log."""
+    server = request.scope.get("server") or (None, None)
+    server_host = server[0] if isinstance(server, (tuple, list)) and len(server) > 0 else None
+    server_port = server[1] if isinstance(server, (tuple, list)) and len(server) > 1 else None
+    return {
+        "endpoint": request.url.path,
+        "http_method": request.method,
+        "ip_address": request.client.host if request.client else None,
+        "remote_port": request.client.port if request.client else None,
+        "local_ip_address": request.url.hostname or server_host,
+        "local_port": request.url.port or server_port,
+    }
+
+
+async def cams_caller(caller: Caller = Depends(require_api_key)) -> Caller:
+    """An authenticated key that is allowed to speak to this integration."""
+    caller.require_scope(SCOPE)
+    return caller
+
+
+# --------------------------------------------------------------------------- #
+# Read feeds — §1
+# --------------------------------------------------------------------------- #
+
+@feeds.get("/_ping")
+async def ping(caller: Caller = Depends(cams_caller)):
+    """The first call a new consumer makes, to prove the key is wired up."""
+    return {"ok": True, "client": caller.client_code, "integration": SCOPE}
+
+
+@feeds.get("/items")
+async def items(request: Request, item_type: str = "", is_active: str = "",
+                updated_since: str = "", db: AsyncSession = Depends(get_db),
+                caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.items(item_type, reads.flag(is_active), updated_since)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/item-categories")
+async def item_categories(request: Request, is_active: str = "", parent_id: str = "",
+                          db: AsyncSession = Depends(get_db),
+                          caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.item_categories(reads.flag(is_active), parent_id)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/uom")
+async def uom(request: Request, is_active: str = "",
+              db: AsyncSession = Depends(get_db), caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.uoms(reads.flag(is_active))
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/warehouses")
+async def warehouses(request: Request, is_active: str = "", tier: str = "",
+                     db: AsyncSession = Depends(get_db),
+                     caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.warehouses(reads.flag(is_active), tier)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/batches")
+async def batches(request: Request, item_id: str = "", updated_since: str = "",
+                  db: AsyncSession = Depends(get_db), caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.batches(item_id, updated_since)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/stock-balance")
+async def stock_balance(request: Request, warehouse_id: str = "", item_id: str = "",
+                        updated_since: str = "", db: AsyncSession = Depends(get_db),
+                        caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.stock_balance(warehouse_id, item_id, updated_since)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/material-issues")
+async def material_issues(request: Request, destination_warehouse_id: str = "",
+                          status: str = "", warehouse_id: str = "",
+                          updated_since: str = "", db: AsyncSession = Depends(get_db),
+                          caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.material_issues(destination_warehouse_id, status,
+                                         warehouse_id, updated_since)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/material-issue-items")
+async def material_issue_items(request: Request, issue_id: str = "",
+                               db: AsyncSession = Depends(get_db),
+                               caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.material_issue_items(issue_id)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/user-warehouses")
+async def user_warehouses(request: Request, warehouse_id: str = "", is_active: str = "",
+                          db: AsyncSession = Depends(get_db),
+                          caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.user_warehouses(warehouse_id, reads.flag(is_active))
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/users")
+async def users(request: Request, is_active: str = "", employee_code: str = "",
+                db: AsyncSession = Depends(get_db), caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.users(reads.flag(is_active), employee_code)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/indents")
+async def indents(request: Request, warehouse_id: str = "", status: str = "",
+                  updated_since: str = "", db: AsyncSession = Depends(get_db),
+                  caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.indents(warehouse_id, status, updated_since)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/indent-items")
+async def indent_items(request: Request, indent_id: str = "",
+                       db: AsyncSession = Depends(get_db),
+                       caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.indent_items(indent_id)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/vehicles")
+async def vehicles(request: Request, warehouse_id: str = "",
+                   db: AsyncSession = Depends(get_db), caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.vehicles(warehouse_id)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+@feeds.get("/serial-numbers")
+async def serial_numbers(request: Request, consumable_code: str = "", item_id: str = "",
+                         warehouse_id: str = "", updated_since: str = "",
+                         db: AsyncSession = Depends(get_db),
+                         caller: Caller = Depends(cams_caller)):
+    stmt, mapper = reads.serial_numbers(consumable_code, item_id, warehouse_id,
+                                        updated_since)
+    return await reads.page(db, stmt, mapper, request.query_params)
+
+
+# --------------------------------------------------------------------------- #
+# Write endpoints — §4
+# --------------------------------------------------------------------------- #
+# Each is the same four steps in `ingest.accept`; only the schema and what counts as a
+# row differ. Registered from `docs.WRITES` — the same table the connection document
+# is built from, so the URL a partner is handed is by construction a URL that exists,
+# and the two path aliases cannot fall out of step with each other.
+
+def _register(write: docs.Write) -> None:
+    async def handler(request: Request, db: AsyncSession = Depends(get_db),
+                      caller: Caller = Depends(cams_caller)):
+        return await ingest.accept(
+            db, await request.body(), request.headers.get(SIGNATURE_HEADER),
+            write.model, client_code=caller.client_code, count=write.count,
+            **_network(request))
+
+    handler.__name__ = f"cams_{write.path.replace('-', '_')}"
+    for route in (f"/{write.path}", f"/cams/{write.path}"):
+        feeds.post(route)(handler)
+
+
+for _write in docs.WRITES:
+    _register(_write)
+
+
+# --------------------------------------------------------------------------- #
+# Console — the SCM side
+# --------------------------------------------------------------------------- #
+
+@console.get("/status")
+async def cams_status(db: AsyncSession = Depends(get_db),
+                      user=Depends(require_permission(VIEW))):
+    """Whether the shared secret exists and what has arrived. Never the secret."""
+    return await ingest.status(db)
+
+
+@console.get("/docs")
+async def connection_docs(request: Request, db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(VIEW))):
+    """Where B-CAMS posts, how it signs, and an example of each of the five bodies.
+
+    The host comes from the request, not from configuration: whoever opens this screen
+    reached SCM on some address, and that is the address to hand the partner. The read
+    feeds are listed from the routes that are actually registered."""
+    feed_paths = tuple(
+        route.path.rsplit("/", 1)[-1] for route in feeds.routes
+        if "GET" in getattr(route, "methods", ()) and not route.path.endswith("_ping")
+    )
+    config = await ingest.config(db)
+    return docs.connection_docs(
+        str(request.base_url), configured=bool(config.get("secret_hmac_key")),
+        feeds=feed_paths)
+
+
+@console.post("/secret", response_model=SecretOut, status_code=201)
+async def rotate_secret(db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(CONSOLE))):
+    """Mint the shared secret B-CAMS signs its writes with. Shown once."""
+    return await ingest.rotate_secret(db, user)
+
+
+@console.get("/events")
+async def events(params: PageParams = Depends(), event: str = Query(""),
+                 db: AsyncSession = Depends(get_db),
+                 user=Depends(require_permission(VIEW))):
+    return await ingest.receipts(db, params, event or None)
+
+
+@console.get("/events/{event_id}", response_model=ReceiptOut)
+async def event_detail(event_id: str, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(VIEW))):
+    doc = await ingest.receipt(db, event_id)
+    if doc is None:
+        raise NotFoundError(f"No B-CAMS event {event_id}")
+    return doc
+
+
+router = APIRouter()
+router.include_router(feeds)
+router.include_router(console)

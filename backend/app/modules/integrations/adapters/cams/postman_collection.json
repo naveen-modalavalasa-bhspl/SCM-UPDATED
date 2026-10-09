@@ -1,0 +1,1032 @@
+{
+  "info": {
+    "name": "SCM → B-CAMS (cams integration)",
+    "description": "All 14 read feeds, the 5 write endpoints, and the SCM-side console routes.\n\nSet the collection variables first: base, apiKey, jwt.\n\nBody signing was removed on 2026-09-01 — the API key is the whole credential and X-CAMS-Signature is not read. A collection-level pre-request script still stamps a fresh event_id, so a re-send is a NEW event. To test idempotency, disable the script line that regenerates eventId (or just send the same request twice with `{{eventId}}` pinned to a literal).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "jwt",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "eventId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Only the write requests carry a body worth signing.",
+          "const raw = pm.request.body && pm.request.body.raw;",
+          "if (!raw) { return; }",
+          "",
+          "// A unique event_id per send, so each POST is a new event rather than a replay.",
+          "// Comment the next line out to test idempotency: the same id twice must answer",
+          "// {\"ok\":true,\"duplicate\":true}.",
+          "pm.collectionVariables.set('eventId', 'pm-' + Date.now() + '-' + Math.random().toString(16).slice(2, 10));",
+          "",
+          "// Bodies are no longer signed (2026-09-01): X-CAMS-Signature is not read."
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('status is 2xx', () => pm.response.to.be.success);",
+          "const body = pm.response.json();",
+          "if (Array.isArray(body.items)) {",
+          "  pm.test('envelope has items/total/page/page_size', () => {",
+          "    pm.expect(body).to.have.property('total');",
+          "    pm.expect(body).to.have.property('page');",
+          "    pm.expect(body).to.have.property('page_size');",
+          "  });",
+          "  console.log(pm.info.requestName + ' → total=' + body.total);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "GET _ping",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/_ping",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "_ping"
+              ]
+            }
+          }
+        },
+        {
+          "name": "GET _ping — no key (expect 401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 without a key', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/_ping",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "_ping"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Reads (P0)",
+      "item": [
+        {
+          "name": "01 items",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/items?item_type=consumable,reagent&page=1&page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "items"
+              ],
+              "query": [
+                {
+                  "key": "item_type",
+                  "value": "consumable,reagent"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "is_active",
+                  "value": "true",
+                  "disabled": true
+                },
+                {
+                  "key": "updated_since",
+                  "value": "2026-08-01",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "02 item-categories",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/item-categories?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "item-categories"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "parent_id",
+                  "value": "3",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "03 uom",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/uom?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "uom"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "04 warehouses",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/warehouses?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "warehouses"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "tier",
+                  "value": "LIP",
+                  "disabled": true
+                },
+                {
+                  "key": "is_active",
+                  "value": "true",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "05 batches",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/batches?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "batches"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "item_id",
+                  "value": "1042",
+                  "disabled": true
+                },
+                {
+                  "key": "updated_since",
+                  "value": "2026-08-01",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "06 stock-balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/stock-balance?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "stock-balance"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "warehouse_id",
+                  "value": "44",
+                  "disabled": true
+                },
+                {
+                  "key": "item_id",
+                  "value": "1042",
+                  "disabled": true
+                },
+                {
+                  "key": "updated_since",
+                  "value": "2026-08-01T00:00:00",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Reads (P1 — receipt chain)",
+      "item": [
+        {
+          "name": "07 material-issues",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/material-issues?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "material-issues"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "destination_warehouse_id",
+                  "value": "44",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "DISPATCHED",
+                  "disabled": true
+                },
+                {
+                  "key": "updated_since",
+                  "value": "2026-08-01",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "08 material-issue-items",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/material-issue-items?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "material-issue-items"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "issue_id",
+                  "value": "7712",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "09 user-warehouses",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/user-warehouses?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "user-warehouses"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "warehouse_id",
+                  "value": "44",
+                  "disabled": true
+                },
+                {
+                  "key": "is_active",
+                  "value": "true",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "10 users",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/users?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "employee_code",
+                  "value": "HR-EMP-15086",
+                  "disabled": true
+                },
+                {
+                  "key": "is_active",
+                  "value": "true",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Reads (P2 — traceability)",
+      "item": [
+        {
+          "name": "11 indents",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/indents?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "indents"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "warehouse_id",
+                  "value": "44",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "APPROVED",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "12 indent-items",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/indent-items?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "indent-items"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "indent_id",
+                  "value": "5580",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "13 vehicles",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/vehicles?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "vehicles"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "14 serial-numbers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/serial-numbers?page_size=500",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "serial-numbers"
+              ],
+              "query": [
+                {
+                  "key": "page_size",
+                  "value": "500"
+                },
+                {
+                  "key": "consumable_code",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "warehouse_id",
+                  "value": "44",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Writes (signed)",
+      "item": [
+        {
+          "name": "B4 material-issue-ack",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"material_issue.acknowledged\",\"event_id\":\"{{eventId}}\",\"generated_at\":\"2026-08-08T10:12:00\",\"issue_id\":7712,\"issue_number\":\"MI-2026-000431\",\"warehouse_id\":44,\"sac\":\"VZM-MEN-01\",\"acknowledged_by_employee_code\":\"HR-EMP-15086\",\"acknowledged_at\":\"2026-08-08T10:11:45\",\"status\":\"received\",\"items\":[{\"item_id\":1042,\"batch_number\":\"B-2026-0417\",\"issued_qty\":200.0,\"received_qty\":198.0,\"shortage_qty\":2.0,\"damaged_qty\":0.0,\"remarks\":\"2 packs torn\"}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/material-issue-ack",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "material-issue-ack"
+              ]
+            }
+          }
+        },
+        {
+          "name": "B2 consumption",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"facility.consumption\",\"event_id\":\"{{eventId}}\",\"generated_at\":\"2026-08-08T00:05:00\",\"consumption_date\":\"2026-08-07\",\"records\":[{\"sac\":\"VZM-MEN-01\",\"warehouse_id\":44,\"facility_name\":\"104-MMU-AP Mentada\",\"vehicle_number\":\"AP31TD4417\",\"employee_code\":\"HR-EMP-15086\",\"employee_name\":\"Ramesh Kumar\",\"role\":\"LT\",\"item_code\":\"101010-0004\",\"batch_number\":\"B-2026-0417\",\"expiry_date\":\"2027-01-14\",\"uom\":\"g\",\"opening_qty\":980.0,\"received_qty\":0.0,\"consumed_qty\":200.0,\"wastage_qty\":0.0,\"returned_qty\":0.0,\"closing_qty\":780.0,\"rate\":145.5,\"consumed_value\":29100.0,\"tests_done\":42}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/consumption",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "consumption"
+              ]
+            }
+          }
+        },
+        {
+          "name": "B1 stock-balance",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"facility.stock_balance\",\"event_id\":\"{{eventId}}\",\"generated_at\":\"2026-08-08T06:30:00\",\"source\":\"B-CAMS\",\"facilities\":[{\"sac\":\"VZM-MEN-01\",\"hcm_office_id\":3081,\"warehouse_id\":44,\"facility_name\":\"104-MMU-AP Mentada\",\"vehicle_number\":\"AP31TD4417\",\"as_of\":\"2026-08-07\",\"items\":[{\"item_code\":\"101010-0004\",\"item_name\":\"ABSORBANT COTTON (500 and 100grms)\",\"batch_number\":\"B-2026-0417\",\"expiry_date\":\"2027-01-14\",\"uom\":\"g\",\"closing_qty\":780.0,\"rate\":145.5,\"value\":113490.0}]}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/stock-balance",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "stock-balance"
+              ]
+            }
+          }
+        },
+        {
+          "name": "B3 stock-transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"facility.stock_transfer\",\"event_id\":\"{{eventId}}\",\"transfer_date\":\"2026-08-08\",\"reason\":\"vehicle_breakdown\",\"from\":{\"sac\":\"VZM-MEN-01\",\"warehouse_id\":44,\"vehicle_number\":\"AP31TD4417\"},\"to\":{\"sac\":\"VZM-MEN-01\",\"warehouse_id\":91,\"vehicle_number\":\"AP31TD9902\"},\"approved_by_employee_code\":\"HR-EMP-11204\",\"items\":[{\"item_code\":\"101010-0004\",\"batch_number\":\"B-2026-0417\",\"qty\":780.0,\"uom\":\"g\"}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/stock-transfer",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "stock-transfer"
+              ]
+            }
+          }
+        },
+        {
+          "name": "U5 wastage",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"facility.wastage\",\"event_id\":\"{{eventId}}\",\"generated_at\":\"2026-08-14T06:57:56.654416Z\",\"scope\":\"full\",\"wastage_date\":\"2026-08-14\",\"record_count\":1,\"records\":[{\"sac\":null,\"warehouse_id\":78,\"facility_name\":\"MOBILE UNIT @RAMABHADRAPURAM-AP-104-MMUS\",\"employee_code\":\"HR-EMP-15828\",\"item_code\":\"141010-0002\",\"uom\":\"ml\",\"wastage_qty\":1.0,\"reason\":\"Spillage\",\"remarks\":\"verify run 2\",\"rate\":99.0,\"wastage_value\":99.0}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/wastage",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "wastage"
+              ]
+            },
+            "description": "Wastage and expiry write-offs. Separate from consumption because wastage_qty alone carries no reason and no value. An expiry write-off is this payload with reason: \"Expired\"."
+          }
+        },
+        {
+          "name": "B1 stock-balance — the 60s real-time push (14-Aug-2026 capture)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"facility.stock_balance\",\"event_id\":\"{{eventId}}\",\"generated_at\":\"2026-08-14T06:53:31.283434Z\",\"source\":\"B-CAMS\",\"basis\":\"stock_balance\",\"scope\":\"partial\",\"facility_count\":1,\"item_count\":1,\"facilities\":[{\"warehouse_id\":78,\"warehouse_code\":\"MOBILE UNIT @RAMABHADRAPURAM\",\"facility_name\":\"MOBILE UNIT @RAMABHADRAPURAM-AP-104-MMUS\",\"tier\":\"LIP\",\"sac\":null,\"hcm_office_id\":null,\"vehicle_number\":null,\"is_vehicle\":true,\"as_of\":\"2026-08-14T06:52:20\",\"items\":[{\"item_code\":\"131111-0001\",\"item_name\":\"Tourniquet\",\"uom\":\"nos\",\"on_hand_qty\":5.0,\"closing_qty\":5.0,\"rate\":99.0,\"value\":495.0,\"batches\":[{\"batch_number\":\"07-July-2026\",\"expiry_date\":\"2026-10-31\",\"qty\":5.0}],\"lt_drawn_qty\":0.0,\"sk_held_qty\":5.0}]}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/stock-balance",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "stock-balance"
+              ]
+            },
+            "description": "The movement-driven push, with scope/basis, the SK/LT split, per-batch lines, and an as_of stamped with a time rather than a plain date. Reduced to the day it names, in IST — so a UTC evening lands on the next day here."
+          }
+        },
+        {
+          "name": "Replay — send B2 twice with a pinned id (expect duplicate:true)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pinned id: the FIRST send stores it, every later send must answer duplicate.",
+                  "pm.collectionVariables.set('eventId', 'pm-replay-fixed-0001');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('200 either way', () => pm.response.to.have.status(200));",
+                  "console.log(body.duplicate ? 'replay recognised' : 'first send — run again to see duplicate:true');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Api-Key",
+                "value": "{{apiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"facility.consumption\",\"event_id\":\"{{eventId}}\",\"consumption_date\":\"2026-08-07\",\"records\":[{\"sac\":\"VZM-MEN-01\",\"warehouse_id\":44,\"item_code\":\"101010-0004\",\"uom\":\"g\",\"opening_qty\":10.0,\"consumed_qty\":2.0,\"closing_qty\":8.0}]}"
+            },
+            "url": {
+              "raw": "{{base}}/api/ext/v1/cams/consumption",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "ext",
+                "v1",
+                "cams",
+                "consumption"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. SCM console (JWT, not the API key)",
+      "item": [
+        {
+          "name": "Received events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/apis/cams/events?page=1&size=20",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "apis",
+                "cams",
+                "events"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "size",
+                  "value": "20"
+                },
+                {
+                  "key": "event",
+                  "value": "facility.consumption",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "One event with its payload",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base}}/api/apis/cams/events/pm-replay-fixed-0001",
+              "host": [
+                "{{base}}"
+              ],
+              "path": [
+                "api",
+                "apis",
+                "cams",
+                "events",
+                "pm-replay-fixed-0001"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

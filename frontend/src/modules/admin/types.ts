@@ -1,0 +1,617 @@
+export interface SyncResult {
+  entity: string;
+  status: string; // RUNNING | SUCCESS | FAILED
+  records_fetched: number;
+  records_upserted: number;
+  error_message?: string | null;
+  /** When this entity last ran. The card shows the newest row per entity, and a row
+   *  from an older run looks identical to one from this one without it. */
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** One piece of follow-up work a sync triggers, and whether it landed. */
+export interface SyncFollowUp {
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface SyncStatus {
+  running: boolean;
+  items: SyncResult[];
+  follow_up?: SyncFollowUp[];
+}
+
+export interface Schedule {
+  enabled: boolean;
+  interval_minutes: number;
+  next_run: string | null;
+}
+
+export type ResetPolicy = "NEVER" | "YEARLY" | "MONTHLY";
+
+export interface DocSeries {
+  id: number;
+  doc_type: string;
+  fiscal_year: string;
+  prefix: string;
+  pattern: string;
+  last_number: number;
+  reset_policy: ResetPolicy;
+  last_reset_period?: string | null;
+  is_active: boolean;
+  preview: string;
+}
+
+export type Operator =
+  | "EQ" | "NEQ" | "GT" | "GTE" | "LT" | "LTE" | "IN" | "NOT_IN" | "BETWEEN";
+export type ActionType =
+  | "ROUTE_APPROVAL" | "ROUTE_FULFILLMENT" | "SPLIT_FULFILLMENT" | "NOTIFY" | "SET_FIELD";
+
+export interface RuleCondition {
+  id?: number;
+  field_name: string;
+  operator: Operator;
+  field_value: string;
+  logic: "AND" | "OR";
+}
+
+export interface RuleAction {
+  id?: number;
+  seq: number;
+  action_type: ActionType;
+  params: Record<string, unknown>;
+}
+
+export interface Conflict {
+  severity: "error" | "warning";
+  rule_id: number;
+  rule_name: string;
+  action_type: string;
+  message: string;
+}
+
+export interface Rule {
+  id: number;
+  event_code: string;
+  name: string;
+  description?: string | null;
+  priority: number;
+  stop_on_match: boolean;
+  is_active: boolean;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  conditions?: RuleCondition[];
+  actions?: RuleAction[];
+  warnings?: Conflict[];
+}
+
+export interface RuleEvent {
+  code: string;
+  name: string;
+  module?: string | null;
+  description?: string | null;
+  /** field name -> "number" | "string"; drives the field picker in the builder. */
+  context_schema: Record<string, string>;
+}
+
+export interface RuleVocabulary {
+  items: RuleEvent[];
+  operators: Operator[];
+  logics: ("AND" | "OR")[];
+  action_types: ActionType[];
+}
+
+export interface SimulateResult {
+  matched: boolean;
+  actions: {
+    action_type: string;
+    params: Record<string, unknown>;
+    rule_id: number;
+    rule_name: string;
+  }[];
+}
+
+export type ApproverType =
+  | "REPORTING_MANAGER" | "DEPT_HEAD" | "POSITION" | "ROLE" | "SPECIFIC_USER";
+export type ApprovalMode = "ANY_ONE" | "ALL" | "MAJORITY";
+
+export interface WorkflowCondition {
+  id?: number;
+  field_name: string;
+  operator: Operator;
+  field_value: string;
+  logic: "AND" | "OR";
+}
+
+export interface WorkflowStage {
+  id?: number;
+  sequence: number;
+  name: string;
+  approver_type: ApproverType;
+  position_id?: number | null;
+  role_id?: number | null;
+  employee_id?: number | null;
+  approval_mode: ApprovalMode;
+  is_optional: boolean;
+  can_edit_document: boolean;
+  sla_hours?: number | null;
+  conditions: WorkflowCondition[];
+}
+
+export interface WorkflowDefinition {
+  id: number;
+  code: string;
+  name: string;
+  doc_type: string;
+  version: number;
+  is_active: boolean;
+  is_fallback: boolean;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  created_at: string;
+  stages: WorkflowStage[];
+}
+
+export interface WorkflowOption {
+  id: number;
+  name: string;
+}
+
+export interface DefaultFlowStep {
+  doc_type: string;
+  title: string;
+  steps: string[];
+  fallback: string;
+}
+
+export interface WorkflowOptions {
+  doc_types: string[];
+  approver_types: ApproverType[];
+  approval_modes: ApprovalMode[];
+  operators: Operator[];
+  positions: WorkflowOption[];
+  roles: WorkflowOption[];
+  employees: WorkflowOption[];
+  default_flow: DefaultFlowStep[];
+}
+
+export interface AuditRow {
+  id: number;
+  entity: string;
+  entity_id: number;
+  entity_no?: string | null;
+  action: string;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  /** field -> {from, to}; only the fields that actually changed. */
+  changed_fields?: Record<string, { from: unknown; to: unknown }> | null;
+  /** Where the request came from and on what. All null on rows written before the
+   *  columns existed — an honest gap the screen shows as a dash, never a guess.
+   *  `location` is the ADDRESS's location, which for a LAN login is the deployment's
+   *  own (see `settings/clientinfo.py`). */
+  ip_address?: string | null;
+  location?: string | null;
+  device_type?: string | null;
+  browser?: string | null;
+  os?: string | null;
+  at?: string | null;
+}
+
+export interface AppLog {
+  id: number;
+  request_id: string;
+  source: "BACKEND" | "FRONTEND";
+  level: "ERROR" | "WARNING";
+  message: string;
+  error_type?: string | null;
+  status_code?: number | null;
+  http_method?: string | null;
+  endpoint?: string | null;
+  page_url?: string | null;
+  source_file?: string | null;
+  function_name?: string | null;
+  line_number?: number | null;
+  column_number?: number | null;
+  stack_trace?: string | null;
+  actor_id?: number | null;
+  actor_name?: string | null;
+  ip_address?: string | null;
+  user_agent?: string | null;
+  context_data?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export type RecipientType = "ROLE" | "POSITION" | "GROUP" | "EMPLOYEE";
+
+export interface NotificationRule {
+  id: number;
+  event_code: string;
+  stage?: string | null;
+  recipient_type: RecipientType;
+  recipient_id?: number | null;
+  recipient_name?: string | null;
+  channel: "IN_APP" | "EMAIL";
+  template?: string | null;
+  is_active: boolean;
+}
+
+// ---------------- Approval ladders (Settings > Approvals Config) ----------------
+
+/** A rung names a RANK (hcm_positions.role_id — COO, SPH, REGIONAL MANAGER…), never
+ *  a person and never a position row. The approver is found at submit time by
+ *  climbing the raiser's own reporting line. */
+export interface LadderHolder {
+  id: number;
+  name: string;
+  code?: string | null;
+}
+
+export interface LadderPosition {
+  id: number;
+  name: string;
+  department_id?: number | null;
+  department_name: string;
+  holders: LadderHolder[];
+}
+
+/** A rank with its people. Keyed on the project alone, so it survives a change of
+ *  document — which is why it is fetched apart from the ladder. */
+export interface LadderRank {
+  role_id: number;
+  role_name: string;
+  depth: number;
+  position_count: number;
+  holders: LadderHolder[];
+  holder_count: number;
+}
+
+export interface LadderRung {
+  sequence: number;
+  name: string;
+  position_role_id: number;
+  is_enabled: boolean;
+  /** How many posts sit under this rank, and how many people fill them. The posts
+   *  themselves are loaded only when the rung is opened — a live project has ~3,400. */
+  position_count: number;
+  holder_count: number;
+  /** null — the default — is every post at this rank. A list narrows the rung to
+   *  exactly those posts, which also excludes any ancestor outside them. */
+  selected_position_ids: number[] | null;
+  /** Nobody in this project holds a position at this rank any more. */
+  is_dead?: boolean;
+  /** HCM added this rank after the ladder was saved; offered switched off. */
+  is_new_rank?: boolean;
+  conditions: WorkflowCondition[];
+}
+
+/** Who may approve a document raised by someone who is also ON this ladder.
+ *
+ *  INDEPENDENT — the raiser is dropped from every rung; somebody else has to sign.
+ *  CREATOR_ALLOWED — the raiser stays on the ladder and gets the approval task, which
+ *  is what Inventory and Warehouse need: the same handful of people hold every post
+ *  there, so dropping the raiser emptied the whole ladder and nothing moved.
+ *  NO_APPROVAL — nobody signs it; the document is born approved with a wf_actions row
+ *  saying so. Unticking every rung is NOT the same thing: an empty ladder reads as a
+ *  misconfiguration and falls through to the reporting line. */
+export type SelfApprovalPolicy = "INDEPENDENT" | "CREATOR_ALLOWED" | "NO_APPROVAL";
+
+/** Both ladder kinds carry the same policy — it belongs to the ladder, not to a role
+ *  or a person, so each project decides for itself. */
+export interface LadderPolicy {
+  self_approval_policy: SelfApprovalPolicy;
+  /** Where an INDEPENDENT ladder sends a document when every rung resolved to the
+   *  raiser himself. A POST, so it survives the person in the chair changing. */
+  fallback_position_id: number | null;
+  /** One line per person who fills more than one switched-on rung; they collapse to a
+   *  single approver at submit, so a "two-step" ladder would only ever be one step. */
+  warnings: string[];
+}
+
+export interface Ladder extends LadderPolicy {
+  workflow_id: number | null;
+  version: number;
+  project_id: number | null;
+  doc_type: string;
+  module: string;
+  /** No ladder saved yet — these rungs are an unsaved draft from the project's ranks. */
+  is_new: boolean;
+  /** A hand-built ladder is what actually runs for this document; these rungs are only
+   *  a draft. One scope has one ladder, so saving here would replace it. */
+  has_custom?: boolean;
+  rungs: LadderRung[];
+  /** Documents mid-approval that will finish on the version now live. */
+  in_flight: number;
+}
+
+/** The overdue-approval chase settings. */
+export interface ReminderConfig {
+  enabled: boolean;
+  interval_minutes: number;
+  max_reminders: number;
+  gap_hours: number;
+  /** Only used when wf_pending.due_at is NULL, which today is every row. */
+  overdue_after_days: number;
+}
+
+/** One overdue approval, and what the next sweep would do about it. */
+export interface OverdueApproval {
+  pending_id: number;
+  doc_type: string;
+  doc_no: string | null;
+  doc_id: number;
+  approver_id: number;
+  raised_by: string | null;
+  stage_name: string | null;
+  due_at: string | null;
+  /** False when the due date was derived rather than set on the task itself. */
+  due_at_is_set: boolean;
+  days_overdue: number;
+  reminders_sent: number;
+  escalated: boolean;
+  next_action: "REMIND" | "ESCALATE" | "WAIT";
+}
+
+export interface ReminderStatus {
+  config: ReminderConfig;
+  items: OverdueApproval[];
+  total: number;
+  next_run: string | null;
+}
+
+export interface ReminderRunResult {
+  overdue: number;
+  reminded: number;
+  escalated: number;
+  skipped: number;
+  enabled: boolean;
+}
+
+/** One document still climbing a ladder that has since been replaced. Correct
+ *  behaviour — the chain is frozen at submit — but worth being able to see. */
+export interface StaleInstance {
+  instance_id: number;
+  doc_type: string;
+  doc_no: string | null;
+  doc_id: number;
+  raised_by: string | null;
+  started_at: string | null;
+  stage_name: string | null;
+  stage_sequence: number;
+  ladder_code: string;
+  project_name: string | null;
+  running_version: number;
+  live_version: number;
+  versions_behind: number;
+}
+
+export interface LadderOptions {
+  projects: { id: number; name: string }[];
+  doc_types: { code: string; label: string; module: string }[];
+  module_order: string[];
+}
+
+/* ---- hand-built ladders (Approvals Config > Build your own ladder) ----
+ *
+ * For Inventory and Warehouse the approver is not above the raiser at all — the whole
+ * warehouse department sits on posts with no parent and no children, and all twelve
+ * share one rank. So a step names a POST, and the steps run in the order they were
+ * ticked. Still not a person: whoever takes the chair inherits the approval. */
+
+export interface LadderDepartment {
+  name: string;
+  position_count: number;
+}
+
+export interface LadderPost {
+  id: number;
+  name: string;
+  role_name: string;
+  holders: LadderHolder[];
+}
+
+/** How a step finds its approver.
+ *  - `hcm`         — a post in the HCM mirror.
+ *  - `local`       — a chair this system owns, for the steps HCM has no post for.
+ *  - `rank`        — climbed from the raiser's own reporting line, so who signs
+ *                    depends on who raised it.
+ *  - `shared_rank` — a rank held OUTSIDE the raiser's line: SCM Head, Indent Team,
+ *                    the PO desk. Everyone holding it signs, with no climbing —
+ *                    climbing to it is impossible, which is why these chairs used to
+ *                    have to be invented locally. */
+export type StepKind = "hcm" | "local" | "rank" | "shared_rank";
+
+export interface CustomLadderStep {
+  sequence: number;
+  position_id?: number | null;
+  post_id?: number | null;
+  position_role_id?: number | null;
+  kind?: StepKind;
+  name: string;
+  holders: LadderHolder[];
+  /** Nobody sits in this chair any more — it is skipped at submit. */
+  is_dead?: boolean;
+}
+
+export interface CustomLadder extends LadderPolicy {
+  workflow_id: number | null;
+  version: number;
+  project_id: number | null;
+  doc_type: string;
+  is_new: boolean;
+  steps: CustomLadderStep[];
+  in_flight: number;
+  /** Built on one of the older screens. Editable here, but saving rewrites it. */
+  is_legacy?: boolean;
+  label?: string;
+  policies?: PolicyChoice[];
+  /** The raiser RANK this chain serves, or null for the one everybody else uses. */
+  raiser_role_id?: number | null;
+  raiser_role_name?: string | null;
+  /** This document's chain may differ by who raised it (today: the Indent). */
+  supports_raiser_chains?: boolean;
+  /** The ranks that already have a chain of their own, for this project. */
+  raiser_chains?: RaiserChain[];
+  /** A rank with no chain yet opens showing the default one, unsaved. */
+  inherited_from_default?: boolean;
+}
+
+/** One rank that has its own saved chain. */
+export interface RaiserChain {
+  role_id: number;
+  role_name: string;
+  version: number;
+}
+
+// ---- Settings > Approval Flow: one screen, one row per document type ----
+
+export interface PolicyChoice {
+  value: SelfApprovalPolicy;
+  label: string;
+  help: string;
+}
+
+/** One document type on the overview: its chain in a line, and whether it has one. */
+export interface FlowRow {
+  code: string;
+  label: string;
+  module: string;
+  workflow_id: number | null;
+  is_configured: boolean;
+  is_legacy: boolean;
+  self_approval_policy: SelfApprovalPolicy;
+  /** "Indent Team → SCM Head" — the whole chain, readable, no table needed. */
+  summary: string;
+  step_count: number;
+  in_flight: number;
+  /** Job profiles allowed to RAISE this document — the other half of "who does what",
+   *  read from the create permission rather than guessed from the chain. */
+  raised_by: string[];
+  /** This document's chain may be configured per raiser rank. */
+  supports_raiser_chains: boolean;
+  /** The ranks that already have their own chain here. */
+  raiser_chains: RaiserChain[];
+}
+
+export interface FlowOverview {
+  items: FlowRow[];
+  policies: PolicyChoice[];
+  modules: string[];
+}
+
+/** A chair the admin can put on a chain. One list, three kinds behind it. */
+export interface FlowRung {
+  id: number;
+  name: string;
+  department?: string | null;
+  role_name?: string;
+  members?: LadderHolder[];
+  position_count?: number;
+  people_count?: number;
+  /** Who actually holds a shared chair. Named because these rungs resolve to people
+   *  now, not to whoever turns out to be above a future raiser. */
+  people?: string[];
+  /** How high this rank sits in the reporting tree — smaller is higher. Only ranks
+   *  carry it; it orders the "when raised by" picker and decides which steps a copy
+   *  across ranks drops. */
+  depth?: number;
+  /** The HCM project the rank belongs to — every project has its own "OE". */
+  project_name?: string | null;
+  /** The rank belongs to another project: it is in this list only because one of
+   *  this project's people sits on that project's post, and a raiser here will not
+   *  climb through it. */
+  other_project?: boolean;
+}
+
+export interface FlowRungs {
+  local: FlowRung[];
+  ranks: FlowRung[];
+  /** Ranks whose holders sit in another project — the company-wide chairs. */
+  shared_ranks: FlowRung[];
+  hcm: FlowRung[];
+}
+
+/** Where a moved document landed on its new chain. */
+export interface FlowMoveResult {
+  instance_id: number;
+  doc_no: string | null;
+  workflow_id: number;
+  stage: string | null;
+  sequence: number;
+}
+
+/** A document still climbing a version of the chain. */
+export interface FlowDocument {
+  id: number;
+  /** The version it is riding — the Move picker leaves that one out. */
+  workflow_id: number;
+  doc_no: string;
+  stage: string | null;
+  sequence: number;
+  started_by: string | null;
+  started_at: string | null;
+}
+
+/** One saved version. Retired versions keep governing the documents frozen onto them,
+ *  which is why each carries its own document list rather than a shared total. */
+export interface FlowVersion {
+  workflow_id: number;
+  version: number;
+  is_active: boolean;
+  code: string;
+  saved_at: string | null;
+  saved_by: string | null;
+  summary: string;
+  /** The rungs themselves. The one-line `summary` truncates on a narrow row, and the
+   *  question the history is opened with — which rung changed — needs the full list. */
+  steps: FlowStepSummary[];
+  documents: FlowDocument[];
+}
+
+/** One rung of a saved version, as the history lists it. */
+export interface FlowStepSummary {
+  sequence: number;
+  name: string;
+  kind: "rank" | "local" | "hcm";
+}
+
+export interface ApprovalPostMember {
+  id: number;
+  name: string;
+  code: string | null;
+  /** HCM has dropped this employee; the chair needs reseating. */
+  is_stale?: boolean;
+}
+
+/** A job profile a post can carry, from /api/rbac/roles. */
+export interface JobProfileOption {
+  id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+  permissions?: string[];
+}
+
+export interface ApprovalPost {
+  id: number;
+  code: string;
+  name: string;
+  department: string | null;
+  hcm_position_id: number | null;
+  /** Seating someone in this post grants them this profile. */
+  rbac_role_id: number | null;
+  is_active: boolean;
+  members: ApprovalPostMember[];
+  used_in_ladders: number;
+}
+
+export interface LadderPreview {
+  from: { position_id: number; position_name: string } | null;
+  chain: { role_name: string; position_name: string; approver_names: string[] }[];
+  self_approved?: boolean;
+  /** The climb reached only the raiser, so the ladder's nominated fallback post is
+   *  where this really goes. */
+  used_fallback?: boolean;
+  note?: string;
+}

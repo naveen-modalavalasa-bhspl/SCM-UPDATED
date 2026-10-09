@@ -1,0 +1,135 @@
+# ---- Secrets / env (never commit) ----
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+backend/.env
+frontend/.env
+*.pem
+*.key
+
+# ---- Python (backend/) ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.tox/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# Alembic — keep versioned migrations, ignore nothing here by default
+# (uncomment if you generate scratch migrations)
+# backend/alembic/versions/*_scratch*.py
+
+# ---- Node / Frontend (frontend/) ----
+node_modules/
+dist/
+dist-ssr/
+build/
+*.local
+.vite/
+.eslintcache
+*.tsbuildinfo
+
+# npm / yarn / pnpm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ---- Database dumps / data ----
+dumps/*
+!dumps/.gitkeep
+*.sql.gz
+*.dump
+
+# ---- Editors / IDE ----
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Logs / temp ----
+*.log
+logs/
+tmp/
+temp/
+
+# ---- Playwright ----
+# Run output, not source. Traces, videos and screenshots are large, binary and only
+# meaningful for the run that produced them; the MCP browser writes a snapshot file
+# per navigation, which is how 26 of them ended up committed.
+.playwright-mcp/
+playwright-report/
+test-results/
+playwright-tests/reports/
+playwright-tests/test-results/
+playwright-tests/.auth/
+# Logins. The suite reads these from a gitignored file precisely so no credential
+# ever lands in a commit — see playwright-tests/users.example.json for the shape.
+playwright-tests/users.json
+
+# ---- Local tool caches ----
+.impeccable/
+
+# ---- Uploaded documents (invoice copies, LR slips, PODs) ----
+# Default store for sys_attachments files; override with UPLOAD_DIR in backend/.env.
+var/
+backend/var/
+
+# ---- Generated master-data workbooks ----
+# docs/masters/*/generator/ rebuilds these from the source lists in one command, so
+# the .xlsx are output, not source, and binary diffs say nothing in review.
+docs/masters/**/*.xlsx
+
+# ---- Runtime logs ----
+# `logs.json` was COMMITTED until 2026-09-03, carrying employee names, internal IP
+# addresses and stack traces. Runtime output is never source; the in-app log table
+# (platform/admin/app_logs.py) is where a deployment reads its errors, and it redacts.
+logs.json
+*.log
+
+# ---- Build output that was being committed ----
+# `tsc -b` compiles vite.config.ts and writes these beside it, so every developer who
+# builds produces a diff in files nobody edits. They are output, not source.
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# A SQLite file in a MySQL-only project (CLAUDE.md: no SQLite fallback). Whatever
+# wrote it, it is not source and it can carry live rows.
+backend/scm.db
