@@ -101,6 +101,21 @@ async def update_warehouse(warehouse_id: int, data: s.WarehouseWrite,
     return await service.update_warehouse(db, warehouse_id, data, user)
 
 
+@router.get("/warehouses/{warehouse_id}/unlocated", response_model=s.UnlocatedStockStatus)
+async def unlocated_stock_status(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(STOCK_VIEW))):
+    """Stock held with no location, and the Unlocated location it is placed in."""
+    return await service.unlocated_stock_status(db, warehouse_id)
+
+
+@router.post("/warehouses/{warehouse_id}/unlocated/place",
+             response_model=s.UnlocatedStockStatus)
+async def place_unlocated_stock(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    """Move everything held at no location into the warehouse's Unlocated location."""
+    return await service.place_unlocated_stock(db, warehouse_id, user)
+
+
 @router.get("/warehouses/{warehouse_id}/bins", response_model=list[s.BinRead])
 async def bin_tree(warehouse_id: int, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(STOCK_VIEW))):

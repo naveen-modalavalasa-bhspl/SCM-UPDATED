@@ -1026,6 +1026,34 @@ the right one is the durable job queue that is still outstanding
     cannot answer. `GET /bins/{id}/volume-budget` serves that arithmetic to the form,
     so the sentence on screen and the rule the save enforces cannot drift apart.
 
+### Stock with no location gets the warehouse's Unlocated location (2026-10-09)
+
+A warehouse that keeps no locations banks GRN/QC stock at `bin_id = 0`. Switch it to
+`is_bin_managed` and that stock stayed at bin 0 — counted in every total, joined to no
+location, so no issue or movement picker could offer it (`bin_options` joins stock to
+locations; the forms require a source location; floor scope filters on location ids).
+
+`modules/warehouse/unlocated.py` gives it an address: ONE location per warehouse of
+the storage-type kind **`UNLOCATED`** (pickable, top level, nothing may sit inside),
+found by KIND never by code, and moves every bin-0 balance row into it through
+`inventory.service.rehome_balance` — IN then OUT via `move_stock` (ledger ref type
+`UNLOCATED`, at the row's own rate, the item's purchase price untouched), with the
+reserved part carried by `allocation.lift_for_rehome` / `set_down_after_rehome`
+(reservation rows and active project holds re-pointed, never released) and the
+in-stock `whs_serial_numbers` re-addressed. Open documents are unaffected: a line
+naming no location already means "wherever it is held".
+
+It runs on the switch (`update_warehouse`), on the warehouse screen's press
+(`POST /warehouses/{id}/unlocated/place`), from `scripts/place_unlocated_stock.py`
+(`--apply`), and as a self-heal at the top of `bin_options` and
+`issue_stock_sources` — because the shared masters API can flip the flag without the
+warehouse module, and a return or transfer can still bank stock at bin 0. The heal is
+one indexed EXISTS when there is nothing to do, runs in a SAVEPOINT and never fails a
+read. `floor_scope_ids` adds each warehouse's Unlocated location, since it stands on
+no floor. `unlocated.assert_location_write` refuses a second one, a child under it,
+changing its kind, or switching it off while it holds stock. A bulk warehouse is
+never touched: bin 0 is where its stock belongs.
+
 ### What a storage location IS, is a master (2026-09-05)
 
 The kinds of storage location — floor, lane, rack, shelf, bin, cold room, refrigerator

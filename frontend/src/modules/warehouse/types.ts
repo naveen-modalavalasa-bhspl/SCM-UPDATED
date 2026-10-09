@@ -110,6 +110,25 @@ export interface PurchaseReturnJourneyLeg {
 
 /* --------------------------------------------------------------- warehouse -- */
 
+/** Stock a bin-managed warehouse holds with no location (`bin_id` 0), and the
+ *  Unlocated location it is placed in — see backend `warehouse/unlocated.py`.
+ *  `pending_*` still stands at no location; `held_*` is in the Unlocated location;
+ *  `placed_*` is what the press just moved. */
+export interface UnlocatedStockStatus {
+  warehouse_id: number;
+  is_bin_managed: boolean;
+  location_id: number | null;
+  location_code: string | null;
+  pending_rows: number;
+  pending_qty: number | string;
+  held_rows: number;
+  held_items: number;
+  held_qty: number | string;
+  placed_rows: number;
+  placed_qty: number | string;
+  placed_units: number;
+}
+
 /** `whs_warehouses`. */
 export interface Warehouse {
   id: number;

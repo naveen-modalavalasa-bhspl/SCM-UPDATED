@@ -1,5 +1,6 @@
 import { api } from "@/shared/api/client";
 import type {
+  UnlocatedStockStatus,
   AcknowledgeWrite,
   ApprovalEvent,
   Attachment,
@@ -119,6 +120,14 @@ export const createWarehouse = (body: WarehouseWrite) =>
 
 export const updateWarehouse = (id: number, body: WarehouseWrite) =>
   put<Warehouse>(`${BASE}/warehouses/${id}`, body);
+
+/** Stock this warehouse holds with no location, and its Unlocated location. */
+export const getUnlocatedStock = (id: number) =>
+  get<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated`);
+
+/** Move everything held with no location into the Unlocated location, now. */
+export const placeUnlocatedStock = (id: number) =>
+  post<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/place`);
 
 /**
  * How much of a storage location's cube the locations inside it already claim.

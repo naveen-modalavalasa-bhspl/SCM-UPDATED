@@ -49,6 +49,7 @@ from app.modules.warehouse import capacity
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
+from app.modules.warehouse import unlocated
 from app.modules.warehouse.enums import (
     DEAD_ISSUE_STATUSES, UNSERVED_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
     SINGLE_ISSUE_REF_TYPES, STOCK_VIEW,
@@ -528,6 +529,7 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
 
     moved = (_d(wh.latitude) != _d(data.latitude) or _d(wh.longitude) != _d(data.longitude)
              or (wh.latitude is None) != (data.latitude is None))
+    starts_keeping_locations = not wh.is_bin_managed and data.is_bin_managed
     for field, value in data.model_dump().items():
         setattr(wh, field, value)
     # Only a coordinate somebody actually TYPED is a verified pin. The form sends the
@@ -541,6 +543,11 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     elif data.latitude is None:
         wh.coordinate_source = wh.coordinate_label = wh.coordinate_confidence = None
     await db.flush()
+    # Everything it received while it kept no locations is standing at bin 0, where no
+    # location picker can reach it. Give it its Unlocated location in the same
+    # transaction as the switch, so there is never a moment it cannot be issued.
+    if starts_keeping_locations:
+        await unlocated.place(db, wh.id, user)
     await write_audit(db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,
                       action=AuditAction.UPDATE, actor=user,
                       before={k: str(v) for k, v in before.items()},
@@ -548,6 +555,30 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     await db.commit()
     await db.refresh(wh)
     return wh
+
+
+async def unlocated_stock_status(db: AsyncSession, warehouse_id: int) -> dict:
+    """Stock held with no location on a bin-managed warehouse — see `unlocated.py`."""
+    return await unlocated.status(db, warehouse_id)
+
+
+async def place_unlocated_stock(db: AsyncSession, warehouse_id: int, user) -> dict:
+    """Give everything this warehouse holds at bin 0 its Unlocated location, now.
+
+    The reads a pick starts from already do this on their own; the press is for the
+    warehouse screen, so whoever switched the site to locations can see it happen and
+    see where the stock went.
+    """
+    wh = await _warehouse(db, warehouse_id)
+    if not wh.is_bin_managed:
+        raise ValidationError(
+            f"{wh.code} keeps no storage locations, so its stock belongs where it is. "
+            "Switch on \"Uses storage locations\" first.")
+    placed = await unlocated.place(db, warehouse_id, user)
+    await db.commit()
+    return {**await unlocated.status(db, warehouse_id),
+            "placed_rows": placed["rows"], "placed_qty": placed["quantity"],
+            "placed_units": placed["units"]}
 
 
 async def bin_tree(db: AsyncSession, warehouse_id: int, user=None) -> list[dict]:
@@ -927,6 +958,9 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
 
     kind = await _resolved_kind(db, data, parent)
+    # One Unlocated location per warehouse, made by the system — see `unlocated.py`.
+    await unlocated.assert_location_write(db, None, kind_code=kind["bin_type"],
+                                          parent=parent, is_active=data.is_active)
 
     # A location has to fit inside the one it hangs off. Checked before the insert, so
     # a warehouse can never be described as holding more than it does — see the note
@@ -986,6 +1020,10 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
     # Checked BEFORE the columns are set, like every other rule here: a refusal must
     # leave the row exactly as it was.
     kind = await _resolved_kind(db, data, parent)
+    # The Unlocated location keeps its kind, its place at the top, and stays on while
+    # it holds stock; nobody makes a second one — see `unlocated.assert_location_write`.
+    await unlocated.assert_location_write(db, row, kind_code=kind["bin_type"],
+                                          parent=parent, is_active=data.is_active)
 
     # Both directions, before anything is written: shrinking a rack can make it too
     # small for the shelves already in it, and growing a shelf can make it too big for
@@ -8484,6 +8522,9 @@ async def issue_stock_sources(
     ids = [int(value) for value in dict.fromkeys(item_ids) if value]
     if not warehouse_id or not ids:
         return []
+    # Stock this warehouse banked before it kept locations is given its Unlocated
+    # location first, or none of it could be offered as a source — see `unlocated.py`.
+    await unlocated.heal(db, warehouse_id, user)
 
     # What THIS indent is already holding on each balance row. Aggregated in a
     # subquery rather than joined directly: a balance row can carry several
@@ -10183,6 +10224,19 @@ async def floor_scope_ids(db: AsyncSession, user) -> set[int] | None:
         ))).scalars().all())
         frontier = children - allowed
         allowed |= children
+    # The Unlocated location of every warehouse those floors are in. It stands on no
+    # floor — it is where stock waits that nobody ever put on one — so walking down
+    # from a floor never reaches it, and a floor in-charge could neither issue that
+    # stock nor move it to its real bay. It belongs to the whole warehouse.
+    if roots:
+        allowed |= set((await db.execute(
+            select(m.WarehouseLocation.id).where(
+                m.WarehouseLocation.warehouse_id.in_(
+                    select(m.WarehouseLocation.warehouse_id)
+                    .where(m.WarehouseLocation.id.in_(roots))),
+                func.upper(m.WarehouseLocation.bin_type) == unlocated.KIND,
+                m.WarehouseLocation.is_active.is_(True),
+            ))).scalars().all())
     return allowed
 
 
@@ -23049,6 +23103,9 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
     dropdown is the courtesy, the gate is the rule.
     """
     holding = bool(item_id or batch_id)
+    # Same as `issue_stock_sources`: stock at bin 0 joins no location, so it would be
+    # missing from every "where is it" answer below. See `unlocated.heal`.
+    await unlocated.heal(db, warehouse_id, user)
     stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
     if user is not None:
         allowed = await floor_scope_ids(db, user)

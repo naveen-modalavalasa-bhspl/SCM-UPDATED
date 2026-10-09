@@ -363,6 +363,9 @@ class RefType(str, Enum):
     TRANSFER = "TRANSFER"                # point to point
     STO = "STO"                          # stock transfer order
     STOCK_MOVEMENT = "STOCK_MOVEMENT"    # bin to bin inside one warehouse
+    # Stock a warehouse holds with no location (bin 0) given its UNLOCATED location
+    # once that warehouse keeps locations — see `warehouse/unlocated.py`.
+    UNLOCATED = "UNLOCATED"
     ADJUSTMENT = "ADJUSTMENT"
     CYCLE_COUNT = "CYCLE_COUNT"
     # Not a movement: the hold recorded on inv_reservations.

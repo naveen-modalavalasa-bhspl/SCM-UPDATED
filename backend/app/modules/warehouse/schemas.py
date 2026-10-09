@@ -86,6 +86,28 @@ class WarehouseRead(_Read):
     created_at: datetime | None = None
 
 
+class UnlocatedStockStatus(BaseModel):
+    """Stock a bin-managed warehouse holds with no location, and where it went.
+
+    `pending_*` is what still stands at bin 0 (it is placed on the next pick or on
+    the press); `held_*` is what its Unlocated location holds now. See
+    `warehouse/unlocated.py`.
+    """
+    warehouse_id: int
+    is_bin_managed: bool
+    location_id: int | None = None
+    location_code: str | None = None
+    pending_rows: int = 0
+    pending_qty: Decimal = Decimal("0")
+    held_rows: int = 0
+    held_items: int = 0
+    held_qty: Decimal = Decimal("0")
+    # Filled only by the press: what that press just moved.
+    placed_rows: int = 0
+    placed_qty: Decimal = Decimal("0")
+    placed_units: int = 0
+
+
 class WarehouseWrite(BaseModel):
     code: str = Field(min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=200)

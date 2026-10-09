@@ -86,7 +86,36 @@ DEFAULTS: tuple[dict, ...] = (
     {"code": "STORAGE", "name": "General storage", "order": 80, "pickable": True,
      "top": True, "parents": ("BLOCK", "FLOOR", "ZONE", "LANE", "RACK", "SHELF"),
      "description": "Somewhere stock is kept that is none of the above."},
+    # Stock this warehouse received before it kept locations. One per warehouse, made
+    # by `warehouse/unlocated.py` and never by hand; nothing may sit inside it.
+    {"code": "UNLOCATED", "name": "Unlocated", "order": 95, "pickable": True,
+     "top": True, "parents": (),
+     "description": "Stock received before this warehouse kept locations. "
+                    "Issue from it, or move it to its real place."},
 )
+
+
+async def ensure_kind(db: AsyncSession, code: str) -> m.StorageType:
+    """The master row for one of the DEFAULTS, created if the master lacks it.
+
+    For a caller that needs one particular kind to exist NOW (the unlocated location)
+    and must not depend on bootstrap having been run since the kind was added.
+    """
+    wanted = code.upper()
+    row = await db.scalar(select(m.StorageType).where(
+        func.upper(m.StorageType.code) == wanted).limit(1))
+    if row is not None:
+        return row
+    spec = next(s for s in DEFAULTS if s["code"] == wanted)
+    row = m.StorageType(
+        code=spec["code"], name=spec["name"], description=spec.get("description"),
+        sort_order=spec["order"], is_pickable=bool(spec.get("pickable")),
+        is_temperature_controlled=bool(spec.get("cold")),
+        allow_top_level=bool(spec.get("top")) or not spec["parents"], is_active=True,
+    )
+    db.add(row)
+    await db.flush()
+    return row
 
 
 async def ensure_defaults(db: AsyncSession) -> int:

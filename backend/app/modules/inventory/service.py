@@ -593,6 +593,54 @@ async def move_stock_out(
         remaining -= take
 
 
+async def rehome_balance(db: AsyncSession, stock: Stock, *, to_bin_id: int,
+                         ref_type: str, ref_id: int, ref_no: str, user,
+                         serial_numbers: list[str] | None = None) -> Decimal:
+    """Move a WHOLE balance row to another location in the same warehouse.
+
+    Free and reserved alike, with its valuation and its holds, and nothing else about
+    it changing — item, batch and project are the same; only the address moves. Used to
+    give stock that was banked with no location (bin 0) a location once its warehouse
+    starts keeping them (`warehouse/unlocated.py`).
+
+    Rule 7, in both halves: the goods move OUT and IN through `move_stock`, which
+    writes the two ledger rows that make the move traceable, and the reservation
+    columns move only through `allocation` — lifted before, set down after, inside this
+    transaction so the stock is never briefly free to another document.
+
+    Carried at the row's OWN rate, and the item's last purchase price is left as it
+    was: `move_stock` treats a priced inward as the newest cost of the item, and a
+    re-address is not a purchase. Returns the quantity moved (free + reserved);
+    `transit_qty` is not moved (nothing writes it) and is left where it is.
+    """
+    stock = await db.get(Stock, stock.id, with_for_update=True)
+    to_bin_id = int(to_bin_id or NO_BIN)
+    if stock is None or int(stock.bin_id or NO_BIN) == to_bin_id:
+        return Decimal("0")
+    lifted = await allocation.lift_for_rehome(db, stock)
+    qty = _d(stock.available_qty or 0)
+    if qty <= 0:
+        return Decimal("0")
+
+    item = await db.get(Item, stock.item_id)
+    purchase_price = getattr(item, "purchase_price", None)
+    rate = _d(stock.valuation_rate) if _d(stock.valuation_rate) > 0 else None
+    common = dict(ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, user=user,
+                  warehouse_id=stock.warehouse_id, batch_id=stock.batch_id,
+                  project_id=stock.project_id, serial_numbers=serial_numbers)
+    # IN before OUT: the warehouse's total never dips by the quantity in between, so
+    # the move cannot set off a "below minimum" alert for stock that never left.
+    landed = await move_stock(db, item_id=stock.item_id, qty=qty,
+                              direction=StockDirection.IN.value, bin_id=to_bin_id,
+                              rate=rate, **common)
+    await move_stock(db, item_id=stock.item_id, qty=qty,
+                     direction=StockDirection.OUT.value, bin_id=stock.bin_id, **common)
+    if item is not None:
+        item.purchase_price = purchase_price
+    await allocation.set_down_after_rehome(db, lifted, landed)
+    return qty
+
+
 async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
                          from_warehouse_id: int, to_warehouse_id: int,
                          from_project_id: int = NO_PROJECT,

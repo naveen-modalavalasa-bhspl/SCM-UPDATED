@@ -10,6 +10,7 @@ import {
 import { MetaCard, MetaRow } from "../../components/DocumentMeta";
 import { BinTree, flattenBins } from "../../components/BinTree";
 import { LabelSheet, type LabelSpec } from "../../components/LabelPrint";
+import { UnlocatedStockCard } from "../../components/UnlocatedStockCard";
 import { deleteBin, getBinTree, getWarehouse, listStorageTypes } from "../../api";
 import { fmtQty } from "../../format";
 import { byRung, parentTypesOf, typeOfLocation } from "../../storageTypes";
@@ -183,6 +184,7 @@ export default function WarehouseDetail() {
         </Card>
       ) : (
         <>
+          <UnlocatedStockCard warehouseId={warehouseId} />
           <SubNav label="Warehouse detail" items={TABS} value={tab} onChange={setTab} />
           <ErrorBanner error={error} />
 
