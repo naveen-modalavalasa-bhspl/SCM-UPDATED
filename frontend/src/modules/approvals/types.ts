@@ -197,6 +197,8 @@ export interface ApprovalIndentLine {
   /** Ceiling for this approver — the request, or what the level below approved. */
   max_quantity: number;
   remarks?: string | null;
+  is_excluded?: boolean;
+  excluded_by_name?: string | null;
 }
 
 export interface ApprovalIndent {
@@ -219,6 +221,8 @@ export interface ApprovalIndent {
 export interface ApprovalQuantityInput {
   line_id: number;
   approved_quantity: number;
+  /** Zero means this line is permanently rejected, not merely reduced. */
+  excluded?: boolean;
 }
 
 export interface ApprovalHistoryRow {

@@ -187,12 +187,9 @@ class IndentItem(Base):
     status = Column(String(20), nullable=False,
                     default=IndentItemStatus.PENDING.value)
     remarks = Column(String(500), nullable=True)
-    # An approver DROPPED this line from a consolidation, as opposed to cutting it to
-    # nothing. Both end at approved_qty 0 and the two were indistinguishable, so a
-    # dropped line came out the far side looking like an ordinary line nobody had got
-    # round to (BUG_SCM_0004/0007/0008) — and the next rung was offered an Exclude
-    # button for something already excluded. Stored, because "who dropped this and
-    # when" is exactly the question asked afterwards and a zero cannot answer it.
+    # An approver rejected this line, either explicitly in consolidation or by
+    # approving zero. Stored because the line must disappear from later approval
+    # rungs while remaining visible, with actor and time, to the requester and audit.
     is_excluded = Column(Boolean, nullable=False, default=False, server_default="0")
     excluded_by_id = Column(BigInteger, nullable=True)
     excluded_by_name = Column(String(200), nullable=True)

@@ -9,6 +9,10 @@ export interface IndentItem {
   ordered_quantity: number;
   received_quantity: number;
   remarks?: string | null;
+  /** A line rejected at zero by an approver. Retained for the raiser's audit view. */
+  is_excluded?: boolean;
+  excluded_by_name?: string | null;
+  excluded_at?: string | null;
 }
 
 /**

@@ -321,13 +321,19 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const approve = useMutation({
     mutationFn: () => approvalsApi.approveIndent(
       indentId,
-      reviewItems.map((line) => ({
-        line_id: line.id,
-        approved_quantity: quantityValue(quantities[line.id]),
-      })),
+      reviewItems.map((line) => {
+        const approvedQuantity = quantityValue(quantities[line.id]);
+        return {
+          line_id: line.id,
+          approved_quantity: approvedQuantity,
+          // Make the permanent line decision explicit on the wire. The backend also
+          // infers this from zero so older clients and direct API callers stay safe.
+          excluded: approvedQuantity === 0,
+        };
+      }),
       comments,
     ),
-    onSuccess: finish("approve"),
+    onSuccess: (result) => finish(result.status === "REJECTED" ? "reject" : "approve")(),
   });
   const reject = useMutation({
     mutationFn: () => approvalsApi.rejectIndent(indentId, reason),
@@ -479,8 +485,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
         <div className="space-y-3 p-4 sm:p-5">
           <div className="grid gap-2 lg:grid-cols-2">
             <Note tone="info" icon={Info} title="How much you may approve">
-              A quantity may be reduced down to zero, never increased, and what you approve becomes
-              the maximum the next approver can pass on.{" "}
+              A quantity may be reduced, never increased, and what you approve becomes the maximum
+              the next approver can pass on. Entering zero rejects that item permanently.{" "}
               {anyReducedBelow
                 ? "Lines already cut by an earlier approver are capped at that lower quantity, not at the original request."
                 : "Each field shows the range you may enter."}

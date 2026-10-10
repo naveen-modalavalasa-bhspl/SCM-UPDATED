@@ -2904,6 +2904,29 @@ describe("indent UI shell", () => {
     expect(screen.queryByRole("button", { name: /Reject/i })).not.toBeInTheDocument();
   });
 
+  it("marks a line rejected at zero on the storekeeper's indent detail", async () => {
+    vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
+      items: [{
+        id: 7,
+        item_id: 10,
+        item_code: "IT-001",
+        item_name: "A4 Paper 75 GSM",
+        uom_code: "NOS",
+        quantity: 5,
+        approved_quantity: 0,
+        ordered_quantity: 0,
+        received_quantity: 0,
+        is_excluded: true,
+        excluded_by_name: "OE Approver",
+      }],
+    }));
+
+    renderWithProviders(<IndentDetailPage />, "/indents/42");
+
+    expect(await screen.findByText("A4 Paper 75 GSM")).toBeInTheDocument();
+    expect(screen.getByText("Rejected")).toHaveAttribute("title", "Rejected by OE Approver");
+  });
+
   function rejectedJourney(stage: Partial<IndentJourney["stages"][number]>) {
     vi.mocked(indentApi.get).mockResolvedValueOnce(detailIndent({
       status: "REJECTED",

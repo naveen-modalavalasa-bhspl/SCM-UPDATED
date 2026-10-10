@@ -175,8 +175,8 @@ class ApprovalIndentLineOut(BaseModel):
     # level below approved after that. Approvers may only reduce.
     max_quantity: float
     remarks: str | None = None
-    # Dropped by an approver below, not cut to zero. The screen shows "Excluded"
-    # instead of a quantity and offers no second Exclude button for it.
+    # Rejected by an approver below, either explicitly or by approving zero. It is
+    # retained for audit views but omitted from the next rung's active lines.
     is_excluded: bool = False
     excluded_by_name: str | None = None
 

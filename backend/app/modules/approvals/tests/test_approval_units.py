@@ -1,11 +1,17 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from app.core.exceptions import ValidationError
+from app.modules.approvals import service as approvals_service
 from app.modules.approvals.schemas import ApprovalQuantityIn, IndentRejectionIn
-from app.modules.approvals.service import _approval_ceiling, _validated_quantities
+from app.modules.approvals.service import (
+    _active_approval_lines, _apply_line_approval, _approval_action_for_lines, _approval_ceiling,
+    _validated_quantities,
+)
+from app.shared.enums import ApprovalAction
 
 
 def _indent(approved_1=0, approved_2=0):
@@ -29,6 +35,171 @@ def test_approved_quantities_allow_reduction_and_zero():
     ])
     assert float(result[1]) == 7
     assert float(result[2]) == 0
+
+
+def test_a_line_rejected_below_is_not_submitted_to_the_next_approver():
+    indent = _indent()
+    indent.items[0].is_excluded = True
+    indent.items[1].is_excluded = False
+
+    result = _validated_quantities(indent, [
+        ApprovalQuantityIn(line_id=2, approved_quantity=3),
+    ])
+
+    assert set(result) == {2}
+    assert [line.id for line in _active_approval_lines(indent)] == [2]
+    with pytest.raises(ValidationError, match="unknown lines: \[1\]"):
+        _validated_quantities(indent, [
+            ApprovalQuantityIn(line_id=1, approved_quantity=0),
+            ApprovalQuantityIn(line_id=2, approved_quantity=3),
+        ])
+
+
+def test_the_document_rejects_only_when_every_line_has_been_rejected():
+    indent = _indent()
+    indent.items[0].is_excluded = True
+    indent.items[1].is_excluded = False
+    assert _approval_action_for_lines(indent) == ApprovalAction.APPROVED
+
+    indent.items[1].is_excluded = True
+    assert _approval_action_for_lines(indent) == ApprovalAction.REJECTED
+
+
+def test_zero_is_persisted_as_a_rejected_line_with_its_actor():
+    indent = _indent()
+    for item in indent.items:
+        item.is_excluded = False
+    actor = SimpleNamespace(id=91, full_name="OE Approver")
+
+    before, after = _apply_line_approval(
+        indent, {1: 0, 2: 3}, {1}, actor,
+    )
+
+    rejected, surviving = indent.items
+    assert rejected.approved_quantity == 0
+    assert rejected.is_excluded is True
+    assert rejected.excluded_by_id == 91
+    assert rejected.excluded_by_name == "OE Approver"
+    assert rejected.excluded_at is not None
+    assert surviving.approved_quantity == 3
+    assert surviving.is_excluded is False
+    assert before == {"line_1_approved_qty": 10.0, "line_2_approved_qty": 4.0}
+    assert after["line_1_excluded"] == 1.0
+    assert _approval_action_for_lines(indent) == ApprovalAction.APPROVED
+
+
+def test_zero_on_the_only_remaining_line_auto_rejects_the_indent():
+    indent = _indent()
+    for item in indent.items:
+        item.is_excluded = False
+    actor = SimpleNamespace(id=92, full_name="DM Approver")
+
+    _apply_line_approval(indent, {1: 0, 2: 0}, {1, 2}, actor)
+
+    assert all(item.is_excluded for item in indent.items)
+    assert _approval_action_for_lines(indent) == ApprovalAction.REJECTED
+
+
+async def test_approve_endpoint_turns_an_all_zero_decision_into_workflow_rejection(monkeypatch):
+    line = SimpleNamespace(
+        id=1, item_id=9, item_code="PAPER", item_name="A4 Paper", uom_code="NOS",
+        quantity=5, approved_quantity=5, allocated_quantity=0, line_no=1, remarks=None,
+        is_excluded=False, excluded_by_id=None, excluded_by_name=None, excluded_at=None,
+    )
+    indent = SimpleNamespace(
+        id=202, indent_no="IND/2026/0202", status="PENDING_APPROVAL", priority="NORMAL",
+        requested_by_name="Store Keeper", position_name="Store Keeper",
+        department_name="Stores", office_name="Site", current_approver_name="DM",
+        required_date=None, created_at=datetime(2026, 10, 10), items=[line],
+    )
+    instance = SimpleNamespace(current_stage_name="DM Review")
+    actor = SimpleNamespace(id=92, full_name="DM Approver")
+    acted: list[tuple[ApprovalAction, str]] = []
+
+    async def fake_write_audit(*args, **kwargs):
+        return None
+
+    async def fake_act(_db, _indent_id, action, comments, _user, final=False):
+        acted.append((action, comments))
+        indent.status = "REJECTED" if action == ApprovalAction.REJECTED else "PENDING_APPROVAL"
+        return indent
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return instance
+
+    class DB:
+        async def execute(self, _statement):
+            return Result()
+
+    monkeypatch.setattr(approvals_service, "write_audit", fake_write_audit)
+    monkeypatch.setattr(approvals_service.indent_service, "act_on_indent", fake_act)
+
+    result = await approvals_service.approve_indent(
+        DB(), indent.id, [ApprovalQuantityIn(line_id=1, approved_quantity=0)],
+        "", actor, task=(indent, instance, False), uom_decimals={"NOS": 0},
+    )
+
+    assert acted == [(
+        ApprovalAction.REJECTED,
+        "All requested items were rejected during quantity approval.",
+    )]
+    assert result.status == "REJECTED"
+    assert result.items == []
+    assert line.is_excluded is True
+    assert line.excluded_by_name == "DM Approver"
+
+
+async def test_sub_precision_zero_cannot_advance_to_the_next_approver(monkeypatch):
+    """The workflow decision must match the NUMERIC(16,3) value persisted."""
+    line = SimpleNamespace(
+        id=1, item_id=9, item_code="OIL", item_name="Oil", uom_code="LTR",
+        quantity=5, approved_quantity=5, allocated_quantity=0, line_no=1, remarks=None,
+        is_excluded=False, excluded_by_id=None, excluded_by_name=None, excluded_at=None,
+    )
+    indent = SimpleNamespace(
+        id=203, indent_no="IND/2026/0203", status="PENDING_APPROVAL", priority="NORMAL",
+        requested_by_name="Store Keeper", position_name="Store Keeper",
+        department_name="Stores", office_name="Site", current_approver_name="DM",
+        required_date=None, created_at=datetime(2026, 10, 10), items=[line],
+    )
+    instance = SimpleNamespace(current_stage_name="OE Review")
+    actor = SimpleNamespace(id=91, full_name="OE Approver")
+    acted = []
+
+    async def fake_write_audit(*args, **kwargs):
+        return None
+
+    async def fake_act(_db, _indent_id, action, comments, _user, final=False):
+        acted.append(action)
+        indent.status = "REJECTED" if action == ApprovalAction.REJECTED else "PENDING_APPROVAL"
+        return indent
+
+    class Result:
+        def scalars(self):
+            return self
+
+        def first(self):
+            return instance
+
+    class DB:
+        async def execute(self, _statement):
+            return Result()
+
+    monkeypatch.setattr(approvals_service, "write_audit", fake_write_audit)
+    monkeypatch.setattr(approvals_service.indent_service, "act_on_indent", fake_act)
+
+    await approvals_service.approve_indent(
+        DB(), indent.id, [ApprovalQuantityIn(line_id=1, approved_quantity=0.0009)],
+        "", actor, task=(indent, instance, False), uom_decimals={"LTR": 3},
+    )
+
+    assert line.approved_quantity == 0
+    assert line.is_excluded is True
+    assert acted == [ApprovalAction.REJECTED]
 
 
 def test_countable_uom_refuses_fractional_approval_even_if_client_is_bypassed():
@@ -140,8 +311,6 @@ def test_operational_approvals_router_declares_required_routes():
 # without a database, because the failure they exist to stop is silent: every figure
 # still renders, and one of them quietly belongs to somebody else.
 # --------------------------------------------------------------------------- #
-from datetime import datetime
-
 from app.modules.approvals.service import _item_snapshot, _visible_quantity_events
 
 

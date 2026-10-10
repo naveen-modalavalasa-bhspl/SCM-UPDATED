@@ -1825,11 +1825,21 @@ def _approval_ceiling(line, has_previous_approval: bool) -> Decimal:
     return min(_quantize(Decimal(str(line.approved_quantity or 0))), requested)
 
 
+def _active_approval_lines(indent: Indent) -> list[IndentItem]:
+    """Lines still owed and therefore visible to the current approval rung."""
+    return [
+        line for line in indent.items
+        if not bool(getattr(line, "is_excluded", False))
+    ]
+
+
 def _approval_out(
     indent: Indent, instance: Instance, has_previous_approval: bool,
     *, can_return_for_correction: bool = False,
     uom_decimals: dict[str, int] | None = None,
 ) -> ApprovalIndentOut:
+    # Rejected lines remain on the indent for the requester and audit ledger, but an
+    # approver above must never be asked to decide them again.
     items = [
         ApprovalIndentLineOut(
             id=line.id,
@@ -1845,7 +1855,8 @@ def _approval_out(
             is_excluded=bool(line.is_excluded),
             excluded_by_name=line.excluded_by_name,
         )
-        for line in sorted(indent.items, key=lambda item: (item.line_no, item.id))
+        for line in sorted(_active_approval_lines(indent),
+                           key=lambda item: (item.line_no, item.id))
     ]
     return ApprovalIndentOut(
         id=indent.id,
@@ -2314,7 +2325,8 @@ def _validated_quantities(
         raw_by_id[item.line_id] = raw
         by_id[item.line_id] = _quantize(raw)
 
-    expected = {line.id for line in indent.items}
+    actionable = _active_approval_lines(indent)
+    expected = {line.id for line in actionable}
     received = set(by_id)
     if received != expected:
         missing = sorted(expected - received)
@@ -2326,7 +2338,7 @@ def _validated_quantities(
             details.append(f"unknown lines: {unknown}")
         raise ValidationError("Submit one quantity for every indent line (" + "; ".join(details) + ")")
 
-    for line in indent.items:
+    for line in actionable:
         approved = by_id[line.id]
         ceiling = _approval_ceiling(line, has_previous_approval)
         label = line.item_name or line.item_code or line.id
@@ -2348,6 +2360,39 @@ def _validated_quantities(
                 f"({_plain(ceiling)}). An approver may only reduce it."
             )
     return by_id
+
+
+def _approval_action_for_lines(indent: Indent) -> ApprovalAction:
+    """Reject when no requested line remains; otherwise advance surviving lines."""
+    return (
+        ApprovalAction.APPROVED
+        if _active_approval_lines(indent)
+        else ApprovalAction.REJECTED
+    )
+
+
+def _apply_line_approval(
+    indent: Indent, approved_by_line: dict[int, Decimal],
+    rejected_line_ids: set[int], user, has_previous_approval: bool = False,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Persist this rung's active line decisions and durable zero-line rejections."""
+    before: dict[str, float] = {}
+    after: dict[str, float] = {}
+    for line in indent.items:
+        if bool(getattr(line, "is_excluded", False)):
+            continue
+        before[f"line_{line.id}_approved_qty"] = float(
+            _approval_ceiling(line, has_previous_approval)
+        )
+        line.approved_quantity = approved_by_line[line.id]
+        after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
+        if line.id in rejected_line_ids:
+            line.is_excluded = True
+            line.excluded_by_id = getattr(user, "id", None)
+            line.excluded_by_name = getattr(user, "full_name", None)
+            line.excluded_at = ist_now()
+            after[f"line_{line.id}_excluded"] = 1.0
+    return before, after
 
 
 async def _nothing_owed(db: AsyncSession, indent) -> bool:
@@ -2393,29 +2438,22 @@ async def approve_indent(
         indent, quantities, has_previous, uom_decimals,
     )
 
-    # Which lines this approver DROPPED, as opposed to cut to nothing. Only lines the
-    # screen actually sent can be excluded; a line it never mentioned keeps whatever it
-    # already carried, so approving without touching anything never excludes.
-    excluded_lines = {q.line_id for q in quantities if getattr(q, "excluded", False)}
+    # Zero is a line-level rejection. Explicit consolidation exclusions use the same
+    # durable marker, so every approval path agrees on what the next rung may see.
+    # Decide from the validated values that will actually be stored. Comparing the
+    # raw float here used to leave a sub-precision value such as 0.0009 active even
+    # though NUMERIC(16,3) stores it as zero. Honour the explicit client signal too,
+    # but never depend on it: API callers that only send a zero remain safe.
+    explicitly_excluded = {
+        q.line_id for q in quantities if getattr(q, "excluded", False)
+    }
+    excluded_lines = explicitly_excluded | {
+        line_id for line_id, approved in approved_by_line.items() if approved == 0
+    }
 
-    before: dict[str, float] = {}
-    after: dict[str, float] = {}
-    for line in indent.items:
-        before[f"line_{line.id}_approved_qty"] = float(
-            _approval_ceiling(line, has_previous)
-        )
-        line.approved_quantity = approved_by_line[line.id]
-        after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
-        # Set once and never unset here: exclusion is a decision already taken further
-        # down the ladder, and a rung above must not silently put back a line somebody
-        # below deliberately dropped. Re-including is its own act, on the screen that
-        # owns it.
-        if line.id in excluded_lines and not line.is_excluded:
-            line.is_excluded = True
-            line.excluded_by_id = getattr(user, "id", None)
-            line.excluded_by_name = getattr(user, "full_name", None)
-            line.excluded_at = ist_now()
-            after[f"line_{line.id}_excluded"] = 1.0
+    before, after = _apply_line_approval(
+        indent, approved_by_line, excluded_lines, user, has_previous,
+    )
 
     await write_audit(
         db,
@@ -2432,9 +2470,13 @@ async def approve_indent(
     # Nothing left owed on any line: everything has been allocated already, so the
     # rungs above have nothing to decide. Ending the ladder here is what stops a
     # fully-served indent travelling to the DM for goods that are already committed.
+    action = _approval_action_for_lines(indent)
+    action_comments = comments
+    if action == ApprovalAction.REJECTED and not (comments or "").strip():
+        action_comments = "All requested items were rejected during quantity approval."
     updated = await indent_service.act_on_indent(
-        db, indent_id, ApprovalAction.APPROVED, comments, user,
-        final=await _nothing_owed(db, indent),
+        db, indent_id, action, action_comments, user,
+        final=action == ApprovalAction.APPROVED and await _nothing_owed(db, indent),
     )
 
     # The action may advance to another stage or complete the workflow. Return the

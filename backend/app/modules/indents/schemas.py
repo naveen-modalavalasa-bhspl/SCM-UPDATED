@@ -85,6 +85,14 @@ class IndentItemOut(BaseModel):
     ordered_quantity: float
     received_quantity: float
     remarks: str | None = None
+    # A zero decision rejects this line permanently while other lines may continue.
+    is_excluded: bool = False
+    excluded_by_name: str | None = None
+    excluded_at: datetime | None = None
+
+    @field_serializer("excluded_at", when_used="json")
+    def serialize_excluded_at(self, value: datetime | None):
+        return _utc_iso(value)
 
 
 class IndentOut(BaseModel):

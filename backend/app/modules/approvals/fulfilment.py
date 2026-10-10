@@ -439,7 +439,7 @@ async def issue_from_my_stock(
                     line_id=line.id,
                     approved_quantity=float(_d(line.approved_quantity)),
                 )
-                for line in remaining
+                for line in remaining if not bool(getattr(line, "is_excluded", False))
             ],
             (f"Allocated {alloc.allocation_no} from own stock. "
              + ("Served in full." if outstanding == 0

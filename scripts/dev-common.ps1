@@ -83,10 +83,17 @@ function Get-DevPortOwner {
                 $owner = [int]$connection.OwningProcess
                 if ($owner -gt 4) { $owners += $owner }
             }
+            # Only trust an empty result when the query itself succeeded. On locked
+            # down Windows accounts Get-NetTCPConnection exists but throws Access
+            # Denied; treating that as "no listener" allowed a second uvicorn to bind
+            # the same port and requests alternated between old and new application
+            # code. A successful query may safely return here; a failed one must use
+            # the netstat fallback below.
+            return @($owners | Sort-Object -Unique)
         } catch {
-            # ObjectNotFound simply means nothing is listening on that port.
+            # AccessDenied and provider failures fall through to netstat. It is also
+            # harmless to do so for ObjectNotFound (nothing listening).
         }
-        return @($owners | Sort-Object -Unique)
     }
 
     # netstat fallback, anchored on the LOCAL address column and requiring the

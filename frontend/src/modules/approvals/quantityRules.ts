@@ -96,7 +96,7 @@ export function quantityError(
   const text = (raw ?? "").trim();
 
   if (text === "") {
-    return `Enter a quantity from ${range}. Enter 0 to approve none of this item.`;
+    return `Enter a quantity from ${range}. Enter 0 to reject this item.`;
   }
   // The minus sign is caught on its own keystroke, before the number is even
   // complete: "-" and "-1" are the same mistake, and the approver hears about it

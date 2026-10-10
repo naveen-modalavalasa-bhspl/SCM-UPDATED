@@ -397,7 +397,16 @@ export function IndentDetailPage() {
                 {(it) => (
                   <TableRow key={it.id}>
                     <TableCell>
-                      <div className="font-medium text-body">{it.item_name}</div>
+                      <div className="flex flex-wrap items-center gap-2 font-medium text-body">
+                        <span>{it.item_name}</span>
+                        {it.is_excluded && (
+                          <span
+                            className="inline-flex min-h-5 items-center rounded-full bg-bad-bg px-2 text-[10px] font-semibold uppercase tracking-wide text-bad"
+                            title={it.excluded_by_name
+                              ? `Rejected by ${it.excluded_by_name}` : "Rejected during approval"}
+                          >Rejected</span>
+                        )}
+                      </div>
                       <div className="mono text-xs text-muted">{it.item_code}</div>
                     </TableCell>
                     <TableCell className="text-right tabular font-semibold">{it.quantity}</TableCell>

@@ -78,7 +78,7 @@ describe("quantityError", () => {
 
   it("explains blank and non-numeric input", () => {
     expect(quantityError(line({ max_quantity: 15 }), ""))
-      .toBe("Enter a quantity from 0 to 15 EA. Enter 0 to approve none of this item.");
+      .toBe("Enter a quantity from 0 to 15 EA. Enter 0 to reject this item.");
     expect(quantityError(line(), undefined)).toMatch(/Enter a quantity from 0 to 5 EA/);
     expect(quantityError(line(), "abc")).toMatch(/Enter a valid number/);
     expect(quantityError(line(), "1e3")).toMatch(/Enter a valid number/);
