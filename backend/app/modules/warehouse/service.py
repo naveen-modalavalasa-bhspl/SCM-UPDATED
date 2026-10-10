@@ -9377,15 +9377,14 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         .where(WfInstance.doc_id == issue.id, WfInstance.doc_type.in_(ISSUE_DOC_TYPES))
         .order_by(WfInstance.id.desc()).limit(1)
     )).scalar_one_or_none())
+    # The holder (or their reporting line), and anyone who APPROVED it — see
+    # `_assert_issue_holder`, which the press itself goes through.
     setattr(issue, "can_issue_from_stock",
             issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
-            and user is not None and await _may_act_as_issue_holder(db, user, holders))
-    # Asset/consumable codes are auto-assigned, so whoever APPROVED the issue may swap
-    # them too, not only the person issuing it. See `set_issue_serials`.
-    setattr(issue, "can_swap_codes",
-            issue.can_issue_from_stock
-            or (issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
-                and await _issue_approved_by(db, issue.id, user)))
+            and user is not None
+            and (await _may_act_as_issue_holder(db, user, holders)
+                 or await _issue_approved_by(db, issue.id, user)))
+    setattr(issue, "can_swap_codes", issue.can_issue_from_stock)
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
     if issue.floor_location_id:
@@ -10637,13 +10636,23 @@ async def _issue_approved_by(db: AsyncSession, issue_id: int, user) -> bool:
 
 
 async def _assert_issue_holder(db: AsyncSession, issue, user) -> None:
-    """Only the person an approved issue is WITH (or their reporting line) works it."""
+    """Who works an approved issue: the person it is WITH (or their reporting line),
+    or anyone who APPROVED it.
+
+    An approver signed off on exactly these goods, and in a small store the approver
+    is very often the one standing at the shelf; refusing them the press left the issue
+    waiting on a holder who was not there. Picking serials goes through here too,
+    because an issue cannot be posted without them.
+    """
     holders = (await _issue_holders_bulk(db, [issue])).get(issue.id, [])
-    if not await _may_act_as_issue_holder(db, user, holders):
-        raise PermissionError_(
-            f"{issue.issue_no} is with {_holder_label(holders) or 'another person'}. "
-            "Only they, or someone they report to, can pick its serials and issue "
-            "it from stock.")
+    if await _may_act_as_issue_holder(db, user, holders):
+        return
+    if await _issue_approved_by(db, issue.id, user):
+        return
+    raise PermissionError_(
+        f"{issue.issue_no} is with {_holder_label(holders) or 'another person'}. "
+        "Only they, someone they report to, or an approver of this issue can pick its "
+        "serials and issue it from stock.")
 
 
 async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
@@ -11240,30 +11249,14 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
            "capture serials on", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
-    # The holder works an approved issue. Whoever APPROVED it may also swap the
-    # auto-assigned asset/consumable codes — but not serials or IMEIs, which are read
-    # off the goods at the shelf by the person issuing them.
-    approver_only = False
     if issue.status == IssueStatus.APPROVED.value:
-        holders = (await _issue_holders_bulk(db, [issue])).get(issue.id, [])
-        if not await _may_act_as_issue_holder(db, user, holders):
-            if not await _issue_approved_by(db, issue.id, user):
-                await _assert_issue_holder(db, issue, user)
-            approver_only = True
+        await _assert_issue_holder(db, issue, user)
 
     by_line = {row.id: row.serial_numbers for row in data.lines}
     unknown = set(by_line) - {line.id for line in issue.items}
     if unknown:
         raise ValidationError(
             f"Line {sorted(unknown)[0]} is not on {issue.issue_no}")
-    if approver_only:
-        auto_coded = {TrackingType.ASSET.value, TrackingType.CONSUMABLE.value}
-        for line in issue.items:
-            if line.id in by_line and getattr(line, "tracking_type", None) not in auto_coded:
-                raise PermissionError_(
-                    f"Only the person issuing {issue.issue_no} can pick serials or "
-                    f"IMEIs. As its approver you can change asset and consumable "
-                    f"codes only.")
 
     # _reserve_issue_serials zips strictly against issue.items, so every line is
     # restated — the ones not being edited keep the serials already reserved.

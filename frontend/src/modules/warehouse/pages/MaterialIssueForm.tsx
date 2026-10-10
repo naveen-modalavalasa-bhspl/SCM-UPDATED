@@ -700,7 +700,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // quantities, but which physical units go out is decided at the shelf, and
   // "Issue from stock" refuses an incomplete set. Saved straight away through the
   // serials endpoint, because the document itself is no longer editable.
-  // Only once APPROVED, and only for the person it is with (or their reporting line):
+  // Only once APPROVED, and only for the person it is with (or their reporting line, or an approver):
   // picking units on a draft or during approval is what got lost on the way through.
   const awaitingIssue = doc?.status === "APPROVED" && !doc?.is_stock_posted;
   const unitsHidden = direction === "OUT"
@@ -1153,7 +1153,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   onClick={() => setConfirming("post")}
                   disabled={problems.length > 0 || !doc?.can_issue_from_stock}
                   title={!doc?.can_issue_from_stock
-                    ? `With ${doc?.currently_with ?? "another person"} — only they, or someone they report to, can issue it`
+                    ? `With ${doc?.currently_with ?? "another person"} — only they, someone they report to, or an approver of this issue can issue it`
                     : problems.length > 0 ? problems[0].message : undefined}
                 >
                   Issue from stock
