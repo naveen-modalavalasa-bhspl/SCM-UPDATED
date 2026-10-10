@@ -396,6 +396,7 @@ function AppRoutes() {
         {/* Confirming one delivery is a screen, not a box over the list: a quantity per
             line, the tracking trail, the photo and the damage report. No rbac_pages row
             of its own — it is the list's detail, and the list's grant is what opens it. */}
+        <Route path="indents/acknowledgements/issue/:issueId" element={<AcknowledgementDetailPage kind="issue" />} />
         <Route path="indents/acknowledgements/:indentId"
                element={<AcknowledgementDetailPage />} />
         {/* The two addresses this screen used to answer on. `/indents/deliveries` was
@@ -598,6 +599,11 @@ function AppRoutes() {
         <Route path="inventory/ledger" element={<StockLedgerView />} />
         <Route path="inventory/replenishment" element={<StockReplenishmentView />} />
         <Route path="inventory/transfers" element={<StockTransferView />} />
+        {/* An STR is an indent underneath; its screens sit under Stock Transfer so the
+            rail and tabs read Inventory, not Indents. */}
+        <Route path="inventory/transfers/new" element={<IndentFormPage />} />
+        <Route path="inventory/transfers/requests/:id/journey" element={<IndentJourneyPage />} />
+        <Route path="inventory/transfers/requests/:id" element={<IndentDetailPage />} />
         {/* An STO's material issue, worked inside Stock Transfer rather than the
             warehouse rail (REQ_020). The same form; only its home path moves. */}
         {/* The two forms' Back lands on their list path; the list IS a tab here. */}

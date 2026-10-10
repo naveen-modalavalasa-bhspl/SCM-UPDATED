@@ -11,6 +11,10 @@ export interface PendingApproval {
   due_at?: string | null;
   current_stage_name?: string | null;
   approver_name?: string | null;
+  /** The indent's own type (STR, MONTHLY…) when doc_type is INDENT. */
+  indent_type?: string | null;
+  /** What the row is shown as: STOCK_TRANSFER_REQUEST for an STR, else doc_type. */
+  display_doc_type?: string | null;
 }
 
 /** One line the approver DROPPED when they signed — stored on the indent line
@@ -170,6 +174,7 @@ export interface DecisionLedger {
 export interface ApprovalReportRow {
   key: string;
   doc_type: string;
+  indent_type?: string | null;
   doc_id: number;
   doc_no?: string | null;
   requester?: string | null;

@@ -1,5 +1,6 @@
 import { api } from "@/shared/api/client";
 import type {
+  UnlocatedStockStatus,
   AcknowledgeWrite,
   ApprovalEvent,
   Attachment,
@@ -119,6 +120,14 @@ export const createWarehouse = (body: WarehouseWrite) =>
 
 export const updateWarehouse = (id: number, body: WarehouseWrite) =>
   put<Warehouse>(`${BASE}/warehouses/${id}`, body);
+
+/** Stock this warehouse holds with no location, and its Unlocated location. */
+export const getUnlocatedStock = (id: number) =>
+  get<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated`);
+
+/** Move everything held with no location into the Unlocated location, now. */
+export const placeUnlocatedStock = (id: number) =>
+  post<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/place`);
 
 /**
  * How much of a storage location's cube the locations inside it already claim.
@@ -1106,6 +1115,10 @@ export const getEmployeeDestination = (employee_id: number) =>
     destination_office_name?: string | null;
     destination_office_sac?: string | null;
     vehicle_number?: string | null;
+    department_id?: number | null;
+    department_name?: string | null;
+    project_id?: number | null;
+    project_name?: string | null;
   }>(`${BASE}/options/employee-destination`, { employee_id });
 
 export const projectOptions = (search?: string) => get<Option[]>(`${BASE}/options/projects`, { search });

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  AlertTriangle, Check, MessageSquare, PackageX, Plus, ScanLine, Trash2, Undo2,
+  AlertTriangle, Barcode, Check, MessageSquare, PackageX, Plus, ScanLine, Trash2, Undo2,
 } from "lucide-react";
 import { Button } from "@/shared/components";
 import { QtyInput, TextInput } from "./LinesEditor";
@@ -398,7 +398,7 @@ function ItemRow(props: ItemProps) {
    * every batch is open; the oldest-first ordering then carries the advice by itself.
    */
   const allowed = allowedExpiries(group.allocated);
-  const batches = batchChoices(sources, allowed);
+  const batches = batchChoices(sources, allowed, group.codedSwap);
   // The oldest batch that still has stock, when this item is not taking from it.
   // Advice on a manual line, never a refusal: the storekeeper can see which pallet is
   // reachable and the screen cannot.
@@ -636,6 +636,36 @@ function ItemRow(props: ItemProps) {
             </div>
           )}
 
+          {/* The one FEFO swap past the same-day rule, explained where it applies.
+            * Without it a later batch simply turned selectable and the storekeeper
+            * could not tell an exception from a mistake. */}
+          {group.codedSwap.size > 0 && !locked && (() => {
+            const allocatedNos = Array.from(new Set(group.allocated
+              .map((row) => row.batch_no).filter(Boolean)));
+            const unlocked = batches.filter((row) => row.codeException);
+            return (
+              <div className="mt-2 flex items-start gap-2 rounded-lg border border-info/30 bg-info-bg px-2.5 py-2 text-[11px] leading-5 text-ink">
+                <Barcode className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+                <span>
+                  <span className="font-semibold">
+                    {allocatedNos.join(", ") || "The allocated batch"} carries no codes
+                  </span>
+                  {" "}— this item must leave with one code per unit, so it cannot be
+                  issued from there. Unlocked instead:{" "}
+                  {unlocked.map((row, i) => (
+                    <span key={row.batchId ?? 0}>
+                      {i > 0 && ", "}
+                      <span className="font-mono font-semibold">{row.batchNo}</span>
+                      {" "}({expiryLabel(row.expiry)})
+                    </span>
+                  ))}
+                  , the oldest batch here that has them. Saving moves the reservation
+                  onto it and frees the allocated batch.
+                </span>
+              </div>
+            );
+          })()}
+
           {/* What changing a location actually DOES. The hold inventory placed does
             * not follow a document by itself: saying so here is the difference
             * between a deliberate correction and a storekeeper discovering later
@@ -708,6 +738,15 @@ function PickRow(props: PickProps) {
     .reduce((sum, other) => sum + other.issued, 0));
   const need = Math.trunc(split.issued);
   const tracked = group.pickable && group.trackingType !== "NONE";
+  // Asset and consumable codes are the system's own labels: the server assigns them,
+  // oldest first from THIS pick's batch and location, on every save — so they are on
+  // the document from the draft onwards and survive submit and approval. A serial or
+  // an IMEI is read off the goods at the shelf, and stays "picked after approval".
+  const autoCodes = group.trackingType === "ASSET" || group.trackingType === "CONSUMABLE";
+  const hidden = unitsHidden && !autoCodes;
+  // Editable on a draft and, once approved, by whoever issues it; only viewable in
+  // between. Serial/IMEI picks keep the document-wide rule.
+  const pickLocked = autoCodes ? locked && unitsLocked : unitsLocked;
   // Everybody else's reservation on this balance row. Worth naming: an unexplained
   // gap between what is on the shelf and what the pick may take reads as a bug.
   const othersHold = split.reserved !== null && split.ownReserved !== null
@@ -936,7 +975,7 @@ function PickRow(props: PickProps) {
           <CellLabel>{unitMeta?.label ?? "Identifiers"}</CellLabel>
           {!tracked ? (
             <span className="inline-block text-[11px] text-muted lg:pt-2.5">Not tracked</span>
-          ) : unitsHidden ? (
+          ) : hidden ? (
             <span className="inline-block text-[11px] text-muted lg:pt-2.5">
               Picked after approval
             </span>
@@ -945,11 +984,15 @@ function PickRow(props: PickProps) {
               <Button
                 variant={split.codes === need && need > 0 ? "soft" : "ghost"}
                 onClick={() => onPickUnits(split.index)}
-                disabled={unitsLocked || needsSource || need <= 0}
+                disabled={needsSource || need <= 0 || (pickLocked && split.codes === 0)}
                 title={
                   needsSource
                     ? "Pick the batch and storage location first"
-                    : unitMeta?.hint ?? "Assign identifiers"
+                    : autoCodes
+                      ? pickLocked
+                        ? "View the codes assigned to this pick"
+                        : "Assigned automatically, oldest first. Open to swap any of them."
+                      : unitMeta?.hint ?? "Assign identifiers"
                 }
               >
                 <ScanLine className="h-4 w-4" />
@@ -976,7 +1019,19 @@ function PickRow(props: PickProps) {
                   </span>
                 )}
               </div>
-              {need > 0 && split.codes !== need && !needsSource && (
+              {autoCodes && need > 0 && !needsSource && (
+                <div className={`text-[10px] font-semibold leading-tight ${
+                  split.codes === need ? "text-ok" : "text-muted"
+                }`}>
+                  {split.codes === need
+                    ? "Auto-assigned"
+                    : split.codes < need && !pickLocked
+                      ? `${need - split.codes} more auto-assigned ${locked ? "when issued" : "on save"}`
+                      : null}
+                </div>
+              )}
+              {need > 0 && split.codes !== need && !needsSource
+                && !(autoCodes && split.codes < need && !pickLocked) && (
                 <div className={`text-[10px] leading-tight ${
                   need - split.codes > 0 ? "text-warn" : "text-bad"
                 }`}>

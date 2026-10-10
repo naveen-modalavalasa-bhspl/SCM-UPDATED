@@ -14,6 +14,7 @@ import {
   Select, SearchField,
 } from "@/shared/components";
 import { approvalsApi } from "../api";
+import { docTypeLabel, rowDocTypeLabel } from "../docTypes";
 import { raisedWindow, type RaisedRange } from "../filters";
 import {
   ageingBuckets, buildReportRows, decisionTrend, filterReportRows, reportKpis,
@@ -23,14 +24,7 @@ import { ApprovalPager } from "../components/Pager";
 import { TONE_BLUE } from "@/shared/components/tones";
 
 const COLORS = ["#4169e1", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2"];
-const TYPE_LABELS: Record<string, string> = {
-  INDENT: "Indent", MR: "Material request", ALLOCATION: "Stock allocation",
-  PO: "Purchase order", GRN: "Goods receipt", ISSUE: "Material issue",
-  WH_ISSUE: "Warehouse issue", OWN_STOCK_ISSUE: "Issue from my point",
-  OWN_STOCK_ALLOCATION: "Allocation from my point", DISPATCH: "Dispatch",
-  PURCHASE_RETURN: "Purchase return", QC_OUTWARD: "Outward QC",
-};
-const typeLabel = (value: string) => TYPE_LABELS[value] ?? value.replace(/_/g, " ");
+const typeLabel = docTypeLabel;
 const RANGE_OPTIONS: Array<{ value: RaisedRange; label: string }> = [
   { value: "", label: "All time" },
   { value: "7d", label: "Last 7 days" },
@@ -127,7 +121,7 @@ export function ApprovalReportsPage() {
   const exportExcel = () => {
     const sheet = XLSX.utils.json_to_sheet(rows.map((row) => ({
       Document: row.doc_no ?? `#${row.doc_id}`,
-      Type: typeLabel(row.doc_type),
+      Type: rowDocTypeLabel(row),
       Requester: row.requester ?? "",
       Approver: row.approver_name ?? "",
       Stage: row.stage,
@@ -144,7 +138,7 @@ export function ApprovalReportsPage() {
 
   const columns: Column<ApprovalReportRow>[] = [
     { key: "date", header: "Date", render: (row) => row.report_at ? new Date(row.report_at).toLocaleString() : "—" },
-    { key: "document", header: "Document", render: (row) => <div><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><p className="text-xs text-muted">{typeLabel(row.doc_type)}</p></div> },
+    { key: "document", header: "Document", render: (row) => <div><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><p className="text-xs text-muted">{rowDocTypeLabel(row)}</p></div> },
     { key: "requester", header: "Requester", hideOnNarrow: true, render: (row) => row.requester ?? "—" },
     { key: "stage", header: "Stage", render: (row) => row.stage },
     { key: "status", header: "Status", render: (row) => <StatusPill status={row.overdue && row.status === "PENDING" ? "OVERDUE" : row.status} /> },
@@ -221,6 +215,6 @@ export function ApprovalReportsPage() {
     </div>
 
     <div className="mb-2 flex items-end justify-between gap-3"><div><h2 className="font-display text-lg font-bold text-ink">Detailed approval report</h2><p className="text-xs text-muted">The table and Excel export use the filters above.</p></div></div>
-    <Card className="p-2"><ResponsiveList data={pageRows} loading={loading} keyOf={(row) => row.key} columns={columns} empty="No approval records match these report filters." renderCard={(row) => <div className="space-y-1"><div className="flex justify-between"><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><StatusPill status={row.overdue && row.status === "PENDING" ? "OVERDUE" : row.status} /></div><p className="text-sm text-body">{typeLabel(row.doc_type)} · {row.stage}</p><p className="text-xs text-muted">{row.requester ?? "—"} · {hours(row.duration_hours)}</p>{row.comments && <p className="text-xs text-body">{row.comments}</p>}</div>} /><ApprovalPager page={page} size={size} total={rows.length} onPage={setPage} /></Card>
+    <Card className="p-2"><ResponsiveList data={pageRows} loading={loading} keyOf={(row) => row.key} columns={columns} empty="No approval records match these report filters." renderCard={(row) => <div className="space-y-1"><div className="flex justify-between"><strong className="font-mono text-ink">{row.doc_no ?? `#${row.doc_id}`}</strong><StatusPill status={row.overdue && row.status === "PENDING" ? "OVERDUE" : row.status} /></div><p className="text-sm text-body">{rowDocTypeLabel(row)} · {row.stage}</p><p className="text-xs text-muted">{row.requester ?? "—"} · {hours(row.duration_hours)}</p>{row.comments && <p className="text-xs text-body">{row.comments}</p>}</div>} /><ApprovalPager page={page} size={size} total={rows.length} onPage={setPage} /></Card>
   </>;
 }

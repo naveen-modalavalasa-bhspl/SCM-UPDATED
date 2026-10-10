@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LibraryBig, Plus, Trash2 } from "lucide-react";
 import { CardBody, Skeleton } from "@heroui/react";
@@ -11,9 +11,9 @@ import {
 } from "../api";
 import { ItemCombobox } from "../components/ItemCombobox";
 import { ChooseBomModal } from "../components/ChooseBomModal";
-import { INDENT_STATUS, INDENT_TYPE, INDENT_TYPE_OPTIONS } from "../constants";
-
-const STR_HOME = "/inventory/transfers?tab=requests";
+import {
+  INDENT_STATUS, INDENT_TYPE, INDENT_TYPE_OPTIONS, STR_HOME, indentBase,
+} from "../constants";
 import {
   comparableVehicleNumber, displayUom, splitDeliveryOffice,
 } from "../displayFormat";
@@ -110,11 +110,14 @@ export function IndentFormPage() {
   const initializedDraftId = useRef<number | null>(null);
   const initializedPrefill = useRef<string | null>(null);
   const [priority, setPriority] = useState("NORMAL");
-  // `?type=STR` opens this form as a Stock Transfer Request: same lines, same
-  // document, its own ladder and number series on the server.
+  // /inventory/transfers/new (or `?type=STR`) opens this form as a Stock Transfer
+  // Request: same lines, same document, its own ladder and number series on the server.
+  const strRoute = useLocation().pathname.startsWith("/inventory/transfers");
   const [indentType, setIndentType] = useState<IndentType>(
-    searchParams.get("type") === INDENT_TYPE.STR ? INDENT_TYPE.STR : INDENT_TYPE.REGULAR);
+    strRoute || searchParams.get("type") === INDENT_TYPE.STR ? INDENT_TYPE.STR : INDENT_TYPE.REGULAR);
   const isStr = indentType === INDENT_TYPE.STR;
+  const docLabel = isStr ? "request" : "indent";
+  const detailPath = (id: number) => `${indentBase(indentType)}/${id}`;
   const [vehicleId, setVehicleId] = useState<number | "">("");
   const [requiredDate, setRequiredDate] = useState("");
   const [remarks, setRemarks] = useState("");
@@ -261,7 +264,7 @@ export function IndentFormPage() {
       : indentApi.create(payload()),
     onSuccess: (indent) => {
       qc.invalidateQueries({ predicate: isIndentModuleQuery });
-      nav(`/indents/${indent.id}`);
+      nav(`${indentBase(indent.indent_type)}/${indent.id}`);
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -388,9 +391,9 @@ export function IndentFormPage() {
       <Card>
         <CardBody className="gap-4 p-5">
           <p className="text-sm font-semibold text-bad">
-            {draftLoadError instanceof Error ? draftLoadError.message : "Could not load this indent."}
+            {draftLoadError instanceof Error ? draftLoadError.message : `Could not load this ${docLabel}.`}
           </p>
-          <Button variant="secondary" onClick={() => nav(`/indents/${editId}`)}>Back to indent</Button>
+          <Button variant="secondary" onClick={() => nav(detailPath(editId!))}>Back to {docLabel}</Button>
         </CardBody>
       </Card>
     );
@@ -405,7 +408,7 @@ export function IndentFormPage() {
               ? "This indent is not available for correction editing."
               : "Only Draft indents can be edited."}
           </p>
-          <Button variant="secondary" onClick={() => nav(`/indents/${editId}`)}>Back to indent</Button>
+          <Button variant="secondary" onClick={() => nav(detailPath(editId!))}>Back to {docLabel}</Button>
         </CardBody>
       </Card>
     );
@@ -418,8 +421,8 @@ export function IndentFormPage() {
                     : { to: "/indents", label: "Back to All indents" }}
         eyebrow={isStr ? "Stock Transfer" : "Indents"}
         title={isCorrectionEdit
-          ? `Edit correction ${draft?.indent_no ?? "indent"}`
-          : isEditing ? `Edit ${draft?.indent_no ?? "indent"}`
+          ? `Edit correction ${draft?.indent_no ?? docLabel}`
+          : isEditing ? `Edit ${draft?.indent_no ?? docLabel}`
           : isStr ? "New stock transfer request" : "New request"}
         actions={!isEditing ? (
           <Button variant="primary" onClick={() => setBomPickerOpen(true)} className={TONE_AMBER}>
@@ -615,7 +618,7 @@ export function IndentFormPage() {
         <Button
           variant="soft"
           className={`flex-1 md:flex-none ${TONE_PINK}`}
-          onClick={() => nav(isEditing ? `/indents/${editId}` : isStr ? STR_HOME : "/indents")}
+          onClick={() => nav(isEditing ? detailPath(editId!) : isStr ? STR_HOME : "/indents")}
         >
           Cancel
         </Button>
@@ -650,7 +653,7 @@ export function IndentFormPage() {
         >
           {save.isPending
             ? (isEditing ? "Saving…" : "Creating…")
-            : (isCorrectionEdit ? "Save correction" : isEditing ? "Save changes" : "Create indent")}
+            : (isCorrectionEdit ? "Save correction" : isEditing ? "Save changes" : isStr ? "Create request" : "Create indent")}
         </Button>
       </div>
 

@@ -49,6 +49,9 @@ const REF_TYPES = [
   { value: "RECEIPT", label: "Receipt / Putaway" },
   { value: "PUTAWAY_ORDER", label: "Putaway Order" },
   { value: "STOCK_MOVEMENT", label: "Stock In / Out (bin move)" },
+  // Stock held with no location, placed in the warehouse's Unlocated location when
+  // it started keeping locations (backend `warehouse/unlocated.py`).
+  { value: "UNLOCATED", label: "Placed in Unlocated" },
   { value: "WH_ISSUE", label: "Warehouse Issue" },
   { value: "VEHICLE_ISSUE", label: "Vehicle Issue" },
   { value: "DISPATCH", label: "Dispatch" },

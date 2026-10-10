@@ -49,6 +49,7 @@ from app.modules.warehouse import capacity
 from app.modules.warehouse import models as m
 from app.modules.warehouse import schemas as s
 from app.modules.warehouse import storage_types
+from app.modules.warehouse import unlocated
 from app.modules.warehouse.enums import (
     DEAD_ISSUE_STATUSES, UNSERVED_ISSUE_STATUSES, QC_OUTWARD_CREATE, QC_OUTWARD_VIEW, RECEIPT_CREATE,
     SINGLE_ISSUE_REF_TYPES, STOCK_VIEW,
@@ -91,7 +92,7 @@ from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
-from app.shared.limits import MAX_UNITS_PER_CODE_MINT, UNIT_MINT_CHUNK
+from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
 logger = logging.getLogger(__name__)
 
@@ -528,6 +529,7 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
 
     moved = (_d(wh.latitude) != _d(data.latitude) or _d(wh.longitude) != _d(data.longitude)
              or (wh.latitude is None) != (data.latitude is None))
+    starts_keeping_locations = not wh.is_bin_managed and data.is_bin_managed
     for field, value in data.model_dump().items():
         setattr(wh, field, value)
     # Only a coordinate somebody actually TYPED is a verified pin. The form sends the
@@ -541,6 +543,11 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     elif data.latitude is None:
         wh.coordinate_source = wh.coordinate_label = wh.coordinate_confidence = None
     await db.flush()
+    # Everything it received while it kept no locations is standing at bin 0, where no
+    # location picker can reach it. Give it its Unlocated location in the same
+    # transaction as the switch, so there is never a moment it cannot be issued.
+    if starts_keeping_locations:
+        await unlocated.place(db, wh.id, user)
     await write_audit(db, entity="whs_warehouses", entity_id=wh.id, entity_no=wh.code,
                       action=AuditAction.UPDATE, actor=user,
                       before={k: str(v) for k, v in before.items()},
@@ -548,6 +555,30 @@ async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.Warehous
     await db.commit()
     await db.refresh(wh)
     return wh
+
+
+async def unlocated_stock_status(db: AsyncSession, warehouse_id: int) -> dict:
+    """Stock held with no location on a bin-managed warehouse — see `unlocated.py`."""
+    return await unlocated.status(db, warehouse_id)
+
+
+async def place_unlocated_stock(db: AsyncSession, warehouse_id: int, user) -> dict:
+    """Give everything this warehouse holds at bin 0 its Unlocated location, now.
+
+    The reads a pick starts from already do this on their own; the press is for the
+    warehouse screen, so whoever switched the site to locations can see it happen and
+    see where the stock went.
+    """
+    wh = await _warehouse(db, warehouse_id)
+    if not wh.is_bin_managed:
+        raise ValidationError(
+            f"{wh.code} keeps no storage locations, so its stock belongs where it is. "
+            "Switch on \"Uses storage locations\" first.")
+    placed = await unlocated.place(db, warehouse_id, user)
+    await db.commit()
+    return {**await unlocated.status(db, warehouse_id),
+            "placed_rows": placed["rows"], "placed_qty": placed["quantity"],
+            "placed_units": placed["units"]}
 
 
 async def bin_tree(db: AsyncSession, warehouse_id: int, user=None) -> list[dict]:
@@ -927,6 +958,9 @@ async def create_bin(db: AsyncSession, data: s.BinWrite, user) -> Bin:
             raise ValidationError("A bin cannot sit under a parent in another warehouse")
 
     kind = await _resolved_kind(db, data, parent)
+    # One Unlocated location per warehouse, made by the system — see `unlocated.py`.
+    await unlocated.assert_location_write(db, None, kind_code=kind["bin_type"],
+                                          parent=parent, is_active=data.is_active)
 
     # A location has to fit inside the one it hangs off. Checked before the insert, so
     # a warehouse can never be described as holding more than it does — see the note
@@ -986,6 +1020,10 @@ async def update_bin(db: AsyncSession, bin_id: int, data: s.BinWrite, user) -> B
     # Checked BEFORE the columns are set, like every other rule here: a refusal must
     # leave the row exactly as it was.
     kind = await _resolved_kind(db, data, parent)
+    # The Unlocated location keeps its kind, its place at the top, and stays on while
+    # it holds stock; nobody makes a second one — see `unlocated.assert_location_write`.
+    await unlocated.assert_location_write(db, row, kind_code=kind["bin_type"],
+                                          parent=parent, is_active=data.is_active)
 
     # Both directions, before anything is written: shrinking a rack can make it too
     # small for the shelves already in it, and growing a shelf can make it too big for
@@ -5283,10 +5321,13 @@ async def _place_unit_codes(
     # somebody asked to have coded is a traceability change, and that is a decision
     # for the business, not for a size limit. The way out is a smaller receipt today
     # and a chunked background job once the queue exists.
-    if int(units) > MAX_UNITS_PER_CODE_MINT:
+    # MAX_UNITS_PER_CODE_MINT is now the recommended value; the live cap is
+    # warehouse.max_units_per_code_mint on Settings, 0 = no limit.
+    mint_cap = unit_limit("max_units_per_code_mint")
+    if mint_cap and int(units) > mint_cap:
         raise ValidationError(
             f"This line would give individual codes to {int(units):,} units, and one "
-            f"request may code at most {MAX_UNITS_PER_CODE_MINT:,}. The quantity "
+            f"request may code at most {mint_cap:,}. The quantity "
             "itself is not the problem -- receive it in smaller putaways, or turn "
             "unit coding off for this item if its units are not tracked individually."
         )
@@ -7125,7 +7166,9 @@ async def create_fulfilment_drafts_for_allocation(db: AsyncSession, alloc, user)
         if not outstanding:
             continue
         lines = outstanding
-        project_id = next(
+        # The CONSUMING project is the indent's (an STR's own project); the stock's
+        # project is only the fallback for an indent that carries none.
+        project_id = getattr(indent, "project_id", None) or next(
             (v["project_id"] for v in lines.values() if v["project_id"]), None
         )
         items: list[s.IssueItemWrite] = []
@@ -7224,10 +7267,20 @@ async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
 
     if sto.doc_kind != STO_KIND_TRANSFER or sto.issue_id or sto.str_id:
         return
+    # Project: the STO's own, else the source point's tag. Department: the raiser's
+    # HCM department — an STO carries none of its own, and a blank here is copied onto
+    # every floor piece of a split.
+    from app.platform.hcm.models import HcmEmployee
+    raiser = (await db.get(HcmEmployee, sto.requested_by_id)
+              if getattr(sto, "requested_by_id", None) else None)
+    project_id = (sto.from_project_id
+                  or await stock_locations.project_of_location(db, sto.from_warehouse_id)
+                  or getattr(raiser, "project_id", None) or None)
     data = s.IssueWrite(
         issue_date=ist_today(),
         warehouse_id=sto.from_warehouse_id,
-        project_id=sto.from_project_id or None,
+        project_id=project_id,
+        department_id=getattr(raiser, "department_id", None),
         remarks=f"STO {sto.sto_no} to {sto.to_warehouse_name}",
         items=[s.IssueItemWrite(item_id=line.item_id, requested_qty=_d(line.requested_qty))
                for line in sto.items],
@@ -7426,7 +7479,8 @@ async def _raise_consignment_for_picking(
     # actually put out; the packer validates against exactly that set.
     serials_by_key: dict[tuple[int, int], list[str]] = {}
     serials_by_item: dict[int, list[str]] = {}
-    for row in (await _issued_serial_index(db, issue)).values():
+    # The index files one unit under each of its names; walk each unit ONCE.
+    for row in {row.id: row for row in (await _issued_serial_index(db, issue)).values()}.values():
         serials_by_key.setdefault(
             (row.item_id, row.batch_id or m.NO_BATCH), []
         ).append(row.serial_number)
@@ -7824,12 +7878,17 @@ async def _reserve_issue_serials(
             raise ValidationError(
                 f"{item.code}: a serialized quantity must be a whole number"
             )
+        auto_codes = (issue.direction == IssueDirection.OUT.value
+                      and mode == UNIT_MODE_CODE)
         if not serials:
-            # Unchanged for every line that names no units, which is most of them:
-            # nothing is reserved and nothing is demanded here.
+            # Nothing named. A serial or IMEI line stays empty — which handset leaves
+            # is read off the label at the shelf. An asset- or consumable-coded line is
+            # filled from its own batch and bay, oldest code first (`_auto_fill_codes`).
             setattr(line, "serial_numbers", [])
             setattr(line, "unit_keys", [])
             setattr(line, "unit_mode", mode)
+            if auto_codes:
+                await _auto_fill_codes(db, issue, line, marker=marker, mode=mode)
             continue
         if issued != issued.to_integral_value():
             raise ValidationError(
@@ -7928,6 +7987,42 @@ async def _reserve_issue_serials(
         setattr(line, "serial_numbers", [row.serial_number for row in chosen])
         setattr(line, "unit_keys", serials)
         setattr(line, "unit_mode", mode)
+        if auto_codes and len(serials) < int(issued):
+            await _auto_fill_codes(db, issue, line, marker=marker, mode=mode)
+
+
+async def _auto_fill_codes(
+    db: AsyncSession, issue: m.MaterialIssue, line, *, marker: str, mode: str,
+) -> None:
+    """Top an asset- or consumable-coded line up to its issued quantity (2026-10-07).
+
+    Those codes are GENERATED by the system at putaway — nobody reads one off a maker's
+    label — so making a storekeeper tick fifteen of them by hand was clerical work with
+    no judgement in it. The codes he did name stand (they are already stamped with
+    `marker`, and `_claim_units` counts its own first); the rest are taken FIFO from
+    the line's OWN batch and bay, so a split pick draws each bay's codes for that bay.
+
+    Runs on every save — create, update and the approved-issue serials endpoint — so
+    the set is held on the units themselves and survives submit and approval. Serial
+    and IMEI lines never come here (`_unit_mode`). Best effort, like `_claim_units`: a
+    bay holding fewer codes than the quantity fills what it can, and
+    `_assert_units_obtainable` says so at submit.
+    """
+    wanted = int(_d(line.issued_qty))
+    if wanted <= 0:
+        return
+    rows = await _claim_units(
+        db,
+        item_id=line.item_id,
+        warehouse_id=issue.warehouse_id,
+        qty=wanted,
+        marker=marker,
+        batch_id=line.batch_id if line.batch_id and line.batch_id != m.NO_BATCH else None,
+        bin_id=line.bin_id if line.bin_id and line.bin_id != m.NO_BIN else None,
+    )
+    setattr(line, "serial_numbers", [row.serial_number for row in rows])
+    setattr(line, "unit_keys", [
+        keys[0] for keys in (_unit_keys(row, mode) for row in rows) if keys])
 
 
 async def _issue_units_by_line(
@@ -7978,16 +8073,48 @@ async def _issue_units_by_line(
         else:
             unattributed.setdefault(row.item_id, []).append(row)
 
-    for line in issue.items:
-        pool = unattributed.get(line.item_id)
+    _attribute_units_to_lines(issue.items, unattributed, by_line)
+    return by_line
+
+
+def _attribute_units_to_lines(lines, pool_by_item: dict, by_line: dict) -> None:
+    """Hand document-stamped units to the lines that sent them, tightest match first.
+
+    A posted unit keeps its `batch_id` and `bin_id`; only its stamp goes per document.
+    So the same batch drawn from two bays on two lines — the normal shape of a split
+    pick — is told apart by WHERE each unit was standing: an exact (batch, bin) match
+    first, then the batch alone, then anything of the item. Handing them out in plain
+    line order gave the first line every unit of the batch and left the second line
+    with the other bay's codes, which outward QC and the consignment then validated
+    against the wrong line. Pure: mutates `pool_by_item` and `by_line` only.
+    """
+    def _named(value, sentinel):
+        return value if value and value != sentinel else None
+
+    def _take(line, matches) -> None:
+        pool = pool_by_item.get(line.item_id)
         if not pool:
-            continue
+            return
         room = int(_d(line.issued_qty)) - len(by_line[line.id])
         if room <= 0:
-            continue
-        by_line[line.id].extend(pool[:room])
-        del pool[:room]
-    return by_line
+            return
+        taken = [row for row in pool if matches(row)][:room]
+        if not taken:
+            return
+        ids = {id(row) for row in taken}
+        by_line[line.id].extend(taken)
+        pool[:] = [row for row in pool if id(row) not in ids]
+
+    for line in lines:
+        batch, bay = _named(line.batch_id, m.NO_BATCH), _named(line.bin_id, m.NO_BIN)
+        if batch and bay:
+            _take(line, lambda row, b=batch, n=bay: row.batch_id == b and row.bin_id == n)
+    for line in lines:
+        batch = _named(line.batch_id, m.NO_BATCH)
+        if batch:
+            _take(line, lambda row, b=batch: row.batch_id == b)
+    for line in lines:
+        _take(line, lambda row: True)
 
 
 def _unit_claim_free_clause(marker: str | None):
@@ -8222,10 +8349,9 @@ async def issue_unit_supply(
 async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> None:
     """Refuse to submit an issue that could never be posted.
 
-    Only serial-tracked lines: those are the ones `post_issue` and `_mark_serials`
-    hold to one named unit per issued unit. An IMEI- or code-named item tops up from
-    whatever the shelf has and ships regardless — a missing identity row must never
-    stop real goods from moving (see `_claim_units`).
+    Every line whose item must leave with one identifier per unit
+    (`_unit_codes_required`) — the same test `_mark_serials` holds `post_issue` to, so
+    an issue that would be refused at posting is refused here, before approval.
 
     Every failing line is reported at once, naming the batch, so the storekeeper
     fixes the document in one pass instead of one approval cycle per line.
@@ -8233,13 +8359,14 @@ async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> 
     if issue.direction != IssueDirection.OUT.value:
         return
     supply = await _issue_unit_supply(db, issue)
+    code_config = await codeformat.code_settings(db)
     short: list[str] = []
     for line in issue.items:
         wanted = _d(line.issued_qty)
         if wanted <= ZERO:
             continue
         item = await _item_snapshot(db, line.item_id)
-        if not item.is_serial_tracked:
+        if not await _unit_codes_required(db, item, config=code_config):
             continue
         # `_issue_unit_supply` already counts the units this line is holding — they
         # are `available` rows stamped with its own marker — so adding the captured
@@ -8250,12 +8377,13 @@ async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> 
         where = (f"batch {line.batch_no}" if line.batch_no else "the unbatched stock")
         if line.bin_code:
             where += f" in bin {line.bin_code}"
+        noun = _UNIT_NOUN[_unit_mode(item)]
         short.append(
-            f"line {line.line_no} ({item.code}) needs {int(wanted)} serial numbers "
+            f"line {line.line_no} ({item.code}) needs {int(wanted)} {noun} "
             f"but {where} holds {available}")
     if short:
         raise ValidationError(
-            "This issue cannot be served with the serial numbers on the shelf — "
+            "This issue cannot be served with the units on the shelf — "
             + "; ".join(short)
             + ". Change the batch or the quantity before submitting: after approval "
               "the batch is frozen and the issue could never be posted.")
@@ -8336,6 +8464,11 @@ async def _decorate_issue_serials(
     return issue
 
 
+# The most source rows `issue_stock_sources` probes for coded units. Each probe is one
+# bounded index lookup; past this a screen is showing more bays than anybody reads.
+_CODED_PROBE_ROWS = 400
+
+
 async def issue_stock_sources(
     db: AsyncSession,
     *,
@@ -8389,6 +8522,9 @@ async def issue_stock_sources(
     ids = [int(value) for value in dict.fromkeys(item_ids) if value]
     if not warehouse_id or not ids:
         return []
+    # Stock this warehouse banked before it kept locations is given its Unlocated
+    # location first, or none of it could be offered as a source — see `unlocated.py`.
+    await unlocated.heal(db, warehouse_id, user)
 
     # What THIS indent is already holding on each balance row. Aggregated in a
     # subquery rather than joined directly: a balance row can carry several
@@ -8486,6 +8622,32 @@ async def issue_stock_sources(
     # One read of the warehouse's tree for the whole answer, so every source can name
     # the floor / lane / rack it sits on rather than a bare bin code.
     index = await _location_index(db, warehouse_id)
+    # Must the item leave with a code per unit, and does this (batch, location) hold a
+    # free coded unit? What the screen needs to offer the one batch swap FEFO allows
+    # past the same-day rule (`_coded_swap_verdict`). A bounded EXISTS per row, never
+    # a COUNT, and only for items that require codes.
+    code_config = await codeformat.code_settings(db)
+    codes_required = {
+        item_id: await _unit_codes_required(
+            db, await _item_snapshot(db, item_id), config=code_config)
+        for item_id in {row[0] for row in rows}}
+    coded_slots: set[tuple[int, int, int]] = set()
+    for item_id, bin_id, batch_id, *_ in rows[:_CODED_PROBE_ROWS]:
+        if not codes_required.get(item_id):
+            continue
+        probe = (select(literal(1)).select_from(m.SerialNumber)
+                 .where(m.SerialNumber.item_id == item_id,
+                        m.SerialNumber.warehouse_id == warehouse_id,
+                        m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+                        m.SerialNumber.is_active == 1,
+                        (m.SerialNumber.batch_id == batch_id) if batch_id else or_(
+                            m.SerialNumber.batch_id.is_(None),
+                            m.SerialNumber.batch_id == 0),
+                        _unit_claim_free_clause("")))
+        if bin_id:
+            probe = probe.where(m.SerialNumber.bin_id == bin_id)
+        if await db.scalar(probe.limit(1)):
+            coded_slots.add((item_id, bin_id or 0, batch_id or 0))
     out = []
     for (item_id, bin_id, batch_id, available_qty, reserved_qty, total_qty,
          own_qty, bin_code, bin_name, batch_no, expiry_date, mfg_date) in rows:
@@ -8516,6 +8678,8 @@ async def issue_stock_sources(
             "batch_available_qty": by_batch.get((item_id, batch_id or 0), (ZERO, ZERO))[1],
             "item_total_qty": by_item.get(item_id, (ZERO, ZERO))[0],
             "item_available_qty": by_item.get(item_id, (ZERO, ZERO))[1],
+            "codes_required": bool(codes_required.get(item_id)),
+            "has_unit_codes": (item_id, bin_id or 0, batch_id or 0) in coded_slots,
         })
     return out
 
@@ -8689,6 +8853,106 @@ def _fefo_swap_allowed(wanted, allocated: list) -> bool:
                for row in allocated)
 
 
+def _expires_before(a, b) -> bool:
+    """Does expiry `a` fall before `b`, in the order stock leaves the shelf?
+    Undated sorts LAST — the same order `issue_stock_sources` serves — so an undated
+    batch is never "older" than a dated one."""
+    if a is None:
+        return False
+    return b is None or a < b
+
+
+def _coded_swap_verdict(*, codes_required: bool, allocated_has_codes: bool,
+                        wanted_has_codes: bool, earlier_coded: list) -> bool | None:
+    """The one exception to the same-day FEFO rule (2026-10-06).
+
+    An item that must leave with one serial / IMEI / asset or consumable code per unit
+    cannot be issued out of a batch that carries no codes — `post_issue` refuses an
+    incomplete set at the shelf, so the allocated batch is a document that can never
+    post. Holding the storekeeper to that batch is not FEFO, it is a dead end. So a
+    swap onto a later batch IS allowed when:
+
+    - the item requires codes, and
+    - the allocated batch has no free coded unit left here, and
+    - the batch being moved onto has some, and
+    - no OTHER batch expiring before it has any (`earlier_coded` empty) — FEFO still
+      decides among the batches that can actually be issued.
+
+    True = allowed. None = this exception does not apply (the ordinary rule stands).
+    Pure, so it reads and tests without a database.
+    """
+    if not (codes_required and not allocated_has_codes and wanted_has_codes):
+        return None
+    return True if not earlier_coded else None
+
+
+async def _batches_with_units(db: AsyncSession, *, item_id: int, warehouse_id: int,
+                              batch_ids, bin_id: int | None = None) -> set[int]:
+    """Which of these batches hold at least one free coded unit at this point.
+
+    One bounded EXISTS per batch on `ix_whs_serial_stock_lookup` — never a COUNT:
+    `whs_serial_numbers` is one row per physical unit and holds hundreds of thousands
+    of them, and "is there at least one" is all the FEFO exception asks.
+    """
+    out: set[int] = set()
+    for batch_id in {int(b) for b in batch_ids if b}:
+        probe = (
+            select(literal(1)).select_from(m.SerialNumber)
+            .where(m.SerialNumber.item_id == item_id,
+                   m.SerialNumber.warehouse_id == warehouse_id,
+                   m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+                   m.SerialNumber.is_active == 1,
+                   m.SerialNumber.batch_id == batch_id,
+                   _unit_claim_free_clause(""))
+        )
+        if bin_id:
+            probe = probe.where(m.SerialNumber.bin_id == bin_id)
+        if await db.scalar(probe.limit(1)):
+            out.add(batch_id)
+    return out
+
+
+async def _coded_swap(db: AsyncSession, *, issue: m.MaterialIssue, item_id: int,
+                      wanted: m.Batch, signed: set[int],
+                      batches: dict[int, m.Batch]) -> tuple[bool, str | None]:
+    """Apply `_coded_swap_verdict` against the shelf. Returns (allowed, hint) — the
+    hint names the batch the storekeeper should have picked instead, when the
+    exception applies in principle but he reached past an older coded batch."""
+    from app.modules.inventory.models import Stock
+
+    item = await _item_snapshot(db, item_id)
+    if not await _unit_codes_required(db, item):
+        return False, None
+    if await _batches_with_units(db, item_id=item_id, warehouse_id=issue.warehouse_id,
+                                 batch_ids=signed):
+        return False, None
+    if not await _batches_with_units(db, item_id=item_id, warehouse_id=issue.warehouse_id,
+                                     batch_ids={wanted.id}):
+        return False, None
+    # Every other batch of the item on this shelf that expires first.
+    others = (await db.execute(
+        select(m.Batch).join(Stock, Stock.batch_id == m.Batch.id)
+        .where(Stock.item_id == item_id, Stock.warehouse_id == issue.warehouse_id,
+               # Free stock only — the screen offers the same rows (stock-sources).
+               Stock.available_qty > 0, m.Batch.id.notin_({wanted.id, *signed}))
+        .distinct()
+    )).scalars().all()
+    earlier = [b for b in others if _expires_before(b.expiry_date, wanted.expiry_date)]
+    coded = await _batches_with_units(db, item_id=item_id, warehouse_id=issue.warehouse_id,
+                                      batch_ids={b.id for b in earlier})
+    earlier_coded = sorted((b for b in earlier if b.id in coded),
+                           key=lambda b: (b.expiry_date is None, b.expiry_date, b.id))
+    verdict = _coded_swap_verdict(codes_required=True, allocated_has_codes=False,
+                                  wanted_has_codes=True, earlier_coded=earlier_coded)
+    if verdict:
+        return True, None
+    first = earlier_coded[0]
+    batches.setdefault(first.id, first)
+    return False, (f" The allocated batch carries no codes, so it may be swapped — but "
+                   f"onto {first.batch_no or f'batch {first.id}'} "
+                   f"({_fefo_expiry(first)}), the oldest batch here that does.")
+
+
 def _fefo_expiry(batch) -> str:
     """A batch's expiry, said the way a refusal has to say it.
 
@@ -8846,8 +9110,16 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             # Same DAY, not "no later than": two batches expiring on the same date are
             # interchangeable to FEFO and everything else is a queue-jump. A batch with
             # no expiry matches only another with none.
-            if not _fefo_swap_allowed(
-                    wanted, [batches.get(other) for other in signed]):
+            allowed = _fefo_swap_allowed(
+                wanted, [batches.get(other) for other in signed])
+            hint = None
+            if not allowed:
+                # The one exception: an item that must leave with a code per unit,
+                # allocated out of a batch that carries none. See `_coded_swap_verdict`.
+                allowed, hint = await _coded_swap(
+                    db, issue=issue, item_id=item_id, wanted=wanted,
+                    signed=signed, batches=batches)
+            if not allowed:
                 raise ValidationError(
                     f"{label}: {named(batch_id)} ({_fefo_expiry(wanted)}) cannot be "
                     f"issued in place of "
@@ -8857,6 +9129,7 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                     + ". Stock leaves oldest first, so an allocated batch may only be "
                     "swapped for one expiring on the same day. Change the storage "
                     "location instead, or send the allocation back to inventory."
+                    + (hint or "")
                 )
 
         # --- and the stock itself ------------------------------------------------
@@ -9028,7 +9301,20 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
     holders = await _issue_holders_bulk(db, list(page["items"]))
     for row in page["items"]:
         setattr(row, "currently_with", _currently_with(row, holders.get(row.id)))
+    await _decorate_indent_types(db, list(page["items"]))
     return page
+
+
+async def _decorate_indent_types(db: AsyncSession, issues: list) -> None:
+    """Stamp `indent_type` so a screen can say "STR" rather than "Indent" for an issue
+    serving a stock transfer request. One query for the page."""
+    from app.modules.indents.models import Indent
+    ids = {i.indent_id for i in issues if i.indent_id}
+    types = dict((await db.execute(
+        select(Indent.id, Indent.indent_type).where(Indent.id.in_(ids))
+    )).all()) if ids else {}
+    for issue in issues:
+        setattr(issue, "indent_type", types.get(issue.indent_id))
 
 
 async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
@@ -9086,6 +9372,7 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         .where(m.MaterialIssue.parent_issue_id == issue.id)
         .order_by(m.MaterialIssue.id)
     )).all()] if not issue.parent_issue_id else [])
+    await _decorate_indent_types(db, [issue])
     return await _decorate_issue_destination(db, issue)
 
 
@@ -9372,7 +9659,10 @@ async def _issue_destination(
 
         to_warehouse_id = await db.scalar(
             select(StockTransferOrder.to_warehouse_id)
-            .where(StockTransferOrder.issue_id == issue.id).limit(1))
+            # A floor piece of a split names its parent, which is what the STO
+            # points at (SCM_0012) — looked up by its own id it found nothing.
+            .where(StockTransferOrder.issue_id == (issue.parent_issue_id or issue.id))
+            .limit(1))
         point = await db.get(Warehouse, to_warehouse_id) if to_warehouse_id else None
         if point is not None and point.office_id:
             return point.office_id, await db.scalar(
@@ -9489,6 +9779,21 @@ def _fill_from_indent(data: s.IssueWrite, indent) -> s.IssueWrite:
     })
 
 
+async def _fill_from_employee(db: AsyncSession, data: s.IssueWrite) -> s.IssueWrite:
+    """No indent: a blank department/project comes from the person it is issued TO
+    (their HCM record), never overwriting what the form chose."""
+    if not data.issued_to_id or (data.department_id and data.project_id):
+        return data
+    from app.platform.hcm.models import HcmEmployee
+    employee = await db.get(HcmEmployee, data.issued_to_id)
+    if employee is None:
+        return data
+    return data.model_copy(update={
+        "department_id": data.department_id or employee.department_id,
+        "project_id": data.project_id or employee.project_id,
+    })
+
+
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                        for_sto: bool = False) -> m.MaterialIssue:
     """Build one material issue draft without committing it.
@@ -9563,6 +9868,8 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                 f"{picking.pick_no} already has material issue {existing}"
             )
     data = _fill_from_indent(data, indent)
+    if indent is None:
+        data = await _fill_from_employee(db, data)
     snapshots = await _issue_snapshot_values(
         db,
         department_id=data.department_id,
@@ -9917,6 +10224,19 @@ async def floor_scope_ids(db: AsyncSession, user) -> set[int] | None:
         ))).scalars().all())
         frontier = children - allowed
         allowed |= children
+    # The Unlocated location of every warehouse those floors are in. It stands on no
+    # floor — it is where stock waits that nobody ever put on one — so walking down
+    # from a floor never reaches it, and a floor in-charge could neither issue that
+    # stock nor move it to its real bay. It belongs to the whole warehouse.
+    if roots:
+        allowed |= set((await db.execute(
+            select(m.WarehouseLocation.id).where(
+                m.WarehouseLocation.warehouse_id.in_(
+                    select(m.WarehouseLocation.warehouse_id)
+                    .where(m.WarehouseLocation.id.in_(roots))),
+                func.upper(m.WarehouseLocation.bin_type) == unlocated.KIND,
+                m.WarehouseLocation.is_active.is_(True),
+            ))).scalars().all())
     return allowed
 
 
@@ -10530,11 +10850,16 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             direction=parent.direction,
             parent_issue_id=parent.id, parent_issue_no=parent.issue_no,
             floor_location_id=floor_id, floor_location_name=bucket["name"],
-            # A child starts where a hand-written issue starts. It does NOT inherit the
-            # parent's approval: the parent said this stock may leave, and the ladder
-            # still decides who signs each piece. Copying APPROVED down here would be a
-            # way of approving a document nobody has looked at (rule 8).
-            status=IssueStatus.DRAFT.value,
+            # A child CARRIES the parent's approval (SCM_0011). It is not a new ask:
+            # its lines are a slice of exactly what the parent's ladder signed —
+            # quantities distributed, never added — and the parent is locked SPLIT the
+            # moment the children exist. Starting each piece at DRAFT sent the floor
+            # in-charge back up a second ladder for stock already approved to leave,
+            # so the piece could be seen and never issued. Who WORKS it is still the
+            # floor's in-charge (`_issue_holders_bulk`), checked at post time.
+            status=IssueStatus.APPROVED.value,
+            approved_by_name=parent.approved_by_name,
+            approved_at=parent.approved_at,
             created_by_id=getattr(user, "id", None),
             created_by_name=getattr(user, "full_name", None),
         )
@@ -10565,6 +10890,16 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         created.append(child)
 
     await db.flush()
+    # The pieces start APPROVED and are never edited, so the realign that runs on an
+    # edit never runs for them: the holds would stay where the allocation put them and
+    # posting floor A's piece could consume a reservation sitting on floor B. Realigned
+    # ONCE over every piece together — per piece, each would read the others' bays as
+    # abandoned and release their holds.
+    await _realign_issue_reservations(db, SimpleNamespace(
+        id=parent.id, issue_no=parent.issue_no, direction=parent.direction,
+        indent_id=parent.indent_id, project_id=parent.project_id,
+        warehouse_id=parent.warehouse_id,
+        items=[line for child in created for line in child.items]), user)
     for child in created:
         await write_audit(db, entity="out_issues", entity_id=child.id,
                           action=AuditAction.CREATE, actor=user,
@@ -10580,6 +10915,18 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
                       before={"status": IssueStatus.APPROVED.value},
                       after={"status": parent.status,
                              "children": [c.issue_no for c in created]})
+    # The pieces land APPROVED in the in-charge's queue; say so, or it waits unseen.
+    from app.platform.notifications import service as notifications
+    people = await stock_locations.floor_incharge_people(
+        db, {c.floor_location_id for c in created if c.floor_location_id})
+    for child in created:
+        await notifications.notify(
+            db, [emp_id for emp_id, _name in people.get(child.floor_location_id, [])],
+            title=f"{child.issue_no} is ready to issue",
+            body=(f"Split from {parent.issue_no} for {child.floor_location_name}: "
+                  f"{child.total_items} item(s), {child.total_qty} unit(s)."),
+            deep_link=notifications.link_for("WH_ISSUE", child.id),
+            entity_type="WH_ISSUE", entity_id=child.id)
     await db.commit()
 
     # Who each piece went to. A floor name alone left the manager guessing whose
@@ -10913,11 +11260,26 @@ async def _issue_slices(
     if not rows:
         return fallback
 
-    named = [r for r in rows
-             if r.batch_id == line.batch_id and r.bin_id == line.bin_id
-             and r.project_id == (issue.project_id or 0)]
-    if named and _d(named[0].available_qty) >= qty:
-        return fallback
+    # The named (bin, batch) under the issue's project OR unscoped stock (project 0),
+    # the project's own row first. Matching the project alone missed every direct issue
+    # carrying a project over unscoped stock, and FEFO then drew from bays the line
+    # never named — WHI0001 took 4 monitors off F1/batch 48 while their serials left
+    # LANE-1/batch 51, leaving both balances wrong.
+    own_project = issue.project_id or 0
+    named = sorted((r for r in rows
+                    if r.batch_id == line.batch_id and r.bin_id == line.bin_id
+                    and r.project_id in (own_project, 0)),
+                   key=lambda r: r.project_id != own_project)
+    if named and sum((_d(r.available_qty) for r in named), ZERO) >= qty:
+        slices, remaining = [], qty
+        for row in named:
+            take = min(remaining, _d(row.available_qty))
+            if take > ZERO:
+                slices.append((row.bin_id, row.batch_id, row.project_id, take))
+                remaining -= take
+            if remaining <= ZERO:
+                break
+        return slices
 
     slices: list[tuple[int, int, int, object]] = []
     remaining = qty
@@ -10956,8 +11318,8 @@ async def _raise_outbound_inspection_for(
     db.add(inspection)
     await db.flush()
 
-    issued_serials = await _issued_serial_index(db, issue)
-    
+    units_by_line = await _issue_units_by_line(db, issue)
+
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
 
@@ -10981,8 +11343,10 @@ async def _raise_outbound_inspection_for(
         # issue speak about a unit with one name. Every kind is seeded: gating this on
         # `is_serial_tracked` left IMEI / asset / consumable lines with no units
         # stored, which the picker reads as "every unit rejected".
+        # This LINE's units, not the batch's: two lines on one batch in two bays each
+        # sent their own units, and seeding by batch gave both lines every unit.
         line_serials = _outbound_seed_units(
-            issued_serials.values(), item=item, item_id=line.item_id,
+            units_by_line.get(line.id, []), item=item, item_id=line.item_id,
             batch_id=line.batch_id)
 
         inspection.items.append(m.OutboundInspectionItem(
@@ -11769,8 +12133,14 @@ async def _close_indent_if_delivered(db: AsyncSession, indent_id: int | None, us
 
 async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
                                        by_name: str | None, remarks: str | None,
-                                       user) -> None:
+                                       user, *,
+                                       received_by_item: dict[int, Decimal] | None = None,
+                                       ) -> None:
     """Sign the issue off and carry the signature onto what it was attached to.
+
+    `received_by_item` is what the receiver COUNTED, per item. Without it every line is
+    taken as delivered in full; with it the consignment lines are stamped with the
+    count, so `credit_arrival` books 6 on the shelf when 6 of 10 arrived (SCM_0013).
 
     Does not commit and writes no audit row: both callers are mid-transaction and own
     their own audit trail.
@@ -11798,8 +12168,15 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
         # Journey's Delivery phase sits PENDING on an indent that is already closed.
         # Only THIS issue's lines: on a grouped consignment the other issues' goods are
         # somebody else's confirmation, still to come.
+        budget = ({k: _d(v) for k, v in received_by_item.items()}
+                  if received_by_item is not None else None)
         for line in _lines_for_issue(dispatch, issue.id, grouped=grouped):
-            line.delivered_qty = _d(line.quantity)
+            if budget is None:
+                line.delivered_qty = _d(line.quantity)
+            else:
+                got = max(ZERO, min(_d(line.quantity), budget.get(line.item_id, ZERO)))
+                budget[line.item_id] = budget.get(line.item_id, ZERO) - got
+                line.delivered_qty = got
         others_open = grouped and bool(await db.scalar(
             select(func.count(m.MaterialIssue.id)).where(
                 m.MaterialIssue.id.in_([issue_id for issue_id in carried
@@ -12189,6 +12566,365 @@ async def acknowledge_issue(db: AsyncSession, issue_id: int, remarks: str | None
     return await get_issue(db, issue_id)
 
 
+_DIRECT_ACK_OPEN = (IssueStatus.ISSUED.value, IssueStatus.DISPATCHED.value)
+
+
+async def _own_points(db: AsyncSession, user) -> set[int]:
+    """The stocking points whose SHELF this login holds — never its reportees'.
+    Acknowledging is "it reached MY shelf"; a DM must not sign for an LIP under him."""
+    points: set[int] = set()
+    for position_id in await stock_locations.active_positions_of(db, user):
+        points |= await stock_locations.held_location_ids(db, position_id, subtree=False)
+    return points
+
+
+#: A consignment still being built or approved: the goods have not left the gate.
+_DISPATCH_NOT_LEFT = (DispatchStatus.DRAFT.value, DispatchStatus.PENDING_APPROVAL.value,
+                      DispatchStatus.APPROVED.value, DispatchStatus.PACKED.value)
+
+
+def _direct_issue_for(user, points: set[int]):
+    """A posted outward issue raised against no indent that THIS login receives.
+
+    An indent-linked issue is confirmed by the indent's raiser on the indent's own
+    acknowledgement. A direct issue has no raiser, so it is the RECEIVER's (SCM_0013):
+    - the point it was consigned to — a consignment out of the gate (`_ON_THE_ROAD`)
+      whose `to_warehouse_id` is a shelf this login holds. A relay leg is addressed to
+      the MDP, so only the MDP sees it; the LIP sees its own leg;
+    - or the employee it was issued TO, provided nothing is still waiting at the gate:
+      acknowledging before gate-out would close the issue with the goods in the store.
+    """
+    consigned = (select(m.Dispatch.id)
+                 .where(_carries_issue(m.MaterialIssue.id),
+                        m.Dispatch.status.in_(_ON_THE_ROAD)))
+    not_left = (select(m.Dispatch.id)
+                .where(_carries_issue(m.MaterialIssue.id),
+                       m.Dispatch.status.in_(_DISPATCH_NOT_LEFT)))
+    # Handed over without a consignment: only once outward QC has let it go — a
+    # posted issue sits in QC in the store, and signing it there closes it unseen.
+    receivers = [and_(m.MaterialIssue.issued_to_id == getattr(user, "id", 0),
+                      ~not_left.correlate(m.MaterialIssue).exists(),
+                      or_(m.MaterialIssue.qc_status.is_(None),
+                          m.MaterialIssue.qc_status.in_(
+                              (*CONSIGNABLE_QC, QcStatus.NOT_REQUIRED.value))))]
+    if points:
+        receivers.append(consigned.where(m.Dispatch.to_warehouse_id.in_(points))
+                         .correlate(m.MaterialIssue).exists())
+    from app.modules.inventory.models import StockTransferOrder
+    sto_issues = (select(StockTransferOrder.issue_id)
+                  .where(StockTransferOrder.issue_id.is_not(None)))
+    return and_(m.MaterialIssue.indent_id.is_(None),
+                m.MaterialIssue.direction == IssueDirection.OUT.value,
+                m.MaterialIssue.is_stock_posted.is_(True),
+                # An STO's issue (or a floor piece of one) is received on the Stock
+                # Transfer screen, not here.
+                m.MaterialIssue.id.notin_(sto_issues),
+                or_(m.MaterialIssue.parent_issue_id.is_(None),
+                    m.MaterialIssue.parent_issue_id.notin_(sto_issues)),
+                or_(*receivers))
+
+
+async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | None = None,
+                                      only_actionable: bool = False) -> list[dict]:
+    statuses = _DIRECT_ACK_OPEN if only_actionable else (
+        *_DIRECT_ACK_OPEN, IssueStatus.ACKNOWLEDGED.value)
+    stmt = (select(m.MaterialIssue).options(selectinload(m.MaterialIssue.items))
+            .where(_direct_issue_for(user, await _own_points(db, user)),
+                   m.MaterialIssue.status.in_(statuses)))
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        stmt = stmt.where(or_(
+            m.MaterialIssue.issue_no.ilike(like),
+            m.MaterialIssue.warehouse_name.ilike(like),
+            select(m.MaterialIssueLine.id).where(
+                m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+                or_(m.MaterialIssueLine.item_code.ilike(like),
+                    m.MaterialIssueLine.item_name.ilike(like)),
+            ).correlate(m.MaterialIssue).exists(),
+        ))
+    issues = (await db.execute(stmt.order_by(m.MaterialIssue.id.desc()).limit(200))).scalars().all()
+    return [{
+        "issue_id": issue.id, "issue_no": issue.issue_no, "issue_date": issue.issue_date,
+        "status": issue.status, "warehouse_name": issue.warehouse_name,
+        "department_name": issue.department_name, "project_name": issue.project_name,
+        "issued_by_name": issue.issued_by_name or issue.created_by_name,
+        "total_qty": issue.total_qty,
+        "acknowledged_by_name": issue.acknowledged_by_name,
+        "acknowledged_at": issue.acknowledged_at,
+        "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
+        "lines": [{"item_code": line.item_code, "item_name": line.item_name,
+                   "uom_code": line.uom_code, "batch_no": line.batch_no,
+                   "issued_qty": line.issued_qty}
+                  for line in issue.items if _d(line.issued_qty) > 0],
+    } for issue in issues]
+
+
+ISSUE_ACK_ENTITY_TYPE = "ISSUE_RECEIPT"
+
+
+async def _direct_issue_of(db: AsyncSession, issue_id: int, user, *,
+                           open_only: bool = False) -> m.MaterialIssue:
+    """A direct issue handed to THIS person — the only one who may receive it."""
+    issue = await get_issue(db, issue_id)
+    if issue.indent_id is not None:
+        raise ValidationError(
+            f"{issue.issue_no} was issued against {issue.indent_no or 'an indent'} — "
+            "acknowledge it on that indent.")
+    if not issue.is_stock_posted:
+        raise ValidationError(f"{issue.issue_no} has not left the store yet")
+    # The SAME predicate the list uses, so a row on the list always opens, and hiding
+    # the row is never the control (rule 6): the receiving point, or the issued-to
+    # person once nothing is waiting at the gate.
+    if not await db.scalar(select(func.count()).select_from(m.MaterialIssue).where(
+            m.MaterialIssue.id == issue.id,
+            _direct_issue_for(user, await _own_points(db, user)))):
+        raise PermissionError_(
+            f"{issue.issue_no} is signed for by the point it was dispatched to, or by "
+            f"{issue.issued_to_name or 'the person it was issued to'}")
+    if open_only:
+        _guard(issue.status, set(_DIRECT_ACK_OPEN), "acknowledge", "issue")
+    return issue
+
+
+async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
+    """A direct issue in the SAME shape as an indent's acknowledgement row.
+
+    So the indent receipt journey — consignment, packages, unit codes, photos — runs
+    over it unchanged: `indent_id` carries the issue id, `indent_no` the issue number
+    and each line's `indent_item_id` the ISSUE LINE id.
+    """
+    from app.modules.logistics.models import TransportRequest
+
+    issue = await _direct_issue_of(db, issue_id, user)
+    lines = [line for line in issue.items
+             if _d(line.issued_qty) - _d(line.returned_qty) > 0]
+    signed = issue.status == IssueStatus.ACKNOWLEDGED.value
+
+    dispatches = list((await db.execute(
+        select(m.Dispatch).where(_carries_issue(issue.id),
+                                 m.Dispatch.status != DispatchStatus.CANCELLED.value)
+        .order_by(m.Dispatch.id)
+    )).scalars().all())
+    dispatch_ids = [d.id for d in dispatches]
+
+    # Package split: the consignment lines packed from this issue, per item.
+    packages_by_item: dict[int, list[dict]] = defaultdict(list)
+    if dispatch_ids:
+        for (item_id, dispatch_id, dispatch_no, package_id, packed_qty, pack) in (await db.execute(
+            select(m.DispatchItem.item_id, m.Dispatch.id, m.Dispatch.dispatch_no,
+                   m.DispatchItem.package_id, func.sum(m.DispatchItem.quantity),
+                   m.DispatchPackage)
+            .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
+            .join(m.DispatchPackage, m.DispatchPackage.id == m.DispatchItem.package_id)
+            .where(m.Dispatch.id.in_(dispatch_ids),
+                   or_(m.DispatchItem.issue_id.is_(None),
+                       m.DispatchItem.issue_id == issue.id))
+            .group_by(m.DispatchItem.item_id, m.Dispatch.id, m.Dispatch.dispatch_no,
+                      m.DispatchItem.package_id, m.DispatchPackage.id)
+            .order_by(m.Dispatch.id, m.DispatchPackage.id)
+        )).all():
+            packages_by_item[item_id].append({
+                "dispatch_id": dispatch_id, "dispatch_no": dispatch_no,
+                "package_id": package_id, "package_no": pack.package_no,
+                "quantity": float(_d(packed_qty)), "package_type": pack.package_type,
+                "barcode": pack.barcode,
+                "weight_kg": float(_d(pack.weight_kg)) if pack.weight_kg is not None else None,
+                "length_cm": float(_d(pack.length_cm)) if pack.length_cm is not None else None,
+                "width_cm": float(_d(pack.width_cm)) if pack.width_cm is not None else None,
+                "height_cm": float(_d(pack.height_cm)) if pack.height_cm is not None else None,
+                "is_fragile": bool(pack.is_fragile),
+                "is_temp_controlled": bool(pack.is_temp_controlled),
+                "packed_by_name": pack.packed_by_name, "packed_at": pack.packed_at,
+            })
+
+    # Which units left, by every stamp a unit of this issue may be wearing now —
+    # the same markers `_delivery_rows` reads for an indent.
+    line_markers = {_issue_line_serial_marker(issue.id, line.id): line.id for line in lines}
+    shared = {*_issue_serial_markers(issue.id), _shipped_unit_marker("issue", issue.id)}
+    for d in dispatches:
+        shared.add(_shipped_unit_marker("dispatch", d.id))
+        if d.dispatch_no:
+            shared.add(f"Received by {d.dispatch_no}")
+    line_of_item: dict[int, int] = {}
+    for line in lines:
+        line_of_item.setdefault(line.item_id, line.id)
+    item_rows = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_({line.item_id for line in lines} or {0}))
+    )).scalars().all()}
+    serials: dict[int, list[str]] = defaultdict(list)
+    for unit in (await db.execute(
+        select(m.SerialNumber)
+        .where(m.SerialNumber.remarks.in_([*line_markers, *shared]),
+               m.SerialNumber.is_active.is_(True))
+        .order_by(m.SerialNumber.id)
+    )).scalars().all():
+        line_id = line_markers.get(unit.remarks or "") or line_of_item.get(unit.item_id)
+        if line_id is None:
+            continue
+        keys = _unit_keys(unit, _unit_mode(item_rows.get(unit.item_id)))
+        code = keys[0] if keys else (unit.serial_number or unit.asset_code
+                                     or unit.consumable_code or unit.imei)
+        if code and code not in serials[line_id]:
+            serials[line_id].append(code)
+
+    legs = list((await db.execute(
+        select(TransportRequest).where(TransportRequest.dispatch_id.in_(dispatch_ids or [0]))
+        .order_by(TransportRequest.id.desc())
+    )).scalars().all())
+
+    out_lines = []
+    for line in lines:
+        sent = _d(line.issued_qty) - _d(line.returned_qty)
+        item = item_rows.get(line.item_id)
+        out_lines.append({
+            "indent_item_id": line.id,
+            "item_code": line.item_code, "item_name": line.item_name,
+            "uom_code": line.uom_code,
+            "approved_quantity": float(sent),
+            "issued_quantity": float(sent),
+            # Handed over at the counter or on a consignment — either way it has left.
+            "dispatched_quantity": float(sent),
+            "received_quantity": float(sent) if signed else 0.0,
+            "is_serial_tracked": bool(getattr(item, "is_serial_tracked", False)),
+            "tracking_type": _tracking_type(item, has_units=bool(serials.get(line.id)))
+            if item is not None else TrackingType.NONE.value,
+            "serial_numbers": serials.get(line.id, []),
+            "on_order_quantity": 0.0,
+            "package_quantities": [
+                {**pack, "quantity": min(pack["quantity"], float(sent))}
+                for pack in packages_by_item.get(line.item_id, [])],
+            "pending_with": None,
+        })
+    return {
+        "indent_id": issue.id,
+        "indent_no": issue.issue_no,
+        "indent_date": issue.issue_date,
+        "required_date": None,
+        "status": issue.status,
+        "priority": None,
+        "project_name": issue.warehouse_name,
+        "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
+        "lines": out_lines,
+        "shipments": [_shipment_row(leg) for leg in legs],
+    }
+
+
+async def direct_issue_attachments(db: AsyncSession, issue_id: int, user) -> list:
+    await _direct_issue_of(db, issue_id, user)
+    return await attachments.list_attachments(db, ISSUE_ACK_ENTITY_TYPE, issue_id)
+
+
+async def add_direct_issue_attachment(db: AsyncSession, issue_id: int, upload, *,
+                                      doc_category: str, user):
+    """Same rules as an indent receipt photo (`indents.add_receipt_attachment`)."""
+    from app.modules.indents import service as ind
+
+    issue = await _direct_issue_of(db, issue_id, user, open_only=True)
+    if ind.ack_category_base(doc_category) not in {ind.ACK_PHOTO_CATEGORY,
+                                                   ind.ACK_BILL_CATEGORY}:
+        raise ValidationError("A delivery attachment is either a photo or a bill")
+    scope = ind.ack_category_scope(doc_category)
+    if scope and (len(scope) > ind.ACK_SCOPE_MAX or not ind._ACK_SCOPE_OK.match(scope)):
+        raise ValidationError("That is not a package this delivery was sent in")
+    line_id = ind.ack_category_item(doc_category)
+    if line_id is not None and line_id not in {line.id for line in issue.items}:
+        raise ValidationError("That is not an item on this issue")
+    return await attachments.add_attachment(
+        db, entity_type=ISSUE_ACK_ENTITY_TYPE, entity_id=issue.id,
+        upload=upload, doc_category=doc_category, user=user)
+
+
+async def direct_issue_attachment_file(db: AsyncSession, issue_id: int,
+                                       attachment_id: int, user):
+    await _direct_issue_of(db, issue_id, user)
+    row = await db.get(attachments.Attachment, attachment_id)
+    if (row is None or row.entity_type != ISSUE_ACK_ENTITY_TYPE
+            or int(row.entity_id) != issue_id):
+        raise NotFoundError(f"Attachment {attachment_id} not found")
+    return await attachments.attachment_file(db, attachment_id)
+
+
+async def delete_direct_issue_attachment(db: AsyncSession, attachment_id: int, user) -> None:
+    row = await attachments.require_attachment(
+        db, attachment_id, entity_type=ISSUE_ACK_ENTITY_TYPE)
+    issue = await _direct_issue_of(db, int(row.entity_id), user, open_only=True)
+    await attachments.delete_attachment(
+        db, attachment_id, user, entity_type=ISSUE_ACK_ENTITY_TYPE, entity_id=issue.id)
+
+
+async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
+                                   lines: dict[int, Decimal], user, *,
+                                   condition: str | None = None,
+                                   remarks: str | None = None) -> dict:
+    """The recipient of a direct issue confirms what reached them.
+
+    Held to the indent receipt's proof rules: a consignment photo and a photo of every
+    item being confirmed. The issue has no received column, so what was counted goes on
+    the remarks and the audit row; the issue is signed either way, because a shortfall
+    on a direct issue is a return to raise, not a delivery still coming.
+    """
+    from app.modules.indents import service as ind
+
+    issue = await _direct_issue_of(db, issue_id, user, open_only=True)
+    if not lines:
+        raise ValidationError("Enter what you received on at least one line")
+    photos = [row for row in await attachments.list_attachments(
+        db, ISSUE_ACK_ENTITY_TYPE, issue.id)
+        if ind.ack_category_base(row.doc_category) == ind.ACK_PHOTO_CATEGORY]
+    if not any((scope := ind.ack_category_scope(row.doc_category)) == ""
+               or scope.startswith("C-") for row in photos):
+        raise ValidationError(
+            "Attach a photo of the consignment (the load, the seal, the number plate) "
+            "before acknowledging")
+    by_id = {line.id: line for line in issue.items}
+    photographed = {ind.ack_category_item(row.doc_category) for row in photos}
+    unproven = [by_id[i] for i in lines if i in by_id and i not in photographed]
+    if unproven:
+        named = ", ".join(l.item_name or l.item_code or f"line {l.id}" for l in unproven[:4])
+        more = len(unproven) - 4
+        raise ValidationError(
+            "Take a photo of each item you are confirming. Still without one: "
+            f"{named}{f' and {more} more' if more > 0 else ''}.")
+    counted: dict[str, float] = {}
+    short: list[str] = []
+    for line_id, got in lines.items():
+        line = by_id.get(line_id)
+        if line is None:
+            raise ValidationError(f"Line {line_id} is not on {issue.issue_no}")
+        sent = _d(line.issued_qty) - _d(line.returned_qty)
+        got = _d(got)
+        if got <= 0 or got > sent:
+            raise ValidationError(
+                f"{line.item_name or line.item_code}: enter between 1 and {sent:g}")
+        counted[str(line.id)] = float(got)
+        if got < sent:
+            short.append(f"{line.item_name or line.item_code} {got:g} of {sent:g}")
+    for line in issue.items:
+        sent = _d(line.issued_qty) - _d(line.returned_qty)
+        if line.id not in lines and sent > 0:
+            short.append(f"{line.item_name or line.item_code} 0 of {sent:g}")
+    ack_condition = ind._delivery_condition(condition, remarks)
+    note = "; ".join(filter(None, [
+        f"Condition {ack_condition}" if ack_condition != ind.ACK_CONDITION_GOOD else None,
+        f"Short: {', '.join(short)}" if short else None,
+        (remarks or "").strip() or None,
+    ])) or None
+
+    received_by_item: dict[int, Decimal] = defaultdict(Decimal)
+    for line_id, got in lines.items():
+        received_by_item[by_id[line_id].item_id] += _d(got)
+    before_status = issue.status
+    await _apply_issue_acknowledgement(db, issue, _name(user), note, user,
+                                       received_by_item=received_by_item)
+    await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
+                      action=AuditAction.UPDATE, actor=user,
+                      before={"status": before_status},
+                      after={"status": issue.status, "received": counted,
+                             "condition": ack_condition, "remarks": note})
+    await db.commit()
+    return await direct_issue_receipt(db, issue.id, user)
+
+
 async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user) -> m.MaterialIssue:
     issue = await get_issue(db, issue_id)
     if issue.is_stock_posted:
@@ -12318,6 +13054,9 @@ async def _issued_serial_index(
             index[row.asset_code.lower()] = row
         if row.consumable_code:
             index[row.consumable_code.lower()] = row
+        # An IMEI-named line is accepted at QC and packed by its IMEI.
+        if row.imei:
+            index.setdefault(row.imei.lower(), row)
     return index
 
 
@@ -12384,6 +13123,37 @@ async def _issue_available_qty_and_serials(
     return issued_qty, issued_serials
 
 
+def _issue_line_place(line) -> str:
+    """'(batch B1 at F1-A1-R1-B2)' - how a packing message names ONE issue line."""
+    batch = f"batch {line.batch_no}" if line.batch_no else "unbatched"
+    return f"({batch} at {line.bin_code})" if line.bin_code else f"({batch})"
+
+
+async def _issue_accepted_by_line(db: AsyncSession, issue: m.MaterialIssue) -> dict[int, Decimal]:
+    """What each line may be packed: QC's accepted quantity, else what it issued.
+
+    A line the completed sheet does not carry needed no check (`_line_needs_outward_qc`)
+    and goes out whole - the same fallback `issue_dispatch_source` offers the packer.
+    """
+    accepted = {line.id: _d(line.issued_qty) for line in issue.items}
+    if issue.qc_status not in (QcStatus.PASSED.value, QcStatus.PARTIAL.value):
+        return accepted
+    inspection_id = await db.scalar(
+        select(m.OutboundInspection.id).where(
+            m.OutboundInspection.issue_id == issue.id,
+            m.OutboundInspection.status == InspectionStatus.COMPLETED.value,
+        ).order_by(m.OutboundInspection.id.desc()).limit(1))
+    if inspection_id is None:
+        return accepted
+    for line_id, qty in (await db.execute(
+        select(m.OutboundInspectionItem.issue_item_id, m.OutboundInspectionItem.accepted_qty)
+        .where(m.OutboundInspectionItem.inspection_id == inspection_id)
+    )).all():
+        if line_id in accepted:
+            accepted[line_id] = _d(qty)
+    return accepted
+
+
 async def _apply_consignment_packages(
     db: AsyncSession,
     dispatch: m.Dispatch,
@@ -12405,11 +13175,26 @@ async def _apply_consignment_packages(
     default_issue_id = issues[0].id if len(issues) == 1 else None
     issued_by_key: dict[tuple[int, int, int], Decimal] = {}
     issued_serials_by_issue: dict[int, dict[str, m.SerialNumber]] = {}
+    # Per issue LINE as well as per batch (2026-10-07): a row the screen names by its
+    # issue line is held to THAT line's accepted quantity and THAT line's units, so a
+    # batch split over two bays cannot be packed as two halves of one pile.
+    lines_by_id: dict[int, m.MaterialIssueLine] = {}
+    accepted_by_line: dict[int, Decimal] = {}
+    unit_names_by_line: dict[int, set[str]] = {}
     for source_issue in issues:
         line_qty, line_serials = await _issue_available_qty_and_serials(db, source_issue)
         for (item_id, batch_id), qty in line_qty.items():
             issued_by_key[(source_issue.id, item_id, batch_id)] = qty
         issued_serials_by_issue[source_issue.id] = line_serials
+        accepted_by_line.update(await _issue_accepted_by_line(db, source_issue))
+        for line in source_issue.items:
+            lines_by_id[line.id] = line
+        for line_id, rows in (await _issue_units_by_line(db, source_issue)).items():
+            unit_names_by_line[line_id] = {
+                value.lower() for row in rows
+                for value in (row.serial_number, row.imei, row.asset_code,
+                              row.consumable_code) if value}
+    packed_by_line: dict[int, Decimal] = {}
 
     existing_barcode_stmt = select(m.DispatchPackage.barcode).join(m.Dispatch).where(
         m.DispatchPackage.barcode.isnot(None),
@@ -12502,6 +13287,30 @@ async def _apply_consignment_packages(
                         f"{package_no}: choose exactly {int(qty)} serials for {item.code}"
                     )
 
+            issue_line = None
+            if item_data.issue_item_id is not None:
+                issue_line = lines_by_id.get(item_data.issue_item_id)
+                if (issue_line is None or issue_line.issue_id != source_issue.id
+                        or issue_line.item_id != item.id
+                        or (issue_line.batch_id or m.NO_BATCH) != batch_id):
+                    raise ValidationError(
+                        f"{package_no}: {item.code} names a line that is not on "
+                        f"{source_issue.issue_no} for this batch")
+                where = _issue_line_place(issue_line)
+                packed_by_line[issue_line.id] = packed_by_line.get(issue_line.id, ZERO) + qty
+                line_cap = accepted_by_line.get(issue_line.id, _d(issue_line.issued_qty))
+                if packed_by_line[issue_line.id] > line_cap:
+                    raise ValidationError(
+                        f"{item.code} {where}: packed {packed_by_line[issue_line.id]} but "
+                        f"only {line_cap} went out from there on {source_issue.issue_no}")
+                own = unit_names_by_line.get(issue_line.id)
+                if own and serials:
+                    stray = [value for value in serials if value.lower() not in own]
+                    if stray:
+                        raise ValidationError(
+                            f"{item.code} {where}: {', '.join(stray[:5])} did not go out "
+                            "from this location. Pick this row's own codes.")
+
             key = (source_issue.id, item.id, batch_id)
             packed_by_key[key] = packed_by_key.get(key, ZERO) + qty
             if packed_by_key[key] > issued_by_key.get(key, ZERO):
@@ -12540,6 +13349,8 @@ async def _apply_consignment_packages(
                         package_id=package.id,
                         issue_id=source_issue.id,
                         issue_no=source_issue.issue_no,
+                        issue_item_id=issue_line.id if issue_line else None,
+                        bin_code=issue_line.bin_code if issue_line else None,
                         mr_id=source_mr_id,
                         mr_no=source_mr_no,
                         indent_id=item_data.indent_id or source_issue.indent_id,
@@ -12570,6 +13381,8 @@ async def _apply_consignment_packages(
                     package_id=package.id,
                     issue_id=source_issue.id,
                     issue_no=source_issue.issue_no,
+                    issue_item_id=issue_line.id if issue_line else None,
+                    bin_code=issue_line.bin_code if issue_line else None,
                     mr_id=source_mr_id,
                     mr_no=source_mr_no,
                     indent_id=item_data.indent_id or source_issue.indent_id,
@@ -12591,6 +13404,16 @@ async def _apply_consignment_packages(
                     remarks=item_data.remarks,
                 ))
                 line_no += 1
+
+    # A line named on any row must be packed in full: half of one bay plus all of the
+    # other adds up to the batch total and still leaves goods on the dock.
+    for line_id, packed_qty in packed_by_line.items():
+        line = lines_by_id[line_id]
+        line_cap = accepted_by_line.get(line_id, _d(line.issued_qty))
+        if packed_qty != line_cap:
+            raise ValidationError(
+                f"{line.item_code or line.item_id} {_issue_line_place(line)}: packed "
+                f"{packed_qty} of {line_cap}")
 
     for key, issued_qty in issued_by_key.items():
         packed_qty = packed_by_key.get(key, ZERO)
@@ -20332,7 +21155,9 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
         stmt = stmt.where(m.SerialNumber.batch_id == batch_id)
     elif unbatched:
         stmt = stmt.where(m.SerialNumber.batch_id.is_(None))
-    if claim_free and not issue_id:
+    # `issue_id` first: with an issue, `claim_free` was rebound to a SQL clause above,
+    # and asking a clause for its truth raises TypeError.
+    if not issue_id and claim_free:
         stmt = stmt.where(_unit_claim_free_clause(None))
     if warehouse_id:
         stmt = stmt.where(m.SerialNumber.warehouse_id == warehouse_id)
@@ -22292,6 +23117,9 @@ async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = 
     dropdown is the courtesy, the gate is the rule.
     """
     holding = bool(item_id or batch_id)
+    # Same as `issue_stock_sources`: stock at bin 0 joins no location, so it would be
+    # missing from every "where is it" answer below. See `unlocated.heal`.
+    await unlocated.heal(db, warehouse_id, user)
     stmt = select(Bin).where(Bin.warehouse_id == warehouse_id, Bin.is_active.is_(True))
     if user is not None:
         allowed = await floor_scope_ids(db, user)
@@ -22775,8 +23603,10 @@ async def indent_options(
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
     rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
+    # An STR says so in the picker — its number alone reads like any indent's.
     return [{"id": r.id, "code": r.indent_no,
-             "name": getattr(r, "department_name", None) or r.indent_no} for r in rows]
+             "name": ("STR · " if r.indent_type == _STR_INDENT_TYPE else "")
+             + (getattr(r, "department_name", None) or r.indent_no)} for r in rows]
 
 
 async def indent_issue_source(
@@ -23337,38 +24167,26 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         item.id: item
         for item in (await db.execute(select(Item).where(Item.id.in_(item_ids)))).scalars().all()
     } if item_ids else {}
-    serials_by_item_batch: dict[tuple[int, int], list[str]] = {}
-    serials_by_item: dict[int, list[str]] = {}
-    serial_rows = (await db.execute(
-        select(m.SerialNumber).where(
-            m.SerialNumber.warehouse_id == issue.warehouse_id,
-            m.SerialNumber.status == SerialStatus.ISSUED.value,
-            m.SerialNumber.remarks.in_(_issue_serial_markers(issue.id)),
-            m.SerialNumber.is_active.is_(True),
-        ).order_by(m.SerialNumber.serial_number)
-    )).scalars().all()
-    # Keyed on the serial, so the consignment can print the IMEI beside the unit it
-    # belongs to instead of the receiving point retyping it off the handset.
-    imei_by_serial = {}
-    for serial in serial_rows:
-        if not serial.imei:
-            continue
-        if serial.serial_number: imei_by_serial[serial.serial_number] = serial.imei
-        if serial.asset_code: imei_by_serial[serial.asset_code] = serial.imei
-        if serial.consumable_code: imei_by_serial[serial.consumable_code] = serial.imei
-    for serial in serial_rows:
-        serials_by_item_batch.setdefault(
-            (serial.item_id, serial.batch_id or m.NO_BATCH),
-            [],
-        ).append(serial.serial_number)
-        serials_by_item.setdefault(serial.item_id, []).append(serial.serial_number)
+    # Per issue LINE, never per (item, batch): one batch drawn from two bays is two
+    # lines, and grouping by batch handed both rows every unit of the batch — the
+    # packer then saw codes on a row that never sent them. `_issue_units_by_line`
+    # attributes each posted unit by the batch AND bay it left from.
+    units_by_line = await _issue_units_by_line(db, issue)
+    imei_by_serial: dict[str, str] = {}
+    serials_by_line: dict[int, list[str]] = {}
+    for line_id, rows in units_by_line.items():
+        serials_by_line[line_id] = [row.serial_number for row in rows if row.serial_number]
+        # Keyed on every name of the unit, so the consignment can print the IMEI beside
+        # the unit it belongs to instead of the receiving point retyping it.
+        for row in rows:
+            if not row.imei:
+                continue
+            for key in (row.serial_number, row.asset_code, row.consumable_code):
+                if key:
+                    imei_by_serial[key] = row.imei
 
     def _get_line_serials(line) -> list[str]:
-        batch_key = line.batch_id or m.NO_BATCH
-        found = serials_by_item_batch.get((line.item_id, batch_key))
-        if not found and (not line.batch_id or line.batch_id == m.NO_BATCH):
-            found = serials_by_item.get(line.item_id, [])
-        return found or []
+        return serials_by_line.get(line.id, [])
 
     # The point the indent was raised from, so the form can PREFILL "To warehouse"
     # rather than leaving it blank and hoping. The server derived it either way, but
@@ -23433,6 +24251,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
             {
                 "issue_id": issue.id,
                 "issue_no": issue.issue_no,
+                "issue_item_id": line.id,
                 "mr_id": line_mr.get("mr_id"),
                 "mr_no": line_mr.get("mr_no"),
                 "indent_id": issue.indent_id,
@@ -23443,6 +24262,11 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "uom_code": line.uom_code,
                 "batch_id": line.batch_id,
                 "batch_no": line.batch_no,
+                "bin_code": line.bin_code,
+                # SERIAL / IMEI / ASSET / CONSUMABLE / NONE: what the codes on this
+                # row are, so the packing screen names them and knows which it may
+                # choose itself (asset and consumable codes) and which it may not.
+                "tracking_type": getattr(line, "tracking_type", None),
                 # Snapshotted on the issue line at creation, so the packer sees what
                 # is actually in the carton rather than a blank the receiving point
                 # has to guess at.
@@ -23507,6 +24331,11 @@ async def employee_destination(db: AsyncSession, employee_id: int) -> dict:
         "destination_office_name": office_name,
         "destination_office_sac": await _office_sac(db, employee.office_id),
         "vehicle_number": _vehicle_from_office_name(office_name),
+        # So Project / Department fill on Issued-to too, not only from an indent.
+        "department_id": employee.department_id,
+        "department_name": employee.department_name,
+        "project_id": employee.project_id,
+        "project_name": employee.project_name,
     }
 
 
@@ -24669,6 +25498,10 @@ def _stock_transfer_issue_ids():
     return select(m.MaterialIssue.id).where(or_(
         m.MaterialIssue.id.in_(select(StockTransferOrder.issue_id)
                                .where(StockTransferOrder.issue_id.is_not(None))),
+        # A floor piece of a split STO issue executes the same transfer (SCM_0011).
+        m.MaterialIssue.parent_issue_id.in_(
+            select(StockTransferOrder.issue_id)
+            .where(StockTransferOrder.issue_id.is_not(None))),
         m.MaterialIssue.indent_id.in_(str_indents),
         m.MaterialIssue.id.in_(
             select(m.MaterialIssueLine.issue_id)

@@ -29,3 +29,13 @@ export const DOC_TYPE_LABELS: Record<string, string> = {
 
 export const docTypeLabel = (value: string) =>
   DOC_TYPE_LABELS[value] ?? value.replace(/_/g, " ");
+
+/** The type a row is SHOWN as. An STR is an indent row whose workflow says INDENT,
+ *  so the server serves `display_doc_type`; `indent_type` covers rows that predate it. */
+export const displayDocType = (row: {
+  doc_type: string; display_doc_type?: string | null; indent_type?: string | null;
+}) => row.display_doc_type
+  ?? (row.doc_type === "INDENT" && row.indent_type === "STR" ? "STOCK_TRANSFER_REQUEST" : row.doc_type);
+
+export const rowDocTypeLabel = (row: Parameters<typeof displayDocType>[0]) =>
+  docTypeLabel(displayDocType(row));

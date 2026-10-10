@@ -37,23 +37,6 @@ from .schemas import (
 )
 
 
-async def _monthly_indent_ids(db: AsyncSession, indent_ids: list[int]) -> set[int]:
-    """Which of these indent ids are Monthly.
-
-    Used to keep Monthly indents out of the individual Waiting for Me queue, where
-    they would duplicate the Consolidation tab (see consolidation_batches_for_user).
-    Read-only — never used anywhere that changes an indent's state.
-    """
-    if not indent_ids:
-        return set()
-    rows = (await db.execute(
-        select(Indent.id).where(
-            Indent.id.in_(indent_ids), Indent.indent_type == IndentType.MONTHLY.value,
-        )
-    )).scalars().all()
-    return set(rows)
-
-
 async def _document_numbers(
     db: AsyncSession, wanted: dict[str, set[int]],
 ) -> dict[tuple[str, int], str]:
@@ -100,20 +83,34 @@ def _missing_numbers(rows: Iterable) -> dict[str, set[int]]:
     return wanted
 
 
+def _display_doc_type(doc_type: str, indent_type: str | None) -> str:
+    """The type an approver is shown. An STR is an `ind_indents` row and its workflow
+    rows say INDENT, but nobody raising or signing one calls it an indent."""
+    if doc_type == DocType.INDENT.value and indent_type == IndentType.STR.value:
+        return DocType.STOCK_TRANSFER_REQUEST.value
+    return doc_type
+
+
 async def pending_for_user(db: AsyncSession, user) -> list[dict]:
     rows = await engine.pending_for_user(db, user)
-    monthly_ids = await _monthly_indent_ids(
-        db, [row["doc_id"] for row in rows if row["doc_type"] == DocType.INDENT.value],
+    indent_types = await _indent_types(
+        db, (row["doc_id"] for row in rows if row["doc_type"] == DocType.INDENT.value),
     )
     rows = [
         row for row in rows
-        if not (row["doc_type"] == DocType.INDENT.value and row["doc_id"] in monthly_ids)
+        if not (row["doc_type"] == DocType.INDENT.value
+                and indent_types.get(row["doc_id"]) == IndentType.MONTHLY.value)
     ]
     numbers = await _document_numbers(db, _missing_numbers(
         (row["doc_type"], row["doc_id"], row["doc_no"]) for row in rows
     ))
     for row in rows:
         row["approver_name"] = user.full_name
+        row["indent_type"] = (
+            indent_types.get(row["doc_id"])
+            if row["doc_type"] == DocType.INDENT.value else None
+        )
+        row["display_doc_type"] = _display_doc_type(row["doc_type"], row["indent_type"])
         if not row["doc_no"]:
             row["doc_no"] = numbers.get((row["doc_type"], row["doc_id"]))
     return rows
@@ -146,17 +143,24 @@ async def pending_summary(db: AsyncSession, user) -> dict:
 
     # Monthly indents are approved as consolidated batches on another screen, so they
     # are not in this queue — the same exclusion pending_page applies to the list.
-    monthly = await _monthly_indent_ids(
-        db, [r.doc_id for r in rows if r.doc_type == DocType.INDENT.value],
+    indent_types = await _indent_types(
+        db, (r.doc_id for r in rows if r.doc_type == DocType.INDENT.value),
     )
     rows = [
         r for r in rows
-        if not (r.doc_type == DocType.INDENT.value and r.doc_id in monthly)
+        if not (r.doc_type == DocType.INDENT.value
+                and indent_types.get(r.doc_id) == IndentType.MONTHLY.value)
     ]
 
+    # An STR rides the INDENT workflow but is counted as what it is, so a chart of
+    # "what is waiting" does not file a stock transfer under Indent.
     by_doc_type: dict[str, int] = {}
     for row in rows:
-        by_doc_type[row.doc_type] = by_doc_type.get(row.doc_type, 0) + 1
+        key = _display_doc_type(
+            row.doc_type,
+            indent_types.get(row.doc_id) if row.doc_type == DocType.INDENT.value else None,
+        )
+        by_doc_type[key] = by_doc_type.get(key, 0) + 1
     waiting = [r.created_at for r in rows if r.created_at]
     return {
         "total": len(rows),
@@ -193,7 +197,14 @@ async def pending_page(
             Pending.doc_no.ilike(like), Pending.doc_summary.ilike(like),
             Pending.requested_by_name.ilike(like), Instance.current_stage_name.ilike(like),
         ))
-    if doc_type:
+    if doc_type == DocType.STOCK_TRANSFER_REQUEST.value:
+        # Not a workflow doc type of its own: an STR is an INDENT row of type STR.
+        conditions.append(and_(Pending.doc_type == DocType.INDENT.value,
+                               Indent.indent_type == IndentType.STR.value))
+    elif doc_type == DocType.INDENT.value:
+        conditions.append(and_(Pending.doc_type == DocType.INDENT.value,
+                               Indent.indent_type != IndentType.STR.value))
+    elif doc_type:
         conditions.append(Pending.doc_type == doc_type)
     if overdue_only:
         conditions.append(Pending.due_at < now)
@@ -212,7 +223,7 @@ async def pending_page(
         Indent.indent_type != IndentType.MONTHLY.value,
     ))
     joined = (
-        select(Pending, Instance)
+        select(Pending, Instance, Indent.indent_type)
         .join(Instance, Instance.id == Pending.instance_id)
         .outerjoin(Indent, indent_join)
     )
@@ -234,11 +245,13 @@ async def pending_page(
         .limit(size)
     )).all()
     numbers = await _document_numbers(db, _missing_numbers(
-        (pending.doc_type, pending.doc_id, pending.doc_no) for pending, _ in rows
+        (pending.doc_type, pending.doc_id, pending.doc_no) for pending, _, _ in rows
     ))
     items = [{
         "instance_id": pending.instance_id,
         "doc_type": pending.doc_type,
+        "indent_type": indent_type,
+        "display_doc_type": _display_doc_type(pending.doc_type, indent_type),
         "doc_id": pending.doc_id,
         "stage_sequence": pending.stage_sequence,
         "doc_no": pending.doc_no or numbers.get((pending.doc_type, pending.doc_id)),
@@ -253,7 +266,7 @@ async def pending_page(
         "overdue": bool(pending.due_at and pending.due_at < now),
         "current_stage_name": instance.current_stage_name,
         "approver_name": user.full_name,
-    } for pending, instance in rows]
+    } for pending, instance, indent_type in rows]
     return {"items": items, "total": total, "page": page, "size": size}
 
 
@@ -747,14 +760,20 @@ def _item_snapshot(
     }
 
 
-def _plain_summary(action: Action | None, items: list[dict]) -> str:
+def _doc_noun(indent: Indent) -> str:
+    """What the document is called in a sentence: an STR is not an indent to anybody."""
+    return ("stock transfer request"
+            if indent.indent_type == IndentType.STR.value else "indent")
+
+
+def _plain_summary(action: Action | None, items: list[dict], noun: str = "indent") -> str:
     if action is None:
         total = sum(item["received_by_approver_quantity"] for item in items)
         return f"You have {total:g} units waiting for your decision."
     if action.action == ApprovalAction.REJECTED.value:
-        return "You denied this indent."
+        return f"You denied this {noun}."
     if action.action == ApprovalAction.RETURNED.value:
-        return "You returned this indent for correction."
+        return f"You returned this {noun} for correction."
     requested = sum(item["received_by_approver_quantity"] for item in items)
     approved = sum(item["approved_by_approver_quantity"] or 0 for item in items)
     reduced = requested - approved
@@ -772,7 +791,7 @@ def _history_events(
     events = [{
         "id": f"indent:{indent.id}:created",
         "kind": "REQUEST_CREATED",
-        "title": "Indent raised",
+        "title": f"{_doc_noun(indent).capitalize()} raised",
         "actor_name": indent.requested_by_name,
         "actor_role": "Requester",
         "stage_name": "Draft",
@@ -921,14 +940,16 @@ async def decision_ledger(
             "actor_role": action.actor_position if action else await _acting_position_name(db, user),
             "decided_at": _iso(action.acted_at) if action else None,
             "comments": action.comments if action else None,
-            "summary": _plain_summary(action, items),
+            "summary": _plain_summary(action, items, _doc_noun(indent)),
         },
         "indent": {
             "id": indent.id,
             "indent_no": indent.indent_no,
             "type": (
                 "Monthly/Consolidation"
-                if indent.indent_type == IndentType.MONTHLY.value else "Regular"
+                if indent.indent_type == IndentType.MONTHLY.value
+                else "Stock transfer request"
+                if indent.indent_type == IndentType.STR.value else "Regular"
             ),
             "indent_type": indent.indent_type,
             "status": indent.status,
@@ -975,8 +996,8 @@ async def decision_ledger(
             # copy of a rule that lives on the server.
             "outcome_label": "Approved at your stage" if cut else "Final approved",
             "note": (
-                "You are seeing this indent as it reached you and the decision you "
-                "took on it. Later stages are not shown."
+                f"You are seeing this {_doc_noun(indent)} as it reached you and the "
+                "decision you took on it. Later stages are not shown."
             ) if cut else None,
         },
         "legacy_gaps": gaps,

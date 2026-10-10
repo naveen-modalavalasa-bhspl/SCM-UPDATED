@@ -137,6 +137,10 @@ export interface IssueGroup {
    *  on each of them back to free stock and takes it where the picks now point, so
    *  the screen has to say so BEFORE the press rather than after. */
   releasing: IssueStockSource[];
+  /** Batches unlocked by the coded-item exception: the item must leave with a code
+   *  per unit, the allocated batch carries none, so FEFO moves on to the oldest batch
+   *  that does. Empty when the exception does not apply. See `codedSwapBatches`. */
+  codedSwap: Set<number>;
 }
 
 /**
@@ -197,6 +201,7 @@ export function groupIssueLines(
         warehouseDrawable: null,
         allocated: [],
         releasing: [],
+        codedSwap: new Set<number>(),
       };
       byKey.set(key, group);
       groups.push(group);
@@ -270,9 +275,11 @@ export function groupIssueLines(
     // pick and what the "more available elsewhere" hint names. Offering stock nobody
     // may take is worse than saying the item is short.
     const allow = allowedExpiries(group.allocated);
+    group.codedSwap = codedSwapBatches(group.allocated, rows);
     group.spare = rows.filter(
       (row) => !taken.has(sourceKey(row.batch_id, row.bin_id))
-        && (!allow || allow.has(row.expiry_date ?? "")),
+        && (!allow || allow.has(row.expiry_date ?? "")
+          || group.codedSwap.has(src(row.batch_id) ?? 0)),
     );
     group.releasing = group.allocated.filter(
       (row) => !taken.has(sourceKey(row.batch_id, row.bin_id)),
@@ -383,6 +390,12 @@ export interface BatchChoice {
   allocated: boolean;
   /** May this line be moved onto it — see `allowedBatchIds`. */
   allowed: boolean;
+  /** Free coded units somewhere in this batch here (only meaningful when the item
+   *  must leave with codes). */
+  hasCodes: boolean;
+  /** Allowed ONLY because of the coded-item exception — said on the option, so the
+   *  storekeeper knows why a later batch is open. */
+  codeException: boolean;
   /** Why not, said in full, because a disabled row with no reason is a dead end. */
   blocked: string | null;
 }
@@ -427,6 +440,7 @@ const byExpiry = (a: BatchChoice, b: BatchChoice): number => {
 export function batchChoices(
   sources: IssueStockSource[],
   allowedExpiries: Set<string> | null = null,
+  codedSwap: Set<number> = new Set(),
 ): BatchChoice[] {
   const by = new Map<number, BatchChoice>();
   for (const row of sources) {
@@ -444,24 +458,65 @@ export function batchChoices(
         allocated: false,
         allowed: true,
         blocked: null,
+        hasCodes: false,
+        codeException: false,
       };
       by.set(key, choice);
     }
     choice.drawable = round(choice.drawable + num(row.drawable_qty));
     choice.locations += 1;
     if (num(row.own_reserved_qty) > 0) choice.allocated = true;
+    if (row.has_unit_codes) choice.hasCodes = true;
   }
   const out = [...by.values()].sort(byExpiry);
+  const codesRequired = sources.some((row) => row.codes_required);
   if (allowedExpiries) {
     for (const choice of out) {
-      choice.allowed = allowedExpiries.has(choice.expiry ?? "");
+      const sameDay = allowedExpiries.has(choice.expiry ?? "");
+      choice.codeException = !sameDay && codedSwap.has(choice.batchId ?? 0);
+      choice.allowed = sameDay || choice.codeException;
       choice.blocked = choice.allowed
         ? null
-        : "Stock leaves oldest first, so an allocated batch may only be swapped for "
-          + "one expiring on the same day.";
+        : codesRequired && !choice.hasCodes
+          ? "No codes on this batch — this item must leave with one code per unit."
+          : codedSwap.size > 0
+            ? "An older batch with codes comes first — stock leaves oldest first."
+            : "Stock leaves oldest first, so an allocated batch may only be swapped for "
+              + "one expiring on the same day.";
     }
   }
   return out;
+}
+
+/**
+ * The one FEFO swap past the same-day rule — the same test as the server's
+ * `_coded_swap_verdict`. An item that must leave with one serial / IMEI / code per
+ * unit cannot be issued out of a batch carrying none, so when EVERY allocated batch
+ * has no free coded unit here, the oldest batch(es) that do are unlocked. FEFO still
+ * decides among the batches that can actually be issued: only the earliest expiry
+ * among the coded ones opens up, never any later one.
+ */
+export function codedSwapBatches(
+  allocated: IssueStockSource[],
+  sources: IssueStockSource[],
+): Set<number> {
+  const signed = new Set(allocated.map((row) => src(row.batch_id)).filter(
+    (id): id is number => !!id));
+  if (!signed.size || !sources.some((row) => row.codes_required)) return new Set();
+  if (sources.some((row) => signed.has(src(row.batch_id) ?? 0) && row.has_unit_codes)) {
+    return new Set();
+  }
+  const coded = sources.filter(
+    (row) => row.has_unit_codes && !signed.has(src(row.batch_id) ?? 0) && src(row.batch_id));
+  if (!coded.length) return new Set();
+  const earliest = (row: IssueStockSource) => row.expiry_date ?? "";
+  const first = [...coded].sort((a, b) => {
+    if (!a.expiry_date) return 1;
+    if (!b.expiry_date) return -1;
+    return a.expiry_date < b.expiry_date ? -1 : a.expiry_date > b.expiry_date ? 1 : 0;
+  })[0];
+  return new Set(coded.filter((row) => earliest(row) === earliest(first))
+    .map((row) => src(row.batch_id) as number));
 }
 
 /** The expiry dates a pick may be moved onto, given where inventory allocated it.
@@ -596,7 +651,8 @@ export function splitProblems(
       // `_assert_issue_sources` refuses exactly this at the save; stated here so it is
       // seen while it can still be corrected, and never only after a failed save.
       if (allowed && split.line.batch_id && split.batchTotal !== null
-          && !allowed.has(split.batchExpiry ?? "")) {
+          && !allowed.has(split.batchExpiry ?? "")
+          && !group.codedSwap.has(split.line.batch_id)) {
         problems.push({
           level: "error", groupKey: group.key, index: split.index,
           message: `${label}: ${split.batchNo ?? "this batch"} expires `

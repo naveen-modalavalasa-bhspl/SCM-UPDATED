@@ -91,8 +91,12 @@ const kindOptions: Array<{ value: IndentKind; label: string }> = [
   { value: "MONTHLY", label: "Monthly/Consolidation" },
 ];
 
+/** An STR rides the INDENT workflow, so it lands on this list too — and is named as
+ *  what it is rather than passing for a regular indent. */
 const typeLabel = (row: ApprovalDecisionRow) =>
-  row.indent_type === "MONTHLY" ? "Monthly/Consolidation" : "Regular";
+  row.indent_type === "MONTHLY" ? "Monthly/Consolidation"
+    : row.indent_type === "STR" ? "Stock transfer request"
+    : "Regular";
 
 /** Where the row goes, said on the button.
  *
@@ -109,7 +113,7 @@ function exportExcel(rows: ApprovalDecisionRow[]) {
   const sheet = XLSX.utils.json_to_sheet(rows.map((row) => ({
     "Decision date": row.decision_at ? new Date(row.decision_at).toLocaleString() : "",
     "Indent number": row.doc_no ?? `#${row.doc_id}`,
-    Type: row.indent_type === "MONTHLY" ? "Monthly/Consolidation" : "Regular",
+    Type: typeLabel(row),
     "Approval stage": row.stage_name ?? `Stage ${row.stage_sequence}`,
     Decision: row.decision,
     Comments: row.comments ?? "",

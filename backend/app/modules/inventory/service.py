@@ -593,6 +593,54 @@ async def move_stock_out(
         remaining -= take
 
 
+async def rehome_balance(db: AsyncSession, stock: Stock, *, to_bin_id: int,
+                         ref_type: str, ref_id: int, ref_no: str, user,
+                         serial_numbers: list[str] | None = None) -> Decimal:
+    """Move a WHOLE balance row to another location in the same warehouse.
+
+    Free and reserved alike, with its valuation and its holds, and nothing else about
+    it changing — item, batch and project are the same; only the address moves. Used to
+    give stock that was banked with no location (bin 0) a location once its warehouse
+    starts keeping them (`warehouse/unlocated.py`).
+
+    Rule 7, in both halves: the goods move OUT and IN through `move_stock`, which
+    writes the two ledger rows that make the move traceable, and the reservation
+    columns move only through `allocation` — lifted before, set down after, inside this
+    transaction so the stock is never briefly free to another document.
+
+    Carried at the row's OWN rate, and the item's last purchase price is left as it
+    was: `move_stock` treats a priced inward as the newest cost of the item, and a
+    re-address is not a purchase. Returns the quantity moved (free + reserved);
+    `transit_qty` is not moved (nothing writes it) and is left where it is.
+    """
+    stock = await db.get(Stock, stock.id, with_for_update=True)
+    to_bin_id = int(to_bin_id or NO_BIN)
+    if stock is None or int(stock.bin_id or NO_BIN) == to_bin_id:
+        return Decimal("0")
+    lifted = await allocation.lift_for_rehome(db, stock)
+    qty = _d(stock.available_qty or 0)
+    if qty <= 0:
+        return Decimal("0")
+
+    item = await db.get(Item, stock.item_id)
+    purchase_price = getattr(item, "purchase_price", None)
+    rate = _d(stock.valuation_rate) if _d(stock.valuation_rate) > 0 else None
+    common = dict(ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, user=user,
+                  warehouse_id=stock.warehouse_id, batch_id=stock.batch_id,
+                  project_id=stock.project_id, serial_numbers=serial_numbers)
+    # IN before OUT: the warehouse's total never dips by the quantity in between, so
+    # the move cannot set off a "below minimum" alert for stock that never left.
+    landed = await move_stock(db, item_id=stock.item_id, qty=qty,
+                              direction=StockDirection.IN.value, bin_id=to_bin_id,
+                              rate=rate, **common)
+    await move_stock(db, item_id=stock.item_id, qty=qty,
+                     direction=StockDirection.OUT.value, bin_id=stock.bin_id, **common)
+    if item is not None:
+        item.purchase_price = purchase_price
+    await allocation.set_down_after_rehome(db, lifted, landed)
+    return qty
+
+
 async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
                          from_warehouse_id: int, to_warehouse_id: int,
                          from_project_id: int = NO_PROJECT,
@@ -857,7 +905,8 @@ async def stock_pipeline(db: AsyncSession, *, warehouse_ids=None, item_ids=None
     from sqlalchemy import column, table
 
     issues = table("out_issues", column("id"), column("warehouse_id"), column("status"),
-                   column("direction"), column("is_stock_posted"), column("indent_id"))
+                   column("direction"), column("is_stock_posted"), column("indent_id"),
+                   column("parent_issue_id"))
     issue_lines = table("out_issue_items", column("issue_id"), column("item_id"),
                         column("issued_qty"), column("indent_item_id"))
     dispatches = table("out_dispatches", column("id"), column("warehouse_id"),
@@ -896,7 +945,11 @@ async def stock_pipeline(db: AsyncSession, *, warehouse_ids=None, item_ids=None
                or_(issues.c.indent_id.is_not(None),
                    issue_lines.c.indent_item_id.is_not(None),
                    issues.c.id.in_(select(StockTransferOrder.issue_id)
-                                   .where(StockTransferOrder.issue_id.is_not(None))))),
+                                   .where(StockTransferOrder.issue_id.is_not(None))),
+                   # ...or a floor piece of a split STO issue.
+                   issues.c.parent_issue_id.in_(
+                       select(StockTransferOrder.issue_id)
+                       .where(StockTransferOrder.issue_id.is_not(None))))),
         issues.c.warehouse_id, issue_lines.c.item_id,
     ).group_by(issues.c.warehouse_id, issue_lines.c.item_id)
     add((await db.execute(pending)).all(), "issued_pending_qty")
@@ -3003,6 +3056,18 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
         raise PermissionError_(
             f"{from_wh.name} is not a stocking point you hold — a transfer can only be "
             "sent from your own point or one under you")
+    # And TO a point inside the same data scope (the job profile's rung): an OE moves
+    # stock between his own and his reportees' points, never into somebody else's.
+    if visible is not None and to_wh.id not in visible:
+        raise PermissionError_(
+            f"{to_wh.name} is outside your data scope — a transfer can only go to a "
+            "point you or your reporting line hold")
+    # A transfer is a SIDEWAYS move on one level — LIP to LIP, MDP to MDP, warehouse to
+    # warehouse. Up and down the chain is an indent / issue, not a transfer.
+    if locations.tier_of(from_wh.warehouse_type) != locations.tier_of(to_wh.warehouse_type):
+        raise ValidationError(
+            f"{from_wh.name} and {to_wh.name} are on different levels. A transfer stays "
+            "on one level: LIP to LIP, MDP to MDP, warehouse to warehouse.")
 
     # What this move IS comes from the two points, never from the request body, so a
     # cross-project transfer cannot be relabelled into something that skips approval.
@@ -3146,18 +3211,37 @@ async def _decorate_sto_stages(db: AsyncSession, rows) -> None:
     """Stamp `issue_status` and `stage` on each STO, in one query for the page."""
     from sqlalchemy import column, table
 
-    issues = table("out_issues", column("id"), column("status"))
+    issues = table("out_issues", column("id"), column("status"),
+                   column("parent_issue_id"))
     ids = {r.issue_id for r in rows if getattr(r, "issue_id", None)}
     status_by_id = dict((await db.execute(
         select(issues.c.id, issues.c.status).where(issues.c.id.in_(ids))
     )).all()) if ids else {}
+    # A split parent stops moving once its floor pieces carry the goods: it rolls up
+    # to CLOSED when they are posted and never sees DISPATCHED or ACKNOWLEDGED. The
+    # STO is as far along as its LEAST advanced live piece.
+    split = {i for i, st in status_by_id.items() if st in ("SPLIT", "CLOSED")}
+    child_stages: dict[int, list[str]] = {}
+    if split:
+        for parent_id, child_status in (await db.execute(
+            select(issues.c.parent_issue_id, issues.c.status)
+            .where(issues.c.parent_issue_id.in_(split))
+        )).all():
+            stage = _STO_STAGE_BY_ISSUE.get(child_status or "", "TO_ISSUE")
+            if stage != "CANCELLED":
+                child_stages.setdefault(parent_id, []).append(stage)
     for r in rows:
         issue_status = status_by_id.get(r.issue_id) if r.issue_id else None
         r.issue_status = issue_status
         if r.status != STOStatus.APPROVED.value or not r.issue_id:
             r.stage = r.status
+        elif child_stages.get(r.issue_id):
+            r.stage = min(child_stages[r.issue_id], key=_STO_STAGE_ORDER.index)
         else:
             r.stage = _STO_STAGE_BY_ISSUE.get(issue_status or "", "TO_ISSUE")
+
+
+_STO_STAGE_ORDER = ["TO_ISSUE", "ISSUED", "IN_TRANSIT", "RECEIVED"]
 
 
 async def _sto_visibility(db: AsyncSession, user):

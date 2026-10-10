@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { CheckCircle2, ListFilter, Truck } from "lucide-react";
 import {
   Button, Can, Card, EmptyState, ErrorBanner, Input, ResponsiveList, Select,
@@ -14,6 +14,7 @@ import type { Acknowledgement } from "../types";
 import {
   displayStatus, summarise, trackingHandle,
 } from "../components/acknowledgementParts";
+import { DirectIssueAcknowledgements } from "../components/DirectIssueAcknowledgements";
 import { FILTER_PILL_COUNT_OFF, FILTER_PILL_COUNT_ON, FILTER_PILL_ON } from "../buttonTones";
 
 /**
@@ -47,6 +48,13 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [onlyActionable, setOnlyActionable] = useState(false);
+  // Indent deliveries, or material issued to me DIRECT (no indent). Stock Transfer
+  // embeds this list for STRs alone, where direct issues have no place.
+  // In the URL so Back from a direct issue's receipt lands on this tab again.
+  const [query, setQuery] = useSearchParams();
+  const view = !embedded && query.get("view") === "direct" ? "direct" : "indent";
+  const setView = (next: "indent" | "direct") =>
+    setQuery(next === "direct" ? { view: "direct" } : {}, { replace: true });
 
   // Filtering happens server-side so the list stays honest when it grows past a page.
   const filters = useMemo(
@@ -72,7 +80,7 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
   const columns: Column<Acknowledgement>[] = [
     {
       key: "indent",
-      header: "Indent",
+      header: indentTypes.length === 1 && indentTypes[0] === "STR" ? "STR" : "Indent",
       render: (row) => (
         <div>
           <div className="font-mono text-xs font-semibold text-ink">{row.indent_no}</div>
@@ -146,6 +154,27 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
       {!embedded && (
         <IndentModuleHeader title="Acknowledgements" showCreate={false} showFilters={false} />
       )}
+
+      {!embedded && (
+        <div role="tablist" aria-label="What to acknowledge" className="inline-flex rounded-xl border border-line bg-content1 p-1">
+          {([["indent", "Against document"], ["direct", "Direct issues"]] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={view === key}
+              onClick={() => setView(key)}
+              className={`h-11 rounded-lg px-4 text-sm font-medium transition ${
+                view === key ? "bg-brand text-white" : "text-body hover:bg-content2"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {view === "direct" ? <DirectIssueAcknowledgements /> : <>
 
       <Card className="flex flex-col gap-3 p-3 md:flex-row md:items-center">
         <div className="min-w-0 flex-1">
@@ -239,6 +268,7 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
           </div>
         )}
       />
+      </>}
     </div>
   );
 }

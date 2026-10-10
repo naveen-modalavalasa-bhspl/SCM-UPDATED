@@ -110,6 +110,25 @@ export interface PurchaseReturnJourneyLeg {
 
 /* --------------------------------------------------------------- warehouse -- */
 
+/** Stock a bin-managed warehouse holds with no location (`bin_id` 0), and the
+ *  Unlocated location it is placed in — see backend `warehouse/unlocated.py`.
+ *  `pending_*` still stands at no location; `held_*` is in the Unlocated location;
+ *  `placed_*` is what the press just moved. */
+export interface UnlocatedStockStatus {
+  warehouse_id: number;
+  is_bin_managed: boolean;
+  location_id: number | null;
+  location_code: string | null;
+  pending_rows: number;
+  pending_qty: number | string;
+  held_rows: number;
+  held_items: number;
+  held_qty: number | string;
+  placed_rows: number;
+  placed_qty: number | string;
+  placed_units: number;
+}
+
 /** `whs_warehouses`. */
 export interface Warehouse {
   id: number;
@@ -1089,6 +1108,8 @@ export interface Issue {
   issue_date: string;
   indent_id?: number | null;
   indent_no?: string | null;
+  /** "STR" when the issue serves a stock transfer request. */
+  indent_type?: string | null;
   picking_id?: number | null;
   pick_no?: string | null;
   warehouse_id: number;
@@ -1288,6 +1309,12 @@ export interface IssueStockSource {
   item_total_qty: number;
   /** The free part of it. */
   item_available_qty: number;
+  /** Must this item leave with one serial / IMEI / asset or consumable code per unit? */
+  codes_required?: boolean;
+  /** Does this (batch, location) hold at least one free coded unit? Drives the one
+   *  FEFO swap past the same-day rule: an allocated batch with no codes may give way
+   *  to the oldest batch that has them. */
+  has_unit_codes?: boolean;
 }
 
 /**
@@ -1477,6 +1504,10 @@ export interface DispatchItem {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1541,6 +1572,10 @@ export interface DispatchItemWrite {
   package_id?: number | null;
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1594,6 +1629,10 @@ export interface PackageWrite {
 export interface ConsignmentPackageItemWrite {
   issue_id?: number | null;
   issue_no?: string | null;
+  /** The issue LINE — one batch drawn from two bays is two lines, and two rows. */
+  issue_item_id?: number | null;
+  /** Where that line drew it from. */
+  bin_code?: string | null;
   mr_id?: number | null;
   mr_no?: string | null;
   indent_id?: number | null;
@@ -1670,6 +1709,8 @@ export interface IssueDispatchSourceItem extends DispatchItemWrite {
   expiry_date?: string | null;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
+  /** What the codes on this row are — serial, IMEI, asset tag or consumable code. */
+  tracking_type?: TrackingType | null;
   serial_numbers?: string[];
   /** serial -> IMEI, so a handset's number shows beside the unit it belongs to. */
   imei_by_serial?: Record<string, string>;

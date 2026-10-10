@@ -290,6 +290,78 @@ async def release(db: AsyncSession, ref_type: str, ref_id: int,
     return returned
 
 
+@dataclass
+class LiftedHolds:
+    """What `lift_for_rehome` took off a balance row, to be set down on another."""
+    from_stock_id: int
+    quantity: Decimal
+    reservations: list[Reservation]
+
+
+async def lift_for_rehome(db: AsyncSession, stock: Stock) -> LiftedHolds:
+    """Free EVERYTHING a balance row holds so the whole row can move, keeping a note.
+
+    The first half of re-homing a row (`inventory.service.rehome_balance`). A move is
+    out-then-in through `move_stock`, which only draws on `available_qty`, so the
+    reserved part has to be made available first — and put straight back by
+    `set_down_after_rehome` on the row it lands on, inside the same transaction, so
+    the goods are never free to anybody in between.
+
+    The WHOLE `reserved_qty` is lifted, not the sum of its ACTIVE reservations: a row
+    whose column has drifted from its reservation rows would otherwise leave the drift
+    behind, stranded at a location the stock no longer stands at.
+    """
+    reservations = list((await db.execute(
+        select(Reservation).where(
+            Reservation.stock_id == stock.id,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        ).with_for_update()
+    )).scalars().all())
+    quantity = _d(stock.reserved_qty or 0)
+    if quantity > ZERO:
+        stock.reserved_qty = ZERO
+        stock.available_qty = _d(stock.available_qty or 0) + quantity
+    await db.flush()
+    return LiftedHolds(from_stock_id=stock.id, quantity=quantity,
+                       reservations=reservations)
+
+
+async def set_down_after_rehome(db: AsyncSession, lifted: LiftedHolds,
+                                stock: Stock) -> None:
+    """Hold on `stock` exactly what `lift_for_rehome` freed, and re-point the holds.
+
+    The reservation ROWS move with the goods rather than being released and raised
+    again: an indent's allocation, a project's hold and an issue's claim are the same
+    commitments they were a moment ago, standing at a new address. Releasing them
+    would write a history of decisions nobody took. `stk_project_holds` carries the
+    address too, and is moved with them.
+    """
+    from app.modules.inventory.models import ProjectHold
+    from app.shared.enums import ProjectHoldStatus
+
+    if lifted.quantity > ZERO:
+        if _d(stock.available_qty or 0) < lifted.quantity:
+            raise ValidationError(
+                f"{stock.item_code or stock.item_id}: only "
+                f"{_d(stock.available_qty or 0)} landed where {lifted.quantity} "
+                "reserved has to be held again. Nothing was moved.")
+        stock.available_qty = _d(stock.available_qty or 0) - lifted.quantity
+        stock.reserved_qty = _d(stock.reserved_qty or 0) + lifted.quantity
+    for res in lifted.reservations:
+        res.stock_id = stock.id
+        res.bin_id = stock.bin_id
+    for hold_row in (await db.execute(
+        select(ProjectHold).where(
+            ProjectHold.stock_id == lifted.from_stock_id,
+            ProjectHold.status == ProjectHoldStatus.ACTIVE.value,
+        ).with_for_update()
+    )).scalars().all():
+        hold_row.stock_id = stock.id
+        hold_row.bin_id = stock.bin_id
+        hold_row.bin_code = stock.bin_code
+    await db.flush()
+
+
 async def release_one(db: AsyncSession, reservation_id: int) -> Reservation:
     """Release a single reservation by its own id.
 

@@ -87,6 +87,28 @@ class WarehouseRead(_Read):
     created_at: datetime | None = None
 
 
+class UnlocatedStockStatus(BaseModel):
+    """Stock a bin-managed warehouse holds with no location, and where it went.
+
+    `pending_*` is what still stands at bin 0 (it is placed on the next pick or on
+    the press); `held_*` is what its Unlocated location holds now. See
+    `warehouse/unlocated.py`.
+    """
+    warehouse_id: int
+    is_bin_managed: bool
+    location_id: int | None = None
+    location_code: str | None = None
+    pending_rows: int = 0
+    pending_qty: Decimal = Decimal("0")
+    held_rows: int = 0
+    held_items: int = 0
+    held_qty: Decimal = Decimal("0")
+    # Filled only by the press: what that press just moved.
+    placed_rows: int = 0
+    placed_qty: Decimal = Decimal("0")
+    placed_units: int = 0
+
+
 class WarehouseWrite(BaseModel):
     code: str = Field(min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=200)
@@ -1707,6 +1729,10 @@ class IssueStockSource(_Read):
     batch_available_qty: Decimal = Decimal("0")
     item_total_qty: Decimal = Decimal("0")
     item_available_qty: Decimal = Decimal("0")
+    # Must this item leave with one serial / IMEI / code per unit, and does this spot
+    # hold any free coded unit? Drives the one FEFO swap past the same-day rule.
+    codes_required: bool = False
+    has_unit_codes: bool = False
 
 
 class TrackingTypeRead(_Read):
@@ -1724,6 +1750,7 @@ class IssueRead(_Read):
     issue_date: date
     indent_id: int | None = None
     indent_no: str | None = None
+    indent_type: str | None = None
     picking_id: int | None = None
     pick_no: str | None = None
     warehouse_id: int
@@ -1817,6 +1844,9 @@ class DispatchItemWrite(BaseModel):
     package_id: int | None = None
     issue_id: int | None = None
     issue_no: str | None = None
+    # The issue LINE, so one batch drawn from two bays stays two rows. See
+    # `out_dispatch_items.issue_item_id`.
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1870,6 +1900,7 @@ class PackageWrite(BaseModel):
 class ConsignmentPackageItemWrite(BaseModel):
     issue_id: int | None = None
     issue_no: str | None = None
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1966,6 +1997,7 @@ class DispatchItemRead(_Read):
     package_id: int | None = None
     issue_id: int | None = None
     issue_no: str | None = None
+    issue_item_id: int | None = None
     mr_id: int | None = None
     mr_no: str | None = None
     indent_id: int | None = None
@@ -1976,6 +2008,7 @@ class DispatchItemRead(_Read):
     uom_code: str | None = None
     batch_id: int | None = None
     batch_no: str | None = None
+    bin_code: str | None = None
     mfg_date: date | None = None
     expiry_date: date | None = None
     serial_no: str | None = None
@@ -3830,6 +3863,10 @@ class EmployeeDestination(BaseModel):
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
     vehicle_number: str | None = None
+    department_id: int | None = None
+    department_name: str | None = None
+    project_id: int | None = None
+    project_name: str | None = None
 
 
 class PickingIssueSource(BaseModel):
@@ -3860,6 +3897,10 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     expiry_date: date | None = None
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
+    # Where the issue line drew it from, so two rows of one batch say which bay.
+    bin_code: str | None = None
+    # SERIAL / IMEI / ASSET / CONSUMABLE / NONE — what the codes on this row are.
+    tracking_type: str | None = None
     serial_numbers: list[str] = []
     # serial -> IMEI, so the packing screen shows the handset's number beside the
     # unit it belongs to rather than making the receiving point retype it.
@@ -3942,10 +3983,39 @@ class AcknowledgeIssueIn(BaseModel):
     remarks: str | None = None
 
 
+class DirectIssueAckLine(BaseModel):
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    issued_qty: Decimal = Decimal("0")
+
+
+class DirectIssueAckRow(BaseModel):
+    """A material issue raised against no indent, as its recipient sees it.
+
+    Indent-linked issues are confirmed through the indent's own acknowledgement; a
+    direct issue has no indent, so the person it was issued TO signs the issue itself.
+    """
+    issue_id: int
+    issue_no: str
+    issue_date: date | None = None
+    status: str
+    warehouse_name: str | None = None
+    department_name: str | None = None
+    project_name: str | None = None
+    issued_by_name: str | None = None
+    total_qty: Decimal = Decimal("0")
+    acknowledged_by_name: str | None = None
+    acknowledged_at: datetime | None = None
+    can_acknowledge: bool = False
+    lines: list[DirectIssueAckLine] = []
+
+
 class IssueSerialLineIn(BaseModel):
     """One line's physical units, named after approval."""
     id: int
-    serial_numbers: list[str] = Field(default_factory=list, max_length=MAX_SERIALS_PER_LINE)
+    serial_numbers: Annotated[list[str], SerialList] = Field(default_factory=list)
 
 
 class IssueSerialsIn(BaseModel):

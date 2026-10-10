@@ -27,6 +27,7 @@ from app.core.pagination import Page, PageParams
 # warehouse evidence behind them (rule 5 forbids the join happening the other way).
 from app.modules.indents.schemas import AcknowledgementRow as IndentAcknowledgementRow
 from app.modules.indents.schemas import FulfilmentStep as IndentFulfilmentStep
+from app.modules.indents.schemas import AcknowledgeIn as IndentAcknowledgeIn
 from app.modules.indents import service as indent_service
 from app.modules.inventory import service as inv_service
 from app.modules.warehouse import schemas as s
@@ -99,6 +100,21 @@ async def update_warehouse(warehouse_id: int, data: s.WarehouseWrite,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
     return await service.update_warehouse(db, warehouse_id, data, user)
+
+
+@router.get("/warehouses/{warehouse_id}/unlocated", response_model=s.UnlocatedStockStatus)
+async def unlocated_stock_status(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(STOCK_VIEW))):
+    """Stock held with no location, and the Unlocated location it is placed in."""
+    return await service.unlocated_stock_status(db, warehouse_id)
+
+
+@router.post("/warehouses/{warehouse_id}/unlocated/place",
+             response_model=s.UnlocatedStockStatus)
+async def place_unlocated_stock(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    """Move everything held at no location into the warehouse's Unlocated location."""
+    return await service.place_unlocated_stock(db, warehouse_id, user)
 
 
 @router.get("/warehouses/{warehouse_id}/bins", response_model=list[s.BinRead])
@@ -1441,6 +1457,74 @@ async def my_acknowledgements(search: str | None = None, status: str | None = No
     return await service.acknowledgements_for_requester(
         db, user, search=search, status=status, only_actionable=only_actionable,
         indent_types=indent_type)
+
+
+# Direct issues (no indent) handed to this person. Same gate as /acknowledgements/mine;
+# the service only ever returns issues whose `issued_to_id` is the caller.
+@router.get("/acknowledgements/direct-issues", response_model=list[s.DirectIssueAckRow])
+async def my_direct_issue_acknowledgements(search: str | None = None,
+                                           only_actionable: bool = False,
+                                           db: AsyncSession = Depends(get_db),
+                                           user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    return await service.direct_issues_for_recipient(
+        db, user, search=search, only_actionable=only_actionable)
+
+
+@router.get("/acknowledgements/direct-issues/{issue_id:int}",
+            response_model=IndentAcknowledgementRow)
+async def direct_issue_receipt(issue_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    return await service.direct_issue_receipt(db, issue_id, user)
+
+
+@router.post("/acknowledgements/direct-issues/{issue_id:int}/acknowledge",
+             response_model=IndentAcknowledgementRow)
+async def acknowledge_direct_issue(issue_id: int, body: IndentAcknowledgeIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    lines = {line.indent_item_id: Decimal(str(line.received_quantity)) for line in body.lines}
+    return await service.acknowledge_direct_issue(
+        db, issue_id, lines, user, condition=body.condition, remarks=body.remarks)
+
+
+@router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments",
+            response_model=list[s.AttachmentRead])
+async def direct_issue_attachments(issue_id: int, db: AsyncSession = Depends(get_db),
+                                   user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    return await service.direct_issue_attachments(db, issue_id, user)
+
+
+@router.post("/acknowledgements/direct-issues/{issue_id:int}/attachments",
+             response_model=s.AttachmentRead, status_code=201)
+async def add_direct_issue_attachment(issue_id: int, file: UploadFile = File(...),
+                                      doc_category: str = Query("RECEIPT_PHOTO"),
+                                      db: AsyncSession = Depends(get_db),
+                                      user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    return await service.add_direct_issue_attachment(
+        db, issue_id, file, doc_category=doc_category, user=user)
+
+
+@router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments/{attachment_id:int}/download")
+async def download_direct_issue_attachment(issue_id: int, attachment_id: int,
+                                           db: AsyncSession = Depends(get_db),
+                                           user=Depends(require_permission_or(
+        INDENT_VIEW, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    path, file_name, mime_type = await service.direct_issue_attachment_file(
+        db, issue_id, attachment_id, user)
+    return FileResponse(path, filename=file_name, media_type=mime_type)
+
+
+@router.delete("/acknowledgements/direct-issues/attachments/{attachment_id:int}",
+               status_code=204)
+async def delete_direct_issue_attachment(attachment_id: int, db: AsyncSession = Depends(get_db),
+                                         user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
+    await service.delete_direct_issue_attachment(db, attachment_id, user)
 
 
 # The delivery half of an indent's journey, for the stepper on its detail page. Any

@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Checkbox } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
-import { AlertCircle, ArrowLeft, CheckCircle2, ClipboardCheck, Download, Layers, Lock, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock } from "lucide-react";
+import { AlertCircle, ArrowLeft, CheckCheck, CheckCircle2, ClipboardCheck, Download, Layers, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, XCircle } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, Select } from "@/shared/components";
 import { ConsignmentIdentityCard, type ConsignmentIssue } from "../components/ConsignmentIdentityCard";
 import { PrintPortal } from "../components/LabelPrint";
@@ -82,11 +82,34 @@ const newPackage = (count: number): PackageDraft => ({
   items: [],
 });
 
-const lineKey = (line: Pick<IssueDispatchSourceItem, "issue_id" | "item_id" | "batch_id">) =>
-  `${line.issue_id ?? 0}:${line.item_id}:${line.batch_id ?? 0}`;
+/**
+ * One row per material-issue LINE.
+ *
+ * Keyed on (issue, item, batch) before, which is not unique: one batch drawn from two
+ * storage locations is two issue lines, and both rows shared a key — typing a quantity
+ * into one wrote it into the other, and both showed the same codes. The issue line id
+ * is the identity; the old triple stays only for consignments saved before the server
+ * carried it, where both sides of the form are built from the same rows and agree.
+ */
+const lineKey = (line: Pick<IssueDispatchSourceItem, "issue_id" | "item_id" | "batch_id" | "issue_item_id">) =>
+  line.issue_item_id
+    ? `line:${line.issue_item_id}`
+    : `${line.issue_id ?? 0}:${line.item_id}:${line.batch_id ?? 0}`;
 
 const itemLabel = (line: IssueDispatchSourceItem) =>
-  `${line.item_code ?? line.item_id}${line.batch_no ? ` / ${line.batch_no}` : ""}`;
+  `${line.item_code ?? line.item_id}${line.batch_no ? ` / ${line.batch_no}` : ""}${line.bin_code ? ` @ ${line.bin_code}` : ""}`;
+
+/** What one code on a row is called, in the plural. */
+const CODE_NOUN: Record<string, string> = {
+  SERIAL: "serials", IMEI: "IMEIs", ASSET: "asset codes", CONSUMABLE: "codes",
+};
+const codeNoun = (line: IssueDispatchSourceItem) =>
+  CODE_NOUN[line.tracking_type ?? ""] ?? (line.is_imei_tracked ? "IMEIs" : "serials");
+
+/** Asset and consumable codes are the system's own labels, so the screen may choose
+ *  them; a serial or an IMEI is read off the goods and only ever follows the count. */
+const autoCoded = (line: IssueDispatchSourceItem) =>
+  line.tracking_type === "ASSET" || line.tracking_type === "CONSUMABLE";
 
 const packageQty = (line: Pick<ConsignmentPackageItemWrite, "quantity">) => num(line.quantity);
 
@@ -449,6 +472,8 @@ export default function ConsignmentForm() {
             ...(existing ?? {}),
             issue_id: line.issue_id ?? doc.ref_id ?? null,
             issue_no: line.issue_no ?? doc.ref_no ?? null,
+            issue_item_id: line.issue_item_id ?? null,
+            bin_code: line.bin_code ?? null,
             mr_id: line.mr_id ?? null,
             mr_no: line.mr_no ?? null,
             indent_id: line.indent_id,
@@ -493,6 +518,8 @@ export default function ConsignmentForm() {
       byLine.set(key, {
         issue_id: line.issue_id ?? doc.ref_id ?? null,
         issue_no: line.issue_no ?? doc.ref_no ?? null,
+        issue_item_id: line.issue_item_id ?? null,
+        bin_code: line.bin_code ?? null,
         mr_id: line.mr_id ?? null,
         mr_no: line.mr_no ?? null,
         indent_id: line.indent_id,
@@ -807,10 +834,11 @@ export default function ConsignmentForm() {
         errors.push(`${line.item_code ?? line.item_id} has no quantity - enter one, or remove it from this package.`);
       }
       if (sourceLine && (allocation.get(lineKey(line)) ?? 0) > sourceLine.issued) {
-        errors.push(`${line.item_code ?? line.item_id} is packed above issued quantity.`);
+        errors.push(`${itemLabel(sourceLine.line)} is packed above issued quantity.`);
       }
       if (line.is_serial_tracked && (line.serial_numbers?.length ?? 0) !== qty) {
-        errors.push(`${line.item_code ?? line.item_id} needs ${fmtQty(qty)} serials selected.`);
+        const noun = sourceLine ? codeNoun(sourceLine.line) : "serials";
+        errors.push(`${sourceLine ? itemLabel(sourceLine.line) : line.item_code ?? line.item_id} needs ${fmtQty(qty)} ${noun} selected.`);
       }
     }
     return Array.from(new Set(errors));
@@ -826,8 +854,7 @@ export default function ConsignmentForm() {
     });
     lineProgress.forEach(({ issued, packed, line }) => {
       if (packed !== issued) {
-        const label = `${line.item_code ?? line.item_id}${line.batch_no ? ` / ${line.batch_no}` : ""}`;
-        issues.push(`${label} packed ${fmtQty(packed)} of ${fmtQty(issued)}.`);
+        issues.push(`${itemLabel(line)} packed ${fmtQty(packed)} of ${fmtQty(issued)}.`);
       }
     });
     selectedSerials.duplicates.forEach((serial) => issues.push(`${serial} is selected in more than one package.`));
@@ -876,6 +903,91 @@ export default function ConsignmentForm() {
   const patchPackage = (index: number, patch: Partial<PackageDraft>) =>
     setPackages((rows) => rows.map((pkg, i) => (i === index ? { ...pkg, ...patch } : pkg)));
 
+  /** A package row built off its issue line — every identifying field copied, so two
+   *  rows of one batch can never be written back as one. */
+  const toPackageLine = (
+    sourceLine: IssueDispatchSourceItem,
+    existing: ConsignmentPackageItemWrite | undefined,
+    patch: Partial<ConsignmentPackageItemWrite>,
+  ): ConsignmentPackageItemWrite => ({
+    issue_id: sourceLine.issue_id,
+    issue_no: sourceLine.issue_no,
+    issue_item_id: sourceLine.issue_item_id ?? null,
+    bin_code: sourceLine.bin_code ?? null,
+    mr_id: sourceLine.mr_id,
+    mr_no: sourceLine.mr_no,
+    indent_id: sourceLine.indent_id,
+    item_id: sourceLine.item_id,
+    item_code: sourceLine.item_code,
+    item_name: sourceLine.item_name,
+    uom_code: sourceLine.uom_code,
+    batch_id: sourceLine.batch_id,
+    batch_no: sourceLine.batch_no,
+    mfg_date: sourceLine.mfg_date,
+    expiry_date: sourceLine.expiry_date,
+    is_serial_tracked: sourceLine.is_serial_tracked,
+    serial_numbers: [],
+    quantity: 0,
+    rate: sourceLine.rate,
+    remarks: sourceLine.remarks,
+    ...existing,
+    ...patch,
+  });
+
+  /** The codes of one issue line that no OTHER package row is carrying yet. */
+  const freeCodes = (
+    rows: PackageDraft[], packageIndex: number, sourceLine: IssueDispatchSourceItem,
+  ) => {
+    const used = new Set<string>();
+    rows.forEach((pkg, index) => pkg.items.forEach((line) => {
+      if (index === packageIndex && lineKey(line) === lineKey(sourceLine)) return;
+      line.serial_numbers?.forEach((code) => used.add(code.toLowerCase()));
+    }));
+    return (sourceLine.serial_numbers ?? []).filter((code) => !used.has(code.toLowerCase()));
+  };
+
+  /**
+   * Select all: put everything still unpacked into this package, codes included.
+   *
+   * Each row takes what its OWN issue line has left after every other package — so a
+   * second carton "selects all" of the remainder, never the whole issue again — and the
+   * codes come off that line's own list, skipping any already in another carton. The
+   * whole remainder of a line is a fact, not a guess, which is why serials and IMEIs
+   * are filled here too: every one of them is going in.
+   */
+  const selectAllInto = (packageIndex: number) => setPackages((rows) => {
+    const elsewhere = new Map<string, number>();
+    rows.forEach((pkg, index) => {
+      if (index === packageIndex) return;
+      pkg.items.forEach((line) => elsewhere.set(
+        lineKey(line), (elsewhere.get(lineKey(line)) ?? 0) + packageQty(line)));
+    });
+    const target = rows[packageIndex];
+    const items = (source?.items ?? []).flatMap((line) => {
+      const qty = Math.max(0, num(line.quantity) - (elsewhere.get(lineKey(line)) ?? 0));
+      if (qty <= 0) return [];
+      const existing = target.items.find((row) => lineKey(row) === lineKey(line));
+      const codes = line.is_serial_tracked
+        ? freeCodes(rows, packageIndex, line).slice(0, Math.floor(qty))
+        : [];
+      return [toPackageLine(line, existing, {
+        quantity: qty,
+        serial_numbers: codes,
+        is_serial_tracked: !!line.is_serial_tracked,
+      })];
+    });
+    return rows.map((pkg, index) => (index === packageIndex ? { ...pkg, items } : pkg));
+  });
+
+  /** Deselect all: empty this package and hand its quantity back to To pack. */
+  const deselectAllFrom = (packageIndex: number) =>
+    setPackages((rows) => rows.map((pkg, index) => (
+      index === packageIndex ? { ...pkg, items: [] } : pkg)));
+
+  /** What this package could still take — drives whether Select all has anything to do. */
+  const canFill = (source?.items ?? []).some(
+    (line) => num(line.quantity) > (allocation.get(lineKey(line)) ?? 0));
+
   const patchPackageLine = (
     packageIndex: number,
     sourceLine: IssueDispatchSourceItem,
@@ -890,6 +1002,8 @@ export default function ConsignmentForm() {
         const nextLine = {
           issue_id: sourceLine.issue_id,
           issue_no: sourceLine.issue_no,
+          issue_item_id: sourceLine.issue_item_id ?? null,
+          bin_code: sourceLine.bin_code ?? null,
           mr_id: sourceLine.mr_id,
           mr_no: sourceLine.mr_no,
           indent_id: sourceLine.indent_id,
@@ -1306,8 +1420,18 @@ export default function ConsignmentForm() {
                         Select only the items going into {editablePackage?.package_no ?? "the open package"}. The issue total stays fixed; To pack is the live balance.
                       </p>
                     </div>
-                    <div className="shrink-0 text-xs text-muted">
-                      Remaining to pack: <b className="tabular text-ink">{fmtQty(remainingToPack)}</b>
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      <span className="mr-1 text-xs text-muted">
+                        Remaining to pack: <b className="tabular text-ink">{fmtQty(remainingToPack)}</b>
+                      </span>
+                      {!locked && editablePackageIndex >= 0 && (
+                        <SelectAllBar
+                          canSelect={canFill}
+                          canClear={(editablePackage?.items.length ?? 0) > 0}
+                          onSelect={() => selectAllInto(editablePackageIndex)}
+                          onClear={() => deselectAllFrom(editablePackageIndex)}
+                        />
+                      )}
                     </div>
                   </div>
                   <div className="overflow-x-auto">
@@ -1315,7 +1439,7 @@ export default function ConsignmentForm() {
                       <thead className="border-b border-line bg-content2/45 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">
                         <tr>
                           <th className="px-3 py-2">Item</th>
-                          <th className="px-3 py-2">Batch</th>
+                          <th className="px-3 py-2">Batch / location</th>
                           <th className="px-3 py-2">Mfg</th>
                           <th className="px-3 py-2">Expiry</th>
                           <th className="px-3 py-2 text-right">Issued total</th>
@@ -1334,7 +1458,7 @@ export default function ConsignmentForm() {
                                 <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                                 <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
                               </td>
-                              <td className="px-3 py-2 text-xs text-muted">{line.batch_no ?? "—"}</td>
+                              <td className="px-3 py-2"><BatchPlace line={line} /></td>
                               <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
                               <td className="px-3 py-2 text-xs text-muted">{line.expiry_date ?? "—"}</td>
                               <td className="px-3 py-2.5 text-right tabular text-ink">{fmtQty(line.quantity)} {line.uom_code ?? ""}</td>
@@ -1396,7 +1520,15 @@ export default function ConsignmentForm() {
                     </div>
                   </div>
                   {!locked && (
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {!pkgLocked && (
+                        <SelectAllBar
+                          canSelect={canFill}
+                          canClear={pkg.items.length > 0}
+                          onSelect={() => selectAllInto(packageIndex)}
+                          onClear={() => deselectAllFrom(packageIndex)}
+                        />
+                      )}
                       <Button
                         variant={pkg.locked ? "subtle" : "primary"}
                         disabled={pkg.locked
@@ -1501,14 +1633,14 @@ export default function ConsignmentForm() {
                     <thead className="border-b border-line bg-content2/45 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-muted">
                       <tr>
                         <th className="px-3 py-2">Item</th>
-                        <th className="px-3 py-2">Batch</th>
+                        <th className="px-3 py-2">Batch / location</th>
                         <th className="px-3 py-2">Mfg</th>
                         <th className="px-3 py-2">Expiry</th>
                         <th className="px-3 py-2 text-right">Issued total</th>
                         <th className="px-3 py-2 text-right">To pack</th>
                         {!inLogistics && <th className="px-3 py-2 text-right">Packed</th>}
                         <th className="px-3 py-2 text-right">This package</th>
-                        <th className="px-3 py-2">Serials</th>
+                        <th className="px-3 py-2">Codes</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1532,7 +1664,7 @@ export default function ConsignmentForm() {
                               <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                               <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
                             </td>
-                            <td className="px-3 py-2 text-xs text-muted">{line.batch_no ?? "—"}</td>
+                            <td className="px-3 py-2"><BatchPlace line={line} /></td>
                             <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
                             <td className="px-3 py-2 text-xs text-muted">{line.expiry_date ?? "—"}</td>
                             <td className="px-3 py-2.5 text-right tabular text-ink">{fmtQty(line.quantity)} {line.uom_code ?? ""}</td>
@@ -1558,7 +1690,14 @@ export default function ConsignmentForm() {
                                 value={thisQty > 0 ? String(thisQty) : ""}
                                 onChange={(event) => {
                                   const nextQty = Math.min(Number(event.target.value || 0), remaining);
-                                  const nextSerials = (current?.serial_numbers ?? []).slice(0, Math.floor(nextQty));
+                                  // Trim when lowered; for asset/consumable codes also TOP UP
+                                  // when raised, from this line's codes no other carton holds.
+                                  const kept = (current?.serial_numbers ?? []).slice(0, Math.floor(nextQty));
+                                  const nextSerials = autoCoded(line)
+                                    ? [...kept, ...freeCodes(packages, packageIndex, line)
+                                        .filter((code) => !kept.includes(code))]
+                                        .slice(0, Math.floor(nextQty))
+                                    : kept;
                                   // keepEmpty: clearing the number is editing it, not
                                   // dropping the item. Without it the backspace that
                                   // emptied the box pruned the line from the package,
@@ -1581,9 +1720,9 @@ export default function ConsignmentForm() {
                                 <Button variant="subtle" disabled={pkgLocked || thisQty <= 0 || remaining < thisQty}
                                         onClick={() => setSerialTarget({ packageIndex, line })}>
                                   {(current?.serial_numbers?.length ?? 0) === thisQty && thisQty > 0 ? (
-                                    <><CheckCircle2 className="h-4 w-4" /> {thisQty} serials</>
+                                    <><CheckCircle2 className="h-4 w-4 text-ok" /> {thisQty} {codeNoun(line)}</>
                                   ) : thisQty > 0 ? (
-                                    `${current?.serial_numbers?.length ?? 0}/${thisQty} serials`
+                                    <span className="text-warn">{current?.serial_numbers?.length ?? 0}/{thisQty} {codeNoun(line)}</span>
                                   ) : "Set qty first"}
                                 </Button>
                               ) : (
@@ -1714,6 +1853,40 @@ export default function ConsignmentForm() {
           setSerialTarget(null);
         }}
       />
+    </div>
+  );
+}
+
+/** The batch, and under it the storage location the issue line drew from. Two rows of
+ *  one batch are two locations; without the second line they read as a duplicate. */
+function BatchPlace({ line }: { line: IssueDispatchSourceItem }) {
+  return (
+    <div className="min-w-0 text-xs">
+      <div className="font-mono text-body">{line.batch_no ?? "—"}</div>
+      {line.bin_code && (
+        <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted" title="Storage location">
+          <MapPin className="h-3 w-3 shrink-0 text-brand" aria-hidden />
+          <span className="truncate font-mono">{line.bin_code}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Select all / Deselect all for one package. */
+function SelectAllBar({ canSelect, canClear, onSelect, onClear }: {
+  canSelect: boolean; canClear: boolean; onSelect: () => void; onClear: () => void;
+}) {
+  return (
+    <div className="inline-flex items-center gap-1 rounded-xl border border-line bg-content2/40 p-1">
+      <Button variant="ghost" disabled={!canSelect} onClick={onSelect}
+              title="Put everything still to pack into this package, with its codes">
+        <CheckCheck className="h-4 w-4 text-ok" /> Select all
+      </Button>
+      <Button variant="ghost" disabled={!canClear} onClick={onClear}
+              title="Empty this package; its quantity goes back to To pack">
+        <XCircle className="h-4 w-4 text-muted" /> Deselect all
+      </Button>
     </div>
   );
 }
