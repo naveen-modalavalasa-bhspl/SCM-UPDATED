@@ -13,8 +13,8 @@ import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
 import { HistoryTimeline } from "../components/HistoryTimeline";
 import {
-  allowedRange, approvalCeiling, formatQuantity, quantityError,
-  quantityValue, wasReducedBelow,
+  acceptsQuantityInput, allowedRange, approvalCeiling, formatQuantity, quantityDecimals,
+  quantityEntryHint, quantityError, quantityValue, wasReducedBelow,
 } from "../quantityRules";
 import { isIndentModuleQuery } from "@/modules/indents/api";
 import { displayUom } from "@/modules/indents/displayFormat";
@@ -145,13 +145,17 @@ function QuantityField({
       >
         <input
           type="text"
-          inputMode="decimal"
+          inputMode={quantityDecimals(line) === 0 ? "numeric" : "decimal"}
+          pattern={quantityDecimals(line) === 0 ? "[0-9]*" : undefined}
           autoComplete="off"
           aria-label={`Approved quantity for ${line.item_name ?? line.id}`}
           aria-invalid={Boolean(error)}
           aria-describedby={`qty-help-${line.id}`}
           value={value}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (acceptsQuantityInput(line, next)) onChange(next);
+          }}
           className="h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right font-semibold tabular-nums text-ink outline-none"
         />
         <span className="shrink-0 whitespace-nowrap text-xs font-medium text-muted">{unit}</span>
@@ -166,7 +170,7 @@ function QuantityField({
         }`}
       >
         {error && <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />}
-        <span>{error ?? `You can approve ${allowedRange(line)}.`}</span>
+        <span>{error ?? `You can approve ${allowedRange(line)}. ${quantityEntryHint(line)}`}</span>
       </p>
     </div>
   );

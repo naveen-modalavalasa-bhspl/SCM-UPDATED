@@ -122,10 +122,10 @@ describe("FlowStepper", () => {
       "DraftCompleted",
       "SubmittedCompleted",
       "ApprovalsCustom Controller Review",
-      "4AllocationPending",
-      "5WarehousePending",
-      "6In-TransitPending",
-      "7AcknowledgementPending",
+      "4Allocation",
+      "5Warehouse",
+      "6In-Transit",
+      "7Acknowledgement",
     ]);
     expect(screen.getByLabelText("Approvals, current: Custom Controller Review")).toBeInTheDocument();
   });
@@ -177,6 +177,25 @@ describe("FlowStepper", () => {
     expect(screen.getByLabelText("Warehouse, completed")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("In-Transit, current")).toHaveClass("bg-brand");
     expect(screen.getByLabelText("Acknowledgement, pending")).toHaveClass("border-line");
+  });
+
+  it("hides the visual Pending caption from every unreached phase", () => {
+    render(<FlowStepper status="PENDING_APPROVAL" journey={journey()} />);
+
+    const rows = screen.getAllByRole("listitem");
+    expect(rows[3]).toHaveTextContent("Allocation");
+    expect(rows[3]).not.toHaveTextContent("Pending");
+    expect(rows[4]).toHaveTextContent("Warehouse");
+    expect(rows[4]).not.toHaveTextContent("Pending");
+    expect(rows[5]).toHaveTextContent("In-Transit");
+    expect(rows[5]).not.toHaveTextContent("Pending");
+    expect(rows[6]).toHaveTextContent("Acknowledgement");
+    expect(rows[6]).not.toHaveTextContent("Pending");
+
+    expect(screen.getByLabelText("Allocation, pending")).toBeInTheDocument();
+    expect(screen.getByLabelText("Warehouse, pending")).toBeInTheDocument();
+    expect(screen.getByLabelText("In-Transit, pending")).toBeInTheDocument();
+    expect(screen.getByLabelText("Acknowledgement, pending")).toBeInTheDocument();
   });
 
   it("shows a return for correction as recoverable, never as a rejection", () => {

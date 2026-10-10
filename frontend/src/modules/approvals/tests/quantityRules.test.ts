@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  allowedRange, approvalCeiling, formatQuantity, quantityError, wasReducedBelow,
+  acceptsQuantityInput, allowedRange, approvalCeiling, formatQuantity, quantityDecimals,
+  quantityError, wasReducedBelow,
 } from "../quantityRules";
 import type { ApprovalIndentLine } from "../types";
 
@@ -57,7 +58,7 @@ describe("quantityError", () => {
     expect(quantityError(line(), "3")).toBeNull();
     expect(quantityError(line(), "0")).toBeNull();
     expect(quantityError(line(), "5")).toBeNull();
-    expect(quantityError(line(), "4.125")).toBeNull();
+    expect(quantityError(line({ uom_code: "KG", uom_decimals: 3 }), "4.125")).toBeNull();
   });
 
   it("names the cap when the entry is too high", () => {
@@ -84,8 +85,33 @@ describe("quantityError", () => {
   });
 
   it("rejects a decimal finer than the database can store", () => {
-    expect(quantityError(line(), "1.2345"))
+    expect(quantityError(line({ uom_code: "KG", uom_decimals: 3 }), "1.2345"))
       .toBe("Use up to 3 decimal places (for example 1.5).");
+  });
+
+  it("uses authoritative UOM precision and rejects fractions for NOS", () => {
+    const nos = line({ uom_code: "NOS", uom_decimals: 0 });
+    expect(quantityDecimals(nos)).toBe(0);
+    expect(acceptsQuantityInput(nos, "10")).toBe(true);
+    expect(acceptsQuantityInput(nos, "10.5")).toBe(false);
+    expect(acceptsQuantityInput(nos, "abc")).toBe(false);
+    expect(quantityError(nos, "4.5")).toBe(
+      "NOS accepts whole numbers only (for example 1 or 10).",
+    );
+  });
+
+  it("allows decimals only to the precision configured by a measured UOM", () => {
+    const litres = line({ uom_code: "LTR", uom_decimals: 2 });
+    expect(acceptsQuantityInput(litres, "1.25")).toBe(true);
+    expect(acceptsQuantityInput(litres, "1.256")).toBe(false);
+    expect(acceptsQuantityInput(litres, "one")).toBe(false);
+    expect(quantityError(litres, "1.25")).toBeNull();
+    expect(quantityError(litres, "1.256")).toBe("Use up to 2 decimal places (for example 1.5).");
+  });
+
+  it("falls back safely for older API responses", () => {
+    expect(quantityDecimals(line({ uom_code: "UOM-NOS", uom_decimals: undefined }))).toBe(0);
+    expect(quantityDecimals(line({ uom_code: "KG", uom_decimals: undefined }))).toBe(3);
   });
 });
 

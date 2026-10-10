@@ -167,6 +167,8 @@ class ApprovalIndentLineOut(BaseModel):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    # Derived from the UOM class: countable units are whole (0), measurements use 3.
+    uom_decimals: int = 3
     requested_quantity: float
     approved_quantity: float
     # The ceiling for this approver: the request at the first level, and whatever the

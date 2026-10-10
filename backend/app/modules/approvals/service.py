@@ -1828,6 +1828,7 @@ def _approval_ceiling(line, has_previous_approval: bool) -> Decimal:
 def _approval_out(
     indent: Indent, instance: Instance, has_previous_approval: bool,
     *, can_return_for_correction: bool = False,
+    uom_decimals: dict[str, int] | None = None,
 ) -> ApprovalIndentOut:
     items = [
         ApprovalIndentLineOut(
@@ -1836,6 +1837,7 @@ def _approval_out(
             item_code=line.item_code,
             item_name=line.item_name,
             uom_code=line.uom_code,
+            uom_decimals=(uom_decimals or {}).get(line.uom_code, MAX_DECIMALS),
             requested_quantity=float(line.quantity),
             approved_quantity=float(_approval_ceiling(line, has_previous_approval)),
             max_quantity=float(_approval_ceiling(line, has_previous_approval)),
@@ -1868,8 +1870,10 @@ async def get_indent_for_approval(
 ) -> ApprovalIndentOut:
     indent, instance, has_previous = await _load_indent_task(db, indent_id, user)
     can_return = await indent_service.can_return_indent_for_correction(db, indent, user)
+    uom_decimals = await decimals_by_code(db, {line.uom_code for line in indent.items})
     return _approval_out(
         indent, instance, has_previous, can_return_for_correction=can_return,
+        uom_decimals=uom_decimals,
     )
 
 
@@ -2299,12 +2303,16 @@ async def consolidation_workspace(
 def _validated_quantities(
     indent: Indent, submitted: list[ApprovalQuantityIn],
     has_previous_approval: bool = False,
+    uom_decimals: dict[str, int] | None = None,
 ) -> dict[int, Decimal]:
     by_id: dict[int, Decimal] = {}
+    raw_by_id: dict[int, Decimal] = {}
     for item in submitted:
         if item.line_id in by_id:
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
-        by_id[item.line_id] = _quantize(Decimal(str(item.approved_quantity)))
+        raw = Decimal(str(item.approved_quantity))
+        raw_by_id[item.line_id] = raw
+        by_id[item.line_id] = _quantize(raw)
 
     expected = {line.id for line in indent.items}
     received = set(by_id)
@@ -2322,6 +2330,12 @@ def _validated_quantities(
         approved = by_id[line.id]
         ceiling = _approval_ceiling(line, has_previous_approval)
         label = line.item_name or line.item_code or line.id
+        decimals = (uom_decimals or {}).get(getattr(line, "uom_code", None), MAX_DECIMALS)
+        if decimals == 0 and raw_by_id[line.id] != raw_by_id[line.id].to_integral_value():
+            unit = getattr(line, "uom_code", None) or "This unit"
+            raise ValidationError(
+                f"Approved quantity for {label}: {unit} accepts whole numbers only"
+            )
         if approved < 0:
             raise ValidationError(f"Approved quantity for {label} cannot be negative")
         if approved > ceiling:
@@ -2366,13 +2380,18 @@ async def _nothing_owed(db: AsyncSession, indent) -> bool:
 async def approve_indent(
     db: AsyncSession, indent_id: int, quantities: list[ApprovalQuantityIn],
     comments: str, user, task: tuple[Indent, Instance, bool] | None = None,
+    uom_decimals: dict[str, int] | None = None,
 ) -> ApprovalIndentOut:
     """`task` is the already-loaded (indent, instance, has_previous) for callers that
     have just validated it — the consolidated approval, which would otherwise pay for
     the same three-query load twice per indent, 900 times over. Loaded here when it is
     not supplied, so the single-indent route is unchanged."""
     indent, instance, has_previous = task or await _load_indent_task(db, indent_id, user)
-    approved_by_line = _validated_quantities(indent, quantities, has_previous)
+    if uom_decimals is None:
+        uom_decimals = await decimals_by_code(db, {line.uom_code for line in indent.items})
+    approved_by_line = _validated_quantities(
+        indent, quantities, has_previous, uom_decimals,
+    )
 
     # Which lines this approver DROPPED, as opposed to cut to nothing. Only lines the
     # screen actually sent can be excluded; a line it never mentioned keeps whatever it
@@ -2426,7 +2445,7 @@ async def approve_indent(
     ).order_by(Instance.id.desc()))).scalars().first()
     if next_instance is None:
         next_instance = instance
-    return _approval_out(updated, next_instance, True)
+    return _approval_out(updated, next_instance, True, uom_decimals=uom_decimals)
 
 
 async def approve_consolidation(
@@ -2454,6 +2473,7 @@ async def approve_consolidation(
 
     approved: list[int] = []
     failed: list[ConsolidationApprovalFailureOut] = []
+    uom_decimals_cache: dict[str, int] = {}
     for indent_id in body.indent_ids:
         try:
             quantities = quantities_by_indent.get(indent_id)
@@ -2465,6 +2485,12 @@ async def approve_consolidation(
             # signing a month took minutes. The task is handed down instead.
             task = await _load_indent_task(db, indent_id, user)
             indent, _instance, has_previous = task
+            missing_uoms = {
+                line.uom_code for line in indent.items
+                if line.uom_code and line.uom_code not in uom_decimals_cache
+            }
+            if missing_uoms:
+                uom_decimals_cache.update(await decimals_by_code(db, missing_uoms))
             # An indent with nothing left owed is NOT skipped here, it is approved and
             # ended. `approve_indent` already passes `final=_nothing_owed(...)` to the
             # engine, which closes the ladder at this rung rather than sending a settled
@@ -2489,7 +2515,10 @@ async def approve_consolidation(
                     )
                     for line in indent.items
                 ]
-            await approve_indent(db, indent_id, quantities, body.comments, user, task=task)
+            await approve_indent(
+                db, indent_id, quantities, body.comments, user, task=task,
+                uom_decimals=uom_decimals_cache,
+            )
             approved.append(indent_id)
         except AppException as exc:
             # One document's problem is not the batch's: record it and carry on.

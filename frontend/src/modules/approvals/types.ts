@@ -190,6 +190,8 @@ export interface ApprovalIndentLine {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  /** 0 for countable units such as NOS; measured units currently allow up to 3. */
+  uom_decimals?: number;
   requested_quantity: number;
   approved_quantity: number;
   /** Ceiling for this approver — the request, or what the level below approved. */

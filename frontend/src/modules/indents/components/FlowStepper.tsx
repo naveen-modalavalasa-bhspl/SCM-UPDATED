@@ -416,6 +416,14 @@ function accessibleState(state: StepState) {
   return state;
 }
 
+function showStepCaption(step: SummaryStep) {
+  // An unreached numbered dot already communicates that the phase is ahead. Keep
+  // its pending state for styling and screen readers, but do not repeat "Pending"
+  // beneath it. More useful pending detail (for example "Sign when it arrives")
+  // remains visible.
+  return !(step.state === "pending" && step.caption === statusCaption("pending"));
+}
+
 function FlowStepperSkeleton() {
   return (
     <div
@@ -530,7 +538,7 @@ export function FlowStepper({
               }`}>
                 {step.label}
               </span>
-              {step.caption && (
+              {step.caption && showStepCaption(step) && (
                 <span className="mt-0.5 block max-w-full break-words text-[10px] font-medium leading-3 text-muted">{step.caption}</span>
               )}
             </div>

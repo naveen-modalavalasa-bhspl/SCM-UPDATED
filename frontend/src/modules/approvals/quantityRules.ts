@@ -6,6 +6,35 @@ import type { ApprovalIndentLine } from "./types";
 export const QUANTITY_DECIMALS = 3;
 /** The shape of a number part-way through being typed: "", "-", "1.", "1.25". */
 const NUMERIC_SHAPE = /^-?\d*(\.\d*)?$/;
+const FALLBACK_WHOLE_UNIT_CODES = new Set([
+  "NOS", "NO", "NUM", "EA", "EACH", "PCS", "PC", "PIECE", "PIECES",
+  "PAIR", "PACK", "PACKET", "BOX", "BOTTLE", "CAN", "UNIT", "UNITS",
+]);
+
+/** The API's UOM classification is authoritative. The code fallback keeps this safe
+ * while an older backend is being rolled forward. Unknown units remain divisible. */
+export function quantityDecimals(line: ApprovalIndentLine): number {
+  const configured = Number(line.uom_decimals);
+  if (Number.isInteger(configured) && configured >= 0 && configured <= QUANTITY_DECIMALS) {
+    return configured;
+  }
+  const code = displayUom(line.uom_code).trim().toUpperCase();
+  return FALLBACK_WHOLE_UNIT_CODES.has(code) ? 0 : QUANTITY_DECIMALS;
+}
+
+/** Whether a value is a valid in-progress edit for this line's unit. */
+export function acceptsQuantityInput(line: ApprovalIndentLine, raw: string): boolean {
+  const decimals = quantityDecimals(line);
+  if (decimals === 0) return /^\d*$/.test(raw);
+  return new RegExp(`^\\d*(?:\\.\\d{0,${decimals}})?$`).test(raw);
+}
+
+export function quantityEntryHint(line: ApprovalIndentLine): string {
+  const decimals = quantityDecimals(line);
+  return decimals === 0
+    ? "Whole numbers only."
+    : `Up to ${decimals} decimal places.`;
+}
 
 /**
  * The most this approver may pass on.
@@ -79,11 +108,16 @@ export function quantityError(
   if (!NUMERIC_SHAPE.test(text) || !Number.isFinite(value)) {
     return `Enter a valid number from ${range}.`;
   }
+  const decimals = quantityDecimals(line);
+  if (decimals === 0 && text.includes(".")) {
+    const unit = displayUom(line.uom_code) || "This unit";
+    return `${unit} accepts whole numbers only (for example 1 or 10).`;
+  }
   if (value > ceiling) {
     return `You can't approve more than ${ceilingLabel(line)}.`;
   }
-  if (decimalPlaces(text) > QUANTITY_DECIMALS) {
-    return `Use up to ${QUANTITY_DECIMALS} decimal places (for example 1.5).`;
+  if (decimalPlaces(text) > decimals) {
+    return `Use up to ${decimals} decimal places (for example 1.5).`;
   }
   return null;
 }

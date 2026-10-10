@@ -11,9 +11,9 @@ from app.modules.approvals.service import _approval_ceiling, _validated_quantiti
 def _indent(approved_1=0, approved_2=0):
     return SimpleNamespace(items=[
         SimpleNamespace(id=1, quantity=10, approved_quantity=approved_1,
-                        item_name="Gloves", item_code="GLV"),
+                        item_name="Gloves", item_code="GLV", uom_code="NOS"),
         SimpleNamespace(id=2, quantity=4, approved_quantity=approved_2,
-                        item_name="Masks", item_code="MSK"),
+                        item_name="Masks", item_code="MSK", uom_code="NOS"),
     ])
 
 
@@ -29,6 +29,26 @@ def test_approved_quantities_allow_reduction_and_zero():
     ])
     assert float(result[1]) == 7
     assert float(result[2]) == 0
+
+
+def test_countable_uom_refuses_fractional_approval_even_if_client_is_bypassed():
+    with pytest.raises(ValidationError, match="NOS accepts whole numbers only"):
+        _validated_quantities(_indent(), [
+            ApprovalQuantityIn(line_id=1, approved_quantity=7.5),
+            ApprovalQuantityIn(line_id=2, approved_quantity=4),
+        ], uom_decimals={"NOS": 0})
+
+
+def test_measured_uom_allows_fractional_approval():
+    indent = SimpleNamespace(items=[
+        SimpleNamespace(id=1, quantity=10, approved_quantity=0,
+                        item_name="Oil", item_code="OIL", uom_code="LTR"),
+    ])
+    result = _validated_quantities(
+        indent, [ApprovalQuantityIn(line_id=1, approved_quantity=7.5)],
+        uom_decimals={"LTR": 3},
+    )
+    assert float(result[1]) == 7.5
 
 
 def test_approved_quantity_cannot_exceed_request():
