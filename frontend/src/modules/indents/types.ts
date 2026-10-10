@@ -490,4 +490,7 @@ export interface DirectIssueAck {
   can_acknowledge: boolean;
   lines: { item_code: string | null; item_name: string | null; uom_code: string | null;
            batch_no: string | null; issued_qty: number | string }[];
+  /** The consignments carrying this issue, each with its package count. */
+  consignments?: { dispatch_id: number; dispatch_no: string; status: string | null;
+                   package_count: number }[];
 }

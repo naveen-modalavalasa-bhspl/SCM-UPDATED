@@ -1823,6 +1823,26 @@ async def employee_destination(employee_id: int = Query(...),
     return await service.employee_destination(db, employee_id)
 
 
+@router.get("/options/issue-employees", response_model=s.IssueEmployeePage)
+async def issue_employee_options(search: str | None = None, office_id: int | None = None,
+                                 db: AsyncSession = Depends(get_db),
+                                 _=Depends(require_permission(STOCK_VIEW))):
+    """Every active employee, searched on the server; `office_id` narrows to one office."""
+    return await service.issue_employee_options(db, search=search, office_id=office_id)
+
+
+@router.get("/options/issue-destinations", response_model=s.IssueDestinationPage)
+async def issue_destination_options(search: str | None = None,
+                                    from_warehouse_id: int | None = None,
+                                    office_id: int | None = None, with_sac: bool = False,
+                                    db: AsyncSession = Depends(get_db),
+                                    user=Depends(require_permission(STOCK_VIEW))):
+    """Every warehouse, MDP and LIP a direct issue can go to — never the user's own."""
+    return await service.issue_destination_options(
+        db, user, search=search, from_warehouse_id=from_warehouse_id,
+        office_id=office_id, with_sac=with_sac)
+
+
 @router.get("/options/projects", response_model=list[s.Option])
 async def project_options(search: str | None = None, db: AsyncSession = Depends(get_db),
                           _=Depends(require_permission(STOCK_VIEW))):

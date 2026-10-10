@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, ListFilter } from "lucide-react";
+import { CheckCircle2, ListFilter, Package } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
   Button, Card, EmptyState, ErrorBanner, Input, ResponsiveList,
@@ -36,8 +36,25 @@ export function DirectIssueAcknowledgements() {
   });
 
   const rows = issues.data ?? [];
-  const items = (row: DirectIssueAck) =>
-    row.lines.map((line) => `${line.item_name ?? line.item_code} × ${Number(line.issued_qty)}`).join(", ");
+
+  /** The consignment(s) the issue travels on, each with its package count beneath. */
+  const consignment = (row: DirectIssueAck) => {
+    const list = row.consignments ?? [];
+    if (list.length === 0) return <span className="text-[11px] text-muted">Not yet consigned</span>;
+    return (
+      <div className="space-y-1.5">
+        {list.map((c) => (
+          <div key={c.dispatch_id} className="min-w-0">
+            <div className="truncate font-mono text-xs font-semibold text-ink">{c.dispatch_no}</div>
+            <div className="inline-flex items-center gap-1 text-[11px] text-muted">
+              <Package className="h-3 w-3" aria-hidden />
+              {c.package_count} package{c.package_count === 1 ? "" : "s"}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   const columns: Column<DirectIssueAck>[] = [
     {
@@ -62,9 +79,9 @@ export function DirectIssueAcknowledgements() {
       ),
     },
     {
-      key: "items",
-      header: "Items",
-      render: (row) => <span className="line-clamp-2 text-sm text-muted" title={items(row)}>{items(row)}</span>,
+      key: "consignment",
+      header: "Consignment",
+      render: consignment,
     },
     {
       key: "status",
@@ -76,7 +93,7 @@ export function DirectIssueAcknowledgements() {
       header: "",
       render: (row) => (row.can_acknowledge && mayAck ? (
         <>
-          <Button onClick={(event) => { event.stopPropagation(); open(row); }}>
+          <Button onClick={() => open(row)}>
             <CheckCircle2 className="h-4 w-4" /> Acknowledge
           </Button>
         </>
@@ -137,10 +154,10 @@ export function DirectIssueAcknowledgements() {
               </div>
               <StatusPill status={row.status} />
             </div>
-            <div className="text-sm text-muted">{items(row)}</div>
+            {consignment(row)}
             {row.can_acknowledge && mayAck && (
               <>
-                <Button onClick={(event) => { event.stopPropagation(); open(row); }}>
+                <Button onClick={() => open(row)}>
                   <CheckCircle2 className="h-4 w-4" /> Acknowledge receipt
                 </Button>
               </>

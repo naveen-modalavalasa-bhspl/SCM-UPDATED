@@ -17,9 +17,10 @@ import type { IssueGroup, IssueSplit } from "../issueSplits";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components/Timeline";
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
+import { SearchPicker, type PickerRow } from "../components/SearchPicker";
 import {
   acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
-  employeeOptions, getEmployeeDestination, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  employeeOptions, getEmployeeDestination, searchIssueDestinations, searchIssueEmployees, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
@@ -36,6 +37,7 @@ import type {
   HandlingUnit,
   Issue, IssueItemWrite, IssueStockSource, IssueWrite, ItemOption, OccupancyMove,
   TrackingType, UnitMode, UnitSupply,
+  IssueDestinationOption, IssueEmployeeOption,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
@@ -276,6 +278,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // defaults to is usually not in it. Hold the name that came with the id, or the
   // field shows its placeholder over a person who IS selected.
   const [issuedToName, setIssuedToName] = useState<string | null>(null);
+  // A direct issue's chosen destination point and issued-to person, held whole so each
+  // picker can fill and narrow the others (see `choosePoint` / `chooseEmployee`).
+  const [destPoint, setDestPoint] = useState<IssueDestinationOption | null>(null);
+  const [issuedTo, setIssuedTo] = useState<IssueEmployeeOption | null>(null);
+  // The employee list follows the destination's office unless the store asks for all.
+  const [everyone, setEveryone] = useState(false);
   const [departmentName, setDepartmentName] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string | null>(null);
   // Some of the reserved stock was received for another project, or for none.
@@ -306,6 +314,20 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     setDestination(doc.destination_office_name ?? "");
     setDestinationSac(doc.destination_office_sac ?? null);
     setIssuedToName(doc.issued_to_name ?? null);
+    setIssuedTo(doc.issued_to_id
+      ? { id: doc.issued_to_id, name: doc.issued_to_name ?? String(doc.issued_to_id) }
+      : null);
+    setDestPoint(doc.destination_warehouse_id
+      ? {
+          warehouse_id: doc.destination_warehouse_id,
+          name: doc.destination_warehouse_name ?? doc.destination_office_name ?? "",
+          warehouse_type: doc.destination_warehouse_type ?? null,
+          office_id: doc.destination_office_id ?? null,
+          office_name: doc.destination_office_name ?? null,
+          sac: doc.destination_office_sac ?? null,
+          vehicle_number: null,
+        }
+      : null);
     setDepartmentName(doc.department_name ?? null);
     setProjectName(doc.project_name ?? null);
     if (doc.warehouse_id) {
@@ -325,6 +347,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       vehicle_id: doc.vehicle_id ?? null,
       vehicle_number: doc.vehicle_number ?? null,
       issued_to_id: doc.issued_to_id ?? null,
+      destination_warehouse_id: doc.destination_warehouse_id ?? null,
       direction: doc.direction,
       original_issue_id: doc.original_issue_id ?? null,
       remarks: doc.remarks ?? "",
@@ -683,6 +706,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const unitsHidden = direction === "OUT"
     && (!doc || doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL");
   const serialsLocked = unitsHidden || (locked && !(awaitingIssue && doc?.can_issue_from_stock));
+  // Asset/consumable codes are auto-assigned and swappable: on a draft, and once
+  // approved by the issuer OR anyone who approved it (`can_swap_codes`).
+  const codesLocked = locked && (unitsHidden || !(awaitingIssue && doc?.can_swap_codes));
   const payload = (): IssueWrite => ({
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
@@ -755,6 +781,95 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     },
   });
 
+  /** A destination point chosen: it fills Destination, SAC and Vehicle, and narrows
+   *  the people offered to its office. A person already chosen from ANOTHER office no
+   *  longer fits, so they are cleared rather than silently kept. */
+  const choosePoint = (point: IssueDestinationOption | null) => {
+    setEveryone(false);
+    if (!point) {
+      setDestPoint(null);
+      setForm((f) => ({ ...f, destination_warehouse_id: null }));
+      // Back to the derived answer: the person's office, else nothing.
+      if (form.issued_to_id) pullEmployee.mutate(form.issued_to_id);
+      else { setDestination(""); setDestinationSac(null); }
+      return;
+    }
+    setDestPoint(point);
+    setDestination(point.office_name || point.name);
+    setDestinationSac(point.sac ?? null);
+    const keepPerson = !issuedTo?.office_id || !point.office_id
+      || issuedTo.office_id === point.office_id;
+    if (!keepPerson) { setIssuedTo(null); setIssuedToName(null); }
+    setForm((f) => ({
+      ...f,
+      destination_warehouse_id: point.warehouse_id,
+      // An MDP or a warehouse is served by no MMU, so it carries no vehicle.
+      vehicle_number: point.vehicle_number ?? null,
+      issued_to_id: keepPerson ? f.issued_to_id : null,
+    }));
+  };
+
+  /** A person chosen: their office fills the rest (`pullEmployee`), and when no point
+   *  was chosen yet, the one stocking point on their office becomes the destination. */
+  const chooseEmployee = (person: IssueEmployeeOption | null) => {
+    setIssuedTo(person);
+    setIssuedToName(person?.name ?? null);
+    set("issued_to_id", person?.id ?? null);
+    if (!person) {
+      if (!destPoint && !form.indent_id) { setDestination(""); setDestinationSac(null); }
+      return;
+    }
+    pullEmployee.mutate(person.id);
+    if (!destPoint && person.office_id) {
+      searchIssueDestinations("", { fromWarehouseId: form.warehouse_id, officeId: person.office_id })
+        .then((found) => {
+          if (found.items.length !== 1) return;
+          const point = found.items[0];
+          setDestPoint(point);
+          setForm((f) => ({
+            ...f,
+            destination_warehouse_id: point.warehouse_id,
+            vehicle_number: f.vehicle_number || point.vehicle_number || null,
+          }));
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const pointKind = (type?: string | null) =>
+    type === "LIP" ? "LIP" : type === "MDP" ? "MDP" : "Warehouse";
+  const pointRow = (p: IssueDestinationOption): PickerRow => ({
+    id: p.warehouse_id,
+    title: p.name,
+    subtitle: [
+      p.office_name && p.office_name !== p.name ? p.office_name : null,
+      p.sac ? `SAC ${p.sac}` : null,
+      p.vehicle_number ? `Vehicle ${p.vehicle_number}` : null,
+    ].filter(Boolean).join(" · ") || null,
+    badges: [{ text: pointKind(p.warehouse_type), tone: p.warehouse_type === "LIP" ? "ok" : "brand" }],
+  });
+  const sacRow = (p: IssueDestinationOption): PickerRow => ({
+    id: p.warehouse_id,
+    title: p.sac ?? "—",
+    subtitle: p.name,
+    badges: [{ text: pointKind(p.warehouse_type), tone: p.warehouse_type === "LIP" ? "ok" : "brand" }],
+  });
+  const personRow = (e: IssueEmployeeOption): PickerRow => ({
+    id: e.id,
+    title: e.name,
+    subtitle: [e.position_name, e.office_name, e.department_name].filter(Boolean).join(" · ") || null,
+    // Employee code, then every post held — the post is what the store recognises.
+    badges: [
+      ...(e.code ? [{ text: e.code, tone: "muted" as const }] : []),
+      ...(e.position_codes ?? []).map((code) => ({ text: code, tone: "brand" as const })),
+    ],
+  });
+  // Whose people the Issued-to list shows: the chosen point's office, unless widened.
+  const personOffice = !everyone ? destPoint?.office_id ?? null : null;
+  // A point with no service area code (an MDP, a main warehouse) says "None" there.
+  const pointHasNoSac = !!destPoint && !destPoint.sac;
+  const direct = !form.indent_id && direction === "OUT";
+
   const pullEmployee = useMutation({
     mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
     onSuccess: (source) => {
@@ -762,10 +877,13 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       // precedence `_issue_destination` applies on a saved issue — so picking the
       // person fills Destination / SAC from their office. The vehicle follows only
       // when the office name carries one; an indent-set number is kept otherwise.
-      setDestination(source.destination_office_name ?? "");
-      setDestinationSac(source.destination_office_sac ?? null);
+      // A destination point the store CHOSE wins here exactly as it does on save.
+      if (!destPoint) {
+        setDestination(source.destination_office_name ?? "");
+        setDestinationSac(source.destination_office_sac ?? null);
+      }
       if (source.issued_to_name) setIssuedToName(source.issued_to_name);
-      if (source.vehicle_number) {
+      if (source.vehicle_number && !destPoint) {
         setForm((current) => ({ ...current, vehicle_number: source.vehicle_number ?? current.vehicle_number }));
       }
       // Department / Project from the person's HCM record — only into a BLANK field:
@@ -1236,6 +1354,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                     isDisabled={locked || !!form.picking_id || direction === "IN"}
                     onChange={(v, option) => {
                       setForm({ ...form, warehouse_id: Number(v) || 0, items: [] });
+                      if (destPoint && destPoint.warehouse_id === Number(v)) choosePoint(null);
                       setIsBinManaged((option as any)?.is_bin_managed ?? true);
                     }}
                     placeholder="Warehouse" />
@@ -1256,7 +1375,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 setForm((f) => ({
                   ...f, indent_id: indentId,
                   issue_type: indentId ? "INDENT_BASED" : "DIRECT",
+                  destination_warehouse_id: indentId ? null : f.destination_warehouse_id,
                 }));
+                if (indentId) setDestPoint(null);
                 if (!indentId) { setDestination(""); setDestinationSac(null); }
                 if (indentId && form.warehouse_id) pullIndent.mutate(indentId);
               }} placeholder={form.warehouse_id ? "Indent / STR" : "Pick warehouse first"} />
@@ -1283,6 +1404,91 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                       setProjectName(option?.name ?? null);
                     }} placeholder="Project" />
           </Field>
+          {direct ? (
+            <>
+              <div className="sm:col-span-2">
+                <SearchPicker<IssueDestinationOption>
+                  label="Destination"
+                  hint="Any warehouse, MDP or LIP but your own. Search a name, a SAC or a vehicle number."
+                  placeholder={destination || "Search warehouse, MDP or LIP"}
+                  value={destPoint ? pointRow(destPoint) : null}
+                  onChange={choosePoint}
+                  queryKey={["issue-destinations", form.warehouse_id]}
+                  load={(q) => searchIssueDestinations(q, { fromWarehouseId: form.warehouse_id })}
+                  toRow={pointRow}
+                  emptyText="No other warehouse, MDP or LIP is active."
+                  disabled={locked}
+                />
+              </div>
+              {pointHasNoSac ? (
+                <div>
+                  <span className="mb-1.5 block text-sm font-medium text-body">Service area code (SAC)</span>
+                  <div className="flex min-h-11 items-center rounded-md border border-dashed border-line bg-content2/40 px-3 text-sm text-muted">
+                    None
+                  </div>
+                  <span className="mt-1 block text-xs text-muted">
+                    {pointKind(destPoint?.warehouse_type)}s carry no service area code.
+                  </span>
+                </div>
+              ) : (
+                <SearchPicker<IssueDestinationOption>
+                  label="Service area code (SAC)"
+                  hint="Picking a SAC picks its LIP as the destination."
+                  placeholder={destinationSac || "Search SAC"}
+                  value={destPoint?.sac ? sacRow(destPoint) : null}
+                  onChange={choosePoint}
+                  queryKey={["issue-sacs", form.warehouse_id]}
+                  load={(q) => searchIssueDestinations(q, { fromWarehouseId: form.warehouse_id, withSac: true })}
+                  toRow={sacRow}
+                  emptyText="No point with a service area code."
+                  disabled={locked}
+                />
+              )}
+              <Field label="Vehicle" hint={destPoint && !destPoint.vehicle_number && !form.vehicle_number
+                ? `None for ${pointKind(destPoint.warehouse_type) === "Warehouse" ? "a warehouse" : `an ${pointKind(destPoint.warehouse_type)}`} — type one if a vehicle is taking it.`
+                : "Filled from the destination; type over it if another vehicle goes."}>
+                <Input value={form.vehicle_number ?? ""} disabled={locked}
+                       onChange={(e) => set("vehicle_number", e.target.value)}
+                       placeholder={destPoint && !destPoint.vehicle_number ? "None" : "Vehicle number"} />
+              </Field>
+              <div className="sm:col-span-2">
+                <SearchPicker<IssueEmployeeOption>
+                  label="Issued to"
+                  hint={destPoint?.office_id && !everyone
+                    ? "People at the destination. Choosing one fills Department and Project."
+                    : "Search every employee by name, code, office or department."}
+                  placeholder="Search name, employee or position code"
+                  value={issuedTo ? personRow(issuedTo) : (form.issued_to_id
+                    ? { id: form.issued_to_id, title: issuedToName ?? String(form.issued_to_id) }
+                    : null)}
+                  onChange={chooseEmployee}
+                  queryKey={["issue-employees", personOffice]}
+                  load={(q) => searchIssueEmployees(q, personOffice)}
+                  toRow={personRow}
+                  emptyText={personOffice ? "Nobody is recorded at this office." : "No active employees."}
+                  filterNote={personOffice ? (
+                    <span>
+                      Showing people at <b className="text-ink">{destPoint?.office_name || destPoint?.name}</b>.{" "}
+                      <button type="button" className="font-semibold text-brand hover:underline"
+                              onClick={() => setEveryone(true)}>
+                        Show everyone
+                      </button>
+                    </span>
+                  ) : destPoint?.office_id ? (
+                    <span>
+                      Showing everyone.{" "}
+                      <button type="button" className="font-semibold text-brand hover:underline"
+                              onClick={() => setEveryone(false)}>
+                        Only people at the destination
+                      </button>
+                    </span>
+                  ) : undefined}
+                  disabled={locked}
+                />
+              </div>
+            </>
+          ) : (
+            <>
           <Field label="Issued to">
             <Lookup name="employees" load={employeeOptions} value={form.issued_to_id ?? ""} isDisabled={locked}
                     // The list is the first page of employees, so a person outside it
@@ -1315,6 +1521,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               disabled
             />
           </Field>
+            </>
+          )}
         </div>
       </Section>
 
@@ -1391,6 +1599,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           binManaged={isBinManaged}
           locked={locked}
           unitsLocked={serialsLocked}
+          codesLocked={codesLocked}
           unitsHidden={unitsHidden}
           onPickUnits={setSerialLine}
           meta={trackingMeta}
@@ -1518,7 +1727,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         noun={unitNoun(activeUnitMode)}
         unitMode={activeUnitMode}
         scope={activeScope}
-        readOnly={serialsLocked}
+        // Asset and consumable codes are auto-assigned but swappable (`codesLocked`).
+        // Serial/IMEI keep the document-wide rule.
+        readOnly={activeTracking === "ASSET" || activeTracking === "CONSUMABLE"
+          ? codesLocked
+          : serialsLocked}
         itemId={activeSerialLine?.item_id}
         warehouseId={form.warehouse_id}
         batchId={sourceId(activeSerialLine?.batch_id)}

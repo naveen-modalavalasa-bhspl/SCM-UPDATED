@@ -1,6 +1,8 @@
 import { api } from "@/shared/api/client";
 import type {
   UnlocatedStockStatus,
+  IssueDestinationOption,
+  IssueEmployeeOption,
   AcknowledgeWrite,
   ApprovalEvent,
   Attachment,
@@ -1087,6 +1089,24 @@ export const consignmentRecommendations = (limit = 8) =>
   get<ConsignmentRecommendation[]>(`${BASE}/options/consignment-recommendations`, { limit });
 
 export const employeeOptions = (search?: string) => get<Option[]>(`${BASE}/options/employees`, { search });
+
+/** Every active employee, searched on the server; `office_id` narrows to one office. */
+export const searchIssueEmployees = (search: string, officeId?: number | null) =>
+  get<{ items: IssueEmployeeOption[]; total: number }>(`${BASE}/options/issue-employees`, {
+    search: search || undefined, office_id: officeId ?? undefined,
+  });
+
+/** Every warehouse / MDP / LIP a direct issue can go to — never the user's own. */
+export const searchIssueDestinations = (
+  search: string,
+  opts: { fromWarehouseId?: number | null; officeId?: number | null; withSac?: boolean } = {},
+) =>
+  get<{ items: IssueDestinationOption[]; total: number }>(`${BASE}/options/issue-destinations`, {
+    search: search || undefined,
+    from_warehouse_id: opts.fromWarehouseId || undefined,
+    office_id: opts.officeId ?? undefined,
+    with_sac: opts.withSac || undefined,
+  });
 
 export const getEmployeeDestination = (employee_id: number) =>
   get<{

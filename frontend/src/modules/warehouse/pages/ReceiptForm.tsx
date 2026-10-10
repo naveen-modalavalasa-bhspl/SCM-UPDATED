@@ -19,6 +19,7 @@ import {
 
 import { fmtMoney, fmtQty, num, rate2, today } from "../format";
 import { alerts } from "@/modules/alerts";
+import { useAuth } from "@/shared/auth/AuthContext";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 import { useMyPoint, usePointLabel } from "../usePointLabel";
 
@@ -119,6 +120,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   const { id } = useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
+  const { can } = useAuth();
   const editing = !!id && id !== "new";
   const isGrn = mode === "PURCHASE";
 
@@ -556,6 +558,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   }, [form.items]);
 
   const locked = !!doc && !["DRAFT", "GATE_ENTRY"].includes(doc.status);
+  /* Filing a document is the same grant as saving one: POST /attachments is gated
+   * on receipt.create, so offering "Attach a file" without it ends in a refusal
+   * banner for an action the screen itself invited. Save is already <Can>-gated;
+   * this keeps the Documents panel honest the same way. */
+  const canFile = can("receipt.create");
   /** Lines came off a consignment, so the items are fixed by what was sent. */
   const fromConsignment = form.receipt_type === "DISPATCH";
 
@@ -777,6 +784,92 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     },
   });
 
+  /** What the selected order still owes, per PO line — and what it owes nothing of. */
+  const { data: poState } = useQuery({
+    queryKey: ["wh-lookup", "po-lines", form.po_id ?? 0, doc?.id ?? 0],
+    queryFn: () => getPoLines(form.po_id as number, doc?.id),
+    enabled: Boolean(form.po_id) && !locked,
+    staleTime: 60_000,
+  });
+
+  /**
+   * What is wrong with each line, said on the line BEFORE Save — the same two rules
+   * the save enforces, so the press never gets as far as the server's refusal:
+   *
+   * - a DUPLICATE: the same item and batch as an earlier line of this Inward
+   *   (`_apply_receipt_lines`);
+   * - an order line ALREADY RECEIVED, or taken past what it still owes
+   *   (`_assert_po_fulfilment`). A line added by hand for an item the order names is
+   *   checked against that item's PO line exactly as the server ties it.
+   */
+  const lineProblems = useMemo(() => {
+    const problems = new Map<number, string>();
+    const first = new Map<string, number>();
+    form.items.forEach((l, i) => {
+      if (!l.item_id) return;
+      const key = `${l.item_id}|${(l.batch_no ?? "").trim().toLowerCase()}`;
+      const earlier = first.get(key);
+      if (earlier === undefined) first.set(key, i);
+      else {
+        const where = l.batch_no?.trim() ? `batch ${l.batch_no.trim()}` : "no batch";
+        problems.set(i, `Duplicate of line ${earlier + 1} (same item, ${where}). Remove this `
+          + `line and add its quantity to line ${earlier + 1}, or enter a different batch.`);
+      }
+    });
+
+    if (form.po_id && poState) {
+      const open = new Map(poState.lines.map((p) => [p.po_item_id, p]));
+      const settled = new Map((poState.settled_lines ?? []).map((p) => [p.po_item_id, p]));
+      const ofItem = new Map<number, number[]>();
+      [...poState.lines, ...(poState.settled_lines ?? [])]
+        .sort((a, b) => a.po_item_id - b.po_item_id)
+        .forEach((p) => ofItem.set(p.item_id, [...(ofItem.get(p.item_id) ?? []), p.po_item_id]));
+      const taken = new Map<number, number>();
+      const by = poState.received_by?.length ? ` by ${poState.received_by.join(", ")}` : "";
+      form.items.forEach((l, i) => {
+        if (!l.item_id || problems.has(i)) return;
+        let pid = l.po_item_id ?? null;
+        if (!pid && ofItem.has(l.item_id)) {
+          const candidates = ofItem.get(l.item_id)!;
+          pid = candidates.find((c) =>
+            num(open.get(c)?.pending_qty) - (taken.get(c) ?? 0) > 0) ?? candidates[0];
+        }
+        if (!pid) return;
+        const running = (taken.get(pid) ?? 0) + num(l.received_qty);
+        const line = open.get(pid);
+        if (!line) {
+          const done = settled.get(pid);
+          if (done) {
+            problems.set(i, `Already fully received against ${form.po_no || "this PO"} — all `
+              + `${fmtQty(done.ordered_qty)}${by}. Nothing is left to receive; remove this line.`);
+          }
+          return;
+        }
+        if (running > num(line.pending_qty)) {
+          problems.set(i, `Only ${fmtQty(line.pending_qty)} still to come on ${form.po_no || "this PO"} `
+            + `(${fmtQty(line.received_qty)} already received${by}), and this Inward takes `
+            + `${fmtQty(running)}. Enter what actually arrived.`);
+        }
+        taken.set(pid, running);
+      });
+    }
+    return problems;
+  }, [form.items, form.po_id, form.po_no, poState]);
+  const problemMessage = (() => {
+    const [index, message] = lineProblems.entries().next().value ?? [];
+    if (index === undefined || !message) return null;
+    const code = form.items[index]?.item_code ?? savedLine(index)?.item_code;
+    const more = lineProblems.size > 1 ? ` (${lineProblems.size - 1} more line${lineProblems.size === 2 ? "" : "s"} to fix)` : "";
+    return `Line ${index + 1}${code ? ` · ${code}` : ""}: ${message}${more}`;
+  })();
+
+  /** The problem on one line, under its item — where the eye already is. */
+  const lineNote = (i: number) => !locked && lineProblems.has(i) ? (
+    <p className="mt-1 whitespace-normal text-[11px] font-semibold leading-snug text-bad">
+      {lineProblems.get(i)}
+    </p>
+  ) : null;
+
   const invalid = {
     warehouse: touched && !form.warehouse_id,
     lines: touched && form.items.length === 0,
@@ -786,6 +879,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     setTouched(true);
     if (!form.warehouse_id) return;
     if (form.items.length === 0) return;
+    if (lineProblems.size > 0) return;
     save.mutate();
   };
 
@@ -819,10 +913,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 {name ?? (fromConsignment ? "Consignment line" : "PO line")}
               </div>
               <div className="truncate font-mono text-[11px] text-muted">{code ?? "—"}</div>
+              {lineNote(i)}
             </div>
           );
         }
         return (
+          <>
           <Lookup
             name="items"
             load={itemOptions}
@@ -843,6 +939,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             }}
             placeholder="Pick an item"
           />
+          {lineNote(i)}
+          </>
         );
       },
     },
@@ -1140,7 +1238,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         }
       />
 
-      <ErrorBanner error={save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
+      <ErrorBanner error={(touched && !locked ? problemMessage : null) ?? save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -1396,6 +1494,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           }
         >
           {invalid.lines && <ErrorBanner error="Add at least one line before saving." />}
+          {!locked && problemMessage && <ErrorBanner error={problemMessage} />}
           <LinesEditor
             rows={form.items}
             columns={columns}
@@ -1447,11 +1546,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       </Section>
 
       <Section title="Documents" hint="Invoice copy, LR slip, packing list, weighbridge ticket.">
+        {!locked && !canFile && (
+          <p className="mb-3 text-xs text-muted">
+            You can view this entry. Attaching a document needs the receipt filing
+            permission — ask your admin for access.
+          </p>
+        )}
         <AttachmentsPanel
           entityType="RECEIPT"
           entityId={doc?.id}
           category="INWARD"
-          readOnly={locked}
+          readOnly={locked || !canFile}
           onStagedChange={setStagedFiles}
         />
       </Section>

@@ -134,6 +134,9 @@ interface Props {
   locked: boolean;
   /** Even the units are settled — posted, cancelled, or somebody else's to name. */
   unitsLocked: boolean;
+  /** Asset/consumable codes only — swappable by the issuer or an approver. Falls back
+   *  to `locked && unitsLocked` when not given. */
+  codesLocked?: boolean;
   /** Identifiers are not picked yet at all — drafts and documents in approval. The
    *  units are chosen at the shelf by whoever issues it, once it is approved. */
   unitsHidden?: boolean;
@@ -162,7 +165,7 @@ interface Props {
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
-  locked, unitsLocked, unitsHidden = false, onPickUnits, meta, problemAt, unitSupply,
+  locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, meta, problemAt, unitSupply,
   sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate,
 }: Props) {
   const patch = (index: number, change: Partial<IssueItemWrite>) =>
@@ -309,6 +312,7 @@ export function IssueSplitEditor({
           indentId={indentId}
           locked={locked}
           unitsLocked={unitsLocked}
+          codesLocked={codesLocked}
           unitsHidden={unitsHidden}
           unitMeta={meta(group.trackingType)}
           problemAt={problemAt}
@@ -358,6 +362,7 @@ interface ItemProps {
   indentId?: number | null;
   locked: boolean;
   unitsLocked: boolean;
+  codesLocked?: boolean;
   unitsHidden: boolean;
   unitMeta: TrackingTypeMeta | null;
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
@@ -718,7 +723,7 @@ interface PickProps extends ItemProps {
 function PickRow(props: PickProps) {
   const {
     group, split, position, sources, batches, fefoHint, binManaged, locked,
-    unitsLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
+    unitsLocked, codesLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
     renderRate,
   } = props;
 
@@ -744,9 +749,9 @@ function PickRow(props: PickProps) {
   // an IMEI is read off the goods at the shelf, and stays "picked after approval".
   const autoCodes = group.trackingType === "ASSET" || group.trackingType === "CONSUMABLE";
   const hidden = unitsHidden && !autoCodes;
-  // Editable on a draft and, once approved, by whoever issues it; only viewable in
+  // Editable on a draft and, once approved, by whoever issues it or approved it; only viewable in
   // between. Serial/IMEI picks keep the document-wide rule.
-  const pickLocked = autoCodes ? locked && unitsLocked : unitsLocked;
+  const pickLocked = autoCodes ? codesLocked ?? (locked && unitsLocked) : unitsLocked;
   // Everybody else's reservation on this balance row. Worth naming: an unexplained
   // gap between what is on the shelf and what the pick may take reads as a bug.
   const othersHold = split.reserved !== null && split.ownReserved !== null

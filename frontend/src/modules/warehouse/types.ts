@@ -1127,6 +1127,9 @@ export interface Issue {
   /** Service area code of the destination office, resolved from HCM when the issue is
    *  served. Null for offices HCM holds no SAC for. */
   destination_office_sac?: string | null;
+  destination_warehouse_id?: number | null;
+  destination_warehouse_name?: string | null;
+  destination_warehouse_type?: string | null;
   direction: "OUT" | "IN";
   original_issue_id?: number | null;
   original_issue_no?: string | null;
@@ -1171,6 +1174,8 @@ export interface Issue {
   /** Only the person an approved issue is with (or someone they report to) may pick
    *  its serials and issue it from stock. The server enforces the same rule. */
   can_issue_from_stock?: boolean;
+  /** May swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it. */
+  can_swap_codes?: boolean;
   /** Who submitted it for approval; shown until stock is posted. */
   submitted_by_name?: string | null;
   /**
@@ -1419,10 +1424,38 @@ export interface IssueWrite {
   vehicle_id?: number | null;
   vehicle_number?: string | null;
   issued_to_id?: number | null;
+  /** The stocking point chosen as the destination; wins over the derived one. */
+  destination_warehouse_id?: number | null;
   direction?: "OUT" | "IN";
   original_issue_id?: number | null;
   remarks?: string | null;
   items: IssueItemWrite[];
+}
+
+/** A point a direct issue can go to (`/options/issue-destinations`). */
+export interface IssueDestinationOption {
+  warehouse_id: number;
+  code?: string | null;
+  name: string;
+  warehouse_type?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  sac?: string | null;
+  vehicle_number?: string | null;
+}
+
+/** A person a direct issue can be issued to (`/options/issue-employees`). */
+export interface IssueEmployeeOption {
+  id: number;
+  code?: string | null;
+  name: string;
+  /** HCM position codes held, primary post first. */
+  position_codes?: string[];
+  position_name?: string | null;
+  office_id?: number | null;
+  office_name?: string | null;
+  department_name?: string | null;
+  project_name?: string | null;
 }
 
 /** `out_dispatches`. */
@@ -2751,6 +2784,9 @@ export interface PoPrefill {
    *  one to receive again — offering it prefilled with the whole ordered quantity is
    *  how one order came to be received twice. */
   lines: PoLineOption[];
+  /** The lines with nothing left, so a line added by hand can be named as already
+   *  received before Save. */
+  settled_lines?: PoLineOption[];
   /** How many lines the order has altogether, so an empty `lines` can be told apart
    *  from an empty order. */
   total_lines?: number;

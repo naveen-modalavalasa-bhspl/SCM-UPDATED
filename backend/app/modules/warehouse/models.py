@@ -435,6 +435,11 @@ class MaterialIssue(Base):
     vehicle_number = Column(String(50), nullable=True)
     issued_to_id = soft_fk()
     issued_to_name = Column(String(200), nullable=True)
+    # The stocking point the goods are going to, when the store CHOSE one on a direct
+    # issue. Wins over the issued-to person's and the indent's office in
+    # `service._issue_destination`. NULL keeps the derived answer.
+    destination_warehouse_id = soft_fk()
+    destination_warehouse_name = Column(String(200), nullable=True)
 
     direction = Column(String(3), nullable=False, default="OUT")
     original_issue_id = Column(BigInteger, nullable=True)

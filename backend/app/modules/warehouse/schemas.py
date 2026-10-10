@@ -895,6 +895,44 @@ class PoLineOption(BaseModel):
     rate: Decimal | None = None
 
 
+class IssueDestinationOption(BaseModel):
+    """One stocking point a direct issue can be sent to, with what follows from it."""
+    warehouse_id: int
+    code: str | None = None
+    name: str
+    warehouse_type: str | None = None
+    office_id: int | None = None
+    office_name: str | None = None
+    sac: str | None = None
+    vehicle_number: str | None = None
+
+
+class IssueDestinationPage(BaseModel):
+    items: list[IssueDestinationOption] = Field(default_factory=list)
+    #: Matches before the cap, so the picker can say "keep typing".
+    total: int = 0
+
+
+class IssueEmployeeOption(BaseModel):
+    """One person a direct issue can be issued to, with their office."""
+    id: int
+    code: str | None = None
+    name: str
+    #: The HCM position codes this person holds, primary post first.
+    position_codes: list[str] = Field(default_factory=list)
+    #: The primary post's role (or position name).
+    position_name: str | None = None
+    office_id: int | None = None
+    office_name: str | None = None
+    department_name: str | None = None
+    project_name: str | None = None
+
+
+class IssueEmployeePage(BaseModel):
+    items: list[IssueEmployeeOption] = Field(default_factory=list)
+    total: int = 0
+
+
 class PoPrefill(BaseModel):
     vendor_id: int | None = None
     vendor_name: str | None = None
@@ -905,6 +943,9 @@ class PoPrefill(BaseModel):
     #: Only the lines with something still outstanding. A fully received line is not
     #: one to receive again — see `service.po_lines`.
     lines: list[PoLineOption] = Field(default_factory=list)
+    #: The lines with NOTHING left — never prefilled, served so the form can name one a
+    #: storekeeper adds by hand as already received, before Save rather than after.
+    settled_lines: list[PoLineOption] = Field(default_factory=list)
     #: How many lines the order has altogether, so a screen can say "nothing left"
     #: rather than drawing an empty list and leaving the storekeeper to wonder whether
     #: the order was empty, the call failed, or the goods are already in.
@@ -1579,6 +1620,9 @@ class IssueWrite(BaseModel):
     # dropped on the way in and the column was written from `vehicle_id` alone.
     vehicle_number: str | None = Field(default=None, max_length=50)
     issued_to_id: int | None = None
+    # The stocking point chosen as the destination (any LIP / MDP / warehouse but the
+    # origin). Optional — without it the destination is derived as before.
+    destination_warehouse_id: int | None = None
     direction: IssueDirection = IssueDirection.OUT
     original_issue_id: int | None = None
     remarks: str | None = None
@@ -1765,6 +1809,10 @@ class IssueRead(_Read):
     destination_office_id: int | None = None
     destination_office_name: str | None = None
     destination_office_sac: str | None = None
+    destination_warehouse_id: int | None = None
+    destination_warehouse_name: str | None = None
+    #: MAIN / MDP / LIP of the chosen destination point, for its badge.
+    destination_warehouse_type: str | None = None
     direction: str
     original_issue_id: int | None = None
     original_issue_no: str | None = None
@@ -1811,6 +1859,8 @@ class IssueDetail(IssueRead):
     # True only for the person an approved issue is with, or someone above them on the
     # HCM reporting line. `post_issue` and `set_issue_serials` enforce the same rule.
     can_issue_from_stock: bool = False
+    # Swap auto-assigned asset/consumable codes: the issuer, or anyone who approved it.
+    can_swap_codes: bool = False
     # Whoever submitted it for approval (the workflow's starter), shown as "Submitted
     # by" until stock is posted and `issued_by_name` is stamped.
     submitted_by_name: str | None = None
@@ -3990,6 +4040,13 @@ class DirectIssueAckLine(BaseModel):
     issued_qty: Decimal = Decimal("0")
 
 
+class DirectIssueConsignment(BaseModel):
+    dispatch_id: int
+    dispatch_no: str
+    status: str | None = None
+    package_count: int = 0
+
+
 class DirectIssueAckRow(BaseModel):
     """A material issue raised against no indent, as its recipient sees it.
 
@@ -4009,6 +4066,8 @@ class DirectIssueAckRow(BaseModel):
     acknowledged_at: datetime | None = None
     can_acknowledge: bool = False
     lines: list[DirectIssueAckLine] = []
+    #: The consignments carrying this issue, each with how many packages it holds.
+    consignments: list[DirectIssueConsignment] = []
 
 
 class IssueSerialLineIn(BaseModel):

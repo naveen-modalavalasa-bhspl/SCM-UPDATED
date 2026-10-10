@@ -78,6 +78,7 @@ from app.platform.settings import service as settings_service
 from app.platform.settings.service import write_audit
 from app.platform.workflow import engine
 from app.platform.workflow import ladder as wf_ladder
+from app.platform.workflow.models import Action as WfAction
 from app.platform.workflow.models import Instance as WfInstance
 from app.modules.inventory.service import warehouse_ids_for_user
 from app.shared.scope import scope_condition
@@ -1459,14 +1460,19 @@ async def _assert_po_fulfilment(db: AsyncSession, receipt: m.Receipt,
         return
     from app.modules.procurement.models import POItem
 
+    po_rows = (await db.execute(
+        select(POItem.id, POItem.item_id, POItem.item_code, POItem.quantity)
+        .where(POItem.po_id == receipt.po_id).order_by(POItem.id))).all()
     ordered = {
         int(row.id): (_d(row.quantity), row.item_code or f"item {row.item_id}")
-        for row in (await db.execute(
-            select(POItem.id, POItem.item_id, POItem.item_code, POItem.quantity)
-            .where(POItem.po_id == receipt.po_id))).all()
+        for row in po_rows
     }
     if not ordered:
         return
+    # The order's lines per item, for a line added by hand with no PO line on it.
+    po_lines_of_item: dict[int, list[int]] = {}
+    for row in po_rows:
+        po_lines_of_item.setdefault(int(row.item_id), []).append(int(row.id))
     # What was already claimed when THIS receipt was raised. Not what has been
     # claimed since: a duplicate written today must not block an edit to the receipt
     # that legitimately took the goods last week.
@@ -1477,6 +1483,18 @@ async def _assert_po_fulfilment(db: AsyncSession, receipt: m.Receipt,
     taken: dict[int, Decimal] = {}
     for index, line in enumerate(lines, start=1):
         po_item_id = int(line.po_item_id) if line.po_item_id else None
+        if po_item_id is None and line.item_id in po_lines_of_item:
+            # Added by hand, but the order DOES name this item. Left unlinked it would
+            # be capped by nothing, and an item the order has fully received could be
+            # received again. Tie it to the item's first PO line with something still
+            # owed (else its first line, which the cap below then refuses with the
+            # receipts that took it), and keep the link on the saved line.
+            candidates = po_lines_of_item[line.item_id]
+            po_item_id = next(
+                (pid for pid in candidates
+                 if ordered[pid][0] - already.get(pid, ZERO) - taken.get(pid, ZERO) > ZERO),
+                candidates[0])
+            line.po_item_id = po_item_id
         if po_item_id is None or po_item_id not in ordered:
             # A delivery can carry something the order does not name — a replacement,
             # a sample, goods the vendor added — and refusing it would stop real goods
@@ -1495,7 +1513,8 @@ async def _assert_po_fulfilment(db: AsyncSession, receipt: m.Receipt,
                     f"Line {index}: {label} is already fully received against "
                     f"{receipt.po_no or 'this order'} — all {cap} of it"
                     + (f", by {who}" if who else "")
-                    + ". There is nothing left to receive on this line."
+                    + ". There is nothing left to receive — remove line "
+                    f"{index} from this Material Inward."
                 )
             raise ValidationError(
                 f"Line {index}: {receipt.po_no or 'this order'} has {outstanding} of "
@@ -1591,14 +1610,16 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(f"Line {index}: received quantity cannot be negative")
         # One line per item per batch. A second line for the same pair is the same
         # goods entered twice, and each one would post its own stock movement.
+        # Mirrored by `duplicateLines` on the form, which says it before the press.
         batch_key = (line.batch_no or "").strip().lower()
         claimed = seen_batch_by_item.setdefault(item.id, {})
         if batch_key in claimed:
             where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
             raise ValidationError(
-                f"Line {index}: {item.code} with {where} is already on line "
-                f"{claimed[batch_key]} of this GRN. Record it once, with the total "
-                f"quantity."
+                f"Line {index} is a duplicate: {item.code} with {where} is already "
+                f"on line {claimed[batch_key]} of this Material Inward. Remove line "
+                f"{index} and add its quantity to line {claimed[batch_key]}, or enter "
+                f"a different batch number on it."
             )
         claimed[batch_key] = index
 
@@ -3814,13 +3835,12 @@ async def po_lines(db: AsyncSession, po_id: int,
     ]
 
     lines = []
+    settled = []
     for line in items:
         ordered = _d(line.quantity)
         already = received.get(int(line.id), ZERO)
         pending = max(ordered - already, ZERO)
-        if pending <= ZERO:
-            continue
-        lines.append({
+        (lines if pending > ZERO else settled).append({
             "po_item_id": line.id,
             "indent_id": None,
             "item_id": line.item_id,
@@ -3841,6 +3861,7 @@ async def po_lines(db: AsyncSession, po_id: int,
         "project_name": po.project_name,
         "total_amount": po.total_amount,
         "lines": lines,
+        "settled_lines": settled,
         "total_lines": len(items),
         "received_by": taken_by,
     }
@@ -9359,6 +9380,12 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
     setattr(issue, "can_issue_from_stock",
             issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
             and user is not None and await _may_act_as_issue_holder(db, user, holders))
+    # Asset/consumable codes are auto-assigned, so whoever APPROVED the issue may swap
+    # them too, not only the person issuing it. See `set_issue_serials`.
+    setattr(issue, "can_swap_codes",
+            issue.can_issue_from_stock
+            or (issue.status == IssueStatus.APPROVED.value and not issue.is_stock_posted
+                and await _issue_approved_by(db, issue.id, user)))
     setattr(issue, "can_acknowledge", await _receiver_confirmed(db, issue))
     setattr(issue, "is_stock_transfer", await is_stock_transfer_issue(db, issue.id))
     if issue.floor_location_id:
@@ -9573,6 +9600,9 @@ async def _decorate_issue_destination(
     setattr(issue, "destination_office_id", office_id)
     setattr(issue, "destination_office_name", office_name)
     setattr(issue, "destination_office_sac", await _office_sac(db, office_id))
+    chosen = getattr(issue, "destination_warehouse_id", None)
+    point = await db.get(Warehouse, chosen) if chosen else None
+    setattr(issue, "destination_warehouse_type", point.warehouse_type if point else None)
     return issue
 
 
@@ -9644,6 +9674,13 @@ async def _issue_destination(
 
     if not issue:
         return None, None
+    # A point the store CHOSE wins over anything derived. A main warehouse may stand
+    # on no HCM office; it is still where the goods go, so its own name answers.
+    chosen = getattr(issue, "destination_warehouse_id", None)
+    if chosen:
+        point = await db.get(Warehouse, chosen)
+        if point is not None:
+            return point.office_id, point.office_name or point.name
     if issue.issued_to_id:
         employee = await db.get(HcmEmployee, issue.issued_to_id)
         if employee is not None and employee.office_id:
@@ -9709,6 +9746,11 @@ async def _requesting_point(
     know which point it was, so they can say WHY the destination came back blank
     instead of showing an empty box nobody can explain.
     """
+    chosen = getattr(issue, "destination_warehouse_id", None)
+    if chosen:
+        point = await db.get(Warehouse, chosen)
+        if point is not None:
+            return point
     office_id, _ = await _issue_destination(db, issue)
     if office_id is None:
         return None
@@ -9878,6 +9920,7 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
         issued_to_id=data.issued_to_id,
         vehicle_number=data.vehicle_number,
     )
+    destination = await _issue_destination_point(db, data.destination_warehouse_id, wh.id)
 
     issue = m.MaterialIssue(
         # items=[] is not cosmetic. Without it the collection is unloaded after the
@@ -9903,6 +9946,8 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
         vehicle_number=snapshots["vehicle_number"],
         issued_to_id=data.issued_to_id,
         issued_to_name=snapshots["issued_to_name"],
+        destination_warehouse_id=destination.id if destination else None,
+        destination_warehouse_name=destination.name if destination else None,
         direction=data.direction.value,
         original_issue_id=original.id if original else None,
         original_issue_no=original.issue_no if original else None,
@@ -10320,6 +10365,9 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     issue.vehicle_number = snapshots["vehicle_number"]
     issue.issued_to_id = data.issued_to_id
     issue.issued_to_name = snapshots["issued_to_name"]
+    destination = await _issue_destination_point(db, data.destination_warehouse_id, wh.id)
+    issue.destination_warehouse_id = destination.id if destination else None
+    issue.destination_warehouse_name = destination.name if destination else None
     issue.remarks = data.remarks
 
     if issue.direction != IssueDirection.IN.value and data.items:
@@ -10571,6 +10619,21 @@ async def _may_act_as_issue_holder(db: AsyncSession, user,
         seen |= parents
         frontier = parents
     return False
+
+
+async def _issue_approved_by(db: AsyncSession, issue_id: int, user) -> bool:
+    """Did this person sign an approval on this issue? Read off `wf_actions`."""
+    if user is None:
+        return False
+    return (await db.execute(
+        select(WfAction.id)
+        .join(WfInstance, WfInstance.id == WfAction.instance_id)
+        .where(WfInstance.doc_id == issue_id,
+               WfInstance.doc_type.in_(ISSUE_DOC_TYPES),
+               WfAction.actor_id == user.id,
+               WfAction.action == ApprovalAction.APPROVED.value)
+        .limit(1)
+    )).scalar_one_or_none() is not None
 
 
 async def _assert_issue_holder(db: AsyncSession, issue, user) -> None:
@@ -11177,14 +11240,30 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
            "capture serials on", "issue")
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
+    # The holder works an approved issue. Whoever APPROVED it may also swap the
+    # auto-assigned asset/consumable codes — but not serials or IMEIs, which are read
+    # off the goods at the shelf by the person issuing them.
+    approver_only = False
     if issue.status == IssueStatus.APPROVED.value:
-        await _assert_issue_holder(db, issue, user)
+        holders = (await _issue_holders_bulk(db, [issue])).get(issue.id, [])
+        if not await _may_act_as_issue_holder(db, user, holders):
+            if not await _issue_approved_by(db, issue.id, user):
+                await _assert_issue_holder(db, issue, user)
+            approver_only = True
 
     by_line = {row.id: row.serial_numbers for row in data.lines}
     unknown = set(by_line) - {line.id for line in issue.items}
     if unknown:
         raise ValidationError(
             f"Line {sorted(unknown)[0]} is not on {issue.issue_no}")
+    if approver_only:
+        auto_coded = {TrackingType.ASSET.value, TrackingType.CONSUMABLE.value}
+        for line in issue.items:
+            if line.id in by_line and getattr(line, "tracking_type", None) not in auto_coded:
+                raise PermissionError_(
+                    f"Only the person issuing {issue.issue_no} can pick serials or "
+                    f"IMEIs. As its approver you can change asset and consumable "
+                    f"codes only.")
 
     # _reserve_issue_serials zips strictly against issue.items, so every line is
     # restated — the ones not being edited keep the serials already reserved.
@@ -12643,7 +12722,9 @@ async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | N
             ).correlate(m.MaterialIssue).exists(),
         ))
     issues = (await db.execute(stmt.order_by(m.MaterialIssue.id.desc()).limit(200))).scalars().all()
+    consignments = await _consignments_of_issues(db, [issue.id for issue in issues])
     return [{
+        "consignments": consignments.get(issue.id, []),
         "issue_id": issue.id, "issue_no": issue.issue_no, "issue_date": issue.issue_date,
         "status": issue.status, "warehouse_name": issue.warehouse_name,
         "department_name": issue.department_name, "project_name": issue.project_name,
@@ -12657,6 +12738,42 @@ async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | N
                    "issued_qty": line.issued_qty}
                   for line in issue.items if _d(line.issued_qty) > 0],
     } for issue in issues]
+
+
+async def _consignments_of_issues(db: AsyncSession,
+                                  issue_ids: list[int]) -> dict[int, list[dict]]:
+    """The live consignments carrying each issue, with their package counts.
+
+    `_carries_issue` for a page of issues in three queries: the consignment that names
+    one issue as its reference, the ones that carry it among several (`DispatchSource`),
+    and one grouped count of packages. Cancelled consignments are not on the road.
+    """
+    if not issue_ids:
+        return {}
+    live = m.Dispatch.status != DispatchStatus.CANCELLED.value
+    pairs = list((await db.execute(
+        select(m.Dispatch.ref_id, m.Dispatch.id, m.Dispatch.dispatch_no, m.Dispatch.status)
+        .where(m.Dispatch.ref_type.in_(SINGLE_ISSUE_REF_TYPES),
+               m.Dispatch.ref_id.in_(issue_ids), live)
+    )).all()) + list((await db.execute(
+        select(m.DispatchSource.issue_id, m.Dispatch.id, m.Dispatch.dispatch_no, m.Dispatch.status)
+        .join(m.Dispatch, m.Dispatch.id == m.DispatchSource.dispatch_id)
+        .where(m.DispatchSource.issue_id.in_(issue_ids), live)
+    )).all())
+    dispatch_ids = {dispatch_id for _i, dispatch_id, _n, _s in pairs}
+    packages = dict((await db.execute(
+        select(m.DispatchPackage.dispatch_id, func.count(m.DispatchPackage.id))
+        .where(m.DispatchPackage.dispatch_id.in_(dispatch_ids))
+        .group_by(m.DispatchPackage.dispatch_id)
+    )).all()) if dispatch_ids else {}
+    out: dict[int, list[dict]] = defaultdict(list)
+    for issue_id, dispatch_id, dispatch_no, status in sorted(pairs, key=lambda p: p[1]):
+        if any(row["dispatch_id"] == dispatch_id for row in out[issue_id]):
+            continue
+        out[issue_id].append({"dispatch_id": dispatch_id, "dispatch_no": dispatch_no,
+                              "status": status,
+                              "package_count": int(packages.get(dispatch_id, 0))})
+    return out
 
 
 ISSUE_ACK_ENTITY_TYPE = "ISSUE_RECEIPT"
@@ -23888,6 +24005,13 @@ async def _requesting_points(
         office_id = office_of_employee.get(row.issued_to_id) if row.issued_to_id else None
         office_of_issue[row.id] = office_id or office_of_indent.get(row.indent_id)
 
+    chosen_ids = {row.destination_warehouse_id for row in issues
+                  if getattr(row, "destination_warehouse_id", None)}
+    chosen = {
+        point.id: point for point in (await db.execute(
+            select(Warehouse).where(Warehouse.id.in_(chosen_ids)))).scalars().all()
+    } if chosen_ids else {}
+
     office_ids = {value for value in office_of_issue.values() if value}
     point_of_office: dict[int, Warehouse] = {}
     if office_ids:
@@ -23897,8 +24021,12 @@ async def _requesting_points(
             .order_by(Warehouse.id)
         )).scalars().all():
             point_of_office.setdefault(point.office_id, point)
+    # A chosen destination wins, exactly as in `_requesting_point`.
+    chosen_of_issue = {row.id: chosen.get(row.destination_warehouse_id)
+                       for row in issues if getattr(row, "destination_warehouse_id", None)}
     return {
-        issue_id: point_of_office.get(office_id) if office_id else None
+        issue_id: chosen_of_issue.get(issue_id)
+        or (point_of_office.get(office_id) if office_id else None)
         for issue_id, office_id in office_of_issue.items()
     }
 
@@ -24321,6 +24449,197 @@ async def employee_destination(db: AsyncSession, employee_id: int) -> dict:
         "department_name": employee.department_name,
         "project_id": employee.project_id,
         "project_name": employee.project_name,
+    }
+
+
+async def _issue_destination_point(
+    db: AsyncSession, warehouse_id: int | None, origin_id: int,
+) -> Warehouse | None:
+    """The chosen destination point of an issue, checked. None when none was chosen."""
+    if not warehouse_id:
+        return None
+    point = await db.get(Warehouse, warehouse_id)
+    if point is None or not point.is_active:
+        raise ValidationError("The destination is not an active warehouse, MDP or LIP")
+    if point.id == origin_id:
+        raise ValidationError(
+            f"{point.name} is the warehouse the goods are leaving. Pick where they are "
+            "going instead.")
+    return point
+
+
+async def _own_point_ids(db: AsyncSession, user) -> set[int]:
+    """The stocking points this login works FROM — never offered as a destination.
+
+    Its own floor only, not everything its role may see: a District Manager can see
+    every LIP under him, and every one of those is somewhere he sends goods to. With a
+    post in hand it is the shelves that post holds (BUG_SCM_012); otherwise the points
+    the person is in charge of or that sit on their own office.
+    """
+    if user is None:
+        return set()
+    position = getattr(user, "active_position_id", None)
+    if position is not None:
+        return await stock_locations.held_location_ids(db, position, subtree=False)
+    conditions = [Warehouse.incharge_id == user.id]
+    if getattr(user, "office_id", None) is not None:
+        conditions.append(Warehouse.office_id == user.office_id)
+    return set((await db.execute(
+        select(Warehouse.id).where(Warehouse.is_active.is_(True), or_(*conditions))
+    )).scalars().all())
+
+
+#: Every active stocking point with its office's SAC, held briefly per process. ~1,000
+#: rows, each needing the office's raw HCM payload for its SAC — read once a minute,
+#: not once a keystroke. The points change on an HCM sync, not between two searches.
+_DESTINATION_CATALOG: dict[str, object] = {"at": 0.0, "rows": []}
+_DESTINATION_TTL = 60.0
+_POINT_ORDER = {"MAIN": 0, "MDP": 1, "LIP": 2}
+
+
+async def _destination_catalog(db: AsyncSession) -> list[dict]:
+    import time
+    from app.platform.hcm import mappers
+    from app.platform.hcm.models import HcmOffice
+
+    now = time.monotonic()
+    if _DESTINATION_CATALOG["rows"] and now - float(_DESTINATION_CATALOG["at"]) < _DESTINATION_TTL:
+        return _DESTINATION_CATALOG["rows"]  # type: ignore[return-value]
+    rows = []
+    for point, office_name, raw in (await db.execute(
+        select(Warehouse, HcmOffice.name, HcmOffice.raw)
+        .outerjoin(HcmOffice, HcmOffice.id == Warehouse.office_id)
+        .where(Warehouse.is_active.is_(True))
+    )).all():
+        office = point.office_name or office_name
+        rows.append({
+            "warehouse_id": point.id,
+            "code": point.code,
+            "name": point.name,
+            "warehouse_type": point.warehouse_type,
+            "office_id": point.office_id,
+            "office_name": office,
+            "sac": mappers.office_sac(raw),
+            # Only a point standing on an MMU office has one — its name ends in it.
+            "vehicle_number": _vehicle_from_office_name(office),
+        })
+    rows.sort(key=lambda r: (_POINT_ORDER.get(r["warehouse_type"], 0), r["name"].lower()))
+    _DESTINATION_CATALOG.update(at=now, rows=rows)
+    return rows
+
+
+def _matches(needles: list[str], *values) -> bool:
+    """Every word typed appears somewhere in the row — in any field, in any order."""
+    haystack = " ".join(str(v) for v in values if v).lower()
+    return all(needle in haystack for needle in needles)
+
+
+async def issue_destination_options(
+    db: AsyncSession, user, *, search: str | None = None,
+    from_warehouse_id: int | None = None, office_id: int | None = None,
+    with_sac: bool = False, limit: int = 50,
+) -> dict:
+    """Where a direct issue can go: every warehouse, MDP and LIP but the user's own.
+
+    Searched across the point's code and name, its office, its service area code and
+    its vehicle, every word anywhere — "badangi", "550R" and "AP39UH" all find the
+    same LIP. `office_id` narrows to the point(s) on one office (the issued-to person
+    has been chosen); `with_sac` to the points that carry a service area code, for the
+    SAC picker. An exact SAC or code match sorts first.
+    """
+    own = await _own_point_ids(db, user)
+    if from_warehouse_id:
+        own = own | {from_warehouse_id}
+    needles = [word for word in (search or "").lower().split() if word]
+    exact = (search or "").strip().lower()
+    hits = [
+        row for row in await _destination_catalog(db)
+        if row["warehouse_id"] not in own
+        and (office_id is None or row["office_id"] == office_id)
+        and (not with_sac or row["sac"])
+        and _matches(needles, row["code"], row["name"], row["office_name"],
+                     row["sac"], row["vehicle_number"], row["warehouse_type"])
+    ]
+    if exact:
+        hits.sort(key=lambda r: 0 if exact in {(r["sac"] or "").lower(),
+                                                (r["code"] or "").lower()} else 1)
+    return {"items": hits[:limit], "total": len(hits)}
+
+
+async def issue_employee_options(
+    db: AsyncSession, *, search: str | None = None, office_id: int | None = None,
+    limit: int = 30,
+) -> dict:
+    """Every active employee, searched on the SERVER — not the first page of them.
+
+    The old lookup loaded one capped page and filtered it in the browser, so anybody
+    past that page could not be found at all. Every word typed must match one of the
+    code, the name, the POSITION code, the office, the department or the project.
+    `office_id` narrows to the people of the chosen destination. Each row carries the
+    position code(s) the person holds — the primary post first — because one name can
+    stand on two posts, and the post is what the store actually recognises.
+    """
+    from app.platform.hcm.models import HcmEmployee, HcmPosition, HcmPositionAssignment
+
+    held = (
+        select(HcmPositionAssignment.employee_id)
+        .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+        .where(HcmPositionAssignment.is_active.is_(True), HcmPosition.is_active.is_(True))
+    )
+    stmt = select(HcmEmployee).where(HcmEmployee.is_active.is_(True))
+    if office_id is not None:
+        stmt = stmt.where(HcmEmployee.office_id == office_id)
+    for word in (search or "").split():
+        like = f"%{word}%"
+        stmt = stmt.where(or_(
+            HcmEmployee.emp_code.ilike(like), HcmEmployee.full_name.ilike(like),
+            HcmEmployee.office_name.ilike(like), HcmEmployee.department_name.ilike(like),
+            HcmEmployee.project_name.ilike(like),
+            HcmEmployee.id.in_(held.where(HcmPosition.code.ilike(like)))))
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    exact = (search or "").strip()
+    order = [HcmEmployee.full_name]
+    if exact:
+        # The code typed in full puts that person first.
+        order.insert(0, case((HcmEmployee.emp_code == exact, 0), else_=1))
+    rows = (await db.execute(stmt.order_by(*order).limit(limit))).scalars().all()
+
+    # One query for the page's posts, primary first.
+    #
+    # HCM also assigns a LIP's store-keeper post to the Driver and the DEO who carry
+    # that charge on the side, so read raw, every one of them wore a Store Keeper code.
+    # A person is shown their OWN post: a store-keeper post appears only for somebody
+    # who holds nothing else, i.e. who IS a Store Keeper.
+    posts: dict[int, list[tuple[str, str | None]]] = {}
+    side_charge: dict[int, list[tuple[str, str | None]]] = {}
+    if rows:
+        for employee_id, code, title, role in (await db.execute(
+            select(HcmPositionAssignment.employee_id, HcmPosition.code,
+                   func.coalesce(HcmPosition.role_name, HcmPosition.name),
+                   HcmPosition.role_name)
+            .join(HcmPosition, HcmPosition.id == HcmPositionAssignment.position_id)
+            .where(HcmPositionAssignment.employee_id.in_([r.id for r in rows]),
+                   HcmPositionAssignment.is_active.is_(True),
+                   HcmPosition.is_active.is_(True),
+                   HcmPosition.code.is_not(None))
+            .order_by(HcmPositionAssignment.employee_id,
+                      HcmPositionAssignment.is_primary.desc(), HcmPosition.id)
+        )).all():
+            keeper = "storekeeper" in (role or "").replace(" ", "").replace("-", "").lower()
+            bucket = side_charge if keeper else posts
+            if code not in {c for c, _t in bucket.get(employee_id, [])}:
+                bucket.setdefault(employee_id, []).append((code, title))
+        for employee_id, keeper_posts in side_charge.items():
+            posts.setdefault(employee_id, keeper_posts)
+    return {
+        "items": [{
+            "id": r.id, "code": r.emp_code, "name": r.full_name,
+            "position_codes": [c for c, _t in posts.get(r.id, [])],
+            "position_name": (posts.get(r.id) or [(None, None)])[0][1],
+            "office_id": r.office_id, "office_name": r.office_name,
+            "department_name": r.department_name, "project_name": r.project_name,
+        } for r in rows],
+        "total": total,
     }
 
 
