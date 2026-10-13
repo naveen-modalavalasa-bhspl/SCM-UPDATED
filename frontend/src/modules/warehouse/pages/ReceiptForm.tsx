@@ -802,8 +802,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
    *   (`_assert_po_fulfilment`). A line added by hand for an item the order names is
    *   checked against that item's PO line exactly as the server ties it.
    */
-  const lineProblems = useMemo(() => {
+  const { lineProblems, duplicateOrigins } = useMemo(() => {
     const problems = new Map<number, string>();
+    const origins = new Map<number, number>();
     const first = new Map<string, number>();
     form.items.forEach((l, i) => {
       if (!l.item_id) return;
@@ -811,9 +812,23 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       const earlier = first.get(key);
       if (earlier === undefined) first.set(key, i);
       else {
-        const where = l.batch_no?.trim() ? `batch ${l.batch_no.trim()}` : "no batch";
-        problems.set(i, `Duplicate of line ${earlier + 1} (same item, ${where}). Remove this `
-          + `line and add its quantity to line ${earlier + 1}, or enter a different batch.`);
+        origins.set(i, earlier);
+        const itemLabel = l.item_code ? `${l.item_code}` : "This item";
+        if (!isGrn) {
+          problems.set(
+            i,
+            `Duplicate item: ${itemLabel} is already added on Line ${earlier + 1}. `
+            + `Duplicate item entries are not allowed on Material Inward — combine the received quantity `
+            + `onto Line ${earlier + 1} or remove this line.`
+          );
+        } else {
+          const where = l.batch_no?.trim() ? `batch "${l.batch_no.trim()}"` : "no batch";
+          problems.set(
+            i,
+            `Duplicate of line ${earlier + 1} (${itemLabel}, ${where}). `
+            + `Duplicate item entries with the same batch are not allowed — combine quantity onto line ${earlier + 1} or specify a different batch number.`
+          );
+        }
       }
     });
 
@@ -853,8 +868,9 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         taken.set(pid, running);
       });
     }
-    return problems;
-  }, [form.items, form.po_id, form.po_no, poState]);
+    return { lineProblems: problems, duplicateOrigins: origins };
+  }, [form.items, form.po_id, form.po_no, poState, isGrn]);
+
   const problemMessage = (() => {
     const [index, message] = lineProblems.entries().next().value ?? [];
     if (index === undefined || !message) return null;
@@ -863,12 +879,60 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     return `Line ${index + 1}${code ? ` · ${code}` : ""}: ${message}${more}`;
   })();
 
+  const mergeDuplicate = (fromIndex: number, toIndex: number) => {
+    const fromLine = form.items[fromIndex];
+    const toLine = form.items[toIndex];
+    if (!fromLine || !toLine) return;
+    const combinedReceived = (num(toLine.received_qty) || 0) + (num(fromLine.received_qty) || 0);
+    const combinedAccepted = (num(toLine.accepted_qty) || 0) + (num(fromLine.accepted_qty) || 0);
+    setForm((current) => ({
+      ...current,
+      items: current.items
+        .map((item, idx) => {
+          if (idx === toIndex) {
+            return {
+              ...item,
+              received_qty: combinedReceived as any,
+              accepted_qty: (isGrn ? combinedAccepted : combinedReceived) as any,
+            };
+          }
+          return item;
+        })
+        .filter((_, idx) => idx !== fromIndex),
+    }));
+  };
+
   /** The problem on one line, under its item — where the eye already is. */
-  const lineNote = (i: number) => !locked && lineProblems.has(i) ? (
-    <p className="mt-1 whitespace-normal text-[11px] font-semibold leading-snug text-bad">
-      {lineProblems.get(i)}
-    </p>
-  ) : null;
+  const lineNote = (i: number) => {
+    if (locked || !lineProblems.has(i)) return null;
+    const earlierIdx = duplicateOrigins.get(i);
+    return (
+      <div className="mt-1.5 flex flex-col gap-1 rounded-lg border border-bad/30 bg-bad-bg/60 p-2 text-[11px] leading-snug text-bad">
+        <div className="flex items-start gap-1.5">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-bad" />
+          <span className="font-semibold">{lineProblems.get(i)}</span>
+        </div>
+        {earlierIdx !== undefined && !locked && (
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => mergeDuplicate(i, earlierIdx)}
+              className="inline-flex items-center gap-1 rounded bg-bad px-2 py-0.5 text-[11px] font-medium text-white shadow-sm hover:bg-bad/90"
+            >
+              Combine quantity into Line {earlierIdx + 1}
+            </button>
+            <button
+              type="button"
+              onClick={() => set("items", form.items.filter((_, x) => x !== i))}
+              className="text-[11px] font-medium text-bad underline hover:no-underline"
+            >
+              Remove line
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const invalid = {
     warehouse: touched && !form.warehouse_id,
@@ -879,7 +943,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     setTouched(true);
     if (!form.warehouse_id) return;
     if (form.items.length === 0) return;
-    if (lineProblems.size > 0) return;
+    if (lineProblems.size > 0) {
+      void alerts.error(
+        !isGrn
+          ? "Duplicate item entries are not allowed on Material Inward. Please combine or remove duplicates before saving."
+          : "Please resolve line errors before saving."
+      );
+      return;
+    }
     save.mutate();
   };
 
@@ -923,6 +994,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             name="items"
             load={itemOptions}
             value={l.item_id || ""}
+            isInvalid={lineProblems.has(i)}
+            errorMessage={lineProblems.get(i)}
+            formatOptionLabel={(option, defaultLabel) => {
+              const otherIdx = form.items.findIndex(
+                (item, idx) => idx !== i && item.item_id === option.id
+              );
+              if (otherIdx !== -1) {
+                return `${defaultLabel} (already on line ${otherIdx + 1})`;
+              }
+              return defaultLabel;
+            }}
             onChange={(v, option) => {
               const item = option as ItemOption | undefined;
               patchLine(i, {
@@ -1238,7 +1320,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         }
       />
 
-      <ErrorBanner error={(touched && !locked ? problemMessage : null) ?? save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
+      <ErrorBanner error={(!locked && (touched || lineProblems.size > 0) ? problemMessage : null) ?? save.error ?? gateEntry.error ?? convert.error ?? forward.error ?? consignment.error ?? route.error} />
 
       {doc && (
         <MetaCard title="Document">
@@ -1507,7 +1589,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               ? undefined
               : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
-            rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
+            rowTone={(l, i) => (lineProblems.has(i) ? "bg-bad-bg/25 border-l-4 border-l-bad" : num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
             empty={fromConsignment
               ? "Pick the incoming consignment above — its lines fill in here."
               : isGrn
