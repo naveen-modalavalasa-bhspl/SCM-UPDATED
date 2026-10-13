@@ -20,7 +20,7 @@ from app.modules.inventory import allocation, availability, hooks, locations
 from app.modules.inventory.enums import AdjustmentStatus, CycleCountStatus, STOStatus
 from app.modules.inventory.models import (
     NO_BATCH, NO_BIN, NO_PROJECT, Allocation, AllocationItem, MaterialRequest,
-    MaterialRequestItem, Stock,
+    MaterialRequestItem, Reservation, Stock,
     StockMovement, StockAdjustment, StockAdjustmentItem, StockTransferOrder,
     StockTransferOrderItem, CycleCount, CycleCountItem, Reservation,
 )
@@ -37,7 +37,7 @@ from app.shared.scope import rung_for, scope_condition
 from app.shared.enums import (
     AdjustmentReason, ApprovalAction, AuditAction, DocType, IndentStatus,
     InstanceStatus, MRStatus,
-    Priority, RefType, ScopeRung, StockDirection, UserRole as RoleCode,
+    Priority, RefType, ReservationStatus, ScopeRung, StockDirection, UserRole as RoleCode,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Project, Uom
@@ -875,7 +875,176 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
             figures = pipeline.get((row.warehouse_id, row.item_id), {})
             for key in ("issued_pending_qty", "outgoing_qty", "incoming_qty"):
                 setattr(row, key, float(figures.get(key, 0)))
+        held = await _indent_held_by_stock(db, [row.id for row in page["items"]])
+        for row in page["items"]:
+            setattr(row, "indent_held_qty", float(held.get(row.id, 0)))
     return page
+
+
+async def list_stock_grouped(db: AsyncSession, params: PageParams,
+                           item_id: int | None = None,
+                           warehouse_id: int | None = None,
+                           project_id: int | None = None,
+                           search: str | None = None,
+                           category_id: int | None = None,
+                           batch_no: str | None = None,
+                           below_reorder: bool = False, *,
+                           stock_view: str | None = None, user=None) -> dict:
+    """One row per item per point with the batches tucked inside the card.
+
+    The LOT list is the ledger truth; this is the READING list — "what do we
+    have of this item here, how much is set aside, and in which batches". Lots
+    that another document has fully reserved still count in the face totals
+    (they are stock on the shelf), and the reserved face figure is the sum so a
+    reservation moved by `place` can never read as disappeared.
+    """
+    lot = (await _stock_query(
+        db, item_id, warehouse_id, project_id, None, search, category_id,
+        batch_no, True, None, None, None, None, None, below_reorder,
+        stock_view="all", user=user)).subquery()
+    groups = (select(lot.c.warehouse_id, lot.c.warehouse_name, lot.c.item_id,
+                     lot.c.item_code, lot.c.item_name, lot.c.uom_code,
+                     func.sum(lot.c.total_qty).label("total_qty"),
+                     func.sum(lot.c.available_qty).label("available_qty"),
+                     func.sum(lot.c.reserved_qty).label("reserved_qty"),
+                     func.count(lot.c.id).label("lots"))
+              .group_by(lot.c.warehouse_id, lot.c.warehouse_name, lot.c.item_id,
+                        lot.c.item_code, lot.c.item_name, lot.c.uom_code)
+              .order_by(lot.c.item_name))
+    # An item a point no longer holds is not a row of the stock balance — it only
+    # appears on the "zero stock" view, which exists to list exactly those.
+    if stock_view != "zero":
+        groups = groups.having(func.sum(lot.c.total_qty) > 0)
+    if stock_view == "available":
+        groups = groups.having(func.sum(lot.c.available_qty) > 0)
+    elif stock_view == "reserved":
+        groups = groups.having(func.sum(lot.c.available_qty) <= 0,
+                               func.sum(lot.c.total_qty) > 0)
+    elif stock_view == "zero":
+        groups = groups.having(func.sum(lot.c.total_qty) <= 0)
+    total = int(await db.scalar(
+        select(func.count()).select_from(groups.subquery())) or 0)
+    page_rows = (await db.execute(
+        groups.offset(params.offset).limit(params.size))).all()
+    keys = [(int(r[0]), int(r[2])) for r in page_rows]
+    lots_by_key: dict[tuple[int, int], list] = {k: [] for k in keys}
+    held_by_key: dict[tuple[int, int], Decimal] = {k: Decimal("0") for k in keys}
+    if keys:
+        wh_ids = {k[0] for k in keys}
+        item_ids = {k[1] for k in keys}
+        lot_rows = (await db.execute(
+            select(Stock).where(Stock.warehouse_id.in_(wh_ids),
+                                Stock.item_id.in_(item_ids)))).scalars().all()
+        wanted = set(keys)
+        lot_ids: list[int] = []
+        for row in lot_rows:
+            key = (int(row.warehouse_id), int(row.item_id))
+            if key in wanted:
+                lots_by_key[key].append(row)
+                lot_ids.append(int(row.id))
+        held = await _indent_held_by_stock(db, lot_ids)
+        stock_by_id = {int(r.id): r for rows in lots_by_key.values() for r in rows}
+        for stock_id, qty in held.items():
+            row = stock_by_id.get(int(stock_id))
+            if row is not None:
+                key = (int(row.warehouse_id), int(row.item_id))
+                held_by_key[key] = held_by_key.get(key, Decimal("0")) + qty
+    item_ids = {k[1] for k in keys}
+    meta: dict = {}
+    if item_ids:
+        cols = (await db.execute(
+            select(Item.id, Item.category_name, Item.reorder_level)
+            .where(Item.id.in_(item_ids)))).all()
+        meta = {c[0]: c for c in cols}
+        await _fill_uom_names_for_groups(db, item_ids)
+    items = []
+    for (wh_id, wh_name, it_id, it_code, it_name, uom, tot, avl, res, lotn) in page_rows:
+        key = (int(wh_id), int(it_id))
+        batches: dict[int, dict] = {}
+        live_lots = 0
+        for row in lots_by_key.get(key, []):
+            # An emptied lot (issued out, moved to Unlocated) is history, not a batch
+            # on the shelf — the card lists only what is actually there.
+            if Decimal(str(row.total_qty or 0)) <= 0 and stock_view != "zero":
+                continue
+            live_lots += 1
+            b = batches.setdefault(int(row.batch_id or 0), {
+                "batch_id": int(row.batch_id or 0), "batch_no": row.batch_no,
+                "expiry_date": row.expiry_date, "total_qty": Decimal("0"),
+                "available_qty": Decimal("0"), "reserved_qty": Decimal("0"),
+                "bins": set(), "bin_codes": []})
+            b["total_qty"] += Decimal(str(row.total_qty or 0))
+            b["available_qty"] += Decimal(str(row.available_qty or 0))
+            b["reserved_qty"] += Decimal(str(row.reserved_qty or 0))
+            if row.bin_id and row.bin_id not in b["bins"]:
+                b["bins"].add(int(row.bin_id))
+                if row.bin_code and len(b["bin_codes"]) < 5:
+                    b["bin_codes"].append(row.bin_code)
+        batch_rows = sorted(
+            batches.values(),
+            key=lambda b: (b["expiry_date"] is None, b["expiry_date"] or date.max,
+                           b["batch_id"]))
+        m = meta.get(it_id)
+        items.append({
+            "item_id": it_id, "item_code": it_code, "item_name": it_name,
+            "category_name": m[1] if m else None,
+            "uom_code": uom, "uom_name": _GROUP_UOM.get(it_id),
+            "warehouse_id": int(wh_id), "warehouse_name": wh_name,
+            "total_qty": float(tot or 0), "available_qty": float(avl or 0),
+            "reserved_qty": float(res or 0),
+            "indent_held_qty": float(held_by_key.get(key, Decimal("0"))),
+            "lots": live_lots if stock_view != "zero" else int(lotn or 0),
+            # Reserved is stated ONCE, for the whole item at this point: an indent
+            # sets aside a quantity, never a batch — the batch is picked FEFO at issue —
+            # so a per-batch reserved figure would only say where the bookkeeping sits.
+            "batches": [{
+                "batch_id": b["batch_id"], "batch_no": b["batch_no"],
+                "expiry_date": b["expiry_date"],
+                "total_qty": float(b["total_qty"]),
+                "available_qty": float(b["available_qty"]),
+                "reserved_qty": 0.0,
+                "indent_held_qty": 0.0, "bins": len(b["bins"]),
+                "bin_codes": b["bin_codes"]} for b in batch_rows],
+        })
+    return {"items": items, "total": total, "page": params.page, "size": params.size}
+
+
+_GROUP_UOM: dict[int, str | None] = {}
+
+
+async def _fill_uom_names_for_groups(db: AsyncSession, item_ids: set[int]) -> None:
+    """UOM display names for the grouped cards. Module-level cache per call set."""
+    _GROUP_UOM.clear()
+    if not item_ids:
+        return
+    rows = (await db.execute(
+        select(Item.id, Item.uom_code, Uom.name).select_from(Item)
+        .outerjoin(Uom, Uom.code == Item.uom_code)
+        .where(Item.id.in_(item_ids)))).all()
+    for item_id, code, name in rows:
+        _GROUP_UOM[int(item_id)] = name or code
+
+
+async def _indent_held_by_stock(db: AsyncSession, stock_ids) -> dict[int, Decimal]:
+    """How much of each balance row's `reserved_qty` is an indent's quantity hold.
+
+    An approved allocation sets aside a QUANTITY of the item at the point; the row its
+    hold happens to sit on is bookkeeping, re-pointed onto whatever batch the
+    storekeeper picks FEFO at issue time. Screens use this to keep that hold off the
+    batch and show it against the item instead.
+    """
+    ids = [i for i in stock_ids if i]
+    if not ids:
+        return {}
+    return {
+        stock_id: Decimal(str(qty or 0)) for stock_id, qty in (await db.execute(
+            select(Reservation.stock_id, func.sum(Reservation.quantity))
+            .where(Reservation.stock_id.in_(ids),
+                   Reservation.ref_type == RefType.RESERVATION.value,
+                   Reservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(Reservation.stock_id)
+        )).all()
+    }
 
 
 #: Consignment statuses that mean "on the road": gated out, and not yet signed for or
@@ -1941,6 +2110,38 @@ async def _adjustment_line_value(db: AsyncSession, item: Item, qty: Decimal,
     return qty * cost
 
 
+async def _free_reserved_for_write_off(db: AsyncSession, adjustment, adj_item,
+                                       user) -> None:
+    """Make a write-off line postable when the stock it names is fully reserved.
+
+    An OUT adjustment names its (bin, batch); the damaged quantity may sit entire
+    inside an indent's set-aside, whose holds keep `available_qty` at zero and send
+    move_stock_out() away with "Insufficient stock: 0 available". The hold is a
+    QUANTITY, not a promise of that particular shelf, so the damaged share is
+    cancelled off the row and floated onto the point's earliest-expiring unexpired
+    free stock — the auditor's verdict is about THESE units, and the documents
+    holding the rest are made whole elsewhere (`allocation.float_out_of_damage`).
+    No-op while the row has enough free stock for the movement on its own.
+    """
+    from app.modules.inventory import allocation
+
+    stmt = (
+        select(Stock)
+        .where(
+            Stock.warehouse_id == adjustment.warehouse_id,
+            Stock.item_id == adj_item.item_id,
+            Stock.batch_id == (adj_item.batch_id or NO_BATCH),
+            Stock.bin_id == (adj_item.bin_id or NO_BIN),
+        )
+        .with_for_update()
+        .order_by(Stock.id)
+    )
+    for stock in (await db.execute(stmt)).scalars().all():
+        shortfall = _d(adj_item.quantity) - (stock.available_qty or 0)
+        if shortfall > 0:
+            await allocation.float_out_of_damage(db, stock, shortfall, user)
+
+
 async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) -> None:
     """Post an approved adjustment's lines to stock. Used by both the auto-approve
     path and the explicit approve, so the two cannot drift.
@@ -1964,11 +2165,13 @@ async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) 
             warehouse_id=adjustment.warehouse_id, project_id=adj_item.project_id,
         )
         if adj_item.direction == StockDirection.OUT.value:
+            await _free_reserved_for_write_off(db, adjustment, adj_item, user)
             await move_stock_out(
                 db, item_id=adj_item.item_id, qty=adj_item.quantity,
                 bin_id=adj_item.bin_id or None, batch_id=adj_item.batch_id or None,
                 **common,
             )
+            await hooks.fire_adjustment_out(db, adjustment, adj_item, user)
         else:
             await move_stock(
                 db, item_id=adj_item.item_id, qty=adj_item.quantity,
@@ -2142,6 +2345,7 @@ async def create_stock_adjustment(db: AsyncSession, data, user) -> StockAdjustme
             system_qty=system_qty,
             physical_qty=physical_qty,
             unit_cost=cost,
+            serial_numbers=item_data.serial_numbers or None,
             remarks=item_data.remarks,
         ))
     db.add_all(adj_items)
@@ -2394,12 +2598,14 @@ async def get_stock_detail(db: AsyncSession, stock_id: int, user=None) -> dict:
     )).scalars().all()
 
     today = ist_today()
+    held = await _indent_held_by_stock(db, [r.id for r in rows])
     lots = [{
         "id": r.id, "bin_id": r.bin_id, "bin_code": r.bin_code,
         "batch_id": r.batch_id, "batch_no": r.batch_no, "expiry_date": r.expiry_date,
         "days_to_expiry": (_as_date(r.expiry_date) - today).days if r.expiry_date else None,
         "available_qty": float(r.available_qty or 0),
         "reserved_qty": float(r.reserved_qty or 0),
+        "indent_held_qty": float(held.get(r.id, 0)),
         "total_qty": float(r.total_qty or 0),
         "project_name": r.project_name, "serial_number": r.serial_number,
         "asset_code": r.asset_code,
@@ -2416,7 +2622,26 @@ async def get_stock_detail(db: AsyncSession, stock_id: int, user=None) -> dict:
         "total_reserved": sum(lot["reserved_qty"] for lot in lots),
         "total_on_hand": sum(lot["total_qty"] for lot in lots),
         "lots": lots,
+        **await _indent_set_aside(db, stock.item_id, stock.warehouse_id),
     }
+
+
+async def _indent_set_aside(db: AsyncSession, item_id: int, warehouse_id: int) -> dict:
+    """Each indent's quantity hold on this item at this point, oldest first."""
+    rows = (await db.execute(
+        select(Reservation.ref_id, func.max(Reservation.ref_no),
+               func.sum(Reservation.quantity), func.min(Reservation.created_at),
+               func.min(Reservation.created_by_name))
+        .where(Reservation.item_id == item_id, Reservation.warehouse_id == warehouse_id,
+               Reservation.ref_type == RefType.RESERVATION.value,
+               Reservation.status == ReservationStatus.ACTIVE.value)
+        .group_by(Reservation.ref_id)
+        .order_by(func.min(Reservation.created_at))
+    )).all()
+    items = [{"indent_id": ref_id, "indent_no": ref_no, "quantity": float(qty or 0),
+              "since": since, "by_name": by_name}
+             for ref_id, ref_no, qty, since, by_name in rows]
+    return {"set_aside": items, "set_aside_total": sum(i["quantity"] for i in items)}
 
 
 async def get_item_locations(

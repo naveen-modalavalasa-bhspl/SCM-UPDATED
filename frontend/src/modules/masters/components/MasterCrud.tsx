@@ -304,6 +304,25 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
       })
     : data;
 
+  /** Current page slice — shared between the S.No renderer (needs indexOf) and the list. */
+  const pageSlice = sorted.slice((page - 1) * MASTER_PAGE_SIZE, page * MASTER_PAGE_SIZE);
+
+  /** S.No prepended to every master list. Absolute across pages so page 2 starts at 26. */
+  const snoColumn: Column<T> = {
+    key: "__sno__",
+    header: "S.No",
+    className: "w-12 text-center",
+    render: (row) => {
+      const idx = pageSlice.indexOf(row);
+      return (
+        <span className="tabular-nums text-muted font-medium text-xs">
+          {(page - 1) * MASTER_PAGE_SIZE + (idx >= 0 ? idx : 0) + 1}
+        </span>
+      );
+    },
+  };
+  const columnsWithSno: Column<T>[] = [snoColumn, ...p.columns];
+
   const canEdit = !p.readOnly;
   // Clearing the field's own error as it is edited keeps a stale message from
   // sitting under a value the user has already fixed.
@@ -454,6 +473,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
           className="h-11 rounded-xl border border-line bg-content1 px-3 text-sm outline-none focus:border-brand"
         >
           <option value="">Default order</option>
+          {/* p.columns, not columnsWithSno — the S.No column is not sortable */}
           {p.columns.filter((c) => c.header).map((c) => (
             <option key={c.key} value={c.key}>Sort by {c.header}</option>
           ))}
@@ -494,13 +514,13 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
         </div>
       ) : (
         <ResponsiveList
-          data={sorted.slice((page - 1) * MASTER_PAGE_SIZE, page * MASTER_PAGE_SIZE)}
+          data={pageSlice}
           page={page}
           totalPages={Math.ceil(sorted.length / MASTER_PAGE_SIZE)}
           onPageChange={setPage}
           loading={isLoading}
           keyOf={(r) => r.id}
-          columns={p.columns}
+          columns={columnsWithSno}
           renderCard={p.renderCard}
           onRowClick={canEdit ? openEdit : undefined}
           empty={`No ${p.title.toLowerCase()} yet.`}

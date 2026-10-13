@@ -299,6 +299,143 @@ async def heal(db: AsyncSession, warehouse_id: int | None, user) -> bool:
     return summary["rows"] > 0
 
 
+async def audit(db: AsyncSession, warehouse_id: int) -> dict:
+    """Why codes can be missing after the switch: stranded units + stale picks.
+
+    * `stranded_units`: in-stock units still standing at no location on a
+      bin-managed warehouse — quantity moved, identity did not.
+    * `stale_lines`: open issue lines still naming no location whose item has
+      an Unlocated source to move to.
+    Read-only; `repair` fixes what this reports.
+    """
+    from app.modules.warehouse.enums import IssueStatus
+
+    wh = await db.get(Warehouse, warehouse_id)
+    if wh is None:
+        raise NotFoundError(f"Warehouse {warehouse_id} not found")
+    base = await status(db, warehouse_id)
+    stranded_units = 0
+    stranded_items = 0
+    if wh.is_bin_managed:
+        rows = (await db.execute(
+            select(m.SerialNumber.item_id,
+                   func.count(m.SerialNumber.id))
+            .where(m.SerialNumber.warehouse_id == wh.id,
+                   or_(m.SerialNumber.bin_id.is_(None),
+                       m.SerialNumber.bin_id == NO_BIN),
+                   m.SerialNumber.status.in_(IN_STOCK_UNIT_STATUSES),
+                   m.SerialNumber.is_active.is_(True))
+            .group_by(m.SerialNumber.item_id)
+        )).all()
+        stranded_items = len(rows)
+        stranded_units = int(sum(int(n or 0) for _, n in rows))
+    stale_lines = 0
+    stale_issues: list[int] = []
+    location = await find_location(db, wh.id)
+    if wh.is_bin_managed and location is not None:
+        open_ids = select(m.MaterialIssue.id).where(
+            m.MaterialIssue.warehouse_id == wh.id,
+            m.MaterialIssue.is_stock_posted.is_(False),
+            m.MaterialIssue.status.notin_(
+                (IssueStatus.CANCELLED.value, IssueStatus.CLOSED.value)))
+        stale = (await db.execute(
+            select(func.count(m.MaterialIssueLine.id))
+            .select_from(m.MaterialIssueLine)
+            .join(m.MaterialIssue,
+                  m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+            .where(m.MaterialIssueLine.issue_id.in_(open_ids),
+                   or_(m.MaterialIssueLine.bin_id.is_(None),
+                       m.MaterialIssueLine.bin_id == NO_BIN))
+        )).scalar() or 0
+        stale_lines = int(stale)
+        stale_issues = list((await db.execute(
+            select(m.MaterialIssue.id)
+            .where(m.MaterialIssue.id.in_(open_ids),
+                   m.MaterialIssue.items.any(or_(
+                       m.MaterialIssueLine.bin_id.is_(None),
+                       m.MaterialIssueLine.bin_id == NO_BIN)))
+            .order_by(m.MaterialIssue.id).limit(50)
+        )).scalars().all())
+    return {**base, "stranded_units": stranded_units,
+            "stranded_items": stranded_items,
+            "stale_lines": stale_lines, "stale_issue_ids": stale_issues}
+
+
+async def repoint_stale_issue_lines(db: AsyncSession, warehouse_id: int,
+                                   user) -> dict:
+    """Point open `bin 0` picks at the Unlocated location they now stand in.
+
+    Only lines whose item actually holds stock at the Unlocated location move —
+    anything else stays as it is. Never commits; the caller owns the transaction.
+    """
+    location = await find_location(db, warehouse_id)
+    if location is None:
+        return {"moved": 0, "issue_ids": []}
+    from app.modules.inventory.models import Stock as InvStock
+    stocked_items = set((await db.execute(
+        select(InvStock.item_id).where(
+            InvStock.warehouse_id == warehouse_id,
+            InvStock.bin_id == location.id,
+            InvStock.total_qty > 0)
+    )).scalars().all())
+    if not stocked_items:
+        return {"moved": 0, "issue_ids": []}
+    from app.modules.warehouse.enums import IssueStatus
+    lines = list((await db.execute(
+        select(m.MaterialIssueLine)
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .where(m.MaterialIssue.warehouse_id == warehouse_id,
+               m.MaterialIssue.is_stock_posted.is_(False),
+               m.MaterialIssue.status.notin_(
+                   (IssueStatus.CANCELLED.value, IssueStatus.CLOSED.value)),
+               or_(m.MaterialIssueLine.bin_id.is_(None),
+                   m.MaterialIssueLine.bin_id == NO_BIN),
+               m.MaterialIssueLine.item_id.in_(stocked_items))
+        .with_for_update()
+    )).scalars().all())
+    touched: set[int] = set()
+    for line in lines:
+        line.bin_id = location.id
+        line.bin_code = location.code
+        touched.add(int(line.issue_id))
+    await db.flush()
+    if touched:
+        await write_audit(db, entity="whs_warehouses", entity_id=warehouse_id,
+                          entity_no=None, action=AuditAction.UPDATE, actor=user,
+                          after={"repointed_lines": len(lines)},
+                          summary=f"{len(lines)} open issue lines pointed at "
+                                  f"{location.code} after the locations switch.")
+    return {"moved": len(lines), "issue_ids": sorted(touched)}
+
+
+async def sweep_stranded_units(db: AsyncSession, warehouse_id: int) -> dict:
+    """Move in-stock units still at no location into the Unlocated location.
+
+    `place` moves them together with the balance rows; this is the backstop for
+    units minted or re-opened afterwards at `bin NULL/0`. Never commits.
+    """
+    location = await find_location(db, warehouse_id)
+    if location is None:
+        return {"units": 0}
+    ids = list((await db.execute(
+        select(m.SerialNumber.id)
+        .where(m.SerialNumber.warehouse_id == warehouse_id,
+               or_(m.SerialNumber.bin_id.is_(None),
+                   m.SerialNumber.bin_id == NO_BIN),
+               m.SerialNumber.status.in_(IN_STOCK_UNIT_STATUSES),
+               m.SerialNumber.is_active.is_(True))
+        .order_by(m.SerialNumber.id).limit(20000)
+    )).scalars().all())
+    for start in range(0, len(ids), 1000):
+        await db.execute(
+            update(m.SerialNumber)
+            .where(m.SerialNumber.id.in_(ids[start:start + 1000]))
+            .values(bin_id=location.id)
+            .execution_options(synchronize_session="fetch"))
+    await db.flush()
+    return {"units": len(ids)}
+
+
 async def status(db: AsyncSession, warehouse_id: int) -> dict:
     """What the warehouse screen says about stock with no location."""
     wh = await db.get(Warehouse, warehouse_id)

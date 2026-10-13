@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   allowedExpiries, batchChoices, groupIssueLines, locationChoices, normalizeSplits,
   redistribute, replaceGroup, splitProblems, trackingOf, trimUnits, codedSwapBatches,
+  fefoPlan,
 } from "../issueSplits";
 import type { IssueItemWrite, IssueStockSource, TrackingType } from "../types";
 
@@ -112,31 +113,21 @@ describe("what inventory allocated, and what the picks now say", () => {
   const group = (lines: IssueItemWrite[], sources: IssueStockSource[]) =>
     groupIssueLines(lines, { 7: sources })[0];
 
-  it("names the locations inventory is holding for this document", () => {
+  it("pins no location as allocated — an indent's hold floats between batches", () => {
+    // 2026-10-12: an allocation sets aside a QUANTITY. Which row its hold happens to sit
+    // on is bookkeeping, re-pointed onto the picks on save — so a pick is never "off
+    // the allocation", and nothing is announced as being released.
     const sources = [
       source({ bin_id: 1, batch_id: 11, available_qty: 0, own_reserved_qty: 5,
                reserved_qty: 5, drawable_qty: 5 }),
       source({ bin_id: 2, batch_id: 12, available_qty: 10, drawable_qty: 10 }),
     ];
-    const out = group([line({ issued_qty: 5, batch_id: 11, bin_id: 1 })], sources);
-
-    expect(out.allocated.map((row) => row.bin_id)).toEqual([1]);
-    // Still picked from where it was allocated, so nothing is being released.
-    expect(out.releasing).toHaveLength(0);
-    expect(out.splits[0].isAllocated).toBe(true);
-  });
-
-  it("flags the allocated location a pick has moved off, which saving will free", () => {
-    const sources = [
-      source({ bin_id: 1, batch_id: 11, available_qty: 0, own_reserved_qty: 5,
-               reserved_qty: 5, drawable_qty: 5 }),
-      source({ bin_id: 2, batch_id: 12, available_qty: 10, drawable_qty: 10 }),
-    ];
-    // The storekeeper found the goods in bay 2 and repointed the pick there.
-    const out = group([line({ issued_qty: 5, batch_id: 12, bin_id: 2 })], sources);
-
-    expect(out.releasing.map((row) => row.bin_id)).toEqual([1]);
-    expect(out.splits[0].isAllocated).toBe(false);
+    for (const pick of [{ batch_id: 11, bin_id: 1 }, { batch_id: 12, bin_id: 2 }]) {
+      const out = group([line({ issued_qty: 5, ...pick })], sources);
+      expect(out.allocated).toEqual([]);
+      expect(out.releasing).toEqual([]);
+      expect(out.splits[0].isAllocated).toBe(false);
+    }
   });
 
   it("reads the warehouse and the batch around each pick, not just the bay", () => {
@@ -201,14 +192,14 @@ describe("what inventory allocated, and what the picks now say", () => {
 /* ------------------------------------------------ what a pick may be moved onto -- */
 
 describe("the batches a pick may be moved onto", () => {
-  // Two batches of one item: AUG-26 expires first and sits in two bays, SEP-26
+  // Two batches of one item: AUG-27 expires first and sits in two bays, SEP-27
   // expires six weeks later. A third, undated, is on the shelf as well.
   const shelf = [
-    source({ bin_id: 1, batch_id: 11, batch_no: "AUG-26", expiry_date: "2026-08-31",
+    source({ bin_id: 1, batch_id: 11, batch_no: "AUG-27", expiry_date: "2027-08-31",
              available_qty: 5, batch_total_qty: 25 }),
-    source({ bin_id: 2, batch_id: 11, batch_no: "AUG-26", expiry_date: "2026-08-31",
+    source({ bin_id: 2, batch_id: 11, batch_no: "AUG-27", expiry_date: "2027-08-31",
              available_qty: 20, batch_total_qty: 25 }),
-    source({ bin_id: 3, batch_id: 12, batch_no: "SEP-26", expiry_date: "2026-09-30",
+    source({ bin_id: 3, batch_id: 12, batch_no: "SEP-27", expiry_date: "2027-09-30",
              available_qty: 15, batch_total_qty: 15 }),
     source({ bin_id: 4, batch_id: 13, batch_no: "NO-DATE", expiry_date: null,
              available_qty: 7, batch_total_qty: 7 }),
@@ -217,7 +208,7 @@ describe("the batches a pick may be moved onto", () => {
   it("offers each batch once, oldest first, with what it can give", () => {
     const choices = batchChoices(shelf);
 
-    expect(choices.map((row) => row.batchNo)).toEqual(["AUG-26", "SEP-26", "NO-DATE"]);
+    expect(choices.map((row) => row.batchNo)).toEqual(["AUG-27", "SEP-27", "NO-DATE"]);
     // Summed over the bays it sits in, and the bay count says how many walks it is.
     expect(choices[0].drawable).toBe(25);
     expect(choices[0].locations).toBe(2);
@@ -230,52 +221,63 @@ describe("the batches a pick may be moved onto", () => {
     expect(batchChoices(shelf).at(-1)?.batchNo).toBe("NO-DATE");
   });
 
+  it("filters out expired batches and their locations", () => {
+    const expiredSource = source({
+      bin_id: 5,
+      batch_id: 99,
+      batch_no: "EXPIRED-20",
+      expiry_date: "2020-01-01",
+      available_qty: 10,
+    });
+    const choices = batchChoices([...shelf, expiredSource]);
+    expect(choices.some((c) => c.batchNo === "EXPIRED-20")).toBe(false);
+
+    const locations = locationChoices([...shelf, expiredSource], 99);
+    expect(locations).toHaveLength(0);
+  });
+
   it("allows a swap only onto a batch expiring on the same day", () => {
-    // Inventory allocated AUG-26. FEFO cannot tell two batches expiring on one day
-    // apart — it can tell AUG-26 from SEP-26, and taking SEP-26 first leaves the
+    // Inventory allocated AUG-27. FEFO cannot tell two batches expiring on one day
+    // apart — it can tell AUG-27 from SEP-27, and taking SEP-27 first leaves the
     // earlier batch on the shelf to expire.
     const allocated = [
-      source({ bin_id: 1, batch_id: 11, batch_no: "AUG-26", expiry_date: "2026-08-31",
+      source({ bin_id: 1, batch_id: 11, batch_no: "AUG-27", expiry_date: "2027-08-31",
                own_reserved_qty: 5, available_qty: 0, reserved_qty: 5,
                drawable_qty: 5 }),
     ];
     const allowed = allowedExpiries(allocated);
     const choices = batchChoices([...shelf,
-      source({ bin_id: 9, batch_id: 14, batch_no: "AUG-26-B",
-               expiry_date: "2026-08-31", available_qty: 4 }),
+      source({ bin_id: 9, batch_id: 14, batch_no: "AUG-27-B",
+               expiry_date: "2027-08-31", available_qty: 4 }),
     ], allowed);
 
     const by = Object.fromEntries(choices.map((row) => [row.batchNo, row]));
-    expect(by["AUG-26"].allowed).toBe(true);
+    expect(by["AUG-27"].allowed).toBe(true);
     // The same expiry on a different batch number is the one swap FEFO permits.
-    expect(by["AUG-26-B"].allowed).toBe(true);
-    expect(by["SEP-26"].allowed).toBe(false);
-    expect(by["SEP-26"].blocked).toContain("oldest first");
+    expect(by["AUG-27-B"].allowed).toBe(true);
+    expect(by["SEP-27"].allowed).toBe(false);
+    expect(by["SEP-27"].blocked).toContain("oldest first");
     // An undated batch matches only another undated one — "no expiry" is not a date.
     expect(by["NO-DATE"].allowed).toBe(false);
   });
 
-  it("keeps a batch FEFO refuses out of what is offered as somewhere else to look", () => {
-    // `spare` prefills the next pick and names what the item is short of. A row on a
-    // later-expiring batch is one the server would refuse, so offering it sends the
-    // storekeeper to a bay he cannot draw from.
-    const group = groupIssueLines(
-      [line({ issued_qty: 5, batch_id: 11, bin_id: 1 })],
-      {
-        7: [
-          source({ bin_id: 1, batch_id: 11, expiry_date: "2026-08-31",
-                   available_qty: 0, reserved_qty: 5, own_reserved_qty: 5,
-                   drawable_qty: 5 }),
-          source({ bin_id: 2, batch_id: 11, expiry_date: "2026-08-31",
-                   available_qty: 9 }),
-          source({ bin_id: 3, batch_id: 12, expiry_date: "2026-09-30",
-                   available_qty: 30 }),
-        ],
-      },
-    )[0];
+  it("plans only the batches the ask needs, earliest expiry first", () => {
+    // Ask 30: AUG-27 gives 25 (two bays), SEP-27 the last 5. NO-DATE is not needed.
+    const plan = fefoPlan(shelf, 30);
+    expect(plan.map((step) => step.batches.map((b) => b.batchNo))).toEqual([["AUG-27"], ["SEP-27"]]);
+    expect(plan.map((step) => step.take)).toEqual([25, 5]);
+    // An ask the first batch covers names only that batch.
+    expect(fefoPlan(shelf, 10).map((step) => step.batches[0].batchNo)).toEqual(["AUG-27"]);
+  });
 
-    // The other bay of the allocated batch, and not the later batch behind it.
-    expect(group.spare.map((row) => row.bin_id)).toEqual([2]);
+  it("puts same-day batches in one step, and never plans expired stock", () => {
+    const plan = fefoPlan([
+      ...shelf,
+      source({ bin_id: 9, batch_id: 14, batch_no: "AUG-27-B", expiry_date: "2027-08-31", available_qty: 4 }),
+      source({ bin_id: 8, batch_id: 99, batch_no: "OLD", expiry_date: "2020-01-01", available_qty: 50 }),
+    ], 27);
+    expect(plan[0].batches.map((b) => b.batchNo).sort()).toEqual(["AUG-27", "AUG-27-B"]);
+    expect(plan.flatMap((step) => step.batches.map((b) => b.batchNo))).not.toContain("OLD");
   });
 
   it("constrains nothing when there is no allocation to depart from", () => {
@@ -323,32 +325,44 @@ describe("lowering an issue quantity", () => {
 });
 
 describe("FEFO, as the grid states it", () => {
-  const problems = (batchId: number, expiry: string) =>
+  const shelf = [
+    source({ bin_id: 1, batch_id: 11, batch_no: "AUG-27", expiry_date: "2027-08-31", available_qty: 5 }),
+    source({ bin_id: 2, batch_id: 14, batch_no: "AUG-27-B", expiry_date: "2027-08-31", available_qty: 5 }),
+    source({ bin_id: 3, batch_id: 12, batch_no: "SEP-27", expiry_date: "2027-09-30", available_qty: 30 }),
+  ];
+  const problems = (picks: Partial<IssueItemWrite>[], ask: number) =>
     splitProblems(
-      groupIssueLines(
-        [line({ issued_qty: 5, batch_id: batchId, bin_id: 1 })],
-        {
-          7: [
-            source({ bin_id: 1, batch_id: 11, batch_no: "AUG-26",
-                     expiry_date: "2026-08-31", available_qty: 0, reserved_qty: 5,
-                     own_reserved_qty: 5, drawable_qty: 5 }),
-            source({ bin_id: 1, batch_id: batchId, batch_no: "OTHER",
-                     expiry_date: expiry, available_qty: 5 }),
-          ],
-        },
-      ),
+      groupIssueLines(picks.map((p) => line({ requested_qty: 0, ...p })).map((l, i) =>
+        (i === 0 ? { ...l, requested_qty: ask } : l)), { 7: shelf }),
       { binManaged: true, unitLabel: label, requireUnits: false },
-    );
+    ).filter((p) => p.level === "error");
 
-  it("refuses a pick that reaches past the batch the allocation reserved", () => {
-    const found = problems(12, "2026-09-30");
-    expect(found.some((p) => p.level === "error" && p.message.includes("oldest first")))
-      .toBe(true);
+  it("refuses a batch the ask does not need", () => {
+    // Ask 5: the AUG-27 tier covers it, so SEP-27 is not offered and not accepted.
+    const found = problems([{ issued_qty: 5, batch_id: 12, bin_id: 3 }], 5);
+    expect(found.some((p) => p.message.includes("not needed"))).toBe(true);
   });
 
-  it("accepts one expiring on the same day, which is the swap FEFO cannot see", () => {
-    expect(problems(14, "2026-08-31").some((p) => p.message.includes("oldest first")))
-      .toBe(false);
+  it("accepts a same-day batch, which FEFO cannot tell apart", () => {
+    expect(problems([{ issued_qty: 5, batch_id: 14, bin_id: 2 }], 5)).toEqual([]);
+  });
+
+  it("refuses a later batch while an earlier one is left short", () => {
+    // Ask 15: 10 from the AUG tier, then 5 from SEP. Taking only 6 from AUG first is a
+    // queue-jump the save also refuses.
+    const found = problems([
+      { issued_qty: 6, batch_id: 11, bin_id: 1 },
+      { issued_qty: 9, batch_id: 12, bin_id: 3 },
+    ], 15);
+    expect(found.some((p) => p.message.includes("take 10 from"))).toBe(true);
+  });
+
+  it("accepts the plan followed in order", () => {
+    expect(problems([
+      { issued_qty: 5, batch_id: 11, bin_id: 1 },
+      { issued_qty: 5, batch_id: 14, bin_id: 2 },
+      { issued_qty: 5, batch_id: 12, bin_id: 3 },
+    ], 15)).toEqual([]);
   });
 });
 

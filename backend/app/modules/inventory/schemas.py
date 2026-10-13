@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchDocuments, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
+    SerialList,
 )
 
 
@@ -37,6 +38,12 @@ class StockRow(BaseModel):
     consumable_code: str | None = None
     available_qty: float
     reserved_qty: float
+    #: The part of `reserved_qty` that is an indent's QUANTITY hold. An indent sets
+    #: aside a quantity of the item at the point, never a batch or a location — the
+    #: batch is chosen FEFO when it is issued — so screens show this at item level and
+    #: not as "reserved" on this lot. `available_qty` is left as it is, because stock
+    #: transfer and every "is there enough" check read it.
+    indent_held_qty: float = 0
     transit_qty: float = 0
     total_qty: float
     # REQ_032 — the outward pipeline for this ITEM at this POINT (not this lot), READ
@@ -137,6 +144,41 @@ class MovementSummaryOut(BaseModel):
     movements: int
     total_in: float
     total_out: float
+
+
+class StockGroupBatch(BaseModel):
+    """One batch inside an item-at-point card: what the bayRADAR card expands to."""
+    batch_id: int
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    total_qty: float = 0
+    available_qty: float = 0
+    reserved_qty: float = 0
+    indent_held_qty: float = 0
+    bins: int = 0
+    bin_codes: list[str] = []
+
+
+class StockGroupRow(BaseModel):
+    """One item at one point: the grouped stock balance row.
+
+    Lots are detail, not the list — one card per item per warehouse/MDP/LIP with
+    the reserved quantity on the face and the batches one tap away.
+    """
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    category_name: str | None = None
+    uom_code: str | None = None
+    uom_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    total_qty: float = 0
+    available_qty: float = 0
+    reserved_qty: float = 0
+    indent_held_qty: float = 0
+    lots: int = 0
+    batches: list[StockGroupBatch] = []
 
 
 class TransferIn(BaseModel):
@@ -428,6 +470,12 @@ class AdjustmentItemIn(BaseModel):
     reads the system figure itself and derives the direction and the correction, so
     a screen holding a stale system number cannot post the wrong difference. A DIRECT
     line (a known write-off) sends `direction` and `quantity` instead.
+
+    `serial_numbers` are the unit codes the write-off covers, on coded items. The
+    warehouse module (which owns them, via a hook) retires exactly these rows so
+    the issue screen stops offering goods the audit just declared gone; a code not
+    on this line's item/batch/bin is refused, which is what keeps the remarks-text
+    workaround from coming back. Empty on anything the shelf holds without codes.
     """
     item_id: int
     bin_id: int = 0
@@ -436,6 +484,7 @@ class AdjustmentItemIn(BaseModel):
     physical_qty: float | None = Field(default=None, ge=0)
     direction: str | None = None  # IN | OUT, direct lines only
     quantity: float | None = Field(default=None, gt=0)
+    serial_numbers: Annotated[list[str], SerialList] = []
     unit_cost: float = 0.0
     remarks: str | None = None
 
@@ -479,6 +528,9 @@ class AdjustmentItemOut(BaseModel):
     system_qty: float | None = None
     physical_qty: float | None = None
     unit_cost: float | None = 0.0
+    # The unit codes an OUT line writes off — what the audit retired, read back so
+    # the screen can say which of them died rather than only how many.
+    serial_numbers: list[str] | None = None
     remarks: str | None = None
 
 
@@ -519,12 +571,23 @@ class StockLotRow(BaseModel):
     days_to_expiry: int | None = None
     available_qty: float
     reserved_qty: float
+    #: See `StockRow.indent_held_qty`.
+    indent_held_qty: float = 0
     total_qty: float
     project_name: str | None = None
     serial_number: str | None = None
     asset_code: str | None = None
     # Warehouse -> zone -> rack -> ... -> bin, walked up whs_warehouse_locations.
     location_path: list[str] = []
+
+
+class IndentSetAside(BaseModel):
+    """One indent's quantity hold on an item at a point (no batch, no location)."""
+    indent_id: int
+    indent_no: str | None = None
+    quantity: float
+    since: datetime | None = None
+    by_name: str | None = None
 
 
 class StockDetailOut(BaseModel):
@@ -540,6 +603,9 @@ class StockDetailOut(BaseModel):
     total_reserved: float
     total_on_hand: float
     lots: list[StockLotRow] = []
+    #: What indents have set aside of this item at this point — quantity only.
+    set_aside_total: float = 0
+    set_aside: list[IndentSetAside] = []
 
 
 class ReplenishmentRuleIn(BaseModel):

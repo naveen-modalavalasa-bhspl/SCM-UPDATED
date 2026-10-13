@@ -80,6 +80,7 @@ const toBalance = (r: StockRow): StockBalanceItem => ({
   uom_name: r.uom_name ?? undefined,
   physical_qty: num(r.total_qty),
   reserved_qty: num(r.reserved_qty),
+  indent_held_qty: num(r.indent_held_qty),
   transit_qty: num(r.transit_qty),
   issued_pending_qty: num(r.issued_pending_qty),
   outgoing_qty: num(r.outgoing_qty),
@@ -352,6 +353,29 @@ export const getStockBalances = (params?: StockBalanceFilter) =>
       }),
     })
     .then((r) => ({ items: unwrap(r.data).map(toBalance), total: r.data.total }));
+
+/** Grouped reading list: one card per item per point, batches tucked inside. */
+export const getStockGroups = (params?: StockBalanceFilter) =>
+  api
+    .get<Page<import("./types").StockGroupRow>>("/api/stock/grouped", {
+      params: clean({
+        item_id: params?.item_id,
+        warehouse_id: params?.warehouse_id,
+        category_id: params?.category_id,
+        search: params?.search?.trim(),
+        batch_no: params?.batch_no?.trim(),
+        stock_view: params?.stock_view || undefined,
+        below_reorder: params?.below_reorder || undefined,
+        expiring_in_days: params?.expiring_in_days,
+        expiry_status: params?.expiry_status,
+        expiry_from: params?.expiry_from,
+        expiry_to: params?.expiry_to,
+        expired_in_last_days: params?.expired_in_last_days,
+        page: params?.page ?? 1,
+        size: params?.size ?? 20,
+      }),
+    })
+    .then((r) => r.data);
 
 export const getStockLedger = (params?: StockLedgerFilter) =>
   api

@@ -27,6 +27,8 @@ export interface StockAdjustmentLine {
   system_qty?: number | null;
   physical_qty?: number | null;
   unit_cost?: number | null;
+  batch_id?: number | null;
+  bin_id?: number | null;
   remarks?: string | null;
 }
 
@@ -77,6 +79,8 @@ export interface VendorOption {
 
 export interface StockBalanceItem {
   id: number;
+  /** Part of reserved_qty that is an indent's QUANTITY hold — not tied to this lot. */
+  indent_held_qty?: number;
   item_id: number;
   item_code: string;
   item_name: string;
@@ -141,6 +145,37 @@ export interface StockBalanceFilter {
   expired_in_last_days?: number;
   page?: number;
   size?: number;
+}
+
+/** One batch inside an item-at-point card. */
+export interface StockGroupBatch {
+  batch_id: number;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  indent_held_qty?: number;
+  bins: number;
+  bin_codes: string[];
+}
+
+/** GET /api/stock/grouped — one card per item per point, batches tucked inside. */
+export interface StockGroupRow {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  category_name?: string | null;
+  uom_code?: string | null;
+  uom_name?: string | null;
+  warehouse_id: number;
+  warehouse_name?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  indent_held_qty?: number;
+  lots: number;
+  batches: StockGroupBatch[];
 }
 
 /** GET /api/stock/summary — the tiles, counted over every matching row. */
@@ -385,6 +420,8 @@ export interface StockRow {
   consumable_code?: string | null;
   available_qty: number;
   reserved_qty: number;
+  /** Part of reserved_qty that is an indent quantity hold (see StockBalanceItem). */
+  indent_held_qty?: number;
   transit_qty?: number;
   issued_pending_qty?: number;
   outgoing_qty?: number;
@@ -779,6 +816,7 @@ export interface StockLot {
   days_to_expiry?: number | null;
   available_qty: number;
   reserved_qty: number;
+  indent_held_qty?: number;
   total_qty: number;
   project_name?: string | null;
   serial_number?: string | null;
@@ -799,6 +837,10 @@ export interface StockDetail {
   total_reserved: number;
   total_on_hand: number;
   lots: StockLot[];
+  /** Indents' quantity holds on this item at this point — no batch, no location. */
+  set_aside_total?: number;
+  set_aside?: { indent_id: number; indent_no?: string | null; quantity: number;
+                since?: string | null; by_name?: string | null }[];
 }
 
 export interface ReplenishmentRule {

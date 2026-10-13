@@ -10,7 +10,7 @@ from app.core.pagination import Page, PageParams
 from app.modules.inventory import locations, service
 from app.modules.inventory.schemas import (
     ActionIn, MovementRow, MRClaimsOut, MRCreateIn, MRListRow, MROut, MRReviseIn,
-    StockRow,
+    StockGroupRow, StockRow,
     TransferIn,
     AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, CountSheetRow, ReplenishmentRow,
     ReservationRow, ReservationReleaseOut, ItemAvailabilityOut,
@@ -45,6 +45,21 @@ async def list_stock(params: PageParams = Depends(), item_id: int | None = None,
                                     include_zero, expiring_in_days, expiry_status,
                                     expiry_from, expiry_to, expired_in_last_days,
                                     below_reorder, stock_view=stock_view, user=user)
+
+
+@stock_router.get("/grouped", response_model=Page[StockGroupRow])
+async def list_stock_grouped(params: PageParams = Depends(), item_id: int | None = None,
+                             warehouse_id: int | None = None, project_id: int | None = None,
+                             search: str | None = None, category_id: int | None = None,
+                             batch_no: str | None = None, below_reorder: bool = False,
+                             stock_view: str | None = None,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.STOCK_VIEW))):
+    """One card per item per point with batches inside — the reading list."""
+    return await service.list_stock_grouped(db, params, item_id, warehouse_id,
+                                            project_id, search, category_id,
+                                            batch_no, below_reorder,
+                                            stock_view=stock_view, user=user)
 
 
 @stock_router.get("/summary", response_model=StockSummaryOut)

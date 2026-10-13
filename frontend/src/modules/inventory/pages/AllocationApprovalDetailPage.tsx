@@ -141,10 +141,9 @@ export function AllocationApprovalDetailPage() {
   const givingNothingWithStock = givenTotal <= 0 && freeTotal > 0;
 
   const overCap = (a?.items ?? []).some((item) => {
-    const typed = edits[item.id];
-    if (typed === undefined || typed === "") return false;
+    const give = giveFor(item);
     const cap = capFor(item);
-    return cap !== undefined && Number(typed) > cap;
+    return cap !== undefined && give > cap;
   });
 
   const act = useMutation({

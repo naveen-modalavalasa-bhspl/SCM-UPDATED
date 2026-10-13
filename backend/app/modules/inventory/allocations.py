@@ -75,6 +75,7 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse
 from app.shared.numbering import next_number
+from app.shared.time import today as ist_today
 
 ZERO = Decimal("0")
 # The two events an allocation can be raised under. ALLOCATION is the inventory desk
@@ -378,11 +379,13 @@ async def competing_claims(
     } for row in rows]
 
     item = await db.get(Item, item_id)
+    today = ist_today()
     stock_stmt = (
         select(func.coalesce(func.sum(Stock.total_qty), 0),
                func.coalesce(func.sum(Stock.available_qty), 0),
                func.coalesce(func.sum(Stock.reserved_qty), 0))
-        .where(Stock.item_id == item_id)
+        .where(Stock.item_id == item_id,
+               or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
     )
     if warehouse_ids is not None:
         stock_stmt = stock_stmt.where(Stock.warehouse_id.in_(warehouse_ids or {0}))
@@ -421,10 +424,12 @@ async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
     item_ids = {item_id for item_id, _ in pairs}
     warehouse_ids = {warehouse_id for _, warehouse_id in pairs}
 
+    today = ist_today()
     stmt = (
         select(Stock.item_id, Stock.warehouse_id,
                func.coalesce(func.sum(Stock.available_qty), 0))
-        .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids))
+        .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids),
+               or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
         .group_by(Stock.item_id, Stock.warehouse_id)
     )
     if lock:
@@ -432,7 +437,8 @@ async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
         # GROUP BY result, so take the rows first and then add them up.
         await db.execute(
             select(Stock.id)
-            .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids))
+            .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids),
+                   or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
             .with_for_update()
         )
     on_shelf = {(item_id, warehouse_id): _d(qty)
@@ -516,10 +522,12 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
         pair = (line.item_id, line.warehouse_id)
         if line.warehouse_id:
             free = free_map.get(pair, ZERO)
+            today = ist_today()
             on_shelf = _d(await db.scalar(
                 select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
                     Stock.item_id == line.item_id,
                     Stock.warehouse_id == line.warehouse_id,
+                    or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today),
                 )
             ))
         else:
@@ -719,10 +727,12 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         # never ordered. Check against available stock at the chosen point — reserved
         # quantity belongs to somebody else's indent and is not ours to promise.
         if quantity > ZERO:
+            today = ist_today()
             on_shelf = _d(await db.scalar(
                 select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
                     Stock.item_id == d["item_id"],
                     Stock.warehouse_id == d["warehouse_id"],
+                    or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today),
                 )
             ))
             # Less whatever an un-approved allocation has already promised out of this
@@ -967,11 +977,13 @@ async def warehouse_available(db: AsyncSession, item_ids: set[int]) -> dict[int,
     """
     if not item_ids:
         return {}
+    today = ist_today()
     rows = (await db.execute(
         select(Stock.item_id, func.coalesce(func.sum(Stock.available_qty), 0))
         .join(Warehouse, Warehouse.id == Stock.warehouse_id)
         .where(Stock.item_id.in_(item_ids),
-               Warehouse.warehouse_type.notin_(list(_CHAIN_TYPES)))
+               Warehouse.warehouse_type.notin_(list(_CHAIN_TYPES)),
+               or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
         .group_by(Stock.item_id)
     )).all()
     return {item_id: _d(qty) for item_id, qty in rows}

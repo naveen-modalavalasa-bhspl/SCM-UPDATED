@@ -68,21 +68,24 @@ interface BatchProps {
   /** The oldest batch on the shelf, when this pick is not on it. Advice, not a rule —
    *  see `batchChoices`. */
   fefoHint?: string | null;
+  isExpired?: boolean;
 }
 
 export function BatchPicker({
-  choices, value, onChange, isDisabled, isBatchTracked, fallbackNo, fefoHint,
+  choices, value, onChange, isDisabled, isBatchTracked, fallbackNo, fefoHint, isExpired,
 }: BatchProps) {
-  const selected = choices.find((row) => (row.batchId ?? 0) === (value ?? 0));
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const validChoices = choices.filter((row) => !(row.expiry && row.expiry < todayIso));
+  const selected = validChoices.find((row) => (row.batchId ?? 0) === (value ?? 0));
   // A batch already on the line that the shelf no longer offers — every unit of it
   // spoken for by another document since the draft was written. It stays selectable
-  // or the field would render empty over a batch the document plainly names.
-  const orphan = !selected && value
+  // only if not expired.
+  const orphan = !selected && value && !isExpired
     ? { batchId: value, batchNo: fallbackNo ?? null, expiry: null, mfg: null, drawable: 0,
         total: 0, locations: 0, allocated: false, allowed: true,
         blocked: null, hasCodes: false, codeException: false } as BatchChoice
     : null;
-  const rows = orphan ? [...choices, orphan] : choices;
+  const rows = orphan ? [...validChoices, orphan] : validChoices;
 
   const trigger = (
     <Select
@@ -127,9 +130,9 @@ export function BatchPicker({
                   <span className="truncate font-mono text-xs font-semibold text-ink">
                     {row.batchNo ?? "Unbatched stock"}
                   </span>
-                  {row.allocated && (
+                  {row.earliest && (
                     <span className="rounded bg-ok-bg px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-ok">
-                      Allocated
+                      Earliest expiry
                     </span>
                   )}
                   {row.hasCodes && (
@@ -252,13 +255,14 @@ interface LocationProps {
   needsBatch?: boolean;
   fallbackCode?: string | null;
   fallbackPath?: string | null;
+  isExpired?: boolean;
 }
 
 export function LocationPicker({
-  choices, value, onChange, isDisabled, needsBatch, fallbackCode, fallbackPath,
+  choices, value, onChange, isDisabled, needsBatch, fallbackCode, fallbackPath, isExpired,
 }: LocationProps) {
   const selected = choices.find((row) => (row.binId ?? 0) === (value ?? 0));
-  const orphan = !selected && value
+  const orphan = !selected && value && !isExpired
     ? { binId: value, binCode: fallbackCode ?? null, binPath: fallbackPath ?? null,
         drawable: 0, total: 0, ownReserved: 0, othersHold: 0,
         allocated: false } as LocationChoice

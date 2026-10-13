@@ -1,17 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/react";
-import { Plus, Check, X, RefreshCw, Download, Trash2 } from "lucide-react";
+import { Plus, Check, X, RefreshCw, Download } from "lucide-react";
 import {
-  Button, Can, Card, Field, FilterBar, FilterDateRange, FilterMenu, Input, PageHeader,
-  ResponsiveList, Select, StatusPill, type Column,
+  Button, Can, Card, FilterBar, FilterDateRange, FilterMenu, Input, PageHeader,
+  ResponsiveList, StatusPill, type Column,
 } from "@/shared/components";
 import {
   listStockAdjustments, createStockAdjustment, approveStockAdjustment, rejectStockAdjustment,
-  getStockAdjustment, getAdjustmentCountSheet, getWarehouses, getCatalogItems,
+  getStockAdjustment, getWarehouses,
 } from "../api";
 import type { StockAdjustment, StockAdjustmentLine } from "../types";
+import { StockAuditForm, type AuditLinePayload } from "./StockAuditForm";
 import { alerts } from "@/modules/alerts";
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { ErrorNote } from "./PageStates";
@@ -36,17 +36,6 @@ const STATUS_TABS = [
   { value: "APPROVED", label: "Approved" },
   { value: "REJECTED", label: "Rejected" },
 ];
-
-/** One row of the count sheet: the system figure and what was physically found. */
-type CountLine = {
-  item_id: number;
-  item_code?: string | null;
-  item_name?: string | null;
-  uom_code?: string | null;
-  system_qty: number;
-  /** Blank means "not counted", and the line is left off the audit. */
-  physical: string;
-};
 
 const fmt = (n: number) => Number(n.toFixed(3)).toString();
 const signed = (n: number) => (n > 0 ? `+${fmt(n)}` : fmt(n));
@@ -152,82 +141,27 @@ export function StockAdjustmentsView() {
     decide.mutate({ id: selected.id, approve });
   };
 
-  // ---- the new-audit form ----
+  // ---- the new-audit form modal state & mutation ----
   const [open, setOpen] = useState(false);
-  const [warehouseId, setWarehouseId] = useState("");
-  const [reason, setReason] = useState("CYCLE_COUNT");
-  const [remarks, setRemarks] = useState("");
-  const [lines, setLines] = useState<CountLine[]>([]);
-  const [addItemId, setAddItemId] = useState("");
-
-  const { data: catalog = [] } = useQuery({
-    queryKey: ["catalog-items"], queryFn: getCatalogItems, enabled: open,
-  });
-  const sheet = useQuery({
-    queryKey: ["adjustment-count-sheet", warehouseId],
-    queryFn: () => getAdjustmentCountSheet(Number(warehouseId)),
-    enabled: open && !!warehouseId,
-  });
-  // A new warehouse is a new count: the sheet is replaced, never merged.
-  useEffect(() => {
-    if (!sheet.data) return;
-    setLines(sheet.data.map((r) => ({ ...r, physical: "" })));
-  }, [sheet.data]);
-
-  const resetForm = () => {
-    setWarehouseId(""); setReason("CYCLE_COUNT"); setRemarks(""); setLines([]); setAddItemId("");
-  };
-  const counted = lines.filter((l) => l.physical.trim() !== "");
-  const differing = counted.filter((l) => Number(l.physical) !== l.system_qty);
-  const invalid = counted.some((l) => !(Number(l.physical) >= 0));
-  const warehouseName = warehouses.find((w) => String(w.id) === warehouseId)?.name ?? "the warehouse";
-
-  const setPhysical = (itemId: number, value: string) =>
-    setLines((prev) => prev.map((l) => (l.item_id === itemId ? { ...l, physical: value } : l)));
-  const removeLine = (itemId: number) => setLines((prev) => prev.filter((l) => l.item_id !== itemId));
-  const addItem = () => {
-    const item = catalog.find((i) => String(i.id) === addItemId);
-    if (!item) return;
-    // Not in the system at this warehouse, so the system figure is nil. The server
-    // reads it again at save, whatever this says.
-    setLines((prev) => [...prev, {
-      item_id: item.id, item_code: item.code, item_name: item.name,
-      uom_code: item.uom_code ?? item.uom, system_qty: 0, physical: "",
-    }]);
-    setAddItemId("");
-  };
-  const addable = useMemo(() => {
-    const present = new Set(lines.map((l) => l.item_id));
-    return catalog
-      .filter((i) => !present.has(i.id))
-      .map((i) => ({ value: String(i.id), label: `${i.code} — ${i.name}` }));
-  }, [catalog, lines]);
 
   const create = useMutation({
-    mutationFn: () =>
-      createStockAdjustment({
-        warehouse_id: Number(warehouseId),
-        reason,
-        remarks: remarks || null,
-        items: counted.map((l) => ({ item_id: l.item_id, physical_qty: Number(l.physical) })),
-      }),
+    mutationFn: (payload: {
+      warehouse_id: number;
+      reason: string;
+      remarks: string | null;
+      items: AuditLinePayload[];
+    }) => createStockAdjustment(payload),
     onSuccess: (saved: StockAdjustment) => {
       void alerts.success("stock.audit.saved", {
         number: saved.adjustment_no,
         status: saved.status === "APPROVED" ? "approved and posted" : "waiting for approval",
       });
-      setOpen(false); resetForm(); setError(""); refresh();
+      setOpen(false);
+      setError("");
+      refresh();
     },
     onError: fail,
   });
-  const askThenCreate = async () => {
-    if (!(await alerts.confirm("stock.audit.submit", {
-      count: `${counted.length} item${counted.length === 1 ? "" : "s"}`,
-      warehouse: warehouseName,
-      diff: String(differing.length),
-    }))) return;
-    create.mutate();
-  };
 
   const columns: Column<StockAdjustment>[] = [
     { key: "adjustment_no", header: "Audit No", render: (r) => <strong>{r.adjustment_no}</strong> },
@@ -356,124 +290,14 @@ export function StockAdjustmentsView() {
         />
       </Card>
 
-      <Modal isOpen={open} onClose={() => setOpen(false)} size="4xl" scrollBehavior="inside">
-        <ModalContent>
-          <ModalHeader>New Stock Audit</ModalHeader>
-          <ModalBody className="space-y-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Warehouse">
-                <Select
-                  value={warehouseId}
-                  onChange={(v) => setWarehouseId(v)}
-                  options={warehouses.map((w) => ({ value: String(w.id), label: w.name }))}
-                  placeholder="Select warehouse"
-                />
-              </Field>
-              <Field label="Reason">
-                <Select value={reason} onChange={setReason} options={REASONS} />
-              </Field>
-            </div>
-
-            {!warehouseId ? (
-              <p className="text-sm text-muted">Pick a warehouse to load what the system holds there.</p>
-            ) : sheet.isLoading ? (
-              <p className="text-sm text-muted">Loading system stock…</p>
-            ) : (
-              <>
-                <p className="text-sm text-muted">
-                  Enter what is physically on the shelf. Leave a count blank to skip that item.{" "}
-                  <strong className="text-ink">{counted.length}</strong> counted,{" "}
-                  <strong className="text-ink">{differing.length}</strong> differ from system stock.
-                </p>
-                <div className="divide-y divide-line/70 rounded-lg border border-line/70">
-                  <div className="hidden grid-cols-[1fr_7rem_8rem_6rem_2.75rem] gap-3 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted sm:grid">
-                    <span>Item</span>
-                    <span className="text-right">System stock</span>
-                    <span className="text-right">Physical stock</span>
-                    <span className="text-right">Difference</span>
-                    <span />
-                  </div>
-                  {lines.length === 0 && (
-                    <p className="px-3 py-4 text-sm text-muted">
-                      The system holds nothing at this warehouse. Add any item you find below.
-                    </p>
-                  )}
-                  {lines.map((l) => {
-                    const isCounted = l.physical.trim() !== "";
-                    const diff = isCounted ? Number(l.physical) - l.system_qty : null;
-                    return (
-                      <div
-                        key={l.item_id}
-                        className="grid grid-cols-2 items-center gap-x-3 gap-y-1 px-3 py-2 sm:grid-cols-[1fr_7rem_8rem_6rem_2.75rem]"
-                      >
-                        <div className="col-span-2 min-w-0 sm:col-span-1">
-                          <div className="truncate font-medium text-ink">{l.item_name ?? "Item"}</div>
-                          <div className="truncate text-xs text-muted">{l.item_code} · {l.uom_code ?? "-"}</div>
-                        </div>
-                        <div className="text-sm tabular-nums sm:text-right">
-                          <span className="text-muted sm:hidden">System: </span>{fmt(l.system_qty)}
-                        </div>
-                        <Input
-                          type="number" min="0" step="0.001" inputMode="decimal"
-                          aria-label={`Physical stock of ${l.item_name ?? "item"}`}
-                          value={l.physical}
-                          onChange={(e) => setPhysical(l.item_id, e.target.value)}
-                          placeholder="Count"
-                        />
-                        <div className={`text-sm tabular-nums sm:text-right ${diff ? "font-semibold text-ink" : "text-muted"}`}>
-                          <span className="font-normal text-muted sm:hidden">Difference: </span>
-                          {diff == null ? "—" : signed(diff)}
-                        </div>
-                        <Button
-                          variant="ghost" aria-label={`Remove ${l.item_name ?? "item"}`}
-                          className="min-h-11 min-w-11 justify-self-end"
-                          onClick={() => removeLine(l.item_id)}
-                        >
-                          <Trash2 size={14} />
-                        </Button>
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-                  <div className="flex-1">
-                    <Field label="Found an item the system does not show here?">
-                      <Select
-                        value={addItemId}
-                        onChange={setAddItemId}
-                        options={addable}
-                        placeholder="Pick an item to add"
-                        searchable
-                      />
-                    </Field>
-                  </div>
-                  <Button variant="subtle" disabled={!addItemId} onClick={addItem}>
-                    <Plus size={14} /> Add item
-                  </Button>
-                </div>
-              </>
-            )}
-
-            <Field label="Remarks">
-              <Input
-                value={remarks}
-                onChange={(e) => setRemarks(e.target.value)}
-                placeholder="Who counted, when, anything the approver should know"
-              />
-            </Field>
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="subtle" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button
-              className={TONE_MINT}
-              disabled={!warehouseId || counted.length === 0 || invalid || create.isPending}
-              onClick={() => void askThenCreate()}
-            >
-              {create.isPending ? "Saving…" : "Submit Audit"}
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+      <StockAuditForm
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        onSubmit={(payload) => {
+          create.mutate(payload);
+        }}
+        isSaving={create.isPending}
+      />
 
       <DetailSheet
         open={reviewId != null}
@@ -524,18 +348,50 @@ export function StockAdjustmentsView() {
 
             <SheetSection title="System vs physical stock">
               {selected.items?.length ? (
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   {selected.items.map((item) => {
                     const diff = lineDifference(item);
                     return (
-                      <div key={item.id} className="rounded-lg border border-line/70 p-3">
-                        <div className="font-semibold text-ink">{item.item_name || "Unknown item"}</div>
-                        <div className="text-xs text-muted">{item.item_code} · {item.uom_code ?? "-"}</div>
-                        <div className="mt-2 grid grid-cols-3 gap-2 text-sm tabular-nums">
-                          <span><span className="block text-xs text-muted">System</span>{item.system_qty != null ? fmt(item.system_qty) : "—"}</span>
-                          <span><span className="block text-xs text-muted">Physical</span>{item.physical_qty != null ? fmt(item.physical_qty) : "—"}</span>
+                      <div key={item.id} className="rounded-xl border border-line/70 p-3 space-y-2 bg-card/60">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-semibold text-ink text-sm">{item.item_name || "Unknown item"}</div>
+                            <div className="text-xs text-muted font-mono">{item.item_code} · {item.uom_code ?? "-"}</div>
+                          </div>
+                          {(item.batch_id || item.bin_id) ? (
+                            <div className="flex flex-wrap gap-1 text-[11px] shrink-0">
+                              {item.batch_id ? (
+                                <span className="rounded-md bg-content2 px-2 py-0.5 border border-line text-body">
+                                  Batch #{item.batch_id}
+                                </span>
+                              ) : null}
+                              {item.bin_id ? (
+                                <span className="rounded-md bg-content2 px-2 py-0.5 border border-line text-body">
+                                  Bin #{item.bin_id}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {item.remarks && (
+                          <div className="text-xs text-brand bg-brand/5 border border-brand/20 rounded-lg p-2 font-mono">
+                            {item.remarks}
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-3 gap-2 text-sm tabular-nums rounded-lg bg-content2/30 p-2">
+                          <span>
+                            <span className="block text-[10px] uppercase font-semibold text-muted">System</span>
+                            {item.system_qty != null ? fmt(item.system_qty) : "—"}
+                          </span>
+                          <span>
+                            <span className="block text-[10px] uppercase font-semibold text-muted">Physical</span>
+                            {item.physical_qty != null ? fmt(item.physical_qty) : "—"}
+                          </span>
                           <span className={diff ? "font-semibold text-ink" : "text-muted"}>
-                            <span className="block text-xs font-normal text-muted">Difference</span>{signed(diff)}
+                            <span className="block text-[10px] uppercase font-semibold text-muted">Difference</span>
+                            {signed(diff)}
                           </span>
                         </div>
                       </div>

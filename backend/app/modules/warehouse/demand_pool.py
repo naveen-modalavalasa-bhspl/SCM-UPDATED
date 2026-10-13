@@ -308,6 +308,19 @@ async def demand_pool(
                 "qty": float(qty),
                 "stage": issue_stage,
             })
+            # The consignment carrying it, as its own document: "In Transit" with only
+            # the issue number named left nobody able to find the load.
+            disp = dispatch_by_issue.get(iss["issue_id"])
+            if disp and not any(d["kind"] == "CONSIGNMENT" and d["id"] == disp["dispatch_id"]
+                                for d in docs):
+                docs.append({
+                    "kind": "CONSIGNMENT",
+                    "id": disp["dispatch_id"],
+                    "no": disp["dispatch_no"],
+                    "status": disp["status"],
+                    "qty": float(qty),
+                    "stage": issue_stage,
+                })
 
         # TO_ISSUE: allocated quantity not yet covered by any live issue
         live_issue_total = sum(stages.values(), _d(0))

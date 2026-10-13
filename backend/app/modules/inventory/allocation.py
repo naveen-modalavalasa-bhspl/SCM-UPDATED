@@ -7,7 +7,9 @@ posts. That is why this deliberately does not go through move_stock(), and why
 CLAUDE.md rule 7 is split: physical changes via move_stock(), reservation columns via
 this module, and nothing else assigns to stk_balance.
 """
+import collections
 from dataclasses import dataclass
+from types import SimpleNamespace
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -388,6 +390,296 @@ async def release_one(db: AsyncSession, reservation_id: int) -> Reservation:
     res.released_at = utcnow()
     await db.flush()
     return res
+
+
+def _shift(db: AsyncSession, res: Reservation, part: Decimal, owner) -> None:
+    """Hand `part` of one hold row to `owner`'s document, on the SAME balance row.
+
+    Only the labels move — ref_type, ref_id, ref_no, ref_line_id — so `reserved_qty`
+    and `available_qty` on the row are exactly what they were. Splits the row when only
+    part of it changes hands, so each document's quantity stays one honest number.
+    """
+    if part >= _d(res.quantity):
+        res.ref_type, res.ref_id = owner.ref_type, owner.ref_id
+        res.ref_no, res.ref_line_id = owner.ref_no, owner.ref_line_id
+        return
+    res.quantity = _d(res.quantity) - part
+    db.add(Reservation(
+        stock_id=res.stock_id, item_id=res.item_id, warehouse_id=res.warehouse_id,
+        bin_id=res.bin_id, batch_id=res.batch_id, project_id=res.project_id,
+        quantity=part, ref_type=owner.ref_type, ref_id=owner.ref_id,
+        ref_no=owner.ref_no, ref_line_id=owner.ref_line_id,
+        status=ReservationStatus.ACTIVE.value,
+        created_by_id=res.created_by_id, created_by_name=res.created_by_name,
+    ))
+
+
+async def swap_holds(
+    db: AsyncSession,
+    ref_type: str,
+    ref_id: int,
+    *,
+    ref_line_id: int,
+    item_id: int,
+    warehouse_id: int,
+    wanted: dict[tuple[int, int], Decimal],
+    pinned: dict[tuple[int, int, int, int], Decimal] | None = None,
+) -> Decimal:
+    """Let an issue take the batch it picked even when ANOTHER indent's hold sits on it.
+
+    An indent sets aside a QUANTITY of an item at a point (2026-10-12). Which balance
+    row carries that hold is bookkeeping: the batch is chosen FEFO when the goods are
+    issued, so whichever indent is issued first gets the earliest-expiring stock. When
+    the storekeeper picks batch X for indent B while indent A's hold happens to sit on
+    X, the two holds simply trade rows — A's part moves to where B's hold was, B's to
+    X. Only the labels change (`_shift`), so every `reserved_qty` / `available_qty` is
+    untouched and so is each indent's total.
+
+    `pinned` is what OTHER open issues have explicitly picked, per
+    (indent, indent line, bin, batch): those holds are somebody's named goods and are
+    never traded away, or that issue would post from a row it does not name.
+
+    Called BEFORE `relocate`, which then covers any remaining gap out of FREE stock.
+    Returns the quantity traded. Does not commit.
+    """
+    pinned = pinned or {}
+    wanted = {_slot(*key): _d(qty) for key, qty in wanted.items() if _d(qty) > ZERO}
+    mine: dict[tuple[int, int], list[Reservation]] = {}
+    for res in await _active(db, ref_type, ref_id, ref_line_id):
+        if res.item_id == item_id and res.warehouse_id == warehouse_id:
+            mine.setdefault(_slot(res.bin_id, res.batch_id), []).append(res)
+    held = {key: sum((_d(r.quantity) for r in rows), ZERO) for key, rows in mine.items()}
+    surplus_rows = [r for key, rows in mine.items()
+                    if held[key] > wanted.get(key, ZERO) for r in rows]
+    spare = {key: held[key] - wanted.get(key, ZERO)
+             for key in held if held[key] > wanted.get(key, ZERO)}
+    traded = ZERO
+
+    for key, qty in wanted.items():
+        need = qty - held.get(key, ZERO)
+        if need <= ZERO or not spare:
+            continue
+        free = sum((_d(row.available_qty) for row in await _stock_at(
+            db, item_id=item_id, warehouse_id=warehouse_id,
+            bin_id=key[0], batch_id=key[1])), ZERO)
+        need -= free
+        if need <= ZERO:
+            continue
+        others = list((await db.execute(
+            select(Reservation).where(
+                Reservation.ref_type == RefType.RESERVATION.value,
+                Reservation.status == ReservationStatus.ACTIVE.value,
+                Reservation.item_id == item_id,
+                Reservation.warehouse_id == warehouse_id,
+                Reservation.bin_id == key[0], Reservation.batch_id == key[1],
+            ).order_by(Reservation.id).with_for_update()
+        )).scalars().all())
+        # Per other indent line, what is not pinned by an open issue of theirs.
+        free_of_pins: dict[tuple[int, int], Decimal] = {}
+        for o in others:
+            owner = (o.ref_id, o.ref_line_id or 0)
+            if o.ref_type == ref_type and o.ref_id == ref_id and (o.ref_line_id or 0) == ref_line_id:
+                continue
+            free_of_pins[owner] = free_of_pins.get(owner, ZERO) + _d(o.quantity)
+        for owner in free_of_pins:
+            free_of_pins[owner] = max(ZERO, free_of_pins[owner]
+                                      - pinned.get((owner[0], owner[1], key[0], key[1]), ZERO))
+        for o in others:
+            owner = (o.ref_id, o.ref_line_id or 0)
+            if need <= ZERO:
+                break
+            if owner not in free_of_pins or free_of_pins[owner] <= ZERO:
+                continue
+            while need > ZERO and free_of_pins[owner] > ZERO and _d(o.quantity) > ZERO:
+                # One of MY rows that is surplus to what this issue wants.
+                donor = next((r for r in surplus_rows
+                              if _d(r.quantity) > ZERO
+                              and spare.get(_slot(r.bin_id, r.batch_id), ZERO) > ZERO), None)
+                if donor is None:
+                    break
+                donor_key = _slot(donor.bin_id, donor.batch_id)
+                part = min(need, free_of_pins[owner], _d(o.quantity),
+                           _d(donor.quantity), spare[donor_key])
+                if part <= ZERO:
+                    break
+                mine_label = SimpleNamespace(ref_type=donor.ref_type, ref_id=donor.ref_id,
+                                             ref_no=donor.ref_no, ref_line_id=donor.ref_line_id)
+                their_label = SimpleNamespace(ref_type=o.ref_type, ref_id=o.ref_id,
+                                              ref_no=o.ref_no, ref_line_id=o.ref_line_id)
+                _shift(db, o, part, mine_label)          # X: theirs -> mine
+                _shift(db, donor, part, their_label)     # Y: mine -> theirs
+                if part >= _d(donor.quantity) and donor.ref_id != ref_id:
+                    surplus_rows.remove(donor)
+                spare[donor_key] -= part
+                if spare[donor_key] <= ZERO:
+                    spare.pop(donor_key)
+                free_of_pins[owner] -= part
+                need -= part
+                traded += part
+                if o.ref_id == ref_id and (o.ref_line_id or 0) == ref_line_id:
+                    break  # the whole row changed hands
+    await db.flush()
+    return traded
+
+
+@dataclass(frozen=True)
+class FloatResult:
+    """Where the damaged quantity's holds ended up: how much was re-placed and
+    how much had nowhere healthy to go."""
+
+    moved: Decimal = ZERO
+    released: Decimal = ZERO
+
+
+async def float_out_of_damage(
+    db: AsyncSession,
+    stock: Stock,
+    qty,
+    user,
+) -> FloatResult:
+    """Write a damaged quantity off a balance row that carries holds.
+
+    `move_stock` decrements ONLY `available_qty`: on a partially reserved row it
+    would drive the columns negative, and on a fully reserved one it refuses. A
+    stock audit must not trip over an indent's set-aside — the hold is a QUANTITY
+    (fulfilment design, 2026-10-12), so the damaged share of it is cancelled off
+    this row and every holding document is made whole against the point's
+    EARLIEST-EXPIRING UNEXPIRED free stock. `swap_holds` is not used here: an
+    audit is nobody's pick, so nothing has earned a trade. What no healthy row can
+    cover is left released — the indent is owed again and the desk answers from
+    live stock, never from a hold the shelf cannot back.
+
+    Returns how much was re-placed and how much was released with nowhere to go;
+    the caller halves the movement and nothing else. The caller posts the OUT
+    against this row AFTER this returns — `available_qty` here covers the damaged
+    quantity only while the transaction has not committed, and the movement
+    removes it. Locks the reservation rows and every sibling balance row of the
+    item at this point. Does not commit."""
+    result = FloatResult()
+    qty = _d(qty)
+    if qty <= ZERO:
+        return result
+
+    from datetime import timedelta
+
+    from app.shared.time import today as ist_today
+
+    reservations = list((await db.execute(
+        select(Reservation).where(
+            Reservation.stock_id == stock.id,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        ).order_by(Reservation.id).with_for_update()
+    )).scalars().all())
+    if not reservations:
+        return result
+
+    held = sum((_d(r.quantity) for r in reservations), ZERO)
+    if held < (stock.reserved_qty or ZERO):
+        raise ValidationError(
+            f"This balance carries {stock.reserved_qty} reserved but only {held} "
+            f"of it is explained by active holds, so the write-off cannot see what "
+            "it would be taking from. Ask the lead to reconcile the reservations "
+            "before the audit is approved."
+        )
+    take = min(qty, held)
+
+    now = utcnow()
+    # 1. Cancel the damaged share off the row, oldest reservation first, splitting a
+    #    row when only part of it is eaten. Every released part is recorded against
+    #    its document so step 2 owes that document the same amount back.
+    cancelled: list[tuple[Reservation, Decimal]] = []
+    left = take
+    for res in reservations:
+        if left <= ZERO:
+            break
+        part = min(_d(res.quantity), left)
+        if part <= ZERO:
+            continue
+        if part >= _d(res.quantity):
+            res.status = ReservationStatus.RELEASED.value
+            res.released_at = now
+        else:
+            res.quantity = _d(res.quantity) - part
+            db.add(Reservation(
+                stock_id=res.stock_id, item_id=res.item_id,
+                warehouse_id=res.warehouse_id, bin_id=res.bin_id,
+                batch_id=res.batch_id, project_id=res.project_id,
+                quantity=part, ref_type=res.ref_type, ref_id=res.ref_id,
+                ref_no=res.ref_no, ref_line_id=res.ref_line_id,
+                status=ReservationStatus.RELEASED.value,
+                created_by_id=res.created_by_id,
+                created_by_name=res.created_by_name,
+                released_at=now,
+            ))
+        cancelled.append((res, part))
+        left -= part
+    stock.reserved_qty = (stock.reserved_qty or ZERO) - take
+    stock.available_qty = (stock.available_qty or ZERO) + take
+    await db.flush()
+
+    # 2. Make every document whole out of the point's free unexpired stock of the
+    #    item — expiry ascending (FEFO: good stock the auditor did not write off),
+    #    never the damaged row or its slot, unlocking nothing another document
+    #    already holds. What cannot be covered stays released.
+    horizon = ist_today() + timedelta(days=1_000_000)
+    rows = list((await db.execute(
+        select(Stock).where(
+            Stock.item_id == stock.item_id,
+            Stock.warehouse_id == stock.warehouse_id,
+            Stock.available_qty > ZERO,
+            Stock.id != stock.id,
+        ).order_by(
+            Stock.expiry_date.is_(None), Stock.expiry_date.asc(), Stock.id,
+        ).with_for_update()
+    )).scalars().all())
+    healthy = [r for r in rows
+               if _slot(r.bin_id, r.batch_id) != _slot(stock.bin_id, stock.batch_id)
+               and (r.expiry_date or horizon) > ist_today()]
+
+    owed: dict[tuple[str, int, int], list] = collections.defaultdict(list)
+    for res, part in cancelled:
+        owed[(res.ref_type, res.ref_id, res.ref_line_id)].append((res, part))
+
+    # Where the hold ended up, per holding document — how much landed on healthy
+    # stock and how much had nowhere healthy to go (released back open).
+    moved = ZERO
+    released = ZERO
+
+    for (ref_type, ref_id, ref_line_id), parts in owed.items():
+        need = sum((_d(p) for _r, p in parts), ZERO)
+        if need <= ZERO:
+            continue
+        sample = parts[0][0]
+        # Swept by hand, not via reserve(): the healthy list is already expiry-
+        # ordered, already excludes expired rows and the condemned (bin, batch), and
+        # is already row-locked. reserve() would re-read the pool and could re-point
+        # the hold onto the row this audit just condemned, which move_stock_out
+        # would then refuse.
+        remaining = need
+        for target in healthy:
+            if remaining <= ZERO:
+                break
+            grabbed = min(remaining, _d(target.available_qty or ZERO))
+            if grabbed <= ZERO:
+                continue
+            target.available_qty = _d(target.available_qty) - grabbed
+            target.reserved_qty = (target.reserved_qty or ZERO) + grabbed
+            db.add(Reservation(
+                stock_id=target.id, item_id=sample.item_id,
+                warehouse_id=target.warehouse_id,
+                bin_id=target.bin_id, batch_id=target.batch_id,
+                project_id=target.project_id, quantity=grabbed,
+                ref_type=ref_type, ref_id=ref_id, ref_no=sample.ref_no,
+                ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
+                created_by_id=getattr(user, "id", None),
+                created_by_name=getattr(user, "full_name", None),
+            ))
+            remaining -= grabbed
+        moved += need - remaining
+        released += remaining
+
+    await db.flush()
+    return FloatResult(moved=moved, released=released)
 
 
 @dataclass(frozen=True)
