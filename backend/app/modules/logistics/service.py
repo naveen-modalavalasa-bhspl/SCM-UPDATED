@@ -300,6 +300,7 @@ from app.modules.logistics.transport import (  # noqa: E402
     receipt_evidence,
     receipt_evidence_file,
     resolve_exception,
+    send_third_party_to_vendor_enabled,
     set_provider,
     share_tracking,
     submit_tr,
@@ -332,6 +333,7 @@ __all__ = [
     "list_issues", "list_trs", "manual_courier_dispatch_enabled",
     "mode_catalogue", "mode_suggestion", "open_exceptions", "provider_board",
     "receipt_evidence", "receipt_evidence_file", "qc_fail", "qc_pass",
-    "record_quote", "resolve_exception", "set_provider", "share_tracking",
+    "record_quote", "resolve_exception", "send_third_party_to_vendor_enabled",
+    "set_provider", "share_tracking",
     "submit_tr", "transport_summary", "update_tr",
 ]

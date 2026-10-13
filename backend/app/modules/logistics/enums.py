@@ -323,10 +323,13 @@ def mode_rule(mode: str) -> ModeRule:
 
 
 def asks_provider_for_price(mode: str | None,
-                            *, manual_courier: bool = False) -> bool:
+                            *, manual_courier: bool = False,
+                            send_third_party_to_vendor: bool = True) -> bool:
     """Does the PROVIDER answer this arrangement with a price, or does the desk settle it?
 
-    A third-party job always does — asking several and comparing them IS the mode. A
+    A third-party job does whenever sent to vendors — asking several and comparing
+    them is the tender flow. When send_third_party_to_vendor is False, third party
+    is settled at the dispatch desk without requesting quotes from vendors. A
     courier does too, whenever there is a provider account to ask: a courier is a
     vendor with a portal login, and a booking pushed at them without ever asking what
     it costs is a leg that reaches the gate with nothing agreed. The desk had no
@@ -347,6 +350,8 @@ def asks_provider_for_price(mode: str | None,
     if rule is None:
         return False
     if manual_courier and (mode or "").upper() == TransportMode.COURIER.value:
+        return False
+    if not send_third_party_to_vendor and (mode or "").upper() == TransportMode.THIRD_PARTY.value:
         return False
     if rule.needs_quotes:
         return True
@@ -538,28 +543,36 @@ _ACK = Stage(
 )
 
 
-def flow_stages(mode: str | None = None, *, manual_courier: bool = False) -> list[Stage]:
+def flow_stages(mode: str | None = None, *, manual_courier: bool = False,
+                send_third_party_to_vendor: bool = True) -> list[Stage]:
     """The stages this mode actually passes through, in order.
 
     Two things past the approval depend on the mode, and they are separate questions:
 
       * was there a PRICE to ask for — a third party asks several providers and
-        compares them, a courier is asked its rate; only the manual courier, who has
-        no login to be asked through, is settled at the desk
-        (`asks_provider_for_price`).
-      * does an outside provider have to ACCEPT it — a third party and a courier both
-        do, and the shipment waits at AWAITING_CARRIER until they answer. A courier was
-        being drawn without that stage, so a booked parcel sitting on exactly that rung
-        matched no stage at all and the stepper fell back to lighting up step one.
+        compares them (when sent to vendors), a courier is asked its rate; the manual
+        courier or desk third party is settled at the desk (`asks_provider_for_price`).
+      * does an outside provider have to ACCEPT it — a vendor third party and a
+        courier both do, and the shipment waits at AWAITING_CARRIER until they answer.
 
-    A hand-over or an own vehicle hires nobody, so it has neither.
+    A hand-over, an own vehicle, or a desk-settled leg hires nobody externally through
+    a portal, so it has neither.
     """
     rule = mode_rule(mode) if mode else None
     stages = [_PLAN, _APPROVE]
-    if mode and asks_provider_for_price(mode, manual_courier=manual_courier):
+    if mode and asks_provider_for_price(
+            mode, manual_courier=manual_courier,
+            send_third_party_to_vendor=send_third_party_to_vendor):
         stages.append(_TENDER)
-    if rule and rule.needs_carrier and not (
-            manual_courier and (mode or "").upper() == TransportMode.COURIER.value):
+    is_third_party_desk = (
+        not send_third_party_to_vendor
+        and (mode or "").upper() == TransportMode.THIRD_PARTY.value
+    )
+    is_manual_courier = (
+        manual_courier
+        and (mode or "").upper() == TransportMode.COURIER.value
+    )
+    if rule and rule.needs_carrier and not is_manual_courier and not is_third_party_desk:
         stages.append(_CONFIRM)
     return stages + [_DISPATCH, _TRANSIT, _ACK]
 

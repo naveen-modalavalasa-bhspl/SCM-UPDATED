@@ -727,7 +727,7 @@ export function DispatchConfirmPage() {
     setCarrierIds([]);
     setPapers({});
     setHandoverPerson("EMPLOYEE");
-    if (next === "COURIER") void dispatchPolicyQuery.refetch();
+    if (next === "COURIER" || next === "THIRD_PARTY") void dispatchPolicyQuery.refetch();
   };
 
   const rule: ModeRule | undefined = useMemo(
@@ -928,6 +928,9 @@ export function DispatchConfirmPage() {
   // the form able to satisfy it. Unknown holds the step and says so instead — but only
   // where the policy is what decides, which a raised leg does not need.
   const courierPolicy = dispatchPolicyQuery.data;
+  /** Whether third-party dispatches are sent to vendor portals for quote tendering
+   *  or handled directly at the desk ("Leaves now"). */
+  const thirdPartyIsVendor = courierPolicy?.send_third_party_to_vendor === true;
   /** Which of the two courier flows applies here — the same answer `manualCourier`
    *  gives, without the "is courier the mode right now" half, so the mode tiles can
    *  say what the courier tile would do before it is chosen. */
@@ -972,10 +975,12 @@ export function DispatchConfirmPage() {
    *  The mirror of the service's `asks_provider_for_price`, and the same reasoning:
    *  courier and third-party both go out to providers for quotes and award one. Only
    *  the manual courier cannot be asked, since a name off a counter receipt has no
-   *  login to send the question to. */
+   *  login to send the question to. And when third-party vendor dispatch is off,
+   *  third-party is settled at the desk without quote requests. */
   const asksForPrice = !manualCourier && (
-    Boolean(rule?.needs_quotes)
-    || (mode === "COURIER" && !courierPolicyUnknown)
+    (mode === "COURIER" && !courierPolicyUnknown)
+    || (mode === "THIRD_PARTY" && thirdPartyIsVendor)
+    || (mode !== "COURIER" && mode !== "THIRD_PARTY" && Boolean(rule?.needs_quotes))
   );
   const tenderedMode = asksForPrice;
 
@@ -1449,23 +1454,29 @@ export function DispatchConfirmPage() {
                   options={(modes ?? [])
                     .filter((option) => typeAllowed(option.value))
                     .map((option) => {
-                      const optionTendered = option.value === "COURIER"
+                      const isCourier = option.value === "COURIER";
+                      const isThirdParty = option.value === "THIRD_PARTY";
+                      const optionTendered = isCourier
                         ? !courierIsManual
-                        : option.needs_quotes;
+                        : isThirdParty
+                          ? thirdPartyIsVendor
+                          : option.needs_quotes;
                       return {
                         value: option.value,
                         label: modeLabel(option.value),
-                        help: option.value === "COURIER"
+                        help: isCourier
                           ? optionTendered
                             ? "Invite courier providers, compare their quotes and award the shipment."
                             : "Record the courier name at the dispatch desk."
-                          : oneLine(option.help),
+                          : isThirdParty
+                            ? optionTendered
+                              ? "Invite carriers, compare their quotes and award the shipment."
+                              : "Dispatch directly with carrier details recorded at the desk."
+                            : oneLine(option.help),
                         icon: MODE_ICON[option.value],
                         // What the press does. A tender goes out to several for
-                        // prices. Manual courier and the modes we move ourselves do not.
-                        badge: option.value === "COURIER" && courierIsManual
-                          ? "Leaves now"
-                          : optionTendered ? "Tender" : "Leaves now",
+                        // prices. Direct bookings and the modes we move ourselves do not.
+                        badge: optionTendered ? "Tender" : "Leaves now",
                       };
                     })}
                 />
@@ -1504,7 +1515,9 @@ export function DispatchConfirmPage() {
                   + "the LR or docket are recorded here. Approval is followed by "
                   + "final dispatch at the desk."
                 : rule?.needs_carrier
-                ? "The provider fills in the journey details when they acknowledge."
+                ? tenderedMode
+                  ? "The provider fills in the journey details when they acknowledge."
+                  : "Recorded at the dispatch desk for direct dispatch."
                 : `What a ${modeLabel(mode).toLowerCase()} leg records.`}
             >
               <div className="grid gap-4 lg:grid-cols-2">
@@ -1521,7 +1534,9 @@ export function DispatchConfirmPage() {
                       hint={manualCourier ? "Recorded at the dispatch desk"
                         : tenderedMode
                           ? "Everyone who should price this job"
-                          : "Asked for their rate before anything is booked"}
+                          : mode === "COURIER"
+                            ? "Asked for their rate before anything is booked"
+                            : "Carrier selected for direct dispatch"}
                     />
                     <div className="col-span-full">
                       {courierPolicyUnknown ? (
@@ -1557,11 +1572,13 @@ export function DispatchConfirmPage() {
                         </Field>
                       ) : (
                       <Field
-                        label={tenderedMode ? "Logistics partners" : "Courier"}
+                        label={tenderedMode ? "Logistics partners" : mode === "COURIER" ? "Courier" : "Carrier"}
                         required
                         hint={tenderedMode
                           ? "Prices come back side by side on Provider Selection."
-                          : "Their price comes back on Provider Selection, where it is accepted."}
+                          : mode === "COURIER"
+                            ? "Their price comes back on Provider Selection, where it is accepted."
+                            : "Selected carrier for direct dispatch."}
                       >
                         <Select
                           value={tenderedMode ? "" : (carrierIds[0] ? String(carrierIds[0]) : "")}
@@ -1585,7 +1602,9 @@ export function DispatchConfirmPage() {
                             ? "No logistics vendors registered yet"
                             : tenderedMode
                               ? "Add a provider to the tender"
-                              : "Select the provider"}
+                              : mode === "COURIER"
+                                ? "Select the provider"
+                                : "Select the carrier"}
                           ariaLabel="Provider"
                         />
 
@@ -1939,7 +1958,7 @@ export function DispatchConfirmPage() {
                           // and saying "for acknowledgement" pointed the desk at a
                           // portal that will never reply.
                           ? "Ready to send for approval."
-                          : "Ready for final dispatch in Shipments."}
+                          : "Ready for direct dispatch."}
                     </span>
                   </p>
                 )}

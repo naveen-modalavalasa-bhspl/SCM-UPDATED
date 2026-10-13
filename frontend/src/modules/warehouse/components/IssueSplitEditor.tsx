@@ -454,7 +454,11 @@ function ItemRow(props: ItemProps) {
   return (
     <div
       className={`overflow-hidden rounded-xl border bg-content1 transition-colors ${
-        over ? "border-bad/50" : settled ? "border-line/70" : "border-warn/40"
+        over
+          ? "border-bad/50"
+          : settled || !group.itemId
+          ? "border-line/70"
+          : "border-warn/40"
       }`}
     >
       <div className="grid gap-4 px-3 py-3 lg:grid-cols-[minmax(15rem,19rem)_minmax(0,1fr)]">
@@ -518,31 +522,41 @@ function ItemRow(props: ItemProps) {
           {/* One sentence, and it is the one that decides whether this item is
             * finished. Never a status word on its own — "Partial" tells nobody what
             * to do next. */}
-          <div className="mt-2 text-xs font-semibold">
-            {over ? (
-              <span className="inline-flex items-center gap-1 text-bad">
-                <AlertTriangle className="h-3.5 w-3.5" /> Over by {fmtQty(-short)}
-              </span>
-            ) : settled ? (
-              <span className="inline-flex items-center gap-1 text-ok">
-                <Check className="h-3.5 w-3.5" />
-                Fully allocated
-                {group.splits.length > 1 && (
-                  <span className="font-normal text-muted">
-                    ({group.splits.length} locations)
-                  </span>
-                )}
-              </span>
-            ) : short > 0 ? (
-              <span className="text-warn">{fmtQty(short)} still to place</span>
-            ) : (
-              <span className={unassigned > 0 ? "text-warn" : "text-bad"}>
-                {Math.abs(unassigned)} {unitMeta?.unit ?? "identifier"}
-                {Math.abs(unassigned) === 1 ? "" : "s"}{" "}
-                {unassigned > 0 ? "to assign" : "too many"}
-              </span>
-            )}
-          </div>
+          {!group.itemId ? (
+            <div className="mt-2 text-xs text-muted">
+              Select an item to issue
+            </div>
+          ) : group.requested <= 0 && group.issued <= 0 ? (
+            <div className="mt-2 text-xs text-muted">
+              Enter requested quantity to issue
+            </div>
+          ) : (
+            <div className="mt-2 text-xs font-semibold">
+              {over ? (
+                <span className="inline-flex items-center gap-1 text-bad">
+                  <AlertTriangle className="h-3.5 w-3.5" /> Over by {fmtQty(-short)}
+                </span>
+              ) : settled ? (
+                <span className="inline-flex items-center gap-1 text-ok">
+                  <Check className="h-3.5 w-3.5" />
+                  Fully allocated
+                  {group.splits.length > 1 && (
+                    <span className="font-normal text-muted">
+                      ({group.splits.length} locations)
+                    </span>
+                  )}
+                </span>
+              ) : short > 0 ? (
+                <span className="text-warn">{fmtQty(short)} still to place</span>
+              ) : unassigned !== 0 ? (
+                <span className={unassigned > 0 ? "text-warn" : "text-bad"}>
+                  {Math.abs(unassigned)} {unitMeta?.unit ?? "identifier"}
+                  {Math.abs(unassigned) === 1 ? "" : "s"}{" "}
+                  {unassigned > 0 ? "to assign" : "too many"}
+                </span>
+              ) : null}
+            </div>
+          )}
 
           {/* What the WAREHOUSE holds of this item, which is the question the picks
             * below are answers to. It is not a sum of what is on screen: a location
@@ -589,7 +603,7 @@ function ItemRow(props: ItemProps) {
             </div>
           )}
 
-          {onRemoveGroup && !locked && group.itemId > 0 && (
+          {onRemoveGroup && !locked && (group.itemId > 0 || !group.splits[0]?.line.indent_item_id) && (
             <button
               type="button"
               onClick={() => onRemoveGroup(group)}

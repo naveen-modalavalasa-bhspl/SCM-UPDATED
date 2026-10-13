@@ -90,6 +90,7 @@ AUDIT_ENTITY = "lgs_transport_requests"
 ZERO = Decimal("0")
 LOOKUP_LIMIT = 50
 MANUAL_COURIER_SETTING = "logistics.manual_courier_dispatch"
+THIRD_PARTY_VENDOR_SETTING = "logistics.send_third_party_to_vendor"
 
 
 def _d(value) -> Decimal:
@@ -113,8 +114,18 @@ async def manual_courier_dispatch_enabled(db: AsyncSession) -> bool:
     return (raw or "").strip().lower() in {"true", "1", "yes", "on"}
 
 
+async def send_third_party_to_vendor_enabled(db: AsyncSession) -> bool:
+    """Whether Third-party logistics sends tenders/quote requests to vendor portals.
+
+    When False, third-party logistics is handled directly at the dispatch desk
+    without sending quote requests to vendors.
+    """
+    raw = await get_setting(db, THIRD_PARTY_VENDOR_SETTING, "false")
+    return (raw or "").strip().lower() in {"true", "1", "yes", "on"}
+
+
 async def dispatch_policy(db: AsyncSession) -> dict:
-    """Everything the dispatch form needs in order to draw the Courier step.
+    """Everything the dispatch form needs in order to draw the Courier & Third-party step.
 
     Which form (the vendor dropdown or the typed name), and — when it is the typed
     one — exactly which boxes the service will hold the press back for. Served rather
@@ -129,6 +140,7 @@ async def dispatch_policy(db: AsyncSession) -> dict:
         # Either one satisfies it. A list, not a field, because that is the shape of
         # the rule — see MANUAL_COURIER_TRACKING_FIELDS.
         "manual_courier_tracking_fields": list(MANUAL_COURIER_TRACKING_FIELDS),
+        "send_third_party_to_vendor": await send_third_party_to_vendor_enabled(db),
     }
 
 
@@ -480,7 +492,8 @@ def mode_suggestion(distance_km: float | None = None,
     return suggest_mode(distance_km, weight_kg, packages)
 
 
-def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False) -> list[dict]:
+def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False,
+                   send_third_party_to_vendor: bool = True) -> list[dict]:
     """The stepper, served rather than drawn from a constant in the screen.
 
     A tendered shipment has two stages the others do not. Letting the frontend decide
@@ -495,7 +508,9 @@ def flow_catalogue(mode: str | None = None, *, manual_courier: bool = False) -> 
         # to say, and the award half of "Provider accepts" is no different.
         "pending_help": stage.pending_help,
         "statuses": list(stage.statuses),
-    } for stage in flow_stages(mode, manual_courier=manual_courier)]
+    } for stage in flow_stages(
+        mode, manual_courier=manual_courier,
+        send_third_party_to_vendor=send_third_party_to_vendor)]
 
 
 #: The queues the logistics desk actually works, in the order the flow runs. Served
@@ -1706,9 +1721,15 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
         mode == TransportMode.COURIER.value
         and await manual_courier_dispatch_enabled(db)
     )
+    send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
     # Whether the provider gets to answer with a price. Courier and third-party both
-    # use the tender path now; only a manual courier has no provider login to ask.
-    tendered = asks_provider_for_price(mode, manual_courier=manual_courier)
+    # use the tender path when configured; only a manual courier or direct third party
+    # has no provider quotation round.
+    tendered = asks_provider_for_price(
+        mode,
+        manual_courier=manual_courier,
+        send_third_party_to_vendor=send_third_party_to_vendor,
+    )
     manual_courier_name = (getattr(data, "manual_courier_name", None) or "").strip()
     if manual_courier:
         if chosen:
@@ -1727,12 +1748,11 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     if rule.needs_carrier and not chosen and not manual_courier:
         raise ValidationError(
             "Choose the logistics provider(s) this consignment goes with")
-    # A booking is made with ONE provider. Courier and third-party are tenders, so they
-    # can name several; the desk-settled modes cannot.
+    # A booking is made with ONE provider. A tender can name several; the desk-settled modes cannot.
     if not tendered and len(chosen) > 1:
         raise ValidationError(
             f"A {rule.label.lower()} booking goes with one provider. "
-            "Choose third-party to send the same job to several and compare.")
+            "Choose third-party with vendor dispatch enabled to send the same job to several and compare.")
 
     method = getattr(data, "evaluation_method", None)
     if method and not evaluation.is_valid(method):
@@ -1813,12 +1833,12 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
     # project ladder was set up; the engine's normal fallback remains the authority on
     # who approves.  All other modes retain their existing no-ladder behaviour.
     if configured is None and not manual_courier:
-        _advance_after_approval(doc)
+        _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
         summary = settled_summary
         # "Confirm dispatch" on a settled mode is the load LEAVING, not a booking to
         # release on a second screen: the gate pass, the docket and the driver are all
         # on the form that was just pressed. `release_now` says so, and only a mode
-        # that needs no tender can be released here — a THIRD_PARTY job has no carrier
+        # that needs no tender can be released here — a tendered job has no carrier
         # yet, and READY is the earliest it can be one.
         if getattr(data, "release_now", False) and doc.status == TransportStatus.READY.value:
             await _release(db, doc, data, user)
@@ -2112,7 +2132,12 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
         # here: a courier with a vendor account is sent for a price, so an edit that
         # re-picks the provider must re-ask rather than quietly booking the leg and
         # walking it on to AWAITING_CARRIER with no price on it.
-        tendered = asks_provider_for_price(doc.mode, manual_courier=manual_courier)
+        send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
+        tendered = asks_provider_for_price(
+            doc.mode,
+            manual_courier=manual_courier,
+            send_third_party_to_vendor=send_third_party_to_vendor,
+        )
         if manual_courier:
             if chosen:
                 raise ValidationError(
@@ -2176,7 +2201,12 @@ async def update_tr(db: AsyncSession, tr_id: int, data, user) -> TransportReques
                 if workflow_status not in {
                         TransportStatus.DRAFT.value,
                         TransportStatus.PENDING_APPROVAL.value}:
-                    doc.status = TransportStatus.AWAITING_CARRIER.value
+                    is_third_party_desk = (
+                        not send_third_party_to_vendor
+                        and doc.mode == TransportMode.THIRD_PARTY.value
+                    )
+                    doc.status = (TransportStatus.READY.value if is_third_party_desk
+                                  else TransportStatus.AWAITING_CARRIER.value)
         elif not manual_courier and mode_changed:
             doc.quotes.clear()
             doc.awarded_quote_id = None
@@ -2235,7 +2265,8 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     # Reading it rather than assuming PENDING_APPROVAL is what stops the request
     # standing still with nobody holding it.
     if instance.status == InstanceStatus.APPROVED.value:
-        _advance_after_approval(doc)
+        send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
+        _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
 
     await write_audit(db, entity=AUDIT_ENTITY, entity_id=doc.id, entity_no=doc.tr_no,
                       action=AuditAction.UPDATE, actor=user,
@@ -2247,7 +2278,8 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
     return doc
 
 
-def _advance_after_approval(doc: TransportRequest) -> None:
+def _advance_after_approval(doc: TransportRequest, *,
+                            send_third_party_to_vendor: bool = True) -> None:
     """Where an approved request goes next.
 
     A shipment somebody outside still owes an answer on goes out to every invited
@@ -2261,7 +2293,12 @@ def _advance_after_approval(doc: TransportRequest) -> None:
     details were entered by the desk.
     """
     rule = mode_rule(doc.mode)
+    is_third_party_desk = (
+        not send_third_party_to_vendor
+        and doc.mode == TransportMode.THIRD_PARTY.value
+    )
     if (rule.needs_quotes and not _is_manual_courier_row(doc)
+            and not is_third_party_desk
             and doc.carrier_id is not None and not doc.quotes):
         # The general Shipments form still has a single provider picker. Treat that
         # pick as the first invitation, then let Provider Selection add more and award
@@ -2272,7 +2309,8 @@ def _advance_after_approval(doc: TransportRequest) -> None:
         ))
         doc.carrier_id = doc.carrier_name = None
         doc.status = TransportStatus.QUOTING.value
-    elif ((rule.needs_quotes and not _is_manual_courier_row(doc))
+    elif (((rule.needs_quotes and not is_third_party_desk)
+           and not _is_manual_courier_row(doc))
             or _awaiting_price(doc)):
         doc.status = TransportStatus.QUOTING.value
     else:
@@ -2294,7 +2332,8 @@ async def act_on_tr(db: AsyncSession, tr_id: int, action: str, user,
     instance = await engine.act(db, DocType.TRANSPORT_REQUEST.value, doc.id,
                                 action, user, comments, context=_context(doc))
     if instance.status == InstanceStatus.APPROVED.value:
-        _advance_after_approval(doc)
+        send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
+        _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
     elif instance.status == InstanceStatus.REJECTED.value:
         doc.status = TransportStatus.REJECTED.value
 

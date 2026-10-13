@@ -40,7 +40,7 @@ interface Props<T> {
   footer?: ReactNode;
   empty?: string;
   /** Shown when the caller wants a line marked, e.g. a rejected quantity in red. */
-  rowTone?: (row: T) => string | undefined;
+  rowTone?: (row: T, index: number) => string | undefined;
   /** Minimum table width for dense documents whose cells need room to breathe. */
   minTableWidth?: string;
 }
@@ -94,7 +94,7 @@ export function LinesEditor<T>({
               </tr>
             ) : (
               rows.map((row, i) => (
-                <tr key={keyOf(row, i)} className={`border-t border-line/70 ${rowTone?.(row) ?? ""}`}>
+                <tr key={keyOf(row, i)} className={`border-t border-line/70 transition-colors ${rowTone?.(row, i) ?? ""}`}>
                   {columns.map((c) => (
                     <td
                       key={c.key}
@@ -135,7 +135,7 @@ export function LinesEditor<T>({
           rows.map((row, i) => (
             <div
               key={keyOf(row, i)}
-              className={`rounded-2xl border border-line/70 bg-content1 p-4 ${rowTone?.(row) ?? ""}`}
+              className={`rounded-2xl border border-line/70 bg-content1 p-4 transition-colors ${rowTone?.(row, i) ?? ""}`}
             >
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">

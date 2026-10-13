@@ -36,6 +36,8 @@ interface Props {
   serverSearch?: string;
   /** Rows to show when the loader has not resolved yet — keeps a chosen id visible. */
   fallback?: Option[];
+  /** Optional custom option label formatter */
+  formatOptionLabel?: (row: Option, defaultLabel: string) => string;
 }
 
 function LookupInner({
@@ -50,6 +52,7 @@ function LookupInner({
   errorMessage,
   serverSearch,
   fallback = NO_FALLBACK,
+  formatOptionLabel,
 }: Props) {
   // A disabled lookup with nothing chosen has nothing to say, so it stays unfetched.
   // A disabled lookup WITH a value still has to fetch: the Select renders the option
@@ -85,11 +88,14 @@ function LookupInner({
     ];
   }, [data, fallback]);
   const options = useMemo(
-    () => rows.map((o) => ({
-      value: o.id,
-      label: o.code ? `${o.code} — ${o.name}` : o.name,
-    })),
-    [rows],
+    () => rows.map((o) => {
+      const defaultLabel = o.code ? `${o.code} — ${o.name}` : o.name;
+      return {
+        value: o.id,
+        label: formatOptionLabel ? formatOptionLabel(o, defaultLabel) : defaultLabel,
+      };
+    }),
+    [rows, formatOptionLabel],
   );
 
   return (

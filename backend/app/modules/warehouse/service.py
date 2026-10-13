@@ -1641,6 +1641,13 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         claimed = seen_batch_by_item.setdefault(item.id, {})
         if batch_key in claimed:
             where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
+            if at_gate or receipt.receipt_type == "GATE_ENTRY" or not line.batch_no:
+                raise ValidationError(
+                    f"Line {index} is a duplicate: {item.code} is already on line "
+                    f"{claimed[batch_key]} of this Material Inward. Duplicate item entries are not "
+                    f"allowed on Material Inward — combine the quantity onto line "
+                    f"{claimed[batch_key]}, or remove line {index}."
+                )
             raise ValidationError(
                 f"Line {index} is a duplicate: {item.code} with {where} is already "
                 f"on line {claimed[batch_key]} of this Material Inward. Remove line "
