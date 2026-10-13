@@ -324,7 +324,7 @@ def mode_rule(mode: str) -> ModeRule:
 
 def asks_provider_for_price(mode: str | None,
                             *, manual_courier: bool = False,
-                            send_third_party_to_vendor: bool = True) -> bool:
+                            send_third_party_to_vendor: bool = False) -> bool:
     """Does the PROVIDER answer this arrangement with a price, or does the desk settle it?
 
     A third-party job does whenever sent to vendors — asking several and comparing
@@ -544,7 +544,7 @@ _ACK = Stage(
 
 
 def flow_stages(mode: str | None = None, *, manual_courier: bool = False,
-                send_third_party_to_vendor: bool = True) -> list[Stage]:
+                send_third_party_to_vendor: bool = False) -> list[Stage]:
     """The stages this mode actually passes through, in order.
 
     Two things past the approval depend on the mode, and they are separate questions:
