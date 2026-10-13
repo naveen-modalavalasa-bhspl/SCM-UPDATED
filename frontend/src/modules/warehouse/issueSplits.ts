@@ -153,6 +153,7 @@ export interface IssueGroup {
  * two cases that are unambiguous.
  */
 export const trackingOf = (line: IssueItemWrite): TrackingType => {
+  if (!line.item_id) return "NONE";
   if (line.tracking_type) return line.tracking_type;
   if (line.is_serial_tracked) return "SERIAL";
   if (line.is_imei_tracked) return "IMEI";
@@ -164,7 +165,7 @@ export const trackingOf = (line: IssueItemWrite): TrackingType => {
  *  test on the Units column: unknown (`undefined`) still offers the picker, because
  *  an unsaved draft has not been read back yet. */
 export const isPickable = (line: IssueItemWrite): boolean =>
-  !!line.is_serial_tracked || !!line.is_imei_tracked || line.has_units !== false;
+  !!line.item_id && (!!line.is_serial_tracked || !!line.is_imei_tracked || line.has_units !== false);
 
 /**
  * The flat line array, read as parents and their splits.

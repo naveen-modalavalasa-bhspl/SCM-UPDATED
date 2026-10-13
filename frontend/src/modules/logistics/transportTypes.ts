@@ -47,6 +47,7 @@ export interface DispatchPolicy {
   manual_courier_dispatch: boolean;
   manual_courier_required_fields: string[];
   manual_courier_tracking_fields: string[];
+  send_third_party_to_vendor?: boolean;
 }
 
 /** What the leg is carrying, which is also WHICH WAY it runs. RETURN is the same

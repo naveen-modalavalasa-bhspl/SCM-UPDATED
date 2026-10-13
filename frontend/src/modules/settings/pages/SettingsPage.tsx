@@ -45,6 +45,7 @@ const TIMEZONES = ["Asia/Kolkata", "UTC", "Asia/Dubai", "Europe/London"]
 
 const LOGISTICS_DEFAULTS: AppSettings["logistics"] = {
   manual_courier_dispatch: false,
+  send_third_party_to_vendor: false,
 };
 
 const SECURITY_DEFAULTS: AppSettings["security"] = {
@@ -315,6 +316,17 @@ export function SettingsPage() {
             LR or docket are recorded on the dispatch press, because a typed courier
             has no login to fill them in later. Off: Courier keeps the
             registered-vendor selection and carrier acknowledgement flow.
+          </p>
+
+          <Toggle
+            label="Send third-party to vendors"
+            checked={form.logistics.send_third_party_to_vendor}
+            onChange={(value) => set("logistics", "send_third_party_to_vendor", value)}
+          />
+          <p className="text-xs text-muted md:col-span-2">
+            On: Third-party dispatches are sent to vendor portals — carriers submit quotes
+            to be compared and awarded. Off: Third-party dispatches are handled directly
+            at the dispatch desk without sending quote requests to vendor portals.
           </p>
           {/* Said here because this is where somebody would expect otherwise. The two
               flows differ in who fills the journey details in, so a shipment cannot be
