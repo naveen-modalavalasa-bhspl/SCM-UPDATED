@@ -417,6 +417,11 @@ class StockAdjustmentItem(Base):
     system_qty = Column(Numeric(16, 3), nullable=True)
     physical_qty = Column(Numeric(16, 3), nullable=True)
     unit_cost = Column(Numeric(16, 2), nullable=True, default=0.00)
+    # The unit codes an OUT line writes off, on a coded item. The warehouse module
+    # retires exactly these rows through `inventory.hooks.ON_ADJUSTMENT_OUT`, so the
+    # audit's own record of which physical units died is the row itself, not remarks
+    # prose. Stored as JSON beside the stock the movement carries on its ledger row.
+    serial_numbers = Column(JSON, nullable=True)
     remarks = Column(String(500), nullable=True)
 
     adjustment = relationship("StockAdjustment", back_populates="items")

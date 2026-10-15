@@ -127,6 +127,12 @@ export interface UnlocatedStockStatus {
   placed_rows: number;
   placed_qty: number | string;
   placed_units: number;
+  stranded_units?: number;
+  stranded_items?: number;
+  stale_lines?: number;
+  stale_issue_ids?: number[];
+  repointed_lines?: number;
+  code_scope?: string | null;
 }
 
 /** `whs_warehouses`. */
@@ -1320,6 +1326,8 @@ export interface IssueStockSource {
    *  FEFO swap past the same-day rule: an allocated batch with no codes may give way
    *  to the oldest batch that has them. */
   has_unit_codes?: boolean;
+  /** Set aside for other indents here — tradeable on save. */
+  other_indent_qty?: number | string;
 }
 
 /**
@@ -1341,7 +1349,22 @@ export interface UnitSupply {
   /** Counted only as far as `need + 1`, so a figure equal to that means "at least
    *  that many". `null` is "no answer" — never draw it as a shortfall. */
   available: number | null;
+  /** Same batch anywhere at this point — "same batch, other bay". */
+  batch_available?: number | null;
+  /** Any batch at this point — "whole point". */
+  point_available?: number | null;
 }
+
+/** Bay vs batch vs point code counts behind the picker's scope switch. */
+export interface SerialScopeCounts {
+  item_id: number;
+  exact: number | null;
+  batch: number | null;
+  point: number | null;
+  has_units: boolean;
+}
+
+export type CodeScopeLevel = "exact" | "batch" | "point";
 
 export interface IssueItemWrite {
   id?: number;

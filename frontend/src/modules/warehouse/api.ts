@@ -131,6 +131,14 @@ export const getUnlocatedStock = (id: number) =>
 export const placeUnlocatedStock = (id: number) =>
   post<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/place`);
 
+/** Stranded units + stale picks standing in the way of the next issue. */
+export const auditUnlocatedStock = (id: number) =>
+  get<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/audit`);
+
+/** Place, sweep stranded units and repoint stale picks in one press. */
+export const repairUnlocatedStock = (id: number, repoint_issues = true) =>
+  post<UnlocatedStockStatus>(`${BASE}/warehouses/${id}/unlocated/repair?repoint_issues=${repoint_issues}`);
+
 /**
  * How much of a storage location's cube the locations inside it already claim.
  *
@@ -439,12 +447,15 @@ export const issueStockSources = (
   indent_id?: number | null,
   // Lots held for this project (Stock Segregation > Project Lots) are offered too.
   project_id?: number | null,
+  // The issue being edited: its own picks are not "pinned by another issue".
+  issue_id?: number | null,
 ) =>
   post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
     warehouse_id,
     item_ids,
     indent_id,
     project_id,
+    issue_id: issue_id ?? undefined,
   });
 
 /**
@@ -745,9 +756,26 @@ export const listSerials = (
     unbatched?: boolean;
     // Only units no document is holding — a stock movement's picker.
     claim_free?: boolean;
+    // Widen the circle when the bay is empty: batch keeps the batch, point lists
+    // the whole point. The save still validates the line's own bay and batch.
+    scope?: "exact" | "batch" | "point";
   } = {},
 ) =>
   get<Page<SerialNumber>>(`${BASE}/serials`, params);
+
+/** Bay vs batch vs point code counts behind the picker's scope switch. */
+export const serialScopeCounts = (params: {
+  item_id: number; warehouse_id: number; batch_id?: number | null;
+  bin_id?: number | null; issue_id?: number | null; issue_line_id?: number | null;
+}) =>
+  get<import("./types").SerialScopeCounts>(`${BASE}/serials/scope-counts`, {
+    item_id: params.item_id,
+    warehouse_id: params.warehouse_id,
+    batch_id: params.batch_id || undefined,
+    bin_id: params.bin_id || undefined,
+    issue_id: params.issue_id || undefined,
+    issue_line_id: params.issue_line_id || undefined,
+  });
 
 export const listBatches = (params: ListParams & { item_id?: number; expiring_days?: number } = {}) =>
   get<Page<Batch>>(`${BASE}/batches`, params);

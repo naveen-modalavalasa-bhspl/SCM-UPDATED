@@ -1851,7 +1851,7 @@ async def dispatch_consignment(db: AsyncSession, data, user) -> TransportRequest
         # Reading the instance rather than assuming it is pending is what stops the
         # request standing still with no one holding it — same rule as `submit_tr`.
         if instance.status == InstanceStatus.APPROVED.value:
-            _advance_after_approval(doc)
+            _advance_after_approval(doc, send_third_party_to_vendor=send_third_party_to_vendor)
             summary = settled_summary
         else:
             doc.status = TransportStatus.PENDING_APPROVAL.value
@@ -1919,6 +1919,7 @@ async def dispatch_leg(db: AsyncSession, tr_id: int, data, user) -> TransportReq
     _check_mode_fields(doc, at_submit=True)
 
     manual_courier = _is_manual_courier_row(doc)
+    send_third_party_to_vendor = await send_third_party_to_vendor_enabled(db)
     doc.requested_position_id = (doc.requested_position_id
                                  or getattr(user, "active_position_id", None))
     raiser_role_id = await ladder.role_of_position(db, doc.requested_position_id)
@@ -2279,7 +2280,7 @@ async def submit_tr(db: AsyncSession, tr_id: int, user) -> TransportRequest:
 
 
 def _advance_after_approval(doc: TransportRequest, *,
-                            send_third_party_to_vendor: bool = True) -> None:
+                            send_third_party_to_vendor: bool = False) -> None:
     """Where an approved request goes next.
 
     A shipment somebody outside still owes an answer on goes out to every invited

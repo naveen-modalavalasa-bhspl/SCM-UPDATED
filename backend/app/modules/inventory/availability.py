@@ -7,12 +7,13 @@ anything or, in sort_key's case, without a database at all.
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.inventory.models import NO_PROJECT, Stock
 from app.shared.enums import PickStrategy
 from app.shared.models.warehouse import Warehouse
+from app.shared.time import today as ist_today
 
 # A batch with no expiry must sort *after* every dated one: an undated drum should not
 # jump ahead of a batch that expires next week.
@@ -58,7 +59,12 @@ async def candidate_stock(db: AsyncSession, item_id: int,
     # stk_balance and stk_ledger as the record of which project the goods were
     # received for — history, not a fence. The parameter is kept so callers reading
     # like "availability for project N" still compile.
-    stmt = select(Stock).where(Stock.item_id == item_id, Stock.available_qty > 0)
+    today = ist_today()
+    stmt = select(Stock).where(
+        Stock.item_id == item_id,
+        Stock.available_qty > 0,
+        or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today),
+    )
     if warehouse_ids:
         # An allocator picked these warehouses explicitly. That choice wins over any
         # type filter a rule suggested — a person looked at the shelf and decided.

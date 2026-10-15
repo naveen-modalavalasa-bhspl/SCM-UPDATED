@@ -142,8 +142,11 @@ async def transport_evaluation_methods(
 @transport_router.get("/flow", response_model=list[dict])
 async def transport_flow(mode: str | None = None,
                          manual_courier: bool = False,
-                         send_third_party_to_vendor: bool = True,
+                         send_third_party_to_vendor: bool | None = None,
+                         db: AsyncSession = Depends(get_db),
                          user=Depends(require_permission(perms.TRANSPORT_VIEW))):
+    if send_third_party_to_vendor is None:
+        send_third_party_to_vendor = await service.send_third_party_to_vendor_enabled(db)
     return service.flow_catalogue(
         mode, manual_courier=manual_courier,
         send_third_party_to_vendor=send_third_party_to_vendor)

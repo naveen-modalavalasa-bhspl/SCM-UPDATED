@@ -141,6 +141,11 @@ export interface IssueGroup {
    *  per unit, the allocated batch carries none, so FEFO moves on to the oldest batch
    *  that does. Empty when the exception does not apply. See `codedSwapBatches`. */
   codedSwap: Set<number>;
+  /** The FEFO plan for the ask, and the batch ids it names. */
+  plan: FefoStep[];
+  required: Set<number>;
+  /** The earliest-expiring batch with stock. */
+  earliest: { batchId: number; batchNo: string | null; expiry: string | null; drawable: number } | null;
 }
 
 /**
@@ -203,6 +208,9 @@ export function groupIssueLines(
         allocated: [],
         releasing: [],
         codedSwap: new Set<number>(),
+        earliest: null,
+        plan: [],
+        required: new Set<number>(),
       };
       byKey.set(key, group);
       groups.push(group);
@@ -239,7 +247,8 @@ export function groupIssueLines(
       binPath: match?.bin_path ?? null,
       binCode: match?.bin_code ?? line.bin_code ?? null,
       batchNo: match?.batch_no ?? line.batch_no ?? null,
-      isAllocated: num(match?.own_reserved_qty) > 0,
+      // An indent hold floats between batches (2026-10-12): no row is "the allocated one".
+      isAllocated: false,
     });
     group.requested += num(line.requested_qty);
     group.issued += issued;
@@ -255,7 +264,10 @@ export function groupIssueLines(
 
   for (const group of groups) {
     group.remaining = Math.max(round(group.requested - group.issued), 0);
-    const all = sourcesByItem[group.itemId] ?? [];
+    const today = new Date().toISOString().slice(0, 10);
+    const all = (sourcesByItem[group.itemId] ?? []).filter(
+      (row) => !(row.expiry_date && row.expiry_date < today)
+    );
     // `item_total_qty` is the same number on every row of the item, so the first row
     // carries the answer; the drawable side IS a sum, because it is only ever over
     // the locations this document may use.
@@ -264,11 +276,22 @@ export function groupIssueLines(
       ? round(all.reduce((sum, row) => sum + num(row.drawable_qty), 0))
       : null;
     const taken = new Set(group.splits.map((s) => sourceKey(s.line.batch_id, s.line.bin_id)));
-    const rows = sourcesByItem[group.itemId] ?? [];
+    const rows = all;
     // Where inventory put the hold. `own_reserved_qty` is this document's own indent's
     // reservation on that balance row — served by `issue_stock_sources` precisely so a
     // screen never has to guess which stock is spoken for by itself.
-    group.allocated = rows.filter((row) => num(row.own_reserved_qty) > 0);
+    // Holds float between batches (2026-10-12): no row is "where inventory put it",
+    // so the old same-day swap lock, restore button and "hold moves" notice — all of
+    // which read this list — stay off. The FEFO plan below is the only rule.
+    group.allocated = [];
+    // The FEFO plan for the ask: the batches it needs, earliest expiry first.
+    group.plan = fefoPlan(rows, Math.max(group.requested, group.issued));
+    group.required = new Set(group.plan.flatMap((step) => step.batches.map((b) => b.batchId as number)));
+    const firstBatch = group.plan[0]?.batches[0];
+    group.earliest = firstBatch
+      ? { batchId: firstBatch.batchId as number, batchNo: firstBatch.batchNo, expiry: firstBatch.expiry,
+          drawable: firstBatch.drawable }
+      : null;
     // Somewhere this ask may ACTUALLY go next, which is not simply "a source it is not
     // already on". A pick drafted from an allocation may only move onto a batch
     // expiring on the same day (see `allowedExpiries`), so a spare row on a later
@@ -391,6 +414,8 @@ export interface BatchChoice {
   allocated: boolean;
   /** May this line be moved onto it — see `allowedBatchIds`. */
   allowed: boolean;
+  /** The earliest-expiring batch that can still give — FEFO's first choice. */
+  earliest?: boolean;
   /** Free coded units somewhere in this batch here (only meaningful when the item
    *  must leave with codes). */
   hasCodes: boolean;
@@ -469,7 +494,12 @@ export function batchChoices(
     if (num(row.own_reserved_qty) > 0) choice.allocated = true;
     if (row.has_unit_codes) choice.hasCodes = true;
   }
-  const out = [...by.values()].sort(byExpiry);
+  const today = new Date().toISOString().slice(0, 10);
+  const out = [...by.values()]
+    .filter((choice) => !(choice.expiry && choice.expiry < today))
+    .sort(byExpiry);
+  const first = out.find((choice) => choice.drawable > 0 && choice.batchId);
+  if (first) first.earliest = true;
   const codesRequired = sources.some((row) => row.codes_required);
   if (allowedExpiries) {
     for (const choice of out) {
@@ -522,6 +552,79 @@ export function codedSwapBatches(
 
 /** The expiry dates a pick may be moved onto, given where inventory allocated it.
  *  `null` — nothing allocated — is "no constraint", never "nothing allowed". */
+/** Does expiry `a` come after `b`? An undated batch sorts after every dated one. */
+export function expiresLater(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a) return !!b;
+  if (!b) return false;
+  return a > b;
+}
+
+/** One step of the FEFO plan: a tier of batches expiring the same day, and how much of
+ *  the ask it covers. Same-day batches are interchangeable to FEFO, so they share one. */
+export interface FefoStep {
+  expiry: string | null;
+  batches: BatchChoice[];
+  /** What this tier can give the document. */
+  drawable: number;
+  /** How much of the ask this tier must cover — all of it, unless it is the last. */
+  take: number;
+}
+
+/**
+ * The batches the ask actually needs, earliest expiry first, and how much from each
+ * (2026-10-12). Expired stock is never in it. Damaged or unusable stock is the stock
+ * audit's business, not the issue's — so a later batch is offered only once every
+ * earlier one is used up, and the batches beyond what the ask needs are not offered
+ * at all. The server applies the same plan on save (`_assert_issue_sources`).
+ */
+export function fefoPlan(sources: IssueStockSource[], ask: number): FefoStep[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const usable = batchChoices(sources).filter(
+    (choice) => choice.batchId && choice.drawable > 0 && !(choice.expiry && choice.expiry < today));
+  const tiers = new Map<string, BatchChoice[]>();
+  for (const choice of usable) {
+    const key = choice.expiry ?? "";
+    tiers.set(key, [...(tiers.get(key) ?? []), choice]);
+  }
+  const ordered = [...tiers.entries()].sort(([a], [b]) => {
+    if (!a) return 1;
+    if (!b) return -1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+  const plan: FefoStep[] = [];
+  let left = round(ask);
+  for (const [expiry, batches] of ordered) {
+    if (left <= 0) break;
+    const drawable = round(batches.reduce((sum, b) => sum + b.drawable, 0));
+    const take = round(Math.min(drawable, left));
+    plan.push({ expiry: expiry || null, batches, drawable, take });
+    left = round(left - take);
+  }
+  return plan;
+}
+
+/** The first FEFO tier this item's picks leave short while a later tier is used —
+ *  the same test the save applies. `null` when the picks follow the plan. */
+export function fefoBreach(group: IssueGroup): { short: FefoStep; taken: number; later: FefoStep } | null {
+  const takes = new Map<number, number>();
+  for (const split of group.splits) {
+    if (split.line.batch_id) {
+      takes.set(split.line.batch_id, round((takes.get(split.line.batch_id) ?? 0) + split.issued));
+    }
+  }
+  let remaining = round([...takes.values()].reduce((a, b) => a + b, 0));
+  let short: { step: FefoStep; taken: number } | null = null;
+  for (const step of group.plan) {
+    if (remaining <= 0) break;
+    const tierTake = round(step.batches.reduce((sum, b) => sum + (takes.get(b.batchId ?? 0) ?? 0), 0));
+    const expect = round(Math.min(step.drawable, remaining));
+    if (short && tierTake > 0) return { short: short.step, taken: short.taken, later: step };
+    if (tierTake < expect && !short) short = { step, taken: tierTake };
+    remaining = round(remaining - tierTake);
+  }
+  return null;
+}
+
 export function allowedExpiries(allocated: IssueStockSource[]): Set<string> | null {
   const rows = allocated.filter((row) => src(row.batch_id));
   if (rows.length === 0) return null;
@@ -534,9 +637,10 @@ export function locationChoices(
   sources: IssueStockSource[],
   batchId: number | null | undefined,
 ): LocationChoice[] {
+  const today = new Date().toISOString().slice(0, 10);
   const wanted = sourceKey(batchId, null);
   return sources
-    .filter((row) => sourceKey(row.batch_id, null) === wanted)
+    .filter((row) => sourceKey(row.batch_id, null) === wanted && !(row.expiry_date && row.expiry_date < today))
     .map((row) => ({
       binId: src(row.bin_id),
       binCode: row.bin_code ?? null,
@@ -611,6 +715,33 @@ export function splitProblems(
     // Which expiry dates this item's picks may sit on, given where inventory
     // allocated them. `null` — nothing allocated — is no constraint at all.
     const allowed = allowedExpiries(group.allocated);
+    // Strict FEFO: a batch outside the plan, or a later tier used before an earlier
+    // one is exhausted. Same test as the save (`_assert_issue_sources`).
+    for (const split of group.splits) {
+      const batch = split.line.batch_id;
+      if (batch && group.plan.length && !group.required.has(batch)) {
+        problems.push({
+          level: "error",
+          groupKey: group.key,
+          index: split.index,
+          message: `${label}: ${split.batchNo ?? "this batch"} is not needed — the ask is covered by `
+            + group.plan.flatMap((step) => step.batches.map((b) => b.batchNo ?? "unbatched")).join(", ")
+            + ", earliest expiry first.",
+        });
+      }
+    }
+    const breach = fefoBreach(group);
+    if (breach) {
+      problems.push({
+        level: "error",
+        groupKey: group.key,
+        message: `${label}: take ${breach.short.take} from `
+          + breach.short.batches.map((b) => b.batchNo ?? "unbatched").join(", ")
+          + ` (expires ${breach.short.expiry ?? "—"}) before using `
+          + breach.later.batches.map((b) => b.batchNo ?? "unbatched").join(", ")
+          + ` — only ${breach.taken} is taken there. Stock leaves earliest-expiry first.`,
+      });
+    }
     if (round(group.issued - group.requested) > 0) {
       problems.push({
         level: "error",

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, Download, MapPin, ScanLine, Truck, X } from "lucide-react";
+import { Boxes, Layers, TriangleAlert, CalendarClock, Tag as TagIcon, Download, MapPin, ScanLine, Truck, X, ChevronDown } from "lucide-react";
 
 /** REQ_032 — the outward pipeline, served per item per point (`service.stock_pipeline`). */
 const PIPELINE = [
@@ -19,10 +19,10 @@ import { FilterBar, FilterSelect, FilterToggle, FilterSelect as FilterMenu,
 import { DetailSheet, SheetRow, SheetSection } from "./DetailSheet";
 import { UnitCell, UnitsPanel } from "./UnitsPanel";
 import {
-  getSerialSummary, getStockBalances, getStockDetail, getStockSummary, getWarehouses,
+  getSerialSummary, getStockBalances, getStockDetail, getStockGroups, getStockSummary, getWarehouses,
   indexSerials, lookupUnit, unplaced,
 } from "../api";
-import type { StockBalanceItem, StockDetail, StockLot } from "../types";
+import type { StockBalanceItem, StockDetail, StockGroupRow, StockLot } from "../types";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { TONE_BLUE } from "@/shared/components/tones";
 
@@ -30,6 +30,16 @@ import { TONE_BLUE } from "@/shared/components/tones";
  *  the live data, so an uncosted row says so rather than printing a confident ₹0.00. */
 const money = (n?: number) =>
   !n ? <span className="text-muted">Not costed</span> : `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`;
+
+/**
+ * An indent sets aside a QUANTITY of an item at a point — never a batch or a location;
+ * the batch is chosen FEFO when it is issued. So on a lot the indent's hold is not
+ * "reserved": it is shelf stock, and the set-aside is shown once, against the item.
+ */
+const shelfQty = (r: { available_qty: number }) => r.available_qty;
+/** Everything reserved on this lot, an indent's allocation included (2026-10-13): once
+ *  an indent is allocated, its quantity shows here as Reserved. */
+const otherHeld = (r: { reserved_qty: number }) => Math.max(0, r.reserved_qty);
 
 const qty = (n: number, uom?: string) => `${n.toLocaleString("en-IN")}${uom ? ` ${uom}` : ""}`;
 
@@ -72,13 +82,13 @@ function ItemTile({ name }: { name: string }) {
 /** How much of what is on the shelf is free vs spoken for. Render-only picture of
  *  available/(available+reserved); no number here is new. */
 function LevelBar({ r }: { r: StockBalanceItem }) {
-  const total = r.available_qty + r.reserved_qty;
+  const total = shelfQty(r) + otherHeld(r);
   if (total <= 0) return null;
   const freePct = Math.round((r.available_qty / total) * 100);
   return (
     <div className="mt-1 flex h-1.5 w-20 overflow-hidden rounded-full bg-content2" aria-hidden>
       <div className="bg-brand transition-all" style={{ width: `${freePct}%` }} />
-      {r.reserved_qty > 0 && <div className="bg-warn" style={{ width: `${100 - freePct}%` }} />}
+      {otherHeld(r) > 0 && <div className="bg-warn" style={{ width: `${100 - freePct}%` }} />}
     </div>
   );
 }
@@ -130,6 +140,61 @@ function LocationPath({ path }: { path: (string | undefined)[] }) {
   );
 }
 
+/**
+ * What indents have set aside of this item here — a QUANTITY each, never a batch. The
+ * storekeeper picks the batch FEFO when the issue is made, so whichever indent is
+ * issued first gets the earliest-expiring stock.
+ */
+function SetAside({ detail, loading, uom }: { detail?: StockDetail; loading: boolean; uom?: string }) {
+  if (loading) return <p className="text-sm text-muted">Loading…</p>;
+  const rows = detail?.set_aside ?? [];
+  const total = detail?.set_aside_total ?? 0;
+  const free = detail?.total_available ?? 0;
+  return (
+    <div className="space-y-2.5">
+      <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg border border-warn/30 bg-warn/[0.05] p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">Set aside</div>
+          <div className="mt-0.5 font-display text-lg font-bold tabular text-warn">{qty(total, uom)}</div>
+        </div>
+        <div className="rounded-lg border border-ok/30 bg-ok/[0.05] p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">Free to allocate</div>
+          <div className="mt-0.5 font-display text-lg font-bold tabular text-ok">{qty(free, uom)}</div>
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-line px-3 py-3 text-center text-xs text-muted">
+          No indent has this item set aside here.
+        </p>
+      ) : (
+        <ul className="divide-y divide-line/60 overflow-hidden rounded-lg border border-line/70">
+          {rows.map((r) => (
+            <li key={r.indent_id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+              <div className="min-w-0">
+                <Link to={`/indents/${r.indent_id}`}
+                      className="font-mono text-xs font-semibold text-ink hover:text-brand hover:underline">
+                  {r.indent_no ?? `Indent #${r.indent_id}`}
+                </Link>
+                <div className="text-[11px] text-muted">
+                  {r.since ? `Since ${new Date(r.since).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}` : ""}
+                  {r.by_name ? ` · by ${r.by_name}` : ""}
+                </div>
+              </div>
+              <div className="shrink-0 text-right">
+                <div className="font-display text-sm font-bold tabular text-warn">{r.quantity.toLocaleString("en-IN")}</div>
+                {uom && <div className="text-[10px] text-muted">{uom}</div>}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="text-[11px] leading-relaxed text-muted">
+        Quantity only — no batch or location is held. The batch is picked earliest-expiry-first when the issue is made.
+      </p>
+    </div>
+  );
+}
+
 function LotCard({ lot, uom }: { lot: StockLot; uom?: string }) {
   const left = lot.days_to_expiry;
   return (
@@ -150,8 +215,8 @@ function LotCard({ lot, uom }: { lot: StockLot; uom?: string }) {
       </div>
       <LocationPath path={lot.location_path} />
       <div className="flex gap-4 text-sm">
-        <span>Available <strong className="text-ink">{lot.available_qty.toLocaleString("en-IN")}</strong> {uom}</span>
-        {lot.reserved_qty > 0 && <span className="text-warning">Reserved {lot.reserved_qty}</span>}
+        <span>Available <strong className="text-ink">{shelfQty(lot).toLocaleString("en-IN")}</strong> {uom}</span>
+        {otherHeld(lot) > 0 && <span className="text-warning">Reserved {otherHeld(lot)}</span>}
       </div>
       {lot.asset_code && (
         <div className="mt-1 font-mono text-[11px] text-muted">{lot.asset_code}</div>
@@ -181,6 +246,12 @@ export function StockBalanceView() {
   const [stockView, setStockView] = useState("");
   const [belowReorder, setBelowReorder] = useState(false);
   const [selected, setSelected] = useState<StockBalanceItem | null>(null);
+  /* Reading list vs ledger truth. Lots are the rows stock moves on; the overview
+   * is one card per item per point — "what do we have here, what is set aside,
+   * and in which batches" — with the reserved face figure that never disappears
+   * when a hold moves bays. */
+  const [balanceView, setBalanceView] = useState<"overview" | "lots">("overview");
+  const [expanded, setExpanded] = useState<string | null>(null);
 
   const { data: warehouses = [] } = useQuery({ queryKey: ["warehouses"], queryFn: getWarehouses });
 
@@ -239,6 +310,14 @@ export function StockBalanceView() {
   });
   const rows = data?.items ?? [];
   const totalPages = data?.total ? Math.ceil(data.total / size) : 0;
+
+  const { data: groupData, isLoading: groupsLoading } = useQuery({
+    queryKey: ["stock-balance-groups", filters],
+    queryFn: () => getStockGroups(filters),
+    enabled: balanceView === "overview",
+  });
+  const groupRows: StockGroupRow[] = groupData?.items ?? [];
+  const groupPages = groupData?.total ? Math.ceil(groupData.total / size) : 0;
 
   // The tiles are counted on the server over every matching row. Summing `rows` here
   // summed one page: at 20/page the screen claimed 20 stock lines and 11 items over
@@ -331,7 +410,7 @@ export function StockBalanceView() {
     };
     const body = rows.map((r) => [
       r.item_code, r.item_name, r.category_name, r.warehouse_name, r.bin_code, r.batch_number, r.expiry_date,
-      r.available_qty, r.reserved_qty,
+      shelfQty(r), otherHeld(r),
       // Three columns, because the three identities are not interchangeable. The
       // summary carries the first five of each — the whole list of a single lot is a
       // Download away in the row's popover, which is the right place for 88 codes.
@@ -399,7 +478,7 @@ export function StockBalanceView() {
       className: "text-right",
       render: (r) => (
         <div className="inline-flex flex-col items-end">
-          <span className="font-display text-base font-bold tabular text-ink">{qty(r.available_qty, uomOf(r))}</span>
+          <span className="font-display text-base font-bold tabular text-ink">{qty(shelfQty(r), uomOf(r))}</span>
           <LevelBar r={r} />
         </div>
       ),
@@ -409,7 +488,10 @@ export function StockBalanceView() {
       header: "Reserved",
       className: "text-right",
       render: (r) => (
-        <span className={r.reserved_qty > 0 ? "font-semibold text-warn" : "text-muted"}>{r.reserved_qty}</span>
+        <span className={otherHeld(r) > 0 ? "font-semibold text-warn" : "text-muted"}
+              title="Reserved on this lot — an indent's allocation, a return or a project hold">
+          {otherHeld(r)}
+        </span>
       ),
     },
     // REQ_032. Item-at-point figures, not per lot — every lot row of one item at one
@@ -689,6 +771,142 @@ export function StockBalanceView() {
         />
       </FilterBar>
 
+      {/* Lots move stock; the overview reads it. One row per item per point,
+        * batches tucked inside the card, reserved on the face in both places. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="flex rounded-full bg-content2 p-1" role="tablist" aria-label="Stock balance view">
+          {([
+            ["overview", "Item overview"],
+            ["lots", "Lot detail"],
+          ] as const).map(([level, label]) => (
+            <button
+              key={level}
+              role="tab"
+              aria-selected={balanceView === level}
+              onClick={() => { setBalanceView(level); setPage(1); setExpanded(null); }}
+              className={`rounded-full px-4 py-1.5 text-xs font-bold transition-all ${
+                balanceView === level
+                  ? "bg-content1 text-ink shadow-sm"
+                  : "text-muted hover:text-ink"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {balanceView === "overview" && (
+          <span className="text-[11px] text-muted">
+            One row per item at each point — open a card for its batches. Reserved shows here and inside.
+          </span>
+        )}
+      </div>
+
+      {balanceView === "overview" ? (
+        <div className="space-y-2.5">
+          {groupsLoading && (
+            <Card className="p-6 text-center text-sm text-muted">Reading the shelves…</Card>
+          )}
+          {!groupsLoading && groupRows.length === 0 && (
+            <Card className="p-6 text-center text-sm text-muted">
+              {activeFilters ? "No stock matches these filters." : "No stock on hand. Rows appear once a GRN is received."}
+            </Card>
+          )}
+          {groupRows.map((g) => {
+            const key = `${g.warehouse_id}:${g.item_id}`;
+            const open = expanded === key;
+            const setAside = Math.max(0, (g.indent_held_qty ?? 0));
+            const heldByOthers = Math.max(0, g.reserved_qty - setAside);
+            const freePct = g.total_qty > 0 ? Math.round((g.available_qty / g.total_qty) * 100) : 0;
+            return (
+              <Card key={key} className="overflow-hidden p-0">
+                <button
+                  onClick={() => setExpanded(open ? null : key)}
+                  className="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-content2/40"
+                  aria-expanded={open}
+                >
+                  <ItemTile name={g.item_name ?? "?"} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-semibold text-ink">{g.item_name}</span>
+                    <span className="block font-mono text-[11px] text-muted">
+                      {g.item_code}{g.category_name ? ` · ${g.category_name}` : ""}
+                    </span>
+                    <span className="mt-0.5 flex items-center gap-1 text-[11px] text-muted">
+                      <MapPin size={12} className="shrink-0" />
+                      <span className="truncate">{g.warehouse_name}</span>
+                      <span>· {g.batches.length} batch{g.batches.length === 1 ? "" : "es"} · {g.lots} lot{g.lots === 1 ? "" : "s"}</span>
+                    </span>
+                  </span>
+                  <span className="text-right">
+                    <span className="block font-display text-lg font-bold tabular text-ink">
+                      {g.total_qty.toLocaleString("en-IN")}{g.uom_name ? ` ${g.uom_name}` : ""}
+                    </span>
+                    <span className="block text-[11px] text-muted">
+                      Free <b className="tabular text-ok">{g.available_qty.toLocaleString("en-IN")}</b>
+                    </span>
+                  </span>
+                  <span className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold ${
+                    g.reserved_qty > 0 ? "bg-warn/10 text-warn ring-1 ring-warn/30" : "bg-content2 text-muted"
+                  }`} title="Set aside for indents + held by returns / project holds. Same figure inside the card.">
+                    Reserved {g.reserved_qty.toLocaleString("en-IN")}
+                  </span>
+                  <ChevronDown size={16} className={`shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`} />
+                </button>
+                <div className="px-4 pb-1">
+                  <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-content2" aria-hidden>
+                    <div className="bg-gradient-to-r from-brand to-[#b04a8a] transition-all" style={{ width: `${freePct}%` }} />
+                    {heldByOthers > 0 && <div className="bg-warn/70" style={{ width: `${100 - freePct}%` }} />}
+                  </div>
+                </div>
+                {open && (
+                  <div className="space-y-2 border-t border-line/60 bg-content2/30 px-4 py-3">
+                    <div className="grid grid-cols-3 gap-2">
+                      {([
+                        ["On shelf", g.total_qty, "text-ink"],
+                        ["Free to give", g.available_qty, "text-ok"],
+                        ["Reserved", g.reserved_qty, "text-warn"],
+                      ] as const).map(([label, v, tone]) => (
+                        <div key={label} className="rounded-xl border border-line/60 bg-content1 px-3 py-2">
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">{label}</div>
+                          <div className={`font-display text-base font-bold tabular ${tone}`}>{v.toLocaleString("en-IN")}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-muted">
+                      Reserved is for the whole of this item at {g.warehouse_name ?? "this point"}
+                      {setAside > 0 && <> — <b className="text-ink">{setAside.toLocaleString("en-IN")}</b> of it set aside for indents</>}.
+                      It is never tied to a batch: the batch is picked earliest-expiry-first when the issue is made.
+                    </p>
+                    <div className="space-y-1.5">
+                      {g.batches.map((b) => (
+                        <div key={b.batch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-line/60 bg-content1 px-3 py-2">
+                          <span className="rounded-md bg-content2/70 px-2 py-0.5 font-mono text-[11px] font-semibold text-body">
+                            {b.batch_no || "No batch"}
+                          </span>
+                          <ExpiryChip date={b.expiry_date ?? undefined} />
+                          <span className="text-xs text-body">
+                            <b className="tabular text-ink">{b.total_qty.toLocaleString("en-IN")}</b> on shelf
+                          </span>
+                          <span className="ml-auto text-[11px] text-muted">
+                            {b.bins} bay{b.bins === 1 ? "" : "s"}
+                            {b.bin_codes.length > 0 ? ` · ${b.bin_codes.join(", ")}${b.bins > b.bin_codes.length ? "…" : ""}` : ""}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+          {groupPages > 1 && (
+            <div className="flex items-center justify-center gap-3 pt-1 text-sm">
+              <Button variant="subtle" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</Button>
+              <span className="text-muted">Page {page} of {groupPages}</span>
+              <Button variant="subtle" disabled={page >= groupPages} onClick={() => setPage(page + 1)}>Next</Button>
+            </div>
+          )}
+        </div>
+      ) : (
       <Card className="p-2">
         <ResponsiveList
           data={rows}
@@ -724,14 +942,15 @@ export function StockBalanceView() {
                   Batch {r.batch_number || "—"} · {r.expiry_date ? `Expires ${r.expiry_date}` : "No expiry"}
                 </div>
                 <div className="flex gap-4 text-sm">
-                  <span>Available <strong>{qty(r.available_qty, uomOf(r))}</strong></span>
-                  <span className="text-muted">Reserved {r.reserved_qty}</span>
+                  <span>Available <strong>{qty(shelfQty(r), uomOf(r))}</strong></span>
+                  <span className="text-muted">Reserved {otherHeld(r)}</span>
                 </div>
               </div>
             );
           }}
         />
       </Card>
+      )}
 
       <DetailSheet
         open={!!selected}
@@ -759,8 +978,8 @@ export function StockBalanceView() {
             <SheetSection title="Quantities">
               <ResponsiveGrid cols={3} gap="gap-2">
                 {([
-                  ["Available", selected.available_qty, "text-brand"],
-                  ["Reserved", selected.reserved_qty, "text-warning"],
+                  ["Available", shelfQty(selected), "text-brand"],
+                  ["Reserved", otherHeld(selected), "text-warning"],
                   // Not "On hand": this is available + reserved, and reserved goods
                   // are committed elsewhere. "Total in stock" says what it is without
                   // implying any of it is free to give.
@@ -828,6 +1047,10 @@ export function StockBalanceView() {
               <div className="space-y-2">
                 {detail?.lots.map((lot) => <LotCard key={lot.id} lot={lot} uom={uomOf(selected)} />)}
               </div>
+            </SheetSection>
+
+            <SheetSection title="Set aside for indents">
+              <SetAside detail={detail} loading={detailLoading} uom={uomOf(selected)} />
             </SheetSection>
 
             <SheetSection title="Costing & Planning">

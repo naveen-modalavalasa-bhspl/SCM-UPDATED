@@ -563,6 +563,32 @@ async def unlocated_stock_status(db: AsyncSession, warehouse_id: int) -> dict:
     return await unlocated.status(db, warehouse_id)
 
 
+async def unlocated_audit(db: AsyncSession, warehouse_id: int) -> dict:
+    """Stranded units + stale picks for the warehouse banner. Read-only."""
+    return await unlocated.audit(db, warehouse_id)
+
+
+async def repair_unlocated_stock(db: AsyncSession, warehouse_id: int, user,
+                                repoint_issues: bool = True) -> dict:
+    """Place bin-0 rows, sweep stranded units, repoint stale picks. One commit.
+
+    The repair WHI0077 needs in one press: `place` moves the quantities,
+    `sweep_stranded_units` moves the identities minted afterwards, and
+    `repoint_stale_issue_lines` moves the open picks drafted before the switch
+    onto the Unlocated bay they now stand in.
+    """
+    placed = await unlocated.place(db, warehouse_id, user)
+    swept = await unlocated.sweep_stranded_units(db, warehouse_id)
+    repointed = await unlocated.repoint_stale_issue_lines(
+        db, warehouse_id, user) if repoint_issues else {"moved": 0, "issue_ids": []}
+    await db.commit()
+    status = await unlocated.audit(db, warehouse_id)
+    return {**status, "placed_rows": placed["rows"],
+            "placed_qty": placed["quantity"],
+            "placed_units": placed["units"] + int(swept.get("units", 0)),
+            "repointed_lines": int(repointed.get("moved", 0))}
+
+
 async def place_unlocated_stock(db: AsyncSession, warehouse_id: int, user) -> dict:
     """Give everything this warehouse holds at bin 0 its Unlocated location, now.
 
@@ -7350,43 +7376,13 @@ async def _allocation_lines_by_batch(
         "indent_item_id": allocated["indent_item_id"],
         "requested_qty": _d(allocated["requested"]) or qty,
     }
-    rows = (await db.execute(
-        select(Reservation)
-        .where(
-            Reservation.ref_type == InventoryRefType.RESERVATION.value,
-            Reservation.ref_id == indent_id,
-            Reservation.item_id == item_id,
-            Reservation.warehouse_id == warehouse_id,
-        )
-        .order_by(Reservation.id)
-    )).scalars().all()
-
-    reserved = sum((_d(row.quantity) for row in rows), ZERO)
-    if not rows or reserved != qty:
-        if rows:
-            logger.warning(
-                "indent %s item %s at warehouse %s: reservations total %s but %s was "
-                "allocated; issue line left unsplit",
-                indent_id, item_id, warehouse_id, reserved, qty,
-            )
-        return [s.IssueItemWrite(**base, issued_qty=qty)]
-
-    # One line per (bin, batch), so a quantity drawn from two batches stays two lines
-    # with two expiry dates rather than one line claiming a batch it half came from.
-    merged: dict[tuple[int, int], Decimal] = {}
-    for row in rows:
-        key = (row.bin_id or m.NO_BIN, row.batch_id or m.NO_BATCH)
-        merged[key] = merged.get(key, ZERO) + _d(row.quantity)
-
-    lines: list[s.IssueItemWrite] = []
-    for (bin_id, batch_id), line_qty in merged.items():
-        lines.append(s.IssueItemWrite(
-            **{**base, "requested_qty": line_qty},
-            issued_qty=line_qty,
-            bin_id=bin_id or None,
-            batch_id=batch_id or None,
-        ))
-    return lines
+    # An allocation sets aside a QUANTITY, never a batch (2026-10-12): the batch is
+    # the storekeeper's pick on the issue, offered earliest-expiry first, so whichever
+    # indent is issued first gets the earliest-expiring stock. Drafting one line per
+    # reserved batch put the allocator's row choice back on the document — exactly the
+    # FEFO break this replaces. One line, no batch, no location.
+    del indent_id, warehouse_id
+    return [s.IssueItemWrite(**base, issued_qty=qty)]
 
 
 async def _warehouse_reference_no(
@@ -7883,6 +7879,34 @@ def _outbound_seed_units(rows, *, item, item_id: int,
     return names
 
 
+async def _lines_without_source(db: AsyncSession, issue: m.MaterialIssue) -> set[int]:
+    """Lines that have not yet named where their goods come from.
+
+    A batch is required only for an item whose stock here is batched, a location only
+    where this point keeps locations — the same test `_assert_sources_picked` applies
+    at submit.
+    """
+    from app.modules.inventory.models import Stock
+
+    lines = [line for line in issue.items if line.id]
+    if not lines:
+        return set()
+    wh = await db.get(Warehouse, issue.warehouse_id)
+    bin_managed = bool(getattr(wh, "is_bin_managed", False))
+    item_ids = {line.item_id for line in lines}
+    batched = set((await db.execute(
+        select(Stock.item_id).where(Stock.warehouse_id == issue.warehouse_id,
+                                    Stock.item_id.in_(item_ids),
+                                    Stock.batch_id != m.NO_BATCH,
+                                    Stock.total_qty > ZERO).distinct()
+    )).scalars().all())
+    return {
+        line.id for line in lines
+        if (line.item_id in batched and not line.batch_id)
+        or (bin_managed and not line.bin_id)
+    }
+
+
 async def _reserve_issue_serials(
     db: AsyncSession,
     issue: m.MaterialIssue,
@@ -7893,10 +7917,22 @@ async def _reserve_issue_serials(
     markers = {line.id: _issue_line_serial_marker(issue.id, line.id)
                for line in issue.items}
     line_no_by_marker = {markers[line.id]: line.line_no for line in issue.items}
+    unpicked = await _lines_without_source(db, issue)
     for line, data in zip(issue.items, inputs, strict=True):
         marker = markers[line.id]
         item = await _item_snapshot(db, line.item_id)
         serials = [value.strip() for value in (data.serial_numbers or []) if value.strip()]
+        # A code-tracked line that has not picked its batch / location yet holds NO
+        # codes (2026-10-13). Auto-filling it took the oldest codes in the whole
+        # warehouse — every code of the earliest batch — and the issue that then
+        # picked that batch FEFO found none left to name (WHI0076 vs WHI0077). Codes
+        # are taken from the line's own source once it has one.
+        if (line.id in unpicked and issue.direction == IssueDirection.OUT.value
+                and _unit_mode(item) == UNIT_MODE_CODE):
+            setattr(line, "serial_numbers", [])
+            setattr(line, "unit_keys", [])
+            setattr(line, "unit_mode", UNIT_MODE_CODE)
+            continue
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: serial numbers must be unique")
         mode = _unit_mode(item)
@@ -8336,6 +8372,8 @@ async def issue_unit_supply(
             "need": need,
             "has_units": pick.item_id in coded,
             "available": None,
+            "batch_available": None,
+            "point_available": None,
         }
         if pick.item_id not in coded or need > _SUPPLY_PROBE_CEILING:
             # No answer rather than a slow one. A line asking for a hundred thousand
@@ -8343,35 +8381,106 @@ async def issue_unit_supply(
             # refuses an incomplete set at the shelf.
             out.append(row)
             continue
-        probe = (
-            select(literal(1))
-            .select_from(m.SerialNumber)
-            .where(m.SerialNumber.item_id == pick.item_id,
-                   m.SerialNumber.warehouse_id == warehouse_id,
-                   m.SerialNumber.status == expected_status,
-                   # `== 1`, not `.is_(True)`: MySQL will not resolve `IS true` through
-                   # the index and falls back to reading rows.
-                   m.SerialNumber.is_active == 1)
-        )
+
+        def _base():
+            return (
+                select(literal(1))
+                .select_from(m.SerialNumber)
+                .where(m.SerialNumber.item_id == pick.item_id,
+                       m.SerialNumber.warehouse_id == warehouse_id,
+                       m.SerialNumber.status == expected_status,
+                       # `== 1`, not `.is_(True)`: MySQL will not resolve `IS true` through
+                       # the index and falls back to reading rows.
+                       m.SerialNumber.is_active == 1)
+            )
+
+        def _claimed(stmt):
+            if scope is not None:
+                stmt = stmt.where(scope)
+            if outward:
+                stmt = stmt.where(_unit_claim_free_clause(
+                    _issue_line_serial_marker(issue_id, pick.line_id)
+                    # "" matches no stamp — a pick with no saved line of its own holds
+                    # nothing yet, so only genuinely unclaimed units count for it.
+                    if issue_id and pick.line_id else ""))
+            return stmt
+
+        async def _count(stmt) -> int:
+            return int((await db.execute(
+                select(func.count()).select_from(stmt.limit(need + 1).subquery())
+            )).scalar() or 0)
+
         # NO_BATCH / NO_BIN mean "the pick names none" — no narrowing, not a lookup for
         # id 0. Same reading as `_claim_units` and `move_stock_out`.
+        exact = _base()
         if pick.batch_id and pick.batch_id != m.NO_BATCH:
-            probe = probe.where(m.SerialNumber.batch_id == pick.batch_id)
+            exact = exact.where(m.SerialNumber.batch_id == pick.batch_id)
         if pick.bin_id and pick.bin_id != m.NO_BIN:
-            probe = probe.where(m.SerialNumber.bin_id == pick.bin_id)
-        if scope is not None:
-            probe = probe.where(scope)
-        if outward:
-            probe = probe.where(_unit_claim_free_clause(
-                _issue_line_serial_marker(issue_id, pick.line_id)
-                # "" matches no stamp — a pick with no saved line of its own holds
-                # nothing yet, so only genuinely unclaimed units count for it.
-                if issue_id and pick.line_id else ""))
-        row["available"] = int((await db.execute(
-            select(func.count()).select_from(probe.limit(need + 1).subquery())
-        )).scalar() or 0)
+            exact = exact.where(m.SerialNumber.bin_id == pick.bin_id)
+        row["available"] = await _count(_claimed(exact))
+        # Fallback circles: same batch anywhere here, then the whole point. Both
+        # bounded like the exact probe — three cheap index lookups per pick.
+        if pick.batch_id and pick.batch_id != m.NO_BATCH:
+            batch_only = _claimed(_base().where(
+                m.SerialNumber.batch_id == pick.batch_id))
+            row["batch_available"] = await _count(batch_only)
+        if pick.batch_id or pick.bin_id:
+            row["point_available"] = await _count(_claimed(_base()))
+        else:
+            row["point_available"] = row["available"]
         out.append(row)
     return out
+
+
+async def serial_scope_counts(db: AsyncSession, *, warehouse_id: int,
+                             item_id: int, batch_id: int | None = None,
+                             bin_id: int | None = None,
+                             issue_id: int | None = None,
+                             issue_line_id: int | None = None,
+                             user=None) -> dict:
+    """How many codable units each widening circle holds: bay, batch, point.
+
+    The three answers behind the code picker's scope switch — "This bay", "This
+    batch anywhere here", "Whole point" — each bounded to 201 rows so a
+    half-million-unit bay costs the same as an empty one.
+    """
+    from app.modules.warehouse.enums import IssueDirection  # local: rule 5 safe
+    _ = IssueDirection
+    cap = 201
+    coded = await db.scalar(
+        select(m.SerialNumber.id)
+        .where(m.SerialNumber.item_id == item_id,
+               m.SerialNumber.warehouse_id == warehouse_id,
+               m.SerialNumber.is_active == 1).limit(1))
+    if coded is None:
+        return {"item_id": item_id, "exact": None, "batch": None,
+                "point": None, "has_units": False}
+    claim = _unit_claim_free_clause(
+        _issue_line_serial_marker(issue_id, issue_line_id) if issue_id else None)
+
+    async def _count(batch=None, bin=None) -> int:
+        stmt = (select(literal(1)).select_from(m.SerialNumber)
+                .where(m.SerialNumber.item_id == item_id,
+                       m.SerialNumber.warehouse_id == warehouse_id,
+                       m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+                       m.SerialNumber.is_active == 1, claim))
+        if batch:
+            stmt = stmt.where(m.SerialNumber.batch_id == batch)
+        if bin:
+            stmt = stmt.where(m.SerialNumber.bin_id == bin)
+        if user is not None:
+            stmt = stmt.where(await scope_condition(
+                db, user, warehouse_col=m.SerialNumber.warehouse_id,
+                warehouse_ids=await warehouse_ids_for_user(db, user)))
+        return int((await db.execute(
+            select(func.count()).select_from(stmt.limit(cap).subquery())
+        )).scalar() or 0)
+
+    exact = await _count(batch=batch_id or None, bin=bin_id or None)
+    batch_n = await _count(batch=batch_id or None) if batch_id else exact
+    point = await _count()
+    return {"item_id": item_id, "exact": exact, "batch": batch_n,
+            "point": point, "has_units": True}
 
 
 async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> None:
@@ -8504,6 +8613,7 @@ async def issue_stock_sources(
     item_ids: list[int],
     indent_id: int | None = None,
     project_id: int | None = None,
+    issue_id: int | None = None,
     user=None,
 ) -> list[dict]:
     """Every (batch, bin) an item can actually be drawn from here, oldest first.
@@ -8596,7 +8706,11 @@ async def issue_stock_sources(
         stmt
         .where(Stock.warehouse_id == warehouse_id,
                Stock.item_id.in_(ids),
-               _stock_offerable(indent_id, project_id))
+               _stock_offerable(indent_id, project_id),
+               or_(
+                   func.coalesce(m.Batch.expiry_date, Stock.expiry_date).is_(None),
+                   func.coalesce(m.Batch.expiry_date, Stock.expiry_date) >= ist_today(),
+               ))
         .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
                   Bin.code, Bin.name, m.Batch.batch_no,
                   m.Batch.expiry_date, m.Batch.mfg_date)
@@ -8620,6 +8734,27 @@ async def issue_stock_sources(
 
     rows = (await db.execute(stmt)).all()
 
+    # Other indents' quantity holds per (item, bin, batch), less what their open
+    # issues have pinned — tradeable on save (`allocation.swap_holds`).
+    tradeable: dict[tuple[int, int, int], Decimal] = {}
+    if indent_id:
+        for t_item, t_bin, t_batch, t_qty in (await db.execute(
+            select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                   func.sum(Reservation.quantity))
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.status == ReservationStatus.ACTIVE.value,
+                   Reservation.warehouse_id == warehouse_id,
+                   Reservation.item_id.in_(ids),
+                   Reservation.ref_id != indent_id)
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id)
+        )).all():
+            tradeable[(int(t_item), int(t_bin or 0), int(t_batch or 0))] = _d(t_qty)
+        _pins, pinned_slots = await _open_issue_pins(
+            db, warehouse_id, set(ids), exclude_issue_id=issue_id)
+        for slot, pinned in pinned_slots.items():
+            if slot in tradeable:
+                tradeable[slot] = max(ZERO, tradeable[slot] - pinned)
+
     # What the warehouse holds for these items ALTOGETHER — every batch, every
     # location, and deliberately NOT filtered by `_stock_offerable`. A screen shows
     # three nested quantities, warehouse then batch then location, and the two outer
@@ -8631,7 +8766,12 @@ async def issue_stock_sources(
         select(Stock.item_id, Stock.batch_id,
                func.sum(Stock.total_qty).label("total_qty"),
                func.sum(Stock.available_qty).label("available_qty"))
-        .where(Stock.warehouse_id == warehouse_id, Stock.item_id.in_(ids))
+        .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
+        .where(Stock.warehouse_id == warehouse_id, Stock.item_id.in_(ids),
+               or_(
+                   func.coalesce(m.Batch.expiry_date, Stock.expiry_date).is_(None),
+                   func.coalesce(m.Batch.expiry_date, Stock.expiry_date) >= ist_today(),
+               ))
         .group_by(Stock.item_id, Stock.batch_id)
     )
     if user is not None:
@@ -8680,7 +8820,8 @@ async def issue_stock_sources(
     for (item_id, bin_id, batch_id, available_qty, reserved_qty, total_qty,
          own_qty, bin_code, bin_name, batch_no, expiry_date, mfg_date) in rows:
         own_reserved = _d(own_qty)
-        drawable = _d(available_qty) + own_reserved
+        other_indents = tradeable.get((item_id, bin_id or 0, batch_id or 0), ZERO)
+        drawable = _d(available_qty) + own_reserved + other_indents
         if drawable <= ZERO:
             continue
         out.append({
@@ -8700,6 +8841,9 @@ async def issue_stock_sources(
             "available_qty": _d(available_qty),
             "reserved_qty": _d(reserved_qty),
             "own_reserved_qty": own_reserved,
+            # Set aside for OTHER indents but tradeable — picking it here moves their
+            # quantity hold onto another batch on save. Never a refusal.
+            "other_indent_qty": other_indents,
             "total_qty": _d(total_qty),
             "drawable_qty": drawable,
             "batch_total_qty": by_batch.get((item_id, batch_id or 0), (ZERO, ZERO))[0],
@@ -8774,6 +8918,15 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
         if issue.project_id:
             await _free_project_holds_for_slots(
                 db, issue, indent_id, indent_item_id, item_id, slots, user)
+        # The batch picked may carry ANOTHER indent's quantity hold — holds float
+        # between batches (`allocation.swap_holds`). Trade rows with it first; what is
+        # left is covered out of free stock by `relocate`.
+        pins, _by_slot = await _open_issue_pins(
+            db, issue.warehouse_id, {item_id}, exclude_issue_id=issue.id)
+        await stock_allocation.swap_holds(
+            db, InventoryRefType.RESERVATION.value, indent_id,
+            ref_line_id=indent_item_id, item_id=item_id,
+            warehouse_id=issue.warehouse_id, wanted=slots, pinned=pins)
         for move in await stock_allocation.relocate(
             db,
             InventoryRefType.RESERVATION.value,
@@ -9010,6 +9163,96 @@ async def _write_line_indents(db: AsyncSession,
     return {int(row[0]): int(row[1]) for row in rows if row[1]}
 
 
+def _expires_later(a, b) -> bool:
+    """Does expiry `a` come after expiry `b`? A batch with no recorded expiry sorts
+    after every dated one — "nobody wrote a date" is never "leaves first"."""
+    if a is None:
+        return b is not None
+    if b is None:
+        return False
+    return a > b
+
+
+def _fefo_expiry_date(value) -> str:
+    return f"expires {value}" if value else "no expiry recorded"
+
+
+async def _open_issue_pins(db: AsyncSession, warehouse_id: int, item_ids,
+                           *, exclude_issue_id: int | None = None):
+    """What OTHER open issues have explicitly picked here, indent line by indent line.
+
+    Returns ({(indent, indent line, bin, batch): qty}, {(item, bin, batch): qty}). Those
+    holds are somebody's named goods: `swap_holds` never trades them away and a pick
+    never counts them as drawable, or that issue would post from a row it does not
+    name. An issue naming no batch and no location pins nothing.
+    """
+    ids = {int(i) for i in item_ids if i}
+    if not ids:
+        return {}, {}
+    by_owner: dict[tuple[int, int, int, int], Decimal] = defaultdict(Decimal)
+    by_slot: dict[tuple[int, int, int], Decimal] = defaultdict(Decimal)
+    stmt = (
+        select(m.MaterialIssue.indent_id, m.MaterialIssueLine.indent_item_id,
+               m.MaterialIssueLine.item_id, m.MaterialIssueLine.bin_id,
+               m.MaterialIssueLine.batch_id, m.MaterialIssueLine.issued_qty)
+        .join(m.MaterialIssueLine, m.MaterialIssueLine.issue_id == m.MaterialIssue.id)
+        .where(m.MaterialIssue.warehouse_id == warehouse_id,
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(False),
+               m.MaterialIssue.status.notin_(UNSERVED_ISSUE_STATUSES),
+               m.MaterialIssueLine.item_id.in_(ids),
+               m.MaterialIssueLine.indent_item_id.is_not(None))
+    )
+    if exclude_issue_id:
+        stmt = stmt.where(m.MaterialIssue.id != exclude_issue_id)
+    for indent_id, line_id, item_id, bin_id, batch_id, qty in (await db.execute(stmt)).all():
+        if not (bin_id or batch_id) or not indent_id:
+            continue
+        by_owner[(int(indent_id), int(line_id), int(bin_id or 0), int(batch_id or 0))] += _d(qty)
+        by_slot[(int(item_id), int(bin_id or 0), int(batch_id or 0))] += _d(qty)
+    return dict(by_owner), dict(by_slot)
+
+
+async def _assert_sources_picked(db: AsyncSession, issue: m.MaterialIssue) -> None:
+    """Every outward line names the batch and location it is taken from.
+
+    Nothing is auto-picked any more (2026-10-12): an allocation sets aside a quantity,
+    and the storekeeper chooses the batch — earliest expiry first — and the location
+    on the issue. Refused at submit, while both are still editable, and named line by
+    line so the fix is obvious. A batch is required only for an item whose stock here
+    is batched, a location only where this warehouse keeps locations.
+    """
+    if issue.direction != IssueDirection.OUT.value:
+        return
+    from app.modules.inventory.models import Stock
+
+    wh = await db.get(Warehouse, issue.warehouse_id)
+    bin_managed = bool(getattr(wh, "is_bin_managed", False))
+    item_ids = {line.item_id for line in issue.items if _d(line.issued_qty) > ZERO}
+    batched = set((await db.execute(
+        select(Stock.item_id).where(Stock.warehouse_id == issue.warehouse_id,
+                                    Stock.item_id.in_(item_ids),
+                                    Stock.batch_id != m.NO_BATCH,
+                                    Stock.total_qty > ZERO).distinct()
+    )).scalars().all()) if item_ids else set()
+    missing = []
+    for line in issue.items:
+        if _d(line.issued_qty) <= ZERO:
+            continue
+        need = []
+        if line.item_id in batched and not line.batch_id:
+            need.append("batch")
+        if bin_managed and not line.bin_id:
+            need.append("storage location")
+        if need:
+            missing.append(f"{line.item_code or line.item_name} ({' and '.join(need)})")
+    if missing:
+        raise ValidationError(
+            "Pick the batch and storage location for every line before submitting — "
+            "batches are offered earliest-expiry first. Still to pick: "
+            + "; ".join(missing[:5]) + (f" and {len(missing) - 5} more" if len(missing) > 5 else ""))
+
+
 async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                                 lines: list[s.IssueItemWrite]) -> None:
     """Is every pick on this document one the shelf can actually serve?
@@ -9052,12 +9295,19 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     line_indents = await _write_line_indents(db, outward)
 
     # What is on the shelf here, per (item, location, batch). One read for the whole
-    # document — the alternative is a query per line.
+    # document — the alternative is a query per line. Expired stock is not on it: it is
+    # never to be issued, so it can neither satisfy a pick nor be drawn by one.
+    today = ist_today()
     on_hand: dict[tuple[int, int, int], Decimal] = {}
     for item_id, bin_id, batch_id, available in (await db.execute(
         select(Stock.item_id, Stock.bin_id, Stock.batch_id,
                func.sum(Stock.available_qty))
-        .where(Stock.warehouse_id == issue.warehouse_id, Stock.item_id.in_(item_ids))
+        .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
+        .where(Stock.warehouse_id == issue.warehouse_id, Stock.item_id.in_(item_ids),
+               or_(
+                   func.coalesce(m.Batch.expiry_date, Stock.expiry_date).is_(None),
+                   func.coalesce(m.Batch.expiry_date, Stock.expiry_date) >= today,
+               ))
         .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id)
     )).all():
         on_hand[(int(item_id), int(bin_id or 0), int(batch_id or 0))] = _d(available)
@@ -9108,6 +9358,54 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
             own[slot] = own.get(slot, ZERO) + _d(qty)
 
+    # Other indents' quantity holds here, less what their open issues have pinned.
+    others: dict[tuple[int, int, int], Decimal] = {}
+    _pins, pinned_slots = await _open_issue_pins(
+        db, issue.warehouse_id, item_ids, exclude_issue_id=getattr(issue, "id", None))
+    own_pairs = pairs or set()
+    for item_id, bin_id, batch_id, ref_id, ref_line_id, qty in (await db.execute(
+        select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+               Reservation.ref_id, Reservation.ref_line_id, func.sum(Reservation.quantity))
+        .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+               Reservation.status == ReservationStatus.ACTIVE.value,
+               Reservation.warehouse_id == issue.warehouse_id,
+               Reservation.item_id.in_(item_ids))
+        .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                  Reservation.ref_id, Reservation.ref_line_id)
+    )).all():
+        if (int(ref_id), int(ref_line_id or 0)) in own_pairs:
+            continue
+        slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+        others[slot] = others.get(slot, ZERO) + _d(qty)
+    for slot, pinned in pinned_slots.items():
+        if slot in others:
+            others[slot] = max(ZERO, others[slot] - pinned)
+
+    # The FEFO plan per item: every batch this document could draw from, grouped into
+    # TIERS of the same expiry date (FEFO cannot tell same-day batches apart), earliest
+    # first. Expired stock is not in it at all — it is never to be issued. An indent
+    # line may also draw on other indents' floating holds (`others`); a manual line
+    # only on free stock and its project's own lots.
+    indent_items = {int(line.item_id) for line in outward if line.indent_item_id}
+    drawable_by_batch: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    for source, indent_only in ((on_hand, False), (own, False), (others, True)):
+        for (s_item, _s_bin, s_batch), qty in source.items():
+            if s_batch and (not indent_only or s_item in indent_items):
+                drawable_by_batch[(s_item, s_batch)] += qty
+    fefo_ids = {b for (_i, b), q in drawable_by_batch.items() if q > ZERO}
+    fefo_rows = {row.id: row for row in (await db.execute(
+        select(m.Batch).where(m.Batch.id.in_(fefo_ids))
+    )).scalars().all()} if fefo_ids else {}
+    today = ist_today()
+    tiers_of: dict[int, dict[object, list[tuple[int, Decimal]]]] = defaultdict(dict)
+    for (s_item, s_batch), qty in drawable_by_batch.items():
+        row = fefo_rows.get(s_batch)
+        if qty <= ZERO or row is None:
+            continue
+        if row.expiry_date is not None and row.expiry_date < today:
+            continue
+        tiers_of[s_item].setdefault(row.expiry_date, []).append((s_batch, qty))
+
     # Every batch either named or allocated, read once: expiry is the whole of the
     # FEFO question.
     batch_ids = {int(line.batch_id) for line in outward if line.batch_id}
@@ -9129,36 +9427,13 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
         bin_id, batch_id = _line_slot(line)
         label = line.item_code or f"item {item_id}"
 
-        # --- the batch swap, against what inventory actually allocated ------------
-        signed = allocated_batches.get((int(line.indent_item_id or 0), item_id), set())
-        if signed and batch_id and batch_id not in signed:
-            wanted = batches.get(batch_id)
-            if wanted is None:
-                raise ValidationError(f"{label}: batch {batch_id} does not exist")
-            # Same DAY, not "no later than": two batches expiring on the same date are
-            # interchangeable to FEFO and everything else is a queue-jump. A batch with
-            # no expiry matches only another with none.
-            allowed = _fefo_swap_allowed(
-                wanted, [batches.get(other) for other in signed])
-            hint = None
-            if not allowed:
-                # The one exception: an item that must leave with a code per unit,
-                # allocated out of a batch that carries none. See `_coded_swap_verdict`.
-                allowed, hint = await _coded_swap(
-                    db, issue=issue, item_id=item_id, wanted=wanted,
-                    signed=signed, batches=batches)
-            if not allowed:
+        # Reject an expired batch right away
+        if batch_id:
+            chosen = batches.get(batch_id)
+            if chosen and chosen.expiry_date and chosen.expiry_date < today:
                 raise ValidationError(
-                    f"{label}: {named(batch_id)} ({_fefo_expiry(wanted)}) cannot be "
-                    f"issued in place of "
-                    + ", ".join(sorted(
-                        f"{named(other)} ({_fefo_expiry(batches.get(other))})"
-                        for other in signed))
-                    + ". Stock leaves oldest first, so an allocated batch may only be "
-                    "swapped for one expiring on the same day. Change the storage "
-                    "location instead, or send the allocation back to inventory."
-                    + (hint or "")
-                )
+                    f"{label}: batch {named(batch_id)} expired on {chosen.expiry_date} "
+                    f"and cannot be issued.")
 
         # --- and the stock itself ------------------------------------------------
         slot = (item_id, bin_id, batch_id)
@@ -9173,7 +9448,11 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                         and (not batch_id or key[2] == batch_id)), ZERO)
 
         mine = under(own)
-        drawable = under(on_hand) + mine
+        # Another indent's quantity hold on this row is drawable too: holds float
+        # between batches and trade rows on save (`allocation.swap_holds`). What an
+        # open issue of theirs has explicitly picked stays theirs.
+        tradeable = under(others) if line.indent_item_id else ZERO
+        drawable = under(on_hand) + mine + tradeable
         if want > drawable:
             where = []
             if batch_id:
@@ -9188,6 +9467,48 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                 + " Split the rest onto another location, or reduce the quantity."
             )
         taken[slot] = want
+
+    # --- FEFO, strictly, per item over the whole document ------------------------
+    # Only the batches the quantity actually needs, earliest expiry first, and an
+    # earlier batch used up before a later one is touched (2026-10-12). Damaged or
+    # unusable stock is the stock audit's business, never the issue's — so there is
+    # no "later batch with a reason". Same-day batches form one tier and may be mixed.
+    by_item_batch: dict[int, dict[int, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    for (t_item, _t_bin, t_batch), qty in taken.items():
+        if t_batch:
+            by_item_batch[t_item][t_batch] += qty
+    for t_item, takes in by_item_batch.items():
+        label = next((line.item_code for line in outward
+                      if int(line.item_id) == t_item and line.item_code), f"item {t_item}")
+        tiers = sorted(tiers_of.get(t_item, {}).items(),
+                       key=lambda kv: (kv[0] is None, kv[0] or date.max))
+        known = {b for _e, members in tiers for b, _q in members}
+        stray = [b for b in takes if b not in known]
+        if stray:
+            raise ValidationError(
+                f"{label}: {named(stray[0])} has nothing this issue may take — it is "
+                "expired, empty, or held by another document. Pick from the batches "
+                "offered, earliest expiry first.")
+        remaining = sum(takes.values(), ZERO)
+        short_tier = None
+        for expiry, members in tiers:
+            if remaining <= ZERO:
+                break
+            tier_draw = sum((q for _b, q in members), ZERO)
+            tier_take = sum((takes.get(b, ZERO) for b, _q in members), ZERO)
+            expect = min(tier_draw, remaining)
+            if short_tier is not None and tier_take > ZERO:
+                first_expiry, first_members, first_expect, first_take = short_tier
+                names = ", ".join(named(b) for b, _q in first_members)
+                raise ValidationError(
+                    f"{label}: take {first_expect:g} from {names} "
+                    f"({_fefo_expiry_date(first_expiry)}) before "
+                    f"{', '.join(named(b) for b, _q in members if takes.get(b))} "
+                    f"({_fefo_expiry_date(expiry)}) — this issue takes only "
+                    f"{first_take:g} there. Stock leaves earliest-expiry first.")
+            if tier_take < expect and short_tier is None:
+                short_tier = (expiry, members, expect, tier_take)
+            remaining -= tier_take
 
 
 async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
@@ -10631,10 +10952,15 @@ async def _issue_approved_by(db: AsyncSession, issue_id: int, user) -> bool:
     """Did this person sign an approval on this issue? Read off `wf_actions`."""
     if user is None:
         return False
+    # A floor piece carries its parent's approval (it is never approved itself), so
+    # the parent's approvers count for it as well.
+    parent_id = await db.scalar(
+        select(m.MaterialIssue.parent_issue_id).where(m.MaterialIssue.id == issue_id))
+    doc_ids = [issue_id] + ([parent_id] if parent_id else [])
     return (await db.execute(
         select(WfAction.id)
         .join(WfInstance, WfInstance.id == WfAction.instance_id)
-        .where(WfInstance.doc_id == issue_id,
+        .where(WfInstance.doc_id.in_(doc_ids),
                WfInstance.doc_type.in_(ISSUE_DOC_TYPES),
                WfAction.actor_id == user.id,
                WfAction.action == ApprovalAction.APPROVED.value)
@@ -10674,6 +11000,7 @@ async def submit_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue
     _guard(issue.status, {IssueStatus.DRAFT.value}, "submit", "issue")
     if not issue.items:
         raise ValidationError("An issue with no lines has nothing to approve")
+    await _assert_sources_picked(db, issue)
     # Checked HERE, while the batch is still editable. It used to be checked only at
     # post_issue, which runs after approval has frozen the batch and the bin, so a
     # line pointed at a batch holding too few serials became an issue that could
@@ -10979,6 +11306,7 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         indent_id=parent.indent_id, project_id=parent.project_id,
         warehouse_id=parent.warehouse_id,
         items=[line for child in created for line in child.items]), user)
+    await _hand_codes_to_floor_pieces(db, parent, created)
     for child in created:
         await write_audit(db, entity="out_issues", entity_id=child.id,
                           action=AuditAction.CREATE, actor=user,
@@ -11024,6 +11352,66 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         # Said out loud, never rounded away — see the docstring.
         "unfulfilled": shortfall,
     }
+
+
+async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
+                                      pieces: list[m.MaterialIssue]) -> None:
+    """Give each floor piece the unit codes for its own quantity (2026-10-13).
+
+    The pieces are written straight to the table and never passed through
+    `_reserve_issue_serials`, so an asset- or consumable-coded line arrived on the
+    floor with no codes — asking for them again — while the parent, now SPLIT and
+    issuing nothing, kept holding the ones it had been given.
+
+    The parent's holds are released first. Each piece line is then reserved exactly
+    as a saved line is: a code the parent already named that sits on this piece's own
+    batch and location is kept (the storekeeper's choice survives the split), and the
+    rest is auto-filled oldest first from that same batch and location
+    (`_auto_fill_codes`). Serial and IMEI lines stay empty — those are read off the
+    goods at the shelf. Every code stays swappable on the piece.
+    """
+    # What the parent held, read off the units themselves (a line keeps no list of
+    # its codes — the stamp on the unit IS the claim), with where each one sits.
+    held = (await db.execute(
+        select(m.SerialNumber).where(_issue_reservation_clause(parent.id))
+        .order_by(m.SerialNumber.id)
+    )).scalars().all()
+    modes: dict[int, str] = {}
+    for item_id in {line.item_id for piece in pieces for line in piece.items}:
+        modes[item_id] = _unit_mode(await db.get(Item, item_id))
+    column = {UNIT_MODE_SERIAL: "serial_number", UNIT_MODE_IMEI: "imei"}
+    named: dict[int, list[str]] = {}
+    where: dict[str, tuple[int, int, int]] = {}
+    for row in held:
+        mode = modes.get(int(row.item_id))
+        if mode is None:
+            continue
+        code = (getattr(row, column[mode]) if mode in column
+                else (row.asset_code or row.consumable_code))
+        if code:
+            named.setdefault(int(row.item_id), []).append(code)
+            where[code] = (int(row.item_id), int(row.batch_id or 0), int(row.bin_id or 0))
+    await _clear_issue_serial_reservations(db, parent.id)
+    await db.flush()
+
+    used: set[str] = set()
+    for piece in pieces:
+        inputs = []
+        for line in piece.items:
+            want = int(_d(line.issued_qty))
+            mine = [c for c in named.get(line.item_id, [])
+                    if c not in used
+                    and where.get(c) == (int(line.item_id), int(line.batch_id or 0),
+                                         int(line.bin_id or 0))][:want]
+            used.update(mine)
+            inputs.append(s.IssueItemWrite(
+                item_id=line.item_id, indent_item_id=line.indent_item_id,
+                requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
+                rate=_d(line.rate) if line.rate is not None else None,
+                batch_id=line.batch_id or None, bin_id=line.bin_id or None,
+                serial_numbers=mine))
+        await _reserve_issue_serials(db, piece, inputs)
+    await db.flush()
 
 
 async def _sync_split_parent(db: AsyncSession, parent_id: int | None, user) -> None:
@@ -11449,6 +11837,19 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     if issue.is_stock_posted:
         raise ValidationError(f"{issue.issue_no} has already been posted")
     await _assert_issue_holder(db, issue, user)
+    # Expiry and FEFO, re-read at the moment the goods LEAVE (2026-10-13). The save
+    # checked them, but approval can take days: a picked batch may have expired since,
+    # or a GRN may have brought in one that expires earlier. Same check as the save,
+    # against today's shelf. Outward only — `_assert_issue_sources` returns otherwise.
+    await _assert_issue_sources(db, issue, [
+        s.IssueItemWrite(
+            item_id=line.item_id, indent_item_id=line.indent_item_id,
+            item_code=line.item_code,
+            requested_qty=_d(line.requested_qty), issued_qty=_d(line.issued_qty),
+            batch_id=line.batch_id or None, bin_id=line.bin_id or None,
+        )
+        for line in issue.items if _d(line.issued_qty) > ZERO
+    ])
     # A parent split before SPLIT existed still reads APPROVED. Its children carry
     # its goods, so posting it as well would take the same stock off the shelf twice.
     live_children = (await db.execute(
@@ -21224,7 +21625,8 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
                        issue_line_id: int | None = None, unbatched: bool = False,
-                       claim_free: bool = False, user=None) -> dict:
+                       claim_free: bool = False,
+                       scope: str | None = None, user=None) -> dict:
     """Units, optionally narrowed to what one issue line may still pick.
 
     `unbatched` narrows to units with no batch — a bare `batch_id` of None means
@@ -21236,6 +21638,10 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
     of this same issue — is already holding, while keeping the ones this line holds
     itself. Without it the picker offered the same serial on two lines of the same
     item, and the second line only found out at the shelf.
+
+    `scope` widens the circle when the bay is empty: `batch` drops the bin but keeps
+    the batch, `point` drops both and lists the whole point. The save still
+    validates the line's own bay and batch — this only lets the picker SEE further.
     """
     stmt = select(m.SerialNumber)
     if issue_id:
@@ -21258,7 +21664,15 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
         stmt = stmt.where(m.SerialNumber.status == status)
     if item_id:
         stmt = stmt.where(m.SerialNumber.item_id == item_id)
-    if batch_id:
+    widen = (scope or "exact").lower()
+    if widen == "point":
+        pass
+    elif widen == "batch":
+        if batch_id:
+            stmt = stmt.where(m.SerialNumber.batch_id == batch_id)
+        elif unbatched:
+            stmt = stmt.where(m.SerialNumber.batch_id.is_(None))
+    elif batch_id:
         stmt = stmt.where(m.SerialNumber.batch_id == batch_id)
     elif unbatched:
         stmt = stmt.where(m.SerialNumber.batch_id.is_(None))
@@ -21268,7 +21682,7 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
         stmt = stmt.where(_unit_claim_free_clause(None))
     if warehouse_id:
         stmt = stmt.where(m.SerialNumber.warehouse_id == warehouse_id)
-    if bin_id:
+    if bin_id and widen == "exact":
         stmt = stmt.where(m.SerialNumber.bin_id == bin_id)
     if search:
         like = f"%{search}%"
@@ -23188,7 +23602,18 @@ def _stock_offerable(indent_id: int | None, project_id: int | None = None):
             Reservation.status == ReservationStatus.ACTIVE.value,
         )
     )
-    return or_(free, mine)
+    if not indent_id:
+        return or_(free, mine)
+    # An indent's hold is a QUANTITY that floats between batches (2026-10-12): a row
+    # carrying ANOTHER indent's hold can be traded for on save (`swap_holds`), so an
+    # indent issue is offered it too.
+    any_indent = Stock.id.in_(
+        select(Reservation.stock_id).where(
+            Reservation.ref_type == InventoryRefType.RESERVATION.value,
+            Reservation.status == ReservationStatus.ACTIVE.value,
+        )
+    )
+    return or_(free, mine, any_indent)
 
 
 async def bin_options(db: AsyncSession, warehouse_id: int, search: str | None = None,
@@ -23804,27 +24229,36 @@ async def indent_issue_source(
         # code, never the storekeeper's own.
         "destination_office_sac": await _office_sac(
             db, requested_by.office_id if requested_by else None),
+        # One line per indent line, QUANTITY only (2026-10-12): the hold is a quantity
+        # that floats between batches, and the storekeeper picks the batch — offered
+        # earliest-expiry first — and the location on the issue itself.
         "items": [
             {
-                "indent_item_id": row.ref_line_id,
-                "item_id": row.item_id,
-                "item_code": item_by_id[row.item_id].code if row.item_id in item_by_id else None,
-                "item_name": item_by_id[row.item_id].name if row.item_id in item_by_id else None,
+                "indent_item_id": line_id,
+                "item_id": item_id,
+                "item_code": item_by_id[item_id].code if item_id in item_by_id else None,
+                "item_name": item_by_id[item_id].name if item_id in item_by_id else None,
                 "is_serial_tracked": (
-                    bool(item_by_id[row.item_id].is_serial_tracked)
-                    if row.item_id in item_by_id else False
+                    bool(item_by_id[item_id].is_serial_tracked)
+                    if item_id in item_by_id else False
                 ),
-                "bin_id": row.bin_id or None,
-                "bin_code": bin_by_id[row.bin_id].code if row.bin_id and row.bin_id in bin_by_id else None,
-                "bin_path": getattr(bin_by_id[row.bin_id], "path", None) if row.bin_id and row.bin_id in bin_by_id else None,
-                "batch_id": row.batch_id or None,
-                "batch_no": batch_by_id[row.batch_id].batch_no if row.batch_id and row.batch_id in batch_by_id else None,
-                "requested_qty": _d(row[5]),
-                "issued_qty": _d(row[5]),
+                "bin_id": None, "bin_code": None, "bin_path": None,
+                "batch_id": None, "batch_no": None,
+                "requested_qty": qty,
+                "issued_qty": qty,
             }
-            for row in rows
+            for (line_id, item_id), qty in _sum_by_line(rows).items()
         ],
     }
+
+
+def _sum_by_line(rows) -> dict[tuple[int, int], Decimal]:
+    """Reservation rows (line, item, bin, batch, project, qty) summed per indent line."""
+    out: dict[tuple[int, int], Decimal] = {}
+    for row in rows:
+        key = (row.ref_line_id, row.item_id)
+        out[key] = out.get(key, ZERO) + _d(row[5])
+    return out
 
 
 async def picking_issue_source(db: AsyncSession, picking_id: int) -> dict:
@@ -25365,6 +25799,82 @@ async def transport_acknowledged(db: AsyncSession, tr, user) -> None:
                 tr.tr_no, dispatch.dispatch_no)
 
 
+async def write_off_units_for_adjustment(
+    db: AsyncSession, adjustment, adj_item, user
+) -> None:
+    """Retire a write-off line's unit codes the moment its stock leaves.
+
+    The audit's OUT movement shrinks `stk_balance`; the units on `whs_serial_numbers`
+    would otherwise still read `available`, and the issue screen's code auto-fill and
+    picker would keep offering codes for units the audit just declared gone. This is
+    the codes' half of the same posting: same transaction, so they are retired with
+    the stock or not at all.
+
+    `adj_item.serial_numbers` are the codes the auditor PICKED on the form, matched
+    to this line's item, batch and bin; a code naming some other unit is refused, so
+    the audit cannot retire stock it did not name. When it names none, the damaged
+    units had no known identity worth telling apart — the oldest N available codes
+    on the (item, batch, bin) are retired instead, so the unit rows stay in step
+    with the balance and the picker cannot offer them.
+
+    Registered on `inventory.hooks.ON_ADJUSTMENT_OUT` at import time; inventory may
+    not import warehouse (rule 5).
+    """
+    wanted = int(_d(adj_item.quantity or 0))
+    if wanted <= 0:
+        return
+    picked = [str(c).strip() for c in (adj_item.serial_numbers or []) if str(c).strip()]
+
+    stmt = (
+        select(m.SerialNumber)
+        .where(
+            m.SerialNumber.item_id == adj_item.item_id,
+            m.SerialNumber.warehouse_id == adjustment.warehouse_id,
+            m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+            m.SerialNumber.is_active.is_(True),
+            m.SerialNumber.batch_id == (adj_item.batch_id or None),
+            m.SerialNumber.bin_id == (adj_item.bin_id or None),
+        )
+        .order_by(m.SerialNumber.id.asc())
+        .with_for_update()
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    by_code = {}
+    for row in rows:
+        for code in (row.serial_number, row.imei, row.asset_code, row.consumable_code):
+            if code:
+                by_code[code] = row
+
+    if picked:
+        missing = [c for c in picked if c not in by_code]
+        if missing:
+            raise ValidationError(
+                f"{len(missing)} of the codes picked on this audit line are not "
+                f"available units of this item at this batch and location "
+                f"(e.g. {', '.join(missing[:3])}) — the audit cannot write them off"
+            )
+        victims = [by_code[c] for c in picked]
+    else:
+        # Unclaimed units first. Retiring a code an open issue already holds would
+        # leave that issue naming a unit that no longer exists, and it would fail at
+        # posting; only when the free ones run out are claimed ones taken.
+        def claimed(row) -> bool:
+            return any((row.remarks or "").startswith(prefix)
+                       for prefix in _CLAIMED_REMARK_PREFIXES)
+        victims = sorted(rows, key=lambda row: (claimed(row), row.id))[:wanted]
+    if not victims:
+        return
+
+    label = f"Written off by {adjustment.adjustment_no}"
+    await _set_unit_fields(
+        db,
+        [row.id for row in victims],
+        status=SerialStatus.SCRAPPED.value,
+        is_active=False,
+        remarks=label,
+    )
+
+
 def _register_transport_hooks() -> None:
     """Wire this module onto the outward leg, once, at import.
 
@@ -25396,6 +25906,23 @@ def _register_stock_transfer_hooks() -> None:
 
 
 _register_stock_transfer_hooks()
+
+
+def _register_audit_write_off_hook() -> None:
+    """Retire the unit codes an approved stock-audit write-off takes off the shelf.
+
+    Warehouse owns `whs_serial_numbers`; inventory owns the posting it sits inside
+    (rule 5), so the handoff is a hook rather than an import, and it fires INSIDE
+    the posting transaction: the codes go with the stock or the posting does not
+    happen. See `write_off_units_for_adjustment`.
+    """
+    from app.modules.inventory import hooks as inv_hooks
+
+    if write_off_units_for_adjustment not in inv_hooks.ON_ADJUSTMENT_OUT:
+        inv_hooks.ON_ADJUSTMENT_OUT.append(write_off_units_for_adjustment)
+
+
+_register_audit_write_off_hook()
 
 # ---------------- Outbound Quality Inspection ----------------
 

@@ -496,7 +496,21 @@ export function ItemMasterTab() {
     : unanswered.length ? `Answer ${unanswered.map((t) => t.tag_name).join(", ")}`
     : null;
 
+  const pageItems = items.data?.items ?? [];
   const columns: Column<MasterItem>[] = [
+    {
+      key: "sno",
+      header: "S.No",
+      render: (row) => {
+        const idx = pageItems.indexOf(row);
+        return (
+          <span className="tabular-nums text-muted font-medium text-xs">
+            {(page - 1) * MASTER_PAGE_SIZE + (idx >= 0 ? idx : 0) + 1}
+          </span>
+        );
+      },
+      className: "w-12 text-center",
+    },
     { key: "photo", header: "", render: (row) => <ItemThumb item={row} /> },
     { key: "code", header: "Item Code", render: (row) => <span className="mono font-semibold">{row.code}</span> },
     { key: "name", header: "Name", render: (row) => row.name },
@@ -509,6 +523,7 @@ export function ItemMasterTab() {
     { key: "owner", header: "Ownership", render: (row) => row.owner_department_name ?? "—" },
     { key: "status", header: "Status", render: (row) => row.is_active ? "Active" : "Inactive" },
   ];
+
 
   return (
     <div>
@@ -529,7 +544,7 @@ export function ItemMasterTab() {
           bulk bar is placed by hand here instead of coming with the factory. */}
       <BulkBar api={mastersApi.items} managePerm="master.item.manage"
                queryKey="items" label="Items" />
-      <ResponsiveList data={items.data?.items ?? []} loading={items.isLoading}
+      <ResponsiveList data={pageItems} loading={items.isLoading}
         page={page} onPageChange={setPage}
         totalPages={Math.ceil((items.data?.total ?? 0) / MASTER_PAGE_SIZE)}
         keyOf={(row) => row.id} columns={columns}

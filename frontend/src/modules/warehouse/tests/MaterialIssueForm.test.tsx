@@ -314,8 +314,8 @@ describe("MaterialIssueForm", () => {
     // "1 of 15" used to be the only signal, and it said nothing about WHICH pick was
     // unscanned. Each pick states its own gap, on the pick.
     await waitFor(() => {
-      expect(screen.getAllByText("4 more to assign").length).toBe(1);
+      expect(screen.getAllByText("4 more auto-assigned on save").length).toBe(1);
     });
-    expect(screen.getAllByText("10 more to assign").length).toBe(1);
+    expect(screen.getAllByText("10 more auto-assigned on save").length).toBe(1);
   });
 });

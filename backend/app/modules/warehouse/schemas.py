@@ -106,6 +106,13 @@ class UnlocatedStockStatus(BaseModel):
     placed_rows: int = 0
     placed_qty: Decimal = Decimal("0")
     placed_units: int = 0
+    # Filled by the audit/repair read: why codes can be missing after the switch.
+    stranded_units: int = 0
+    stranded_items: int = 0
+    stale_lines: int = 0
+    stale_issue_ids: list[int] = []
+    repointed_lines: int = 0
+    code_scope: str | None = None
 
 
 class WarehouseWrite(BaseModel):
@@ -1714,7 +1721,7 @@ class UnitSupplyQuery(BaseModel):
 
 class UnitSupplyRead(_Read):
     """What one pick could name. `available` is `null` when there is no answer — the
-    item carries no identified units at this point, or the quantity is past the probe
+    item carries no identified units at this warehouse at all, or the quantity is past the probe
     ceiling — which is NOT the same as zero, and a screen must not draw it as a
     shortfall."""
     item_id: int
@@ -1725,6 +1732,25 @@ class UnitSupplyRead(_Read):
     has_units: bool = False
     #: Counted only as far as `need + 1`, so a figure equal to that means "at least".
     available: int | None = None
+    #: Fallback pools for the same pick: same batch anywhere at this point, and any
+    #: batch at this point. The picker names them "Same batch, other bay" and
+    #: "Any batch here" so a stranded pick still finds its codes.
+    batch_available: int | None = None
+    point_available: int | None = None
+
+
+class SerialScopeCounts(BaseModel):
+    """How many codable units each widening circle holds.
+
+    exact: the bay + batch named. batch: the batch anywhere at this point.
+    point: the item anywhere at this point. Bounded to `need + 1` each, so a
+    figure equal to that means "at least".
+    """
+    item_id: int
+    exact: int | None = None
+    batch: int | None = None
+    point: int | None = None
+    has_units: bool = False
 
 
 class IssueStockSourceFetchIn(BaseModel):
@@ -1733,6 +1759,8 @@ class IssueStockSourceFetchIn(BaseModel):
     indent_id: int | None = None
     # Lots held for this project are offered as the document's own.
     project_id: int | None = None
+    #: The issue being edited, so its own picks are not counted as pinned by "another".
+    issue_id: int | None = None
 
 
 class IssueStockSource(_Read):
@@ -1761,6 +1789,8 @@ class IssueStockSource(_Read):
     available_qty: Decimal
     reserved_qty: Decimal = Decimal("0")
     own_reserved_qty: Decimal = Decimal("0")
+    #: Set aside for OTHER indents here, tradeable on save (holds float between batches).
+    other_indent_qty: Decimal = Decimal("0")
     total_qty: Decimal = Decimal("0")
     drawable_qty: Decimal
     # The two OUTER quantities this location's numbers sit inside: what the whole

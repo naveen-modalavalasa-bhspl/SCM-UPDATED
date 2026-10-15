@@ -19,14 +19,14 @@ import { Timeline, approvalsToTimeline, type TimelineEntry } from "../components
 import { CodeAssignmentScreen } from "./CodeAssignmentScreen";
 import { SearchPicker, type PickerRow } from "../components/SearchPicker";
 import {
-  acknowledgeIssue, approveIssue, cancelIssue, createIssue, departmentOptions,
-  employeeOptions, getEmployeeDestination, searchIssueDestinations, searchIssueEmployees, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
+  acknowledgeIssue, approveIssue, auditUnlocatedStock, cancelIssue, createIssue, departmentOptions,
+  employeeOptions, getEmployeeDestination, repairUnlocatedStock, searchIssueDestinations, searchIssueEmployees, getIndentIssueSource, getIssue, getPickingIssueSource, indentOptions,
   issueApprovalHistory,  postIssue, projectOptions,
   occupancyPreview,
   itemHandlingUnits,
   returnableIssueOptions, rejectIssue, setIssueSerials, splitIssue, submitIssue, updateIssue,
   warehouseOptions,
-  issueStockSources,
+  issueStockSources, listSerials,
   issueUnitSupply,
 } from "../api";
 import type { IssueSplitResult } from "../api";
@@ -437,6 +437,51 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
 
   const setLines = (items: IssueItemWrite[]) => setForm((f) => ({ ...f, items }));
 
+  /**
+   * A pick has just been given its batch and location: fill its asset / consumable
+   * codes there and then, oldest first, up to the quantity it issues (2026-10-12).
+   *
+   * Those codes are the system's own labels — nobody reads them off a maker's box — so
+   * the storekeeper should see them the moment the source is decided, not after a
+   * save. The server still checks every one on save (`_reserve_issue_serials`) and tops
+   * up anything missing (`_autofill_codes`); this only makes the choice visible early.
+   * They stay swappable in the code screen. Serial / IMEI picks are read off the goods
+   * and are never pre-filled.
+   */
+  const fillCodesFor = async (index: number, line: IssueItemWrite) => {
+    const type = line.tracking_type;
+    if (type !== "ASSET" && type !== "CONSUMABLE") return;
+    const need = Math.trunc(num(line.issued_qty));
+    if (!need || !line.item_id || !form.warehouse_id) return;
+    try {
+      const page = await listSerials({
+        item_id: line.item_id,
+        warehouse_id: form.warehouse_id,
+        batch_id: line.batch_id || undefined,
+        bin_id: line.bin_id || undefined,
+        unbatched: !line.batch_id || undefined,
+        issue_id: editing ? Number(id) : undefined,
+        issue_line_id: line.id || undefined,
+        claim_free: !line.id || undefined,
+        status: "available",
+        page: 1,
+        size: Math.min(need, 500),
+      });
+      const codes = (page.items ?? [])
+        .map((row) => row.asset_code ?? row.consumable_code ?? row.serial_number)
+        .filter((code): code is string => !!code)
+        .slice(0, need);
+      setForm((f) => ({
+        ...f,
+        items: f.items.map((l, i) => (
+          i === index && l.batch_id === line.batch_id && l.bin_id === line.bin_id
+            ? { ...l, serial_numbers: codes } : l)),
+      }));
+    } catch {
+      // Not fatal: the save fills them (`_autofill_codes`) and says so if it cannot.
+    }
+  };
+
   /* ----------------------------------------------- where the stock actually is --
    *
    * A line names ONE batch and ONE bin; the shelf regularly holds the quantity in
@@ -452,8 +497,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     [form.items],
   );
   const { data: sources = [], isSuccess: sourcesReady } = useQuery({
-    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, form.project_id ?? 0, itemIds],
-    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id, form.project_id),
+    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, form.project_id ?? 0, itemIds, doc?.id ?? 0],
+    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id, form.project_id, doc?.id),
     // Only while the picks are still open. Once the stock is posted the balances
     // have already moved, and drawing "available" against a document that has gone
     // out would report every split as over-issued.
@@ -1089,6 +1134,52 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
    *  of the grid as well as on the item it belongs to. */
   const relocating = groups.filter((g) => g.allocated.length > 0 && g.releasing.length > 0);
 
+  /* Picks drafted before this point kept locations: bin 0 in a bin-managed
+   * warehouse. They match no source row, so they read as "nothing here" while the
+   * stock waits one bay away in UNLOCATED. Brain-first name: "Waiting to be
+   * placed" — the goods are here, the address is old. */
+  const waitingPlacement = isBinManaged
+    ? form.items
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => line.item_id && !line.bin_id)
+        .filter(({ line }) => (sourcesByItem[line.item_id] ?? []).some(
+          (row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"),
+        ))
+    : [];
+  const { data: unlocatedAudit } = useQuery({
+    queryKey: ["wh-unlocated-audit", form.warehouse_id],
+    queryFn: () => auditUnlocatedStock(form.warehouse_id),
+    enabled: !!form.warehouse_id && isBinManaged && waitingPlacement.length > 0,
+    staleTime: 30_000,
+  });
+  const repairUnlocated = useMutation({
+    mutationFn: () => repairUnlocatedStock(form.warehouse_id, true),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
+      qc.invalidateQueries({ queryKey: ["wh-issue-unit-supply"] });
+      qc.invalidateQueries({ queryKey: ["wh-unlocated-audit"] });
+    },
+  });
+  const pointStaleAt = (index: number) => {
+    const line = form.items[index];
+    if (!line?.item_id) return false;
+    const rows = sourcesByItem[line.item_id] ?? [];
+    const target = rows.find((row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"));
+    if (!target || line.bin_id) return false;
+    patchLine(index, { bin_id: target.bin_id ?? null, bin_code: target.bin_code ?? null });
+    void fillCodesFor(index, { ...line, bin_id: target.bin_id ?? null });
+    return true;
+  };
+  /* Bay empty but batch/point has codes: "same batch, other bay" / "whole point".
+   * Read off the widened unit-supply probes so the grid says WHERE the codes are,
+   * not just that this bay has none. */
+  const widerCodes = groups.filter((g) => g.splits.some((s) => {
+    const supply = unitSupply[unitSupplyKey(
+      s.line.item_id, s.line.batch_id, isBinManaged ? s.line.bin_id : null)];
+    return (supply?.available ?? 0) <= 0
+      && ((supply?.batch_available ?? 0) > 0 || (supply?.point_available ?? 0) > 0);
+  }));
+
 
   if (editing && isLoading) return <div className="py-16 text-center text-muted">Loading…</div>;
 
@@ -1589,6 +1680,60 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
 
+        {/* Waiting to be placed: picks drafted before this point kept locations.
+          * One press points them at the UNLOCATED bay their stock now stands in —
+          * no retyping, no lost reservation. */}
+        {!locked && waitingPlacement.length > 0 && (
+          <div className="mb-3 overflow-hidden rounded-2xl border border-warn/40 bg-gradient-to-r from-warn/10 via-warn/[0.06] to-transparent px-4 py-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-warn/15 text-warn">
+                <MapPin className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-bold text-ink">
+                  {waitingPlacement.length} pick{waitingPlacement.length === 1 ? "" : "s"} waiting to be placed
+                </p>
+                <p className="text-xs text-body">
+                  Made before this point kept locations. The stock is in{" "}
+                  <b className="font-mono">UNLOCATED</b>
+                  {unlocatedAudit && (unlocatedAudit.stranded_units ?? 0) > 0
+                    ? ` along with ${unlocatedAudit.stranded_units} unpacked codes`
+                    : ""}
+                  {" "}— point them there in one press.
+                </p>
+              </div>
+              <Button
+                variant="soft"
+                disabled={repairUnlocated.isPending}
+                onClick={() => {
+                  waitingPlacement.forEach(({ index }) => pointStaleAt(index));
+                  repairUnlocated.mutate();
+                }}
+              >
+                {repairUnlocated.isPending ? "Placing…" : "Place in UNLOCATED"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Codes beyond this bay: the quantity is here, the identity is next door.
+          * The picker switch ("This batch, any bay" / "Whole point") already lists
+          * them — this only says the fact before the picker is opened. */}
+        {!locked && waitingPlacement.length === 0 && widerCodes.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-start gap-2.5 rounded-xl border border-info/30 bg-info-bg px-3 py-2.5 text-sm text-info">
+            <Info className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <b>
+                {widerCodes.length === 1
+                  ? `${widerCodes[0].itemCode ?? "One item"} has its codes beyond this bay.`
+                  : `${widerCodes.length} items have their codes beyond this bay.`}
+              </b>{" "}
+              Open the code picker and widen to “This batch, any bay” or “Whole
+              point” — the bay on the pick is empty of codes, the point is not.
+            </div>
+          </div>
+        )}
+
         <IssueSplitEditor
           groups={groups}
           lines={form.items}
@@ -1602,6 +1747,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           codesLocked={codesLocked}
           unitsHidden={unitsHidden}
           onPickUnits={setSerialLine}
+          onSourcePicked={(index, line) => { void fillCodesFor(index, line); }}
           meta={trackingMeta}
           problemAt={problemAt}
           unitSupply={unitSupply}

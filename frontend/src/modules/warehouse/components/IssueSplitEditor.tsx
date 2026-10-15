@@ -142,6 +142,9 @@ interface Props {
   unitsHidden?: boolean;
   /** Opens the identifier picker for one pick, by its flat index. */
   onPickUnits: (index: number) => void;
+  /** A pick has just been given its batch AND location (or batch, where the point
+   *  keeps none) — the form fills asset / consumable codes for it there and then. */
+  onSourcePicked?: (index: number, line: IssueItemWrite) => void;
   meta: (code?: TrackingType | null) => TrackingTypeMeta | null;
   /** Flat indices that carry a problem, so the row can show it where it happened. */
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
@@ -165,11 +168,20 @@ interface Props {
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
-  locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, meta, problemAt, unitSupply,
+  locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, onSourcePicked, meta, problemAt, unitSupply,
   sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate,
 }: Props) {
-  const patch = (index: number, change: Partial<IssueItemWrite>) =>
-    onChange(lines.map((line, i) => (i === index ? { ...line, ...change } : line)));
+  const patch = (index: number, change: Partial<IssueItemWrite>,
+                 event?: { batchPicked?: boolean; locationPicked?: boolean }) => {
+    const next = lines.map((line, i) => (i === index ? { ...line, ...change } : line));
+    onChange(next);
+    const line = next[index];
+    // Batch and location both named (or the batch, where nothing is binned): the
+    // source is decided, so the codes for it can be filled straight away.
+    const picked = event?.locationPicked ? !!line.bin_id
+      : event?.batchPicked ? !!line.batch_id && !binManaged : false;
+    if (picked && onSourcePicked) onSourcePicked(index, line);
+  };
 
   /**
    * Take a pick off an item, and give what it was requesting back to the item.
@@ -196,18 +208,17 @@ export function IssueSplitEditor({
   const addPick = (group: IssueGroup) => {
     const template = group.splits[group.splits.length - 1]?.line;
     if (!template) return;
-    const next = group.spare[0];
-    const take = next
-      ? round(Math.min(group.remaining, num(next.drawable_qty)))
-      : 0;
+    // Blank, never pre-picked (2026-10-12): which batch and which bay are the
+    // storekeeper's choice, offered earliest-expiry first in the dropdowns.
+    const take = round(Math.max(group.remaining, 0));
     const fresh: IssueItemWrite = {
       ...template,
       id: undefined,
-      batch_id: next?.batch_id ?? null,
-      batch_no: next?.batch_no ?? null,
-      bin_id: binManaged ? next?.bin_id ?? null : null,
-      bin_code: next?.bin_code ?? null,
-      bin_path: next?.bin_path ?? null,
+      batch_id: null,
+      batch_no: null,
+      bin_id: null,
+      bin_code: null,
+      bin_path: null,
       requested_qty: take,
       issued_qty: take,
       serial_numbers: [],
@@ -368,7 +379,8 @@ interface ItemProps {
   problemAt: Map<number, { level: "error" | "warn"; message: string }>;
   unitSupply?: Record<string, UnitSupply>;
   sourcesReady?: boolean;
-  onPatch: (index: number, change: Partial<IssueItemWrite>) => void;
+  onPatch: (index: number, change: Partial<IssueItemWrite>,
+            event?: { batchPicked?: boolean; locationPicked?: boolean }) => void;
   onAddPick: () => void;
   onRemovePick: (index: number) => void;
   onRestore: () => void;
@@ -403,7 +415,12 @@ function ItemRow(props: ItemProps) {
    * every batch is open; the oldest-first ordering then carries the advice by itself.
    */
   const allowed = allowedExpiries(group.allocated);
-  const batches = batchChoices(sources, allowed, group.codedSwap);
+  // Strict FEFO (2026-10-12): only the batches the ask needs, earliest expiry first.
+  // The batch already on a line stays listed so a saved pick never renders empty; if
+  // the plan no longer names it, the row says so (`splitProblems`).
+  const batches = batchChoices(sources, allowed, group.codedSwap).filter(
+    (choice) => group.required.has(choice.batchId ?? 0)
+      || group.splits.some((s) => (s.line.batch_id ?? 0) === (choice.batchId ?? 0) && choice.batchId));
   // The oldest batch that still has stock, when this item is not taking from it.
   // Advice on a manual line, never a refusal: the storekeeper can see which pallet is
   // reachable and the screen cannot.
@@ -425,6 +442,10 @@ function ItemRow(props: ItemProps) {
   const unassigned = Math.trunc(group.issued) - group.codes;
   const askEditable = !locked && !!group.itemId && !group.splits[0]?.line.indent_item_id;
   const spareQty = group.spare.reduce((sum, row) => sum + num(row.drawable_qty), 0);
+  // The next place worth walking to: earliest expiry, but never an expired lot.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const nextSpare = group.spare.find(
+    (row) => !(row.expiry_date && row.expiry_date < todayIso)) ?? null;
   // The whole reason this screen has to say anything about reservations at all: a
   // pick moved off the location inventory allocated is a hold that MOVES when this
   // document is saved. Announced before the press, never after.
@@ -611,6 +632,12 @@ function ItemRow(props: ItemProps) {
               </div>
             </div>
           )}
+          {/* The FEFO plan: only the batches this ask needs, earliest expiry first, and
+            * how much from each. An earlier step must be used up before a later one —
+            * the same plan the save checks. Nothing is picked for the storekeeper. */}
+          {group.plan.length > 0 && !locked && (
+            <FefoPlanStrip group={group} />
+          )}
           <div className="space-y-1.5">
             {group.splits.map((split, position) => (
               <PickRow
@@ -636,12 +663,12 @@ function ItemRow(props: ItemProps) {
                 <span className="text-[11px] text-muted">
                   {fmtQty(spareQty)} more available in {group.spare.length} other
                   {" "}location{group.spare.length === 1 ? "" : "s"}
-                  {group.spare[0] && (
-                    <> — next is{" "}
+                  {nextSpare && (
+                    <> — earliest good is{" "}
                       <span className="font-mono text-ink">
-                        {group.spare[0].bin_code ?? "unbinned"}
+                        {nextSpare.bin_code ?? "unbinned"}
                       </span>
-                      {group.spare[0].batch_no ? ` · ${group.spare[0].batch_no}` : ""}
+                      {nextSpare.batch_no ? ` · ${nextSpare.batch_no}` : ""}
                     </>
                   )}
                 </span>
@@ -734,6 +761,58 @@ interface PickProps extends ItemProps {
   problem?: { level: "error" | "warn"; message: string };
 }
 
+/** The batches an item's ask needs, in the order stock must leave. */
+function FefoPlanStrip({ group }: { group: IssueGroup }) {
+  const taken = new Map<number, number>();
+  for (const split of group.splits) {
+    if (split.line.batch_id) {
+      taken.set(split.line.batch_id, round((taken.get(split.line.batch_id) ?? 0) + split.issued));
+    }
+  }
+  const total = round(group.plan.reduce((sum, step) => sum + step.take, 0));
+  const short = round(Math.max(group.requested, group.issued) - total);
+  return (
+    <div className="mb-2 rounded-xl border border-brand/20 bg-brand/[0.035] px-3 py-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-bold uppercase tracking-wider text-brand">
+          FEFO plan · take in this order
+        </span>
+        {short > 0 && (
+          <span className="text-[10px] font-semibold text-warn">
+            {fmtQty(short)} short — no other unexpired stock here
+          </span>
+        )}
+      </div>
+      <ol className="flex flex-wrap items-stretch gap-1.5">
+        {group.plan.map((step, i) => {
+          const got = round(step.batches.reduce((sum, b) => sum + (taken.get(b.batchId ?? 0) ?? 0), 0));
+          const done = got >= step.take && step.take > 0;
+          return (
+            <li key={`${step.expiry}-${i}`}
+                className={`flex min-w-[9.5rem] items-center gap-2 rounded-lg border px-2.5 py-1.5 transition ${
+                  done ? "border-ok/40 bg-ok/[0.07]" : "border-line bg-content1"}`}>
+              <span className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                done ? "bg-ok text-white" : "bg-brand/10 text-brand"}`}>
+                {done ? <Check className="h-3 w-3" /> : i + 1}
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate font-mono text-xs font-semibold text-ink">
+                  {step.batches.map((b) => b.batchNo ?? "unbatched").join(" / ")}
+                </span>
+                <span className="block text-[10px] leading-tight text-muted">
+                  {step.expiry ? `exp ${expiryLabel(step.expiry)}` : "no expiry"} · take{" "}
+                  <b className="tabular text-ink">{fmtQty(step.take)}</b>
+                  {got > 0 && !done && <> · {fmtQty(got)} picked</>}
+                </span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function PickRow(props: PickProps) {
   const {
     group, split, position, sources, batches, fefoHint, binManaged, locked,
@@ -742,6 +821,8 @@ function PickRow(props: PickProps) {
   } = props;
 
   const line = split.line;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const isBatchExpired = !!(split.batchExpiry && split.batchExpiry < todayIso);
   // Only the locations holding THIS batch of this item. Changing the bay within a
   // batch is one physical batch sitting in two places, which FEFO cannot tell apart
   // and which is the storekeeper's call — so this list is deliberately wide open
@@ -830,6 +911,7 @@ function PickRow(props: PickProps) {
             isBatchTracked={group.isBatchTracked}
             fallbackNo={split.batchNo ?? line.batch_no}
             fefoHint={fefoHint}
+            isExpired={isBatchExpired}
             onChange={(choice) =>
               onPatch(split.index, {
                 batch_id: choice?.batchId ?? null,
@@ -842,9 +924,10 @@ function PickRow(props: PickProps) {
                 bin_code: null,
                 bin_path: null,
                 serial_numbers: [],
-              })
+              }, { batchPicked: true })
             }
           />
+
           {/* This batch across the WHOLE warehouse — the middle of the three widths.
             * The pick takes from one bay of it; knowing whether the batch has forty
             * more elsewhere or nothing at all is what decides whether the shortfall
@@ -879,6 +962,7 @@ function PickRow(props: PickProps) {
                 needsBatch={group.isBatchTracked && !line.batch_id}
                 fallbackCode={split.binCode ?? line.bin_code}
                 fallbackPath={split.binPath ?? line.bin_path}
+                isExpired={isBatchExpired}
                 onChange={(choice) =>
                   onPatch(split.index, {
                     bin_id: choice?.binId ?? null,
@@ -887,7 +971,7 @@ function PickRow(props: PickProps) {
                     // Named at the bay being left. A unit that is not in the bin the
                     // pick now claims is refused at save either way.
                     serial_numbers: [],
-                  })
+                  }, { locationPicked: true })
                 }
               />
               {/* Floor › lane › rack › shelf › bin. The dropdown label carries it too,

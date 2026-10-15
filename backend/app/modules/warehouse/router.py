@@ -116,6 +116,23 @@ async def place_unlocated_stock(warehouse_id: int, db: AsyncSession = Depends(ge
     return await service.place_unlocated_stock(db, warehouse_id, user)
 
 
+@router.get("/warehouses/{warehouse_id}/unlocated/audit",
+            response_model=s.UnlocatedStockStatus)
+async def unlocated_audit(warehouse_id: int, db: AsyncSession = Depends(get_db),
+                          _=Depends(require_permission(STOCK_VIEW))):
+    """Stranded units + stale picks standing in the way of the next issue."""
+    return await service.unlocated_audit(db, warehouse_id)
+
+
+@router.post("/warehouses/{warehouse_id}/unlocated/repair",
+             response_model=s.UnlocatedStockStatus)
+async def repair_unlocated_stock(warehouse_id: int, repoint_issues: bool = True,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(MASTER_LOCATION_MANAGE))):
+    """Place, sweep stranded units and repoint stale picks in one press."""
+    return await service.repair_unlocated_stock(db, warehouse_id, user, repoint_issues)
+
+
 @router.get("/warehouses/{warehouse_id}/bins", response_model=list[s.BinRead])
 async def bin_tree(warehouse_id: int, db: AsyncSession = Depends(get_db),
                    user=Depends(require_permission(STOCK_VIEW))):
@@ -649,6 +666,7 @@ async def issue_stock_sources_post(body: s.IssueStockSourceFetchIn,
         item_ids=body.item_ids,
         indent_id=body.indent_id,
         project_id=body.project_id,
+        issue_id=body.issue_id,
         user=user,
     )
 
@@ -1269,14 +1287,29 @@ async def list_serials(params: PageParams = Depends(), status: str | None = None
                        warehouse_id: int | None = None, bin_id: int | None = None,
                        search: str | None = None, issue_id: int | None = None,
                        issue_line_id: int | None = None, unbatched: bool = False,
-                       claim_free: bool = False,
+                       claim_free: bool = False, scope: str | None = None,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(STOCK_VIEW))):
     return await service.list_serials(db, params, status=status, item_id=item_id,
                                       batch_id=batch_id, warehouse_id=warehouse_id,
                                       bin_id=bin_id, search=search, issue_id=issue_id,
                                       issue_line_id=issue_line_id, unbatched=unbatched,
-                                      claim_free=claim_free, user=user)
+                                      claim_free=claim_free, scope=scope, user=user)
+
+
+@router.get("/serials/scope-counts", response_model=s.SerialScopeCounts)
+async def serial_scope_counts(item_id: int, warehouse_id: int,
+                              batch_id: int | None = None,
+                              bin_id: int | None = None,
+                              issue_id: int | None = None,
+                              issue_line_id: int | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(STOCK_VIEW))):
+    """Bay vs batch vs point code counts behind the picker's scope switch."""
+    return await service.serial_scope_counts(db, warehouse_id=warehouse_id,
+                                             item_id=item_id, batch_id=batch_id,
+                                             bin_id=bin_id, issue_id=issue_id,
+                                             issue_line_id=issue_line_id, user=user)
 
 
 @router.get("/serials/lookup")

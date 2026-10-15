@@ -18,6 +18,16 @@ const STAGE_TONE: Record<string, { bg: string; text: string; border: string }> =
   success: { bg: "#d1fae5", text: "#065f46", border: "#a7f3d0" },
 };
 
+/** Each document a pool row names, what it is called and where it opens. */
+const DOC_KIND: Record<string, { label: string; path: (id: number) => string }> = {
+  ISSUE: { label: "Issue", path: (id) => `/warehouse/material-issues/${id}` },
+  CONSIGNMENT: { label: "Consignment", path: (id) => `/logistics/consignments/${id}` },
+};
+
+/** The part of a document number a person reads: BHS/104/2026-27/WHI0023 → WHI0023.
+ *  The full number is in the chip's tooltip and in the export. */
+const docShort = (no?: string | null) => (no ? no.split("/").pop() || no : null);
+
 function stageStyle(tone: string) {
   return STAGE_TONE[tone] ?? STAGE_TONE.neutral;
 }
@@ -99,16 +109,21 @@ function SourceRow({
       </td>
       <td className="py-2.5 px-3">
         <div className="flex gap-1.5 flex-wrap">
-          {source.docs.slice(0, 3).map((doc, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => nav(meta?.deep_link ?? "#")}
-              className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 rounded px-2 py-0.5 text-[11px] font-medium transition-colors"
-            >
-              {doc.kind} #{doc.id}
-            </button>
-          ))}
+          {source.docs.map((doc, i) => {
+            const known = DOC_KIND[doc.kind];
+            return (
+              <button
+                key={`${doc.kind}-${doc.id}-${i}`}
+                type="button"
+                title={`${known?.label ?? doc.kind} ${doc.no ?? ""} · ${doc.status.replace(/_/g, " ").toLowerCase()} · ${doc.qty}`}
+                onClick={() => nav(known ? known.path(doc.id) : meta?.deep_link ?? "#")}
+                className="group inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-800 transition-colors hover:border-emerald-300 hover:bg-emerald-100"
+              >
+                <span className="font-semibold uppercase tracking-wide text-emerald-600/80">{known?.label ?? doc.kind}</span>
+                <span className="font-mono font-semibold">{docShort(doc.no) ?? `#${doc.id}`}</span>
+              </button>
+            );
+          })}
         </div>
       </td>
     </tr>
@@ -522,7 +537,7 @@ export default function WarehouseDemandPoolPage() {
       const rows: (string | number | boolean | null | undefined)[][] = [];
       for (const g of groupsToExport) {
         for (const s of g.sources) {
-          const docsStr = s.docs.map((d) => `${d.kind} #${d.id}`).join("; ");
+          const docsStr = s.docs.map((d) => `${DOC_KIND[d.kind]?.label ?? d.kind} ${d.no ?? `#${d.id}`}`).join("; ");
           rows.push([
             s.indent_no,
             g.item_code,
