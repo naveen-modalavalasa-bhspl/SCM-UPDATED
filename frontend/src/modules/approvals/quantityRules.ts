@@ -67,7 +67,7 @@ export function quantityError(
   const text = (raw ?? "").trim();
 
   if (text === "") {
-    return `Enter a quantity from ${range}. Enter 0 to approve none of this item.`;
+    return `Enter a quantity from ${range}. Enter 0 to reject this item.`;
   }
   // The minus sign is caught on its own keystroke, before the number is even
   // complete: "-" and "-1" are the same mistake, and the approver hears about it
@@ -78,6 +78,9 @@ export function quantityError(
   const value = Number(text);
   if (!NUMERIC_SHAPE.test(text) || !Number.isFinite(value)) {
     return `Enter a valid number from ${range}.`;
+  }
+  if (value < 0) {
+    return "Cannot enter a negative number.";
   }
   if (value > ceiling) {
     return `You can't approve more than ${ceilingLabel(line)}.`;

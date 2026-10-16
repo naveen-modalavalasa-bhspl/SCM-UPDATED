@@ -27,6 +27,11 @@ from app.shared.uom import MAX_DECIMALS, decimals_by_code
 
 logger = logging.getLogger(__name__)
 
+
+def _d(v) -> Decimal:
+    return Decimal(str(v or 0))
+
+
 from .schemas import (
     ApprovalIndentLineOut, ApprovalIndentOut, ApprovalQuantityIn,
     ConsolidatedItemAllocationOut, ConsolidatedItemOut,
@@ -2322,6 +2327,9 @@ def _validated_quantities(
     has_previous_approval: bool = False,
 ) -> dict[int, Decimal]:
     by_id: dict[int, Decimal] = {}
+    excluded_set: set[int] = {
+        item.line_id for item in submitted if getattr(item, "excluded", False)
+    }
     for item in submitted:
         if item.line_id in by_id:
             raise ValidationError(f"Quantity for line {item.line_id} was submitted twice")
@@ -2408,11 +2416,8 @@ async def approve_indent(
         )
         line.approved_quantity = approved_by_line[line.id]
         after[f"line_{line.id}_approved_qty"] = float(line.approved_quantity)
-        # Set once and never unset here: exclusion is a decision already taken further
-        # down the ladder, and a rung above must not silently put back a line somebody
-        # below deliberately dropped. Re-including is its own act, on the screen that
-        # owns it.
-        if line.id in excluded_lines and not line.is_excluded:
+        # Setting quantity to 0 or dropping a line permanently marks it excluded/rejected.
+        if (line.id in excluded_lines or line.approved_quantity == 0) and not line.is_excluded:
             line.is_excluded = True
             line.excluded_by_id = getattr(user, "id", None)
             line.excluded_by_name = getattr(user, "full_name", None)
@@ -2431,13 +2436,21 @@ async def approve_indent(
         summary=f"Updated quantities at {instance.current_stage_name or 'approval stage'}",
     )
 
-    # Nothing left owed on any line: everything has been allocated already, so the
-    # rungs above have nothing to decide. Ending the ladder here is what stops a
-    # fully-served indent travelling to the DM for goods that are already committed.
-    updated = await indent_service.act_on_indent(
-        db, indent_id, ApprovalAction.APPROVED, comments, user,
-        final=await _nothing_owed(db, indent),
-    )
+    positive_count = sum(1 for line in indent.items if _d(line.approved_quantity) > 0 and not getattr(line, "is_excluded", False))
+    if positive_count == 0:
+        # All items were set to 0 (or the only item was set to 0): stop here with REJECTED status.
+        updated = await indent_service.act_on_indent(
+            db, indent_id, ApprovalAction.REJECTED,
+            comments or "All requested items rejected (quantities set to 0)",
+            user,
+        )
+    else:
+        # Positive quantities remain: advance to next stage or complete approval.
+        # Zero-quantity lines are excluded and will not enter inventory fulfilment.
+        updated = await indent_service.act_on_indent(
+            db, indent_id, ApprovalAction.APPROVED, comments, user,
+            final=await _nothing_owed(db, indent),
+        )
 
     # The action may advance to another stage or complete the workflow. Return the
     # latest document with the quantities just persisted.

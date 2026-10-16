@@ -2123,6 +2123,7 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
     _fulfilment_target(actions)
     _fulfilment_warehouse_types(actions)
 
+    total_approved = sum(_d(line.approved_quantity) for line in indent.items)
     for line in indent.items:
         # allocated_quantity is NOT reset here. It used to be, back when nothing could
         # be served before the ladder finished, so zeroing was just clearing a field
@@ -2130,11 +2131,16 @@ async def _fulfil(db: AsyncSession, indent: Indent, user) -> None:
         # part-way up (approvals/fulfilment.py), and wiping it here told inventory the
         # line was untouched — so the units already handed over would be issued a
         # second time, with the stk_ledger rows for the first lot still on file.
+        line_approved = _d(line.approved_quantity)
         line.status = (
             IndentItemStatus.ISSUED.value
-            if line.allocated_quantity and line.allocated_quantity >= line.approved_quantity
+            if (line.allocated_quantity and line.allocated_quantity >= line.approved_quantity) or line_approved <= 0
             else IndentItemStatus.PENDING.value
         )
+    if total_approved <= 0:
+        indent.status = IndentStatus.CLOSED.value
+        return
+
     indent.status = IndentStatus.AWAITING_ALLOCATION.value
     # The one place a monthly indent enters the fulfilment queue, so the one place it
     # can pick up its consolidation. Every downstream screen groups by that document

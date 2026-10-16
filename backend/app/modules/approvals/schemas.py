@@ -2,7 +2,9 @@
 from datetime import date, datetime
 
 from fastapi import Query
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator,
+)
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
 )

@@ -77,7 +77,7 @@ export function GatePassPrintPage() {
 
   return (
     <PrintTemplate
-      title="Deliverable Document"
+      title="DC/DOD - Document of Deliverable"
       kicker="Authority for the load to leave"
       documentNo={gatePassNo}
       dateFields={[["Pass date", fmtDate(doc.tr_date ?? doc.created_at)]]}
