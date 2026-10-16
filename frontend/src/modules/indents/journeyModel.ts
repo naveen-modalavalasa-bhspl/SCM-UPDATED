@@ -125,6 +125,7 @@ const HISTORY_STATUSES: Record<string, string> = {
   REJECTED: "REJECTED",
   RETURNED: "RETURNED",
   RESUBMITTED: "SUBMITTED",
+  READY_FOR_ALLOCATION: "AWAITING_ALLOCATION",
   ACKNOWLEDGEMENT_SUBMITTED: "ACKNOWLEDGED",
 };
 
@@ -179,6 +180,7 @@ const OCCURRED_STAGE_STATUSES = new Set([
   // An ANY_ONE peer that was stood down is a real, timestamped outcome: it is the
   // only thing that explains why one authority acted and its peers never did.
   "NOT_REQUIRED",
+  "AWAITING_ALLOCATION",
 ]);
 
 const UPCOMING_STAGE_STATUSES = new Set(["PENDING", "NOT_REQUIRED"]);
