@@ -4345,6 +4345,9 @@ async def indent_journey(db: AsyncSession, indent_id: int, user) -> dict:
             "REJECTED": "REJECTED",
             "RETURNED": "RETURNED",
             "APPROVED": "APPROVED",
+            "READY_FOR_ALLOCATION": (
+                "COMPLETED" if operational.get("has_allocation") else "AWAITING_ALLOCATION"
+            ),
             "ACKNOWLEDGEMENT_SUBMITTED": "ACKNOWLEDGED",
         }.get(event_type)
         if status is None:

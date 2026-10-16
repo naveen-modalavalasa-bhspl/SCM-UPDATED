@@ -35,7 +35,14 @@ function formatDuration(seconds?: number | null) {
   return rest ? `${hours} hr ${rest} min` : `${hours} hr`;
 }
 
-function stageTone(stage: IndentJourneyStage) {
+function isWaitingAllocationStage(stage: IndentJourneyStage, isAllocationPending: boolean) {
+  return isAllocationPending && (
+    stage.title?.toLowerCase() === "ready for allocation" || stageStatus(stage) === "AWAITING_ALLOCATION"
+  );
+}
+
+function stageTone(stage: IndentJourneyStage, isAllocationPending = false) {
+  if (isWaitingAllocationStage(stage, isAllocationPending)) return "border-info/50 bg-info-bg text-info";
   const status = stageStatus(stage);
   if (status === "REJECTED") return "border-bad bg-bad-bg text-bad";
   if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return "border-warn bg-warn-bg text-warn";
@@ -50,17 +57,21 @@ function stageTone(stage: IndentJourneyStage) {
   return "border-line bg-white text-muted";
 }
 
-function statusLabel(stage: IndentJourneyStage) {
+function statusLabel(stage: IndentJourneyStage, isAllocationPending = false) {
   if (stage.is_current) return "Current";
   const status = stageStatus(stage);
   if (
     (stage.stage_type === "draft" && status === "APPROVED")
     || (stage.stage_type === "submission" && status === "SUBMITTED")
   ) return "Completed";
+  if (isWaitingAllocationStage(stage, isAllocationPending)) {
+    return "Waiting for allocation";
+  }
   const labels: Record<string, string> = {
     SUBMITTED: "Submitted",
     APPROVED: "Approved",
     COMPLETED: "Completed",
+    AWAITING_ALLOCATION: "Waiting for allocation",
     ACKNOWLEDGED: "Acknowledged",
     REJECTED: "Rejected",
     PENDING: "Pending",
@@ -96,9 +107,13 @@ function correctedReturnStageKeys(stages: IndentJourneyStage[]) {
   return corrected;
 }
 
-function StageIcon({ stage }: { stage: IndentJourneyStage }) {
+function StageIcon({ stage, isAllocationPending = false }: { stage: IndentJourneyStage; isAllocationPending?: boolean }) {
+  if (isWaitingAllocationStage(stage, isAllocationPending)) {
+    const cls = `grid h-9 w-9 shrink-0 place-items-center rounded-full border ${stageTone(stage, isAllocationPending)}`;
+    return <span className={cls}><Clock className="h-4 w-4" /></span>;
+  }
   const status = stageStatus(stage);
-  const cls = `grid h-9 w-9 shrink-0 place-items-center rounded-full border ${stageTone(stage)}`;
+  const cls = `grid h-9 w-9 shrink-0 place-items-center rounded-full border ${stageTone(stage, isAllocationPending)}`;
   if (status === "REJECTED") return <span className={cls}><X className="h-4 w-4" /></span>;
   if (status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION) return <span className={cls}><Undo2 className="h-4 w-4" /></span>;
   if (status === "CANCELLED") return <span className={cls}><Ban className="h-4 w-4" /></span>;
@@ -123,8 +138,8 @@ function trackAccent(state: JourneyTrackState) {
 }
 
 function JourneyStageRow({
-  stage, isLast, correctionResubmitted = false,
-}: { stage: IndentJourneyStage; isLast: boolean; correctionResubmitted?: boolean }) {
+  stage, isLast, correctionResubmitted = false, isAllocationPending = false,
+}: { stage: IndentJourneyStage; isLast: boolean; correctionResubmitted?: boolean; isAllocationPending?: boolean }) {
   const when = formatIndentDateTime(stage.timestamp);
   const duration = formatDuration(stage.duration_seconds);
   const status = stageStatus(stage);
@@ -132,15 +147,16 @@ function JourneyStageRow({
   const rejected = status === "REJECTED";
   const returned = status === "RETURNED" || status === INDENT_STATUS.RETURNED_FOR_CORRECTION;
   const awaited = !stage.timestamp && !current;
+  const waitingAllocation = isWaitingAllocationStage(stage, isAllocationPending);
   return (
     <li className="relative flex gap-3 sm:gap-4">
       <div className="flex flex-col items-center">
-        <StageIcon stage={stage} />
+        <StageIcon stage={stage} isAllocationPending={isAllocationPending} />
         {!isLast && <span className="mt-2 h-full min-h-10 w-px bg-line" />}
       </div>
       <article
         className={`mb-4 min-w-0 flex-1 rounded-lg border p-4 shadow-sm transition-colors duration-150 motion-reduce:transition-none ${
-          current
+          current || waitingAllocation
             ? "border-brand/40 bg-brand/5"
             : rejected
               ? "border-bad/40 bg-bad-bg"
@@ -162,9 +178,11 @@ function JourneyStageRow({
             )}
           </div>
           <span className={`w-fit shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold ${
-            current ? "border-brand/30 bg-brand/10 text-brand" : "border-line bg-content2 text-muted"
+            current || waitingAllocation
+              ? "border-info/30 bg-info-bg text-info"
+              : "border-line bg-content2 text-muted"
           }`}>
-            {statusLabel(stage)}
+            {statusLabel(stage, isAllocationPending)}
           </span>
         </div>
         <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
@@ -242,11 +260,18 @@ export function IndentJourneyPage() {
     queryKey: indentKeys.journey(accountScope, indentId),
     queryFn: ({ signal }) => indentApi.journey(indentId, signal),
     enabled: Number.isFinite(indentId),
-    staleTime: INDENT_QUERY_STALE_TIME,
+    staleTime: 10_000,
     gcTime: INDENT_QUERY_GC_TIME,
     placeholderData: (previousData) => previousData,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status && !["CLOSED", "REJECTED"].includes(status)) {
+        return 10_000;
+      }
+      return false;
+    },
   });
   const steps = useMemo(() => journeySteps(data), [data]);
   const correctedReturns = useMemo(
@@ -327,13 +352,25 @@ export function IndentJourneyPage() {
 
   return (
     <div className="min-w-0 space-y-5">
-      <button
-        type="button"
-        onClick={() => nav(`${base}/${indentId}`)}
-        className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-muted hover:text-body"
-      >
-        <ArrowLeft className="h-4 w-4" /> Back to indent details
-      </button>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => nav(`${base}/${indentId}`)}
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-muted hover:text-body"
+        >
+          <ArrowLeft className="h-4 w-4" /> Back to indent details
+        </button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="gap-1.5 text-xs font-semibold"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin motion-reduce:animate-none" : ""}`} />
+          {isFetching ? "Refreshing..." : "Refresh"}
+        </Button>
+      </div>
 
       <header className="flex flex-col gap-4 rounded-xl border border-line bg-content1 p-5 shadow-sm lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
@@ -395,6 +432,7 @@ export function IndentJourneyPage() {
                         <JourneyStageRow
                           key={stageKey(stage)}
                           stage={stage}
+                          isAllocationPending={isAllocationPending}
                           correctionResubmitted={correctedReturns.has(stageKey(stage))}
                           isLast={
                             index === track.occurred.length - 1
@@ -419,6 +457,7 @@ export function IndentJourneyPage() {
                     <JourneyStageRow
                       key={stageKey(stage)}
                       stage={stage}
+                      isAllocationPending={isAllocationPending}
                       isLast={index === steps.upcoming.length - 1}
                     />
                   ))}
