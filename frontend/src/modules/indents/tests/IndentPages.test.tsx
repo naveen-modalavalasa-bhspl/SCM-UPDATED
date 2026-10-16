@@ -4074,6 +4074,29 @@ describe("indent UI shell", () => {
     )).toBeInTheDocument();
   });
 
+  it("does not display missing records warning banner when indent is at allocation stage", async () => {
+    vi.mocked(indentApi.journey).mockResolvedValueOnce(journeyData({
+      status: "AWAITING_ALLOCATION",
+      current_stage_message: "Waiting for allocation",
+      phases: [
+        { title: "Draft", status: "APPROVED", is_current: false, stage_type: "phase" },
+        { title: "Submitted", status: "APPROVED", is_current: false, stage_type: "phase" },
+        { title: "Approvals", status: "APPROVED", is_current: false, stage_type: "phase" },
+        { title: "Allocation", status: "PENDING", is_current: true, stage_type: "phase" },
+        { title: "Warehouse", status: "PENDING", is_current: false, stage_type: "phase" },
+        { title: "Delivery", status: "PENDING", is_current: false, stage_type: "phase" },
+        { title: "Acknowledgement", status: "PENDING", is_current: false, stage_type: "phase" },
+      ],
+      missing_sources: ["inv_allocations.status=APPROVED and approved_at"],
+    }));
+
+    renderWithProviders(<IndentJourneyPage />, "/indents/42/journey");
+
+    expect(await screen.findByText("IND/2026/0042")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for allocation")).toBeInTheDocument();
+    expect(screen.queryByText(/Some records could not be read/)).not.toBeInTheDocument();
+  });
+
   it("offers a retry instead of an endless skeleton when the journey fails", async () => {
     vi.mocked(indentApi.journey).mockRejectedValueOnce(new Error("Journey service unavailable"));
 

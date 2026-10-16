@@ -309,13 +309,21 @@ export function IndentJourneyPage() {
   const journeyCompleted = data.phases.length > 0 && data.phases.every((phase) => (
     COMPLETED_PHASE_STATUSES.has(stageStatus(phase))
   ));
-  // A consignment still inside the gate has no `gate_out_at` to read. That is the
-  // normal state of an indent the warehouse has not released yet, not a record the
-  // evidence walk failed on, so listing it fired the banner on almost every open
-  // request. Every other missing source still shows.
-  const visibleMissingSources = data.missing_sources?.filter(
-    (source) => source !== "out_dispatches.gate_out_at",
-  ) ?? [];
+  // In-progress requests naturally do not have downstream records yet:
+  // - An indent waiting for allocation has no approved allocation yet.
+  // - A consignment still inside the gate has no `gate_out_at` to read yet.
+  // These are normal operational states, not missing or unreadable records.
+  const isAllocationPending =
+    data.status === "AWAITING_ALLOCATION"
+    || data.status === "APPROVED"
+    || !data.phases.some(
+      (phase) => phase.title.toLowerCase().includes("allocation") && COMPLETED_PHASE_STATUSES.has(stageStatus(phase)),
+    );
+  const visibleMissingSources = data.missing_sources?.filter((source) => {
+    if (source === "out_dispatches.gate_out_at") return false;
+    if (isAllocationPending && source.includes("inv_allocations")) return false;
+    return true;
+  }) ?? [];
 
   return (
     <div className="min-w-0 space-y-5">
