@@ -45,8 +45,10 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
         { key: "is_bin_managed", label: "Bin managed", type: "switch" },
         { key: "is_active", label: "Active", type: "switch" },
       ]}
+      // A new warehouse starts as MAIN, and a main store keeps storage locations by
+      // default — the same rule as Warehouse > Masters (`WarehouseForm`).
       emptyForm={{ code: "", name: "", warehouse_type: "MAIN", facility_id: null,
-                   address: "", is_bin_managed: false, is_active: true }}
+                   address: "", is_bin_managed: true, is_active: true }}
       toForm={(r) => ({ code: r.code, name: r.name, warehouse_type: r.warehouse_type,
         facility_id: r.facility_id ?? null, address: r.address ?? "",
         is_bin_managed: r.is_bin_managed, is_active: r.is_active })}

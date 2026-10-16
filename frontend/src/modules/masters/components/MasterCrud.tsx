@@ -210,9 +210,11 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
   const fields: FormField[] = shortPath ? baseFields.map((f) => f.key !== "code" ? f : {
     ...f, maxLength: undefined, pattern: undefined, patternMessage: undefined,
     hint: "Exactly 3 letters, e.g. ERB for Erba. Filled in from the name; change it if you like.",
-    validate: (v, all) => {
+    // Strict: every save must carry a 3-letter code. The legacy rows were all
+    // recoded up front, so there is nothing left to grandfather here.
+    validate: (v) => {
       const text = String(v ?? "").trim().toUpperCase();
-      return /^[A-Z]{3}$/.test(text) || (all._orig_code && text === String(all._orig_code).toUpperCase())
+      return /^[A-Z]{3}$/.test(text)
         ? null : "The code must be exactly 3 letters, e.g. ERB.";
     },
   }) : baseFields;

@@ -178,15 +178,17 @@ export default function PutawayForm() {
             <Button variant="ghost" onClick={() => nav("/warehouse/putaway")}>
               <ArrowLeft className="h-4 w-4" /> Back
             </Button>
+            {/* Same code the server checks on /start and /confirm — not stock.transfer,
+                which is the STO permission and would tie putaway to raising transfers. */}
             {!done && task.status === "pending" && (
-              <Can do="stock.transfer">
+              <Can do="putaway.execute">
                 <Button variant="soft" onClick={() => start.mutate()} disabled={start.isPending}>
                   Start
                 </Button>
               </Can>
             )}
             {!done && (
-              <Can do="stock.transfer">
+              <Can do="putaway.execute">
                 <Button
                   onClick={() => setConfirming(true)}
                   // One serial per unit placed, or the bin holds stock nobody can trace.

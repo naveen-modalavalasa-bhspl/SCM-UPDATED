@@ -20,6 +20,12 @@ import { usePointLabel } from "../../usePointLabel";
  * what actually refuses it.
  */
 
+/** A main store keeps storage locations unless somebody says otherwise; every other
+ *  type starts in bulk. Only a NEW warehouse follows this — flipping an existing one
+ *  moves its stock into the Unlocated location, which is not a side effect of
+ *  re-typing it. */
+const binManagedByDefault = (type: string) => type === "MAIN";
+
 const TYPES = [
   { value: "CENTRAL", label: "Central warehouse" },
   { value: "MAIN", label: "Main store" },
@@ -39,7 +45,7 @@ const EMPTY: WarehouseWrite = {
   latitude: null,
   longitude: null,
   incharge_id: null,
-  is_bin_managed: false,
+  is_bin_managed: binManagedByDefault("MAIN"),
   requires_inward: null,
   is_active: true,
 };
@@ -61,6 +67,8 @@ export default function WarehouseForm() {
 
   const [form, setForm] = useState<WarehouseWrite>(EMPTY);
   const [touched, setTouched] = useState(false);
+  // Once the user flips "Bin managed" themselves, a type change no longer overrides it.
+  const [binChosen, setBinChosen] = useState(false);
 
   const { data: existing, isLoading } = useQuery({
     queryKey: ["wh-warehouse", id],
@@ -89,6 +97,13 @@ export default function WarehouseForm() {
 
   const set = <K extends keyof WarehouseWrite>(key: K, value: WarehouseWrite[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
+
+  const setType = (type: string) =>
+    setForm((f) => ({
+      ...f,
+      warehouse_type: type,
+      is_bin_managed: editing || binChosen ? f.is_bin_managed : binManagedByDefault(type),
+    }));
 
   const save = useMutation({
     mutationFn: () =>
@@ -153,7 +168,7 @@ export default function WarehouseForm() {
           <Field label="Type">
             <Select
               value={form.warehouse_type}
-              onChange={(v) => set("warehouse_type", v || "MAIN")}
+              onChange={(v) => setType(v || "MAIN")}
               options={TYPES}
               ariaLabel="Warehouse type"
             />
@@ -207,10 +222,7 @@ export default function WarehouseForm() {
           <label className="flex items-start gap-3">
             <Switch
               isSelected={form.warehouse_type === "CENTRAL"}
-              onValueChange={(value) => set(
-                "warehouse_type",
-                value ? "CENTRAL" : "MAIN",
-              )}
+              onValueChange={(value) => setType(value ? "CENTRAL" : "MAIN")}
               aria-label="Central warehouse"
             />
             <span>
@@ -224,7 +236,7 @@ export default function WarehouseForm() {
           <label className="flex items-start gap-3">
             <Switch
               isSelected={form.is_bin_managed}
-              onValueChange={(v) => set("is_bin_managed", v)}
+              onValueChange={(v) => { setBinChosen(true); set("is_bin_managed", v); }}
               aria-label="Bin managed"
             />
             <span>

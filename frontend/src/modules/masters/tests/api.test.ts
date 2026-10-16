@@ -15,13 +15,16 @@ describe("masters api", () => {
   it("covers every master the Masters screen shows a tab for", () => {
     expect(Object.keys(mastersApi).sort()).toEqual([
       "attributes", "bins", "bomGroups", "bomItems", "boms",
-      "brandManufacturers", "brands", "categories", "categoryTags", "departments",
+      "brandItemMapping", "brandManufacturers", "brands", "categories", "categoryTags",
+      "departments",
       "dosageForms", "facilities", "features", "generalNames", "hsnCodes",
       "itemClasses", "itemComponents", "itemEligibility", "itemGroups", "itemPackaging",
-      "itemSpecs", "itemSubClasses", "items", "manufacturers",
+      "itemPhotos", "itemSpecs", "itemSubClasses", "items", "manufacturers",
       "nextItemCode",
-      "ownershipDepartments", "packaging", "projects", "specs", "unitCodeTracking", "uom", "uomConversions",
-      "userGroups", "vendorItems", "vendors", "warehouses",
+      "ownershipDepartments", "packaging", "paymentTerms", "projects", "specs",
+      "unitCodeTracking", "uom", "uomClasses", "uomConversions",
+      "userGroups", "vendorCategories", "vendorItems", "vendorMapping", "vendors",
+      "warehouses",
     ]);
   });
 

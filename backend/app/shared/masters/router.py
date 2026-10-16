@@ -17,9 +17,13 @@ from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
     MASTERS, UOM_SUGGESTIONS, VendorMappingIn, build_item_code, build_item_prefix,
     save_vendor_mapping, vendor_mapping_sources,
+    BrandItemMappingIn, brand_item_mapping_sources, save_brand_item_mapping,
     check_hsn_code, hsn_out, packaging_breakdown, peek_item_serial, sibling_item,
 )
-from app.shared.models.master import GeneralName, HsnCode, Item, ItemCategory, ItemSpec, Uom
+from app.shared.models.master import (
+    BrandItemMapping, BrandManufacturer, GeneralName, HsnCode, Item, ItemCategory,
+    ItemSpec, Uom,
+)
 
 router = build_router(MASTERS)
 
@@ -631,6 +635,75 @@ async def save_vendor_mapping_route(
         data: VendorMappingIn, db: AsyncSession = Depends(get_db),
         user=Depends(require_permission(perms.MASTER_VENDOR_MANAGE))):
     return await save_vendor_mapping(db, data, user)
+
+
+# Brand item mapping: brands x categories/items in one save. Same permission
+# as the Brands master (master.brand.manage) — the screen maps brands onto
+# items, and manufacturers ride along from each brand's own configuration.
+@_tracking.get("/api/brand-item-mapping/sources")
+async def brand_item_mapping_sources_route(
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_BRAND_MANAGE))):
+    return await brand_item_mapping_sources(db)
+
+
+@_tracking.post("/api/brand-item-mapping")
+async def save_brand_item_mapping_route(
+        data: BrandItemMappingIn, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_BRAND_MANAGE))):
+    return await save_brand_item_mapping(db, data, user)
+
+
+@_tracking.get("/api/brand-item-mapping")
+async def list_brand_item_mappings(
+        item_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(get_current_user)):
+    """All brand mappings for one item — used by the View detail panel."""
+    rows = (await db.execute(
+        select(BrandItemMapping).where(
+            BrandItemMapping.item_id == item_id,
+            BrandItemMapping.is_active.is_(True),
+        )
+    )).scalars().all()
+    # For each brand, gather its manufacturer names
+    brand_ids = [r.brand_id for r in rows]
+    mfr_map: dict[int, list[str]] = {}
+    if brand_ids:
+        bms = (await db.execute(
+            select(BrandManufacturer).where(
+                BrandManufacturer.brand_id.in_(brand_ids),
+                BrandManufacturer.is_active.is_(True),
+            )
+        )).scalars().all()
+        for bm in bms:
+            mfr_map.setdefault(bm.brand_id, []).append(bm.manufacturer_name or "")
+    return [
+        {
+            "id": r.id,
+            "item_id": r.item_id,
+            "item_code": r.item_code,
+            "item_name": r.item_name,
+            "brand_id": r.brand_id,
+            "brand_code": r.brand_code,
+            "brand_name": r.brand_name,
+            "manufacturer_names": mfr_map.get(r.brand_id, []),
+            "is_active": r.is_active,
+        }
+        for r in rows
+    ]
+
+
+@_tracking.delete("/api/brand-item-mapping/{mapping_id}")
+async def deactivate_brand_item_mapping(
+        mapping_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_BRAND_MANAGE))):
+    """Soft-delete one brand-item mapping (sets is_active = False)."""
+    row = await db.get(BrandItemMapping, mapping_id)
+    if row is None:
+        raise NotFoundError("Brand-item mapping not found.")
+    row.is_active = False
+    await db.commit()
+    return {"success": True, "id": mapping_id}
 
 
 router.include_router(_tracking)

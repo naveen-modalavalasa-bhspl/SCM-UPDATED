@@ -63,6 +63,7 @@ describe("verified button locations", () => {
       "stock.transfer.view", "stock.transfer.request", "stock.transfer",
       "stock.transfer.approve", "stock.transfer.serve", "stock.transfer.qc",
       "stock.transfer.issue", "stock.transfer.receive",
+      "master.location.manage", "putaway.execute",
     ]);
     for (const code of Object.keys(ACTION_LOCATIONS)) expect(REAL).toContain(code);
   });
