@@ -780,6 +780,7 @@ export const ACTION_LOCATIONS: Record<string, { button: string; where: string }>
   "stock.transfer.qc": { button: "New inspection / Outward QC", where: "Inventory > Stock Transfer > Outward QC (or an order's Outward QC button)" },
   "stock.transfer.issue": { button: "Open material issue", where: "Inventory > Stock Transfer > Orders > Open an order" },
   "stock.transfer.receive": { button: "Confirm receipt", where: "Inventory > Stock Transfer > Acknowledgements" },
+  "putaway.execute": { button: "Start / Confirm putaway", where: "Warehouse > Put-away > Open a task" },
   "master.location.manage": { button: "New warehouse / Edit / Add location / Storage types", where: "Warehouse > Masters" },
   "movement.view": { button: "View Stock Movements", where: "Warehouse > Stock Movements" },
   "movement.create": { button: "New order / Save draft", where: "Warehouse > Stock Movements" },

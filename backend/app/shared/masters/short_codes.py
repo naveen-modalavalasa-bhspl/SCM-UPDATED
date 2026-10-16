@@ -6,9 +6,11 @@ BOMs) carry a code of exactly three letters: ERB for Erba, TBM for Transasia
 Bio-Medicals. HSN, vendors, warehouses and bins are deliberately not among them —
 each has its own fixed shape.
 
-The rule bites on a NEW row and on a CHANGED code only. Rows saved before it keep
-the code they have: items, stock and documents snapshot these codes, and recoding
-544 rows to make a list tidy would break the links that matter.
+The rule bites on EVERY save, new or old: a code that is not three letters is
+refused wherever it is written. The legacy rows that predated the rule were
+recoded to three letters up front (`scripts/recode_master_codes.py`), with every
+live snapshot following by integer id — so there is nothing left to grandfather,
+and no edit can reintroduce a long code through any door.
 
 A person never has to invent one. A blank code is filled from the name — the first
 letter of each word, or the first three letters of a single word — and when that is
@@ -94,15 +96,12 @@ async def suggest(db: AsyncSession, model: type, name: str,
 
 
 async def enforce(db: AsyncSession, defn: Any, row: Any, data: Any) -> None:
-    """Upper-case the code, fill a blank one from the name, and refuse a new or
-    changed code that is not three letters. A row keeping its old code passes."""
+    """Upper-case the code, fill a blank one from the name, and refuse anything
+    that is not three letters — on every save, new or old. There are no legacy
+    codes left to grandfather (see the module docstring), so no pass-through."""
     if not applies(defn) or not hasattr(data, "code"):
         return
     code = (getattr(data, "code", None) or "").strip().upper()
-    existing = (getattr(row, "code", None) or "").upper() if row is not None else ""
-    if existing and code == existing:
-        data.code = getattr(row, "code")            # legacy code, left exactly as is
-        return
     if not code:
         code = await suggest(db, defn.model, getattr(data, "name", "") or "")
     if not SHORT_CODE.fullmatch(code):
@@ -118,25 +117,18 @@ async def enforce(db: AsyncSession, defn: Any, row: Any, data: Any) -> None:
 
 
 async def fill_and_check(defn: Any, db: AsyncSession,
-                         parsed: list[dict]) -> list[tuple[int, str]]:
+                   parsed: list[dict]) -> list[tuple[int, str]]:
     """For a bulk import: give each NEW row with a blank code one made from its name,
-    and report a new or changed code that is not three letters — in the review, so it
-    is fixed before Save rather than refused by it. Returns (sheet row, message)."""
+    and report ANY code that is not three letters — in the review, so it is fixed
+    before Save rather than refused by it. Returns (sheet row, message)."""
     if not applies(defn):
         return []
     taken = await taken_codes(db, defn.model)
-    ids = [r["id"] for r in parsed if r.get("id") is not None]
-    stored = {i: (c or "").upper() for i, c in (await db.execute(
-        select(defn.model.id, defn.model.code).where(defn.model.id.in_(ids))
-    )).all()} if ids else {}
     problems: list[tuple[int, str]] = []
     for record in parsed:
         line = int(record.get("__row__") or 0)
         code = str(record.get("code") or "").strip().upper()
-        if record.get("id") is not None:
-            if code and code == stored.get(record["id"]):
-                continue
-        elif not code and record.get("name"):
+        if record.get("id") is None and not code and record.get("name"):
             for candidate in candidates(str(record["name"])):
                 if candidate not in taken:
                     record["code"] = code = candidate

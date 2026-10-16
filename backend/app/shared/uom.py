@@ -18,15 +18,18 @@ number an approver is shown and the number a storekeeper reserves round identica
 
 from collections.abc import Iterable
 from decimal import ROUND_DOWN, Decimal
+from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import Numeric, event, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
-from app.shared.models.master import Uom
+from app.core.exceptions import ValidationError
+from app.shared.models.master import Uom, UomClassRow
 
 #: Classes whose quantities only exist in whole units, in every spelling the live
 #: mst_uom carries. Compared case-folded.
-WHOLE_UNIT_CLASSES = {"COUNT", "PACKAGING", "QUANTITY"}
+WHOLE_UNIT_CLASSES = {"COUNT", "PACKAGING", "QUANTITY", "COU", "PAC", "QUA"}
 
 #: What `NUMERIC(16,3)` holds — the cap for anything genuinely divisible.
 MAX_DECIMALS = 3
@@ -78,22 +81,111 @@ async def decimals_by_code(db: AsyncSession, codes: Iterable[str | None]) -> dic
         return {}
     # Every unit, not a filtered set: the table is ~33 rows, and the fallbacks below
     # cannot be expressed as one IN clause across two columns.
-    rows = (await db.execute(select(Uom.code, Uom.name, Uom.uom_class))).all()
-    by_code = {row.code: row.uom_class for row in rows if row.code}
-    folded = {row.code.strip().lower(): row.uom_class for row in rows if row.code}
-    by_name = {row.name.strip().lower(): row.uom_class
-               for row in rows if row.name}
+    rows = _with_flags((await db.execute(_UNITS)).all(),
+                       (await db.execute(_CLASS_FLAGS)).all())
+    return {code: d for code in wanted
+            if (d := _resolve(_unit_maps(rows), code)) is not None}
 
-    out: dict[str, int] = {}
-    for code in wanted:
-        key = code.strip().lower()
-        if code in by_code:
-            out[code] = decimals_for(by_code[code])
-        elif key in folded:
-            out[code] = decimals_for(folded[key])
-        elif key in by_name:
-            out[code] = decimals_for(by_name[key])
-    return out
+
+# Two reads, matched in Python: mst_uom and mst_uom_classes carry different
+# collations on the live server, so joining uom_class = code raises MySQL 1267.
+_UNITS = select(Uom.code, Uom.name, Uom.uom_class)
+_CLASS_FLAGS = select(UomClassRow.code, UomClassRow.allows_decimal)
+
+
+def _with_flags(units, flags) -> list[SimpleNamespace]:
+    """Each unit with its type's "Allows decimal" flag (None when the type has no row)."""
+    by_class = {(c.code or "").strip().upper(): c.allows_decimal for c in flags}
+    return [SimpleNamespace(code=u.code, name=u.name, uom_class=u.uom_class,
+                            allows_decimal=by_class.get((u.uom_class or "").strip().upper()))
+            for u in units]
+
+
+def _unit_decimals(row) -> int:
+    """The type's own flag decides; a unit whose type has no row falls back to the
+    built-in whole-unit classes."""
+    if row.allows_decimal is not None:
+        return MAX_DECIMALS if row.allows_decimal else 0
+    return decimals_for(row.uom_class)
+
+
+def _unit_maps(rows) -> tuple[dict, dict, dict]:
+    by_code = {r.code: _unit_decimals(r) for r in rows if r.code}
+    folded = {r.code.strip().lower(): _unit_decimals(r) for r in rows if r.code}
+    by_name = {r.name.strip().lower(): _unit_decimals(r) for r in rows if r.name}
+    return by_code, folded, by_name
+
+
+def _resolve(maps: tuple[dict, dict, dict], code: str) -> int | None:
+    """Code, else code case-folded, else NAME case-folded (see decimals_by_code)."""
+    by_code, folded, by_name = maps
+    key = code.strip().lower()
+    for table, k in ((by_code, code), (folded, key), (by_name, key)):
+        if k in table:
+            return table[k]
+    return None
+
+
+# --------------------------------------------------------------------------- #
+#  "Allows decimal" — enforced on every document line, at flush
+# --------------------------------------------------------------------------- #
+# Every document line (indent, RFQ, PO, GRN/inward, issue, transfer, return ...)
+# snapshots `uom_code`. Checking at flush covers all of them — and any added later —
+# without each module remembering to. Stock tables are skipped: they only ever carry
+# what a document already put there, and legacy fractional balances must still move.
+_SKIP_PREFIXES = ("stk_",)
+_qty_cols_cache: dict[type, tuple[str, ...]] = {}
+
+
+def _qty_columns(cls: type) -> tuple[str, ...]:
+    if cls not in _qty_cols_cache:
+        mapper = sa_inspect(cls)
+        table = getattr(cls, "__tablename__", "") or ""
+        cols: tuple[str, ...] = ()
+        if "uom_code" in mapper.column_attrs and not table.startswith(_SKIP_PREFIXES):
+            cols = tuple(
+                p.key for p in mapper.column_attrs
+                if ("qty" in p.key or "quantity" in p.key)
+                and isinstance(p.columns[0].type, Numeric))
+        _qty_cols_cache[cls] = cols
+    return _qty_cols_cache[cls]
+
+
+def _changed_fractions(session: Session) -> list[tuple[str, str, Decimal]]:
+    """(uom_code, column, value) for every fractional quantity this flush writes."""
+    found = []
+    for obj in list(session.new) + list(session.dirty):
+        cols = _qty_columns(type(obj))
+        code = getattr(obj, "uom_code", None) if cols else None
+        if not code:
+            continue
+        state = sa_inspect(obj)
+        for col in cols:
+            if obj not in session.new and not state.attrs[col].history.has_changes():
+                continue
+            value = getattr(obj, col)
+            if value is None:
+                continue
+            value = _d(value)
+            if value != value.to_integral_value():
+                found.append((code, col, value))
+    return found
+
+
+@event.listens_for(Session, "before_flush")
+def _refuse_fractions_of_whole_units(session, _ctx, _instances) -> None:
+    found = _changed_fractions(session)
+    if not found:
+        return
+    with session.no_autoflush:
+        maps = _unit_maps(_with_flags(session.execute(_UNITS).all(),
+                                      session.execute(_CLASS_FLAGS).all()))
+    for code, col, value in found:
+        if _resolve(maps, code) == 0:
+            label = col.replace("_", " ").replace("qty", "quantity").strip().capitalize()
+            raise ValidationError(
+                f"{label} {value.normalize()} {code}: {code} is counted in whole units "
+                f"(its UOM type does not allow decimals). Enter a whole number.")
 
 
 def share_out(

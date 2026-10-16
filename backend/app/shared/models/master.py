@@ -86,6 +86,9 @@ class UomClassRow(Base):
     code = Column(String(30), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
     description = Column(String(300), nullable=True)
+    # May a unit of this type carry a fraction on a document? Enforced at flush by
+    # `shared.uom` on every row that snapshots a `uom_code`.
+    allows_decimal = Column(Boolean, nullable=False, default=True, server_default="1")
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -387,6 +390,31 @@ class BrandManufacturer(Base):
         UniqueConstraint("brand_id", "manufacturer_id",
                          name="uq_brand_manufacturer"),
     )
+
+
+class BrandItemMapping(Base):
+    """Which brands are mapped to which items.
+
+    Managed via the Brand Item Mapping screen, replacing the old per-item brand_id /
+    manufacturer_id fields on the item form. One item may carry several brands; one
+    brand may cover many items. Manufacturer context is inherited from the brand's own
+    mst_brand_manufacturers rows, so it is NOT stored here separately.
+    """
+    __tablename__ = "mst_brand_item_mappings"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    item_code = Column(String(50), nullable=True)         # snapshot
+    item_name = Column(String(300), nullable=True)        # snapshot
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(50), nullable=True)        # snapshot
+    brand_name = Column(String(200), nullable=True)       # snapshot
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+    __table_args__ = (
+        UniqueConstraint("item_id", "brand_id", name="uq_brand_item_mapping"),
+    )
+
 
 
 class ItemClass(Base):

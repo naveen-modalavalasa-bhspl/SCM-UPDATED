@@ -19,6 +19,8 @@ from app.core.exceptions import (
     unhandled_exception_handler,
 )
 from app.platform.admin.app_logs import capture_backend_error, safe_request_id
+# Registers the "Allows decimal" flush guard on every session.
+from app.shared import uom as _uom_flush_guard  # noqa: F401,E402
 
 log = logging.getLogger("app")
 

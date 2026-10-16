@@ -28,6 +28,7 @@ from app.platform.rbac.models import Role
 from app.shared.models.master import (
     ItemEligibility,
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
+    BrandItemMapping,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
     Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
@@ -158,8 +159,12 @@ class ItemIn(BaseModel):
     short_name: str | None = None
     category_id: int
     general_name_id: int
-    brand_id: int
-    manufacturer_id: int
+    # Brand and manufacturer are optional on the item form — they are managed
+    # centrally via the Brand Item Mapping screen (mst_brand_item_mappings). The
+    # form still accepts them for backward compatibility with existing saves and
+    # API clients, but it no longer requires them.
+    brand_id: int | None = None
+    manufacturer_id: int | None = None
     item_class_id: int
     item_sub_class_id: int | None = None
     # Operational owner used by downstream ticket routing. This is separate from
@@ -266,8 +271,10 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     uom = await db.get(Uom, data.uom_id)
     category = await db.get(ItemCategory, data.category_id)
     general = await db.get(GeneralName, data.general_name_id)
-    brand = await db.get(Brand, data.brand_id)
-    manufacturer = await db.get(Manufacturer, data.manufacturer_id)
+    # Brand and manufacturer are optional — managed via Brand Item Mapping.
+    brand = await db.get(Brand, data.brand_id) if data.brand_id else None
+    manufacturer = await db.get(Manufacturer, data.manufacturer_id) \
+        if data.manufacturer_id else None
     item_class = await db.get(ItemClass, data.item_class_id)
     hsn = await db.get(HsnCode, data.hsn_id)
     sub_class = await db.get(ItemSubClass, data.item_sub_class_id) \
@@ -281,9 +288,9 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         missing.append("category")
     if general is None:
         missing.append("general name")
-    if brand is None:
+    if data.brand_id and brand is None:
         missing.append("brand")
-    if manufacturer is None:
+    if data.manufacturer_id and manufacturer is None:
         missing.append("manufacturer")
     if item_class is None:
         missing.append("item class")
@@ -305,16 +312,19 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         raise ValidationError(
             f"Category: “{category.name}” is a main group (Level {category.level}). "
             "Pick the exact category under it (Level 3).")
-    mapping = await db.scalar(select(BrandManufacturer.id).where(
-        BrandManufacturer.brand_id == brand.id,
-        BrandManufacturer.manufacturer_id == manufacturer.id,
-        BrandManufacturer.is_active.is_(True),
-    ))
-    if mapping is None:
-        raise ValidationError(
-            f"Manufacturer: “{manufacturer.name}” is not linked to the brand "
-            f"“{brand.name}”. Pick the right manufacturer, or link them under "
-            "Masters › Brands.")
+    # The brand-manufacturer pairing is only checked when BOTH are named — an
+    # item without either carries no pairing to verify.
+    if brand is not None and manufacturer is not None:
+        mapping = await db.scalar(select(BrandManufacturer.id).where(
+            BrandManufacturer.brand_id == brand.id,
+            BrandManufacturer.manufacturer_id == manufacturer.id,
+            BrandManufacturer.is_active.is_(True),
+        ))
+        if mapping is None:
+            raise ValidationError(
+                f"Manufacturer: “{manufacturer.name}” is not linked to the brand "
+                f"“{brand.name}”. Pick the right manufacturer, or link them under "
+                "Masters › Brands.")
     if sub_class and sub_class.item_class_id != item_class.id:
         raise ValidationError(
             f"Item sub class: “{sub_class.name}” belongs to a different item class, "
@@ -335,12 +345,29 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         await next_item_serial(db, prefix)            # takes the series lock first
         sibling = await sibling_item(db, prefix, category.id, general.id)
         if sibling is not None:
-            clash = await db.scalar(select(Item.id).where(
-                Item.code == sibling.code, Item.brand_id == brand.id,
-                Item.manufacturer_id == manufacturer.id))
-            if clash is not None:
+            # The same code + the same brand + the same manufacturer is the same
+            # item. NULL-safe on both sides: an item with no brand clashes only
+            # with another unbranded item of that code, never with a branded
+            # variant sharing the code (brand variants intentionally share one).
+            clash_stmt = select(Item.id).where(Item.code == sibling.code)
+            if brand is not None:
+                clash_stmt = clash_stmt.where(Item.brand_id == brand.id)
+            else:
+                clash_stmt = clash_stmt.where(Item.brand_id.is_(None))
+            if manufacturer is not None:
+                clash_stmt = clash_stmt.where(
+                    Item.manufacturer_id == manufacturer.id)
+            else:
+                clash_stmt = clash_stmt.where(Item.manufacturer_id.is_(None))
+            if await db.scalar(clash_stmt) is not None:
+                if brand is not None and manufacturer is not None:
+                    who = f" by {brand.name} / {manufacturer.name}"
+                elif brand is not None:
+                    who = f" by {brand.name}"
+                else:
+                    who = ""
                 raise ValidationError(
-                    f"“{general.name}” by {brand.name} / {manufacturer.name} already "
+                    f"“{general.name}”{who} already "
                     f"exists as {sibling.code}. Edit that item instead.")
             item.serial_no, item.code = sibling.serial_no, sibling.code
         else:
@@ -350,8 +377,15 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
     item.hsn_code = hsn.code
     item.category_name = category.name
     item.general_name_code, item.general_name = general.code, general.name
-    item.brand_code, item.brand_name = brand.code, brand.name
-    item.manufacturer_code, item.manufacturer_name = manufacturer.code, manufacturer.name
+    if brand is not None:
+        item.brand_code, item.brand_name = brand.code, brand.name
+    else:
+        item.brand_code, item.brand_name = None, None
+    if manufacturer is not None:
+        item.manufacturer_code, item.manufacturer_name = (manufacturer.code,
+                                                          manufacturer.name)
+    else:
+        item.manufacturer_code, item.manufacturer_name = None, None
     item.item_class_code, item.item_class_name = item_class.code, item_class.name
     item.item_sub_class_code = sub_class.code if sub_class else None
     item.item_sub_class_name = sub_class.name if sub_class else None
@@ -458,12 +492,18 @@ class UomClassIn(BaseModel):
     code: str = Field(min_length=1, max_length=30, pattern=r"^[A-Za-z0-9_]+$")
     name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(None, max_length=300)
+    # Off → every unit of this type is whole-only on every document (shared.uom).
+    allows_decimal: bool = True
     is_active: bool = True
 
     @field_validator("code", mode="before")
     @classmethod
     def _upper(cls, value):
         return str(value).strip().upper() if value is not None else value
+
+
+def uom_class_out(row: UomClassRow) -> dict:
+    return {**named_code_out(row), "allows_decimal": bool(row.allows_decimal)}
 
 
 class UomIn(BaseModel):
@@ -1268,6 +1308,124 @@ async def save_vendor_mapping(db: AsyncSession, data: VendorMappingIn, user) -> 
     await db.commit()
     return {"success": True, "created": created, "updated": updated,
             "suppliers": len(vendors), "items": len(items)}
+
+
+# --------------------------------------------------------------------------- #
+#  Brand item mapping (2026-10-15)
+# --------------------------------------------------------------------------- #
+# Brand and manufacturer left the item form; they are managed centrally here.
+# The mapping screen picks brands on one side, categories or items on the other,
+# and saves every combination in one press. Manufacturers ride along from each
+# brand's own mst_brand_manufacturers rows, so they are stored nowhere here.
+class BrandItemMappingIn(BaseModel):
+    brand_ids: list[int] = Field(min_length=1, max_length=500)
+    item_ids: list[int] = Field(default_factory=list, max_length=1000)
+    # A category stands for every active item under it, at any depth.
+    category_ids: list[int] = Field(default_factory=list, max_length=500)
+
+
+async def brand_item_mapping_sources(db: AsyncSession) -> dict:
+    """Everything the Brand Item Mapping screen needs in one call.
+
+    All active brands (with their manufacturer names), the full item category
+    tree, all active items, and every brand-item pair already mapped. Mirrors
+    the shape of `vendor_mapping_sources`.
+    """
+    cats = (await db.execute(select(ItemCategory).where(
+        ItemCategory.is_active.is_(True)).order_by(ItemCategory.path))).scalars().all()
+    items = (await db.execute(select(Item).where(
+        Item.is_active.is_(True)).order_by(Item.code))).scalars().all()
+    brands = (await db.execute(select(Brand).where(
+        Brand.is_active.is_(True)).order_by(Brand.name))).scalars().all()
+    pairs = (await db.execute(
+        select(BrandItemMapping.brand_id, BrandItemMapping.item_id).where(
+            BrandItemMapping.is_active.is_(True)))).all()
+    # Per-brand manufacturer names off the eagerly-loaded Brand.manufacturers
+    # relationship (selectin, so no lazy load on this async session).
+    return {
+        "brands": [{"id": b.id, "code": b.code, "name": b.name,
+                    "manufacturer_names": [bm.manufacturer_name or ""
+                                           for bm in (b.manufacturers or [])
+                                           if bm.is_active and bm.manufacturer_name]}
+                   for b in brands],
+        "categories": [{"id": c.id, "code": c.code, "name": c.name, "level": c.level,
+                        "parent_id": c.parent_id, "path": c.path} for c in cats],
+        "items": [{"id": i.id, "code": i.code, "name": i.name,
+                   "category_id": i.category_id} for i in items],
+        "mapped": [[b, i] for b, i in pairs],
+    }
+
+
+async def save_brand_item_mapping(db: AsyncSession, data: BrandItemMappingIn,
+                                  user) -> dict:
+    """Create or restore mst_brand_item_mappings rows in one call.
+
+    Category IDs expand to all active items they contain (at any depth), so one
+    tick on a category node maps all its items without the caller enumerating
+    them. An inactive row is restored rather than duplicated — the unique
+    constraint on (item_id, brand_id) would refuse a fresh insert.
+    """
+    brand_rows = (await db.execute(select(Brand).where(
+        Brand.id.in_(data.brand_ids)))).scalars().all()
+    if len(brand_rows) != len(set(data.brand_ids)):
+        raise ValidationError(
+            "Brands: one of them no longer exists. Refresh and pick again.")
+
+    item_ids = set(data.item_ids)
+    if data.category_ids:
+        paths = [p for (p,) in (await db.execute(select(ItemCategory.path).where(
+            ItemCategory.id.in_(data.category_ids)))).all() if p]
+        if paths:
+            under = select(ItemCategory.id).where(
+                or_(*[ItemCategory.path.like(f"{p}%") for p in paths]))
+            item_ids |= {i for (i,) in (await db.execute(select(Item.id).where(
+                Item.is_active.is_(True), Item.category_id.in_(under)))).all()}
+    if not item_ids:
+        raise ValidationError(
+            "Materials: pick at least one item, or a category that has items in it.")
+    if len(item_ids) * len(brand_rows) > MAX_MAPPING_PAIRS:
+        raise ValidationError(
+            f"That is {len(item_ids) * len(brand_rows):,} combinations; the most in "
+            f"one save is {MAX_MAPPING_PAIRS:,}. Pick fewer brands or categories.")
+
+    items = {i.id: i for i in (await db.execute(select(Item).where(
+        Item.id.in_(item_ids)))).scalars().all()}
+    existing = {
+        (r.brand_id, r.item_id): r
+        for r in (await db.execute(select(BrandItemMapping).where(
+            BrandItemMapping.brand_id.in_([b.id for b in brand_rows]),
+            BrandItemMapping.item_id.in_(list(items))))).scalars().all()
+    }
+
+    created = updated = 0
+    for brand in brand_rows:
+        for item in items.values():
+            row = existing.get((brand.id, item.id))
+            if row is None:
+                row = BrandItemMapping(
+                    brand_id=brand.id, brand_code=brand.code, brand_name=brand.name,
+                    item_id=item.id, item_code=item.code, item_name=item.name,
+                    is_active=True,
+                )
+                db.add(row)
+                created += 1
+            elif not row.is_active:
+                row.is_active = True
+                row.item_code, row.item_name = item.code, item.name
+                row.brand_code, row.brand_name = brand.code, brand.name
+                updated += 1
+            # A row already active is left alone (idempotent).
+
+    from app.platform.settings.service import write_audit
+    await write_audit(
+        db, entity="mst_brand_item_mappings", action=AuditAction.UPDATE, actor=user,
+        entity_no="BRAND-ITEM-MAPPING",
+        summary=(f"Brand item mapping: {len(brand_rows)} brand(s) x "
+                 f"{len(items)} item(s), {created} new, {updated} restored"),
+        after={"brand_ids": [b.id for b in brand_rows], "item_ids": sorted(items)})
+    await db.commit()
+    return {"success": True, "created": created, "updated": updated,
+            "brands": len(brand_rows), "items": len(items)}
 
 
 def named_code_out(row) -> dict:
@@ -2537,7 +2695,7 @@ MASTERS: list[MasterDef] = [
     # UOM form's list can be extended without a release. Same permission as UOM.
     MasterDef(path="uom-classes", name="UOM type", model=UomClassRow,
               schema=UomClassIn, manage_perm=perms.MASTER_UOM_MANAGE,
-              serialize=named_code_out, search_cols=("name", "code"),
+              serialize=uom_class_out, search_cols=("name", "code"),
               order_col="name", paginated=False,
               apply=named_code_apply(UomClassRow, "A UOM type"),
               usage=(("Units of measure", "mst_uom", "uom_class"),)),
