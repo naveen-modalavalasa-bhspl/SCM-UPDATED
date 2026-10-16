@@ -3643,34 +3643,45 @@ async def _journey_operational_evidence(
             "_sort_order": 120,
         })
     is_complete = has_genuine_closure
-    if not allocations_found:
-        missing_sources.append("inv_allocations.status=APPROVED and approved_at")
-    elif awaiting_procurement:
-        # Not a gap in the evidence: the shortfall is a live material request and no
-        # warehouse document can exist until procurement delivers against it. Listing
-        # `out_issues` here fired the "missing evidence" banner on every indent that
-        # is simply out of stock, and named the wrong document as the next step.
-        pass
-    elif not issues:
-        missing_sources.append("out_issues.is_stock_posted=true and posted_at")
-    elif not issue_complete:
-        missing_sources.append("remaining posted out_issue_items.issued_qty")
-    elif not dispatched:
-        missing_sources.append("out_dispatches.gate_out_at")
-    elif not delivered and not fully_received:
-        missing_sources.append("out_dispatches.delivered_at")
-    elif not delivery_complete and not fully_received:
-        missing_sources.append("remaining out_dispatch_items.delivered_qty")
-    elif received_total <= 0:
-        missing_sources.append(
-            "ind_indent_items.received_qty and acknowledgement audit"
-        )
-    elif not fully_received:
-        missing_sources.append("remaining ind_indent_items.received_qty")
-    elif indent.status == IndentStatus.CLOSED.value and closed_audit is None:
-        missing_sources.append("sys_audit_log status.to=CLOSED")
-    elif not is_complete:
-        missing_sources.append("ind_indents.status=CLOSED audit transition")
+    if indent.status == IndentStatus.CLOSED.value:
+        if not allocations_found:
+            missing_sources.append("inv_allocations.status=APPROVED and approved_at")
+        elif awaiting_procurement:
+            # Not a gap in the evidence: the shortfall is a live material request and no
+            # warehouse document can exist until procurement delivers against it. Listing
+            # `out_issues` here fired the "missing evidence" banner on every indent that
+            # is simply out of stock, and named the wrong document as the next step.
+            pass
+        elif not issues:
+            missing_sources.append("out_issues.is_stock_posted=true and posted_at")
+        elif not issue_complete:
+            missing_sources.append("remaining posted out_issue_items.issued_qty")
+        elif not dispatched:
+            missing_sources.append("out_dispatches.gate_out_at")
+        elif not delivered and not fully_received:
+            missing_sources.append("out_dispatches.delivered_at")
+        elif not delivery_complete and not fully_received:
+            missing_sources.append("remaining out_dispatch_items.delivered_qty")
+        elif received_total <= 0:
+            missing_sources.append(
+                "ind_indent_items.received_qty and acknowledgement audit"
+            )
+        elif not fully_received:
+            missing_sources.append("remaining ind_indent_items.received_qty")
+        elif closed_audit is None:
+            missing_sources.append("sys_audit_log status.to=CLOSED")
+        elif not is_complete:
+            missing_sources.append("ind_indents.status=CLOSED audit transition")
+    else:
+        # Open indents are still in progress. Downstream stages that have not occurred
+        # yet (such as allocation, issue, dispatch, etc.) are normal pending steps,
+        # not missing records. Only flag genuine data inconsistencies where a status
+        # claims a stage completed without records.
+        if (
+            indent.status == IndentStatus.ALLOCATED.value
+            and not allocations_found
+        ):
+            missing_sources.append("inv_allocations.status=APPROVED and approved_at")
 
     return {
         "stages": stages,
