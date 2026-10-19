@@ -3,13 +3,15 @@ import { ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  PageHeader, Button, Can, Card, Field, Input, ResponsiveList, StatusPill,
+  PageHeader, Button, Can, Card, Field, Input, ResponsiveList, StatusPill, useToast,
   type Column,
 } from "@/shared/components";
 import {
   approveMaterialRequest, getMaterialRequest, rejectMaterialRequest,
-  reviseMaterialRequest,
+  resubmitMaterialRequestCorrection, reviseMaterialRequest, sendBackMaterialRequest,
+  sendMaterialRequestFurtherBack,
 } from "../api";
+import { MRCorrectionForm } from "../components/MRCorrectionForm";
 import { MRClaimsPanel } from "../components/MRClaimsPanel";
 import { ErrorNote, LoadingRows } from "../components/PageStates";
 // Reaching across into procurement for one call, the same direction the chain already
@@ -39,6 +41,7 @@ export function MaterialRequestDetailPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const { can } = useAuth();
+  const toast = useToast();
   const [comments, setComments] = useState("");
   // Only the lines actually touched, keyed by line id. Absent means "unchanged" —
   // seeding this from the server would send every line back on every save and make an
@@ -113,8 +116,66 @@ export function MaterialRequestDetailPage() {
     },
   });
 
+  // Send back and Reject both need a reason: the person it lands with has to know why.
+  const [reasonError, setReasonError] = useState("");
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["material-request", mrId] });
+    qc.invalidateQueries({ queryKey: ["material-requests"] });
+    qc.invalidateQueries({ queryKey: ["approvals"] });
+  };
+  const sendBack = useMutation({
+    mutationFn: () => sendBackMaterialRequest(mrId, comments.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setComments("");
+      invalidate();
+    },
+  });
+  const sendBackWithReason = () => {
+    if (sendBack.isPending) return;
+    if (!comments.trim()) {
+      setReasonError("Enter a reason in Comments before sending this request back.");
+      return;
+    }
+    setReasonError("");
+    sendBack.mutate();
+  };
+  // The holder of a sent-back request: a comment (optional to resubmit, required to
+  // pass it further down).
+  const [fixComment, setFixComment] = useState("");
+  const [fixError, setFixError] = useState("");
+  const resubmit = useMutation({
+    mutationFn: () => resubmitMaterialRequestCorrection(mrId, fixComment.trim()),
+    onSuccess: () => {
+      toast.success("Resubmitted for approval");
+      setFixComment("");
+      invalidate();
+    },
+  });
+  const sendFurtherBack = useMutation({
+    mutationFn: () => sendMaterialRequestFurtherBack(mrId, fixComment.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setFixComment("");
+      invalidate();
+    },
+  });
+  const sendFurtherBackWithReason = () => {
+    if (sendFurtherBack.isPending) return;
+    if (!fixComment.trim()) {
+      setFixError("Enter a reason before sending this request further back.");
+      return;
+    }
+    setFixError("");
+    sendFurtherBack.mutate();
+  };
+
   const decide = async (approve: boolean) => {
     if (act.isPending || save.isPending || !data) return;
+    if (!approve && !comments.trim()) {
+      setReasonError("Enter a reason in Comments before rejecting this request.");
+      return;
+    }
     const first = data.items[0];
     // One line: name it. More: count them — quoting only the first line's quantity
     // described a five-line request by one of its lines.
@@ -410,18 +471,80 @@ export function MaterialRequestDetailPage() {
         </p>
       )}
 
+      {data.status === "RETURNED_FOR_CORRECTION" && (
+        <Card className="mt-4 border border-warn/40 bg-warn-bg/40 p-4 text-sm">
+          <p className="font-semibold text-ink">
+            Sent back to {data.correction?.owner_name ?? data.current_approver_name ?? "the previous approver"}
+            {data.correction?.returned_by_name ? ` by ${data.correction.returned_by_name}` : ""}
+          </p>
+          {data.correction?.reason && (
+            <p className="mt-2 text-ink">Reason: {data.correction.reason}</p>
+          )}
+          {data.can_resubmit_correction && (
+            <>
+              <p className="mt-2 text-ink">
+                {data.can_edit_correction
+                  ? "Edit the request below, Save changes, then resubmit."
+                  : data.can_pass_correction_down
+                    ? "You can resubmit it as it is, or send it further back to the person below you."
+                    : "Add a comment if needed and resubmit."}
+              </p>
+              <div className="mt-3">
+                <Field label={data.can_pass_correction_down ? "Comment (required to send further back)" : "Comment (optional)"}>
+                  <Input
+                    value={fixComment}
+                    onChange={(e) => { setFixComment(e.target.value); setFixError(""); }}
+                    placeholder="Visible to the approver"
+                  />
+                </Field>
+              </div>
+              {fixError && <p className="mt-2 text-danger">{fixError}</p>}
+              {resubmit.error && <p className="mt-2 text-danger">{(resubmit.error as Error).message}</p>}
+              {sendFurtherBack.error && <p className="mt-2 text-danger">{(sendFurtherBack.error as Error).message}</p>}
+              <div className="mt-3 flex flex-wrap gap-2">
+                {data.can_pass_correction_down && (
+                  <Button variant="subtle" onClick={sendFurtherBackWithReason}
+                    disabled={sendFurtherBack.isPending || resubmit.isPending}>
+                    {sendFurtherBack.isPending ? "Sending…" : "Send further back"}
+                  </Button>
+                )}
+                <Button onClick={() => resubmit.mutate()} disabled={resubmit.isPending || sendFurtherBack.isPending}>
+                  {resubmit.isPending ? "Resubmitting…" : "Resubmit for approval"}
+                </Button>
+              </div>
+            </>
+          )}
+        </Card>
+      )}
+
+      {data.status === "RETURNED_FOR_CORRECTION" && data.can_edit_correction && (
+        <MRCorrectionForm
+          key={`${data.id}-${(data.items ?? []).map((i) => `${i.id}:${i.quantity}`).join(",")}`}
+          mr={data}
+          onSaved={invalidate}
+        />
+      )}
+
       {mine && (
         <div className="mt-4 space-y-3">
           <Field label="Comments">
             <Input
               value={comments}
-              onChange={(e) => setComments(e.target.value)}
-              placeholder="Optional — why you are approving, refusing or changing a quantity"
+              onChange={(e) => { setComments(e.target.value); setReasonError(""); }}
+              placeholder="Required for Send back and Reject, optional for Approve"
             />
           </Field>
+          {reasonError && <p className="text-danger">{reasonError}</p>}
           {act.error && <p className="text-danger">{(act.error as Error).message}</p>}
           {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
+          {sendBack.error && <p className="text-danger">{(sendBack.error as Error).message}</p>}
           <div className="flex flex-wrap gap-2">
+            <Can do="mr.approve">
+              <Button variant="subtle" onClick={sendBackWithReason}
+                disabled={act.isPending || sendBack.isPending}>
+                Send back
+              </Button>
+            </Can>
             <Can do="mr.approve">
               <Button className={TONE_APPROVE}
                 onClick={() => void decide(true)}

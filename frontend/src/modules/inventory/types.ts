@@ -530,6 +530,20 @@ export interface MaterialRequestListRow {
    *  request is waiting on. One person often holds two rungs of the same ladder, so
    *  being named the approver is not the same as being able to sign right now. */
   can_act?: boolean;
+  /** Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and why. */
+  correction?: {
+    owner_name?: string | null;
+    returned_by_name?: string | null;
+    returned_from_stage?: string | null;
+    returned_at?: string | null;
+    reason?: string | null;
+  } | null;
+  /** True only for the person it was sent back to. */
+  can_resubmit_correction?: boolean;
+  /** Only the raiser may edit it once sent back to them. */
+  can_edit_correction?: boolean;
+  /** An approver holding it may pass it one rung further down. */
+  can_pass_correction_down?: boolean;
   has_requisition?: boolean;
   created_at: string;
 }

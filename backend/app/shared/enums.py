@@ -35,6 +35,10 @@ class POStatus(str, Enum):
     DRAFT = "DRAFT"
     SUBMITTED = "SUBMITTED"
     PENDING_APPROVAL = "PENDING_APPROVAL"   # added
+    # An approver sent the order back one rung for a fix, with a reason. The approval
+    # is paused, not ended: the wf_instance stays IN_PROGRESS and resumes at the rung
+    # that sent it back (engine.return_for_correction / resubmit_correction).
+    RETURNED_FOR_CORRECTION = "RETURNED_FOR_CORRECTION"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     SENT_TO_VENDOR = "SENT_TO_VENDOR"
@@ -461,6 +465,9 @@ class MRStatus(str, Enum):
     """inv_material_requests.status. The bridge from a short indent to procurement."""
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
+    # Sent back one rung for a fix, with a reason; approval paused, not ended
+    # (see POStatus.RETURNED_FOR_CORRECTION).
+    RETURNED_FOR_CORRECTION = "RETURNED_FOR_CORRECTION"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     ORDERED = "ORDERED"
@@ -531,6 +538,9 @@ class RFQStatus(str, Enum):
     """pro_rfqs.status."""
     DRAFT = "DRAFT"
     PENDING_APPROVAL = "PENDING_APPROVAL"
+    # Sent back one rung for a fix, with a reason; approval paused, not ended. Not
+    # published, so vendors cannot see it (see POStatus.RETURNED_FOR_CORRECTION).
+    RETURNED_FOR_CORRECTION = "RETURNED_FOR_CORRECTION"
     # Approved and the vendors can see it. The tokens are live from this point.
     PUBLISHED = "PUBLISHED"
     # The deadline passed or a buyer shut it early. Vendors can read, not quote.

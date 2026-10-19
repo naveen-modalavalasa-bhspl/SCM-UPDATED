@@ -50,6 +50,9 @@ class POCreate(POHeaderIn):
     vendor_id: int
     expected_date: date | None = None
     lines: Annotated[list[POLineIn], DocumentLines]
+    # "Copy as new PO": the order the form was pre-filled from. Recorded for the
+    # reader only; see PurchaseOrder.copied_from_po_id.
+    copied_from_po_id: int | None = None
 
     _no_past_expected_date = field_validator("expected_date")(
         lambda cls, v: not_in_past(v, "Expected date"))
@@ -92,6 +95,19 @@ class POAmendIn(POHeaderIn):
     reason: str
     expected_date: date | None = None
     lines: Annotated[list[POAmendLineIn], DocumentLines] | None = None
+
+
+class POCorrectionIn(POHeaderIn):
+    """The raiser's full edit of a PO sent back to them — every field the create form
+    asks for. `lines` replaces the whole list (an existing `id` keeps that line and its
+    link to the indent/quotation; no `id` adds one; an id left out is removed).
+    `vendor_id` is ignored on an order written off a quotation: the vendor IS the quote."""
+    vendor_id: int | None = None
+    expected_date: date | None = None
+    lines: Annotated[list[POAmendLineIn], DocumentLines]
+
+    _no_past_expected_date = field_validator("expected_date")(
+        lambda cls, v: not_in_past(v, "Expected date"))
 
 
 class POVendorResponseIn(BaseModel):
@@ -259,6 +275,8 @@ class POOut(BaseModel):
     rfq_no: str | None = None
     quotation_id: int | None = None
     quotation_no: str | None = None
+    copied_from_po_id: int | None = None
+    copied_from_po_no: str | None = None
     vendor_id: int
     vendor_name: str | None = None
     facility_id: int | None = None
@@ -292,6 +310,14 @@ class POOut(BaseModel):
     # because a screen can only see the document's status and its own permission
     # codes, and neither answers "is it with me". See service._attach_pending_one.
     awaiting_me: bool = False
+    # Set while the order is RETURNED_FOR_CORRECTION: who it went back to, who sent it
+    # and the (compulsory) reason. See service.get_po_detail.
+    correction: dict | None = None
+    can_resubmit_correction: bool = False
+    # Only the RAISER may edit a sent-back PO; an approver holding it may resubmit or
+    # pass it further down (while there is a rung below them).
+    can_edit_correction: bool = False
+    can_pass_correction_down: bool = False
     # What the vendor said, and which revision they said it about. Both null on an
     # order that has never been sent, which is how a reader tells "not asked yet" from
     # "asked and waiting".
@@ -331,6 +357,34 @@ class POListRow(BaseModel):
     # codes, and neither answers "is it with me". See service._attach_pending_one.
     awaiting_me: bool = False
     created_at: datetime
+
+
+class POCopyLineOut(BaseModel):
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    quantity: float
+    rate: float
+    tax_percent: float
+
+
+class POCopyOut(POHeaderIn):
+    """A New PO form pre-filled from an existing order — nothing is saved.
+
+    Cleaned against today's masters, so what the form opens with is something
+    `create_po` will accept: an inactive vendor, term or project is left blank, an
+    inactive item's line is dropped, and each is said in `warnings`. The indent and
+    quotation links are never carried — the copy is a hand-raised order.
+    """
+    source_po_id: int
+    source_po_no: str
+    source_po_date: date | None = None
+    vendor_id: int | None = None
+    vendor_name: str | None = None
+    expected_date: date | None = None
+    lines: list[POCopyLineOut] = []
+    warnings: list[str] = []
 
 
 # --------------------------------------------------------------------------- #
@@ -619,6 +673,11 @@ class RFQPurchaseOrderRef(BaseModel):
 
 
 class RFQOut(RFQListRow):
+    # Set while RETURNED_FOR_CORRECTION — see service._attach_correction.
+    correction: dict | None = None
+    can_resubmit_correction: bool = False
+    can_edit_correction: bool = False
+    can_pass_correction_down: bool = False
     requisition_id: int | None = None
     requisition_no: str | None = None
     consolidation_id: int | None = None
