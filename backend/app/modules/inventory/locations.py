@@ -1104,8 +1104,12 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
                HcmPosition.project_id, HcmPosition.project_name)
         .where(HcmPosition.is_active.is_(True), HcmPosition.office_id.isnot(None))
     )).all()
-    offices = {o.id: (o.name, o.office_mode) for o in (await db.execute(
-        select(HcmOffice.id, HcmOffice.name, HcmOffice.office_mode)
+    # SCM_0053: HCM already sends an address for every office (`map_office`, both the
+    # poll sync and the webhook); carried onto the warehouse here, the same snapshot
+    # rule office_name already follows, so a DC/DOD gate pass has a "From" address to
+    # print without inventing a second address source.
+    offices = {o.id: (o.name, o.office_mode, o.address) for o in (await db.execute(
+        select(HcmOffice.id, HcmOffice.name, HcmOffice.office_mode, HcmOffice.address)
     )).all()}
 
     # office -> what kind of stocking point it is. Section first, warehouse second: a
@@ -1115,7 +1119,7 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
         tier = SECTION_TIER.get(_letters(row.section_name))
         if tier:
             kinds.setdefault(row.office_id, (tier, tier))
-    for office_id, (_name, mode) in offices.items():
+    for office_id, (_name, mode, _address) in offices.items():
         if _letters(mode) == WAREHOUSE_OFFICE_TYPE:
             # MAIN, not a rung: a store is where stock arrives from outside, which is
             # what tier_of() already reads the top of the chain as.
@@ -1140,18 +1144,24 @@ async def rebuild_stocking_points(db: AsyncSession) -> dict:
 
     warehouses: dict[int, Warehouse] = {}
     for code, (office_id, kind) in wanted.items():
-        name = offices.get(office_id, (str(office_id), None))[0]
+        name, _mode, address = offices.get(office_id, (str(office_id), None, None))
         warehouse = existing.get(code)
         if warehouse is None:
             warehouse = Warehouse(
                 code=code, name=f"{name} - {kind}", office_id=office_id,
-                office_name=name, warehouse_type=kind,
+                office_name=name, address=address, warehouse_type=kind,
                 is_bin_managed=False, is_active=True,
             )
             db.add(warehouse)
         else:
             warehouse.name, warehouse.office_name = f"{name} - {kind}", name
             warehouse.warehouse_type, warehouse.is_active = kind, True
+            # Backfill only — never overwrite. `address` is also a field
+            # `WarehouseWrite` lets an admin hand-correct (unlike name/office_name,
+            # which this function already always overwrites), so a sync must not
+            # silently replace a correction nobody asked it to touch.
+            if not (warehouse.address or "").strip() and address:
+                warehouse.address = address
         warehouses[office_id] = warehouse
 
     # HCM's own GPS, where it has any, is the most exact position a stocking point

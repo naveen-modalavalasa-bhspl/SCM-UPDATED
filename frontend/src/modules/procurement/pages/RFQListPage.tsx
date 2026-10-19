@@ -3,12 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Lock, Unlock } from "lucide-react";
 import { Can, Card, ConfirmModal, ErrorBanner, FilterBar, FilterMenu, PageHeader, ResponsiveList, StatusPill, Textarea, useToast, type Column } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { rfqApi } from "../api";
-import type { RFQListRow } from "../types";
+import type { ReqListRow, RFQListRow } from "../types";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
 import { RFQKpis } from "../components/ProcurementKpis";
+import { money } from "./RequisitionListPage";
 import { useUrlFilters } from "../urlFilters";
 
 /** RFQStatus, as the backend enum spells it. */
@@ -39,9 +41,24 @@ export function RFQListPage() {
   const nav = useNavigate();
   const toast = useToast();
   const queryClient = useQueryClient();
+  // Freeze/unfreeze both require rfq.approve on the server (same as RFQDetailPage) —
+  // a view-only user must not be offered a button that can only ever come back a
+  // permission error.
+  const { can } = useAuth();
+  const canLock = can("rfq.approve");
+  // SCM_0058: same permission that already gates the Create RFQ button on the
+  // Requisition detail page — this tab is a second doorway onto that same press.
+  const canCreate = can("rfq.create");
 
   // Filters live in the URL — see `../urlFilters`. The KPI strip above sets them.
   const { get, getBool, set, clear, page, setPage, activeCount } = useUrlFilters();
+  // SCM_0058: which half of the screen is showing. Held in the URL, same reason
+  // every other filter here is — a link into "Approved Requisitions" has to land on
+  // that tab, not on the RFQ register.
+  const tab = get("tab") === "approved-requisitions" && canCreate
+    ? "approved-requisitions" : "rfqs";
+  const selectTab = (next: "rfqs" | "approved-requisitions") =>
+    set({ tab: next === "rfqs" ? undefined : next });
   const status = get("status");
   const closing = get("closing");
   const search = get("search");
@@ -62,6 +79,16 @@ export function RFQListPage() {
       ready_to_award: readyToAward || undefined,
       page, size: SIZE,
     }),
+    enabled: tab === "rfqs",
+  });
+
+  // SCM_0058: an approved requisition used to be invisible here until somebody
+  // opened it from the Requisitions register and pressed Create RFQ. This is that
+  // same press's second doorway, not a new document or a new approval.
+  const candidates = useQuery({
+    queryKey: ["rfq-candidates", page],
+    queryFn: () => rfqApi.candidates({ page, size: SIZE }),
+    enabled: tab === "approved-requisitions",
   });
 
   const freezeMutation = useMutation({
@@ -140,7 +167,7 @@ export function RFQListPage() {
         </span>
       ),
     },
-    { key: "lines", header: "Lines", className: "text-right", hideOnNarrow: true, render: (r) => r.total_items },
+    { key: "lines", header: "Number of Items", className: "text-right", hideOnNarrow: true, render: (r) => r.total_items },
     {
       key: "due",
       header: "Closes",
@@ -156,7 +183,7 @@ export function RFQListPage() {
       key: "lock",
       header: "Lock / Pricing",
       render: (r) => {
-        if (r.status !== "PUBLISHED" && !r.is_price_frozen) {
+        if ((r.status !== "PUBLISHED" && !r.is_price_frozen) || !canLock) {
           return <span className="text-xs text-muted">—</span>;
         }
         if (r.is_price_frozen) {
@@ -192,6 +219,34 @@ export function RFQListPage() {
     },
   ];
 
+  // SCM_0058: req no, project, warehouse, value, how much of it there is and how
+  // long it has been sitting — the same facts the Requisitions register already
+  // shows for this row, so nothing on this tab contradicts that screen.
+  const candidateColumns: Column<ReqListRow>[] = [
+    {
+      key: "req",
+      header: "Requisition",
+      render: (r) => <span className="font-mono text-xs font-semibold text-ink">{r.req_no}</span>,
+    },
+    { key: "project", header: "Project", hideOnNarrow: true, render: (r) => r.project_name ?? "—" },
+    { key: "warehouse", header: "Warehouse", hideOnNarrow: true, render: (r) => r.warehouse_name ?? "—" },
+    { key: "lines", header: "Number of Items", className: "text-right", render: (r) => r.total_items },
+    {
+      key: "value",
+      header: "Estimated",
+      className: "text-right",
+      render: (r) => <span className="font-semibold text-ink">{money(r.estimated_value)}</span>,
+    },
+    {
+      key: "raised",
+      header: "Approved",
+      hideOnNarrow: true,
+      render: (r) => <span className="text-sm text-muted">{fmtDate(r.created_at)}</span>,
+    },
+  ];
+  const candidateRows = candidates.data?.items ?? [];
+  const candidateTotalPages = Math.max(1, Math.ceil((candidates.data?.total ?? 0) / SIZE));
+
   return (
     <div>
       <PageHeader
@@ -204,6 +259,76 @@ export function RFQListPage() {
         }
       />
 
+      {/* SCM_0058: two tabs over two different documents (RFQs, and the approved
+          requisitions still waiting to become one), not two screens — a buyer with
+          only rfq.view sees one tab and never knows the other existed. */}
+      {canCreate && (
+        <div
+          role="tablist"
+          aria-label="Requests for Quotation"
+          className="mb-4 inline-flex gap-1 rounded-xl border border-line/70 bg-content2/60 p-1"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "rfqs"}
+            onClick={() => selectTab("rfqs")}
+            className={`rounded-lg px-3.5 py-1.5 text-sm font-semibold transition ${
+              tab === "rfqs" ? "bg-content1 text-ink shadow-sm" : "text-muted hover:text-ink"
+            }`}
+          >
+            RFQs
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "approved-requisitions"}
+            onClick={() => selectTab("approved-requisitions")}
+            className={`rounded-lg px-3.5 py-1.5 text-sm font-semibold transition ${
+              tab === "approved-requisitions" ? "bg-content1 text-ink shadow-sm" : "text-muted hover:text-ink"
+            }`}
+          >
+            Approved Requisitions
+            {(candidates.data?.total ?? 0) > 0 && (
+              <span className="ml-1.5 rounded-full bg-brand/10 px-1.5 py-0.5 text-xs text-brand">
+                {candidates.data?.total}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+
+      {tab === "approved-requisitions" ? (
+        <>
+          <ErrorBanner error={candidates.error} />
+          <Card className="p-2">
+            <ResponsiveList
+              data={candidateRows}
+              columns={candidateColumns}
+              keyOf={(r) => r.id}
+              loading={candidates.isLoading}
+              onRowClick={(r) => nav(`/procurement/rfqs/new?requisition=${r.id}`)}
+              page={page}
+              totalPages={candidateTotalPages}
+              onPageChange={setPage}
+              empty="Nothing approved is waiting to go out for quotation."
+              renderCard={(r) => (
+                <div className="space-y-1.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="font-mono text-xs font-semibold text-ink">{r.req_no}</span>
+                    <span className="text-sm font-semibold text-ink">{money(r.estimated_value)}</span>
+                  </div>
+                  <div className="text-sm text-body">{r.project_name ?? "—"} · {r.warehouse_name ?? "—"}</div>
+                  <div className="text-xs text-muted">
+                    {r.total_items} items · approved {fmtDate(r.created_at)}
+                  </div>
+                </div>
+              )}
+            />
+          </Card>
+        </>
+      ) : (
+      <>
       <div className="mb-4">
         <RFQKpis />
       </div>
@@ -250,17 +375,23 @@ export function RFQListPage() {
                 </span>
                 <div className="flex items-center gap-2">
                   {r.is_price_frozen ? (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setUnfreezeTarget({ id: r.id, no: r.rfq_no });
-                      }}
-                      className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 bg-amber-500/10 border border-amber-500/20"
-                    >
-                      Locked
-                    </button>
-                  ) : r.status === "PUBLISHED" ? (
+                    canLock ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setUnfreezeTarget({ id: r.id, no: r.rfq_no });
+                        }}
+                        className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 bg-amber-500/10 border border-amber-500/20"
+                      >
+                        Locked
+                      </button>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded text-[11px] font-medium text-amber-700 bg-amber-500/10 border border-amber-500/20">
+                        Locked
+                      </span>
+                    )
+                  ) : r.status === "PUBLISHED" && canLock ? (
                     <button
                       type="button"
                       onClick={(e) => {
@@ -284,6 +415,8 @@ export function RFQListPage() {
           )}
         />
       </Card>
+      </>
+      )}
 
       <ConfirmModal
         isOpen={!!unfreezeTarget}

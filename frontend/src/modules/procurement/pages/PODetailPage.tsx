@@ -211,6 +211,12 @@ export function PODetailPage() {
 
   const canDecide = po.data.awaiting_me ?? po.data.status === "PENDING_APPROVAL";
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
+  // CGST+SGST within a state, IGST across one — summed from the lines rather than
+  // trusted off `tax_amount`, which says nothing about which split it is.
+  const cgstTotal = po.data.items.reduce((sum: number, item: any) => sum + (item.cgst_amount ?? 0), 0);
+  const sgstTotal = po.data.items.reduce((sum: number, item: any) => sum + (item.sgst_amount ?? 0), 0);
+  const igstTotal = po.data.items.reduce((sum: number, item: any) => sum + (item.igst_amount ?? 0), 0);
+  const isIntraState = cgstTotal > 0;
   const canAmend = po.data.amendment_allowed === true;
   const isDraft = po.data.status === "DRAFT";
   const isFinished = ["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
@@ -334,6 +340,7 @@ export function PODetailPage() {
           <div className="grid gap-4 sm:grid-cols-3">
             {[
               { label: "Vendor", value: po.data.vendor_name ?? "—" },
+              { label: "Vendor GSTIN", value: po.data.vendor_gstin ?? "—" },
               { label: "Project", value: po.data.project_name ?? "—" },
               { label: "Expected date", value: fmtDate(po.data.expected_date) },
             ].map((f) => (
@@ -441,7 +448,13 @@ export function PODetailPage() {
                             <span>{money(item.rate)}</span>
                           </div>
                         </td>
-                        <td className="p-3 text-right">{item.tax_percent}%</td>
+                        <td className="p-3 text-right">
+                          {/* CGST+SGST within a state, IGST across one — decided by the
+                              order's own tax_region, never typed on a line. */}
+                          {(item.cgst_percent ?? 0) > 0
+                            ? <>CGST {item.cgst_percent}%<br />SGST {item.sgst_percent}%</>
+                            : <>IGST {item.igst_percent ?? item.tax_percent}%</>}
+                        </td>
                         <td className="p-3 text-right font-extrabold tabular-nums">
                           <div className="flex flex-col items-end">
                             {isRateChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{money(prev.amount)}</span></div>}
@@ -491,7 +504,12 @@ export function PODetailPage() {
               {[
                 { label: "Subtotal", value: po.data.sub_total, tint: "from-blue-50 to-white border-blue-100" },
                 { label: "Discount", value: po.data.discount_amount, tint: "from-violet-50 to-white border-violet-100" },
-                { label: "Tax", value: po.data.tax_amount, tint: "from-emerald-50 to-white border-emerald-100" },
+                ...(isIntraState
+                  ? [
+                    { label: "CGST", value: cgstTotal, tint: "from-emerald-50 to-white border-emerald-100" },
+                    { label: "SGST", value: sgstTotal, tint: "from-emerald-50 to-white border-emerald-100" },
+                  ]
+                  : [{ label: "IGST", value: igstTotal, tint: "from-emerald-50 to-white border-emerald-100" }]),
                 { label: "Freight", value: po.data.freight_amount, tint: "from-amber-50 to-white border-amber-100" },
               ].map((k) => (
                 <div key={k.label} className={`rounded-xl border bg-gradient-to-br p-3 ${k.tint}`}>

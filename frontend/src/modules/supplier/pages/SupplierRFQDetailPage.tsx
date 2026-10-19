@@ -28,9 +28,6 @@ interface QuoteLine {
   required_date?: string | null;
   rate: string;
   discount_percent: string;
-  /** The whole GST rate. Which half applies — CGST + SGST or IGST — is decided by the
-   *  two GSTINs and only changes how the tax is described, not how much it is. */
-  gst_rate: string;
   delivery_days: string;
   hsn_code?: string | null;
   /** The rate the item's HSN notifies, or null where the item has no HSN. */
@@ -44,10 +41,10 @@ interface QuoteLine {
  * the browser's arithmetic is never trusted into the database. A vendor may re-submit
  * until the deadline; each save bumps `revision_count`, which the buyer can see.
  *
- * The tax box is not a free choice: the rate is capped by the rate notified for the
- * item's HSN. Whether that rate is charged as CGST + SGST or as IGST is decided by the
- * two GSTINs, so the vendor types ONE figure and the server enforces the ceiling again
- * regardless of what the browser sent.
+ * GST is not a vendor choice (SCM_0062): it is the rate the item's HSN notifies,
+ * split into CGST + SGST or IGST by the two GSTINs' states — law, not negotiation.
+ * Removing the edit removed the one way a mistyped number could refuse the whole
+ * submission; what shows here is read-only, the same figure the server computes.
  */
 export function SupplierRFQDetailPage() {
   const { id } = useParams();
@@ -108,10 +105,6 @@ export function SupplierRFQDetailPage() {
       required_date: item.required_date,
       rate: item.rate ? String(item.rate) : "",
       discount_percent: item.discount_percent ? String(item.discount_percent) : "",
-      // Opens at the notified rate. That is what is normally charged, so the vendor
-      // types nothing in the usual case and can only bring it down from there.
-      gst_rate: (item.tax_percent || item.max_gst_rate)
-        ? String(item.tax_percent || item.max_gst_rate) : "",
       delivery_days: item.delivery_days == null ? "" : String(item.delivery_days),
       hsn_code: item.hsn_code,
       max_gst: item.max_gst_rate ?? null,
@@ -122,16 +115,17 @@ export function SupplierRFQDetailPage() {
   // DESCRIBED (CGST + SGST, or IGST), never how much it is.
   const interstate = quote?.tax_region !== "INTRA";
 
-  /** What this line is taxed at. One rate, whichever route the goods travel. */
-  const taxRate = (line: QuoteLine) => Number(line.gst_rate || 0);
+  /** What this line is taxed at — the item's own HSN-notified rate, never a figure
+   *  the vendor chose. Zero where the item has no HSN. */
+  const taxRate = (line: QuoteLine) => Number(line.max_gst ?? 0);
 
-  /** The ceiling this line may quote up to, or null where the item has no HSN. */
-  const ceiling = (line: QuoteLine) => line.max_gst;
-
-  const overCeiling = lines.filter((line) => {
-    const limit = ceiling(line);
-    return limit != null && taxRate(line) > limit + 1e-9;
-  });
+  /** CGST+SGST within a state, IGST across one — the split, for display only. */
+  const gstSplitLabel = (line: QuoteLine) => {
+    const rate = taxRate(line);
+    return interstate
+      ? `IGST ${rate}%`
+      : `CGST ${rate / 2}% + SGST ${rate / 2}%`;
+  };
 
   /** The starred answers this quotation is still missing.
    *
@@ -178,8 +172,9 @@ export function SupplierRFQDetailPage() {
         freight_amount: Number(header.freight_amount || 0),
         discount_amount: Number(header.discount_amount || 0),
         remarks: header.remarks || null,
-        // One GST rate per line. The server caps it at the HSN's notified rate and
-        // decides which half of it applies from the two GSTINs.
+        // Always the HSN's notified rate (SCM_0062) — the server re-derives and
+        // caps it the same way regardless of what is sent, so this is read-only
+        // here too, not a value the vendor could still override.
         lines: lines.map((line) => ({
           rfq_item_id: line.rfq_item_id,
           quantity: Number(line.quantity || 0),
@@ -625,8 +620,6 @@ export function SupplierRFQDetailPage() {
           lines.map((line, index) => {
             const gross = Number(line.quantity || 0) * Number(line.rate || 0);
             const net = gross - (gross * Number(line.discount_percent || 0)) / 100;
-            const limit = ceiling(line);
-            const over = limit != null && taxRate(line) > limit + 1e-9;
             const short = Number(line.quantity || 0) < line.requested;
             const taxed = net + (net * taxRate(line)) / 100;
 
@@ -682,18 +675,14 @@ export function SupplierRFQDetailPage() {
                     />
                   </Field>
 
-                  {/* One rate. Which half of it applies is the two GSTINs' business, not
-                    * the vendor's, so there is a single box rather than one per half. */}
-                  <Field
-                    label="GST %"
-                    hint={line.max_gst != null ? `Up to ${line.max_gst}%` : undefined}
-                  >
-                    <Input
-                      type="number" min="0" step="0.01"
-                      max={line.max_gst ?? undefined}
-                      value={line.gst_rate} disabled={!open}
-                      onChange={(e) => set(index, { gst_rate: e.target.value })}
-                    />
+                  {/* SCM_0062: GST is the HSN's notified rate, not a vendor choice — shown
+                    * as the split the two GSTINs decide, read-only. A mistyped number
+                    * here used to be the one way a submission could come back refused
+                    * over a figure the vendor never actually needed to touch. */}
+                  <Field label="GST">
+                    <div className="flex h-11 items-center rounded-lg border border-line bg-content2/50 px-3 text-sm font-medium text-body">
+                      {gstSplitLabel(line)}
+                    </div>
                   </Field>
 
                   <div className="flex items-end pb-2">
@@ -706,13 +695,6 @@ export function SupplierRFQDetailPage() {
                     </div>
                   </div>
                 </div>
-                {over && (
-                  <p className="mt-2 text-xs text-danger">
-                    Above the {limit}% notified for
-                    {line.hsn_code ? ` HSN ${line.hsn_code}` : " this item"}. Quote at or
-                    below it — the submission will be refused otherwise.
-                  </p>
-                )}
               </div>
             );
           })
@@ -746,7 +728,7 @@ export function SupplierRFQDetailPage() {
               onChange={(e) => setHeader({ ...header, freight_amount: e.target.value })}
             />
           </Field>
-          <Field label="Overall discount">
+          <Field label="Overall discount (amount)" hint="A flat amount off the total, not a percentage">
             <Input
               type="number" min="0" step="0.01" value={header.discount_amount} disabled={!open}
               onChange={(e) => setHeader({ ...header, discount_amount: e.target.value })}
@@ -776,13 +758,6 @@ export function SupplierRFQDetailPage() {
             <dd className="mt-1 font-semibold text-ink">{money(totals.grand)}</dd>
           </div>
         </dl>
-
-        {open && overCeiling.length > 0 && (
-          <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
-            {overCeiling.length} line{overCeiling.length === 1 ? "" : "s"} quote more tax
-            than the HSN allows. Bring them down to submit.
-          </p>
-        )}
 
         {open && gaps.length > 0 && (
           <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
@@ -854,7 +829,7 @@ export function SupplierRFQDetailPage() {
         {open && !openCr && (
           <button
             className="w-full sm:w-auto rounded-xl bg-gradient-to-r from-brand to-brand/90 px-8 py-3.5 text-base font-bold text-white shadow-xl transition-all hover:scale-105 hover:shadow-2xl hover:from-brand/90 hover:to-brand focus:outline-none focus:ring-4 focus:ring-brand/30 disabled:opacity-40 disabled:pointer-events-none disabled:transform-none"
-            disabled={save.isPending || !lines.length || overCeiling.length > 0
+            disabled={save.isPending || !lines.length
               || gaps.length > 0 || otpCode.trim().length < 5}
             onClick={() => save.mutate()}
           >

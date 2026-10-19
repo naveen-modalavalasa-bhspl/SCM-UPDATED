@@ -19,6 +19,8 @@ from app.core.exceptions import PermissionError_, ValidationError
 from app.platform.hcm import service as hcm_service
 from app.platform.hcm.models import HcmEmployee, HcmPositionAssignment
 from app.platform.notifications import service as notifications
+from app.platform.settings.service import write_audit
+from app.shared.enums import AuditAction
 from app.platform.workflow import custom_ladder, fallback, ladder, resolver
 from app.platform.workflow.conditions import stage_applies
 from app.platform.workflow import doc_registry
@@ -504,6 +506,44 @@ def _link_by_sequence(instance: Instance, sequence: int) -> dict | None:
     return None
 
 
+async def _log_ladder_denial(db: AsyncSession, instance: Instance, user,
+                             role_name: str | None, approver_names: list | None,
+                             approver_ids) -> None:
+    """One `sys_audit_log` row for "you are not a valid approver" — the ladder's own
+    counterpart to `core.dependencies._log_permission_denial`. Holding the RBAC
+    permission to act on a doc type is not holding the SEAT the resolved chain froze
+    at submit time, and that second refusal used to leave no trace an admin could use
+    to tell the two apart — "permission issue" and "wrong person entirely" read as the
+    same blank screen.
+
+    `entity_no` carries `doc_type:doc_id` (fits String(50) for any real document
+    number) so a search for one document surfaces every refusal against it; who the
+    chain actually wants goes in `changed_fields`, since that is the one fact that
+    lets an admin fix this from Job Profiles / Approvals Config instead of guessing.
+
+    Commits on its own for the same reason as the RBAC twin: `act`/`_act_ladder`/
+    `return_for_correction` are about to abort via the exception this precedes, with
+    nothing else written yet in this request, so there is no later commit to join and
+    no partial document state to protect. Never raises: a denial that could not be
+    logged must still deny.
+    """
+    try:
+        await write_audit(
+            db, entity="workflow",
+            entity_no=f"{instance.doc_type}:{instance.doc_id}"[:50],
+            action=AuditAction.PERMISSION_DENIED, actor=user,
+            after={
+                "reason": "not a valid approver for the current stage",
+                "stage_role": role_name,
+                "expected_approver_ids": list(approver_ids or []),
+                "expected_approver_names": approver_names or [],
+            },
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — logging the refusal must never replace it
+        await db.rollback()
+
+
 def _single_allowed_position(link: dict | None) -> int | None:
     if not link:
         return None
@@ -771,6 +811,10 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
         )
     )).scalars().all()
     if user.id not in {row.approver_id for row in pending}:
+        await _log_ladder_denial(
+            db, instance, user, link.get("role_name"),
+            link.get("approver_names"), {row.approver_id for row in pending},
+        )
         raise PermissionError_("You are not a valid approver for the current stage")
 
     # Someone holding two posts must act under one the ladder picked. A delegate never
@@ -859,6 +903,10 @@ async def return_for_correction(
         )
     )).scalars().all()
     if user.id not in {row.approver_id for row in pending}:
+        await _log_ladder_denial(
+            db, instance, user, link.get("role_name"),
+            link.get("approver_names"), {row.approver_id for row in pending},
+        )
         raise PermissionError_("You are not a valid approver for the current stage")
 
     active_position_id = getattr(user, "active_position_id", None)
@@ -1150,6 +1198,10 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
     ]
     approver_ids = {a.id for a in approvers}
     if user.id not in pending_ids:
+        await _log_ladder_denial(
+            db, instance, user, getattr(stage, "name", None),
+            [a.full_name for a in approvers], pending_ids,
+        )
         raise PermissionError_("You are not a valid approver for the current stage")
     active_position_id = getattr(user, "active_position_id", None)
     # The position checks below stop someone approving from the wrong hat. They are

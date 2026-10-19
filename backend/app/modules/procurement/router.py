@@ -461,6 +461,20 @@ async def rfq_evaluation_methods(
     return service.evaluation_methods()
 
 
+# Declared BEFORE `/{rfq_id}`, same int-typed-path reason as `/evaluation-methods`
+# above and `/candidates` on the consolidated sheets. SCM_0058: an approved
+# requisition used to be invisible from this screen until somebody opened it and
+# pressed Create RFQ — this is the second doorway into exactly that same press.
+@rfqs.get("/candidates", response_model=Page[ReqListRow])
+async def rfq_requisition_candidates(
+        params: PageParams = Depends(), project_id: int | None = None,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.RFQ_CREATE))):
+    """Approved requisitions not already an RFQ or on a consolidation sheet — the
+    Approved Requisitions tab's own rows."""
+    return await service.rfq_candidates(db, params, project_id)
+
+
 @rfqs.get("/{rfq_id}", response_model=RFQOut)
 async def get_rfq(rfq_id: int, db: AsyncSession = Depends(get_db),
                   user=Depends(require_permission(perms.RFQ_VIEW))):
