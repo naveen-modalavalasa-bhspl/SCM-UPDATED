@@ -3484,6 +3484,31 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
     ))).scalar_one_or_none()
     if not rfq:
         raise NotFoundError(f"RFQ {rfq_id} not found")
+    # This enrichment is read-only context for the response — never the reason an
+    # action that already committed gets reported as failed. `act_on_rfq` calls this
+    # AFTER its own `db.commit()`, purely to build the reply; a buyer who pressed
+    # Approve and watched it error, then pressed it again and was told the RFQ was
+    # "not awaiting approval" (SCM_0071/SCM_0072), had their approval go through both
+    # times — it was THIS lookup that failed, after the state change it was reporting
+    # on had already succeeded. Same rule as `email_rfq_copies`: a secondary failure
+    # must never undo, or look like it undid, the primary one.
+    try:
+        await _attach_rfq_context(db, rfq)
+    except Exception:
+        logger.exception(
+            "Could not attach PO/requisition context to RFQ %s; returning the bare "
+            "document rather than reporting the caller's own action as failed.",
+            rfq.rfq_no)
+        rfq.po_id = rfq.po_no = rfq.po_status = None
+        rfq.purchase_orders = []
+        for invitation in rfq.vendors:
+            invitation.live_allocated_quantities = None
+        rfq.priority = rfq.requisition_status = None
+        rfq.source_indent_nos = []
+    return rfq
+
+
+async def _attach_rfq_context(db: AsyncSession, rfq: RFQ) -> None:
     # The order this award already became, if it became one. Transient attributes off a
     # lookup rather than columns on pro_rfqs: the PO already points backward at the RFQ,
     # and a second copy of that link on the RFQ is a second thing that can go stale.
@@ -3566,7 +3591,6 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
             .order_by(RequisitionItem.line_no)
         )).scalars().all()
     ) if requisition else []
-    return rfq
 
 
 # --------------------------------------------------------------------------- #
