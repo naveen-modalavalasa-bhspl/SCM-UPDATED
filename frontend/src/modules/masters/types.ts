@@ -280,6 +280,25 @@ export interface MasterBrand {
   is_active: boolean;
 }
 
+/** Brand → Variant: a line within a brand. Code is unique within the brand. */
+export interface MasterBrandVariant {
+  id: number;
+  brand_id: number;
+  brand_code: string | null;
+  brand_name: string | null;
+  code: string;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+}
+
+/** Brand → Variant → Model. Code is unique within the variant. */
+export interface MasterBrandModel extends MasterBrandVariant {
+  variant_id: number;
+  variant_code: string | null;
+  variant_name: string | null;
+}
+
 export interface MasterGeneralName {
   id: number;
   code: string;

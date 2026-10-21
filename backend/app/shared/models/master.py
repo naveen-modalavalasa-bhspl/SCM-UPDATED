@@ -392,6 +392,44 @@ class BrandManufacturer(Base):
     )
 
 
+class BrandVariant(Base):
+    """`mst_brand_variants` — a line within a brand (Accu-Chek → Active, Instant).
+    Code and name are unique within the brand, not globally: two brands may each
+    have a "PRO". Brand name/code are snapshots, like every child master here."""
+    __tablename__ = "mst_brand_variants"
+    id = pk()
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(50), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    code = Column(String(20), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("brand_id", "code", name="uq_brand_variant_code"),
+    )
+
+
+class BrandModel(Base):
+    """`mst_brand_models` — a model within a brand's variant (Brand → Variant →
+    Model). Unique by code and by name within its variant."""
+    __tablename__ = "mst_brand_models"
+    id = pk()
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(50), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    variant_id = Column(ForeignKey("mst_brand_variants.id"), index=True, nullable=False)
+    variant_code = Column(String(20), nullable=True)
+    variant_name = Column(String(200), nullable=True)
+    code = Column(String(20), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("variant_id", "code", name="uq_brand_model_code"),
+    )
+
+
 class BrandItemMapping(Base):
     """Which brands are mapped to which items.
 

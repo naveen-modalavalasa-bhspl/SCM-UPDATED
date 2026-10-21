@@ -12,6 +12,7 @@ import type {
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
   MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, MasterUomClass, NamedMaster,
+  MasterBrandModel, MasterBrandVariant,
   MasterBrandItemMapping, BrandItemMappingSources,
 } from "./types";
 
@@ -230,6 +231,8 @@ export const mastersApi = {
   // shared/masters/defs.py). There is nothing here to create or edit.
   projects: { list: (p: ListParams = {}) => page<Project>("/api/projects", p) },
   brands: crud<MasterBrand>("/api/brands"),
+  brandVariants: crud<MasterBrandVariant>("/api/brand-variants"),
+  brandModels: crud<MasterBrandModel>("/api/brand-models"),
   manufacturers: crud<NamedMaster>("/api/manufacturers"),
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
