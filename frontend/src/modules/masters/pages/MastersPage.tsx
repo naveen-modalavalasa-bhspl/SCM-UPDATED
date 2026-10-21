@@ -9,14 +9,14 @@ import type { RefRow } from "../types";
 import { Code, NamedLookupTab, ReadOnlyTab } from "../tabs/common";
 import {
   BrandsTab, CategoriesTab, GeneralNamesTab, HsnCodesTab, ItemClassesTab,
-  ItemSubClassesTab, ItemsTab,
+  ItemSubClassesTab, ItemsTab, BrandItemMappingTab,
 } from "../tabs/itemTabs";
 import { ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
 import {
   PaymentTermsTab, VendorCategoriesTab, VendorItemsTab, VendorsTab,
 } from "../tabs/vendorTabs";
 import { VendorMappingPanel } from "../components/VendorMappingPanel";
-import { ConversionsTab, UomTab } from "../tabs/uomTabs";
+import { ConversionsTab, UomClassesTab, UomTab } from "../tabs/uomTabs";
 import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
 } from "../tabs/attributeTabs";
@@ -25,6 +25,7 @@ import { ItemEligibilityTab } from "../tabs/eligibilityTabs";
 const TABS = [
   "items", "categories", "general-names", "item-classes", "item-sub-classes",
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
+  "brand-item-mapping",
   "features", "packaging", "item-groups",
   "attributes", "specs", "category-tags",
   "uom", "uom-classes", "conversions", "warehouses",
@@ -47,7 +48,7 @@ export type MasterGroup = { label: string; tabs: MasterTab[] };
 
 const GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups", "item-eligibility"] },
-  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes"] },
+  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes", "brand-item-mapping"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
   { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
   { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items", "payment-terms"] },
@@ -74,7 +75,7 @@ const GROUPS: MasterGroup[] = [
  *  editor for the same rows is how two screens come to disagree. */
 export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups"] },
-  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms"] },
+  { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "brand-item-mapping"] },
   { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
   { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
 ];
@@ -107,6 +108,7 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   "general-names": "Generic Names", "item-sub-classes": "Item Subclasses",
   brands: "Brands", manufacturers: "Manufacturers",
   "dosage-forms": "Dosage Forms", "hsn-codes": "HSN Codes",
+  "brand-item-mapping": "Brand Item Mapping",
   features: "Features", packaging: "Packages", "item-groups": "Item Groups",
   attributes: "Attributes", specs: "Specifications", "category-tags": "Category Tagging",
   uom: "UOM", "uom-classes": "UOM Types", conversions: "Conversions", warehouses: "Warehouses",
@@ -300,6 +302,7 @@ export function MastersShell({
       {tab === "brands" && <BrandsTab />}
       {tab === "manufacturers" && <NamedLookupTab title="Manufacturer" queryKey="manufacturers" api={mastersApi.manufacturers} managePerm="master.brand.manage" />}
       {tab === "dosage-forms" && <NamedLookupTab title="Dosage form" queryKey="dosage-forms" api={mastersApi.dosageForms} />}
+      {tab === "brand-item-mapping" && <BrandItemMappingTab />}
       {tab === "features" && <FeaturesTab />}
       {tab === "packaging" && <PackagingTab />}
       {tab === "item-groups" && <ItemGroupsTab items={itemOpts} />}
@@ -311,10 +314,7 @@ export function MastersShell({
           fetches them itself rather than joining the shared NEEDS sources above. */}
       {tab === "bom-groups" && <BomGroupsTab />}
       {tab === "uom" && <UomTab />}
-      {tab === "uom-classes" && <NamedLookupTab title="UOM type" queryKey="uom-classes"
-        api={mastersApi.uomClasses} managePerm="master.uom.manage"
-        codeRule={{ maxLength: 30, pattern: /^[A-Za-z0-9_]+$/,
-                    patternMessage: "Use letters, numbers or an underscore, e.g. COUNT" }} />}
+      {tab === "uom-classes" && <UomClassesTab />}
       {tab === "conversions" && <ConversionsTab uoms={uomOpts} />}
       {tab === "warehouses" && <WarehousesTab facilities={facOpts} />}
       {tab === "projects" && <ProjectsTab />}

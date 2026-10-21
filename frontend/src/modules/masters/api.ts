@@ -11,7 +11,8 @@ import type {
   MasterItemPackaging, MasterItemSpec, MasterPackaging, MasterSpec,
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
-  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, NamedMaster,
+  MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, MasterUomClass, NamedMaster,
+  MasterBrandItemMapping, BrandItemMappingSources,
 } from "./types";
 
 type ListParams = {
@@ -104,6 +105,14 @@ export interface VendorMappingSave {
   vendor_ids: number[]; item_ids: number[]; category_ids: number[];
   lead_time_days: number | null; min_order_qty: number | null;
   last_rate: number | null; is_preferred: boolean;
+}
+
+export type { BrandItemMappingSources };
+
+export interface BrandItemMappingSave {
+  brand_ids: number[];
+  item_ids: number[];
+  category_ids: number[];
 }
 
 export interface ItemPhoto {
@@ -225,7 +234,7 @@ export const mastersApi = {
   generalNames: crud<MasterGeneralName>("/api/general-names"),
   dosageForms: crud<NamedMaster>("/api/dosage-forms"),
   /** What a unit measures (Count, Weight ...). A master since 2026-10-01. */
-  uomClasses: crud<NamedMaster>("/api/uom-classes"),
+  uomClasses: crud<MasterUomClass>("/api/uom-classes"),
   /** How suppliers are grouped (Glassware, Reagents ...). */
   vendorCategories: crud<MasterVendorCategory>("/api/vendor-categories"),
   paymentTerms: crud<MasterPaymentTerm>("/api/payment-terms"),
@@ -235,6 +244,22 @@ export const mastersApi = {
     save: (body: VendorMappingSave) => api.post<{
       created: number; updated: number; suppliers: number; items: number;
     }>("/api/vendor-items/mapping", body).then((r) => r.data),
+  },
+  brandItemMapping: {
+    /** All brands, categories and items needed to drive the mapping panel. */
+    sources: () => api.get<BrandItemMappingSources>("/api/brand-item-mapping/sources")
+      .then((r) => r.data),
+    /** Bulk-create/restore brand ↔ item pairings. */
+    save: (body: { brand_ids: number[]; item_ids: number[]; category_ids: number[] }) =>
+      api.post<{ created: number; updated: number; brands: number; items: number }>(
+        "/api/brand-item-mapping", body,
+      ).then((r) => r.data),
+    /** All mappings for a single item, for the detail view row. */
+    listForItem: (itemId: number) =>
+      api.get<MasterBrandItemMapping[]>(`/api/brand-item-mapping?item_id=${itemId}`)
+        .then((r) => r.data),
+    deactivate: (id: number) =>
+      api.delete(`/api/brand-item-mapping/${id}`).then((r) => r.data),
   },
   itemPhotos: {
     list: (itemId: number) =>

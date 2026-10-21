@@ -13,16 +13,58 @@ import { mastersApi } from "../api";
 import { BulkBar } from "./BulkBar";
 import { MASTER_PAGE_SIZE } from "./MasterCrud";
 import type {
-  MasterBrand, MasterBrandManufacturer, MasterCategoryTag, MasterGeneralName,
-  MasterItem, MasterItemComponent,
+  MasterBrand, MasterBrandItemMapping, MasterBrandManufacturer, MasterCategoryTag,
+  MasterGeneralName, MasterItem, MasterItemComponent,
   MasterItemPackaging, NamedMaster, PackagingBreakdown, UomClass,
 } from "../types";
 
 export const ITEM_SECTIONS = [
-  "Basic", "Kit Components", "Attributes", "Specifications", "Features", "Units",
-  "Identification", "Tracking", "Packaging", "Additional", "Photos",
+  "Basic", "Brands", "Kit Components", "Attributes", "Specifications", "Features",
+  "Units", "Identification", "Tracking", "Packaging", "Additional", "Photos",
 ] as const;
 type ItemSection = (typeof ITEM_SECTIONS)[number];
+
+/** One row per product. Brand left the item for the Brand Item Mapping screen,
+ *  so rows that differ only by brand are one product: they group under their
+ *  general name, and the representative (an active row when there is one, else
+ *  the oldest) stands in for the group's shared fields. Display-only — every
+ *  variant keeps its own id, code, stock and documents. */
+export interface ItemProductGroup {
+  key: string;
+  generalName: string | null;
+  representative: MasterItem;
+  variants: MasterItem[];
+}
+
+export function groupItemsByProduct(rows: MasterItem[]): ItemProductGroup[] {
+  const byProduct = new Map<string, MasterItem[]>();
+  for (const row of rows) {
+    const key = row.general_name_id != null ? `g-${row.general_name_id}` : `i-${row.id}`;
+    const list = byProduct.get(key) ?? [];
+    list.push(row);
+    byProduct.set(key, list);
+  }
+  return Array.from(byProduct.entries()).map(([key, variants]) => {
+    const ordered = [...variants].sort((a, b) =>
+      Number(b.is_active) - Number(a.is_active) || a.id - b.id);
+    return {
+      key,
+      generalName: ordered[0].general_name ?? null,
+      representative: ordered[0],
+      variants,
+    };
+  });
+}
+
+/** Every brand the group's variants carry, deduplicated, in first-seen order. */
+export function groupBrandNames(group: ItemProductGroup): string[] {
+  const seen = new Set<string>();
+  for (const variant of group.variants) {
+    const name = (variant.brand_name ?? "").trim();
+    if (name && !seen.has(name)) seen.add(name);
+  }
+  return Array.from(seen);
+}
 
 type DraftComponent = {
   component_item_id: number;
@@ -255,21 +297,9 @@ export function ItemMasterTab() {
     queryKey: ["masters", "general-names"],
     queryFn: () => mastersApi.generalNames.list({ size: 300 }).then((r) => r.items),
   });
-  const brands = useQuery({
-    queryKey: ["masters", "brands", "all"],
-    queryFn: () => mastersApi.brands.list({ size: 300 }).then((r) => r.items),
-  });
-  const manufacturers = useQuery({
-    queryKey: ["masters", "manufacturers"],
-    queryFn: () => mastersApi.manufacturers.list({ size: 300 }).then((r) => r.items),
-  });
-  const mappings = useQuery({
-    queryKey: ["masters", "brands", "manufacturers", form.brand_id],
-    queryFn: () => mastersApi.brandManufacturers.list({
-      brand_id: Number(form.brand_id), size: 300,
-    }).then((r) => r.items),
-    enabled: Boolean(form.brand_id),
-  });
+  // Brands and manufacturers left the item form — they are mapped centrally
+  // on the Brand Item Mapping screen. The form keeps their ids in state only
+  // so an edit of an older branded item still saves what it was created with.
   const classes = useQuery({
     queryKey: ["masters", "item-classes", "all"],
     queryFn: () => mastersApi.itemClasses.list({ size: 300 }).then((r) => r.items),
@@ -355,12 +385,7 @@ export function ItemMasterTab() {
   const l1 = cats.filter((row) => row.level === 1);
   const l2 = cats.filter((row) => row.level === 2 && row.parent_id === Number(level1));
   const l3 = cats.filter((row) => row.level === 3 && row.parent_id === Number(level2));
-  const manufacturerRows = manufacturersForBrand(
-    manufacturers.data ?? [], mappings.data ?? [],
-  );
   const chosenCategory = cats.find((row) => row.id === Number(form.category_id));
-  const chosenGeneral = general.data?.find((row) => row.id === Number(form.general_name_id));
-  const brandRows = brandsForGeneralName(brands.data ?? [], chosenGeneral);
   // The serial a new item is about to get, read live: the save mints it under
   // lock, so the form asks what it would be rather than guessing. `####` only
   // shows while that answer is in flight or when the pair is not picked yet.
@@ -485,8 +510,6 @@ export function ItemMasterTab() {
   // refusing: identity, a unit, an HSN, and every field the category insists on.
   const blocker = !form.category_id ? "Category is required"
     : !form.general_name_id ? "Generic name is required"
-    : !form.brand_id ? "Brand is required"
-    : !form.manufacturer_id ? "Manufacturer is required"
     : !preview ? "Pick the Level 3 category"
     : !form.name.trim() ? "Give the item a name"
     : !form.uom_id ? "Pick a primary unit on the Units tab"
@@ -496,13 +519,19 @@ export function ItemMasterTab() {
     : unanswered.length ? `Answer ${unanswered.map((t) => t.tag_name).join(", ")}`
     : null;
 
-  const pageItems = items.data?.items ?? [];
-  const columns: Column<MasterItem>[] = [
+  // One row per product: variants that differ only by brand collapse under
+  // their general name (see groupItemsByProduct). Page-local: the grouping
+  // covers the rows this page fetched, and search still narrows server-side.
+  const productGroups = useMemo(
+    () => groupItemsByProduct(items.data?.items ?? []),
+    [items.data],
+  );
+  const columns: Column<ItemProductGroup>[] = [
     {
       key: "sno",
       header: "S.No",
       render: (row) => {
-        const idx = pageItems.indexOf(row);
+        const idx = productGroups.indexOf(row);
         return (
           <span className="tabular-nums text-muted font-medium text-xs">
             {(page - 1) * MASTER_PAGE_SIZE + (idx >= 0 ? idx : 0) + 1}
@@ -511,17 +540,31 @@ export function ItemMasterTab() {
       },
       className: "w-12 text-center",
     },
-    { key: "photo", header: "", render: (row) => <ItemThumb item={row} /> },
-    { key: "code", header: "Item Code", render: (row) => <span className="mono font-semibold">{row.code}</span> },
-    { key: "name", header: "Name", render: (row) => row.name },
-    { key: "general", header: "Generic Name", render: (row) => row.general_name ?? "—" },
-    { key: "brand", header: "Brand / Manufacturer",
-      render: (row) => `${row.brand_name ?? "—"} / ${row.manufacturer_name ?? "—"}` },
-    { key: "hsn", header: "HSN", render: (row) => row.hsn_code ?? "—" },
-    { key: "kind", header: "Kind", render: (row) => (row.is_asset ? "Asset" : "Consumable") },
-    { key: "uom", header: "Primary UOM", render: (row) => row.uom_code ?? "—" },
-    { key: "owner", header: "Ownership", render: (row) => row.owner_department_name ?? "—" },
-    { key: "status", header: "Status", render: (row) => row.is_active ? "Active" : "Inactive" },
+    { key: "photo", header: "", render: (row) => <ItemThumb item={row.representative} /> },
+    { key: "code", header: "Item Code", render: (row) => (
+      <span>
+        <span className="mono font-semibold">{row.representative.code}</span>
+        {row.variants.length > 1 && (
+          <span className="ml-2 rounded-full bg-content2 px-2 py-0.5 text-xs text-muted">
+            {row.variants.length} variants
+          </span>
+        )}
+      </span>
+    ) },
+    { key: "name", header: "Name",
+      render: (row) => row.generalName ?? row.representative.name },
+    { key: "brand", header: "Brands", render: (row) => {
+      const names = groupBrandNames(row);
+      return names.length > 0 ? names.join(", ") : "—";
+    } },
+    { key: "hsn", header: "HSN", render: (row) => row.representative.hsn_code ?? "—" },
+    { key: "kind", header: "Kind",
+      render: (row) => (row.representative.is_asset ? "Asset" : "Consumable") },
+    { key: "uom", header: "Primary UOM", render: (row) => row.representative.uom_code ?? "—" },
+    { key: "owner", header: "Ownership",
+      render: (row) => row.representative.owner_department_name ?? "—" },
+    { key: "status", header: "Status",
+      render: (row) => row.representative.is_active ? "Active" : "Inactive" },
   ];
 
 
@@ -544,12 +587,22 @@ export function ItemMasterTab() {
           bulk bar is placed by hand here instead of coming with the factory. */}
       <BulkBar api={mastersApi.items} managePerm="master.item.manage"
                queryKey="items" label="Items" />
-      <ResponsiveList data={pageItems} loading={items.isLoading}
+      <ResponsiveList data={productGroups} loading={items.isLoading}
         page={page} onPageChange={setPage}
         totalPages={Math.ceil((items.data?.total ?? 0) / MASTER_PAGE_SIZE)}
-        keyOf={(row) => row.id} columns={columns}
-        onRowClick={canManage ? openEdit : undefined}
-        empty="No items found." renderCard={(row) => <div><b>{row.code}</b><div>{row.name}</div></div>} />
+        keyOf={(row) => row.key} columns={columns}
+        onRowClick={canManage ? (group) => openEdit(group.representative) : undefined}
+        empty="No items found." renderCard={(group) => (
+          <div>
+            <b>{group.representative.code}</b>
+            <div>{group.generalName ?? group.representative.name}</div>
+            {group.variants.length > 1 && (
+              <div className="text-xs text-muted">
+                {group.variants.length} variants · {groupBrandNames(group).join(", ") || "no brands"}
+              </div>
+            )}
+          </div>
+        )} />
 
       {/* The dialog keeps ONE height across all ten tabs. Sized to its content it
           collapsed to a two-line box on Kit Components and jumped back to full height
@@ -586,19 +639,11 @@ export function ItemMasterTab() {
               <Field label="Category Path"><Input value={chosenCategory?.path ?? ""} disabled /></Field>
               <Field label="Generic Name *"><Select value={form.general_name_id}
                 options={opt(general.data ?? [])} onChange={(v) => {
-                  // Same clear-the-rung-below rule the brand already follows: the
-                  // brand list is about to change, so a stale pick must not survive.
+                  // Clearing brand/manufacturer when general name changes keeps stale
+                  // picks from riding along on save. Both fields are now managed via
+                  // Brand Item Mapping, but the form still accepts them if pre-filled.
                   set("general_name_id", v); set("brand_id", ""); set("manufacturer_id", "");
                 }} /></Field>
-              <Field label="Brand *"><Select value={form.brand_id}
-                options={opt(brandRows)} onChange={(v) => {
-                  set("brand_id", v); set("manufacturer_id", "");
-                }}
-                isDisabled={!form.general_name_id}
-                placeholder="Select generic name first" /></Field>
-              <Field label="Manufacturer *"><Select value={form.manufacturer_id}
-                options={opt(manufacturerRows)} onChange={(v) => set("manufacturer_id", v)}
-                isDisabled={!form.brand_id} placeholder="Select brand first" /></Field>
               <Field label="Item Class"><Select value={form.item_class_id}
                 options={opt(classes.data ?? [])} onChange={(v) => {
                   set("item_class_id", v); set("item_sub_class_id", "");
@@ -637,6 +682,10 @@ export function ItemMasterTab() {
               <div className="md:col-span-3"><Field label="Description"><Input value={form.description}
                 onChange={(e) => set("description", e.target.value)} /></Field></div>
             </div>}
+
+            {tab === "Brands" && (!editing
+              ? <Empty>Save the item first — brands are mapped to it afterwards.</Empty>
+              : <ItemBrands itemId={editing.id} />)}
 
             {tab === "Kit Components" && (
               !form.has_components
@@ -768,6 +817,39 @@ export function ItemMasterTab() {
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <div className="rounded-xl bg-content2 p-5 text-sm text-body">{children}</div>;
+}
+
+/** The brands mapped to one item, read-only. Mapping itself happens on
+ *  Masters › Classification › Brand Item Mapping — this tab only shows what
+ *  that screen recorded, with each brand's manufacturers beside it. */
+function ItemBrands({ itemId }: { itemId: number }) {
+  const mapped = useQuery({
+    queryKey: ["masters", "brand-item-mapping", "for-item", itemId],
+    queryFn: () => mastersApi.brandItemMapping.listForItem(itemId),
+  });
+  if (mapped.isLoading) return <Empty>Loading mapped brands…</Empty>;
+  if (mapped.error) return <Empty>Brands could not be loaded.</Empty>;
+  const rows: MasterBrandItemMapping[] = mapped.data ?? [];
+  if (rows.length === 0) {
+    return <Empty>No brands mapped yet — map them on Masters › Classification › Brand Item Mapping.</Empty>;
+  }
+  return (
+    <ul className="grid gap-3 md:grid-cols-2">
+      {rows.map((row) => (
+        <li key={row.id} className="rounded-xl border border-line p-4">
+          <div className="text-sm font-semibold">
+            {row.brand_code ? <span className="mono mr-2">{row.brand_code}</span> : null}
+            {row.brand_name ?? "—"}
+          </div>
+          <div className="mt-1 text-xs text-muted">
+            {(row.manufacturer_names ?? []).length > 0
+              ? `Manufacturers: ${(row.manufacturer_names ?? []).join(", ")}`
+              : "No manufacturers linked"}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** Renders whatever the category asked for. A LIST attribute becomes a dropdown of

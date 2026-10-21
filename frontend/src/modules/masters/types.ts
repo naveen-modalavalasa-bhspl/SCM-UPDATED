@@ -76,6 +76,11 @@ export interface NamedMaster {
   is_active: boolean;
 }
 
+/** A UOM type. `allows_decimal` off → every unit of the type is whole-only on documents. */
+export interface MasterUomClass extends NamedMaster {
+  allows_decimal: boolean;
+}
+
 export interface MasterBrandManufacturer {
   id: number;
   brand_id: number;
@@ -85,6 +90,31 @@ export interface MasterBrandManufacturer {
   manufacturer_code?: string | null;
   manufacturer_name?: string | null;
   is_active: boolean;
+}
+
+/** A brand-to-item mapping: which brands are associated with an item. */
+export interface MasterBrandItemMapping {
+  id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  brand_id: number;
+  brand_code?: string | null;
+  brand_name?: string | null;
+  /** Manufacturer comes from the brand's own manufacturer list. */
+  manufacturer_names?: string[] | null;
+  is_preferred?: boolean;
+  is_active: boolean;
+}
+
+/** Sources for the Brand Item Mapping panel — analogous to VendorMappingSources. */
+export interface BrandItemMappingSources {
+  brands: { id: number; code: string; name: string; manufacturer_names: string[] }[];
+  categories: { id: number; code: string; name: string; level: number | null;
+                parent_id: number | null; path: string | null }[];
+  items: { id: number; code: string; name: string; category_id: number }[];
+  /** [brand_id, item_id] pairs that are already mapped. */
+  mapped: [number, number][];
 }
 
 export interface MasterItemSubClass extends NamedMaster {

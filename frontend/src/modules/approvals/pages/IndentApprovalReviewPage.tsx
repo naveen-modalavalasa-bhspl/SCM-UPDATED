@@ -126,12 +126,13 @@ function Note({
  * ring live on the wrapper, so it still reads and behaves as one field.
  */
 function QuantityField({
-  line, unit, value, error, onChange,
+  line, unit, value, error, isZero, onChange,
 }: {
   line: ApprovalIndentLine;
   unit: string;
   value: string;
   error: string | null;
+  isZero?: boolean;
   onChange: (raw: string) => void;
 }) {
   return (
@@ -140,7 +141,9 @@ function QuantityField({
         className={`flex h-11 items-center rounded-xl border bg-content1 pr-3 transition focus-within:ring-2 ${
           error
             ? "border-bad bg-bad-bg/40 focus-within:ring-bad/30"
-            : "border-line focus-within:border-brand focus-within:ring-brand/25"
+            : isZero
+              ? "border-danger/40 bg-danger/5 focus-within:border-danger focus-within:ring-danger/25"
+              : "border-line focus-within:border-brand focus-within:ring-brand/25"
         }`}
       >
         <input
@@ -152,7 +155,9 @@ function QuantityField({
           aria-describedby={`qty-help-${line.id}`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          className="h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right font-semibold tabular-nums text-ink outline-none"
+          className={`h-full min-w-0 flex-1 rounded-xl bg-transparent px-3 text-right font-semibold tabular-nums outline-none ${
+            isZero ? "text-danger" : "text-ink"
+          }`}
         />
         <span className="shrink-0 whitespace-nowrap text-xs font-medium text-muted">{unit}</span>
       </div>
@@ -162,11 +167,14 @@ function QuantityField({
         id={`qty-help-${line.id}`}
         role={error ? "alert" : undefined}
         className={`mt-1.5 flex items-start gap-1.5 text-left text-[11px] leading-snug ${
-          error ? "font-medium text-bad" : "text-muted"
+          error ? "font-medium text-bad" : isZero ? "font-medium text-danger" : "text-muted"
         }`}
       >
         {error && <AlertCircle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />}
-        <span>{error ?? `You can approve ${allowedRange(line)}.`}</span>
+        {isZero && !error && <X className="mt-px h-3.5 w-3.5 shrink-0 text-danger" aria-hidden />}
+        <span>
+          {error ?? (isZero ? `Item rejected (0 ${unit})` : `You can approve ${allowedRange(line)}.`)}
+        </span>
       </p>
     </div>
   );
@@ -174,8 +182,15 @@ function QuantityField({
 
 /** The difference this approver is making to a line, as a chip rather than a number
  *  in a column of numbers: "no change" should never look like a decision. */
-function DifferenceChip({ difference, unit }: { difference: number | null; unit: string }) {
+function DifferenceChip({ difference, unit, isZero }: { difference: number | null; unit: string; isZero?: boolean }) {
   if (difference == null) return <span className="text-xs text-muted">—</span>;
+  if (isZero) {
+    return (
+      <span className="inline-flex min-h-7 items-center gap-1 rounded-full bg-danger/10 px-2.5 text-xs font-semibold text-danger">
+        <X className="h-3 w-3" /> Rejected
+      </span>
+    );
+  }
   if (difference === 0) {
     return (
       <span className="inline-flex min-h-7 items-center rounded-full bg-content2 px-2.5 text-xs font-semibold text-muted">
@@ -287,6 +302,12 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     !errorByLine[line.id] && quantityValue(quantities[line.id]) < approvalCeiling(line)
   )).length, [errorByLine, quantities, reviewItems]);
 
+  const zeroLinesCount = useMemo(() => reviewItems.filter((line) => (
+    !errorByLine[line.id] && quantities[line.id]?.trim() !== "" && quantityValue(quantities[line.id]) === 0
+  )).length, [errorByLine, quantities, reviewItems]);
+
+  const allZero = reviewItems.length > 0 && zeroLinesCount === reviewItems.length;
+
   // Every keystroke is kept; the message under the field does the correcting. Refusing
   // the key instead leaves the approver staring at a box that will not take their 16.
   const setQuantity = (line: { id: number }, raw: string) => {
@@ -297,7 +318,10 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const announce = (decision: "approve" | "reject" | "return") => {
     const number = indent.data?.indent_no ?? "The indent";
     const raiser = indent.data?.requested_by_name || "the raiser";
-    if (decision === "approve") void alerts.success("indent.approved", { number });
+    if (decision === "approve") {
+      if (allZero) void alerts.success("indent.rejected", { number, raiser });
+      else void alerts.success("indent.approved", { number });
+    }
     else if (decision === "reject") void alerts.success("indent.rejected", { number, raiser });
     else void alerts.success("indent.returned", { number, raiser });
   };
@@ -477,8 +501,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
         <div className="space-y-3 p-4 sm:p-5">
           <div className="grid gap-2 lg:grid-cols-2">
             <Note tone="info" icon={Info} title="How much you may approve">
-              A quantity may be reduced down to zero, never increased, and what you approve becomes
-              the maximum the next approver can pass on.{" "}
+              A quantity may be reduced down to zero, never increased. Entering 0 rejects that specific item.{" "}
               {anyReducedBelow
                 ? "Lines already cut by an earlier approver are capped at that lower quantity, not at the original request."
                 : "Each field shows the range you may enter."}
@@ -518,6 +541,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                   const ceiling = approvalCeiling(line);
                   const raw = quantities[line.id] ?? "";
                   const lineError = errorByLine[line.id];
+                  const isZero = !lineError && raw.trim() !== "" && quantityValue(raw) === 0;
                   const difference = lineError ? null : quantityValue(raw) - ceiling;
                   const reduced = wasReducedBelow(line);
                   const unit = displayUom(line.uom_code);
@@ -527,9 +551,11 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       className={`transition-colors ${
                         lineError
                           ? "bg-bad-bg/40"
-                          : difference != null && difference < 0
-                            ? "bg-warn-bg/40"
-                            : "hover:bg-content2/50"
+                          : isZero
+                            ? "bg-danger/5"
+                            : difference != null && difference < 0
+                              ? "bg-warn-bg/40"
+                              : "hover:bg-content2/50"
                       }`}
                     >
                       <td className="px-4 py-3 align-top">
@@ -565,12 +591,13 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                             unit={unit}
                             value={raw}
                             error={lineError}
+                            isZero={isZero}
                             onChange={(value) => setQuantity(line, value)}
                           />
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right align-top">
-                        <DifferenceChip difference={difference} unit={unit} />
+                        <DifferenceChip difference={difference} unit={unit} isZero={isZero} />
                       </td>
                     </tr>
                   );
@@ -586,13 +613,20 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
               const ceiling = approvalCeiling(line);
               const raw = quantities[line.id] ?? "";
               const lineError = errorByLine[line.id];
+              const isZero = !lineError && raw.trim() !== "" && quantityValue(raw) === 0;
               const difference = lineError ? null : quantityValue(raw) - ceiling;
               const reduced = wasReducedBelow(line);
               const unit = displayUom(line.uom_code);
               return (
                 <div
                   key={line.id}
-                  className={`rounded-xl border p-3 ${lineError ? "border-bad/40 bg-bad-bg/30" : "border-line bg-content1"}`}
+                  className={`rounded-xl border p-3 ${
+                    lineError
+                      ? "border-bad/40 bg-bad-bg/30"
+                      : isZero
+                        ? "border-danger/30 bg-danger/5"
+                        : "border-line bg-content1"
+                  }`}
                 >
                   <div className="flex items-start gap-2.5">
                     <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-lg bg-content2 text-[11px] font-bold tabular-nums text-muted">
@@ -602,7 +636,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       <strong className="block truncate font-semibold text-ink">{line.item_name}</strong>
                       <p className="truncate font-mono text-xs text-muted">{line.item_code}</p>
                     </div>
-                    <DifferenceChip difference={difference} unit={unit} />
+                    <DifferenceChip difference={difference} unit={unit} isZero={isZero} />
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <div className="rounded-xl bg-content2 px-3 py-2">
@@ -628,6 +662,7 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
                       unit={unit}
                       value={raw}
                       error={lineError}
+                      isZero={isZero}
                       onChange={(value) => setQuantity(line, value)}
                     />
                   </div>
@@ -722,18 +757,21 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
         <p
           role="status"
           className={`flex min-w-0 items-center gap-2 text-sm font-medium ${
-            invalidQuantity ? "text-bad" : checksDone ? "text-ok" : "text-muted"
+            invalidQuantity ? "text-bad" : allZero ? "text-danger" : checksDone ? "text-ok" : "text-muted"
           }`}
         >
           {invalidQuantity
             ? <><AlertCircle className="h-4 w-4 shrink-0" aria-hidden />
                 Correct the {invalidCount === 1 ? "highlighted quantity" : `${invalidCount} highlighted quantities`} before approving.</>
-            : checksDone
-              ? <><CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
-                  Ready to sign — {reviewItems.length} {reviewItems.length === 1 ? "line" : "lines"}
-                  {cutCount > 0 ? `, ${cutCount} reduced` : ", nothing reduced"}.</>
-              : <><Info className="h-4 w-4 shrink-0" aria-hidden />
-                  Confirm every item on the checklist before approving ({checkedCount} of {CHECKS.length}).</>}
+            : allZero
+              ? <><X className="h-4 w-4 shrink-0 text-danger" aria-hidden />
+                  All requested items are set to 0. Submitting will stop this request as REJECTED.</>
+              : checksDone
+                ? <><CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden />
+                    Ready to sign — {reviewItems.length - zeroLinesCount} approved
+                    {zeroLinesCount > 0 ? `, ${zeroLinesCount} rejected` : ""}.</>
+                : <><Info className="h-4 w-4 shrink-0" aria-hidden />
+                    Confirm every item on the checklist before approving ({checkedCount} of {CHECKS.length}).</>}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           {canReturnForCorrection && (
@@ -744,8 +782,14 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
           <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => { setReason(""); setConfirming("reject"); }}>
             <X className="h-4 w-4" /> Reject
           </Button>
-          <Button className={TONE_APPROVE} disabled={busy || invalidQuantity || !checksDone} onClick={() => setConfirming("approve")}>
-            <Check className="h-4 w-4" /> Approve
+          <Button
+            className={allZero ? TONE_REJECT : TONE_APPROVE}
+            variant={allZero ? "danger" : "primary"}
+            disabled={busy || invalidQuantity || (!allZero && !checksDone)}
+            onClick={() => setConfirming("approve")}
+          >
+            {allZero ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+            {allZero ? "Reject Indent (All items 0)" : "Approve"}
           </Button>
         </div>
       </Card>
@@ -753,14 +797,24 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
     <ConfirmModal
       isOpen={confirming !== null}
-      title={confirming === "approve" ? "Approve this request?" : confirming === "reject" ? "Reject this request?" : "Return for correction?"}
-      message={confirming === "approve"
-        ? "The saved quantities move to the next approval level or complete the approval."
-        : confirming === "reject"
-          ? "The request will stop and the requester will see your reason."
-          : "Your correction instructions will be recorded in approval history."}
-      confirmLabel={confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return for correction"}
-      danger={confirming === "reject"}
+      title={allZero && confirming === "approve"
+        ? "Reject this request?"
+        : confirming === "approve"
+          ? "Approve this request?"
+          : confirming === "reject"
+            ? "Reject this request?"
+            : "Return for correction?"}
+      message={allZero && confirming === "approve"
+        ? "All items have been set to 0 quantity. This request will stop here and be marked as REJECTED."
+        : confirming === "approve"
+          ? (zeroLinesCount > 0
+              ? `${zeroLinesCount} item(s) with 0 quantity will be rejected. The remaining ${reviewItems.length - zeroLinesCount} item(s) will move forward.`
+              : "The saved quantities move to the next approval level or complete the approval.")
+          : confirming === "reject"
+            ? "The request will stop and the requester will see your reason."
+            : "Your correction instructions will be recorded in approval history."}
+      confirmLabel={allZero && confirming === "approve" ? "Reject Request" : confirming === "approve" ? "Approve" : confirming === "reject" ? "Reject" : "Return for correction"}
+      danger={confirming === "reject" || (allZero && confirming === "approve")}
       busy={busy || ((confirming === "reject" || confirming === "return") && !reason.trim())}
       error={actionError}
       onClose={() => !busy && setConfirming(null)}

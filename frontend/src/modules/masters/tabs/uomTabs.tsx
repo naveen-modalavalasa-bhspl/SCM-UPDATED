@@ -1,7 +1,7 @@
 import { mastersApi } from "../api";
 import { MasterCrud } from "../components/MasterCrud";
 import type { Option } from "../components/MasterCrud";
-import type { MasterUom, MasterUomConversion, UomClass } from "../types";
+import type { MasterUom, MasterUomClass, MasterUomConversion, UomClass } from "../types";
 import { Button, Can, Card, Field, Select } from "@/shared/components";
 import type { Column } from "@/shared/components";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -176,3 +176,36 @@ export function ConversionsTab({ uoms }: { uoms: Option[] }) {
 /** The rung above BrandsTab: which brands sell this general name. Kept here rather
  *  than on a mapping screen for the same reason brands carry their manufacturers —
  *  a mapping you have to remember to go and make somewhere else does not get made. */
+
+/** UOM types, with the one rule a type carries for all its units: may a document
+ *  hold a fraction of them. Enforced on save by the server on every document line. */
+export function UomClassesTab() {
+  const api = mastersApi.uomClasses;
+  return <MasterCrud<MasterUomClass>
+    title="UOM type" queryKey="uom-classes" searchable managePerm="master.uom.manage"
+    columns={[
+      { key: "code", header: "Code", render: (r) => <Code>{r.code}</Code> },
+      { key: "name", header: "Name", render: (r) => r.name },
+      { key: "allows_decimal", header: "Allows decimal",
+        render: (r) => (r.allows_decimal ? "Yes" : "No — whole units") },
+      { key: "active", header: "Status", render: (r) => <Active on={r.is_active} /> },
+    ]}
+    renderCard={(r) => <div><Code>{r.code}</Code><div>{r.name}</div>
+      <div className="text-xs text-muted">{r.allows_decimal ? "Allows decimal" : "Whole units only"}</div></div>}
+    fetchList={(search) => api.list({ search, size: 300 }).then((r) => r.items)}
+    fields={[
+      { key: "code", label: "Code", required: true, maxLength: 30, pattern: /^[A-Za-z0-9_]+$/,
+        patternMessage: "Use letters, numbers or an underscore, e.g. COUNT" },
+      { key: "name", label: "Name", required: true, maxLength: 200 },
+      { key: "description", label: "Description", maxLength: 300 },
+      { key: "allows_decimal", label: "Allows decimal", type: "switch" },
+      { key: "is_active", label: "Active", type: "switch" }]}
+    emptyForm={{ code: "", name: "", description: "", allows_decimal: true, is_active: true }}
+    toForm={(r) => ({ code: r.code, name: r.name, description: r.description ?? "",
+                      allows_decimal: r.allows_decimal ?? true, is_active: r.is_active })}
+    bulk={api} usage={api.usage}
+    onCreate={(v) => api.create(v as Partial<MasterUomClass>)}
+    onUpdate={(id, v) => api.update(id, v as Partial<MasterUomClass>)}
+    onDeactivate={api.deactivate}
+  />;
+}
