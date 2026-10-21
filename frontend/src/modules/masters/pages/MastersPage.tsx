@@ -8,7 +8,7 @@ import { type Option } from "../components/MasterCrud";
 import type { RefRow } from "../types";
 import { Code, NamedLookupTab, ReadOnlyTab } from "../tabs/common";
 import {
-  BrandsTab, CategoriesTab, GeneralNamesTab, HsnCodesTab, ItemClassesTab,
+  CategoriesTab, GeneralNamesTab, HsnCodesTab, ItemClassesTab,
   ItemSubClassesTab, ItemsTab, BrandItemMappingTab,
 } from "../tabs/itemTabs";
 import { ProjectsTab, WarehousesTab } from "../tabs/locationTabs";
@@ -17,6 +17,7 @@ import {
 } from "../tabs/vendorTabs";
 import { VendorMappingPanel } from "../components/VendorMappingPanel";
 import { ConversionsTab, UomClassesTab, UomTab } from "../tabs/uomTabs";
+import { BrandFamilyTab } from "../tabs/brandFamilyTabs";
 import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
 } from "../tabs/attributeTabs";
@@ -299,7 +300,7 @@ export function MastersShell({
       {tab === "hsn-codes" && <HsnCodesTab />}
       {tab === "payment-terms" && <PaymentTermsTab />}
       {tab === "item-sub-classes" && <ItemSubClassesTab />}
-      {tab === "brands" && <BrandsTab />}
+      {tab === "brands" && <BrandFamilyTab />}
       {tab === "manufacturers" && <NamedLookupTab title="Manufacturer" queryKey="manufacturers" api={mastersApi.manufacturers} managePerm="master.brand.manage" />}
       {tab === "dosage-forms" && <NamedLookupTab title="Dosage form" queryKey="dosage-forms" api={mastersApi.dosageForms} />}
       {tab === "brand-item-mapping" && <BrandItemMappingTab />}

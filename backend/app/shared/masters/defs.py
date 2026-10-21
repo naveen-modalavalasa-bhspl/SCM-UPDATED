@@ -28,7 +28,7 @@ from app.platform.rbac.models import Role
 from app.shared.models.master import (
     ItemEligibility,
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
-    BrandItemMapping,
+    BrandItemMapping, BrandModel, BrandVariant,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
     PackHierarchy, Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
@@ -1784,6 +1784,97 @@ async def apply_brand_manufacturer(
     row.is_active = data.is_active
 
 
+# --------------------------------------------------------------------------- #
+#  Brand variants and models (Brand → Variant → Model)
+# --------------------------------------------------------------------------- #
+_CHILD_CODE = r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$"
+
+
+class _BrandChildIn(BaseModel):
+    code: str = Field(min_length=1, max_length=20, pattern=_CHILD_CODE)
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(None, max_length=300)
+    is_active: bool = True
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _upper(cls, value):
+        return str(value).strip().upper() if value is not None else value
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _trim(cls, value):
+        return str(value).strip() if value is not None else value
+
+
+class BrandVariantIn(_BrandChildIn):
+    brand_id: int
+
+
+class BrandModelIn(_BrandChildIn):
+    brand_id: int
+    variant_id: int
+
+
+def brand_variant_out(row) -> dict:
+    return {"id": row.id, "brand_id": row.brand_id, "brand_code": row.brand_code,
+            "brand_name": row.brand_name, "code": row.code, "name": row.name,
+            "description": row.description, "is_active": row.is_active}
+
+
+def brand_model_out(row: BrandModel) -> dict:
+    return {**brand_variant_out(row), "variant_id": row.variant_id,
+            "variant_code": row.variant_code, "variant_name": row.variant_name}
+
+
+async def _active_brand(db: AsyncSession, brand_id: int) -> Brand:
+    brand = await db.get(Brand, brand_id)
+    if not brand:
+        raise ValidationError("Brand: pick one from the list.")
+    if not brand.is_active:
+        raise ValidationError(f"Brand “{brand.name}” is inactive. Reactivate it first.")
+    return brand
+
+
+async def apply_brand_variant(db: AsyncSession, row: BrandVariant,
+                              data: BrandVariantIn) -> None:
+    brand = await _active_brand(db, data.brand_id)
+    # Its models snapshot the brand, so a variant with models cannot change brand.
+    if row.id is not None and row.brand_id != brand.id and await db.scalar(
+            select(BrandModel.id).where(BrandModel.variant_id == row.id).limit(1)):
+        raise ValidationError(
+            "This variant already has models, so it cannot move to another brand. "
+            "Create a new variant under that brand instead.")
+    scope = BrandVariant.brand_id == brand.id
+    await require_unique(db, BrandVariant, "code", data.code, row,
+                         f"Variant code in {brand.name}", scope=scope)
+    await require_unique(db, BrandVariant, "name", data.name, row,
+                         f"A variant of {brand.name} named", scope=scope)
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.brand_code, row.brand_name = brand.code, brand.name
+
+
+async def apply_brand_model(db: AsyncSession, row: BrandModel,
+                            data: BrandModelIn) -> None:
+    brand = await _active_brand(db, data.brand_id)
+    variant = await db.get(BrandVariant, data.variant_id)
+    if not variant or variant.brand_id != brand.id:
+        raise ValidationError(f"Variant: pick one of the variants of {brand.name}.")
+    if not variant.is_active:
+        raise ValidationError(f"Variant “{variant.name}” is inactive. Reactivate it first.")
+    scope = BrandModel.variant_id == variant.id
+    label = f"{brand.name} {variant.name}"
+    await require_unique(db, BrandModel, "code", data.code, row,
+                         f"Model code in {label}", scope=scope)
+    await require_unique(db, BrandModel, "name", data.name, row,
+                         f"A model of {label} named", scope=scope)
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.brand_code, row.brand_name = brand.code, brand.name
+    row.variant_code, row.variant_name = variant.code, variant.name
+
+
 class ItemClassIn(BaseModel):
     code: str = Field(
         min_length=1, max_length=10,
@@ -3146,7 +3237,22 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="brands", name="Brand", model=Brand, schema=BrandIn,
               manage_perm=perms.MASTER_BRAND_MANAGE, serialize=brand_out,
               search_cols=("name", "code"), apply=apply_brand,
-              usage=((*USED_BY_ITEMS, "brand_id"), ("Manufacturer mappings", "mst_brand_manufacturers", "brand_id"), ("General name mappings", "mst_brand_general_names", "brand_id"),)),
+              usage=((*USED_BY_ITEMS, "brand_id"), ("Manufacturer mappings", "mst_brand_manufacturers", "brand_id"), ("General name mappings", "mst_brand_general_names", "brand_id"), ("Variants", "mst_brand_variants", "brand_id"),)),
+
+    # Brand → Variant → Model, each scoped to its parent (Masters › Brands sub-tabs).
+    MasterDef(path="brand-variants", name="Brand variant", model=BrandVariant,
+              schema=BrandVariantIn, manage_perm=perms.MASTER_BRAND_MANAGE,
+              serialize=brand_variant_out, search_cols=("name", "code", "brand_name"),
+              order_col="brand_name", apply=apply_brand_variant,
+              filters=("brand_id",),
+              usage=(("Models", "mst_brand_models", "variant_id"),)),
+
+    MasterDef(path="brand-models", name="Brand model", model=BrandModel,
+              schema=BrandModelIn, manage_perm=perms.MASTER_BRAND_MANAGE,
+              serialize=brand_model_out,
+              search_cols=("name", "code", "brand_name", "variant_name"),
+              order_col="brand_name", apply=apply_brand_model,
+              filters=("brand_id", "variant_id")),
 
     MasterDef(path="brand-manufacturers", name="Brand manufacturer",
               model=BrandManufacturer, schema=BrandManufacturerIn,

@@ -1542,3 +1542,24 @@ async def test_uom_type_carries_allows_decimal(client, admin):
                              json={"code": "SACK", "name": "Sack", "allows_decimal": False},
                              headers=admin)).json()
     assert row["allows_decimal"] is False
+
+
+async def test_brand_variant_and_model_chain(client, admin):
+    def make(path, body):
+        return client.post(path, json=body, headers=admin)
+    brand = (await make("/api/brands", {"code": "ACC", "name": "Accu-Chek"})).json()
+    other = (await make("/api/brands", {"code": "ONE", "name": "OneTouch"})).json()
+    variant = (await make("/api/brand-variants",
+                          {"brand_id": brand["id"], "code": "act", "name": "Active"})).json()
+    assert variant["code"] == "ACT" and variant["brand_name"] == "Accu-Chek"
+    # Same code under another brand is fine; twice under one brand is not.
+    assert (await make("/api/brand-variants",
+                       {"brand_id": other["id"], "code": "ACT", "name": "Active"})).status_code == 200
+    assert (await make("/api/brand-variants",
+                       {"brand_id": brand["id"], "code": "ACT", "name": "X"})).status_code == 422
+    model = (await make("/api/brand-models", {"brand_id": brand["id"],
+             "variant_id": variant["id"], "code": "M1", "name": "Mini"})).json()
+    assert model["variant_name"] == "Active"
+    # A variant of a different brand is refused.
+    assert (await make("/api/brand-models", {"brand_id": other["id"],
+            "variant_id": variant["id"], "code": "M2", "name": "Mini"})).status_code == 422
