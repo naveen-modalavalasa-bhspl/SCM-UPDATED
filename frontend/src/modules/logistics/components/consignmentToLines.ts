@@ -96,6 +96,7 @@ export function headerFromConsignment(doc: ConsignmentDetail): Partial<TRInput> 
     indent_no: indentNo,
     from_warehouse_id: doc.warehouse_id ?? null,
     from_warehouse_name: doc.warehouse_name ?? null,
+    from_warehouse_address: doc.warehouse_address ?? null,
     // The consignment's OWN destination, never the indent's office.
     //
     // `destination_office_name` is derived from the indent (`_issue_destination`), so

@@ -37,7 +37,11 @@ export const CARRYING_LABEL: Record<CarryingField, string> = {
   trip_reference: "Trip reference",
   lr_no: "LR no",
   docket_no: "Docket no",
-  tracking_url: "Tracking link",
+  // SCM_0052: the one slot a third-party leg's load is traced by on the printed
+  // pass — whichever of a tracking link, an LR/docket number or a carrier
+  // reference the provider actually gave, in one box instead of six mostly-dash
+  // ones. See `allocated()` above for which modes still print the others.
+  tracking_url: "Tracking Number / Reference Number",
   eway_bill_no: "E-way bill",
   carrier_reference: "Carrier reference",
   handed_over_by_name: "Handed over to",
@@ -96,15 +100,17 @@ function allocated(rule: ModeRule | undefined | null): CarryingField[] {
   if (!rule) return ALL;
   const requires = (field: string) => rule.required_fields.includes(field);
 
-  // An outside provider carries it: who they are, what it costs, and the two papers
-  // the receiving site chases it on.
+  // An outside provider carries it: who they are, what it costs, and ONE number to
+  // trace the load by. Vehicle no, licence no, e-way bill, carrier reference, LR no
+  // and docket no used to print as six separate boxes — mostly dashes, since a
+  // third-party leg rarely has all six filled in at once — collapsed here (SCM_0052)
+  // onto the one slot a gate guard or a receiving site actually chases a load by.
   if (rule.needs_carrier) {
     return [
       "carrier_name",
       ...(rule.needs_quotes ? ["freight_amount" as const] : []),
       "expected_delivery",
-      "vehicle_number", "driver_name", "driver_phone", "driver_licence_no",
-      "lr_no", "docket_no", "tracking_url", "eway_bill_no", "carrier_reference",
+      "driver_name", "driver_phone", "tracking_url",
     ];
   }
 

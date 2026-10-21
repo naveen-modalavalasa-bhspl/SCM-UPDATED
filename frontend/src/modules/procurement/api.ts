@@ -251,6 +251,10 @@ export const rfqApi = {
   evaluationMethods: () =>
     api.get<EvaluationMethodOption[]>("/api/rfqs/evaluation-methods")
       .then((r) => r.data),
+  /** Approved requisitions with neither an RFQ nor a consolidation sheet on them
+   *  yet — the Approved Requisitions tab's own rows (SCM_0058). */
+  candidates: (params: { project_id?: number; page?: number; size?: number } = {}) =>
+    api.get<Paginated<ReqListRow>>("/api/rfqs/candidates", { params }).then((r) => r.data),
   award: (id: number, quotation_ids: number[], comments = "", generate_pos = true) =>
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_ids, comments, generate_pos }).then((r) => r.data),
   awardSplit: (

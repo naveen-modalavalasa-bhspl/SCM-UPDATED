@@ -55,7 +55,20 @@ function isHalted(state: StepState) {
   return HALTED_STATES.includes(state);
 }
 
-function statusCaption(state: StepState) {
+export const PENDING_PHASE_CAPTIONS: Record<string, string> = {
+  draft: "Draft",
+  submitted: "Awaiting submission",
+  approvals: "Awaiting approval",
+  allocation: "Awaiting allocation",
+  warehouse: "Pending warehouse",
+  delivery: "In transit",
+  acknowledgement: "Awaiting acknowledgement",
+};
+
+function statusCaption(state: StepState, phaseKey?: string) {
+  if (state === "pending" && phaseKey && PENDING_PHASE_CAPTIONS[phaseKey]) {
+    return PENDING_PHASE_CAPTIONS[phaseKey];
+  }
   const captions: Record<StepState, string> = {
     completed: "Completed",
     current: "Current",
@@ -94,7 +107,7 @@ function stageCaption(phaseKey: string, stage: IndentJourneyStage, state: StepSt
   if (CAPTIONED_PHASE_KEYS.includes(phaseKey) && state === "current" && stage.approver_name) {
     return stage.approver_name;
   }
-  return statusCaption(state);
+  return statusCaption(state, phaseKey);
 }
 
 function activeApprovalStage(journey: IndentJourney) {
@@ -231,7 +244,7 @@ function fallbackSteps(statusValue: string, journey: IndentJourney): SummaryStep
     label: phase.label,
     state: states[index],
     caption: phase.key === "approvals" && states[index] === "current" && detail
-      ? detail : statusCaption(states[index]),
+      ? detail : statusCaption(states[index], phase.key),
   }));
 }
 
@@ -249,7 +262,7 @@ function buildSteps(status: string, journey?: IndentJourney): SummaryStep[] | nu
       return {
         ...step,
         state: step.state === "skipped" ? "skipped" : "pending",
-        caption: step.state === "skipped" ? "Not required" : "Pending",
+        caption: step.state === "skipped" ? "Not required" : statusCaption("pending", step.key),
       };
     });
   }
@@ -517,7 +530,7 @@ export function FlowStepper({
             )}
             <span
               aria-label={`${step.label}, ${accessibleState(step.state)}${
-                step.caption && step.caption !== statusCaption(step.state)
+                step.caption && step.caption !== statusCaption(step.state, step.key)
                   ? `: ${step.caption}` : ""
               }`}
               className={`relative z-10 grid h-8 w-8 shrink-0 place-items-center rounded-full border text-xs font-bold transition-colors ${stateClasses(step.state)}`}

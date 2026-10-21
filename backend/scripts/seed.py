@@ -119,8 +119,14 @@ PAGE_TREE = [
     # the page and its rbac_pages row (ind_ack) are gone — do not re-add a row here.
     ("ind_reports", "/indents/reports", "Activity Ledger", "bar-chart",
      P.page_view_code("ind_reports"), 15, "grp_indents"),
-    ("ind_notifications", "/indents/notifications", "Notifications", "bell",
-     P.page_view_code("ind_notifications"), 16, "grp_indents"),
+    # SCM_0056 (2026-10-19) — replaced by the top-level Alerts & Notifications page
+    # (`notifications` in page_registry.PAGES), which reads every notification the
+    # bell does rather than this derived, indent-only subset. Left commented rather
+    # than deleted: seed_pages sets is_active = True for everything in PAGE_TREE, so
+    # a row left here would put this screen back on the rail at the next seed.
+    # `page_registry.RETIRED_PAGES` parks it on an existing database.
+    # ("ind_notifications", "/indents/notifications", "Notifications", "bell",
+    #  P.page_view_code("ind_notifications"), 16, "grp_indents"),
     # What a BOM puts on the form, and which items a role or region may ask for at
     # all. LAST in the group — the rail opens a module on its first child and a master
     # is never what somebody came to Indents to do.

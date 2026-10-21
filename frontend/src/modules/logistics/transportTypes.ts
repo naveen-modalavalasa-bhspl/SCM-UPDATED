@@ -164,6 +164,9 @@ export interface Consignment {
   status: string;
   warehouse_id: number;
   warehouse_name?: string | null;
+  /** SCM_0053: the origin's address, carried into the transport leg this
+   *  consignment is dispatched on. */
+  warehouse_address?: string | null;
   to_warehouse_id?: number | null;
   to_warehouse_name?: string | null;
   destination_office_id?: number | null;
@@ -815,6 +818,9 @@ export interface TransportRequest {
   indent_no?: string | null;
   from_warehouse_id?: number | null;
   from_warehouse_name?: string | null;
+  /** The origin's address (SCM_0053) — what the DC/DOD gate pass prints under
+   *  "From". Carried off the consignment's own warehouse_address. */
+  from_warehouse_address?: string | null;
   to_location_name?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;
@@ -1058,6 +1064,9 @@ export interface TRInput {
   indent_no?: string | null;
   from_warehouse_id?: number | null;
   from_warehouse_name?: string | null;
+  /** The origin's address (SCM_0053) — what the DC/DOD gate pass prints under
+   *  "From". Carried off the consignment's own warehouse_address. */
+  from_warehouse_address?: string | null;
   to_location_name?: string | null;
   delivery_address?: string | null;
   contact_person?: string | null;

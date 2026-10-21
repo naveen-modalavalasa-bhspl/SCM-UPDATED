@@ -100,7 +100,7 @@ export function RequisitionListPage() {
         ? r.pending_with.join(", ")
         : (r.current_approver_name ?? "—")),
     },
-    { key: "lines", header: "Lines", className: "text-right", render: (r) => r.total_items },
+    { key: "lines", header: "Number of Items", className: "text-right", render: (r) => r.total_items },
     {
       key: "value",
       header: "Estimated",
