@@ -8,7 +8,7 @@ import { CardBody, Skeleton } from "@heroui/react";
 import { Button, Card } from "@/shared/components";
 import { IndentStatusBadge } from "../components/IndentStatusBadge";
 import {
-  INDENT_QUERY_GC_TIME, INDENT_QUERY_STALE_TIME, indentApi, indentKeys,
+  INDENT_QUERY_GC_TIME, indentApi, indentKeys,
   isIndentUnavailableError, useIndentAccountCacheIsolation, useIndentAccountScope,
 } from "../api";
 import { INDENT_STATUS, STR_BASE, STR_HOME } from "../constants";
@@ -361,7 +361,6 @@ export function IndentJourneyPage() {
           <ArrowLeft className="h-4 w-4" /> Back to indent details
         </button>
         <Button
-          size="sm"
           variant="secondary"
           onClick={() => refetch()}
           disabled={isFetching}

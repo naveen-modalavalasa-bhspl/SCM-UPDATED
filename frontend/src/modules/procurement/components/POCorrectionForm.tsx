@@ -157,7 +157,7 @@ export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
         </div>
 
         <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100">
-          <POHeaderFields value={header} onChange={(patch) => setHeader({ ...header, ...patch })} />
+          <POHeaderFields value={header} orderTotal={totals.grand} onChange={(patch) => setHeader({ ...header, ...patch })} />
         </div>
 
         <dl className="grid grid-cols-2 gap-3 rounded-xl bg-white p-3 text-sm ring-1 ring-indigo-100 sm:grid-cols-5">

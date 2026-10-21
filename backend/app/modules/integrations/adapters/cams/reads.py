@@ -40,7 +40,7 @@ from app.platform.hcm.models import (
 )
 from app.shared.enums import WarehouseType
 from app.shared.models.master import (
-    Item, ItemCategory, ItemPackaging, ItemSpec, Uom, UomConversion,
+    Item, ItemCategory, ItemPackaging, ItemSpec, PackHierarchy, Uom, UomConversion,
 )
 from app.shared.models.warehouse import Warehouse
 
@@ -254,7 +254,12 @@ def items(item_type: str | None = None, is_active: bool | None = None,
     pack = (
         select(ItemPackaging.item_id.label("item_id"),
                ItemPackaging.quantity.label("pack_size"))
-        .where(ItemPackaging.level == 1, ItemPackaging.is_active.is_(True))
+        # The DEFAULT hierarchy's smallest pack only (2026-10-08): an item packed in
+        # strips of 10 and strips of 15 has two level-1 rungs, and joining both would
+        # send the item twice.
+        .join(PackHierarchy, PackHierarchy.id == ItemPackaging.hierarchy_id)
+        .where(ItemPackaging.level == 1, ItemPackaging.is_active.is_(True),
+               PackHierarchy.is_default.is_(True))
         .subquery()
     )
     stmt = (

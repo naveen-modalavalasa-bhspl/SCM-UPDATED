@@ -123,14 +123,24 @@ export interface MasterItemSubClass extends NamedMaster {
   item_class_name?: string | null;
 }
 
-export interface MasterPaymentTerm {
+/** How one stage of a payment term is paid: in one go, or in N instalments. */
+export type PaymentSplit = "ONE" | "EQUAL" | "CUSTOM";
+export type PaymentStageKey = "advance" | "delivery" | "installation" | "warranty";
+
+export type MasterPaymentTerm = {
   id: number; code: string; name: string; description: string | null; is_active: boolean;
-  advance_pct: number; advance_days: number; delivery_pct: number; delivery_days: number;
-  installation_pct: number; installation_days: number;
-  warranty_pct: number; warranty_days: number;
-  /** "30,60,90": the delivery share in equal instalments. */
-  delivery_schedule: string | null;
-}
+  /** One line for a dropdown or a list, written by the server. */
+  summary: string;
+  /** What a PO prints: "[CODE] Name" then one line per stage. */
+  wording: string;
+} & {
+  [K in PaymentStageKey as `${K}_pct`]: number } & {
+  [K in PaymentStageKey as `${K}_days`]: number } & {
+  [K in PaymentStageKey as `${K}_split`]: PaymentSplit } & {
+  /** "30,60,90,120": days after the stage's trigger, one per instalment. */
+  [K in PaymentStageKey as `${K}_instalment_days`]: string | null } & {
+  /** "30,40,10,20": each instalment's % of the stage. CUSTOM only. */
+  [K in PaymentStageKey as `${K}_instalment_pcts`]: string | null };
 
 export interface MasterVendorCategory {
   id: number; code: string; name: string; description: string | null;
@@ -340,9 +350,23 @@ export interface MasterPackaging {
  * box and are blank in the ordinary case; `gross_weight_kg` is what one of these weighs
  * full, which is item-specific and so cannot live on the container type.
  */
+/** One named family of packs for an item (2026-10-08). Its levels are the
+ *  `MasterItemPackaging` rows that name it. */
+export interface MasterPackHierarchy {
+  id: number;
+  item_id: number;
+  name: string;
+  description?: string | null;
+  /** The one a new document offers first. At most one per item. */
+  is_default: boolean;
+  is_active: boolean;
+}
+
 export interface MasterItemPackaging {
   id: number;
   item_id: number;
+  /** The pack hierarchy this level belongs to. Levels count from 1 within it. */
+  hierarchy_id?: number | null;
   level: number;
   package_id: number;
   package_name?: string | null;
@@ -357,6 +381,9 @@ export interface MasterItemPackaging {
   /** The rung putaway and bin occupancy work in unless a document says otherwise.
    *  At most one per item — setting one clears the others. */
   is_default_putaway_unit?: boolean;
+  /** The least one pack of this level may be MADE with, in the item's own unit
+   *  (2026-10-11). Blank: no minimum. Never more than one pack holds. */
+  min_fill_qty?: number | null;
   is_active: boolean;
 }
 
@@ -387,6 +414,7 @@ export interface PackagingBreakdown {
   tare_weight_kg?: number | null;
   max_stack_tiers?: number | null;
   is_default_putaway_unit?: boolean;
+  min_fill_qty?: number | null;
 }
 
 /** One component of a kit. A real item, so the contents can be issued. */

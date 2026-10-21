@@ -18,7 +18,10 @@ describe("procurement api", () => {
        // The same full edit on a draft.
        "editDraft",
        // "Copy as new PO": an order's content for the New PO form; saves nothing.
-       "copyTemplate"].sort(),
+       "copyTemplate",
+       // A supplier sending a different pack hierarchy from the order's: the buyer
+       // reads the changes and accepts or declines each (2026-10-08).
+       "repackLine", "packChanges", "decidePackChange"].sort(),
     );
     expect(typeof poApi.createFromIndent).toBe("function");
     // Raised by hand, alongside the two derived paths: an order that begins as a

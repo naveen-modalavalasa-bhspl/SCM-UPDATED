@@ -295,7 +295,8 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                      warehouse_id: int | None = None, facility_id: int | None = None,
                      bin_id: int = NO_BIN, batch_id: int = NO_BATCH,
                      project_id: int = NO_PROJECT, rate=None,
-                     serial_numbers: list[str] | None = None) -> Stock:
+                     serial_numbers: list[str] | None = None,
+                     pack_text: str | None = None) -> Stock:
     """The ONLY function that changes stock. Always writes a stk_ledger row.
 
     Either warehouse_id or facility_id must be given; a facility resolves to its
@@ -472,6 +473,9 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         serial_numbers=(serial_numbers if serial_numbers is not None
                         else stock.serial_number),
         ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
+        # The packs this movement was, when the caller knows them (inventory is the
+        # base module and may not read a pack itself — rule 5).
+        pack_text=(pack_text or None) and pack_text[:300],
         created_by_id=user.id, created_by_name=user.full_name,
     )
     db.add(movement)
@@ -529,6 +533,7 @@ async def move_stock_out(
     bin_id: int | None = None,
     batch_id: int | None = None,
     serial_numbers: list[str] | None = None,
+    pack_text: str | None = None,
 ) -> None:
     """Issue stock across matching balance rows using move_stock() for every slice.
 
@@ -589,6 +594,7 @@ async def move_stock_out(
             batch_id=row.batch_id,
             project_id=row.project_id,
             serial_numbers=take_units(pool, take),
+            pack_text=pack_text,
         )
         remaining -= take
 

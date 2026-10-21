@@ -1422,6 +1422,7 @@ export default function ConsignmentForm() {
                               <td className="px-3 py-2">
                                 <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                                 <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
+                              {source && !doc && <QcTag line={line} />}
                               </td>
                               <td className="px-3 py-2"><BatchPlace line={line} /></td>
                               <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
@@ -1628,6 +1629,7 @@ export default function ConsignmentForm() {
                             <td className="px-3 py-2">
                               <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                               <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
+                              {source && !doc && <QcTag line={line} />}
                             </td>
                             <td className="px-3 py-2"><BatchPlace line={line} /></td>
                             <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
@@ -1801,6 +1803,20 @@ function BatchPlace({ line }: { line: IssueDispatchSourceItem }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** Whether this row went through outward QC or out without needing it. Only on a
+ *  fresh packing source — a saved consignment's rows are rebuilt from its own lines. */
+function QcTag({ line }: { line: IssueDispatchSourceItem }) {
+  return line.requires_qc ? (
+    <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ok">
+      <CheckCircle2 className="h-3 w-3" aria-hidden /> QC accepted
+    </span>
+  ) : (
+    <span className="mt-0.5 inline-block text-[10px] font-semibold uppercase tracking-wider text-muted">
+      No QC needed
+    </span>
   );
 }
 

@@ -1,6 +1,9 @@
+import type { PackEntry, PackEntryIn, PackHierarchy } from "@/shared/packing";
 export interface POItem {
   id: number;
   item_id: number;
+  /** An indent stands behind the line: its quantity is the indent's. */
+  indent_item_id?: number | null;
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
@@ -12,6 +15,34 @@ export interface POItem {
    *  a PO raised from an indent — nobody quoted, so nobody promised. */
   delivery_days?: number | null;
   received_quantity: number;
+  /** How the line is to be packed (2026-10-08), with its sentence served. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+}
+
+/** A supplier's change of pack hierarchy on a despatch note, and the buyer's answer. */
+export interface POPackChange {
+  id: number;
+  despatch_note_id: number;
+  dn_no: string;
+  dn_status: string;
+  po_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  despatched_qty: number;
+  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  ordered_hierarchy_name?: string | null;
+  sent_hierarchy_name?: string | null;
+  sent_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  reason?: string | null;
+  decision_note?: string | null;
+  decided_by_name?: string | null;
+  decided_at?: string | null;
 }
 
 /** One frozen stage of a PO's payment terms (advance, against delivery, ...). */
@@ -118,6 +149,8 @@ export interface POAmend extends POHeader {
     quantity: number;
     rate: number;
     tax_percent?: number;
+    pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntryIn[] | null;
   }[] | null;
 }
 
@@ -183,6 +216,8 @@ export interface POCreate extends POHeader {
     quantity: number;
     rate: number;
     tax_percent?: number;
+    pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntryIn[] | null;
   }[];
   copied_from_po_id?: number | null;
 }
@@ -878,6 +913,15 @@ export interface DespatchItem {
   mfg_date?: string | null;
   expiry_date?: string | null;
   remarks?: string | null;
+  /** How the supplier packed it (2026-10-08), and the buyer's answer to a change. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+  pack_change_status?: "NONE" | "PENDING" | "ACCEPTED" | "DECLINED" | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
 export interface DespatchNote {
@@ -910,6 +954,9 @@ export interface DespatchLineWrite {
   mfg_date?: string | null;
   expiry_date?: string | null;
   remarks?: string | null;
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntryIn[] | null;
+  pack_change_reason?: string | null;
 }
 
 export interface DespatchNoteWrite {
@@ -939,6 +986,12 @@ export interface VendorPOLine {
   pending_qty: number;
   rate?: number | null;
   amount?: number | null;
+  /** How the order asks for it to be packed, and every hierarchy the item has. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+  pack_options?: PackHierarchy[];
 }
 
 export interface VendorPO {
@@ -1687,4 +1740,16 @@ export interface DemandPoolResponse {
   page: number;
   size: number;
   total: number;
+}
+
+
+/** One item mapped to the signed-in vendor, and every way it may be packed
+ *  (`GET /api/supplier/items/packing`, 2026-10-11). */
+export interface VendorItemPacking {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  vendor_item_code?: string | null;
+  hierarchies: PackHierarchy[];
 }

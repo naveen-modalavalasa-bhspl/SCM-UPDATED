@@ -8,7 +8,7 @@ import type {
   MasterAttribute, MasterBin, MasterBom, MasterBomGroup, MasterBomItem, MasterBrand,
   MasterCategory, MasterCategoryTag, MasterFeature, MasterItem,
   MasterHsnCode, MasterItemClass, MasterItemComponent, MasterItemGroup,
-  MasterItemPackaging, MasterItemSpec, MasterPackaging, MasterSpec,
+  MasterItemPackaging, MasterItemSpec, MasterPackHierarchy, MasterPackaging, MasterSpec,
   MasterUom, MasterUomConversion, MasterVendor, MasterVendorItem, PackagingBreakdown,
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
   MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, MasterUomClass, NamedMaster,
@@ -23,7 +23,8 @@ type ListParams = {
 
 const page = <T>(url: string, params: ListParams) =>
   api.get<Paginated<T>>(url, { params }).then((r) => r.data);
-const all = <T>(url: string) => api.get<{ items: T[] }>(url).then((r) => r.data.items);
+const all = <T>(url: string, params?: Record<string, unknown>) =>
+  api.get<{ items: T[] }>(url, params ? { params } : undefined).then((r) => r.data.items);
 
 /**
  * Every mst_ master is served by the same backend factory, so the client for one is
@@ -333,11 +334,15 @@ export const mastersApi = {
 
   itemPackaging: {
     ...crud<MasterItemPackaging>("/api/item-packaging"),
-    /** The ladder with its running totals. Multiplied up on the server on every
-     *  read, so the totals cannot drift from the rungs they come from. */
-    breakdown: (itemId: number) =>
-      all<PackagingBreakdown>(`/api/items/${itemId}/packaging-breakdown`),
+    /** The ladder with its running totals, for ONE pack hierarchy (the item's default
+     *  when none is named). Multiplied up on the server on every read, so the totals
+     *  cannot drift from the rungs they come from. */
+    breakdown: (itemId: number, hierarchyId?: number | null) =>
+      all<PackagingBreakdown>(`/api/items/${itemId}/packaging-breakdown`,
+        hierarchyId ? { hierarchy_id: hierarchyId } : undefined),
   },
+  /** The named families an item is packed in — "Strip of 10", "Strip of 15". */
+  packHierarchies: crud<MasterPackHierarchy>("/api/pack-hierarchies"),
 
   departments: () => all<RefRow>("/api/departments"),
   ownershipDepartments: () => all<RefRow>("/api/departments/ownership-options"),

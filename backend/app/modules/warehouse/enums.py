@@ -816,6 +816,25 @@ RETURN_CLOSED_STATUSES = frozenset({
 })
 
 
+class HandlingUnitStatus(str, Enum):
+    """`whs_handling_units.status` — one physical pack on the shelf (2026-10-08).
+
+    SEALED: standing on its own. INSIDE: sealed, inside a bigger pack (`parent_id`).
+    OPENED: taken apart by a repack or a break bulk — its code is retired and never
+    reused. CONSUMED: everything in it left the shelf on an issue or a movement.
+    Only SEALED and INSIDE are stock; the other two are history.
+    """
+    SEALED = "SEALED"
+    INSIDE = "INSIDE"
+    OPENED = "OPENED"
+    CONSUMED = "CONSUMED"
+
+
+#: A pack that is still on the shelf.
+LIVE_HANDLING_UNIT_STATUSES = (HandlingUnitStatus.SEALED.value,
+                               HandlingUnitStatus.INSIDE.value)
+
+
 class SerialStatus(str, Enum):
     """`whs_serial_numbers.status` — a MySQL ENUM, lower case in the schema."""
     AVAILABLE = "available"

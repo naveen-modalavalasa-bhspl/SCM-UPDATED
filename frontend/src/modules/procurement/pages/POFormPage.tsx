@@ -13,6 +13,7 @@ import {
 } from "../components/POHeaderFields";
 import type { POCopyTemplate } from "../types";
 import { money } from "./RequisitionListPage";
+import { toPayload } from "@/shared/packing";
 
 /** A copy template in the shape this form edits. */
 function headerFromCopy(t: POCopyTemplate): POHeaderValue {
@@ -156,6 +157,8 @@ export function POFormPage() {
             quantity: Number(line.quantity),
             rate: Number(line.rate || 0),
             tax_percent: Number(line.tax_percent || 0),
+            pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+            pack_breakdown: line.pack_breakdown?.length ? toPayload(line.pack_breakdown) : null,
           })),
         copied_from_po_id: copied?.source_po_id ?? null,
       }),
@@ -261,7 +264,8 @@ export function POFormPage() {
 
         <div>
           <h2 className="mb-3 text-sm font-semibold text-ink">What is being ordered</h2>
-          <LinePicker lines={lines} onChange={setLines} showRate showTax showDate={false} />
+          <LinePicker lines={lines} onChange={setLines} showRate showTax showDate={false}
+                      showPacking />
         </div>
 
         {/* Project, remarks, addresses, terms and the document money — the same block
@@ -270,6 +274,7 @@ export function POFormPage() {
         <div className="border-t border-line pt-4">
           <POHeaderFields
             value={header}
+            orderTotal={totals.grand}
             onChange={(patch) => setHeader({ ...header, ...patch })}
           />
         </div>

@@ -254,10 +254,13 @@ def _request_validation_message(exc: RequestValidationError) -> tuple[str, str |
     return text, _field_path(issues[0].get("loc", ())) or None
 
 
+
 async def request_validation_exception_handler(
     request: Request, exc: RequestValidationError,
 ):
+    print(f'\n\n!!! VALIDATION ERROR: {exc.errors()} !!!\n\n')
     message, field = _request_validation_message(exc)
+
     await _report(request, exc, 422, message)
     return JSONResponse(
         status_code=422,

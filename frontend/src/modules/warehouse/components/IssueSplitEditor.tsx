@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { baseOf, packable, type PackHierarchy } from "@/shared/packing";
+import { IssuePickPacking } from "./IssuePickPacking";
 import {
   AlertTriangle, Barcode, Check, MessageSquare, PackageX, Plus, ScanLine, Trash2, Undo2,
 } from "lucide-react";
@@ -164,12 +166,14 @@ interface Props {
   onRemoveGroup?: (group: IssueGroup) => void;
   /** Per-pick rate editor — unchanged from the flat grid, kept on the pick. */
   renderRate?: (split: IssueSplit) => React.ReactNode;
+  /** Each item's pack hierarchies, so a pick can be issued in packs (2026-10-08). */
+  packOptionsByItem?: Record<number, PackHierarchy[]>;
 }
 
 export function IssueSplitEditor({
   groups, lines, onChange, sourcesByItem, warehouseId, indentId, binManaged,
   locked, unitsLocked, codesLocked, unitsHidden = false, onPickUnits, onSourcePicked, meta, problemAt, unitSupply,
-  sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate,
+  sourcesReady, onAddItem, renderItemPicker, onRemoveGroup, renderRate, packOptionsByItem,
 }: Props) {
   const patch = (index: number, change: Partial<IssueItemWrite>,
                  event?: { batchPicked?: boolean; locationPicked?: boolean }) => {
@@ -338,6 +342,7 @@ export function IssueSplitEditor({
           onRemoveGroup={onRemoveGroup}
           renderItemPicker={renderItemPicker}
           renderRate={renderRate}
+          packOptions={packable(packOptionsByItem?.[group.itemId])}
           hasSources={(sourcesByItem[group.itemId] ?? []).length > 0}
         />
       ))}
@@ -389,6 +394,7 @@ interface ItemProps {
   onRemoveGroup?: (group: IssueGroup) => void;
   renderItemPicker: (split: IssueSplit) => React.ReactNode;
   renderRate?: (split: IssueSplit) => React.ReactNode;
+  packOptions: PackHierarchy[];
   hasSources: boolean;
 }
 
@@ -817,7 +823,7 @@ function PickRow(props: PickProps) {
   const {
     group, split, position, sources, batches, fefoHint, binManaged, locked,
     unitsLocked, codesLocked, unitsHidden, unitMeta, unitSupply, onPatch, onPickUnits, onRemove, problem,
-    renderRate,
+    renderRate, packOptions,
   } = props;
 
   const line = split.line;
@@ -1064,6 +1070,9 @@ function PickRow(props: PickProps) {
             onChange={(value) => onPatch(split.index, {
               issued_qty: value,
               serial_numbers: trimUnits(line, num(value)),
+              // Packs that no longer make the quantity no longer describe the pick.
+              ...(line.pack_breakdown?.length && baseOf(line.pack_breakdown) !== num(value)
+                ? { pack_breakdown: null, pack_hierarchy_id: null } : {}),
             })}
           />
         </div>
@@ -1194,6 +1203,21 @@ function PickRow(props: PickProps) {
             </div>
           )}
         </div>
+      )}
+
+      {packOptions.length > 0 && !!line.item_id && (
+        <IssuePickPacking
+          line={line}
+          hierarchies={packOptions}
+          codesPerPack={autoCodes}
+          locked={locked}
+          uom={packOptions[0]?.base_uom}
+          onChange={(change, qty) => onPatch(split.index, {
+            ...change,
+            ...(qty !== undefined
+              ? { issued_qty: qty, serial_numbers: trimUnits(line, qty) } : {}),
+          })}
+        />
       )}
 
       {problem && (

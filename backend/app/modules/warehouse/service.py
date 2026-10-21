@@ -92,6 +92,9 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
+from app.shared import packing as shared_packing
+from app.shared.masters.packs import ladders as pack_ladders_for
+from app.modules.warehouse import packing as wh_packing
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
@@ -1624,6 +1627,17 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
     inbound_transfer = (receipt.transfer_id is not None
                         or receipt.receipt_type == ReceiptType.DISPATCH.value)
 
+    # Packing first (2026-10-08). A line counted in packs carries its own total, and
+    # a despatch-note line's packing is the supplier's, fixed — so the quantity each
+    # line really claims is only known after this, and the PO cap below must read it.
+    line_packing = []
+    for line in lines:
+        packed = await wh_packing.receipt_line_packing(
+            db, item=await _item_snapshot(db, line.item_id), line_in=line,
+            received=line.received_qty)
+        line.received_qty = packed["received"]
+        line_packing.append(packed)
+
     # Does the order still owe what this receipt claims to be taking off it? Checked
     # before a single line is written, so an over-receipt is refused whole rather than
     # half-applied. See `_assert_po_fulfilment`.
@@ -1793,6 +1807,10 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             remarks=line.remarks,
             serial_numbers=serials or None,
             imei_numbers=imeis or None,
+            pack_hierarchy_id=line_packing[index - 1]["pack_hierarchy_id"],
+            declared_pack_breakdown=line_packing[index - 1]["declared_pack_breakdown"],
+            pack_breakdown=line_packing[index - 1]["pack_breakdown"],
+            despatch_note_item_id=line_packing[index - 1]["despatch_note_item_id"],
         )
         row = _take_existing(line, item.id)
         if row is None:
@@ -3474,6 +3492,17 @@ async def _prepare_receipt_line(
             qty=_d(line.accepted_qty),
         )
 
+    # A site with no bins still holds packs (2026-10-08): the receipt's count is
+    # shelved as it arrived, at the bulk location.
+    shelved = await wh_packing.shelve(
+        db, item=item,
+        key={"item_id": line.item_id, "warehouse_id": receipt.warehouse_id,
+             "bin_id": m.NO_BIN, "batch_id": line.batch_id or m.NO_BATCH,
+             "project_id": receipt.project_id or 0},
+        qty=_d(line.accepted_qty), hierarchy_id=line.pack_hierarchy_id,
+        entries_in=None, default_entries=line.pack_breakdown,
+        source=("RECEIPT", receipt.id, receipt.grn_no), user=user)
+
     stock = await move_stock(
         db,
         item_id=line.item_id,
@@ -3493,10 +3522,12 @@ async def _prepare_receipt_line(
         # What THIS receipt brought in — never the lot as it stands afterwards. Empty
         # stays None so a leg that genuinely named no units keeps the old fallback.
         serial_numbers=_ledger_units(moved_units),
+        pack_text=shared_packing.describe(shelved, item.uom_code) if shelved else None,
     )
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
+
 
     if not units and not countable:
         await _code_lot(db, stock, item=item, warehouse_id=receipt.warehouse_id)
@@ -3542,6 +3573,8 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         # so an item without a unit still gets a task rather than blocking the putaway.
         uom_id=item.uom_id or 0,
         qty=_d(line.accepted_qty),
+        # The receipt's hierarchy, fixed for the life of the stock (2026-10-08).
+        pack_hierarchy_id=line.pack_hierarchy_id,
         # No suggestion, and therefore not system-directed: the storekeeper decides
         # where this goes, at any rung of the tree. See the note where `_suggest_bin`
         # stood.
@@ -3710,6 +3743,8 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
         rate=rates.get(key),
         batch_no=line.batch_no, mfg_date=line.mfg_date,
         expiry_date=line.expiry_date,
+        # How the supplier packed it, declared and fixed; and the count to start from.
+        **wh_packing.despatch_prefill_packing(line, sent),
     )
 
 
@@ -3822,6 +3857,17 @@ async def _po_receipts_naming(db: AsyncSession, po_id: int, po_item_id: int,
                      for grn_no, status, qty in rows)
 
 
+def _po_line_packing(ladders, hierarchy_id, pending) -> dict:
+    ladder = next((row for row in ladders if row.hierarchy_id == hierarchy_id), None) \
+        or (ladders[0] if ladders else None)
+    if ladder is None or ladder.top == 0:
+        return {}
+    entries = shared_packing.greedy(ladder, pending)
+    for entry in entries:
+        entry["hierarchy"] = ladder.hierarchy_name
+    return {"pack_hierarchy_id": ladder.hierarchy_id, "pack_breakdown": entries}
+
+
 async def po_lines(db: AsyncSession, po_id: int,
                    *, receipt_id: int | None = None) -> dict:
     """What is still OWED on a purchase order, so a GRN fills itself from the order.
@@ -3851,8 +3897,10 @@ async def po_lines(db: AsyncSession, po_id: int,
 
     items = (await db.execute(
         select(POItem.id, POItem.item_id, POItem.item_code, POItem.item_name,
-               POItem.uom_code, POItem.quantity, POItem.rate, POItem.indent_item_id)
+               POItem.uom_code, POItem.quantity, POItem.rate, POItem.indent_item_id,
+               POItem.pack_hierarchy_id)
         .where(POItem.po_id == po_id).order_by(POItem.id))).all()
+    ladders = await pack_ladders_for(db, {line.item_id for line in items})
     received = await po_received_by_line(db, po_id, exclude_receipt_id=receipt_id)
     # Who has already had it. An empty line list is only useful with this beside it:
     # "nothing pending" and "REC0031 took all nineteen lines on 7 September" are the
@@ -3884,6 +3932,10 @@ async def po_lines(db: AsyncSession, po_id: int,
             "received_qty": already,
             "pending_qty": pending,
             "rate": line.rate,
+            # What is still owed, in whole packs of the order's hierarchy — the
+            # count a receipt with no despatch note starts from.
+            **_po_line_packing(ladders.get(line.item_id) or [], line.pack_hierarchy_id,
+                               pending),
         })
 
     return {
@@ -4542,7 +4594,10 @@ async def get_putaway(db: AsyncSession, task_id: int, user=None) -> dict:
     await _assert_in_scope(db, user, m.PutawayTask, task,
                            warehouse_col=m.PutawayTask.warehouse_id,
                            label="Putaway task")
-    return await _decorate_putaway(db, task)
+    # Packing only on the single task (2026-10-08): the queue lists twenty at a time
+    # and only the confirm screen offers a re-pack.
+    return {**await _decorate_putaway(db, task),
+            **await wh_packing.putaway_packing(db, task)}
 
 
 async def putaway_codes(db: AsyncSession, task_id: int, user=None) -> dict:
@@ -4988,6 +5043,28 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     moved_units = await _place_serials(db, task, target, primary_list, receipt, receipt_item,
                                        qty=qty)
 
+    # The packs (2026-10-08). One `whs_handling_units` row per physical pack on this
+    # shelf, in the receipt's hierarchy, at the levels the storekeeper chose — or as
+    # they arrived. The units just placed are linked to the packs they are in, and a
+    # code-tracked item's packs are named with its own code: an ATOM, which a repack
+    # may wrap but never split.
+    shelved = await wh_packing.shelve(
+        db, item=item,
+        key={"item_id": task.item_id, "warehouse_id": task.warehouse_id,
+             "bin_id": target.id, "batch_id": task.batch_id or m.NO_BATCH,
+             "project_id": project_id},
+        qty=qty,
+        hierarchy_id=task.pack_hierarchy_id or (
+            receipt_item.pack_hierarchy_id if receipt_item else None),
+        entries_in=data.pack_breakdown,
+        default_entries=(receipt_item.pack_breakdown if receipt_item else None),
+        lot_no=task.lot_no,
+        source=("PUTAWAY", task.id, task.putaway_no), user=user)
+    if shelved:
+        task.pack_hierarchy_id = task.pack_hierarchy_id or (
+            receipt_item.pack_hierarchy_id if receipt_item else None)
+        task.pack_breakdown = shelved
+
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
                              ref_type=InventoryRefType.RECEIPT.value,
                              ref_id=receipt.id if receipt else task.id,
@@ -5013,11 +5090,14 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                              # a serial-tracked line the two are the same list, and for
                              # an unserialised one it is the codes just minted, which
                              # `serials` never held.
-                             serial_numbers=_ledger_units(moved_units))
+                             serial_numbers=_ledger_units(moved_units),
+                             pack_text=(shared_packing.describe(shelved, item.uom_code)
+                                        if shelved else None))
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
     stock.bin_code = target.code
+
 
     # A continuous item has no unit to name, so its identity goes on the LOT — the same
     # rule the bulk-receipt path applies. Without this a bin-managed putaway of grams or
@@ -5062,6 +5142,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             item_packaging_id=task.item_packaging_id,
             package_id=task.package_id,
             package_name=task.package_name,
+            pack_hierarchy_id=task.pack_hierarchy_id,
             handling_units=capacity.space_for(
                 capacity.choose_pack(
                     (await capacity.pack_ladders(db, [task.item_id]))
@@ -6993,6 +7074,203 @@ async def _guard_issue_indent_caps(db: AsyncSession, items: list, header_indent_
     return set(wanted)
 
 
+async def _guard_network_own_stock(db: AsyncSession, items: list,
+                                   header_indent_id: int | None, warehouse_id: int, *,
+                                   exclude_issue_id: int | None = None) -> None:
+    """Across EVERY point, an indent may be served at most its approved quantity out of
+    points' OWN stock (2026-10-06).
+
+    The per-tier cap (`_guard_issue_indent_caps`) lets each rung of the chain issue the
+    whole indent, because WH -> MDP -> LIP is the same units travelling. That is right
+    for a forwarded leg and wrong for anything else: once the LIP had served its share
+    from its own shelf, the main warehouse could still issue the indent's full approved
+    quantity again out of free stock — the same item to the same indent, twice.
+
+    So the units each point gives from its own shelf are counted network-wide: what a
+    point issued for the indent, less what ARRIVED there for the indent on a dispatch
+    receipt (that part is passing through, already counted where it came from). The
+    sum may not pass the approved quantity. A pure forwarding leg adds nothing to it and
+    is never refused here.
+    """
+    from app.modules.indents.models import Indent as Indent_, IndentItem
+
+    wanted: dict[int, dict[int, Decimal]] = defaultdict(lambda: defaultdict(lambda: ZERO))
+    for line in items:
+        owner = await _indent_id_for_line(db, line, header_indent_id)
+        if not owner:
+            continue
+        wanted[owner][int(line.item_id)] += _d(
+            line.requested_qty if line.issued_qty is None else line.issued_qty)
+
+    for indent_id, by_item in wanted.items():
+        caps = await _indent_cap(db, indent_id)
+        if not caps:
+            continue
+        owner = func.coalesce(IndentItem.indent_id, m.MaterialIssue.indent_id)
+        issued: dict[tuple[int, int], Decimal] = defaultdict(lambda: ZERO)
+        for wh_id, item_id, qty in (await db.execute(
+            select(m.MaterialIssue.warehouse_id, m.MaterialIssueLine.item_id,
+                   func.coalesce(func.sum(m.MaterialIssueLine.issued_qty), 0))
+            .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+            .outerjoin(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+            .where(owner == indent_id,
+                   m.MaterialIssue.direction == IssueDirection.OUT.value,
+                   m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+                   *([m.MaterialIssue.id != exclude_issue_id] if exclude_issue_id else []))
+            .group_by(m.MaterialIssue.warehouse_id, m.MaterialIssueLine.item_id)
+        )).all():
+            issued[(int(wh_id), int(item_id))] += _d(qty)
+        arrived: dict[tuple[int, int], Decimal] = defaultdict(lambda: ZERO)
+        for wh_id, item_id, qty in (await db.execute(
+            select(m.Receipt.warehouse_id, m.ReceiptItem.item_id,
+                   func.coalesce(func.sum(m.ReceiptItem.received_qty), 0))
+            .join(m.Receipt, m.Receipt.id == m.ReceiptItem.receipt_id)
+            .where(m.Receipt.receipt_type == ReceiptType.DISPATCH.value,
+                   m.ReceiptItem.indent_id == indent_id,
+                   m.Receipt.status.notin_((ReceiptStatus.DRAFT.value,
+                                            ReceiptStatus.CANCELLED.value)))
+            .group_by(m.Receipt.warehouse_id, m.ReceiptItem.item_id)
+        )).all():
+            arrived[(int(wh_id), int(item_id))] += _d(qty)
+
+        def own_total(extra: dict[int, Decimal]) -> dict[int, Decimal]:
+            totals: dict[int, Decimal] = defaultdict(lambda: ZERO)
+            points = {key for key in issued} | {(warehouse_id, i) for i in extra}
+            for wh_id, item_id in points:
+                qty = issued.get((wh_id, item_id), ZERO) + (
+                    extra.get(item_id, ZERO) if wh_id == warehouse_id else ZERO)
+                totals[item_id] += max(ZERO, qty - arrived.get((wh_id, item_id), ZERO))
+            return totals
+
+        before, after = own_total({}), own_total(by_item)
+        for item_id, total in after.items():
+            cap = caps.get(item_id)
+            if cap is None or total <= cap or total <= before.get(item_id, ZERO):
+                continue
+            indent_no = await db.scalar(
+                select(Indent_.indent_no).where(Indent_.id == indent_id))
+            name = getattr(await db.get(Item, item_id), "name", None) or f"item {item_id}"
+            served = before.get(item_id, ZERO)
+            raise ValidationError(
+                f"{indent_no}: {name} has already been served {served} of {cap} from "
+                f"stock across the warehouse, MDP and LIP points. This issue would give "
+                f"{total - served} more of this point's own stock — at most "
+                f"{max(cap - served, ZERO)} may still go out.")
+
+
+async def _unposted_claims(db: AsyncSession, indent_id: int, warehouse_id: int, *,
+                           exclude_issue_id: int | None = None) -> dict[int, Decimal]:
+    """Per indent LINE, what live issues at THIS point have claimed but not yet posted.
+
+    Posting consumes the reservation, so a posted issue has already taken its share
+    off `held_here`. An unposted one has not — it is a claim on the same hold, and two
+    of them each claiming the whole of it is how one point drafted the same three
+    units twice. A split parent is dead (its children carry the claim).
+    """
+    from app.modules.indents.models import IndentItem
+
+    rows = (await db.execute(
+        select(m.MaterialIssueLine.indent_item_id,
+               func.coalesce(func.sum(m.MaterialIssueLine.issued_qty), 0))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .join(IndentItem, IndentItem.id == m.MaterialIssueLine.indent_item_id)
+        .where(IndentItem.indent_id == indent_id,
+               m.MaterialIssue.warehouse_id == warehouse_id,
+               m.MaterialIssue.direction == IssueDirection.OUT.value,
+               m.MaterialIssue.is_stock_posted.is_(False),
+               m.MaterialIssue.status.notin_(DEAD_ISSUE_STATUSES),
+               *([m.MaterialIssue.id != exclude_issue_id] if exclude_issue_id else []))
+        .group_by(m.MaterialIssueLine.indent_item_id)
+    )).all()
+    return {int(line_id): _d(qty) for line_id, qty in rows if line_id}
+
+
+async def _held_by_line(db: AsyncSession, indent_id: int, *,
+                        warehouse_id: int | None = None) -> dict[int, Decimal]:
+    """Per indent line, what the allocation still holds — at one point, or anywhere."""
+    from app.modules.inventory.models import Reservation
+
+    stmt = (select(Reservation.ref_line_id, func.sum(Reservation.quantity))
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.ref_id == indent_id,
+                   Reservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(Reservation.ref_line_id))
+    if warehouse_id is not None:
+        stmt = stmt.where(Reservation.warehouse_id == warehouse_id)
+    return {int(line_id): _d(qty) for line_id, qty in (await db.execute(stmt)).all()
+            if line_id}
+
+
+async def _forwarding_point(db: AsyncSession, indent_id: int, warehouse_id: int) -> bool:
+    """Did goods for this indent ARRIVE at this point on a dispatch receipt — is it a
+    middle leg of WH -> MDP -> LIP for it? (`_is_forwarding`, for one indent.)"""
+    return bool(await db.scalar(
+        select(m.Receipt.id)
+        .join(m.ReceiptItem, m.ReceiptItem.receipt_id == m.Receipt.id)
+        .where(m.Receipt.receipt_type == ReceiptType.DISPATCH.value,
+               m.Receipt.warehouse_id == warehouse_id,
+               m.Receipt.status != ReceiptStatus.CANCELLED.value,
+               m.ReceiptItem.indent_id == indent_id)
+        .limit(1)))
+
+
+async def _guard_point_reservation(db: AsyncSession, items: list,
+                                   header_indent_id: int | None, warehouse_id: int, *,
+                                   exclude_issue_id: int | None = None) -> None:
+    """Refuse an indent line asking this point for more than its allocation here still
+    has unclaimed (2026-10-06).
+
+    The same rule `post_issue` applies — an indent line with a reservation anywhere may
+    only issue what is reserved AT THIS POINT — asked at save time, net of the other
+    unposted issues already claiming it. Without it a second draft for the same three
+    units saved, climbed the whole approval ladder and only failed at the shelf.
+
+    A line whose indent holds nothing anywhere (forwarded goods, a manual issue after
+    the allocation was spent) is not measured here: the indent cap still bounds it.
+    """
+    from app.modules.indents.models import Indent
+
+    wanted: dict[tuple[int, int], Decimal] = defaultdict(lambda: ZERO)
+    labels: dict[tuple[int, int], str] = {}
+    for line in items:
+        if not getattr(line, "indent_item_id", None):
+            continue
+        owner = await _indent_id_for_line(db, line, header_indent_id)
+        if not owner:
+            continue
+        key = (owner, int(line.indent_item_id))
+        wanted[key] += _d(line.requested_qty if line.issued_qty is None
+                          else line.issued_qty)
+        labels[key] = getattr(line, "item_code", None) or f"item {line.item_id}"
+    for (indent_id, line_id), qty in wanted.items():
+        if qty <= ZERO:
+            continue
+        anywhere = (await _held_by_line(db, indent_id)).get(line_id, ZERO)
+        if anywhere <= ZERO:
+            continue
+        # A forwarding point issues goods that arrived for the indent with no hold
+        # here; the network own-stock cap bounds it instead.
+        if await _forwarding_point(db, indent_id, warehouse_id):
+            continue
+        here = (await _held_by_line(db, indent_id, warehouse_id=warehouse_id)).get(
+            line_id, ZERO)
+        claimed = (await _unposted_claims(
+            db, indent_id, warehouse_id, exclude_issue_id=exclude_issue_id)).get(
+            line_id, ZERO)
+        open_here = here - claimed
+        if qty > open_here:
+            indent_no = await db.scalar(
+                select(Indent.indent_no).where(Indent.id == indent_id))
+            others = await _live_issue_labels(db, indent_id, [warehouse_id],
+                                              exclude_issue_id)
+            raise ValidationError(
+                f"{indent_no}: {labels[(indent_id, line_id)]} has {here} allocated at "
+                f"this point"
+                + (f", {claimed} of it already claimed by {others}" if claimed else "")
+                + f" — {max(open_here, ZERO)} is left to issue here, not {qty}."
+                + (" Open that issue instead of raising another." if claimed else ""))
+
+
 async def _guard_indent_quantity(db: AsyncSession, indent_id: int, indent_no: str,
                                  wanted: dict[int, Decimal], taken: dict[int, Decimal],
                                  doc: str, holders: str = "") -> None:
@@ -8075,6 +8353,11 @@ async def _auto_fill_codes(
     wanted = int(_d(line.issued_qty))
     if wanted <= 0:
         return
+    # A line stated in packs takes THOSE packs first (2026-10-08) — see
+    # `packing.reserve_named_packs`. Whatever they do not cover is topped up below.
+    await wh_packing.reserve_named_packs(
+        db, warehouse_id=issue.warehouse_id, line=line, marker=marker,
+        claimed_prefixes=_CLAIMED_REMARK_PREFIXES)
     rows = await _claim_units(
         db,
         item_id=line.item_id,
@@ -8532,6 +8815,7 @@ async def _decorate_issue_serials(
 ) -> m.MaterialIssue:
     rows_by_line = await _issue_units_by_line(db, issue)
     item_ids = {line.item_id for line in issue.items}
+    qc_by_item: dict[int, bool] = {}
     serial_by_item: dict[int, bool] = {}
     imei_tracked_by_item: dict[int, bool] = {}
     item_by_id: dict[int, object] = {}
@@ -8540,9 +8824,12 @@ async def _decorate_issue_serials(
         item_rows = (await db.execute(
             # `is_asset` too: it is what separates an asset tag from a consumable lot
             # code on the badge, and both are UNIT_MODE_CODE to the matcher.
-            select(Item.id, Item.is_serial_tracked, Item.is_imei_tracked, Item.is_asset)
+            select(Item.id, Item.is_serial_tracked, Item.is_imei_tracked, Item.is_asset,
+                   Item.requires_qi)
             .where(Item.id.in_(item_ids))
         )).all()
+        qc_by_item = {row[0]: bool(row[4]) for row in item_rows}
+        item_rows = [row[:4] for row in item_rows]
         serial_by_item = {
             item_id: bool(is_serial_tracked)
             for item_id, is_serial_tracked, _, _ in item_rows
@@ -8593,6 +8880,7 @@ async def _decorate_issue_serials(
         setattr(line, "tracking_type",
                 _tracking_type(item_by_id.get(line.item_id), has_units=has_units))
         setattr(line, "units_available", supply.get(line.id))
+        setattr(line, "requires_qc", qc_by_item.get(line.item_id, False))
         # What the storekeeper validated on, echoed back in the same currency he typed:
         # the serial for a serialized item, the IMEI for a handset, the code otherwise.
         setattr(line, "unit_keys", [
@@ -8617,6 +8905,15 @@ async def issue_stock_sources(
     user=None,
 ) -> list[dict]:
     """Every (batch, bin) an item can actually be drawn from here, oldest first.
+
+    `issue_id`: the document being edited. A direct issue reserves its own picks
+    (`ISSUE_HOLD`), and those count as its own exactly as an indent's allocation does.
+
+    Each row also says whether the item MUST leave with a code per unit
+    (`codes_required`) and whether that (batch, location) holds any free coded unit
+    (`has_unit_codes`) — what the screen needs to offer the one batch swap FEFO allows
+    past the same-day rule (`_coded_swap_verdict`). A bounded EXISTS per row, never a
+    count.
 
     `project_id`: lots set aside for that project (`stk_project_holds`) count as this
     document's own, exactly like the indent's reservation. Nobody else sees them.
@@ -8680,6 +8977,23 @@ async def issue_stock_sources(
     else:
         mine = None
         own = literal(0)
+    # A direct issue's own hold, served apart from the indent's: it is stock this
+    # document may draw, but it is NOT an allocation — the screen must not read it as
+    # one and switch the FEFO lock on for a manual issue.
+    if issue_id:
+        held = (
+            select(Reservation.stock_id.label("stock_id"),
+                   func.sum(Reservation.quantity).label("qty"))
+            .where(Reservation.ref_type == InventoryRefType.ISSUE_HOLD.value,
+                   Reservation.ref_id == issue_id,
+                   Reservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(Reservation.stock_id)
+            .subquery()
+        )
+        hold_qty = func.coalesce(func.sum(held.c.qty), 0)
+    else:
+        held = None
+        hold_qty = literal(0)
 
     stmt = (
         select(
@@ -8690,6 +9004,7 @@ async def issue_stock_sources(
             func.sum(Stock.reserved_qty).label("reserved_qty"),
             func.sum(Stock.total_qty).label("total_qty"),
             own.label("own_reserved_qty"),
+            hold_qty.label("issue_hold_qty"),
             Bin.code,
             Bin.name,
             m.Batch.batch_no,
@@ -8702,11 +9017,13 @@ async def issue_stock_sources(
     )
     if mine is not None:
         stmt = stmt.outerjoin(mine, mine.c.stock_id == Stock.id)
+    if held is not None:
+        stmt = stmt.outerjoin(held, held.c.stock_id == Stock.id)
     stmt = (
         stmt
         .where(Stock.warehouse_id == warehouse_id,
                Stock.item_id.in_(ids),
-               _stock_offerable(indent_id, project_id),
+               _stock_offerable(indent_id, project_id, issue_id),
                or_(
                    func.coalesce(m.Batch.expiry_date, Stock.expiry_date).is_(None),
                    func.coalesce(m.Batch.expiry_date, Stock.expiry_date) >= ist_today(),
@@ -8818,10 +9135,12 @@ async def issue_stock_sources(
             coded_slots.add((item_id, bin_id or 0, batch_id or 0))
     out = []
     for (item_id, bin_id, batch_id, available_qty, reserved_qty, total_qty,
-         own_qty, bin_code, bin_name, batch_no, expiry_date, mfg_date) in rows:
+         own_qty, hold_qty_row, bin_code, bin_name, batch_no, expiry_date,
+         mfg_date) in rows:
         own_reserved = _d(own_qty)
         other_indents = tradeable.get((item_id, bin_id or 0, batch_id or 0), ZERO)
-        drawable = _d(available_qty) + own_reserved + other_indents
+        issue_hold = _d(hold_qty_row)
+        drawable = _d(available_qty) + own_reserved + other_indents + issue_hold
         if drawable <= ZERO:
             continue
         out.append({
@@ -8844,6 +9163,7 @@ async def issue_stock_sources(
             # Set aside for OTHER indents but tradeable — picking it here moves their
             # quantity hold onto another batch on save. Never a refusal.
             "other_indent_qty": other_indents,
+            "issue_hold_qty": issue_hold,
             "total_qty": _d(total_qty),
             "drawable_qty": drawable,
             "batch_total_qty": by_batch.get((item_id, batch_id or 0), (ZERO, ZERO))[0],
@@ -8915,6 +9235,25 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
         # place.
         if all(slot == (0, 0) for slot in slots):
             continue
+        # A line naming a batch but no bay asks for THAT BATCH wherever it stands, not
+        # for a bay numbered 0. When every hold of this line already sits on a batch the
+        # document names, nothing has moved — relocating would try to pull the hold onto
+        # a balance row that does not exist and refuse a correct document (found
+        # 2026-10-06 by the split scenarios).
+        if any(bin_id == 0 for bin_id, _batch in slots):
+            from app.modules.inventory.models import Reservation
+            named = {batch for _bin, batch in slots}
+            held_batches = set((await db.execute(
+                select(Reservation.batch_id).where(
+                    Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                    Reservation.ref_id == indent_id,
+                    Reservation.ref_line_id == indent_item_id,
+                    Reservation.item_id == item_id,
+                    Reservation.warehouse_id == issue.warehouse_id,
+                    Reservation.status == ReservationStatus.ACTIVE.value)
+            )).scalars().all())
+            if 0 in named or {int(b or 0) for b in held_batches} <= named:
+                continue
         if issue.project_id:
             await _free_project_holds_for_slots(
                 db, issue, indent_id, indent_item_id, item_id, slots, user)
@@ -8958,6 +9297,72 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
             after={"moves": moved},
         )
     return moved
+
+
+async def _direct_issue_lines(db: AsyncSession, issue: m.MaterialIssue) -> list:
+    """The outward lines no indent stands behind — a direct issue, a stock transfer,
+    a scrap write-off. Nothing was allocated for them, so nothing is reserved for them
+    unless the issue reserves it itself."""
+    if issue.direction != IssueDirection.OUT.value:
+        return []
+    line_indents = await _line_indent_ids(db, issue)
+    return [line for line in issue.items
+            if _d(line.issued_qty) > ZERO
+            and not (line_indents.get(line.id) or issue.indent_id)]
+
+
+async def _release_issue_hold(db: AsyncSession, issue_id: int) -> Decimal:
+    """Give everything a direct issue was holding back to `available_qty`."""
+    return await stock_allocation.release(
+        db, InventoryRefType.ISSUE_HOLD.value, issue_id)
+
+
+async def _hold_direct_issue_stock(db: AsyncSession, issue: m.MaterialIssue, user, *,
+                                   strict: bool = True) -> None:
+    """Reserve the picks of a direct issue from the moment it is saved (2026-10-06).
+
+    An indent-based issue is drafted from an approved allocation, which RESERVED the
+    stock — nobody else can take it while the document climbs its ladder. A direct
+    issue had no such hold: two drafts could promise the same ten units, both be
+    approved, and the second found the shelf empty at posting, after its whole
+    approval. Now each line's (bin, batch) is held under `ISSUE_HOLD`, re-taken on
+    every save (released first, so an edit never double-holds), released on cancel
+    and reject, and CONSUMED when the issue posts — exactly the life an allocation's
+    hold has.
+
+    Lots set aside for the issue's project are taken first (they are its own), the
+    rest from free stock at the named spot. `strict=False` is the best-effort path a
+    split parent uses when its floor issues are all cancelled: the hold is restored
+    where it still can be, and posting re-checks the shelf either way.
+    """
+    await _release_issue_hold(db, issue.id)
+    short: list[str] = []
+    for line in await _direct_issue_lines(db, issue):
+        want = _d(line.issued_qty)
+        got = ZERO
+        if issue.project_id:
+            got += await stock_allocation.take_from_holds(
+                db, item_id=line.item_id, project_id=issue.project_id, qty=want,
+                ref_type=InventoryRefType.ISSUE_HOLD.value, ref_id=issue.id,
+                ref_no=issue.issue_no, ref_line_id=line.id, user=user,
+                warehouse_ids=[issue.warehouse_id],
+                bin_id=line.bin_id or None, batch_id=line.batch_id or None)
+        if got < want:
+            got += await stock_allocation.reserve_at(
+                db, item_id=line.item_id, qty=want - got,
+                warehouse_id=issue.warehouse_id,
+                bin_id=line.bin_id or None, batch_id=line.batch_id or None,
+                ref_type=InventoryRefType.ISSUE_HOLD.value, ref_id=issue.id,
+                ref_no=issue.issue_no, ref_line_id=line.id, user=user)
+        if got < want:
+            where = " / ".join(filter(None, (line.batch_no, line.bin_code))) or "this point"
+            short.append(f"{line.item_code or line.item_id}: {want} wanted at {where}, "
+                         f"only {got} free to reserve")
+    if short and strict:
+        raise ValidationError(
+            "This issue could not reserve its stock — " + "; ".join(short)
+            + ". Another document took it since the shelf was read; refresh and "
+              "re-pick.")
 
 
 async def _free_project_holds_for_slots(db: AsyncSession, issue: m.MaterialIssue,
@@ -9344,6 +9749,21 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                 allocated_batches.setdefault(
                     (int(ref_line_id or 0), int(item_id)), set()).add(int(batch_id))
 
+    # What THIS document holds itself — a direct issue reserves its picks the moment
+    # it is saved (`_hold_direct_issue_stock`), and an edit to the same picks must not
+    # be refused for want of the stock it is already holding.
+    if issue.id:
+        for item_id, bin_id, batch_id, qty in (await db.execute(
+            select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                   func.sum(Reservation.quantity))
+            .where(Reservation.ref_type == InventoryRefType.ISSUE_HOLD.value,
+                   Reservation.ref_id == issue.id,
+                   Reservation.status == ReservationStatus.ACTIVE.value)
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id)
+        )).all():
+            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+            own[slot] = own.get(slot, ZERO) + _d(qty)
+
     # Lots held for this document's project are its own too (stk_project_holds).
     if issue.project_id:
         for item_id, bin_id, batch_id, qty in (await db.execute(
@@ -9542,6 +9962,16 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             raise ValidationError(
                 f"{location.code} is inactive and cannot be issued from")
 
+    # A line stated in packs ("2 Box + 5 Strip") issues exactly that many units; the
+    # server works the quantity out before anything below reads it (2026-10-08).
+    line_packs = []
+    for line in lines:
+        hid, entries, base = await wh_packing.issue_line_packing(
+            db, item=await _item_snapshot(db, line.item_id), line_in=line)
+        if base is not None:
+            line.issued_qty = base
+        line_packs.append((hid, entries))
+
     # Does the shelf actually hold what every pick claims, and is a swapped batch one
     # FEFO cannot tell apart from the one that was allocated? Both refused here, on
     # the draft, while the batch and the location are still the storekeeper's to
@@ -9606,6 +10036,9 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             requested_qty=requested, issued_qty=issued, returned_qty=ZERO,
             rate=rate or None, amount=(issued * rate) if rate else None,
             remarks=line.remarks,
+            pack_hierarchy_id=line_packs[index - 1][0],
+            pack_breakdown=line_packs[index - 1][1],
+            break_bulk=bool(getattr(line, "break_bulk", False)),
         ))
     _issue_totals(issue)
     # Flushed so every line has an id before `_reserve_issue_serials` stamps units
@@ -9719,13 +10152,23 @@ async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIss
         setattr(issue, "floor_in_charge_names",
                 (await stock_locations.floor_incharge_names(
                     db, {issue.floor_location_id})).get(issue.floor_location_id, []))
-    setattr(issue, "child_issues", [dict(row._mapping) for row in (await db.execute(
+    # The split FAMILY, from either end: on a parent its floor issues, on a floor issue
+    # its siblings (itself included), so a storekeeper holding -002 can see what -001
+    # and -003 are doing without going back up to the parent.
+    family = (await db.execute(
         select(m.MaterialIssue.id, m.MaterialIssue.issue_no, m.MaterialIssue.status,
-               m.MaterialIssue.floor_location_name, m.MaterialIssue.is_stock_posted,
-               m.MaterialIssue.total_qty)
-        .where(m.MaterialIssue.parent_issue_id == issue.id)
+               m.MaterialIssue.floor_location_id, m.MaterialIssue.floor_location_name,
+               m.MaterialIssue.is_stock_posted, m.MaterialIssue.total_qty,
+               m.MaterialIssue.total_items)
+        .where(m.MaterialIssue.parent_issue_id == (issue.parent_issue_id or issue.id))
         .order_by(m.MaterialIssue.id)
-    )).all()] if not issue.parent_issue_id else [])
+    )).all()
+    in_charge = await stock_locations.floor_incharge_names(
+        db, {row.floor_location_id for row in family if row.floor_location_id})         if family else {}
+    setattr(issue, "child_issues", [
+        {**dict(row._mapping),
+         "in_charge_names": in_charge.get(row.floor_location_id, [])}
+        for row in family])
     await _decorate_indent_types(db, [issue])
     return await _decorate_issue_destination(db, issue)
 
@@ -10164,7 +10607,8 @@ async def _fill_from_employee(db: AsyncSession, data: s.IssueWrite) -> s.IssueWr
 
 
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
-                       for_sto: bool = False) -> m.MaterialIssue:
+                       for_sto: bool = False,
+                       forwarding: bool = False) -> m.MaterialIssue:
     """Build one material issue draft without committing it.
 
     Same reason as _build_picking: allocation approval creates its warehouse drafts
@@ -10186,6 +10630,11 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
         # cycle. Capping the batch against the header's indent alone would let one
         # LT's line be checked and the other 899 sail through unchecked.
         wanted = await _guard_issue_indent_caps(db, data.items, data.indent_id, wh.id)
+        # Not for a forward draft: it is written while a RECEIPT posts, and goods
+        # forwarded down the chain hold no reservation at this point by design.
+        if not forwarding:
+            await _guard_point_reservation(db, data.items, data.indent_id, wh.id)
+            await _guard_network_own_stock(db, data.items, data.indent_id, wh.id)
 
         # A LIP is the bottom of the chain: everything it holds arrived against a
         # request and everything it gives out answers one. Issuing with no indent
@@ -10290,7 +10739,12 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
     # document is holding, and `_reserve_issue_serials` validates the units it names
     # against the line's own bin and batch.
     await _realign_issue_reservations(db, issue, user)
+    # A direct issue has no allocation holding its stock — it holds its own.
+    await _hold_direct_issue_stock(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
+    # A coded pack leaves whole unless the line says break bulk (2026-10-08).
+    await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
+                                        user)
     if original:
         _validate_issue_return(issue, original)
     if picking:
@@ -10385,7 +10839,7 @@ async def _forward_drafts(db: AsyncSession, *, warehouse_id: int, source_no: str
             issued_to_id=indent.requested_by_id,
             remarks=f"Forwarded from {source_no}",
             items=items,
-        ), user)
+        ), user, forwarding=True)
         drafts.append(draft)
 
     await db.commit()
@@ -10702,16 +11156,24 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
         # out — they are the ones being replaced.
         await _guard_issue_indent_caps(db, data.items, data.indent_id, wh.id,
                                        exclude_issue_id=issue.id)
+        await _guard_point_reservation(db, data.items, data.indent_id, wh.id,
+                                       exclude_issue_id=issue.id)
+        await _guard_network_own_stock(db, data.items, data.indent_id, wh.id,
+                                       exclude_issue_id=issue.id)
     await _clear_issue_serial_reservations(db, issue.id)
     await _apply_issue_lines(db, issue, data.items)
     # The edit that matters most on this screen: a storekeeper who moves a line onto
     # the bay the goods are actually in moves inventory's hold with it, and frees the
     # bay he has left. See `_realign_issue_reservations`.
     await _realign_issue_reservations(db, issue, user)
+    await _hold_direct_issue_stock(db, issue, user)
     # Then the same floor gate `create_issue` applies, in the same place: a repointed
     # line may only land on a bay this user's position actually covers.
     await _assert_issue_floor_access(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
+    # A coded pack leaves whole unless the line says break bulk (2026-10-08).
+    await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
+                                        user)
     if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
         _validate_issue_return(issue, original)
@@ -11117,6 +11579,12 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
 
     index = await _location_index(db, parent.warehouse_id)
 
+    # A direct parent holds its own stock (`_hold_direct_issue_stock`). Handed back
+    # before the shelf is read, so the floors' free stock includes it; each child
+    # re-takes exactly its own piece below, in the same transaction, so nothing is
+    # ever briefly free to anybody else.
+    await _release_issue_hold(db, parent.id)
+
     # Every (bin, batch) the parent's items can be drawn from in this warehouse,
     # oldest stock first. Read off stk_balance, never off the unit tables — those hold
     # one row per physical thing and there are hundreds of thousands of them.
@@ -11226,21 +11694,19 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
             "is nothing to split. Post the issue yourself, or put the stock away "
             "first.")
 
-    # Numbered in the same series as the parent: `_build_issue` numbers from the
-    # INDENT's project first, and `out_issues.project_name` is often empty, so
-    # numbering off the issue alone put children in a separate "NA" series.
-    series_project = parent.project_name
-    if parent.indent_id:
-        from app.modules.indents.models import Indent
-        indent = await db.get(Indent, parent.indent_id)
-        series_project = getattr(indent, "project_name", None) or series_project
-
     created: list[m.MaterialIssue] = []
+    # Children are numbered off their PARENT — WHI0013-001, -002, -003 — so anybody
+    # holding one floor's paper can see at a glance which issue it is a piece of, and
+    # the pieces sort together. Counted over every child ever cut (cancelled ones
+    # included), because a re-split must never reuse a number already printed.
+    sequence = int(await db.scalar(
+        select(func.count()).select_from(m.MaterialIssue)
+        .where(m.MaterialIssue.parent_issue_id == parent.id)) or 0)
     for floor_id, bucket in by_floor.items():
+        sequence, child_no = await _next_child_issue_no(db, parent.issue_no, sequence)
         child = m.MaterialIssue(
             items=[],
-            issue_no=await next_number(db, WarehouseDocType.WH_ISSUE.value,
-                                       project=series_project),
+            issue_no=child_no,
             issue_type=parent.issue_type,
             issue_date=parent.issue_date,
             indent_id=parent.indent_id, indent_no=parent.indent_no,
@@ -11307,6 +11773,9 @@ async def split_issue_by_floor(db: AsyncSession, issue_id: int, user) -> dict:
         warehouse_id=parent.warehouse_id,
         items=[line for child in created for line in child.items]), user)
     await _hand_codes_to_floor_pieces(db, parent, created)
+    for child in created:
+        # A direct parent's hold, re-taken piece by piece (see the release above).
+        await _hold_direct_issue_stock(db, child, user)
     for child in created:
         await write_audit(db, entity="out_issues", entity_id=child.id,
                           action=AuditAction.CREATE, actor=user,
@@ -11414,6 +11883,20 @@ async def _hand_codes_to_floor_pieces(db: AsyncSession, parent: m.MaterialIssue,
     await db.flush()
 
 
+async def _next_child_issue_no(db: AsyncSession, parent_no: str,
+                               after: int) -> tuple[int, str]:
+    """The next free `<parent>-NNN` after `after`. Checked against the table rather
+    than trusted to the count: an issue number is unique, and a hand-made row or a
+    half-finished earlier split must not make the split fail on a duplicate."""
+    sequence = after
+    while True:
+        sequence += 1
+        candidate = f"{parent_no}-{sequence:03d}"
+        if not await db.scalar(select(m.MaterialIssue.id).where(
+                m.MaterialIssue.issue_no == candidate).limit(1)):
+            return sequence, candidate
+
+
 async def _sync_split_parent(db: AsyncSession, parent_id: int | None, user) -> None:
     """Roll a split parent's status up from its children. Never set by hand.
 
@@ -11452,12 +11935,33 @@ async def _sync_split_parent(db: AsyncSession, parent_id: int | None, user) -> N
         after = IssueStatus.SPLIT.value
     if after == parent.status:
         return
+    reason = "rolled up from its floor issues"
+    full = None
+    if after == IssueStatus.APPROVED.value:
+        # Back to a whole document — but only if the indent still has room for it.
+        # While it was split, a fresh issue may have been raised for the quantity its
+        # children did not cover; reviving the parent at its full quantity beside that
+        # issue would claim the same indent line twice. It CLOSES instead, having
+        # served nothing, and the indent's remainder stays free for a new issue.
+        full = await get_issue(db, parent.id)
+        try:
+            await _guard_issue_indent_caps(db, full.items, full.indent_id,
+                                           full.warehouse_id, exclude_issue_id=parent.id)
+        except ValidationError as refused:
+            after = IssueStatus.CLOSED.value
+            reason = f"floor issues cancelled; not reopened — {refused}"
+    if after == parent.status:
+        return
     before = parent.status
     parent.status = after
+    if after == IssueStatus.APPROVED.value and full is not None:
+        # A direct parent takes its hold back where the shelf still has it. Best
+        # effort — posting re-reads the shelf either way.
+        await _hold_direct_issue_stock(db, full, user, strict=False)
     await write_audit(db, entity="out_issues", entity_id=parent.id,
                       entity_no=parent.issue_no, action=AuditAction.UPDATE, actor=user,
                       before={"status": before},
-                      after={"status": after, "reason": "rolled up from its floor issues"})
+                      after={"status": after, "reason": reason})
 
 
 async def act_on_issue(
@@ -11495,6 +11999,7 @@ async def act_on_issue(
     elif instance.status == InstanceStatus.REJECTED.value:
         issue.status = IssueStatus.REJECTED.value
         issue.current_approver_name = None
+        await _release_issue_hold(db, issue.id)
     else:
         issue.current_approver_name = _approver_label(
             await engine.current_approvers(db, doc_type, issue.id),
@@ -11665,6 +12170,7 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
             batch_id=line.batch_id,
             bin_id=line.bin_id,
             remarks=line.remarks,
+            break_bulk=bool(getattr(line, "break_bulk", False)),
             # `unit_keys`, not `serial_numbers`: an untouched line is restated in the
             # currency its item is validated on, so an IMEI-named unit is not looked
             # up by a serial the IMEI lookup cannot see.
@@ -11677,6 +12183,8 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     ]
     await _clear_issue_serial_reservations(db, issue.id)
     await _reserve_issue_serials(db, issue, inputs)
+    await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
+                                        user)
 
     await write_audit(db, entity="out_issues", entity_id=issue.id,
                       entity_no=issue.issue_no, action=AuditAction.UPDATE, actor=user,
@@ -11762,12 +12270,22 @@ async def _issue_slices(
     # location, rather than issuing a partial quantity nobody asked for.
     return slices if remaining <= ZERO else fallback
 
+def _line_needs_outward_qc(item, line) -> bool:
+    """Does this issue line go on the outward QC sheet? Only an item that asks for it."""
+    return bool(getattr(item, "requires_qi", False)) and _d(line.issued_qty) > ZERO
+
+
 async def _raise_outbound_inspection_for(
     db: AsyncSession,
     issue: m.MaterialIssue,
     user,
 ) -> m.OutboundInspection:
-    """The outbound inspection a posted issue creates for items requiring QC."""
+    """The outbound inspection a posted issue creates for items requiring QC.
+
+    Only lines whose item `requires_qi`. A line that needs no check goes to logistics
+    at its issued quantity (`_line_needs_outward_qc`); putting it on the sheet made the
+    inspector pass goods nobody asked him to look at, and a failed sheet held them back.
+    """
     inspection = m.OutboundInspection(
         items=[],
         # From the receipt it belongs to — see the note on the GRN number.
@@ -11789,6 +12307,8 @@ async def _raise_outbound_inspection_for(
 
     for line in issue.items:
         item = await _item_snapshot(db, line.item_id)
+        if not _line_needs_outward_qc(item, line):
+            continue
 
         # FIXED 2026-08-21 — one STRING per unit, seeded once.
         #
@@ -11830,6 +12350,17 @@ async def _raise_outbound_inspection_for(
     return inspection
 
 
+def _ledger_packs(line, qty) -> str | None:
+    """The packs an issue line went out as, for the ledger row of one slice of it.
+    A line drawn from several balance rows writes several ledger rows; each says it is
+    PART of the line's packing rather than claiming all of it (2026-10-08)."""
+    entries = getattr(line, "pack_breakdown", None)
+    if not entries:
+        return None
+    text = shared_packing.describe(entries, getattr(line, "uom_code", None))
+    return text if _d(qty) == _d(line.issued_qty) else f"Part of {text}"
+
+
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     """Takes the stock off the shelf. The only step here that moves anything."""
     issue = await get_issue(db, issue_id)
@@ -11865,6 +12396,17 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
 
     outward = issue.direction == IssueDirection.OUT.value
     direction = StockDirection.OUT.value if outward else StockDirection.IN.value
+
+    # The last door before stock moves, so the indent cap is asked here too, against
+    # every OTHER live issue as it stands NOW. The cap at save time is not enough:
+    # a split parent whose floor issues are all cancelled rolls back to APPROVED and
+    # counts again, and if a fresh issue was raised for the same indent while it was
+    # split, both would otherwise post — the same item issued twice to one indent.
+    if outward and issue.items:
+        await _guard_issue_indent_caps(db, issue.items, issue.indent_id,
+                                       issue.warehouse_id, exclude_issue_id=issue.id)
+        await _guard_network_own_stock(db, issue.items, issue.indent_id,
+                                       issue.warehouse_id, exclude_issue_id=issue.id)
 
     # The serial set has to be complete before anything leaves the shelf. Checked
     # here rather than at draft creation: this is the first moment the storekeeper
@@ -11970,16 +12512,28 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     item_id=line.item_id,
                     warehouse_id=issue.warehouse_id,
                 )
-                if qty > held:
-                    raise ValidationError(
-                        f"{line.item_code or line.item_id}: only {held} is allocated "
-                        f"against this indent; cannot issue {qty}."
-                    )
-                if held_here < qty:
-                    raise ValidationError(
-                        f"{line.item_code or line.item_id}: {qty} is allocated, but only "
-                        f"{held_here} is reserved in {issue.warehouse_name or 'this warehouse'}."
-                    )
+                # A point the indent's goods were FORWARDED to (WH -> MDP -> LIP)
+                # holds them with no reservation here — that hold was consumed where
+                # they came from. It takes what IS reserved here first and the rest
+                # from its free stock below; `_guard_network_own_stock` (run above)
+                # is what bounds that. Before this, an MDP forwarding goods for an
+                # indent that ALSO had a share reserved at the LIP was refused here
+                # outright, because "held anywhere > 0" read as "must be held here".
+                forwarding_here = held_here < qty and await _forwarding_point(
+                    db, line_indent_id, issue.warehouse_id)
+                if not forwarding_here:
+                    if qty > held:
+                        raise ValidationError(
+                            f"{line.item_code or line.item_id}: only {held} is allocated "
+                            f"against this indent; cannot issue {qty}."
+                        )
+                    if held_here < qty:
+                        raise ValidationError(
+                            f"{line.item_code or line.item_id}: {qty} is allocated, but "
+                            f"only {held_here} is reserved in "
+                            f"{issue.warehouse_name or 'this warehouse'}."
+                        )
+                from_hold = min(qty, held_here)
 
                 # The hold standing where THIS line says the goods are, first. One
                 # allocation held in two bays is served by two issue lines, and an
@@ -11991,20 +12545,20 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     db,
                     InventoryRefType.RESERVATION.value,
                     line_indent_id,
-                    quantity=qty,
+                    quantity=from_hold,
                     ref_line_id=line.indent_item_id,
                     item_id=line.item_id,
                     warehouse_id=issue.warehouse_id,
                     bin_id=line.bin_id or None,
                     batch_id=line.batch_id or None,
-                )
+                ) if from_hold > ZERO else []
                 taken = sum((row.quantity for row in slices), ZERO)
-                if taken < qty:
+                if taken < from_hold:
                     slices = slices + await stock_allocation.consume_for_issue(
                         db,
                         InventoryRefType.RESERVATION.value,
                         line_indent_id,
-                        quantity=qty - taken,
+                        quantity=from_hold - taken,
                         ref_line_id=line.indent_item_id,
                         item_id=line.item_id,
                         warehouse_id=issue.warehouse_id,
@@ -12019,7 +12573,35 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
                         project_id=stock.project_id,
                         serial_numbers=take_units(units, stock.quantity),
+                        pack_text=_ledger_packs(line, stock.quantity),
                     )
+                qty -= sum((row.quantity for row in slices), ZERO)
+                if qty <= ZERO:
+                    continue
+                # Only a forwarding point gets here with quantity left: the rest of
+                # the forwarded goods come off its free stock, below.
+
+        if outward and not line_indent_id:
+            # A direct issue's own hold (`_hold_direct_issue_stock`): consumed and
+            # moved off exactly the balance rows it reserved, as an allocation's is.
+            # Drafts saved before the hold existed carry none and fall through to the
+            # free-stock path below for whatever is not covered.
+            held_slices = await stock_allocation.consume_for_issue(
+                db, InventoryRefType.ISSUE_HOLD.value, issue.id, quantity=qty,
+                ref_line_id=line.id, item_id=line.item_id,
+                warehouse_id=issue.warehouse_id)
+            for stock in held_slices:
+                await move_stock(
+                    db, item_id=line.item_id, qty=stock.quantity,
+                    direction=StockDirection.OUT.value, ref_type=ledger_ref_type,
+                    ref_id=issue.id, ref_no=issue.issue_no, user=user,
+                    warehouse_id=stock.warehouse_id, bin_id=stock.bin_id,
+                    batch_id=stock.batch_id, project_id=stock.project_id,
+                    serial_numbers=take_units(units, stock.quantity),
+                    pack_text=_ledger_packs(line, stock.quantity),
+                )
+            qty -= sum((row.quantity for row in held_slices), ZERO)
+            if qty <= ZERO:
                 continue
 
         if outward and issue.project_id:
@@ -12049,6 +12631,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     bin_id=source_bin, batch_id=source_batch,
                     project_id=source_project,
                     serial_numbers=take_units(units, slice_qty),
+                    pack_text=_ledger_packs(line, slice_qty),
                 )
         else:
             await move_stock(
@@ -12061,6 +12644,12 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
             )
 
     await _mark_serials(db, issue, outward)
+    if outward:
+        # The packs follow the units out (2026-10-08): emptied packs are consumed, a
+        # part-taken one is opened and what stays is packed again, and every pack
+        # around a changed one opens.
+        await wh_packing.settle_issue(db, issue, await _issue_units_by_line(db, issue),
+                                      user)
     if outward and issue.project_id:
         from app.modules.warehouse.project_holds import clear_spent_unit_stamps
         await clear_spent_unit_stamps(
@@ -12074,9 +12663,11 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
     issue.issued_by_id = getattr(user, "id", None)
     issue.issued_by_name = _name(user)
     issue.status = IssueStatus.ISSUED.value
-    # Every OUTWARD issue is inspected before logistics may take it: a consignment is
-    # built only from what outward QC passed, whatever the item's `requires_qi` says.
-    needs_qc = needs_qc or outward
+    # Outward QC follows the ITEM (2026-10-07). An issue is inspected only when at least
+    # one of its lines carries an item that `requires_qi`, and the sheet holds only those
+    # lines (`_raise_outbound_inspection_for`); the rest go to logistics at their issued
+    # quantity. An issue with no such line is NOT_REQUIRED and is consignable at once —
+    # forcing every outward issue through QC held goods nobody had asked to inspect.
     issue.qc_status = QcStatus.PENDING.value if needs_qc else QcStatus.NOT_REQUIRED.value
 
     if needs_qc and outward:
@@ -12248,7 +12839,17 @@ async def _claim_units(
             or_(m.SerialNumber.remarks.is_(None),
                 and_(*[~m.SerialNumber.remarks.startswith(prefix)
                        for prefix in _CLAIMED_REMARK_PREFIXES])),
-        ).order_by(m.SerialNumber.id)
+        # Loose units first, then PART packs (2026-10-11 — a carton already short is
+        # used up before a full one is touched), then pack by pack (2026-10-08). Packs
+        # are created smallest-first at putaway, so this empties strips before it
+        # opens a box and takes whole packs wherever the quantity allows — a pick lands
+        # on at most one part pack, which is the one a coded item's break bulk has to
+        # answer for.
+        ).order_by(m.SerialNumber.handling_unit_id.is_not(None),
+                   select(case((m.HandlingUnit.content_qty.is_(None), 1), else_=0))
+                   .where(m.HandlingUnit.id == m.SerialNumber.handling_unit_id)
+                   .correlate(m.SerialNumber).scalar_subquery(),
+                   m.SerialNumber.handling_unit_id, m.SerialNumber.id)
         .limit(wanted - len(mine))
         .with_for_update()
     )).scalars().all()
@@ -13473,6 +14074,10 @@ async def cancel_issue(db: AsyncSession, issue_id: int, reason: str | None, user
                          reason=reason or "Issue cancelled")
 
     await _clear_issue_serial_reservations(db, issue.id)
+    # A direct issue's own hold goes back to the shelf with it. An indent issue's
+    # stock stays reserved for the INDENT (the allocation still stands), so the indent
+    # returns to this point's dropdown with that quantity still waiting for it.
+    await _release_issue_hold(db, issue.id)
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user, before=before,
                       after={"status": issue.status, "reason": reason})
@@ -23559,12 +24164,17 @@ async def warehouse_options(db: AsyncSession, *, search: str | None = None, mine
              "warehouse_type": r.warehouse_type} for r in rows]
 
 
-def _own_hold_clause(indent_id: int | None, project_id: int | None = None):
+def _own_hold_clause(indent_id: int | None, project_id: int | None = None,
+                     issue_id: int | None = None):
     """Which `inv_reservations` rows a document may draw on as its own: its indent's
-    reservation, and the lots held for its project. Everybody else's stay hidden."""
+    reservation, the lots held for its project, and — for a direct issue being edited —
+    the stock it reserved itself. Everybody else's stay hidden."""
     from app.modules.inventory.models import ProjectHold, Reservation
 
     clauses = []
+    if issue_id:
+        clauses.append(and_(Reservation.ref_type == InventoryRefType.ISSUE_HOLD.value,
+                            Reservation.ref_id == issue_id))
     if indent_id:
         clauses.append(and_(Reservation.ref_type == InventoryRefType.RESERVATION.value,
                             Reservation.ref_id == indent_id))
@@ -23577,7 +24187,8 @@ def _own_hold_clause(indent_id: int | None, project_id: int | None = None):
     return or_(*clauses) if clauses else false()
 
 
-def _stock_offerable(indent_id: int | None, project_id: int | None = None):
+def _stock_offerable(indent_id: int | None, project_id: int | None = None,
+                     issue_id: int | None = None):
     """Stock a picker may still choose: what is free, plus what THIS indent is holding.
 
     FIXED 2026-08-21 — both option lists filtered on `available_qty > 0` alone, and an
@@ -23594,11 +24205,11 @@ def _stock_offerable(indent_id: int | None, project_id: int | None = None):
     from app.modules.inventory.models import Reservation, Stock
 
     free = Stock.available_qty > ZERO
-    if not indent_id and not project_id:
+    if not indent_id and not project_id and not issue_id:
         return free
     mine = Stock.id.in_(
         select(Reservation.stock_id).where(
-            _own_hold_clause(indent_id, project_id),
+            _own_hold_clause(indent_id, project_id, issue_id),
             Reservation.status == ReservationStatus.ACTIVE.value,
         )
     )
@@ -24131,10 +24742,32 @@ async def indent_options(
     if search:
         stmt = stmt.where(Indent.indent_no.ilike(f"%{search}%"))
     rows = (await db.execute(stmt.order_by(Indent.id.desc()).limit(LOOKUP_LIMIT))).scalars().all()
-    # An STR says so in the picker — its number alone reads like any indent's.
-    return [{"id": r.id, "code": r.indent_no,
-             "name": ("STR · " if r.indent_type == _STR_INDENT_TYPE else "")
-             + (getattr(r, "department_name", None) or r.indent_no)} for r in rows]
+    
+    if warehouse_id is not None:
+        peers = await _same_tier_warehouse_ids(db, warehouse_id)
+    else:
+        peers = None
+
+    items = []
+    for r in rows:
+        caps = await _indent_cap(db, r.id)
+        taken = await _already_issued(db, r.id, warehouse_ids=peers)
+        if not any(cap > taken.get(item_id, ZERO) for item_id, cap in caps.items()):
+            continue
+        if warehouse_id is not None:
+            # Offered only while something reserved HERE is still unclaimed. A draft
+            # already covering this point's whole allocation is the document to open —
+            # offering the indent again is how the same units were drafted twice.
+            # Cancelling that draft frees the claim, and the indent comes back.
+            held = await _held_by_line(db, r.id, warehouse_id=warehouse_id)
+            claims = await _unposted_claims(db, r.id, warehouse_id)
+            if not any(qty > claims.get(line_id, ZERO) for line_id, qty in held.items()):
+                continue
+        # An STR says so in the picker — its number alone reads like any indent's.
+        items.append({"id": r.id, "code": r.indent_no,
+                      "name": ("STR · " if r.indent_type == _STR_INDENT_TYPE else "")
+                      + (getattr(r, "department_name", None) or r.indent_no)})
+    return items
 
 
 async def indent_issue_source(
@@ -24205,6 +24838,56 @@ async def indent_issue_source(
         b.id: b
         for b in (await db.execute(select(m.Batch).where(m.Batch.id.in_(batch_ids)))).scalars().all()
     } if batch_ids else {}
+
+    peers = await _same_tier_warehouse_ids(db, warehouse_id)
+    taken = await _already_issued(db, indent_id, warehouse_ids=peers)
+    caps = await _indent_cap(db, indent_id)
+
+    items = []
+    # What the indent still owes this tier, per item, SPENT as the rows are read. One
+    # item reserved over two batches is two rows, and capping each row at the whole
+    # outstanding figure prefilled 5 + 5 against an indent owed 6 — a form the save
+    # then refused, with no hint which line to cut.
+    left = {item_id: max(ZERO, cap - taken.get(item_id, ZERO))
+            for item_id, cap in caps.items()}
+    # And what other unposted issues at this point already claim of the same hold —
+    # spent off the rows the same way, oldest reservation row first.
+    claimed = await _unposted_claims(db, indent_id, warehouse_id)
+    for row in rows:
+        item_id = row.item_id
+        reserved_qty = _d(row[5])
+        line_claim = claimed.get(row.ref_line_id or 0, ZERO)
+        usable = max(ZERO, reserved_qty - line_claim)
+        if row.ref_line_id:
+            claimed[row.ref_line_id] = max(ZERO, line_claim - reserved_qty)
+        qty = min(usable, left.get(item_id, ZERO))
+        if qty <= ZERO:
+            continue
+        left[item_id] = left.get(item_id, ZERO) - qty
+        items.append({
+            "indent_item_id": row.ref_line_id,
+            "item_id": item_id,
+            "item_code": item_by_id[item_id].code if item_id in item_by_id else None,
+            "item_name": item_by_id[item_id].name if item_id in item_by_id else None,
+            "is_serial_tracked": (
+                bool(item_by_id[item_id].is_serial_tracked)
+                if item_id in item_by_id else False
+            ),
+            "bin_id": row.bin_id or None,
+            "bin_code": bin_by_id[row.bin_id].code if row.bin_id and row.bin_id in bin_by_id else None,
+            "bin_path": getattr(bin_by_id[row.bin_id], "path", None) if row.bin_id and row.bin_id in bin_by_id else None,
+            "batch_id": row.batch_id or None,
+            "batch_no": batch_by_id[row.batch_id].batch_no if row.batch_id and row.batch_id in batch_by_id else None,
+            "requested_qty": qty,
+            "issued_qty": qty,
+        })
+
+    if not items:
+        holders = await _live_issue_labels(db, indent_id, [warehouse_id])
+        raise ValidationError(
+            f"{indent.indent_no} has nothing left to issue from this point"
+            + (f" — {holders} already cover{'s' if ',' not in holders else ''} what is "
+               "reserved here. Open that issue instead." if holders else "."))
 
     return {
         "indent_id": indent.id,
@@ -24465,11 +25148,13 @@ async def _requesting_points(
     }
 
 
-# An outward issue reaches logistics only once outward QC has passed it (PARTIAL: the
-# accepted part). NOT_REQUIRED is not in it — issues posted before QC became mandatory
-# for every outward issue are inspected first, which is why it is INSPECTABLE.
-CONSIGNABLE_QC = (QcStatus.PASSED.value, QcStatus.PARTIAL.value)
-INSPECTABLE_QC = (QcStatus.PENDING.value, QcStatus.FAILED.value, QcStatus.NOT_REQUIRED.value)
+# An outward issue reaches logistics once outward QC has passed it (PARTIAL: the
+# accepted part), or when none of its items requires QC at all (NOT_REQUIRED — see
+# the note in `post_issue`). The two sets are disjoint, so an issue is offered to
+# exactly one of the QC desk and the packing desk, never both.
+CONSIGNABLE_QC = (QcStatus.PASSED.value, QcStatus.PARTIAL.value,
+                  QcStatus.NOT_REQUIRED.value)
+INSPECTABLE_QC = (QcStatus.PENDING.value, QcStatus.FAILED.value)
 
 
 def _consignable_issues_stmt():
@@ -24814,6 +25499,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 # row are, so the packing screen names them and knows which it may
                 # choose itself (asset and consumable codes) and which it may not.
                 "tracking_type": getattr(line, "tracking_type", None),
+                "requires_qc": bool(getattr(line, "requires_qc", False)),
                 # Snapshotted on the issue line at creation, so the packer sees what
                 # is actually in the carton rather than a blank the receiving point
                 # has to guess at.
@@ -26180,13 +26866,28 @@ async def _apply_outbound_inspection_result(db: AsyncSession,
     inspection.status = InspectionStatus.COMPLETED.value
 
     issue = await get_issue(db, inspection.issue_id)
-    if inspection.passed_items == len(inspection.items):
-        issue.qc_status = QcStatus.PASSED.value
-    elif inspection.failed_items == len(inspection.items):
-        issue.qc_status = QcStatus.FAILED.value
-    else:
-        issue.qc_status = QcStatus.PARTIAL.value
+    # Lines the sheet does not carry needed no check and still go out whole, so a
+    # sheet that failed everything it held leaves the issue PARTIAL, not FAILED.
+    covered = {row.issue_item_id for row in inspection.items}
+    unchecked = any(line.id not in covered and _d(line.issued_qty) > ZERO
+                    for line in issue.items)
+    issue.qc_status = _outbound_qc_verdict(
+        passed=inspection.passed_items, failed=inspection.failed_items,
+        lines=len(inspection.items), unchecked=unchecked)
     return issue.qc_status
+
+
+def _outbound_qc_verdict(*, passed: int, failed: int, lines: int, unchecked: bool) -> str:
+    """The issue's QC status from its sheet, counting lines that never needed one.
+
+    Pure. `unchecked` is "the issue also carries goods outside the sheet" — those are
+    consignable whatever the sheet says, so they turn a FAILED into a PARTIAL.
+    """
+    if passed == lines:
+        return QcStatus.PASSED.value
+    if failed == lines:
+        return QcStatus.PARTIAL.value if unchecked else QcStatus.FAILED.value
+    return QcStatus.PARTIAL.value
 
 
 async def _outbound_inspection_approval_pending(db: AsyncSession,

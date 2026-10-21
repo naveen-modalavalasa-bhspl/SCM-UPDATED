@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, CheckCircle2, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Info, Plus, ScanLine, Trash2 } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -234,10 +234,15 @@ export default function OutboundQualityInspectionForm({
     mutationFn: (issueId: number) => getIssue(issueId),
     onSuccess: (receipt) => {
       setPulled(receipt);
+      // Only the lines whose item asks for outward QC. The rest go to packing at
+      // their issued quantity; an issue raised before the flag was served carries
+      // none, and is inspected whole as it always was.
+      const all = receipt.items ?? [];
+      const flagged = all.filter((l) => l.requires_qc);
       setForm((f) => ({
         ...f,
         warehouse_id: receipt.warehouse_id,
-        items: (receipt.items ?? []).map((l) => ({
+        items: (flagged.length > 0 ? flagged : all).map((l) => ({
           issue_item_id: l.id,
           item_id: l.item_id,
           // Carried through so the line can name itself before the first save.
@@ -697,6 +702,27 @@ export default function OutboundQualityInspectionForm({
           </Field>
         </div>
       </Section>
+
+      {(() => {
+        const covered = new Set(form.items.map((line) => line.issue_item_id));
+        const skipped = (delivery?.items ?? []).filter(
+          (line) => !line.requires_qc && !covered.has(line.id) && num(line.issued_qty) > 0);
+        if (skipped.length === 0) return null;
+        return (
+          <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-line bg-content2/50 px-4 py-3 text-sm">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
+            <div>
+              <p className="font-semibold text-ink">
+                {skipped.length} {skipped.length === 1 ? "line needs" : "lines need"} no outward QC
+              </p>
+              <p className="mt-0.5 text-xs text-muted">
+                {skipped.map((line) => `${line.item_code ?? line.item_id}${line.batch_no ? ` / ${line.batch_no}` : ""}`).join(", ")}
+                {" "}— not inspected here, and packed at the full issued quantity.
+              </p>
+            </div>
+          </div>
+        );
+      })()}
 
       <Section title="Lines" hint="Every unit is accepted by default. Enter a rejected quantity, then tick only the rejected units.">
         <LinesEditor

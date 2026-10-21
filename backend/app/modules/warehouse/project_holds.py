@@ -133,7 +133,22 @@ async def list_lots(db: AsyncSession, params: PageParams, user, *,
         tail = node["path"] if node else "bulk"
         return f"{r.warehouse_name or 'Warehouse'} / {tail}"
 
+    # How each lot is bagged (2026-10-08) — one read for the page.
+    from app.modules.warehouse.packing import pack_summary
+    packed = {row["stock_id"]: row for row in await pack_summary(db, [
+        {"item_id": r.item_id, "warehouse_id": r.warehouse_id, "bin_id": r.bin_id or 0,
+         "batch_id": r.batch_id or 0, "project_id": r.project_id or 0,
+         "total_qty": r.total_qty, "uom_code": r.uom_code, "stock_id": r.id}
+        for r in rows])} if rows else {}
+
     page["items"] = [{
+        "project_id": r.project_id or None,
+        "pack_text": (packed.get(r.id) or {}).get("pack_text"),
+        "packs": (packed.get(r.id) or {}).get("packs") or [],
+        "loose_qty": (packed.get(r.id) or {}).get("loose_qty"),
+        "pack_unreconciled": bool((packed.get(r.id) or {}).get("unreconciled")),
+        "pack_below_min": int((packed.get(r.id) or {}).get("below_min") or 0),
+        "pack_part_packs": int((packed.get(r.id) or {}).get("part_packs") or 0),
         "location_path": location_path(r),
         "stock_id": r.id, "item_id": r.item_id, "item_code": r.item_code,
         "lot_nos": lots.get((r.item_id, r.warehouse_id, r.bin_id or 0, r.batch_id or 0), []),

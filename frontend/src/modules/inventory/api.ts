@@ -121,6 +121,7 @@ const toLedger = (r: MovementRow): StockLedgerItem => ({
   in_qty: r.direction === "IN" ? num(r.quantity) : 0,
   out_qty: r.direction === "OUT" ? num(r.quantity) : 0,
   balance_qty: num(r.balance_after),
+  pack_text: r.pack_text ?? null,
   // Kept null when the ledger row has no rate rather than coerced to 0: a zero here
   // reads as "this stock is worthless", which is a different claim from "nobody
   // costed it". Rows written before stk_ledger.rate/.value were mapped are null.

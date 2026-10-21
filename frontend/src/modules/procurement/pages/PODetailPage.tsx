@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { PackChangesPanel } from "../components/PackChangesPanel";
+import { POLinePacking } from "../components/POLinePacking";
+import { PackQty } from "@/shared/packing";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FilePen, Printer, Send, Undo2, X,
@@ -434,6 +437,9 @@ export function PODetailPage() {
         </div>
       </div>
 
+      {/* ── A supplier sending a different packing — the buyer answers here ── */}
+      <PackChangesPanel poId={po.data.id} />
+
       {/* ── Line items — emerald block, editable on approval ───────── */}
       <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-teal-50 to-white shadow-sm">
         <div className="h-1 w-full bg-gradient-to-r from-emerald-400 via-teal-400 to-emerald-500" />
@@ -480,6 +486,8 @@ export function PODetailPage() {
                             {isRateChanged && <span className="rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-cyan-700">Rate Changed</span>}
                           </div>
                           <div className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</div>
+                          <POLinePacking poId={po.data.id} poStatus={po.data.status} line={item}
+                                         showChips={false} />
                           {item.delivery_days != null && <div className="text-xs text-emerald-700">Vendor quoted {item.delivery_days} day{item.delivery_days===1?"":"s"}</div>}
                         </td>
                         <td className="p-3 text-right">
@@ -498,11 +506,16 @@ export function PODetailPage() {
                                 />
                                 <span className="text-xs text-muted">{item.uom_code ?? ""}</span>
                               </div>
+                              {!!item.pack_breakdown?.length && (
+                                <PackQty entries={item.pack_breakdown} qty={item.quantity} uom={item.uom_code}
+                                         itemId={item.item_id} align="right" />
+                              )}
                             </div>
                           ) : (
                             <div className="flex flex-col items-end">
                               {isQtyChanged && <div className="text-[11px] font-semibold text-blue-700">was <span className="line-through">{prev.quantity}</span></div>}
-                              <div><span className="font-bold">{item.quantity}</span> <span className="text-xs text-muted">{item.uom_code ?? ""}</span></div>
+                              <PackQty entries={item.pack_breakdown} qty={item.quantity} uom={item.uom_code}
+                                       itemId={item.item_id} align="right" />
                             </div>
                           )}
                           {editable && isIncrease && <div className="mt-1 text-[11px] font-bold text-red-600">Increase not allowed</div>}

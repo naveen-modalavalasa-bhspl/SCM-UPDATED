@@ -112,6 +112,10 @@ class StockMovement(Base):
     ref_id = Column(BigInteger, nullable=True)
     ref_no = Column(String(50), nullable=True)
     remarks = Column(String(500), nullable=True)
+    # How this movement was PACKED, as the sentence the document said at the time
+    # ("2 Box + 5 Strip = 25 TAB", 2026-10-08). A snapshot like every other name on the
+    # row: the ledger is append-only and must read the same after any repack.
+    pack_text = Column(String(300), nullable=True)
     created_by_id = soft_fk()
     created_by_name = Column(String(200), nullable=True)
     created_at = created_at_col()

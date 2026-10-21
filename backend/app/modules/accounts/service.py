@@ -145,10 +145,14 @@ def _milestones(po: PurchaseOrder, sums: dict, delivered_on: date | None,
     nth: dict[str, int] = {}
     out = []
     for row, amount in zip(rows, amounts):
-        meta = dict(_META.get(row.stage, {"label": row.stage, "trigger": ""}))
+        meta = dict(_META.get(row.stage, {"label": row.stage, "trigger": "",
+                                          "short": row.stage[:3]}))
+        # Every milestone carries a code -- ADV 1/1, DLV 2/4 -- so a payment, a
+        # remittance advice and the printed order can all name the same instalment.
+        nth[row.stage] = nth.get(row.stage, 0) + 1
+        code = f"{meta['short']} {nth[row.stage]}/{per_stage[row.stage]}"
         if per_stage[row.stage] > 1:
             # Instalments of one stage (50% against delivery in 30/60/90 days).
-            nth[row.stage] = nth.get(row.stage, 0) + 1
             meta["label"] = (f"{meta['label']} — instalment {nth[row.stage]} of "
                              f"{per_stage[row.stage]}")
         paid, pending = sums.get(row.id, (Decimal(0), Decimal(0)))
@@ -162,7 +166,8 @@ def _milestones(po: PurchaseOrder, sums: dict, delivered_on: date | None,
             trigger_met, start = None, None
         due = start + timedelta(days=row.due_days or 0) if start else None
         out.append({
-            "id": row.id, "seq": row.seq, "stage": row.stage, "label": meta["label"],
+            "id": row.id, "seq": row.seq, "stage": row.stage, "code": code,
+            "label": meta["label"],
             "trigger": meta["trigger"], "percent": float(row.percent),
             "due_days": row.due_days or 0, "amount": float(amount),
             "paid": float(paid), "pending": float(pending),

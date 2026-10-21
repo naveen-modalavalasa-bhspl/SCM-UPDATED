@@ -280,6 +280,8 @@ export interface StockLedgerItem {
   in_qty: number;
   out_qty: number;
   balance_qty: number;
+  /** How the movement was packed (2026-10-08), as written at the time. */
+  pack_text?: string | null;
   /** Null, not 0, when the movement was never costed — "not costed" is not "free". */
   unit_rate: number | null;
   total_value: number | null;
@@ -472,6 +474,8 @@ export interface MovementRow {
   direction: "IN" | "OUT";
   quantity: number;
   balance_after: number;
+  /** How the movement was packed, snapshotted on the row (2026-10-08). */
+  pack_text?: string | null;
   /** stk_ledger.rate / .value — null on rows written before they were mapped. */
   rate?: number | null;
   value?: number | null;

@@ -99,6 +99,8 @@ class MovementRow(BaseModel):
     serial_numbers: list[str] | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
+    # How the movement was packed, snapshotted when it was written (2026-10-08).
+    pack_text: str | None = None
     # Every unit code this movement carried, for an item that is not serial-tracked —
     # where the code IS the unit's identity. A list, because the screen's code column
     # lists and copies them one per line; `asset_code` / `consumable_code` above stay

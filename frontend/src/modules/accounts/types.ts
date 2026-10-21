@@ -8,6 +8,8 @@ export interface Milestone {
   id: number;
   seq: number;
   stage: string;
+  /** ADV 1/1, DLV 2/4: the stage's short code and which of its instalments. */
+  code?: string;
   label: string;
   trigger: string;
   percent: number;
