@@ -19,7 +19,9 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.config import settings
-from app.core.exceptions import AuthenticationError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    AuthenticationError, NotFoundError, PermissionError_, ValidationError,
+)
 from app.core.pagination import PageParams, paginate
 from app.core.security import (
     create_access_token, hash_password_async, verify_password_async,
@@ -556,6 +558,11 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
         status=POStatus.DRAFT.value,
         remarks=data.remarks,
     )
+    if data.copied_from_po_id:
+        source = await db.get(PurchaseOrder, data.copied_from_po_id)
+        if source is None:
+            raise ValidationError(f"Unknown purchase order {data.copied_from_po_id}")
+        po.copied_from_po_id, po.copied_from_po_no = source.id, source.po_no
     await _apply_po_header(db, po, data)
     db.add(po)
     await db.flush()
@@ -580,6 +587,110 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
     logger.info("purchase order %s raised directly by %s (%d line(s))",
                 po.po_no, user.full_name, len(data.lines))
     return await get_po(db, po.id)
+
+
+async def copy_po_template(db: AsyncSession, po_id: int, user) -> dict:
+    """"Copy as new PO": an existing order's content as a New PO form, nothing saved.
+
+    Nothing is written and no number is drawn — the form saves through `create_po`
+    like any hand-raised order, so a copy opened and abandoned leaves no trace. What
+    this decides is what the form may be pre-filled WITH, checked against today's
+    masters so the save does not fail on something the buyer cannot see:
+
+    - an inactive or blacklisted vendor, an inactive payment term or project is left
+      blank (the term's wording stays — it is the buyer's text);
+    - a line whose item is inactive is dropped; tax and unit come from the item master
+      when it has them, since the old order's may be out of date;
+    - the indent, requisition, RFQ and quotation links are never carried. That demand
+      was already ordered, so the copy is a direct PO and orders nothing twice;
+    - the expected date keeps its distance from the order date, counted from today.
+
+    Any order the caller can open may be copied, whatever its status — only the
+    content is taken, never its approvals, receipts, payments or attachments.
+    """
+    from app.shared.models.master import PaymentTerm
+
+    if perms.PO_VIEW not in await get_user_permissions(
+            db, user, getattr(user, "active_position_id", None)):
+        raise PermissionError_(f"Missing permission: {perms.PO_VIEW}")
+    source = await get_po(db, po_id, user, include_approver=True)
+    warnings: list[str] = []
+
+    vendor = await db.get(Vendor, source.vendor_id)
+    vendor_ok = bool(vendor and vendor.is_active and not vendor.is_blacklisted)
+    if not vendor_ok:
+        warnings.append(f"Vendor {source.vendor_name or source.vendor_id} is no longer "
+                        "active — pick the vendor again.")
+
+    payment_term_id = source.payment_term_id
+    if payment_term_id:
+        term = await db.get(PaymentTerm, payment_term_id)
+        if term is None or not term.is_active:
+            payment_term_id = None
+            warnings.append("The payment term on the original order is no longer active "
+                            "— pick one again. Its wording has been kept.")
+
+    project_id = source.project_id
+    if project_id:
+        project = await db.get(Project, project_id)
+        if project is None or not project.is_active:
+            project_id = None
+            warnings.append(f"Project {source.project_name or project_id} is no longer "
+                            "active — pick the project again.")
+
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_([line.item_id for line in source.items]))
+    )).scalars().all()} if source.items else {}
+    lines, dropped = [], []
+    for line in sorted(source.items, key=lambda row: row.id):
+        item = items.get(line.item_id)
+        if item is None or not item.is_active:
+            dropped.append(line.item_name or line.item_code or str(line.item_id))
+            continue
+        lines.append({
+            "item_id": item.id, "item_code": item.code, "item_name": item.name,
+            "uom_code": item.uom_code or line.uom_code,
+            "quantity": float(line.quantity), "rate": float(line.rate),
+            "tax_percent": float(item.tax_percent if item.tax_percent is not None
+                                 else line.tax_percent),
+        })
+    if dropped:
+        warnings.append("Left out because the item is no longer active: "
+                        + ", ".join(dropped) + ".")
+
+    # The order-level discount was agreed on the full order; on fewer lines it may now
+    # exceed what is left, which `create_po` would refuse.
+    sub_total = sum(line["quantity"] * line["rate"] for line in lines)
+    discount = float(source.discount_amount or 0)
+    if discount > sub_total:
+        discount = 0.0
+        warnings.append("The discount was cleared: it is more than the copied lines "
+                        "add up to.")
+
+    expected_date = None
+    if source.expected_date and source.po_date and source.expected_date > source.po_date:
+        expected_date = ist_today() + (source.expected_date - source.po_date)
+
+    return {
+        "source_po_id": source.id, "source_po_no": source.po_no,
+        "source_po_date": source.po_date,
+        "vendor_id": source.vendor_id if vendor_ok else None,
+        "vendor_name": source.vendor_name if vendor_ok else None,
+        "expected_date": expected_date,
+        "project_id": project_id,
+        "remarks": source.remarks,
+        "payment_term_id": payment_term_id,
+        "payment_terms": source.payment_terms,
+        "delivery_terms": source.delivery_terms,
+        "material_terms": source.material_terms,
+        "logistics_terms": source.logistics_terms,
+        "billing_address": source.billing_address,
+        "shipping_address": source.shipping_address,
+        "discount_amount": discount,
+        "freight_amount": float(source.freight_amount or 0),
+        "lines": lines,
+        "warnings": warnings,
+    }
 
 
 #: A purchase order that has stopped claiming anything — it never reaches a vendor and
@@ -1064,10 +1175,15 @@ async def update_po_header(db: AsyncSession, po_id: int,
     The totals are recomputed from the stored lines, never from the caller: this route
     can move discount and freight and must never be able to move a rate.
     """
-    po = await get_po(db, po_id, user)
-    if po.status != POStatus.DRAFT.value:
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status == POStatus.DRAFT.value:
+        # A draft keeps the raiser's own scope; this raises if it is outside it.
+        await get_po(db, po_id, user)
+    elif not (po.status == POStatus.RETURNED_FOR_CORRECTION.value
+              and await _raiser_owns_correction(db, po, user)):
         raise ValidationError(
-            f"Only a draft purchase order can be edited (this one is {po.status})")
+            "Only a draft purchase order, or one sent back to its raiser for "
+            f"correction, can be edited (this one is {po.status})")
 
     if data.expected_date is not None:
         po.expected_date = data.expected_date
@@ -1084,7 +1200,7 @@ async def update_po_header(db: AsyncSession, po_id: int,
 
     await db.commit()
     logger.info("purchase order %s header edited by %s", po.po_no, user.full_name)
-    return await get_po(db, po_id, user)
+    return await get_po(db, po_id, user, include_approver=True)
 
 
 async def list_pos(
@@ -1233,6 +1349,9 @@ async def act_on_po(db: AsyncSession, po_id: int, action: str, comments: str, us
     po = await get_po(db, po_id)
     if po.status != POStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"PO is not awaiting approval (status {po.status})")
+    # A rejection ends the order, so the raiser must be told why.
+    if action.upper().startswith("REJECT") and not (comments or "").strip():
+        raise ValidationError("A reason is required to reject this order")
     instance = await engine.act(db, DocType.PO.value, po.id, action, user, comments)
     if instance.status == InstanceStatus.APPROVED.value:
         po.status = POStatus.APPROVED.value
@@ -1247,6 +1366,219 @@ async def act_on_po(db: AsyncSession, po_id: int, action: str, comments: str, us
     await db.commit()
     await db.refresh(po)
     return po
+
+
+def _po_workflow_context(po: PurchaseOrder) -> dict:
+    """The same context `submit_po` starts the ladder with, so a resubmitted rung
+    resolves its conditions exactly as it did the first time."""
+    return {"total_amount": float(po.total_amount),
+            "project_id": po.project_id or None,
+            "doc_no": po.po_no}
+
+
+async def send_back_po(db: AsyncSession, po_id: int, comments: str, user) -> PurchaseOrder:
+    """Send a PO back ONE rung for correction: to the approver who signed just below,
+    or to the raiser when it is still at the first rung. The reason is compulsory —
+    the person it lands with has to know what to fix."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this order back")
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"PO is not awaiting approval (status {po.status})")
+    await engine.return_for_correction(
+        db, DocType.PO.value, po.id, user, reason, context=_po_workflow_context(po))
+    correction = await engine.get_correction_state(db, DocType.PO.value, po.id) or {}
+    before_status = po.status
+    po.status = POStatus.RETURNED_FOR_CORRECTION.value
+    po.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": po.status},
+        summary=f"Sent PO back to {po.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{po.po_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+    await db.commit()
+    await db.refresh(po)
+    return await get_po_detail(db, po.id, user)
+
+
+async def resubmit_po_correction(db: AsyncSession, po_id: int, user,
+                                 comments: str = "") -> PurchaseOrder:
+    """The person a PO was sent back to hands it up again; it reopens at the rung
+    that sent it back, never at the bottom of the ladder. An optional comment goes
+    on the PO's conversation so the approver sees what was done."""
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"PO is not sent back for correction (status {po.status})")
+    await engine.resubmit_correction(
+        db, DocType.PO.value, po.id, user, context=_po_workflow_context(po))
+    before_status = po.status
+    po.status = POStatus.PENDING_APPROVAL.value
+    await _refresh_current_approver(db, po)
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": po.status},
+        summary="Resubmitted PO after correction"
+                + (f": {comments.strip()}" if (comments or "").strip() else ""),
+    )
+    if (comments or "").strip():
+        db.add(POComment(po_id=po.id, author_id=user.id, author_name=user.full_name,
+                         message=f"Resubmitted: {comments.strip()}"[:2000]))
+    await db.commit()
+    await db.refresh(po)
+    return await get_po_detail(db, po.id, user)
+
+
+async def correct_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
+    """The raiser's full edit of a PO sent back to them: vendor, expected date, lines
+    (item, quantity, rate, tax — add and remove) and the whole header, exactly what the
+    create form asks. Nothing has been sent or received on a sent-back order, so no
+    receipt guard applies. The vendor is locked on an order written off a quotation."""
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"PO is not sent back for correction (status {po.status})")
+    if not await _raiser_owns_correction(db, po, user):
+        raise ValidationError("Only the raiser can edit a PO that was sent back")
+    return await _rewrite_po(db, po, data, user, "Corrected PO after it was sent back")
+
+
+async def edit_draft_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
+    """The full edit of a DRAFT order (2026-10-19): vendor, expected date, every line
+    and the header — the same fields, rules and save as a sent-back correction.
+
+    Before this a draft could only have its header filled in, so a wrong item or
+    quantity on an order nobody had signed yet meant cancelling and raising it again.
+    Nothing has been approved, sent or received on a draft, so nothing guards it but
+    the raiser's own scope (`get_po` without the approver reach) and `po.edit`.
+    """
+    po = await get_po(db, po_id, user)
+    if po.status != POStatus.DRAFT.value:
+        raise ValidationError(
+            f"Only a draft purchase order can be edited here (this one is {po.status})")
+    return await _rewrite_po(db, po, data, user, "Edited draft PO")
+
+
+async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
+                      summary: str) -> PurchaseOrder:
+    """Write a whole edit onto an order not yet signed — a draft, or one sent back.
+    The caller has already decided this order may be edited by this login."""
+    if not data.lines:
+        raise ValidationError("A purchase order must have at least one line")
+    _assert_po_addresses(
+        data.billing_address if data.billing_address is not None else po.billing_address,
+        data.shipping_address if data.shipping_address is not None else po.shipping_address)
+
+    if data.vendor_id and data.vendor_id != po.vendor_id:
+        if po.quotation_id:
+            raise ValidationError(
+                f"{po.po_no} was written off quotation {po.quotation_no or ''} — its "
+                "vendor cannot be changed here. Reject it and raise a new order instead.")
+        vendor = await db.get(Vendor, data.vendor_id)
+        if vendor is None:
+            raise ValidationError(f"Unknown vendor {data.vendor_id}")
+        po.vendor_id = vendor.id
+        po.vendor_name = vendor.name
+        po.vendor_gstin = vendor.gstin
+
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_([line.item_id for line in data.lines]))
+    )).scalars().all()}
+    by_id = {line.id: line for line in po.items}
+    kept = {line.id for line in data.lines if line.id is not None}
+    for incoming in data.lines:
+        item = items.get(incoming.item_id)
+        if item is None:
+            raise ValidationError(f"Unknown item id: {incoming.item_id}")
+        amount = _d(incoming.quantity) * _d(incoming.rate)
+        existing = by_id.get(incoming.id) if incoming.id is not None else None
+        if incoming.id is not None and existing is None:
+            raise ValidationError(f"Unknown PO line id {incoming.id}")
+        if existing is not None:
+            if existing.item_id != item.id:
+                existing.item_id = item.id
+                existing.item_code = item.code
+                existing.item_name = item.name
+                existing.uom_code = item.uom_code
+            existing.quantity = _d(incoming.quantity)
+            existing.rate = _d(incoming.rate)
+            existing.tax_percent = _d(incoming.tax_percent)
+            existing.amount = amount
+        else:
+            db.add(POItem(
+                po_id=po.id, item_id=item.id, item_code=item.code,
+                item_name=item.name, uom_code=item.uom_code,
+                quantity=_d(incoming.quantity), rate=_d(incoming.rate),
+                tax_percent=_d(incoming.tax_percent), amount=amount,
+            ))
+    for line in list(po.items):
+        if line.id not in kept:
+            await db.delete(line)
+    await db.flush()
+
+    if data.expected_date is not None:
+        po.expected_date = data.expected_date
+    if data.remarks is not None:
+        po.remarks = data.remarks
+    await _apply_po_header(db, po, data)
+
+    lines = list((await db.execute(
+        select(POItem).where(POItem.po_id == po.id))).scalars().all())
+    sub_total = tax_total = Decimal("0")
+    for line in lines:
+        amount = _d(line.amount)
+        sub_total += amount
+        tax_total += amount * _d(line.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        after={"vendor_id": po.vendor_id, "lines": len(lines),
+               "total_amount": float(po.total_amount or 0)},
+        summary=summary,
+    )
+    await db.commit()
+    db.expire_all()
+    return await get_po_detail(db, po.id, user)
+
+
+async def pass_po_correction_down(db: AsyncSession, po_id: int, comments: str,
+                                  user) -> PurchaseOrder:
+    """An approver a PO was sent back to passes it one rung further down — to the
+    approver below, or to the raiser. Reason compulsory, as for any send-back."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this order back")
+    po = await get_po(db, po_id, user, include_approver=True)
+    if po.status != POStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"PO is not sent back for correction (status {po.status})")
+    await engine.pass_correction_down(
+        db, DocType.PO.value, po.id, user, reason, context=_po_workflow_context(po))
+    correction = await engine.get_correction_state(db, DocType.PO.value, po.id) or {}
+    po.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_purchase_orders", entity_id=po.id, entity_no=po.po_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": po.status}, after={"status": po.status},
+        summary=f"Sent PO further back to {po.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{po.po_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="PO", entity_id=po.id, deep_link=f"/procurement/pos/{po.id}")
+    await db.commit()
+    await db.refresh(po)
+    return await get_po_detail(db, po.id, user)
 
 
 async def send_to_vendor(db: AsyncSession, po_id: int, user) -> PurchaseOrder:
@@ -1844,11 +2176,19 @@ async def update_po_approval_quantities(
     never inflate it.
     """
     po = await get_po(db, po_id, user, include_approver=True)
-    if po.status != POStatus.PENDING_APPROVAL.value:
+    if po.status == POStatus.RETURNED_FOR_CORRECTION.value:
+        # Sent back: the person it was sent back to fixes it, under the same
+        # decrease-only rule an approver works to.
+        if not await _raiser_owns_correction(db, po, user):
+            raise ValidationError(
+                "Only the raiser can edit a sent-back PO. An approver it was sent back "
+                "to can resubmit it or send it further back.")
+    elif po.status != POStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Only a PO awaiting approval can be edited (status {po.status})")
-    actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
-    if po.id not in actionable:
-        raise ValidationError("Only the current approver can edit quantities during approval")
+    else:
+        actionable = await engine.actionable_doc_ids(db, DocType.PO.value, [po.id], user)
+        if po.id not in actionable:
+            raise ValidationError("Only the current approver can edit quantities during approval")
 
     by_id = {line.id: line for line in po.items}
     if not by_id:
@@ -2071,7 +2411,72 @@ async def get_po_detail(db: AsyncSession, po_id: int, user=None):
             or (po.vendor_status is None and po.status == POStatus.SENT_TO_VENDOR.value)
         )
     )
+    await _attach_correction(db, DocType.PO.value, po,
+                             po.status == POStatus.RETURNED_FOR_CORRECTION.value, user,
+                             raiser_id=po.created_by_id)
     return await _attach_pending_one(db, DocType.PO.value, po, user)
+
+
+async def po_correction_in_reach(db: AsyncSession, request, user) -> bool:
+    """`require_permission_or` hook: an approver without `po.edit` may still edit the
+    header of a PO that was sent back to THEM — they are the one asked to fix it."""
+    try:
+        po_id = int(request.path_params.get("po_id"))
+    except (TypeError, ValueError):
+        return False
+    po = await db.get(PurchaseOrder, po_id)
+    return bool(po is not None
+                and po.status == POStatus.RETURNED_FOR_CORRECTION.value
+                and await _raiser_owns_correction(db, po, user))
+
+
+async def _is_correction_owner(db: AsyncSession, doc_type: str, doc_id: int, user) -> bool:
+    """Is THIS login the person a sent-back document was handed to?"""
+    state = await engine.get_correction_state(db, doc_type, doc_id)
+    return bool(state and user is not None
+                and int(state.get("correction_owner_employee_id") or 0) == int(user.id))
+
+
+async def _raiser_owns_correction(db: AsyncSession, po: PurchaseOrder, user) -> bool:
+    """Editing a sent-back PO is the RAISER's job only. An approver it was handed back
+    to may resubmit it or pass it further down, never change it."""
+    return bool(user is not None and po.created_by_id == user.id
+                and await _is_correction_owner(db, DocType.PO.value, po.id, user))
+
+
+async def _attach_correction(db: AsyncSession, doc_type: str, doc, returned: bool, user,
+                             raiser_id: int | None = None):
+    """Who a sent-back document went to, by whom and why — and whether THIS login is
+    the one who can hand it up again. Served so the screen never guesses ownership
+    from a name."""
+    doc.correction = None
+    doc.can_resubmit_correction = False
+    doc.can_edit_correction = False
+    doc.can_pass_correction_down = False
+    if not returned:
+        return doc
+    state = await engine.get_correction_state(db, doc_type, doc.id)
+    if state:
+        doc.correction = {
+            "owner_name": state.get("correction_owner_name"),
+            "returned_by_name": state.get("returned_by_name"),
+            "returned_from_stage": state.get("returned_from_stage"),
+            "returned_at": state.get("returned_at"),
+            "reason": state.get("correction_comment"),
+        }
+        doc.can_resubmit_correction = bool(
+            user is not None
+            and int(state.get("correction_owner_employee_id") or 0) == int(user.id)
+        )
+        # Only the raiser edits. An approver holding it can only resubmit, or pass it
+        # further down while there is a rung below them.
+        doc.can_edit_correction = bool(
+            doc.can_resubmit_correction and raiser_id is not None
+            and int(raiser_id) == int(user.id))
+        doc.can_pass_correction_down = bool(
+            doc.can_resubmit_correction
+            and int(state.get("returned_from_sequence") or 0) > 1)
+    return doc
 
 
 async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
@@ -2080,9 +2485,11 @@ async def get_requisition_detail(db: AsyncSession, req_id: int, user=None):
 
 
 async def get_rfq_detail(db: AsyncSession, rfq_id: int, user=None):
-    return await _attach_pending_one(
-        db, DocType.RFQ.value,
-        await get_rfq(db, rfq_id, user, include_approver=True), user)
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    await _attach_correction(db, DocType.RFQ.value, rfq,
+                             rfq.status == RFQStatus.RETURNED_FOR_CORRECTION.value, user,
+                             raiser_id=rfq.created_by_id)
+    return await _attach_pending_one(db, DocType.RFQ.value, rfq, user)
 
 
 async def get_consolidation_detail(db: AsyncSession, cons_id: int, user=None):
@@ -3237,7 +3644,13 @@ async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = N
 async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RFQ:
     rfq = await get_rfq(db, rfq_id, user)
     EDITABLE = (RFQStatus.DRAFT.value, RFQStatus.PENDING_APPROVAL.value)
-    if rfq.status not in EDITABLE:
+    if rfq.status == RFQStatus.RETURNED_FOR_CORRECTION.value:
+        # Sent back: only its raiser edits it, and only once it has reached them.
+        if not await _rfq_raiser_owns_correction(db, rfq, user):
+            raise ValidationError(
+                "Only the raiser can edit an RFQ that was sent back. An approver it was "
+                "sent back to can resubmit it or send it further back.")
+    elif rfq.status not in EDITABLE:
         raise ValidationError(f"Cannot edit an RFQ in {rfq.status} status")
     if data.evaluation_method is not None:
         if not evaluation.is_valid(data.evaluation_method):
@@ -3471,6 +3884,9 @@ async def act_on_rfq(db: AsyncSession, rfq_id: int, action: str, comments: str,
     rfq = await get_rfq(db, rfq_id)
     if rfq.status != RFQStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"RFQ is not awaiting approval (status {rfq.status})")
+    # A rejection cancels the RFQ, so the raiser must be told why.
+    if action.upper().startswith("REJECT") and not (comments or "").strip():
+        raise ValidationError("A reason is required to reject this RFQ")
     instance = await engine.act(db, DocType.RFQ.value, rfq.id, action, user, comments)
     if instance.status == InstanceStatus.APPROVED.value:
         # Approved means published: the tokens go live and the vendors can quote.
@@ -3484,6 +3900,100 @@ async def act_on_rfq(db: AsyncSession, rfq_id: int, action: str, comments: str,
     if rfq.status == RFQStatus.PUBLISHED.value:
         await email_rfq_copies(db, rfq, user)
     return await get_rfq(db, rfq_id)
+
+
+def _rfq_workflow_context(rfq: RFQ) -> dict:
+    """The same context `submit_rfq` starts the ladder with."""
+    return {"vendor_count": rfq.vendor_count,
+            "project_id": rfq.project_id or None,
+            "doc_no": rfq.rfq_no}
+
+
+async def send_back_rfq(db: AsyncSession, rfq_id: int, comments: str, user):
+    """Send an RFQ back ONE rung for correction (previous approver, or the raiser at
+    the first rung). Reason compulsory. It stays unpublished: vendors see nothing."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this RFQ back")
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    if rfq.status != RFQStatus.PENDING_APPROVAL.value:
+        raise ValidationError(f"RFQ is not awaiting approval (status {rfq.status})")
+    await engine.return_for_correction(
+        db, DocType.RFQ.value, rfq.id, user, reason, context=_rfq_workflow_context(rfq))
+    correction = await engine.get_correction_state(db, DocType.RFQ.value, rfq.id) or {}
+    before_status = rfq.status
+    rfq.status = RFQStatus.RETURNED_FOR_CORRECTION.value
+    rfq.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_rfqs", entity_id=rfq.id, entity_no=rfq.rfq_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": rfq.status},
+        summary=f"Sent RFQ back to {rfq.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{rfq.rfq_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="RFQ", entity_id=rfq.id, deep_link=f"/procurement/rfqs/{rfq.id}")
+    await db.commit()
+    return await get_rfq_detail(db, rfq.id, user)
+
+
+async def _rfq_raiser_owns_correction(db: AsyncSession, rfq: RFQ, user) -> bool:
+    """Editing a sent-back RFQ is the RAISER's job only (see _raiser_owns_correction)."""
+    return bool(user is not None and rfq.created_by_id == user.id
+                and await _is_correction_owner(db, DocType.RFQ.value, rfq.id, user))
+
+
+async def pass_rfq_correction_down(db: AsyncSession, rfq_id: int, comments: str, user):
+    """An approver an RFQ was sent back to passes it one rung further down. Reason
+    compulsory."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this RFQ back")
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    if rfq.status != RFQStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"RFQ is not sent back for correction (status {rfq.status})")
+    await engine.pass_correction_down(
+        db, DocType.RFQ.value, rfq.id, user, reason, context=_rfq_workflow_context(rfq))
+    correction = await engine.get_correction_state(db, DocType.RFQ.value, rfq.id) or {}
+    rfq.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="pro_rfqs", entity_id=rfq.id, entity_no=rfq.rfq_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": rfq.status}, after={"status": rfq.status},
+        summary=f"Sent RFQ further back to {rfq.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{rfq.rfq_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="RFQ", entity_id=rfq.id, deep_link=f"/procurement/rfqs/{rfq.id}")
+    await db.commit()
+    return await get_rfq_detail(db, rfq.id, user)
+
+
+async def resubmit_rfq_correction(db: AsyncSession, rfq_id: int, user, comments: str = ""):
+    """Hand a sent-back RFQ up again; it reopens at the rung that sent it back."""
+    rfq = await get_rfq(db, rfq_id, user, include_approver=True)
+    if rfq.status != RFQStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(f"RFQ is not sent back for correction (status {rfq.status})")
+    await engine.resubmit_correction(
+        db, DocType.RFQ.value, rfq.id, user, context=_rfq_workflow_context(rfq))
+    before_status = rfq.status
+    rfq.status = RFQStatus.PENDING_APPROVAL.value
+    rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
+    await write_audit(
+        db, entity="pro_rfqs", entity_id=rfq.id, entity_no=rfq.rfq_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before_status}, after={"status": rfq.status},
+        summary="Resubmitted RFQ after correction"
+                + (f": {comments.strip()}" if (comments or "").strip() else ""),
+    )
+    await db.commit()
+    return await get_rfq_detail(db, rfq.id, user)
 
 
 async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:

@@ -12,7 +12,13 @@ describe("procurement api", () => {
        // document instead of over a side channel the audit never sees, and trims the
        // quantities they are signing for. Both are gated per document by the engine,
        // not by the screen — see `update_po_approval_quantities`.
-       "comments", "postComment", "updateApprovalQuantities"].sort(),
+       "comments", "postComment", "updateApprovalQuantities",
+       // Sent back for correction, and the raiser's edit of it.
+       "correct", "sendBack", "resubmitCorrection", "sendBackFurther",
+       // The same full edit on a draft.
+       "editDraft",
+       // "Copy as new PO": an order's content for the New PO form; saves nothing.
+       "copyTemplate"].sort(),
     );
     expect(typeof poApi.createFromIndent).toBe("function");
     // Raised by hand, alongside the two derived paths: an order that begins as a

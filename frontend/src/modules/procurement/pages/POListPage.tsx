@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Download } from "lucide-react";
+import { Copy, Download } from "lucide-react";
 import { Can, Card, ErrorBanner, FilterBar, FilterDateRange, FilterMenu, PageHeader, ResponsiveList, StatusPill, type Column } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { poApi } from "../api";
@@ -30,6 +30,31 @@ const money = (n?: number) =>
   `₹${Number(n ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const SIZE = 20;
+
+/** "Copy as new PO" from the register. Opens the New PO form pre-filled; nothing is
+ *  saved until that form is. Stops the click so the row does not open as well. */
+function CopyPOButton({ id, poNo }: { id: number; poNo: string }) {
+  const nav = useNavigate();
+  return (
+    <Can do="po.create">
+      <button
+        type="button"
+        title={`Copy ${poNo} as a new PO`}
+        aria-label={`Copy ${poNo} as a new PO`}
+        // The table row starts its own press on pointerdown, so stopping only the
+        // click could still open the row underneath.
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          nav(`/pos/new?copyFrom=${id}`);
+        }}
+        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted hover:bg-content2 hover:text-brand"
+      >
+        <Copy size={16} />
+      </button>
+    </Can>
+  );
+}
 
 /** Every filter this screen owns, so Clear knows what to drop. */
 const FILTER_KEYS = ["search", "status", "vendor", "date_from", "date_to",
@@ -136,6 +161,12 @@ export function POListPage() {
         </span>
       ),
     },
+    {
+      key: "copy",
+      header: "",
+      className: "w-12 text-right",
+      render: (r) => <CopyPOButton id={r.id} poNo={r.po_no} />,
+    },
   ];
 
   return (
@@ -221,8 +252,9 @@ export function POListPage() {
                 <StatusPill status={r.status} />
               </div>
               <div className="text-sm text-body">{r.vendor_name ?? "—"}</div>
-              <div className="text-xs text-muted">
+              <div className="flex items-center justify-between gap-2 text-xs text-muted">
                 {money(r.total_amount)}
+                <CopyPOButton id={r.id} poNo={r.po_no} />
               </div>
             </div>
           )}

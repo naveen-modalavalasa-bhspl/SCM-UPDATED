@@ -21,16 +21,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import throttle
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_vendor, require_permission
+from app.core.dependencies import (
+    get_current_vendor, require_permission, require_permission_or,
+)
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import po_documents, quote_otp, service, stats, suppliers
 from app.modules.procurement.schemas import (
+    POCorrectionIn,
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     ConsolidationStatsOut, DemandPoolRow, LedgerStatsOut, POStatsOut, QuoteStatsOut,
     ReqStatsOut, RFQStatsOut,
     DespatchNoteIn, DespatchNoteOut, MRCandidateRow, VendorPOListRow, VendorPOOut,
-    POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
+    POAmendIn, POApprovalQtyIn, POCommentIn, POCommentOut, POCopyOut, POCreate, POFromQuotationIn, POHeaderUpdate, POListRow, POOut,
     PODocumentOut, PORevisionOut, POVendorResponseIn, QuoteChangeDecisionIn, QuoteChangeRequestIn,
     QuoteChangeRequestOut, QuoteCommentIn, QuoteCommentOut, QuoteListRow,
     QuoteOtpOut, QuoteOut, QuoteSubmit, QuoteUnfreezeIn, ReqCreate, ReqFromMRsIn, ReqListRow,
@@ -142,6 +145,14 @@ async def get_one(po_id: int, db: AsyncSession = Depends(get_db),
     return await service.get_po_detail(db, po_id, user=user)
 
 
+@pos.get("/{po_id}/copy", response_model=POCopyOut)
+async def copy_template(po_id: int, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.PO_CREATE))):
+    """"Copy as new PO": this order's content for the New PO form. Saves nothing —
+    the number is drawn when the form is saved through `POST /api/pos`."""
+    return await service.copy_po_template(db, po_id, user)
+
+
 @pos.get("/{po_id}/documents", response_model=list[PODocumentOut])
 async def po_documents_list(po_id: int, db: AsyncSession = Depends(get_db),
                             user=Depends(require_permission(perms.PO_VIEW))):
@@ -160,8 +171,10 @@ async def po_document_download(po_id: int, attachment_id: int,
 
 @pos.put("/{po_id}", response_model=POOut)
 async def update_po(po_id: int, body: POHeaderUpdate, db: AsyncSession = Depends(get_db),
-                    user=Depends(require_permission(perms.PO_EDIT))):
-    """The header a draft order was raised without — terms, addresses, project."""
+                    user=Depends(require_permission_or(
+        perms.PO_EDIT, perms.PO_APPROVE, service.po_correction_in_reach))):
+    """The header a draft order was raised without — terms, addresses, project. Also
+    a PO sent back for correction, by the person it was sent back to."""
     return await service.update_po_header(db, po_id, body, user)
 
 
@@ -239,6 +252,41 @@ async def approve(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db)
 async def reject(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
                  user=Depends(require_permission(perms.PO_REJECT))):
     return await service.act_on_po(db, po_id, "REJECT", body.comments, user)
+
+
+@pos.post("/{po_id}/send-back", response_model=POOut)
+async def send_back(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(perms.PO_APPROVE))):
+    return await service.send_back_po(db, po_id, body.comments, user)
+
+
+@pos.post("/{po_id}/resubmit-correction", response_model=POOut)
+async def resubmit_correction(po_id: int, body: ActionIn | None = None,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.resubmit_po_correction(
+        db, po_id, user, body.comments if body else "")
+
+
+@pos.put("/{po_id}/correction", response_model=POOut)
+async def correct_po(po_id: int, body: POCorrectionIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.PO_VIEW))):
+    """The raiser's full edit of a PO sent back to them; the service checks it is theirs."""
+    return await service.correct_po(db, po_id, body, user)
+
+
+@pos.put("/{po_id}/draft", response_model=POOut)
+async def edit_draft(po_id: int, body: POCorrectionIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.PO_EDIT))):
+    """The full edit of a DRAFT order — vendor, date, lines and header. Same body as
+    the correction edit; the service refuses anything past draft."""
+    return await service.edit_draft_po(db, po_id, body, user)
+
+
+@pos.post("/{po_id}/send-back-further", response_model=POOut)
+async def send_back_further(po_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(perms.PO_VIEW))):
+    return await service.pass_po_correction_down(db, po_id, body.comments, user)
 
 
 @pos.post("/{po_id}/send-to-vendor", response_model=POOut)
@@ -525,6 +573,27 @@ async def reject_rfq(rfq_id: int, body: ActionIn,
                      user=Depends(require_permission(perms.RFQ_APPROVE))):
     return await service.act_on_rfq(
         db, rfq_id, ApprovalAction.REJECTED.value, body.comments, user)
+
+
+@rfqs.post("/{rfq_id}/send-back", response_model=RFQOut)
+async def send_back_rfq(rfq_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                        user=Depends(require_permission(perms.RFQ_APPROVE))):
+    return await service.send_back_rfq(db, rfq_id, body.comments, user)
+
+
+@rfqs.post("/{rfq_id}/resubmit-correction", response_model=RFQOut)
+async def resubmit_rfq_correction(rfq_id: int, body: ActionIn | None = None,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.resubmit_rfq_correction(
+        db, rfq_id, user, body.comments if body else "")
+
+
+@rfqs.post("/{rfq_id}/send-back-further", response_model=RFQOut)
+async def send_back_rfq_further(rfq_id: int, body: ActionIn,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(require_permission(perms.RFQ_VIEW))):
+    return await service.pass_rfq_correction_down(db, rfq_id, body.comments, user)
 
 
 @rfqs.get("/{rfq_id}/invites")

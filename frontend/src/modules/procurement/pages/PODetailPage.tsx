@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, Check, ChevronDown, ChevronRight, FilePen, Printer, Send, X,
+  ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FilePen, Printer, Send, Undo2, X,
   ShoppingCart, Package, Building2, Calendar, Coins, MapPin, FileText, ShieldCheck, History, Sparkles, TrendingDown, Save,
 } from "lucide-react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { Stepper, type Step } from "@/shared/components/Stepper";
@@ -13,6 +13,7 @@ import { revisionLines } from "../types";
 import { ApprovalTrail } from "../components/ApprovalTrail";
 import { POPaymentsPanel } from "../components/POPaymentsPanel";
 import { POApprovalChat } from "../components/POApprovalChat";
+import { POCorrectionForm } from "../components/POCorrectionForm";
 import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
@@ -112,14 +113,6 @@ export function PODetailPage() {
     },
   });
 
-  const saveHeader = useMutation({
-    mutationFn: () => poApi.update(poId, poHeaderPayload(header)),
-    onSuccess: () => {
-      toast.success("Order details saved");
-      refresh();
-    },
-  });
-
   const decide = useMutation({
     mutationFn: (action: "approve" | "reject") =>
       action === "approve" ? poApi.approve(poId, comments) : poApi.reject(poId, comments),
@@ -155,8 +148,63 @@ export function PODetailPage() {
       send.mutate();
   };
 
+  // Send back needs a reason: the person it lands with has to know what to fix.
+  const [sendBackError, setSendBackError] = useState("");
+  const sendBack = useMutation({
+    mutationFn: () => poApi.sendBack(poId, comments.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setComments("");
+      refresh();
+      if (approvalView || decisionView) nav("/approvals");
+    },
+  });
+  const sendBackWithReason = () => {
+    if (sendBack.isPending) return;
+    if (!comments.trim()) {
+      setSendBackError("Enter a reason in Comments before sending this order back.");
+      return;
+    }
+    setSendBackError("");
+    sendBack.mutate();
+  };
+
+  // The holder of a sent-back PO: a comment (optional to resubmit, required to pass it
+  // further down).
+  const [fixComment, setFixComment] = useState("");
+  const [fixError, setFixError] = useState("");
+  const resubmit = useMutation({
+    mutationFn: () => poApi.resubmitCorrection(poId, fixComment.trim()),
+    onSuccess: () => {
+      toast.success("Resubmitted for approval");
+      setFixComment("");
+      refresh();
+    },
+  });
+  const sendBackFurther = useMutation({
+    mutationFn: () => poApi.sendBackFurther(poId, fixComment.trim()),
+    onSuccess: (updated) => {
+      toast.success(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`);
+      setFixComment("");
+      refresh();
+    },
+  });
+  const sendBackFurtherWithReason = () => {
+    if (sendBackFurther.isPending) return;
+    if (!fixComment.trim()) {
+      setFixError("Enter a reason before sending this order further back.");
+      return;
+    }
+    setFixError("");
+    sendBackFurther.mutate();
+  };
+
   const decideWithConfirm = async (action: "approve" | "reject") => {
     if (decide.isPending || !po.data) return;
+    if (action === "reject" && !comments.trim()) {
+      setSendBackError("Enter a reason in Comments before rejecting this order.");
+      return;
+    }
     const number = formatPONo(po.data.po_no, po.data.revision_no);
     const asked =
       action === "approve"
@@ -219,9 +267,13 @@ export function PODetailPage() {
   const isIntraState = cgstTotal > 0;
   const canAmend = po.data.amendment_allowed === true;
   const isDraft = po.data.status === "DRAFT";
+  // Sent back to the RAISER: only they may fix the details and trim quantities. An
+  // approver it was sent back to can only resubmit or pass it further down.
+  const canFix = po.data.status === "RETURNED_FOR_CORRECTION" && !!po.data.can_edit_correction;
+  const canEditQty = isApprovalPending;
   const isFinished = ["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED", "REJECTED"].includes(po.data.status);
   const backTo = decisionView ? "/approvals/decisions" : approvalView ? "/approvals" : "/pos";
-  const busy = submit.isPending || send.isPending || decide.isPending;
+  const busy = submit.isPending || send.isPending || decide.isPending || sendBack.isPending;
 
   const steps: Step[] = (() => {
     const s = po.data.status;
@@ -234,6 +286,7 @@ export function PODetailPage() {
       { id: "received", label: "Received", status: "upcoming" },
     ];
     if (s === "DRAFT" || s === "SUBMITTED" || s === "PENDING_APPROVAL") base[1].status = "current";
+    else if (s === "RETURNED_FOR_CORRECTION") base[1] = { id: "approved", label: "Sent back", status: "current" };
     else if (s === "REJECTED") base[1] = { id: "approved", label: "Rejected", status: "error" };
     else {
       base[1].status = "complete";
@@ -282,10 +335,22 @@ export function PODetailPage() {
               <Button variant="subtle" onClick={() => window.open(`/pos/${poId}/print`, "_blank")} className="!bg-slate-50 !text-slate-900 shadow-sm hover:!bg-slate-200">
                 <Printer className="h-4 w-4" /> PDF
               </Button>
+              <Can do="po.create">
+                <Button variant="subtle" onClick={() => nav(`/pos/new?copyFrom=${poId}`)} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
+                  <Copy className="h-4 w-4" /> Copy as new PO
+                </Button>
+              </Can>
               {!isFinished && canAmend && (
                 <Can do="po.edit">
                   <Button variant="subtle" onClick={startAmending} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
                     <FilePen className="h-4 w-4" /> Amend
+                  </Button>
+                </Can>
+              )}
+              {isDraft && (
+                <Can do="po.edit">
+                  <Button variant="subtle" onClick={() => document.getElementById("edit-draft")?.scrollIntoView({ behavior: "smooth" })} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
+                    <FilePen className="h-4 w-4" /> Edit
                   </Button>
                 </Can>
               )}
@@ -355,6 +420,14 @@ export function PODetailPage() {
               <span className="font-bold text-ink">Remarks: </span>{po.data.remarks}
             </div>
           )}
+          {po.data.copied_from_po_id && (
+            <div className="mt-4 rounded-xl bg-white p-3 text-sm text-body ring-1 ring-amber-100">
+              <span className="font-bold text-ink">Copied from: </span>
+              <Link to={`/pos/${po.data.copied_from_po_id}`} className="font-mono font-semibold text-brand hover:underline">
+                {po.data.copied_from_po_no ?? `PO #${po.data.copied_from_po_id}`}
+              </Link>
+            </div>
+          )}
           {po.data.quotation_no && (
             <div className="mt-4 grid gap-3 rounded-xl bg-white p-3 ring-1 ring-amber-100 sm:grid-cols-2">
               {[
@@ -380,7 +453,7 @@ export function PODetailPage() {
               {linesExpanded ? <ChevronDown className="h-3.5 w-3.5"/> : <ChevronRight className="h-3.5 w-3.5"/>}{linesExpanded ? "Hide" : "View"}
             </Button>
           </div>
-          {isApprovalPending && (
+          {canEditQty && (
             <div className="mb-3 flex items-center gap-2 rounded-xl bg-amber-50 p-3 text-xs font-medium text-amber-800 ring-1 ring-amber-200">
               <TrendingDown className="h-4 w-4 shrink-0"/> Approver may <b>decrease</b> quantities here (increase blocked). Edited numbers are what the vendor receives.
             </div>
@@ -398,7 +471,7 @@ export function PODetailPage() {
                     const isNew = previous.length > 0 && !prev;
                     const isQtyChanged = previous.length > 0 && prev && Number(prev.quantity) !== Number(item.quantity);
                     const isRateChanged = previous.length > 0 && prev && Number(prev.rate) !== Number(item.rate);
-                    const editable = isApprovalPending;
+                    const editable = canEditQty;
                     const original = Number(item.quantity);
                     const draftVal = qtyDraft[item.id] ?? String(item.quantity);
                     const parsed = Number(draftVal);
@@ -468,7 +541,7 @@ export function PODetailPage() {
               </table>
             </div>
           )}
-          {isApprovalPending && linesExpanded && (
+          {canEditQty && linesExpanded && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <div className="text-xs text-muted">
                 {qtyChanges.length ? `${qtyChanges.length} line(s) changed` : "No quantity changes yet"} {hasQtyIncrease && <span className="font-bold text-red-600">· increase blocked</span>}
@@ -588,18 +661,17 @@ export function PODetailPage() {
 
       {!isDraft && <POPaymentsPanel poId={poId} />}
 
+      {canFix && (
+        <POCorrectionForm key={`${po.data.id}-${po.data.total_amount}-${po.data.items.length}`} po={po.data} onSaved={refresh} />
+      )}
+
+      {/* The whole draft is editable — vendor, date, lines and header — with the same
+        * form a sent-back order uses. It used to be the header block alone. */}
       {isDraft && (
         <Can do="po.edit">
-          <div className="overflow-hidden rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white shadow-sm">
-            <div className="h-1 w-full bg-gradient-to-r from-indigo-500 to-violet-500" />
-            <div className="p-4">
-              <div className="mb-3 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-indigo-700"><div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white"><FilePen className="h-4 w-4"/></div><h2 className="text-sm font-extrabold uppercase tracking-widest">Order details</h2></div>
-                <Button variant="subtle" disabled={saveHeader.isPending} onClick={() => saveHeader.mutate()}>{saveHeader.isPending ? "Saving…" : "Save details"}</Button>
-              </div>
-              {saveHeader.error && <p className="mb-2 text-sm font-semibold text-red-600">{(saveHeader.error as Error).message}</p>}
-              <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100"><POHeaderFields value={header} onChange={(patch) => setHeader({ ...header, ...patch })} /></div>
-            </div>
+          <div id="edit-draft" className="scroll-mt-4">
+            <POCorrectionForm key={`draft-${po.data.id}-${po.data.total_amount}-${po.data.items.length}`}
+                              po={po.data} onSaved={refresh} mode="draft" />
           </div>
         </Can>
       )}
@@ -669,6 +741,50 @@ export function PODetailPage() {
         </div>
       )}
 
+      {po.data.status === "RETURNED_FOR_CORRECTION" && (
+        <div className="overflow-hidden rounded-2xl border border-amber-300 bg-amber-50 shadow-sm p-4 text-sm">
+          <div className="flex items-center gap-2 font-bold text-amber-900">
+            <Undo2 className="h-4 w-4" />
+            Sent back to {po.data.correction?.owner_name ?? po.data.current_approver_name ?? "the previous approver"}
+            {po.data.correction?.returned_by_name && <> by {po.data.correction.returned_by_name}</>}
+          </div>
+          {po.data.correction?.reason && (
+            <p className="mt-2 rounded-xl bg-white p-2.5 font-medium text-ink ring-1 ring-amber-200">
+              Reason: {po.data.correction.reason}
+            </p>
+          )}
+          {po.data.can_resubmit_correction && (
+            <>
+              <p className="mt-2 text-amber-900">
+                {po.data.can_edit_correction
+                  ? "Edit the order below (vendor, items, quantities, rates, terms…), Save changes, then resubmit."
+                  : po.data.can_pass_correction_down
+                    ? "You can resubmit it as it is, or send it further back to the person below you."
+                    : "Add a comment if needed and resubmit."}
+              </p>
+              <div className="mt-3">
+                <Field label={po.data.can_pass_correction_down ? "Comment (required to send further back)" : "Comment (optional)"}>
+                  <Input value={fixComment} onChange={(e) => { setFixComment((e.target as HTMLInputElement).value); setFixError(""); }} placeholder="Visible to the approver" />
+                </Field>
+              </div>
+              {fixError && <p className="mt-2 font-semibold text-red-600">{fixError}</p>}
+              {resubmit.error && <p className="mt-2 font-semibold text-red-600">{(resubmit.error as Error).message}</p>}
+              {sendBackFurther.error && <p className="mt-2 font-semibold text-red-600">{(sendBackFurther.error as Error).message}</p>}
+              <div className="mt-3 flex justify-end gap-2">
+                {po.data.can_pass_correction_down && (
+                  <Button variant="subtle" disabled={sendBackFurther.isPending || resubmit.isPending} onClick={sendBackFurtherWithReason} className="border border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200">
+                    <Undo2 className="h-4 w-4" /> {sendBackFurther.isPending ? "Sending…" : "Send further back"}
+                  </Button>
+                )}
+                <Button disabled={resubmit.isPending || sendBackFurther.isPending} onClick={() => resubmit.mutate()} className={TONE_SUBMIT}>
+                  <Send className="h-4 w-4" /> {resubmit.isPending ? "Resubmitting…" : "Resubmit for approval"}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {canDecide && (
         <div className="overflow-hidden rounded-2xl border border-amber-300 bg-gradient-to-br from-amber-50 via-orange-50 to-white shadow-md">
           <div className="h-1 w-full bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600" />
@@ -684,10 +800,15 @@ export function PODetailPage() {
               </p>
             )}
             <Field label="Comments">
-              <Input value={comments} onChange={(e) => setComments((e.target as HTMLInputElement).value)} placeholder="Optional approval comment — visible in trail" />
+              <Input value={comments} onChange={(e) => { setComments((e.target as HTMLInputElement).value); setSendBackError(""); }} placeholder="Required for Send back and Reject, optional for Approve. Visible in trail" />
             </Field>
+            {sendBackError && <p className="mt-2 text-sm font-semibold text-red-600">{sendBackError}</p>}
             {decide.error && <p className="mt-2 text-sm font-semibold text-red-600">{(decide.error as Error).message}</p>}
+            {sendBack.error && <p className="mt-2 text-sm font-semibold text-red-600">{(sendBack.error as Error).message}</p>}
             <div className="mt-3 flex justify-end gap-2">
+              <Can do="po.approve">
+                <Button variant="subtle" disabled={busy} onClick={sendBackWithReason} className="border border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200"><Undo2 className="h-4 w-4"/> Send back</Button>
+              </Can>
               <Can do="po.reject">
                 <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
               </Can>

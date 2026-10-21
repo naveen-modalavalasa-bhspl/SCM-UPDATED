@@ -47,6 +47,12 @@ class PurchaseOrder(Base):
     quotation_id = soft_fk()
     quotation_no = Column(String(50), nullable=True)      # snapshot
 
+    # The order this one was copied from (2026-10-19). A reference for the reader and
+    # nothing more: a copy is a new hand-raised order, so no quantity, approval or
+    # payment is ever rolled back along it.
+    copied_from_po_id = soft_fk()
+    copied_from_po_no = Column(String(30), nullable=True)  # snapshot
+
     vendor_id = Column(ForeignKey("mst_vendors.id"), index=True, nullable=False)
     vendor_name = Column(String(200), nullable=True)   # snapshot
     vendor_gstin = Column(String(20), nullable=True)   # snapshot

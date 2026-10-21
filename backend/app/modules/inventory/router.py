@@ -9,7 +9,8 @@ from app.core.dependencies import require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.inventory import locations, service
 from app.modules.inventory.schemas import (
-    ActionIn, MovementRow, MRClaimsOut, MRCreateIn, MRListRow, MROut, MRReviseIn,
+    ActionIn, MovementRow, MRClaimsOut, MRCorrectionIn, MRCreateIn, MRListRow, MROut,
+    MRReviseIn,
     StockGroupRow, StockRow,
     TransferIn,
     AdjustmentIn, AdjustmentOut, AdjustmentListRow, AdjustmentRejectIn, CountSheetRow, ReplenishmentRow,
@@ -392,6 +393,34 @@ async def reject_mr(mr_id: int, body: ActionIn, db: AsyncSession = Depends(get_d
                     user=Depends(require_permission(perms.MR_REJECT))):
     return await service.act_on_mr(db, mr_id, ApprovalAction.REJECTED.value, user,
                                    body.comments)
+
+
+@mr_router.post("/{mr_id}/send-back", response_model=MROut)
+async def send_back_mr(mr_id: int, body: ActionIn, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(perms.MR_APPROVE))):
+    return await service.send_back_mr(db, mr_id, body.comments, user)
+
+
+@mr_router.post("/{mr_id}/resubmit-correction", response_model=MROut)
+async def resubmit_mr_correction(mr_id: int, body: ActionIn | None = None,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(require_permission(perms.MR_VIEW))):
+    return await service.resubmit_mr_correction(
+        db, mr_id, user, body.comments if body else "")
+
+
+@mr_router.post("/{mr_id}/send-back-further", response_model=MROut)
+async def send_back_mr_further(mr_id: int, body: ActionIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission(perms.MR_VIEW))):
+    return await service.pass_mr_correction_down(db, mr_id, body.comments, user)
+
+
+@mr_router.put("/{mr_id}/correction", response_model=MROut)
+async def correct_mr(mr_id: int, body: MRCorrectionIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(perms.MR_VIEW))):
+    """The raiser's full edit of an MR sent back to them; the service checks it is theirs."""
+    return await service.correct_mr(db, mr_id, body.model_dump(), user)
 
 
 router.include_router(stock_router)
