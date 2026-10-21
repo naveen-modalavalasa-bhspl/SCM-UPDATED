@@ -121,7 +121,7 @@ async def pending_for_user(db: AsyncSession, user) -> list[dict]:
     return rows
 
 
-async def pending_summary(db: AsyncSession, user) -> dict:
+async def pending_summary(db: AsyncSession, user, scope: str = "mine") -> dict:
     """The tiles and the doc-type chips above the approval inbox, counted in SQL.
 
     The screen used to answer these by fetching its whole queue a second time (page 1
@@ -130,15 +130,23 @@ async def pending_summary(db: AsyncSession, user) -> dict:
     a queue passes 500 rows.
     """
     now = ist_now()
-    conditions = [
-        Pending.approver_id == user.id,
-        Instance.status == InstanceStatus.IN_PROGRESS.value,
-    ]
-    # Same hat rule the list below applies, or the tiles would keep counting work the
-    # list no longer shows (see engine.instances_for_other_hats).
-    other_hat = await engine.other_hat_condition(db, user)
-    if other_hat is not None:
-        conditions.append(other_hat)
+    if scope == "company":
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("Admin permission required to view company-wide approval queue")
+        conditions = [
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+    else:
+        conditions = [
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+        # Same hat rule the list below applies, or the tiles would keep counting work the
+        # list no longer shows (see engine.instances_for_other_hats).
+        other_hat = await engine.other_hat_condition(db, user)
+        if other_hat is not None:
+            conditions.append(other_hat)
     base = (
         select(Pending.doc_type, Pending.doc_id, Pending.due_at, Pending.created_at)
         .join(Instance, Instance.id == Pending.instance_id)
@@ -179,21 +187,29 @@ async def pending_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     doc_type: str = "", overdue_only: bool = False,
     raised_from: datetime | None = None, raised_to: datetime | None = None,
-    sort: str = "oldest",
+    sort: str = "oldest", scope: str = "mine",
 ) -> dict:
     # Same rule the engine applies in pending_for_user: a task whose workflow has
     # finished is not work, whatever the row says. Without it a cancelled document
     # kept a live-looking task in the queue and in every count above it.
-    conditions = [
-        Pending.approver_id == user.id,
-        Instance.status == InstanceStatus.IN_PROGRESS.value,
-    ]
-    # A task belongs to the POST the ladder resolved to, not merely to the person
-    # holding it. Someone wearing two District Manager hats must not be shown the other
-    # district's work — they cannot sign it, and acting on it half-succeeded.
-    other_hat = await engine.other_hat_condition(db, user)
-    if other_hat is not None:
-        conditions.append(other_hat)
+    if scope == "company":
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("Admin permission required to view company-wide approval queue")
+        conditions = [
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+    else:
+        conditions = [
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+        # A task belongs to the POST the ladder resolved to, not merely to the person
+        # holding it. Someone wearing two District Manager hats must not be shown the other
+        # district's work — they cannot sign it, and acting on it half-succeeded.
+        other_hat = await engine.other_hat_condition(db, user)
+        if other_hat is not None:
+            conditions.append(other_hat)
     now = ist_now()
     term = search.strip()
     if term:
@@ -252,6 +268,15 @@ async def pending_page(
     numbers = await _document_numbers(db, _missing_numbers(
         (pending.doc_type, pending.doc_id, pending.doc_no) for pending, _, _ in rows
     ))
+    approver_ids = {pending.approver_id for pending, _, _ in rows if pending.approver_id}
+    approver_names: dict[int, str] = {}
+    if approver_ids and scope == "company":
+        emp_rows = (await db.execute(
+            select(HcmEmployee.id, HcmEmployee.full_name)
+            .where(HcmEmployee.id.in_(approver_ids))
+        )).all()
+        approver_names = {eid: name for eid, name in emp_rows}
+
     items = [{
         "instance_id": pending.instance_id,
         "doc_type": pending.doc_type,
@@ -270,7 +295,8 @@ async def pending_page(
         # different question: "Past due 0" above a filter that returned a row.
         "overdue": bool(pending.due_at and pending.due_at < now),
         "current_stage_name": instance.current_stage_name,
-        "approver_name": user.full_name,
+        "approver_name": approver_names.get(pending.approver_id, user.full_name) if scope == "company" else user.full_name,
+        "is_overridden": pending.approver_id != user.id,
     } for pending, instance, indent_type in rows]
     return {"items": items, "total": total, "page": page, "size": size}
 
@@ -1805,7 +1831,9 @@ async def _load_indent_task(
         Pending.approver_id == user.id,
     ))
     if not assigned:
-        raise PermissionError_("This indent is not assigned to you at the current stage")
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("This indent is not assigned to you at the current stage")
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
 

@@ -359,8 +359,8 @@ export function IndentFormPage() {
   const delivery = splitDeliveryOffice(rawDeliveryOfficeName, draft?.vehicle_number);
   const inferredVehicle = delivery.vehicleNumber
     ? vehicles.find((vehicle) =>
-        comparableVehicleNumber(vehicle.name || vehicle.code)
-          === comparableVehicleNumber(delivery.vehicleNumber))
+      comparableVehicleNumber(vehicle.name || vehicle.code)
+      === comparableVehicleNumber(delivery.vehicleNumber))
     : undefined;
   const resolvedVehicleId = vehicleId === "" ? (inferredVehicle?.id ?? "") : vehicleId;
   const vehicleNumber = draft?.vehicle_number
@@ -378,11 +378,11 @@ export function IndentFormPage() {
     || (deliveryOfficeId === ""
       ? null
       : (me?.active_position?.office_id === deliveryOfficeId
-          ? me.active_position.office_sac
-          : me?.employee.office_id === deliveryOfficeId
-            ? me.employee.office_sac
-            : me?.positions.find((position) => position.office_id === deliveryOfficeId)
-              ?.office_sac) ?? null);
+        ? me.active_position.office_sac
+        : me?.employee.office_id === deliveryOfficeId
+          ? me.employee.office_sac
+          : me?.positions.find((position) => position.office_id === deliveryOfficeId)
+            ?.office_sac) ?? null);
 
   if (isEditing && isDraftLoading) return <Skeleton className="h-40 rounded-2xl" />;
 
@@ -418,12 +418,12 @@ export function IndentFormPage() {
     <>
       <PageHeader
         back={isStr ? { to: STR_HOME, label: "Back to Stock Transfer" }
-                    : { to: "/indents", label: "Back to All indents" }}
+          : { to: "/indents", label: "Back to All indents" }}
         eyebrow={isStr ? "Stock Transfer" : "Indents"}
         title={isCorrectionEdit
           ? `Edit correction ${draft?.indent_no ?? docLabel}`
           : isEditing ? `Edit ${draft?.indent_no ?? docLabel}`
-          : isStr ? "New stock transfer request" : "New request"}
+            : isStr ? "New stock transfer request" : "New request"}
         actions={!isEditing ? (
           <Button variant="primary" onClick={() => setBomPickerOpen(true)} className={TONE_AMBER}>
             <LibraryBig className="h-4 w-4" /> Choose BOM

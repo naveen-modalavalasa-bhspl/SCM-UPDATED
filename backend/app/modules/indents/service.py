@@ -961,8 +961,12 @@ async def _has_pending_approval(db: AsyncSession, indent_id: int, user_id: int) 
     ))
 
 
-async def _assert_active_workflow_task(db: AsyncSession, indent_id: int, user_id: int) -> None:
+async def _assert_active_workflow_task(db: AsyncSession, indent_id: int, user_id: int, user=None) -> None:
     if not await _has_pending_approval(db, indent_id, user_id):
+        if user is not None:
+            from app.platform.workflow.engine import is_workflow_admin
+            if await is_workflow_admin(db, user):
+                return
         raise PermissionError_("This indent is not currently assigned to you for approval")
 
 
@@ -1925,7 +1929,7 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
         raise ValidationError(f"Indent is not awaiting approval (status {indent.status})")
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
-    await _assert_active_workflow_task(db, indent.id, user.id)
+    await _assert_active_workflow_task(db, indent.id, user.id, user=user)
     if action == ApprovalAction.REJECTED:
         comments = (comments or "").strip()
         if not comments:

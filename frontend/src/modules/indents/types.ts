@@ -125,21 +125,21 @@ export interface ActivityRow {
   indent_id: number;
   indent_no: string;
   event_type?:
-    | "REQUEST_CREATED"
-    | "REQUEST_SUBMITTED"
-    | "APPROVAL_COMPLETED"
-    | "REQUEST_REJECTED"
-    | "REQUEST_RETURNED"
-    | "APPROVAL_ROUTED_AUTOMATICALLY"
-    | "STOCK_ALLOCATED"
-    | "PROCUREMENT_REQUEST_CREATED"
-    | "MATERIAL_ISSUED"
-    | "MATERIAL_DISPATCHED"
-    | "RECEIPT_ACKNOWLEDGED"
-    | "BOOKMARK_ADDED"
-    | "BOOKMARK_REMOVED"
-    | string
-    | null;
+  | "REQUEST_CREATED"
+  | "REQUEST_SUBMITTED"
+  | "APPROVAL_COMPLETED"
+  | "REQUEST_REJECTED"
+  | "REQUEST_RETURNED"
+  | "APPROVAL_ROUTED_AUTOMATICALLY"
+  | "STOCK_ALLOCATED"
+  | "PROCUREMENT_REQUEST_CREATED"
+  | "MATERIAL_ISSUED"
+  | "MATERIAL_DISPATCHED"
+  | "RECEIPT_ACKNOWLEDGED"
+  | "BOOKMARK_ADDED"
+  | "BOOKMARK_REMOVED"
+  | string
+  | null;
   event_label?: string | null;
   result?: string | null;
   result_label?: string | null;
@@ -488,9 +488,13 @@ export interface DirectIssueAck {
   acknowledged_by_name: string | null;
   acknowledged_at: string | null;
   can_acknowledge: boolean;
-  lines: { item_code: string | null; item_name: string | null; uom_code: string | null;
-           batch_no: string | null; issued_qty: number | string }[];
+  lines: {
+    item_code: string | null; item_name: string | null; uom_code: string | null;
+    batch_no: string | null; issued_qty: number | string
+  }[];
   /** The consignments carrying this issue, each with its package count. */
-  consignments?: { dispatch_id: number; dispatch_no: string; status: string | null;
-                   package_count: number }[];
+  consignments?: {
+    dispatch_id: number; dispatch_no: string; status: string | null;
+    package_count: number
+  }[];
 }

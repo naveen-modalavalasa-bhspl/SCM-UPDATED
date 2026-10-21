@@ -231,7 +231,7 @@ async def _attach_package_quantities(
 
     by_item: dict[tuple[str, object], list[dict]] = {}
     for row in rows:
-        key = _package_quantity_key(SimpleNamespace(**row))
+        key = _package_quantity_key(SimpleNamespace(**{str(k): v for k, v in row.items()}))
         if key is None:
             continue
         by_item.setdefault(key, []).append({

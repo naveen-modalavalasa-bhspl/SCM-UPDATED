@@ -136,12 +136,16 @@ export interface PendingApprovalQuery {
   raised_from?: string;
   raised_to?: string;
   sort?: string;
+  scope?: "mine" | "company";
 }
 
 export const approvalsApi = {
   pending: (page = 1, size = 20, filters: PendingApprovalQuery = {}) =>
     api.get<Paginated<PendingApproval>>("/api/approvals/pending", { params: { page, size, ...filters } }).then((r) => r.data),
-  pendingAll: () => allPages<PendingApproval>("/api/approvals/pending"),
+  pendingAll: (scope?: "mine" | "company") =>
+    allPages<PendingApproval>(`/api/approvals/pending?scope=${scope === "company" ? "company" : "mine"}`),
+  summary: (scope: "mine" | "company" = "mine") =>
+    api.get<PendingSummary>("/api/approvals/pending/summary", { params: { scope } }).then((r) => r.data),
   decisions: (page = 1, size = 20, filters: { search?: string; decision?: string; doc_type?: string } = {}) =>
     api.get<Paginated<ApprovalDecisionRow>>("/api/approvals/my-decisions", { params: { page, size, ...filters } }).then((r) => r.data),
   decisionsAll: () => allPages<ApprovalDecisionRow>("/api/approvals/my-decisions"),
@@ -217,8 +221,8 @@ export const approvalsApi = {
   /** The inbox counted server-side. Scoped to the caller by the endpoint — the same
    *  approver_id + other-hat rule `pending` itself applies, so the tiles can never
    *  report work the list will not show. */
-  pendingSummary: () =>
-    api.get<PendingSummary>("/api/approvals/pending/summary").then((r) => r.data),
+  pendingSummary: (scope: "mine" | "company" = "mine") =>
+    api.get<PendingSummary>("/api/approvals/pending/summary", { params: { scope } }).then((r) => r.data),
   /** Monthly cycles waiting on me. Gated on `allocation.view` server-side, so a
    *  caller without it gets a 403 and the card stays off the page. */
   allocationCycles: () =>
