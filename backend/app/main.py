@@ -11,11 +11,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
-from sqlalchemy.exc import DataError, IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 
 from app.core.exceptions import (
     AppException, app_exception_handler, data_error_handler, http_exception_handler,
-    integrity_error_handler, request_validation_exception_handler,
+    integrity_error_handler, operational_error_handler, request_validation_exception_handler,
     unhandled_exception_handler,
 )
 from app.platform.admin.app_logs import capture_backend_error, safe_request_id
@@ -179,6 +179,8 @@ app.add_exception_handler(DataError, data_error_handler)
 # else still points at is the caller's to fix, and answering 500 said nothing about
 # which. The constraint name never leaves the log — see integrity_error_handler.
 app.add_exception_handler(IntegrityError, integrity_error_handler)
+# Database connection drops, lock timeouts, or server gone away
+app.add_exception_handler(OperationalError, operational_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 
@@ -246,6 +248,77 @@ async def readiness():
         log.warning("Readiness check failed: %s", exc)
         raise HTTPException(status_code=503, detail="database unavailable") from exc
     return {"status": "ready"}
+
+
+@app.get("/health/system", tags=["health"])
+async def system_health():
+    """Detailed system diagnostic and health check endpoint."""
+    import time
+    from datetime import datetime, timezone
+    from urllib.parse import urlparse
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    from app.core.database import engine
+    from app.core.config import settings
+
+    start_time = time.time()
+    db_info: dict = {
+        "status": "unknown",
+        "latency_ms": None,
+        "database": None,
+        "host": None,
+        "version": None,
+        "table_count": None,
+    }
+    status = "healthy"
+    diagnostics = []
+
+    # Database connectivity & latency check
+    try:
+        parsed = urlparse(settings.DATABASE_URL)
+        db_info["host"] = parsed.hostname
+        db_info["port"] = parsed.port or 3306
+        t0 = time.time()
+        async with engine.connect() as conn:
+            db_info["database"] = (await conn.execute(text("SELECT DATABASE()"))).scalar()
+            db_info["version"] = (await conn.execute(text("SELECT VERSION()"))).scalar()
+            db_info["table_count"] = (await conn.execute(
+                text("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")
+            )).scalar()
+        db_info["latency_ms"] = round((time.time() - t0) * 1000, 2)
+        db_info["status"] = "healthy"
+    except Exception as exc:
+        status = "degraded"
+        db_info["status"] = "unhealthy"
+        db_info["error"] = str(exc)[:200]
+        diagnostics.append(f"Database connection error: {exc}")
+
+    schedulers_info = {
+        "enabled": settings.RUN_SCHEDULERS,
+        "hcm_sync": "active" if settings.RUN_SCHEDULERS else "disabled",
+        "approval_reminders": "active" if settings.RUN_SCHEDULERS else "disabled",
+        "monthly_indent": "active" if settings.RUN_SCHEDULERS else "disabled",
+    }
+
+    total_latency_ms = round((time.time() - start_time) * 1000, 2)
+    response_code = 200 if status == "healthy" else 503
+
+    return JSONResponse(
+        status_code=response_code,
+        content={
+            "status": status,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_latency_ms": total_latency_ms,
+            "application": {
+                "name": "SCM ERP",
+                "version": "1.22",
+                "environment": getattr(settings, "ENVIRONMENT", "development"),
+            },
+            "database": db_info,
+            "schedulers": schedulers_info,
+            "diagnostics": diagnostics if diagnostics else ["All system components operational."],
+        },
+    )
 
 
 def _include_routers() -> None:

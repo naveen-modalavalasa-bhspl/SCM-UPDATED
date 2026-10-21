@@ -432,11 +432,53 @@ async def integrity_error_handler(request: Request, exc: Exception):
     )
 
 
+async def operational_error_handler(request: Request, exc: Exception):
+    """Database driver/connection failure or timeout: lock wait, disconnect, server gone."""
+    raw = str(getattr(exc, "orig", exc))
+    lowered = raw.lower()
+    if "lock wait timeout" in lowered or "1205" in lowered or "deadlock" in lowered or "1213" in lowered:
+        status, code, title = 409, "LOCK_TIMEOUT", "Record temporarily locked"
+        message = (
+            "This record is currently being updated by another operation or user. "
+            "Please wait a moment and try again."
+        )
+    elif "can't connect" in lowered or "connection refused" in lowered or "2003" in lowered or "2006" in lowered or "lost connection" in lowered:
+        status, code, title = 503, "DATABASE_UNAVAILABLE", "Database server unavailable"
+        message = (
+            "Unable to connect to the database server. Please verify network connectivity "
+            "or contact system administration if the database is restarting."
+        )
+    elif "statement timeout" in lowered or "query timeout" in lowered:
+        status, code, title = 504, "DATABASE_TIMEOUT", "Database query timed out"
+        message = (
+            "The database query took too long to complete. Please try narrowing your search "
+            "or filter criteria and retry."
+        )
+    else:
+        status, code, title = 500, "DATABASE_ERROR", "Database operation error"
+        message = (
+            "A database operation could not be completed. Please retry, or contact system "
+            "administration if the problem persists."
+        )
+    log.error("Database operational error: %s", raw)
+    await _report(request, exc, status, message)
+    return JSONResponse(
+        status_code=status,
+        content=_envelope(message, code=code, title=title),
+    )
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception):
     # `error` is fixed on purpose, and `detail` is the sentence a screen shows.
     # Whatever went wrong is in the log with its traceback; anything derived from
     # the exception itself risks carrying a connection string, a query or a path
     # out to the browser.
+    request_id = getattr(request.state, "request_id", None)
+    ref = f" (Ref: {request_id})" if request_id else ""
+    user_detail = (
+        f"We couldn't complete this request due to an unexpected server issue{ref}. "
+        "Please try again in a moment, or contact support with this reference if it persists."
+    )
     await _report(request, exc, 500, "Internal server error")
     return JSONResponse(
         status_code=500,
@@ -445,7 +487,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             code="SERVER_ERROR",
             title="Something went wrong on our side",
         ) | {
-            "detail": "We couldn't complete this request due to a server problem. "
-                      "Please try again in a moment.",
+            "detail": user_detail,
         },
     )
+

@@ -78,6 +78,28 @@ const EMPTY_ANSWERS = new Set([
 ]);
 
 function usable(text: unknown): string | undefined {
+  if (Array.isArray(text)) {
+    const parts = text
+      .map((item) => {
+        if (typeof item === "string") return usable(item);
+        if (item && typeof item === "object") {
+          const loc = Array.isArray((item as any).loc)
+            ? (item as any).loc.filter((p: any) => p !== "body" && p !== "query" && p !== "header").join(".")
+            : "";
+          const msg = (item as any).msg || (item as any).message || (item as any).detail;
+          const cleanMsg = typeof msg === "string" ? usable(msg) : undefined;
+          return loc && cleanMsg ? `${loc}: ${cleanMsg}` : cleanMsg;
+        }
+        return undefined;
+      })
+      .filter((s): s is string => Boolean(s));
+    if (parts.length > 0) return parts.join(". ");
+    return undefined;
+  }
+  if (text && typeof text === "object") {
+    const candidate = (text as any).message ?? (text as any).msg ?? (text as any).detail;
+    if (typeof candidate === "string" || Array.isArray(candidate)) return usable(candidate);
+  }
   if (typeof text !== "string") return undefined;
   const clean = text.trim();
   if (!clean || clean.length > 400) return undefined;
@@ -237,11 +259,10 @@ export function describeError(error: unknown): Notice {
     ? fallback.title // an expired token: the endpoint's own wording is not the story
     : usable(body.title);
 
-  const message = status >= 500 || (status === 401 && !isSignInAttempt(url))
-    // Never repeat a 5xx body: it is the one case where the text on the wire may
-    // not have been through the backend's sanitising at all.
+  // Prioritize the server's detailed explanation whenever it is human-readable and non-technical.
+  const message = (status === 401 && !isSignInAttempt(url))
     ? fallback.message
-    : detail ?? fallback.message;
+    : (detail ?? fallback.message);
 
   return {
     level: fallback.level,
