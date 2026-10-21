@@ -143,7 +143,46 @@ export function RFQDetailPage() {
     },
     onSuccess: () => { setQtyEdits({}); refresh("Approved — vendors can now see the approved quantities")(); },
   });
-  const reject = useMutation({ mutationFn: () => rfqApi.reject(rfqId), onSuccess: refresh("Rejected") });
+  // Reject and Send back both ask for a reason in a dialog; the server refuses either
+  // without one. `reasonFor` says which of the two the open dialog is for.
+  const [reasonFor, setReasonFor] = useState<"reject" | "send_back" | null>(null);
+  const [reason, setReason] = useState("");
+  const closeReason = () => { setReasonFor(null); setReason(""); };
+  const reject = useMutation({
+    mutationFn: (comments: string) => rfqApi.reject(rfqId, comments),
+    onSuccess: () => { closeReason(); refresh("Rejected")(); },
+  });
+  const sendBack = useMutation({
+    mutationFn: (comments: string) => rfqApi.sendBack(rfqId, comments),
+    onSuccess: (updated) => {
+      closeReason();
+      refresh(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`)();
+    },
+  });
+  // The holder of a sent-back RFQ: a comment (optional to resubmit, required to pass
+  // it further down).
+  const [fixComment, setFixComment] = useState("");
+  const [fixError, setFixError] = useState("");
+  const resubmit = useMutation({
+    mutationFn: () => rfqApi.resubmitCorrection(rfqId, fixComment.trim()),
+    onSuccess: () => { setFixComment(""); refresh("Resubmitted for approval")(); },
+  });
+  const sendFurtherBack = useMutation({
+    mutationFn: () => rfqApi.sendBackFurther(rfqId, fixComment.trim()),
+    onSuccess: (updated) => {
+      setFixComment("");
+      refresh(`Sent back to ${updated.current_approver_name ?? "the previous approver"}`)();
+    },
+  });
+  const sendFurtherBackWithReason = () => {
+    if (sendFurtherBack.isPending) return;
+    if (!fixComment.trim()) {
+      setFixError("Enter a reason before sending this RFQ further back.");
+      return;
+    }
+    setFixError("");
+    sendFurtherBack.mutate();
+  };
   const close = useMutation({ mutationFn: () => rfqApi.close(rfqId), onSuccess: refresh("Closed to further quotes") });
 
   // ── Freeze Prices (2026-09-26) ────────────────────────────────────────────
@@ -160,6 +199,7 @@ export function RFQDetailPage() {
   });
 
   const busy = submit.isPending || approve.isPending || reject.isPending
+    || sendBack.isPending || resubmit.isPending
     || close.isPending || freeze.isPending || unfreeze.isPending;
 
   // ── The Quotes strip (2026-09-26) ─────────────────────────────────────────
@@ -306,7 +346,10 @@ export function RFQDetailPage() {
             )}
             {canDecide && (
               <Can do="rfq.approve">
-                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
+                <Button variant="subtle" disabled={busy} onClick={() => setReasonFor("send_back")}>
+                  Send back
+                </Button>
+                <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => setReasonFor("reject")}>
                   Reject
                 </Button>
                 <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
@@ -346,7 +389,59 @@ export function RFQDetailPage() {
       />
 
       <ErrorBanner error={error ?? submit.error ?? approve.error ?? reject.error ?? close.error
+        ?? sendBack.error ?? resubmit.error
         ?? freeze.error ?? unfreeze.error ?? saveQuantities.error} />
+
+      {rfq?.status === "RETURNED_FOR_CORRECTION" && (
+        <div className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm">
+          <p className="font-bold text-amber-900">
+            Sent back to {rfq.correction?.owner_name ?? rfq.current_approver_name ?? "the previous approver"}
+            {rfq.correction?.returned_by_name ? ` by ${rfq.correction.returned_by_name}` : ""}
+          </p>
+          {rfq.correction?.reason && (
+            <p className="mt-2 rounded-xl bg-white p-2.5 font-medium text-ink ring-1 ring-amber-200">
+              Reason: {rfq.correction.reason}
+            </p>
+          )}
+          {rfq.can_resubmit_correction && (
+            <>
+              <p className="mt-2 text-amber-900">
+                {rfq.can_edit_correction
+                  ? "Press Edit RFQ to change it (same form as when it was raised), save, then resubmit."
+                  : rfq.can_pass_correction_down
+                    ? "You can resubmit it as it is, or send it further back to the person below you."
+                    : "Add a comment if needed and resubmit."}
+              </p>
+              <div className="mt-3">
+                <Textarea
+                  value={fixComment}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => { setFixComment(e.target.value); setFixError(""); }}
+                  minRows={1}
+                  placeholder={rfq.can_pass_correction_down ? "Comment (required to send further back)" : "Comment (optional)"}
+                  aria-label="Comment"
+                />
+              </div>
+              {fixError && <p className="mt-2 font-semibold text-red-600">{fixError}</p>}
+              {sendFurtherBack.error && <p className="mt-2 font-semibold text-red-600">{(sendFurtherBack.error as Error).message}</p>}
+              <div className="mt-3 flex flex-wrap justify-end gap-2">
+                {rfq.can_edit_correction && (
+                  <Button variant="subtle" disabled={busy} onClick={() => nav(`/procurement/rfqs/${rfqId}/edit`)}>
+                    Edit RFQ
+                  </Button>
+                )}
+                {rfq.can_pass_correction_down && (
+                  <Button variant="subtle" disabled={busy || sendFurtherBack.isPending} onClick={sendFurtherBackWithReason}>
+                    {sendFurtherBack.isPending ? "Sending…" : "Send further back"}
+                  </Button>
+                )}
+                <Button className={TONE_SUBMIT} disabled={busy || sendFurtherBack.isPending} onClick={() => resubmit.mutate()}>
+                  {resubmit.isPending ? "Resubmitting…" : "Resubmit for approval"}
+                </Button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <DetailShell
         main={(
@@ -615,6 +710,31 @@ export function RFQDetailPage() {
           minRows={2}
           placeholder="e.g. Winning vendor's delivery date slipped — re-opening the tender"
           aria-label="Reason for reopening bidding"
+        />
+      </ConfirmModal>
+      <ConfirmModal
+        isOpen={reasonFor !== null}
+        title={reasonFor === "reject"
+          ? `Reject ${rfq?.rfq_no ?? "this RFQ"}?`
+          : `Send ${rfq?.rfq_no ?? "this RFQ"} back?`}
+        message={reasonFor === "reject"
+          ? "The RFQ will be cancelled. Say why — it is recorded in the approval trail."
+          : "It goes back to the previous approver (or the raiser) to correct and resubmit. Say what needs fixing — it is recorded in the approval trail."}
+        confirmLabel={reasonFor === "reject" ? "Reject" : "Send back"}
+        tone={reasonFor === "reject" ? "danger" : "warning"}
+        busy={reject.isPending || sendBack.isPending}
+        confirmDisabled={!reason.trim()}
+        onConfirm={() => (reasonFor === "reject"
+          ? reject.mutate(reason.trim())
+          : sendBack.mutate(reason.trim()))}
+        onClose={closeReason}
+      >
+        <Textarea
+          value={reason}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setReason(e.target.value)}
+          minRows={2}
+          placeholder="Reason (required)"
+          aria-label="Reason"
         />
       </ConfirmModal>
     </div>

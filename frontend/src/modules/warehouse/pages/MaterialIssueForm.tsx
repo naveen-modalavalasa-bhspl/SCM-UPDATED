@@ -1017,6 +1017,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     },
   });
 
+  // SCM_0063: `act` is shared across every action this form confirms (submit,
+  // approve, reject, post, ack, cancel). Without this, an error left over from a
+  // PREVIOUS press stayed on `act.error` and the ConfirmModal for the NEXT press
+  // showed it immediately — reading as "this press failed" on a request that was
+  // never actually sent, even while the earlier press's real effect (e.g. an
+  // approval that went through) was already reflected in the document.
+  useEffect(() => {
+    if (confirming) act.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirming]);
+
   // Raised, then every rung the engine recorded, then where it is waiting now, then
   // what happened to the stock. The approvals come from wf_actions rather than the
   // document's own approved_at/approved_by_name: those are written only when the whole

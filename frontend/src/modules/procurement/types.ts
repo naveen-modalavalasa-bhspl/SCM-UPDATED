@@ -12,6 +12,15 @@ export interface POItem {
    *  a PO raised from an indent — nobody quoted, so nobody promised. */
   delivery_days?: number | null;
   received_quantity: number;
+  /** Which half of `tax_percent` is law, decided by the order's own `tax_region` —
+   *  only one pair is ever non-zero on a given order. Derived server-side, never
+   *  typed here. */
+  cgst_percent?: number;
+  sgst_percent?: number;
+  igst_percent?: number;
+  cgst_amount?: number;
+  sgst_amount?: number;
+  igst_amount?: number;
 }
 
 /** One frozen stage of a PO's payment terms (advance, against delivery, ...). */
@@ -34,8 +43,16 @@ export interface PurchaseOrder {
   rfq_no?: string | null;
   quotation_id?: number | null;
   quotation_no?: string | null;
+  /** "Copy as new PO": the order this one was pre-filled from. A reference only. */
+  copied_from_po_id?: number | null;
+  copied_from_po_no?: string | null;
   vendor_id: number;
   vendor_name?: string | null;
+  // Stored snapshot (vendor_gstin), plus the two facts it decides — derived at read
+  // time, never stored. See service.tax_region on the backend.
+  vendor_gstin?: string | null;
+  tax_region?: string | null;
+  company_gstin?: string | null;
   facility_id?: number | null;
   facility_name?: string | null;
   project_id?: number | null;
@@ -64,6 +81,20 @@ export interface PurchaseOrder {
    *  wearing a position the ladder named. Served by the backend because a screen can
    *  only see the status and its own permissions, and neither answers "is it with me". */
   awaiting_me?: boolean;
+  /** Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and why. */
+  correction?: {
+    owner_name?: string | null;
+    returned_by_name?: string | null;
+    returned_from_stage?: string | null;
+    returned_at?: string | null;
+    reason?: string | null;
+  } | null;
+  /** True only for the person it was sent back to. */
+  can_resubmit_correction?: boolean;
+  /** Only the raiser may edit a sent-back PO. */
+  can_edit_correction?: boolean;
+  /** An approver holding it may pass it one rung further down. */
+  can_pass_correction_down?: boolean;
   /** What the vendor said about the order we sent them. Null means never sent. */
   vendor_status?: string | null;
   vendor_responded_at?: string | null;
@@ -167,6 +198,29 @@ export interface POCreate extends POHeader {
     rate: number;
     tax_percent?: number;
   }[];
+  copied_from_po_id?: number | null;
+}
+
+/** An existing order's content for the New PO form — `GET /api/pos/{id}/copy`.
+ *  Already checked against today's masters: anything no longer usable is blank or
+ *  left out, and `warnings` says what. Nothing is saved until the form is. */
+export interface POCopyTemplate extends POHeader {
+  source_po_id: number;
+  source_po_no: string;
+  source_po_date?: string | null;
+  vendor_id?: number | null;
+  vendor_name?: string | null;
+  expected_date?: string | null;
+  lines: {
+    item_id: number;
+    item_code?: string | null;
+    item_name?: string | null;
+    uom_code?: string | null;
+    quantity: number;
+    rate: number;
+    tax_percent: number;
+  }[];
+  warnings: string[];
 }
 
 /** Everything the awarded quotation does not already say. Vendor, lines, rates and
@@ -428,6 +482,20 @@ export interface RFQListRow {
    *  wearing a position the ladder named. Served by the backend because a screen can
    *  only see the status and its own permissions, and neither answers "is it with me". */
   awaiting_me?: boolean;
+  /** Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and why. */
+  correction?: {
+    owner_name?: string | null;
+    returned_by_name?: string | null;
+    returned_from_stage?: string | null;
+    returned_at?: string | null;
+    reason?: string | null;
+  } | null;
+  /** True only for the person it was sent back to. */
+  can_resubmit_correction?: boolean;
+  /** Only the raiser may edit it once sent back to them. */
+  can_edit_correction?: boolean;
+  /** An approver holding it may pass it one rung further down. */
+  can_pass_correction_down?: boolean;
   /** Freeze Prices (2026-09-26): the tender is closed to pricing. Suppliers can no
    *  longer quote or change prices; POs can be raised against its quotations. */
   is_price_frozen?: boolean;

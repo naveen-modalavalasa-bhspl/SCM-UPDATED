@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Spinner, Skeleton, Table, TableBody, TableCell, TableColumn, TableHeader, TableRow,
 } from "@heroui/react";
+import { FilterMenu } from "@/shared/components";
 import {
   INDENT_QUERY_GC_TIME,
   INDENT_QUERY_STALE_TIME,
@@ -24,7 +25,7 @@ import {
   useAllRequestsUrlState,
 } from "../context/AllRequestsUrlState";
 import { formatIndentShortDate } from "../dateTime";
-import { INDENT_LIST_TYPES, INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+import { INDENT_LIST_TYPES, INDENT_REQUEST_STATUS_FILTER_OPTIONS, INDENT_TYPE_OPTIONS } from "../constants";
 
 interface Column<T> {
   key: string;
@@ -77,10 +78,15 @@ function IndentListContent({
   listUrl,
   size,
   replacePage,
+  indentType,
+  setIndentType,
 }: {
   listUrl: string;
   size: number;
   replacePage: (page: number) => void;
+  /** SCM_0051: "" means every type this screen lists. */
+  indentType: string;
+  setIndentType: (value: string) => void;
 }) {
   const nav = useNavigate();
   const accountScope = useIndentAccountScope();
@@ -117,8 +123,9 @@ function IndentListContent({
     // filter nobody asked for.
     region_unassigned: includeUnassignedRegion || undefined,
     // Stock transfer requests are indents underneath, and are listed on Inventory >
-    // Stock Transfer instead.
-    indent_type: INDENT_LIST_TYPES,
+    // Stock Transfer instead. SCM_0051: a picked type narrows within that same list,
+    // never reopens STR here.
+    indent_type: indentType ? [indentType] : INDENT_LIST_TYPES,
     sort_by: sortBy,
     sort_dir: sortDir,
     page,
@@ -127,6 +134,7 @@ function IndentListContent({
     endDate,
     hasCompleteDateRange,
     includeUnassignedRegion,
+    indentType,
     page,
     requiredByFrom,
     requiredByTo,
@@ -177,26 +185,40 @@ function IndentListContent({
     {
       key: "no",
       header: "Indent",
-      className: "w-[26%] px-4 text-left align-middle lg:w-[16%]",
+      className: "w-[26%] px-4 text-left align-middle lg:w-[14%]",
       render: (row) => <span className="mono font-semibold text-ink">{row.indent_no}</span>,
+    },
+    {
+      // SCM_0051: no column named which kind of request this is — a buyer could
+      // not tell a Monthly (Fixed) indent from an ad-hoc one without opening it.
+      key: "type",
+      header: "Indent Type",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[10%]",
+      hideOnNarrow: true,
+      render: (row) => (
+        <span className="block truncate text-sm text-body">
+          {INDENT_TYPE_OPTIONS.find((o) => o.value === row.indent_type)?.label
+            ?? row.indent_type ?? "-"}
+        </span>
+      ),
     },
     {
       key: "req",
       header: "Requested by",
-      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[15%]",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[14%]",
       hideOnNarrow: true,
       render: (row) => <span className="block truncate">{row.requested_by_name ?? "-"}</span>,
     },
     {
       key: "dept",
       header: "Department",
-      className: "w-[26%] overflow-hidden px-4 text-left align-middle lg:w-[14%]",
+      className: "w-[26%] overflow-hidden px-4 text-left align-middle lg:w-[13%]",
       render: (row) => <span className="block truncate">{row.department_name ?? "-"}</span>,
     },
     {
       key: "region",
       header: "Region",
-      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[13%]",
+      className: "w-0 overflow-hidden px-4 text-left align-middle lg:w-[12%]",
       hideOnNarrow: true,
       render: (row) => (
         <span className="block truncate" title={row.region_name ?? undefined}>
@@ -207,13 +229,13 @@ function IndentListContent({
     {
       key: "items",
       header: "Items",
-      className: "w-[12%] px-4 text-center align-middle lg:w-[8%]",
+      className: "w-[12%] px-4 text-center align-middle lg:w-[7%]",
       render: (row) => <span className="block tabular-nums text-muted">{row.total_items}</span>,
     },
     {
       key: "status",
       header: "Status",
-      className: "w-[36%] min-w-0 px-4 text-left align-middle lg:w-[16%]",
+      className: "w-[36%] min-w-0 px-4 text-left align-middle lg:w-[14%]",
       render: (row) => (
         <IndentSummaryStatusBadge
           status={row.status}
@@ -224,14 +246,14 @@ function IndentListContent({
     {
       key: "date",
       header: "Raised",
-      className: "w-0 px-4 text-left align-middle lg:w-[10%]",
+      className: "w-0 px-4 text-left align-middle lg:w-[9%]",
       hideOnNarrow: true,
       render: (row) => <span className="whitespace-nowrap text-muted">{formatIndentShortDate(row.created_at)}</span>,
     },
     {
       key: "age",
       header: "Age",
-      className: "w-0 px-4 text-left align-middle lg:w-[8%]",
+      className: "w-0 px-4 text-left align-middle lg:w-[7%]",
       hideOnNarrow: true,
       render: (row) => (
         <span className="whitespace-nowrap tabular-nums text-muted">
@@ -253,6 +275,18 @@ function IndentListContent({
         showRegion
         regionFilterLabel="Department"
       />
+
+      {/* SCM_0051: the status/region/priority filters above come from
+          IndentFilterBar's shared machinery; Indent Type is its own small control
+          since only this screen offers it today. */}
+      <div className="mb-4 max-w-xs">
+        <FilterMenu
+          label="Indent Type"
+          value={indentType}
+          onChange={setIndentType}
+          options={INDENT_TYPE_OPTIONS}
+        />
+      </div>
 
       {error && <p className="mb-4 rounded-lg border border-bad/30 bg-bad-bg px-4 py-3 text-sm text-bad">{error.message}</p>}
       <section className="relative" aria-label="Indent results" aria-busy={isFetching}>
@@ -334,6 +368,9 @@ function IndentListContent({
                       <span className="min-w-0">
                         <span className="mono block truncate font-semibold text-ink">{row.indent_no}</span>
                         <span className="mt-1 block truncate text-xs text-muted">
+                          {INDENT_TYPE_OPTIONS.find((o) => o.value === row.indent_type)?.label
+                            ?? row.indent_type ?? "-"}
+                          {" · "}
                           {row.department_name ?? "-"}
                           {row.region_name ? ` · ${row.region_name}` : ""}
                         </span>
@@ -359,10 +396,16 @@ function IndentListContent({
 }
 
 export function IndentListPage() {
-  const { filters, listUrl, replacePage, size } = useAllRequestsUrlState();
+  const { filters, listUrl, replacePage, size, indentType, setIndentType } = useAllRequestsUrlState();
   return (
     <IndentFilterValueProvider value={filters}>
-      <IndentListContent listUrl={listUrl} size={size} replacePage={replacePage} />
+      <IndentListContent
+        listUrl={listUrl}
+        size={size}
+        replacePage={replacePage}
+        indentType={indentType}
+        setIndentType={setIndentType}
+      />
     </IndentFilterValueProvider>
   );
 }

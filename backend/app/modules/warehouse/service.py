@@ -14394,6 +14394,7 @@ async def _build_consignment(db: AsyncSession, data: s.ConsignmentWrite, user) -
         dispatch_date=data.dispatch_date,
         warehouse_id=wh.id,
         warehouse_name=wh.name,
+        warehouse_address=wh.address,
         to_warehouse_id=to_wh.id if to_wh else None,
         to_warehouse_name=to_wh.name if to_wh else None,
         customer_id=data.customer_id,
@@ -14473,6 +14474,7 @@ async def update_consignment(db: AsyncSession, dispatch_id: int, data: s.Consign
     dispatch.dispatch_date = data.dispatch_date
     dispatch.warehouse_id = wh.id
     dispatch.warehouse_name = wh.name
+    dispatch.warehouse_address = wh.address
     dispatch.to_warehouse_id = to_wh.id if to_wh else None
     dispatch.to_warehouse_name = to_wh.name if to_wh else None
     dispatch.customer_id = data.customer_id
@@ -14566,7 +14568,7 @@ async def create_dispatch(db: AsyncSession, data: s.DispatchWrite, user) -> m.Di
         dispatch_no=await _consignment_no(db, project_name),
         dispatch_type=data.dispatch_type.value,
         dispatch_date=data.dispatch_date,
-        warehouse_id=wh.id, warehouse_name=wh.name,
+        warehouse_id=wh.id, warehouse_name=wh.name, warehouse_address=wh.address,
         to_warehouse_id=to_wh.id if to_wh else None,
         to_warehouse_name=to_wh.name if to_wh else None,
         customer_id=data.customer_id,
@@ -14614,6 +14616,7 @@ async def update_dispatch(db: AsyncSession, dispatch_id: int, data: s.DispatchWr
     dispatch.dispatch_date = data.dispatch_date
     dispatch.warehouse_id = wh.id
     dispatch.warehouse_name = wh.name
+    dispatch.warehouse_address = wh.address
     dispatch.to_warehouse_id = to_wh.id if to_wh else None
     dispatch.to_warehouse_name = to_wh.name if to_wh else None
     dispatch.customer_id = data.customer_id
@@ -20543,6 +20546,7 @@ async def _build_return_consignment(db: AsyncSession, doc: m.PurchaseReturn, use
         dispatch_date=ist_today() if 'ist_today' in globals() else date.today(),
         warehouse_id=doc.warehouse_id,
         warehouse_name=wh.name if wh else doc.warehouse_name,
+        warehouse_address=wh.address if wh else None,
         vendor_id=doc.vendor_id,
         vendor_name=vendor.name if vendor else doc.vendor_name,
         delivery_address=_vendor_address(vendor) if vendor else None,

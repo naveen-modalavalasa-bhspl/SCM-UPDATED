@@ -473,6 +473,34 @@ export const rejectMaterialRequest = (id: number, comments = "") =>
     .post<MaterialRequest>(`/api/material-requests/${id}/reject`, { comments })
     .then((r) => r.data);
 
+/** Back ONE rung (previous approver, or the raiser at the first rung). Reason required. */
+export const sendBackMaterialRequest = (id: number, comments: string) =>
+  api
+    .post<MaterialRequest>(`/api/material-requests/${id}/send-back`, { comments })
+    .then((r) => r.data);
+
+export const resubmitMaterialRequestCorrection = (id: number, comments = "") =>
+  api
+    .post<MaterialRequest>(`/api/material-requests/${id}/resubmit-correction`, { comments })
+    .then((r) => r.data);
+
+/** An approver it was sent back to passes it one rung further down. Reason required. */
+export const sendMaterialRequestFurtherBack = (id: number, comments: string) =>
+  api
+    .post<MaterialRequest>(`/api/material-requests/${id}/send-back-further`, { comments })
+    .then((r) => r.data);
+
+/** The raiser's full edit of a sent-back MR — the create form's fields. */
+export const correctMaterialRequest = (id: number, data: {
+  items: { id?: number | null; item_id: number; quantity: number }[];
+  priority?: string | null;
+  required_by?: string | null;
+  remarks?: string | null;
+}) =>
+  api
+    .put<MaterialRequest>(`/api/material-requests/${id}/correction`, data)
+    .then((r) => r.data);
+
 /** Change what the request asks for before it is signed. Lines are keyed by MR LINE
  *  id, never item id — one MR can carry the same item twice. */
 export const reviseMaterialRequest = (

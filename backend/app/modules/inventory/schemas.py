@@ -230,6 +230,14 @@ class MROut(MRListRow):
     # of the same ladder, and the screen has to know which hat is on. Advice for the
     # buttons only; `engine.act` re-checks and is the gate (rule 6).
     can_act: bool = False
+    # Set while RETURNED_FOR_CORRECTION: who it went back to, who sent it and the
+    # (compulsory) reason; and whether THIS login is the one who can resubmit it.
+    correction: dict | None = None
+    can_resubmit_correction: bool = False
+    # Only the raiser edits a sent-back MR; an approver holding it resubmits or passes
+    # it further down.
+    can_edit_correction: bool = False
+    can_pass_correction_down: bool = False
     project_name: str | None = None
     remarks: str | None = None
     approved_at: datetime | None = None
@@ -257,6 +265,24 @@ class MRCreateIn(BaseModel):
     items: list[MRLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     indent_id: int | None = None
     indent_no: str | None = None
+    priority: str | None = None
+    required_by: date | None = None
+    remarks: str | None = None
+
+    _no_past_required_by = field_validator("required_by")(
+        lambda cls, v: not_in_past(v, "Required by"))
+
+
+class MRCorrectionLineIn(BaseModel):
+    """One line of a corrected MR. `id` keeps an existing line; none adds one."""
+    id: int | None = None
+    item_id: int
+    quantity: float = Field(gt=0)
+
+
+class MRCorrectionIn(BaseModel):
+    """The raiser's full edit of a sent-back MR - the create form's fields."""
+    items: list[MRCorrectionLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
     priority: str | None = None
     required_by: date | None = None
     remarks: str | None = None

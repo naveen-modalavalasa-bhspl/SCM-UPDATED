@@ -536,6 +536,11 @@ class Dispatch(Base):
 
     warehouse_id = Column(BigInteger, index=True, nullable=False)
     warehouse_name = Column(String(200), nullable=True)
+    # Snapshot of the stocking point's own address (SCM_0053) — same rule as
+    # warehouse_name: a document that leaves the building must not go stale because
+    # somebody later edits the warehouse master. Carried onto the transport leg's own
+    # from_warehouse_address, which is what the gate pass actually prints.
+    warehouse_address = Column(String(500), nullable=True)
     to_warehouse_id = Column(BigInteger, nullable=True)
     to_warehouse_name = Column(String(200), nullable=True)
     customer_id = Column(BigInteger, nullable=True)

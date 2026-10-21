@@ -94,7 +94,10 @@ const IndentFormPage = lazy(() => import("@/modules/indents/pages/FormPage").the
 const IndentJourneyPage = lazy(() => import("@/modules/indents/pages/JourneyPage").then((m) => ({ default: m.IndentJourneyPage })));
 const IndentPrintPage = lazy(() => import("@/modules/indents/pages/PrintPage").then((m) => ({ default: m.IndentPrintPage })));
 const IndentListPage = lazy(() => import("@/modules/indents/pages/ListPage").then((m) => ({ default: m.IndentListPage })));
-const IndentNotificationsPage = lazy(() => import("@/modules/indents/pages/NotificationsPage").then((m) => ({ default: m.IndentNotificationsPage })));
+// SCM_0056: the indent-only notifications screen is retired — see LegacyNotificationsRedirect
+// and modules/notifications below — but the lazy chunk stays importable, unimported,
+// same as every other retired screen (modules/warehouse/Dispatch.tsx etc).
+const AlertsNotificationsPage = lazy(() => import("@/modules/notifications/pages/NotificationsPage").then((m) => ({ default: m.NotificationsPage })));
 const IndentReportsPage = lazy(() => import("@/modules/indents/pages/ReportsPage").then((m) => ({ default: m.IndentReportsPage })));
 const InspectionPrintPage = lazy(() => import("@/modules/warehouse/pages/InspectionPrintPage").then((m) => ({ default: m.InspectionPrintPage })));
 const InventoryOverviewPage = lazy(() => import("@/modules/inventory/pages/OverviewPage").then((m) => ({ default: m.InventoryOverviewPage })));
@@ -389,6 +392,10 @@ function AppRoutes() {
         {/* Not in PAGE_TREE on purpose: everyone has a profile, so gating it behind an
             rbac_pages row would only mean a permission every role must be granted. */}
         <Route path="profile" element={<ProfilePage />} />
+        {/* SCM_0056: the signed-in person's own inbox — top level, `always_on` in
+            page_registry.py for the same reason Home is. Reads the same
+            shared/api/notifications module the bell does. */}
+        <Route path="notifications" element={<AlertsNotificationsPage />} />
         <Route path="indents" element={<IndentListPage />} />
         <Route path="indents/dashboard" element={<IndentDashboardPage />} />
         <Route path="indents/board" element={<IndentBoardPage />} />
@@ -406,7 +413,9 @@ function AppRoutes() {
         <Route path="indents/acknowledgments"
                element={<Navigate to="/indents/acknowledgements" replace />} />
         <Route path="indents/reports" element={<IndentReportsPage />} />
-        <Route path="indents/notifications" element={<IndentNotificationsPage />} />
+        {/* SCM_0056 — replaced by the top-level Alerts & Notifications page, which
+            reads every notification the bell does rather than an indent-only subset. */}
+        <Route path="indents/notifications" element={<Navigate to="/notifications" replace />} />
         <Route path="indents/new" element={<IndentFormPage />} />
         <Route path="indents/masters" element={<IndentMastersPage />} />
         <Route path="indents/:id/journey" element={<IndentJourneyPage />} />
