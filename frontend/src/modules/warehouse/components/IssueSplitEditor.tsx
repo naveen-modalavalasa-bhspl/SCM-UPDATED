@@ -482,12 +482,17 @@ function ItemRow(props: ItemProps) {
 
           <dl className="mt-2.5 flex flex-wrap items-end gap-x-5 gap-y-2">
             <div>
-              <dt className={HEAD}>Requested</dt>
+              {/* SCM_0068: "Requested" implies a request behind the line, which is
+                  true for an indent line and false for one raised with no indent —
+                  the storekeeper is deciding the quantity, nobody asked for it. Same
+                  field, same mechanism (normalizeSplits still redistributes this
+                  number across the picks below); only the word changes. */}
+              <dt className={HEAD}>{askEditable ? "Quantity to issue" : "Requested"}</dt>
               <dd className="tabular text-sm font-semibold text-ink">
                 {askEditable ? (
                   <span className="block w-24">
                     <QtyInput
-                      ariaLabel={`Requested quantity for ${group.itemCode ?? "this item"}`}
+                      ariaLabel={`Quantity to issue for ${group.itemCode ?? "this item"}`}
                       value={group.requested}
                       onChange={(value) => onSetAsk(num(value))}
                     />
