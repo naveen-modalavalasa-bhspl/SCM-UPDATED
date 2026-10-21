@@ -13,8 +13,31 @@ import { Button } from "./ActionButton";
 import { poApi } from "../api";
 import type { POItem } from "../types";
 
-/** Where an order's packing can no longer move: goods are in, or it is over. */
-const CLOSED = new Set(["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED", "REJECTED"]);
+/**
+ * Packing can only be changed before the order is transmitted to the external supplier:
+ * - DRAFT: editable
+ * - RETURNED_FOR_CORRECTION: editable by raiser
+ * - APPROVED: editable ONLY if not yet sent to the supplier (vendor_status is null / not sent)
+ *
+ * It is FORBIDDEN / HIDDEN when:
+ * - SENT_TO_VENDOR: already officially sent to the supplier
+ * - ACCEPTED_BY_SUPPLIER (or vendorStatus is ACCEPTED/PENDING/REJECTED)
+ * - PENDING_APPROVAL / SUBMITTED: locked in active approval queue
+ * - PARTIALLY_RECEIVED, RECEIVED, CLOSED, CANCELLED, REJECTED
+ */
+export function canEditLinePacking(poStatus: string, vendorStatus?: string | null): boolean {
+  if (vendorStatus && ["PENDING", "ACCEPTED", "REJECTED"].includes(vendorStatus.toUpperCase())) {
+    return false;
+  }
+  const status = (poStatus ?? "").toUpperCase();
+  if (["DRAFT", "RETURNED_FOR_CORRECTION"].includes(status)) {
+    return true;
+  }
+  if (status === "APPROVED") {
+    return !vendorStatus;
+  }
+  return false;
+}
 
 /**
  * A PO line's packing, with the means to change it in a dedicated popup modal:
@@ -24,8 +47,8 @@ const CLOSED = new Set(["PARTIALLY_RECEIVED", "RECEIVED", "CLOSED", "CANCELLED",
  * included. Picking another hierarchy re-packs the same quantity, and the screen says
  * how many packs of each level that quantity needs.
  */
-export function POLinePacking({ poId, poStatus, line, showChips = true }: {
-  poId: number; poStatus: string; line: POItem;
+export function POLinePacking({ poId, poStatus, vendorStatus, line, showChips = true }: {
+  poId: number; poStatus: string; vendorStatus?: string | null; line: POItem;
   /** Off where the quantity cell already shows the packs (`PackQty`). */
   showChips?: boolean;
 }) {
@@ -62,7 +85,9 @@ export function POLinePacking({ poId, poStatus, line, showChips = true }: {
     ? <PackChips entries={line.pack_breakdown} uom={line.uom_code} />
     : <span className="text-xs text-muted">Not packed</span>;
 
-  if (!hierarchies.length || CLOSED.has(poStatus)) {
+  const isEditable = canEditLinePacking(poStatus, vendorStatus);
+
+  if (!hierarchies.length || !isEditable) {
     return line.pack_breakdown?.length && chips ? <div className="mt-1">{chips}</div> : null;
   }
 

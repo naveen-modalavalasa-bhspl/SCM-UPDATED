@@ -486,7 +486,8 @@ export function PODetailPage() {
                             {isRateChanged && <span className="rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-cyan-700">Rate Changed</span>}
                           </div>
                           <div className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</div>
-                          <POLinePacking poId={po.data.id} poStatus={po.data.status} line={item}
+                          <POLinePacking poId={po.data.id} poStatus={po.data.status}
+                                         vendorStatus={po.data.vendor_status} line={item}
                                          showChips={false} />
                           {item.delivery_days != null && <div className="text-xs text-emerald-700">Vendor quoted {item.delivery_days} day{item.delivery_days===1?"":"s"}</div>}
                         </td>

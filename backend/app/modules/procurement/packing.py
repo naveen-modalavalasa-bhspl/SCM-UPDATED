@@ -289,6 +289,26 @@ async def repack_po_line(db: AsyncSession, po: PurchaseOrder, line: POItem, *,
     Refused once the supplier has despatched against the order: the despatch note
     already states how the goods were packed, and the gate receives against that.
     """
+    from app.shared.enums import POStatus, POVendorStatus
+    disallowed_statuses = (
+        POStatus.SENT_TO_VENDOR.value,
+        POStatus.ACCEPTED_BY_SUPPLIER.value,
+        POStatus.PENDING_APPROVAL.value,
+        POStatus.SUBMITTED.value,
+        POStatus.PARTIALLY_RECEIVED.value,
+        POStatus.RECEIVED.value,
+        POStatus.CLOSED.value,
+        POStatus.CANCELLED.value,
+        POStatus.REJECTED.value,
+    )
+    if po.status in disallowed_statuses or (po.vendor_status and po.vendor_status in (
+        POVendorStatus.PENDING.value, POVendorStatus.ACCEPTED.value, POVendorStatus.REJECTED.value
+    )):
+        raise ValidationError(
+            f"{po.po_no} is {po.status} — packaging cannot be edited once an order is sent to "
+            "the supplier, awaiting approval, or closed. To alter packaging on an active contract, "
+            "amend the order."
+        )
     if po.status in closed_statuses:
         raise ValidationError(f"{po.po_no} is {po.status} — its packing can no longer change.")
     if despatched_no:

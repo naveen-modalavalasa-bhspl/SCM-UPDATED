@@ -34,9 +34,9 @@ const LINE: POItem = {
     { item_packaging_id: null, level: 0, name: "Loose", size: 1, qty: 150, hierarchy: "pack of 500" },
   ],
 };
-const show = (status: string, line: POItem = LINE) => render(
+const show = (status: string, line: POItem = LINE, vendorStatus?: string | null) => render(
   <QueryClientProvider client={new QueryClient()}>
-    <POLinePacking poId={54} poStatus={status} line={line} />
+    <POLinePacking poId={54} poStatus={status} vendorStatus={vendorStatus} line={line} />
   </QueryClientProvider>);
 
 beforeEach(() => repackLine.mockReset().mockResolvedValue({}));
@@ -82,5 +82,19 @@ describe("changing a PO line's packing", () => {
     show("PARTIALLY_RECEIVED");
     expect(screen.queryByRole("button", { name: /Change packing/ })).toBeNull();
     expect(screen.getByText(/1 Pack/)).toBeTruthy();
+  });
+
+  it("hides change packing button once sent to vendor or accepted by supplier or pending approval", () => {
+    const r1 = show("SENT_TO_VENDOR", LINE, "PENDING");
+    expect(screen.queryByRole("button", { name: /Change packing/ })).toBeNull();
+    r1.unmount();
+
+    const r2 = show("ACCEPTED_BY_SUPPLIER", LINE, "ACCEPTED");
+    expect(screen.queryByRole("button", { name: /Change packing/ })).toBeNull();
+    r2.unmount();
+
+    const r3 = show("PENDING_APPROVAL");
+    expect(screen.queryByRole("button", { name: /Change packing/ })).toBeNull();
+    r3.unmount();
   });
 });
