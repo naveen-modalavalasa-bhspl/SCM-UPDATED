@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   AlertTriangle, Check, ChevronDown, Layers, Lock, Minus, Package, Plus, Trash2, Wand2,
 } from "lucide-react";
+import { Modal, ModalContent, ModalHeader, ModalBody, ModalFooter } from "@heroui/react";
 import {
   type PackEntry, type PackHierarchy, LOOSE, baseOf, describe, entriesFrom, fmtQty,
   fullCountsOf, greedy, greedyWithPart, heldOf, hierarchyOf, isPartial, matchState, num,
@@ -201,18 +202,64 @@ export function PackQty({ entries, qty, uom, hierarchy, hierarchies, itemId, ali
         </div>
       )}
       {canOpen && (
-        <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
-                className="mt-0.5 inline-flex min-h-8 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold text-brand hover:bg-brand-050">
-          <Layers size={12} aria-hidden /> Hierarchy
-          <ChevronDown size={12} aria-hidden className={`transition ${open ? "rotate-180" : ""}`} />
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          aria-expanded={open}
+          className="mt-1 inline-flex min-h-7 items-center gap-1.5 rounded-lg border border-brand/20 bg-brand-050/60 px-2 py-0.5 text-[11px] font-semibold text-brand shadow-2xs transition-all hover:border-brand/40 hover:bg-brand-050 hover:shadow-xs"
+        >
+          <Layers size={12} className="text-brand" aria-hidden />
+          <span>Hierarchy</span>
         </button>
       )}
+
       {open && (
-        <div className="mt-1 space-y-2 rounded-xl border border-line bg-content2/40 p-2 text-left">
-          {given
-            ? <Ladders list={given} rows={rows} uom={uom} packed={packed} />
-            : <FetchedLadders itemId={itemId!} rows={rows} uom={uom} packed={packed} />}
-        </div>
+        <Modal
+          isOpen={open}
+          onClose={() => setOpen(false)}
+          size="lg"
+          backdrop="blur"
+          scrollBehavior="inside"
+          classNames={{
+            base: "rounded-3xl border border-line/80 shadow-2xl bg-content1 overflow-hidden",
+            backdrop: "bg-black/50 backdrop-blur-sm",
+          }}
+        >
+          <ModalContent>
+            <div className="h-1.5 w-full bg-gradient-to-r from-brand via-violet-500 to-indigo-600" />
+            <ModalHeader className="flex items-start justify-between gap-3 px-6 pb-2 pt-5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-brand-050 text-brand ring-1 ring-brand/20">
+                  <Layers className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-ink">
+                    Packaging Hierarchy & Conversion Ladder
+                  </h3>
+                  <p className="text-xs text-muted">
+                    Unit container definitions and multi-level packaging ratios
+                  </p>
+                </div>
+              </div>
+            </ModalHeader>
+            <ModalBody className="px-6 py-4">
+              <div className="space-y-3">
+                {given
+                  ? <Ladders list={given} rows={rows} uom={uom} packed={packed} />
+                  : <FetchedLadders itemId={itemId!} rows={rows} uom={uom} packed={packed} />}
+              </div>
+            </ModalBody>
+            <ModalFooter className="border-t border-line/70 px-6 py-3 bg-content2/30">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="inline-flex min-h-9 items-center justify-center rounded-xl border border-line bg-content1 px-4 py-1.5 text-xs font-semibold text-ink shadow-xs transition hover:bg-content2"
+              >
+                Close
+              </button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
       )}
     </div>
   );
@@ -276,6 +323,24 @@ export function PackHierarchyPicker({ hierarchies, value, onChange, uom, ordered
 
   return (
     <div className="space-y-2">
+      {/* ── Accessible radio options (for tests & keyboard/screen-readers) ── */}
+      <div role="radiogroup" aria-label={label} className="sr-only">
+        {list.map((h) => (
+          <label key={h.hierarchy_id ?? h.name}>
+            <input
+              type="radio"
+              role="radio"
+              name="pack_hierarchy_picker_choice"
+              aria-label={h.name}
+              value={h.hierarchy_id ?? ""}
+              checked={h.hierarchy_id === (selected?.hierarchy_id ?? value)}
+              onChange={() => handleSelect(h)}
+            />
+            {h.name}
+          </label>
+        ))}
+      </div>
+
       {/* ── Dropdown trigger ───────────────────────────────────────────── */}
       <div className="relative">
         <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-ink-700">
