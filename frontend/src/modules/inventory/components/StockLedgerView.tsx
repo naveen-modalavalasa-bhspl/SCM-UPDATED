@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
-import { ArrowDownLeft, ArrowUpRight, Download, History } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Boxes, Download, History } from "lucide-react";
 import {
   Button, Card, KpiTiles, PageHeader, ResponsiveList, type Column, type KpiTileSpec,
 } from "@/shared/components";
@@ -437,6 +437,15 @@ export function StockLedgerView() {
       render: (r) => (r.out_qty
         ? <span className="inline-block rounded-md bg-bad-bg px-2 py-0.5 font-semibold tabular text-bad">−{r.out_qty}</span>
         : <span className="text-muted">—</span>),
+    },
+    {
+      // How the movement was packed, as the document said at the time (2026-10-08).
+      key: "packs",
+      header: "Packing",
+      hideOnNarrow: true,
+      render: (r) => r.pack_text
+        ? <span className="inline-flex items-center gap-1 text-xs text-ink-700"><Boxes className="h-3.5 w-3.5 text-brand" aria-hidden />{r.pack_text}</span>
+        : <span className="text-muted">—</span>,
     },
     {
       key: "balance",

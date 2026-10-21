@@ -12,7 +12,10 @@ describe("procurement api", () => {
        // document instead of over a side channel the audit never sees, and trims the
        // quantities they are signing for. Both are gated per document by the engine,
        // not by the screen — see `update_po_approval_quantities`.
-       "comments", "postComment", "updateApprovalQuantities"].sort(),
+       "comments", "postComment", "updateApprovalQuantities",
+       // A supplier sending a different pack hierarchy from the order's: the buyer
+       // reads the changes and accepts or declines each (2026-10-08).
+       "packChanges", "decidePackChange"].sort(),
     );
     expect(typeof poApi.createFromIndent).toBe("function");
     // Raised by hand, alongside the two derived paths: an order that begins as a

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { PackQty, usePackSummary } from "@/shared/packing";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
@@ -239,6 +240,8 @@ export function StockBalanceView() {
   });
   const rows = data?.items ?? [];
   const totalPages = data?.total ? Math.ceil(data.total / size) : 0;
+  // How each row on the page is bagged — "2 Carton + 3 Box" (2026-10-08).
+  const packs = usePackSummary(rows.map((r) => r.id));
 
   // The tiles are counted on the server over every matching row. Summing `rows` here
   // summed one page: at 20/page the screen claimed 20 stock lines and 11 items over
@@ -403,6 +406,20 @@ export function StockBalanceView() {
           <LevelBar r={r} />
         </div>
       ),
+    },
+    {
+      key: "packing",
+      header: "Packing",
+      hideOnNarrow: true,
+      render: (r) => {
+        const row = packs.data?.[r.id];
+        if (!row?.packs?.length) return <span className="text-xs text-muted">Loose</span>;
+        // The packs (a part pack reads "1 Carton (350/500)"), the balance in the item's
+        // own unit under them, and the hierarchy one press away (2026-10-11). A pack
+        // under its minimum is flagged by PackQty; the repack is on Stock Segregation >
+        // Lots.
+        return <PackQty entries={row.packs} qty={r.physical_qty} uom={uomOf(r)} itemId={r.item_id} />;
+      },
     },
     {
       key: "reserved",
@@ -701,7 +718,7 @@ export function StockBalanceView() {
           onPageChange={setPage}
           // The serial/code lookup lands after the list. Without this the table keeps
           // the cells it built before that answer arrived — see ResponsiveList.revision.
-          revision={`${serialRows.length}:${rows.length}`}
+          revision={`${serialRows.length}:${rows.length}:${Object.keys(packs.data ?? {}).length}`}
           empty={
             activeFilters
               ? "No stock matches these filters."

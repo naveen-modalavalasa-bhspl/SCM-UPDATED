@@ -864,3 +864,18 @@ class ItemScope(str, Enum):
     """
     ROLE = "ROLE"
     REGION = "REGION"
+
+
+class PackChangeStatus(str, Enum):
+    """A supplier's change of PACK HIERARCHY on a despatch note line (2026-10-08).
+
+    The order said "strips of 10"; the supplier is sending strips of 15. Allowed —
+    the quantity in tablets is what was bought — but the buyer is told, and decides.
+    NONE: the line is packed in the order's own hierarchy. PENDING: waiting on the
+    buyer. ACCEPTED: the order now says the new hierarchy. DECLINED: the buyer refused
+    it; the gate sees that on the receipt before it books the goods in.
+    """
+    NONE = "NONE"
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    DECLINED = "DECLINED"

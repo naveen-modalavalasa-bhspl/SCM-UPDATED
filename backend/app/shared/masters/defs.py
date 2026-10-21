@@ -10,7 +10,7 @@ import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
-from sqlalchemy import false, func, or_, select, update
+from sqlalchemy import false, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -30,7 +30,7 @@ from app.shared.models.master import (
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
-    Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    PackHierarchy, Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
     UomClassRow, VendorCategory, VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
@@ -1933,18 +1933,147 @@ async def apply_item_group(db: AsyncSession, row: ItemGroup,
 
 
 # --------------------------------------------------------------------------- #
-#  Item packaging — the tray -> box -> container ladder
+#  Pack hierarchies — named families of packs for one item (2026-10-08)
+# --------------------------------------------------------------------------- #
+class PackHierarchyIn(BaseModel):
+    """A named family of packs: "Strip of 10", "Strip of 15". Its levels are the
+    `item-packaging` rows that name it."""
+    item_id: int
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=300)
+    is_default: bool = False
+    is_active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _tidy(cls, value: str) -> str:
+        cleaned = " ".join((value or "").split())
+        if not cleaned:
+            raise ValueError('Give the hierarchy a name people will recognise, '
+                             'e.g. "Strip of 10".')
+        return cleaned
+
+
+def pack_hierarchy_out(h: PackHierarchy) -> dict:
+    return {"id": h.id, "item_id": h.item_id, "name": h.name,
+            "description": h.description, "is_default": bool(h.is_default),
+            "is_active": h.is_active}
+
+
+async def apply_pack_hierarchy(db: AsyncSession, row: PackHierarchy,
+                               data: PackHierarchyIn) -> None:
+    item = await db.get(Item, data.item_id)
+    if item is None:
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
+    if row.id and row.item_id and row.item_id != data.item_id:
+        raise ValidationError("A pack hierarchy cannot move to another item.")
+    # Unique per item, ignoring case — checked here so the message names the clash.
+    clash = await db.scalar(select(PackHierarchy.id).where(
+        PackHierarchy.item_id == data.item_id,
+        func.lower(PackHierarchy.name) == data.name.lower(),
+        PackHierarchy.id != (row.id or 0)))
+    if clash is not None:
+        raise ValidationError(
+            f'{item.name} already has a pack hierarchy called "{data.name}". Each '
+            'hierarchy needs its own name, e.g. "Strip of 10" and "Strip of 15".')
+    others = await db.scalar(select(func.count()).select_from(PackHierarchy).where(
+        PackHierarchy.item_id == data.item_id,
+        PackHierarchy.is_active.is_(True),
+        PackHierarchy.id != (row.id or 0)))
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    # The first hierarchy of an item is its default — there is nothing else to offer.
+    if not others and row.is_active:
+        row.is_default = True
+    if row.is_default:
+        await db.execute(
+            update(PackHierarchy)
+            .where(PackHierarchy.item_id == data.item_id,
+                   PackHierarchy.id != (row.id or 0))
+            .values(is_default=False))
+
+
+async def validate_pack_hierarchy_deactivate(db: AsyncSession, row: PackHierarchy) -> None:
+    """A hierarchy that stock on the shelf is packed in cannot go: those packs would
+    be left describing themselves in a family that no longer exists."""
+    live = await _live_handling_units(db, hierarchy_id=row.id)
+    if live:
+        raise ValidationError(
+            f'{live} pack(s) on the shelf are packed as "{row.name}". Issue or repack '
+            'them before retiring this hierarchy.')
+    if row.is_default:
+        # Hand the default on rather than leaving the item with none.
+        successor = await db.scalar(select(PackHierarchy.id).where(
+            PackHierarchy.item_id == row.item_id, PackHierarchy.is_active.is_(True),
+            PackHierarchy.id != row.id).order_by(PackHierarchy.name).limit(1))
+        if successor is not None:
+            await db.execute(update(PackHierarchy).where(PackHierarchy.id == successor)
+                             .values(is_default=True))
+        row.is_default = False
+
+
+#: A pack still on the shelf: standing on its own, or inside a bigger one.
+LIVE_PACK_STATUSES = ("SEALED", "INSIDE")
+
+
+async def _live_handling_units(db: AsyncSession, *, hierarchy_id: int | None = None,
+                               item_packaging_id: int | None = None) -> int:
+    """How many packs on the shelf use this hierarchy / rung. Raw SQL: the table is
+    the warehouse module's and shared may not import a module (rule 5)."""
+    column, value = (("pack_hierarchy_id", hierarchy_id) if hierarchy_id
+                     else ("item_packaging_id", item_packaging_id))
+    if not value:
+        return 0
+    exists = await db.scalar(text(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name = 'whs_handling_units'"))
+    if not exists:
+        return 0
+    return int(await db.scalar(text(
+        f"SELECT COUNT(*) FROM whs_handling_units WHERE {column} = :v "
+        "AND status IN ('SEALED', 'INSIDE')"), {"v": value}) or 0)
+
+
+async def _hierarchy_for_rung(db: AsyncSession, item_id: int,
+                              hierarchy_id: int | None) -> PackHierarchy:
+    """The hierarchy a rung belongs to. None means the item's default, and an item
+    with no hierarchy at all gets a "Standard" one — so a client that never heard of
+    hierarchies still builds a ladder exactly as it did before."""
+    if hierarchy_id:
+        found = await db.get(PackHierarchy, hierarchy_id)
+        if found is None or found.item_id != item_id:
+            raise ValidationError(
+                "Pack hierarchy: that hierarchy is not one of this item's. Pick one "
+                "from the item's own list.")
+        if not found.is_active:
+            raise ValidationError(f'The "{found.name}" hierarchy has been retired.')
+        return found
+    found = await db.scalar(select(PackHierarchy).where(
+        PackHierarchy.item_id == item_id, PackHierarchy.is_active.is_(True))
+        .order_by(PackHierarchy.is_default.desc(), PackHierarchy.id).limit(1))
+    if found is None:
+        found = PackHierarchy(item_id=item_id, name="Standard", is_default=True,
+                              is_active=True)
+        db.add(found)
+        await db.flush()
+    return found
+
+
+# --------------------------------------------------------------------------- #
+#  Item packaging — the levels of one hierarchy: strip -> box -> carton
 # --------------------------------------------------------------------------- #
 class ItemPackagingIn(BaseModel):
-    """One rung of an item's ladder — a PACKAGING UNIT, in the WMS sense.
+    """One rung of a hierarchy — a PACKAGING UNIT, in the WMS sense.
 
-    `quantity` is the conversion factor (1 BOX = 50 EACH). The dimensions are an
-    OVERRIDE of the container type's own box and are blank in the ordinary case, so a
-    ladder stays cheap to configure and only genuine exceptions are typed.
-    `gross_weight_kg` is what ONE of these weighs full — item-specific by definition,
-    which is exactly why it cannot live on the container type.
+    `quantity` is the conversion factor to the level below (1 BOX = 10 STRIP; level 1
+    counts the item's own unit). The dimensions are an OVERRIDE of the container
+    type's own box and are blank in the ordinary case. `gross_weight_kg` is what ONE
+    of these weighs full — item-specific by definition, which is exactly why it
+    cannot live on the container type.
     """
     item_id: int
+    # None = the item's default hierarchy (created as "Standard" if it has none).
+    hierarchy_id: int | None = None
     level: int
     package_id: int
     quantity: float
@@ -1954,6 +2083,9 @@ class ItemPackagingIn(BaseModel):
     gross_weight_kg: float | None = Field(default=None, ge=0, le=1000000)
     max_stack_tiers: int | None = Field(default=None, ge=1, le=999)
     is_default_putaway_unit: bool = False
+    # The least one pack of this level may be made with, in the item's own unit.
+    # Blank: no floor. Never more than what one pack of the level holds.
+    min_fill_qty: float | None = Field(default=None, gt=0, le=1e12)
     is_active: bool = True
 
     @model_validator(mode="after")
@@ -1967,7 +2099,8 @@ class ItemPackagingIn(BaseModel):
 
 
 def item_packaging_out(p: ItemPackaging) -> dict:
-    return {"id": p.id, "item_id": p.item_id, "level": p.level,
+    return {"id": p.id, "item_id": p.item_id, "hierarchy_id": p.hierarchy_id,
+            "level": p.level,
             "package_id": p.package_id, "package_name": p.package_name,
             "quantity": _num(p.quantity), "uom_id": p.uom_id,
             "uom_code": p.uom_code,
@@ -1976,14 +2109,22 @@ def item_packaging_out(p: ItemPackaging) -> dict:
             "gross_weight_kg": _num(p.gross_weight_kg),
             "max_stack_tiers": p.max_stack_tiers,
             "is_default_putaway_unit": bool(p.is_default_putaway_unit),
+            "min_fill_qty": _num(p.min_fill_qty),
             "is_active": p.is_active}
 
 
 async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
                                data: ItemPackagingIn) -> None:
     """Level 1 is measured in the item's own unit; every level above counts the level
-    below it. The rungs are stored, never the running totals — a stored total is one
-    edit away from disagreeing with its own parts."""
+    below it, WITHIN ONE HIERARCHY. The rungs are stored, never the running totals — a
+    stored total is one edit away from disagreeing with its own parts.
+
+    Three rules, all per hierarchy:
+      * levels are contiguous — a missing rung cannot be multiplied up;
+      * a container type appears at most once — a strip cannot hold a strip, and the
+        same box twice would make "1 Box" mean two different quantities;
+      * one default putaway unit.
+    """
     if data.level < 1:
         raise ValidationError(f"Pack level must be 1 or more. You typed {data.level}.")
     if data.quantity <= 0:
@@ -1998,34 +2139,76 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
         raise ValidationError(
             f"Quantity: level {data.level} must hold a whole number of the pack below "
             f"it, e.g. 12 — not {data.quantity}.")
+    hierarchy = await _hierarchy_for_rung(db, data.item_id, data.hierarchy_id)
 
     # A ladder with a missing rung cannot be multiplied up, so a level may only be
-    # added directly on top of one that already exists.
+    # added directly on top of one that already exists in the same hierarchy.
     if data.level > 1:
         below = await db.scalar(select(ItemPackaging.id).where(
-            ItemPackaging.item_id == data.item_id,
+            ItemPackaging.hierarchy_id == hierarchy.id,
             ItemPackaging.level == data.level - 1,
             ItemPackaging.is_active.is_(True)))
         if below is None:
             raise ValidationError(
-                f"Pack level {data.level - 1} does not exist yet. Add level "
+                f'"{hierarchy.name}" has no level {data.level - 1} yet. Add level '
                 f"{data.level - 1} before level {data.level}.")
+
+    # A container type at most once per hierarchy. Across hierarchies it is fine —
+    # strips of 10 and strips of 15 both go into a Box.
+    if data.is_active:
+        twin = await db.scalar(select(ItemPackaging.level).where(
+            ItemPackaging.hierarchy_id == hierarchy.id,
+            ItemPackaging.package_id == data.package_id,
+            ItemPackaging.is_active.is_(True),
+            ItemPackaging.id != (row.id or 0)))
+        if twin is not None:
+            raise ValidationError(
+                f'{package.name} is already level {twin} of "{hierarchy.name}". A '
+                "container type can be used once per hierarchy — pick a different "
+                "container for this level.")
+
+    # Changing what a level HOLDS while stock is packed in it would silently change
+    # how much is on the shelf. The packs keep their own snapshot, but the next person
+    # to read "3 Box" would read a different number of tablets.
+    if row.id and _num(row.quantity) != _num(data.quantity):
+        live = await _live_handling_units(db, item_packaging_id=row.id)
+        if live:
+            raise ValidationError(
+                f"{live} {row.package_name or 'pack'}(s) on the shelf hold "
+                f"{_num(row.quantity)} each. Changing it to {data.quantity} would "
+                "change how much stock they are counted as. Create a new hierarchy "
+                "for the new pack size instead.")
+
+    # The floor sits UNDER the level's size: a carton of 600 cannot have to hold 700.
+    if data.min_fill_qty is not None:
+        from app.shared import packing as shared_packing
+        from app.shared.masters import packs as shared_packs
+        below_size = 1.0
+        if data.level > 1:
+            ladder = await shared_packs.ladder(db, data.item_id, hierarchy.id)
+            if data.level - 1 <= ladder.top:
+                below_size = float(ladder.at(data.level - 1).size)
+        size = below_size * float(data.quantity)
+        if data.min_fill_qty > size:
+            raise ValidationError(
+                f"Minimum fill: one {package.name} holds {shared_packing.fmt(size)} "
+                f"{item.uom_code or 'units'}, so it cannot have to hold at least "
+                f"{shared_packing.fmt(data.min_fill_qty)}. Leave it blank for no minimum.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
+    row.hierarchy_id = hierarchy.id
     row.package_name = package.name
     # Every result is ultimately expressed in the item's own stocking UOM.
     row.uom_id, row.uom_code = item.uom_id, item.uom_code
 
-    # At most one default putaway unit per item. Enforced here rather than by an index
-    # for the reason `apply_vendor_item` gives about its preferred vendor: "at most one
-    # TRUE per item" is not something a unique index can express. Turning one rung on
-    # turns the others off, because the alternative is a form that refuses to save and
-    # sends the storekeeper away to find the old default first.
+    # At most one default putaway unit per hierarchy. Turning one rung on turns the
+    # others off, because the alternative is a form that refuses to save and sends the
+    # storekeeper away to find the old default first.
     if data.is_default_putaway_unit:
         await db.execute(
             update(ItemPackaging)
-            .where(ItemPackaging.item_id == data.item_id,
+            .where(ItemPackaging.hierarchy_id == hierarchy.id,
                    ItemPackaging.id != (row.id or 0))
             .values(is_default_putaway_unit=False)
         )
@@ -2035,6 +2218,7 @@ async def validate_item_packaging_deactivate(
     db: AsyncSession, row: ItemPackaging,
 ) -> None:
     higher = await db.scalar(select(ItemPackaging.id).where(
+        ItemPackaging.hierarchy_id == row.hierarchy_id,
         ItemPackaging.item_id == row.item_id,
         ItemPackaging.level > row.level,
         ItemPackaging.is_active.is_(True),
@@ -2043,20 +2227,32 @@ async def validate_item_packaging_deactivate(
         raise ValidationError(
             "There is a bigger pack level above this one. Remove the highest level "
             "first, then this one.")
+    live = await _live_handling_units(db, item_packaging_id=row.id)
+    if live:
+        raise ValidationError(
+            f"{live} {row.package_name or 'pack'}(s) are on the shelf at this level. "
+            "Repack or issue them before removing it.")
 
 
-async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
+async def packaging_breakdown(db: AsyncSession, item_id: int,
+                              hierarchy_id: int | None = None) -> list[dict]:
     """The ladder with its running totals: 1 tray = 10 L, 1 box = 10 trays = 100 L.
 
-    Multiplied up on read rather than stored, so the totals cannot drift from the
-    rungs they come from.
+    One hierarchy at a time (the default when none is named). Multiplied up on read
+    rather than stored, so the totals cannot drift from the rungs they come from.
     """
     item = await db.get(Item, item_id)
     if item is None:
         raise NotFoundError("Item not found")
+    if hierarchy_id is None:
+        hierarchy_id = await db.scalar(select(PackHierarchy.id).where(
+            PackHierarchy.item_id == item_id, PackHierarchy.is_active.is_(True))
+            .order_by(PackHierarchy.is_default.desc(), PackHierarchy.id).limit(1))
     rows = (await db.execute(
         select(ItemPackaging)
-        .where(ItemPackaging.item_id == item_id, ItemPackaging.is_active.is_(True))
+        .where(ItemPackaging.item_id == item_id, ItemPackaging.is_active.is_(True),
+               (ItemPackaging.hierarchy_id == hierarchy_id) if hierarchy_id
+               else ItemPackaging.hierarchy_id.is_(None))
         .order_by(ItemPackaging.level)
     )).scalars().all()
 
@@ -2110,6 +2306,7 @@ async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
             "max_stack_tiers": (row.max_stack_tiers
                                 or (container.max_stack_tiers if container else None)),
             "is_default_putaway_unit": bool(row.is_default_putaway_unit),
+            "min_fill_qty": _num(row.min_fill_qty),
         })
     return out
 
@@ -2849,10 +3046,20 @@ MASTERS: list[MasterDef] = [
               filters=("item_id", "group_id")),
 
     # ---- an item's packing ladder and, for a kit, its contents ----
+    # Pack hierarchies (2026-10-08): the named families an item is packed in. The
+    # levels of each are the item-packaging rows that name it.
+    MasterDef(path="pack-hierarchies", name="Pack hierarchy", model=PackHierarchy,
+              schema=PackHierarchyIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
+              serialize=pack_hierarchy_out, search_cols=("name",), order_col="name",
+              apply=apply_pack_hierarchy, filters=("item_id",),
+              before_deactivate=validate_pack_hierarchy_deactivate,
+              usage=(("Packs on the shelf", "whs_handling_units", "pack_hierarchy_id"),
+                     ("Purchase order lines", "pro_po_items", "pack_hierarchy_id"),
+                     ("Goods receipt lines", "inb_receipt_items", "pack_hierarchy_id"))),
     MasterDef(path="item-packaging", name="Item packaging", model=ItemPackaging,
               schema=ItemPackagingIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
               serialize=item_packaging_out, order_col="level",
-              apply=apply_item_packaging, filters=("item_id",),
+              apply=apply_item_packaging, filters=("item_id", "hierarchy_id"),
               default_active_only=True,
               before_deactivate=validate_item_packaging_deactivate),
 

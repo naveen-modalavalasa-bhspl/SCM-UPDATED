@@ -9,13 +9,14 @@ import {
   Button, Can, Field, Input, ResponsiveList, Select, type Column,
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
+import { ladderCaption, usePackOptions } from "@/shared/packing";
 import { mastersApi } from "../api";
 import { BulkBar } from "./BulkBar";
 import { MASTER_PAGE_SIZE } from "./MasterCrud";
 import type {
   MasterBrand, MasterBrandManufacturer, MasterCategoryTag, MasterGeneralName,
   MasterItem, MasterItemComponent,
-  MasterItemPackaging, NamedMaster, PackagingBreakdown, UomClass,
+  MasterItemPackaging, MasterPackHierarchy, NamedMaster, PackagingBreakdown, UomClass,
 } from "../types";
 
 export const ITEM_SECTIONS = [
@@ -712,7 +713,7 @@ export function ItemMasterTab() {
             {tab === "Packaging" && (
               !editing
                 ? <Empty>Save the item first — the packing ladder is built against it.</Empty>
-                : <ItemPackagingLadder itemId={editing.id}
+                : <ItemPackHierarchies itemId={editing.id}
                     itemName={editing.name} baseUom={editing.uom_code} />
             )}
 
@@ -1030,10 +1031,134 @@ export function packagingBreakupText(
   return `${packages.join(" = ")} = ${product}${itemName ? ` of ${itemName}` : ""}`;
 }
 
-/** An item's container ladder. Level 1 holds the item's UOM directly; each level
- *  above contains a whole number of the package immediately below it. */
-function ItemPackagingLadder({ itemId, itemName, baseUom }: {
+/** An item's pack hierarchies (2026-10-08): the named families it is packed in —
+ *  "Strip of 10" and "Strip of 15" at the same time — each with its own ladder of
+ *  levels. A container type is used at most once per hierarchy; across hierarchies it
+ *  is fine (both families go into a Box). The default hierarchy is the one a new PO
+ *  offers first. */
+export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
   itemId: number; itemName: string; baseUom?: string | null;
+}) {
+  const qc = useQueryClient();
+  const [selected, setSelected] = useState<number | null>(null);
+  const [newName, setNewName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const hierarchies = useQuery({
+    queryKey: ["masters", "pack-hierarchies", itemId],
+    queryFn: () => mastersApi.packHierarchies
+      .list({ item_id: itemId, size: 50 })
+      .then((r) => r.items.filter((h) => h.is_active)),
+  });
+  const ladders = usePackOptions([itemId]);
+  const list = hierarchies.data ?? [];
+  const current = list.find((h) => h.id === selected)
+    ?? list.find((h) => h.is_default) ?? list[0];
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["masters", "pack-hierarchies", itemId] });
+    qc.invalidateQueries({ queryKey: ["pack-options"] });
+  };
+  const create = useMutation({
+    mutationFn: () => mastersApi.packHierarchies.create({
+      item_id: itemId, name: newName.trim(), is_active: true,
+      is_default: list.length === 0,
+    }),
+    onSuccess: (row) => { setNewName(""); setError(null); setSelected(row.id); refresh(); },
+    onError: (reason: Error) => setError(reason.message),
+  });
+  const makeDefault = useMutation({
+    mutationFn: (row: MasterPackHierarchy) => mastersApi.packHierarchies.update(row.id, {
+      item_id: row.item_id, name: row.name, description: row.description ?? null,
+      is_default: true, is_active: true,
+    }),
+    onSuccess: () => { setError(null); refresh(); },
+    onError: (reason: Error) => setError(reason.message),
+  });
+  const retire = useMutation({
+    mutationFn: (row: MasterPackHierarchy) => mastersApi.packHierarchies.deactivate(row.id),
+    onSuccess: () => { setError(null); setSelected(null); refresh(); },
+    onError: (reason: Error) => setError(reason.message),
+  });
+  const caption = (id: number) => {
+    const h = (ladders.data?.[itemId] ?? []).find((row) => row.hierarchy_id === id);
+    return h && h.levels.length > 1 ? ladderCaption(h, baseUom) : "No levels yet";
+  };
+
+  return (
+    <div className="space-y-4">
+      {error && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{error}</div>}
+      <div className="rounded-xl border border-line bg-content2/40 p-3">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <span className="text-sm font-semibold text-ink">Pack hierarchies</span>
+          <span className="text-xs text-muted">
+            One item can be packed several ways at once — each way is a hierarchy.
+          </span>
+        </div>
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+          <Field label="Pack hierarchy">
+            <Select
+              value={current?.id ?? ""}
+              ariaLabel="Pack hierarchy"
+              placeholder={list.length ? "Choose a pack hierarchy" : "No pack hierarchy yet"}
+              isDisabled={!list.length}
+              options={list.map((h) => ({
+                value: h.id,
+                label: `${h.name}${h.is_default ? " (default)" : ""} — ${caption(h.id)}`,
+              }))}
+              onChange={(value) => setSelected(value ? Number(value) : null)}
+            />
+          </Field>
+          <Can do="master.packaging.manage">
+            <div className="flex min-h-11 items-center gap-2 rounded-xl border border-dashed border-line bg-content1 px-2">
+              <input value={newName} onChange={(e) => setNewName(e.target.value)}
+                     placeholder='New, e.g. "Strip of 15"' aria-label="New pack hierarchy name"
+                     maxLength={100}
+                     onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) create.mutate(); }}
+                     className="h-9 w-44 bg-transparent text-sm outline-none" />
+              <Button variant="soft" onClick={() => create.mutate()}
+                      disabled={!newName.trim() || create.isPending}>
+                <Plus size={14} /> Add
+              </Button>
+            </div>
+          </Can>
+        </div>
+        {current && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            {current.is_default && (
+              <span className="rounded-full bg-ok-bg px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ok">
+                Default
+              </span>
+            )}
+            {!current.is_default && (
+              <Can do="master.packaging.manage">
+                <Button variant="ghost" className="text-xs"
+                        onClick={() => makeDefault.mutate(current)}
+                        disabled={makeDefault.isPending}>Make default</Button>
+              </Can>
+            )}
+            <Can do="master.packaging.manage">
+              <Button variant="ghost" className="text-xs text-bad"
+                      onClick={() => retire.mutate(current)} disabled={retire.isPending}>
+                Retire hierarchy
+              </Button>
+            </Can>
+          </div>
+        )}
+      </div>
+      {hierarchies.isLoading
+        ? <p className="text-sm text-muted">Loading…</p>
+        : current
+          ? <ItemPackagingLadder key={current.id} itemId={itemId} hierarchyId={current.id}
+              hierarchyName={current.name} itemName={itemName} baseUom={baseUom} />
+          : <Empty>Add a pack hierarchy above — for a tablet, "Strip of 10" — then build its levels.</Empty>}
+    </div>
+  );
+}
+
+/** One hierarchy's ladder. Level 1 holds the item's UOM directly; each level above
+ *  contains a whole number of the package immediately below it. */
+function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, baseUom }: {
+  itemId: number; hierarchyId: number; hierarchyName: string; itemName: string;
+  baseUom?: string | null;
 }) {
   const qc = useQueryClient();
   const [packageId, setPackageId] = useState("");
@@ -1043,17 +1168,19 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
   // is the ordinary case and keeps a ladder cheap to configure.
   const [grossWeight, setGrossWeight] = useState("");
   const [override, setOverride] = useState({ length_cm: "", width_cm: "", height_cm: "" });
+  // The least one pack of the new level may be made with (2026-10-11). Blank: none.
+  const [minFill, setMinFill] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const rungs = useQuery({
-    queryKey: ["masters", "item-packaging", itemId],
+    queryKey: ["masters", "item-packaging", itemId, hierarchyId],
     queryFn: () => mastersApi.itemPackaging
-      .list({ item_id: itemId, size: 50, include_inactive: true })
+      .list({ item_id: itemId, hierarchy_id: hierarchyId, size: 50, include_inactive: true })
       .then((r) => r.items),
   });
   const breakdown = useQuery({
-    queryKey: ["masters", "packaging-breakdown", itemId],
-    queryFn: () => mastersApi.itemPackaging.breakdown(itemId),
+    queryKey: ["masters", "packaging-breakdown", itemId, hierarchyId],
+    queryFn: () => mastersApi.itemPackaging.breakdown(itemId, hierarchyId),
   });
   const packages = useQuery({
     queryKey: ["masters", "packaging", "all"],
@@ -1061,6 +1188,8 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
   });
 
   const activeRungs = (rungs.data ?? []).filter((rung) => rung.is_active);
+  // A container is used at most once per hierarchy — the server refuses it too.
+  const usedPackages = new Set(activeRungs.map((rung) => rung.package_id));
   const nextLevel = Math.max(0, ...activeRungs.map((rung) => rung.level)) + 1;
   const below = breakdown.data?.find((row) => row.level === nextLevel - 1);
   const inactiveAtNextLevel = (rungs.data ?? [])
@@ -1085,9 +1214,11 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
       const sides = ["length_cm", "width_cm", "height_cm"] as const;
       const measured = sides.every((key) => Number(override[key]) > 0);
       const payload = {
-        item_id: itemId, level: nextLevel, package_id: Number(packageId),
+        item_id: itemId, hierarchy_id: hierarchyId, level: nextLevel,
+        package_id: Number(packageId),
         quantity: enteredQuantity,
         gross_weight_kg: grossWeight === "" ? null : Number(grossWeight),
+        min_fill_qty: minFill === "" ? null : Number(minFill),
         // All three or none — the server refuses a half-measured box, because two
         // sides describe nothing a slotting check can use.
         ...(measured
@@ -1100,10 +1231,11 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
         : mastersApi.itemPackaging.create(payload);
     },
     onSuccess: () => {
-      setPackageId(""); setQuantity(""); setGrossWeight(""); setError(null);
+      setPackageId(""); setQuantity(""); setGrossWeight(""); setMinFill(""); setError(null);
       setOverride({ length_cm: "", width_cm: "", height_cm: "" });
       qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
       qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
+      qc.invalidateQueries({ queryKey: ["pack-options"] });
     },
     onError: (reason: Error) => setError(reason.message),
   });
@@ -1113,17 +1245,43 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
   const setDefault = useMutation({
     mutationFn: (rung: MasterItemPackaging) =>
       mastersApi.itemPackaging.update(rung.id, {
-        item_id: rung.item_id, level: rung.level, package_id: rung.package_id,
+        item_id: rung.item_id, hierarchy_id: hierarchyId, level: rung.level,
+        package_id: rung.package_id,
         quantity: rung.quantity, length_cm: rung.length_cm ?? null,
         width_cm: rung.width_cm ?? null, height_cm: rung.height_cm ?? null,
         gross_weight_kg: rung.gross_weight_kg ?? null,
         max_stack_tiers: rung.max_stack_tiers ?? null,
+        // Carried through: the update replaces the whole rung, and leaving it out
+        // would quietly clear the floor.
+        min_fill_qty: rung.min_fill_qty ?? null,
         is_default_putaway_unit: true, is_active: true,
       }),
     onSuccess: () => {
       setError(null);
       qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
       qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
+      qc.invalidateQueries({ queryKey: ["pack-options"] });
+    },
+    onError: (reason: Error) => setError(reason.message),
+  });
+  // The floor of one level, edited in place (2026-10-11).
+  const setFloor = useMutation({
+    mutationFn: ({ rung, value }: { rung: MasterItemPackaging; value: number | null }) =>
+      mastersApi.itemPackaging.update(rung.id, {
+        item_id: rung.item_id, hierarchy_id: hierarchyId, level: rung.level,
+        package_id: rung.package_id,
+        quantity: rung.quantity, length_cm: rung.length_cm ?? null,
+        width_cm: rung.width_cm ?? null, height_cm: rung.height_cm ?? null,
+        gross_weight_kg: rung.gross_weight_kg ?? null,
+        max_stack_tiers: rung.max_stack_tiers ?? null,
+        is_default_putaway_unit: !!rung.is_default_putaway_unit,
+        min_fill_qty: value, is_active: true,
+      }),
+    onSuccess: () => {
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
+      qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
+      qc.invalidateQueries({ queryKey: ["pack-options"] });
     },
     onError: (reason: Error) => setError(reason.message),
   });
@@ -1133,6 +1291,7 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
       setError(null);
       qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
       qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
+      qc.invalidateQueries({ queryKey: ["pack-options"] });
     },
     onError: (reason: Error) => setError(reason.message),
   });
@@ -1177,6 +1336,16 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
           </span>
         );
       } },
+    // The size is the most one pack holds; this is the least one may be MADE with. A
+    // pack that falls under it later (stock issued out of it) is flagged for a repack.
+    { key: "min", header: "Minimum fill", render: (r) => {
+        const row = breakdown.data?.find((b) => b.level === r.level);
+        return (
+          <MinFillCell value={r.min_fill_qty ?? null} max={row?.base_quantity}
+                       uom={baseUom} busy={setFloor.isPending}
+                       onSave={(value) => setFloor.mutate({ rung: r, value })} />
+        );
+      } },
     { key: "default", header: "Putaway unit", render: (r) => (
         r.is_default_putaway_unit ? (
           <span className="rounded-full bg-ok-bg px-2 py-0.5 text-[11px] font-semibold text-ok">
@@ -1203,21 +1372,14 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
   return (
     <div className="space-y-4">
       {error && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{error}</div>}
-      <p className="text-sm text-muted">
-        Level 1 contains the product directly in {baseUom ?? "the item's UOM"}. Each
-        higher level contains a whole number of the container immediately below.
-      </p>
-      <p className="text-sm text-muted">
-        These levels are what the warehouse checks a bin against — not the loose item.
-        A putaway is measured in whole packs, so the box comes from the container type
-        (set once, under Masters &gt; Packages) and only the loaded weight, which
-        depends on what is inside, is asked for here.
-      </p>
       <div className="grid gap-3 md:grid-cols-[2fr_1fr_auto] md:items-end">
-        <Field label={`Level ${nextLevel} container type`}>
+        <Field label={`Level ${nextLevel} container type`}
+               hint={usedPackages.size
+                 ? `Containers already in "${hierarchyName}" are not offered again.`
+                 : undefined}>
           <Select value={packageId}
                   options={(packages.data ?? [])
-                    .filter((p) => p.is_active)
+                    .filter((p) => p.is_active && !usedPackages.has(p.id))
                     .map((p) => ({ value: p.id, label: `${p.code} — ${p.name}` }))}
                   onChange={setPackageId} /></Field>
         <Field label={nextLevel === 1
@@ -1232,13 +1394,22 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
         </Button>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-[1fr_1fr] md:items-start mt-2">
+      <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr] md:items-start mt-2">
         <Field
           label="Gross weight of one, loaded (kg)"
           hint="Container plus contents. Optional — without it a rack's weight limit cannot be checked against this pack."
         >
           <Input type="number" min={0} step="0.001" value={grossWeight}
                  onChange={(e) => setGrossWeight(e.target.value)} />
+        </Field>
+        <Field
+          label={`Minimum fill (${baseUom ?? "item UOM"})`}
+          hint={projectedBaseQuantity > 0 && quantityValid
+            ? `One holds ${amount(projectedBaseQuantity)}. The least one may be made with — blank for no minimum.`
+            : "The least one pack of this level may be made with. Blank for no minimum."}
+        >
+          <Input type="number" min={0} step="0.001" value={minFill}
+                 onChange={(e) => setMinFill(e.target.value)} />
         </Field>
         <div>
           <span className="mb-1.5 block text-sm font-medium text-body">
@@ -1293,6 +1464,40 @@ function ItemPackagingLadder({ itemId, itemName, baseUom }: {
             </div>
           </div>
         )} />
+    </div>
+  );
+}
+
+/** One level's minimum fill, read and edited in place. The server refuses a floor
+ *  above what one pack holds; this only says so before the press. */
+function MinFillCell({ value, max, uom, busy, onSave }: {
+  value: number | null; max?: number; uom?: string | null; busy: boolean;
+  onSave: (value: number | null) => void;
+}) {
+  const { can } = useAuth();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  if (!editing) {
+    if (!can("master.packaging.manage")) {
+      return <span className="text-xs text-muted">{value != null ? `${amount(value)} ${uom ?? ""}` : "None"}</span>;
+    }
+    return (
+      <button type="button" onClick={() => { setDraft(value != null ? String(value) : ""); setEditing(true); }}
+              className="min-h-9 rounded-md px-2 text-xs font-semibold text-brand hover:bg-brand-050">
+        {value != null ? `${amount(value)} ${uom ?? ""}` : "Set minimum"}
+      </button>
+    );
+  }
+  const n = Number(draft);
+  const invalid = draft !== "" && (!(n > 0) || (max != null && n > max));
+  return (
+    <div className="flex items-center gap-1">
+      <Input type="number" min={0} step="0.001" value={draft} aria-label="Minimum fill"
+             onChange={(e) => setDraft(e.target.value)} className="w-24" />
+      <Button variant="ghost" className="text-xs" disabled={busy || invalid}
+              title={invalid && max != null ? `At most ${amount(max)} — what one pack holds` : undefined}
+              onClick={() => { onSave(draft === "" ? null : n); setEditing(false); }}>Save</Button>
+      <Button variant="ghost" className="text-xs" onClick={() => setEditing(false)}>Cancel</Button>
     </div>
   );
 }

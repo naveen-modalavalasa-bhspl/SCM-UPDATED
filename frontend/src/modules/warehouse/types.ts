@@ -10,6 +10,7 @@
  * `uom_code`, every `*_name`), so a list screen renders from one payload and never
  * fans out to fetch a vendor or an item.
  */
+import type { PackEntry, PackEntryIn, PackHierarchy, PackLevel } from "@/shared/packing";
 
 /** The paginated envelope every list endpoint returns. */
 export interface Page<T> {
@@ -663,6 +664,15 @@ export interface ReceiptItem {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Packing (2026-10-08). `declared_pack_breakdown` is the supplier's despatch
+   *  note — fixed; `pack_breakdown` is what was counted, never over the declared. */
+  despatch_note_item_id?: number | null;
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  declared_pack_breakdown?: PackEntry[] | null;
+  declared_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
 }
 
 export interface ReceiptItemWrite {
@@ -691,6 +701,20 @@ export interface ReceiptItemWrite {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Packing (2026-10-08). `declared_pack_breakdown` is the supplier's despatch
+   *  note — fixed; `pack_breakdown` is what was counted, never over the declared. */
+  despatch_note_item_id?: number | null;
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  declared_pack_breakdown?: PackEntry[] | null;
+  declared_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  /** Display only: the buyer's answer when the supplier changed the packing. */
+  pack_change_status?: string | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
 export interface ReceiptWrite {
@@ -880,6 +904,15 @@ export interface OutboundInspectionWrite {
 export interface Putaway {
   id: number;
   putaway_no: string;
+  /** Packing (2026-10-08) — served on the single task only. */
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  received_pack_breakdown?: PackEntry[] | null;
+  received_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_levels?: PackLevel[];
+  codes_per_pack?: boolean;
   grn_id?: number | null;
   grn_no?: string | null;
   grn_item_id?: number | null;
@@ -995,6 +1028,8 @@ export interface PutawayCodes {
 export interface PutawayConfirm {
   actual_bin_id: number;
   qty?: number;
+  /** How the goods are shelved, in the receipt's hierarchy (2026-10-08). */
+  pack_breakdown?: PackEntryIn[] | null;
   /** The rung being put away. Omitted falls back to the task's own, then to the item's
    *  default putaway unit — so an untouched screen still measures the load. */
   item_packaging_id?: number | null;
@@ -1238,6 +1273,12 @@ export interface IssueItem {
   /** The item's `requires_qi`: this line goes on the outward QC sheet. A line that
    *  does not goes to logistics at its issued quantity. */
   requires_qc?: boolean;
+  /** Packing (2026-10-08). */
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  break_bulk?: boolean;
 }
 
 export type UnitMode = "SERIAL" | "IMEI" | "CODE";
@@ -1358,6 +1399,11 @@ export interface IssueItemWrite {
   remarks?: string | null;
   serial_numbers?: string[] | null;
   imei_numbers?: string[] | null;
+  /** Issue in packs (2026-10-08): the packs set the issue qty. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  /** Open a coded pack to give part of it — needs `issue.break_bulk`. */
+  break_bulk?: boolean;
 }
 
 export interface StockMovement {
@@ -2698,6 +2744,17 @@ export interface DespatchPrefillLine {
   batch_no?: string | null;
   mfg_date?: string | null;
   expiry_date?: string | null;
+  /** The supplier's packing, declared and fixed, and the count to start from. */
+  despatch_note_item_id?: number | null;
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  counted_pack_breakdown?: PackEntry[] | null;
+  pack_change_status?: string | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
 /** A vendor's despatch note in the shape the receipt form needs — the paperwork the
@@ -2731,6 +2788,11 @@ export interface PoLineOption {
   rate?: number | null;
   indent_id?: number | null;
   indent_no?: string | null;
+  /** What is still owed, in whole packs of the order's hierarchy. */
+  pack_hierarchy_id?: number | null;
+  pack_hierarchy_name?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
 }
 
 export interface PoPrefill {
@@ -2917,6 +2979,80 @@ export interface ProjectLot {
   held_qty: number;
   holds: ProjectLotHold[];
   is_unit_tracked: boolean;
+  /** Packing (2026-10-08): the row's project (part of its key) and how it is bagged. */
+  project_id?: number | null;
+  pack_text?: string | null;
+  packs?: PackEntry[];
+  loose_qty?: number | null;
+  pack_unreconciled?: boolean;
+  /** Packs here under their level's minimum, and part packs (2026-10-11). */
+  pack_below_min?: number;
+  pack_part_packs?: number;
+}
+
+/** One physical pack on the shelf, with whatever stands inside it. */
+export interface ShelfPack {
+  id: number;
+  hu_code: string;
+  code_kind: string;
+  level: number;
+  pack_name?: string | null;
+  pack_size: number;
+  /** What it really holds (2026-10-11) — less than `pack_size` for a part pack. */
+  content_qty?: number;
+  is_part?: boolean;
+  /** Under its level's minimum: allowed, flagged until it is repacked. */
+  below_min?: boolean;
+  min_fill?: number | null;
+  /** Coded at its own level: may be wrapped, never split (except by break bulk). */
+  is_atom: boolean;
+  status: string;
+  source_no?: string | null;
+  contents: ShelfPack[];
+}
+
+/** One stock row pack by pack — what the repack screen draws. */
+export interface LotPacks {
+  stock_id: number;
+  item_id: number;
+  warehouse_id: number;
+  bin_id: number;
+  batch_id: number;
+  project_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  bin_code?: string | null;
+  batch_no?: string | null;
+  total_qty: number;
+  available_qty: number;
+  reserved_qty: number;
+  loose_qty: number;
+  pack_text?: string | null;
+  /** Packs here under their minimum, and part packs (2026-10-11). */
+  below_min?: number;
+  part_packs?: number;
+  codes_per_pack: boolean;
+  serialised: boolean;
+  hierarchies: (PackHierarchy & {
+    in_use: boolean;
+    /** The smallest level a repack may choose: a code cannot be split. */
+    coded_floor: number;
+    /** FULL outermost packs per level. */
+    top_counts: Record<string, number>;
+    /** The outermost PART packs, one per pack. A repack keeps one only where the
+     *  target names a pack of that level holding exactly that. */
+    top_parts?: { level: number; fill: number; below_min?: boolean }[];
+    packs: ShelfPack[];
+  })[];
+}
+
+export interface PackSummaryRow {
+  stock_id: number;
+  packs: PackEntry[];
+  loose_qty: number;
+  pack_text?: string | null;
+  unreconciled: boolean;
 }
 
 export interface ProjectHold {

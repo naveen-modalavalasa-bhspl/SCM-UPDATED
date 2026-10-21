@@ -5,6 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, FileText, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
+import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
+import { PackQty, packable, usePackOptions } from "@/shared/packing";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
 import { ReceiptLinkedDocuments } from "../components/LinkedDocuments";
@@ -232,6 +234,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         remarks: l.remarks,
         serial_numbers: parseCodes(l.serial_numbers),
         imei_numbers: parseCodes(l.imei_numbers),
+        despatch_note_item_id: l.despatch_note_item_id ?? null,
+        pack_hierarchy_id: l.pack_hierarchy_id ?? null,
+        declared_pack_breakdown: l.declared_pack_breakdown ?? null,
+        pack_breakdown: l.pack_breakdown ?? null,
       })),
     });
     if (doc.vendor_name) setVendorName(doc.vendor_name);
@@ -281,6 +287,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         received_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         accepted_qty: line.pending_qty != null ? num(line.pending_qty) as any : num(line.ordered_qty) as any,
         rate: rate2(line.rate),
+        pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+        pack_breakdown: line.pack_breakdown ?? null,
       }));
       // Nothing outstanding is an ANSWER, and a toast that scrolls away is not where
       // it belongs: the storekeeper is standing at a delivery and needs to know the
@@ -402,6 +410,15 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           batch_no: line.batch_no,
           mfg_date: line.mfg_date,
           expiry_date: line.expiry_date,
+          // The supplier's packing is DECLARED: copied once, fixed at the gate.
+          despatch_note_item_id: line.despatch_note_item_id ?? null,
+          pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+          declared_pack_breakdown: line.pack_breakdown ?? null,
+          pack_breakdown: line.counted_pack_breakdown ?? line.pack_breakdown ?? null,
+          pack_change_status: line.pack_change_status ?? null,
+          ordered_pack_hierarchy_name: line.ordered_pack_hierarchy_name ?? null,
+          pack_change_reason: line.pack_change_reason ?? null,
+          pack_change_note: line.pack_change_note ?? null,
         })),
       }));
       if (prefill.vendor_name) setVendorName(prefill.vendor_name);
@@ -531,6 +548,12 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     setForm((f) => ({ ...f, [key]: value }));
 
   /** Every line edit runs through here so the derived quantities stay derived. */
+  // Pack hierarchies of every item on the receipt, in one call (2026-10-08).
+  const packOptions = usePackOptions(form.items.map((line) => line.item_id));
+  /** A line whose quantity comes from its packs — the received box follows them. */
+  const isPacked = (line: ReceiptItemWrite) =>
+    !!line.pack_breakdown?.length && packable(packOptions.data?.[line.item_id]).length > 0;
+
   const patchLine = (index: number, patch: Partial<ReceiptItemWrite>) =>
     setForm((f) => {
       const items = f.items.map((l, i) => {
@@ -860,14 +883,24 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
       numeric: true,
       width: "min-w-[10rem] w-40",
       render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Received quantity, line ${i + 1}`}
-          value={l.received_qty}
-          disabled={locked}
-          max={l.po_item_id ? num(l.ordered_qty) : undefined}
-          invalid={touched && blankQty(l.received_qty)}
-          onChange={(v) => patchLine(i, { received_qty: v, accepted_qty: v })}
-        />
+        <div className="space-y-1">
+          <QtyInput
+            ariaLabel={`Received quantity, line ${i + 1}`}
+            value={l.received_qty}
+            disabled={locked || isPacked(l)}
+            max={l.po_item_id ? num(l.ordered_qty) : undefined}
+            invalid={touched && blankQty(l.received_qty)}
+            onChange={(v) => patchLine(i, { received_qty: v, accepted_qty: v })}
+          />
+          {/* The count in packs, the quantity in the item's own unit under it, and
+            * the hierarchy one press away (2026-10-11). */}
+          {isPacked(l) && (
+            <PackQty entries={l.pack_breakdown} qty={l.received_qty}
+                     uom={savedLine(i)?.uom_code ?? l.uom_code}
+                     hierarchies={packable(packOptions.data?.[Number(l.item_id)])}
+                     itemId={Number(l.item_id) || null} align="right" />
+          )}
+        </div>
       ),
     },
     {
@@ -1409,6 +1442,14 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               : () => set("items", [...form.items, emptyLine()])}
             onRemove={locked ? undefined : (i) => set("items", form.items.filter((_, x) => x !== i))}
             rowTone={(l) => (num(l.rejected_qty) > 0 ? "bg-bad-bg/40" : undefined)}
+            renderDetail={(l, i) => {
+              const options = packable(packOptions.data?.[l.item_id]);
+              if (!l.item_id || !options.length) return null;
+              return (
+                <ReceiptLinePacking line={l} hierarchies={options} locked={locked}
+                                    onChange={(patch) => patchLine(i, patch)} />
+              );
+            }}
             empty={fromConsignment
               ? "Pick the incoming consignment above — its lines fill in here."
               : isGrn

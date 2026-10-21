@@ -25,6 +25,7 @@ from app.core.dependencies import get_current_vendor, require_permission
 from app.core.pagination import Page, PageParams
 from app.modules.procurement import po_documents, quote_otp, service, stats, suppliers
 from app.modules.procurement.schemas import (
+    PackChangeDecisionIn, POLinePackingIn,
     ActionIn, ApprovalTrailOut, AwardIn, ConsolidationCreate, ConsolidationLinesIn,
     ConsolidationListRow, ConsolidationOut, ConsolidationSourceOut,
     ConsolidationStatsOut, DemandPoolRow, LedgerStatsOut, POStatsOut, QuoteStatsOut,
@@ -179,6 +180,40 @@ async def po_revisions(po_id: int, db: AsyncSession = Depends(get_db),
                        user=Depends(require_permission(perms.PO_VIEW))):
     """Every version this order has been. Reading one needs only `po.view`."""
     return await service.po_revisions(db, po_id, user)
+
+
+# ── Supplier changes of packing (2026-10-08) ───────────────────────────────
+
+@pos.put("/{po_id}/lines/{line_id}/packing", response_model=POOut)
+async def repack_po_line(po_id: int, line_id: int, body: POLinePackingIn,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.PO_EDIT))):
+    """Change a line's pack hierarchy, level and count."""
+    return await service.repack_po_line(db, po_id, line_id, body, user)
+
+
+@pos.get("/{po_id}/pack-changes")
+async def po_pack_changes(po_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(perms.PO_VIEW))):
+    """Every despatch-note line where the supplier sent a different pack hierarchy
+    from the order's, with the buyer's answer where there is one."""
+    return {"items": await service.list_po_pack_changes(db, po_id, user)}
+
+
+@pos.post("/{po_id}/pack-changes/{line_id}/accept")
+async def accept_pack_change(po_id: int, line_id: int, body: PackChangeDecisionIn,
+                             db: AsyncSession = Depends(get_db),
+                             user=Depends(require_permission(perms.PO_PACK_CHANGE))):
+    """The order now says the supplier's hierarchy; the supplier is told."""
+    return await service.decide_po_pack_change(db, po_id, line_id, True, body, user)
+
+
+@pos.post("/{po_id}/pack-changes/{line_id}/decline")
+async def decline_pack_change(po_id: int, line_id: int, body: PackChangeDecisionIn,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(require_permission(perms.PO_PACK_CHANGE))):
+    """Refused, with a reason the supplier and the gate both read."""
+    return await service.decide_po_pack_change(db, po_id, line_id, False, body, user)
 
 
 # ── PO discussion (approver <=> raiser) & approval quantity edits ──────────
@@ -678,6 +713,14 @@ async def vendor_login(body: VendorLoginIn, request: Request,
 async def vendor_me(db: AsyncSession = Depends(get_db),
                     account=Depends(get_current_vendor)):
     return await service.vendor_profile(db, account.vendor_id)
+
+
+# The packing of the vendor's own mapped items (2026-10-11), for the portal's
+# Profile > Packing tab. Vendor id from the token, like every route here.
+@supplier.get("/items/packing")
+async def vendor_item_packing(db: AsyncSession = Depends(get_db),
+                              account=Depends(get_current_vendor)):
+    return await service.vendor_item_packing(db, account.vendor_id)
 
 
 @supplier.post("/change-password", status_code=204)

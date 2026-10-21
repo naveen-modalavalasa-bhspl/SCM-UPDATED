@@ -11,6 +11,7 @@ import {
   blankPOHeader, POHeaderFields, poHeaderPayload, poMissingAddresses, type POHeaderValue,
 } from "../components/POHeaderFields";
 import { money } from "./RequisitionListPage";
+import { toPayload } from "@/shared/packing";
 
 interface MasterVendor {
   id: number;
@@ -89,6 +90,8 @@ export function POFormPage() {
             quantity: Number(line.quantity),
             rate: Number(line.rate || 0),
             tax_percent: Number(line.tax_percent || 0),
+            pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+            pack_breakdown: line.pack_breakdown?.length ? toPayload(line.pack_breakdown) : null,
           })),
       }),
     onSuccess: (po) => {
@@ -162,7 +165,8 @@ export function POFormPage() {
 
         <div>
           <h2 className="mb-3 text-sm font-semibold text-ink">What is being ordered</h2>
-          <LinePicker lines={lines} onChange={setLines} showRate showTax showDate={false} />
+          <LinePicker lines={lines} onChange={setLines} showRate showTax showDate={false}
+                      showPacking />
         </div>
 
         {/* Project, remarks, addresses, terms and the document money — the same block

@@ -1,7 +1,7 @@
 """Master-data endpoints. CRUD comes from the MasterDef registry; the only things
 written by hand here are the two HCM mirrors (read-only, rule 10) and item specs,
 whose primary key is item_id rather than a surrogate id."""
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
@@ -13,6 +13,8 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmFacility
 from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
+from app.shared.limits import MAX_BATCH_IDS
+from app.shared.masters import packs
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
     MASTERS, UOM_SUGGESTIONS, VendorMappingIn, build_item_code, build_item_prefix,
@@ -238,14 +240,38 @@ _packing = APIRouter(tags=["masters"])
 
 
 @_packing.get("/api/items/{item_id}/packaging-breakdown")
-async def item_packaging_breakdown(item_id: int, db: AsyncSession = Depends(get_db),
+async def item_packaging_breakdown(item_id: int, hierarchy_id: int | None = None,
+                                   db: AsyncSession = Depends(get_db),
                                    user=Depends(get_current_user)):
     """1 tray = 10 L, 1 box = 10 trays = 100 L, 1 container = 10 boxes = 1000 L.
 
-    Computed from the stored rungs on every read rather than kept as a column, so
-    the totals can never drift from the quantities they come from.
+    One hierarchy at a time — the item's default when none is named. Computed from
+    the stored rungs on every read rather than kept as a column, so the totals can
+    never drift from the quantities they come from.
     """
-    return {"items": await packaging_breakdown(db, item_id)}
+    return {"items": await packaging_breakdown(db, item_id, hierarchy_id)}
+
+
+@_packing.get("/api/pack-options")
+async def item_pack_options(item_ids: str = Query(..., max_length=4000),
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(get_current_user)):
+    """Every pack hierarchy of these items, each level with its size in base units and
+    its sentence ("Box · 10 Strip (100 TAB)"). One call for a whole document: the pack
+    pickers on a PO, a despatch note, a GRN and an issue all read it.
+
+    `item_ids` is a comma-separated list, capped like every other id selection.
+    """
+    ids = []
+    for part in item_ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    if len(ids) > MAX_BATCH_IDS:
+        raise ValidationError(f"Ask for at most {MAX_BATCH_IDS} items at once.")
+    options = await packs.pack_options(db, ids)
+    return {"items": [{"item_id": item_id, "hierarchies": rows}
+                      for item_id, rows in options.items()]}
 
 
 router.include_router(_packing)

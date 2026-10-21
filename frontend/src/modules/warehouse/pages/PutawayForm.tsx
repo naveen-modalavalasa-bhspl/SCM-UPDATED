@@ -1,8 +1,13 @@
 import { useEffect, useState } from "react";
+import {
+  PackBreakdownEditor, PackChips, PackQty, baseOf, greedy, heldOf, isPartial, num as packNum,
+  shrinkWithin, toPayload,
+  type PackEntry, type PackHierarchy,
+} from "@/shared/packing";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, ScanLine } from "lucide-react";
+import { ArrowLeft, ScanLine, Tags } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { PackSelector } from "../components/PackSelector";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
@@ -51,6 +56,8 @@ export default function PutawayForm() {
   // and "1500 eaches" are different questions about the same quantity — and only the
   // person holding the goods knows which one landed on the dock.
   const [packId, setPackId] = useState<number | null>(null);
+  // How the goods go on the shelf, in the receipt's hierarchy (2026-10-08).
+  const [shelfPacks, setShelfPacks] = useState<PackEntry[] | null>(null);
   const [remarks, setRemarks] = useState("");
   const [serials, setSerials] = useState<string[]>([]);
   const [scan, setScan] = useState("");
@@ -96,7 +103,30 @@ export default function PutawayForm() {
     // Whatever the task was raised with, else the item's default putaway unit — both
     // already resolved by the server, so the screen never picks a rung of its own.
     setPackId(task.item_packaging_id ?? null);
+    setShelfPacks(task.pack_breakdown ?? task.received_pack_breakdown ?? null);
   }, [task]);
+
+  // The receipt's hierarchy, as served — the putaway may change its LEVELS, never it.
+  const hierarchy: PackHierarchy | null = task?.pack_levels?.length
+    ? { hierarchy_id: task.pack_hierarchy_id ?? null,
+        name: task.pack_hierarchy_name ?? "Packing", base_uom: task.uom_code,
+        levels: task.pack_levels }
+    : null;
+  // Packs are MADE here: one under its level's minimum is refused by the server, so
+  // the press waits until it is repacked smaller or left loose (2026-10-11).
+  const packsMatch = !hierarchy || !shelfPacks?.length
+    || (baseOf(shelfPacks) === qty && !(shelfPacks ?? []).some((e) => isPartial(e)
+      && packNum(hierarchy.levels[e.level]?.min_fill) > 0
+      && heldOf(e) < packNum(hierarchy.levels[e.level]?.min_fill)));
+  // A part putaway re-reads what arrived inside the smaller quantity.
+  const changeQty = (next: number) => {
+    setQty(next);
+    if (hierarchy && task?.received_pack_breakdown?.length) {
+      setShelfPacks(shrinkWithin(task.received_pack_breakdown, next));
+    } else if (hierarchy) {
+      setShelfPacks(greedy(hierarchy, next));
+    }
+  };
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["wh-putaway", id] });
@@ -113,6 +143,7 @@ export default function PutawayForm() {
         item_packaging_id: packId,
         remarks: remarks || null,
         serial_numbers: serials,
+        pack_breakdown: hierarchy && shelfPacks?.length ? toPayload(shelfPacks) : null,
       }),
     onSuccess: (placed) => {
       // The stock is in the bin either way — capacity never blocks a putaway. What
@@ -191,7 +222,7 @@ export default function PutawayForm() {
                   onClick={() => setConfirming(true)}
                   // One serial per unit placed, or the bin holds stock nobody can trace.
                   disabled={
-                    binId === "" || qty <= 0 ||
+                    binId === "" || qty <= 0 || !packsMatch ||
                     (!!task.is_serial_tracked && serials.length !== Math.floor(qty))
                   }
                 >
@@ -261,6 +292,12 @@ export default function PutawayForm() {
               Lot <span className="font-mono font-semibold text-ink">{task.lot_no}</span>
             </p>
           )}
+          {!!task.pack_breakdown?.length && (
+            <div className="mt-2 flex justify-center">
+              <PackQty entries={task.pack_breakdown} qty={task.qty} uom={task.uom_code}
+                       hierarchy={hierarchy} />
+            </div>
+          )}
           {task.expiry_date && (
             <p className="mt-2 text-sm text-muted">
               {task.is_asset ? "Warranty" : "Expiry"}{" "}
@@ -310,10 +347,48 @@ export default function PutawayForm() {
               <Input
                 type="number"
                 value={String(qty)}
-                onChange={(e) => setQty(Number(e.target.value))}
+                onChange={(e) => changeQty(Number(e.target.value))}
               />
+              {hierarchy && !!shelfPacks?.length && (
+                <PackQty entries={shelfPacks} qty={qty} uom={task.uom_code} hierarchy={hierarchy}
+                         className="mt-1" />
+              )}
             </Field>
           </div>
+
+          {/* HOW it goes on the shelf (2026-10-08): the receipt's hierarchy, at the
+            * levels the storekeeper chooses — a carton opened into its boxes, loose strips
+            * boxed. Every pack becomes a row; for a code-tracked item each is named with
+            * its own code, and that level is the smallest it can ever be split into. */}
+          {hierarchy && (
+            <div className="mt-4 space-y-2 rounded-xl border border-line p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-sm font-semibold text-ink">
+                  How it goes on the shelf
+                  <span className="ml-2 text-xs font-normal text-muted">{hierarchy.name}</span>
+                </span>
+                {task.received_pack_breakdown?.length ? (
+                  <span className="inline-flex flex-wrap items-center gap-1 text-xs text-muted">
+                    Arrived as <PackChips entries={task.received_pack_breakdown}
+                                          uom={task.uom_code} showHierarchy={false} muted />
+                  </span>
+                ) : null}
+              </div>
+              {/* Packs are MADE here, so a part pack under its level's minimum is
+                * refused (2026-10-11). A short carton that arrived can be shelved as
+                * smaller packs, or left loose. */}
+              <PackBreakdownEditor hierarchy={hierarchy} value={shelfPacks} target={qty}
+                                   uom={task.uom_code} onChange={setShelfPacks} enforceMin />
+              {task.codes_per_pack && (
+                <p className="flex items-start gap-1.5 rounded-lg bg-info-bg px-3 py-2 text-xs text-info">
+                  <Tags className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                  Each pack gets its own code here. Codes cannot be split, so the smallest
+                  pack you shelve is the smallest this stock can later be repacked into —
+                  bigger packs can always be made from it.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* WHICH pack. Chosen before the bin, because it changes what "does this fit"
             * even means: the same 1500 eaches are three pallets or thirty cartons, and

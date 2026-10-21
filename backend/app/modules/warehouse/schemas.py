@@ -6,6 +6,7 @@ what a user can actually set — `grn_no`, every `*_name`, every rollup and ever
 status are decided by the service, and accepting them from the client would let a
 caller invent its own document number or mark its own issue approved.
 """
+from app.shared.packing import PACK_ENTRIES, PackEntryIn, describe as describe_packs
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -669,6 +670,14 @@ class ReceiptItemWrite(BaseModel):
     # serial and IMEI cells instead of hiding the numbers it was handed.
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False
+    # Packing (2026-10-08). `despatch_note_item_id` ties the line to the supplier's
+    # despatch line, whose packing is DECLARED and fixed — the service copies it from
+    # there, never from the client. `pack_breakdown` is what was COUNTED: the same
+    # packs, each at most what was declared. With no despatch note the storekeeper
+    # states the packing directly. Either way `received_qty` is the count's total.
+    despatch_note_item_id: int | None = None
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
     @field_validator("received_qty", "ordered_qty")
     @classmethod
@@ -757,6 +766,28 @@ class ReceiptItemRead(_Read):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    despatch_note_item_id: int | None = None
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    declared_pack_breakdown: list[dict] | None = None
+    declared_pack_text: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.declared_pack_breakdown and not self.declared_pack_text:
+            self.declared_pack_text = describe_packs(self.declared_pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown, self.declared_pack_breakdown):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
 class ReceiptRead(_Read):
@@ -871,6 +902,25 @@ class PoLineOption(BaseModel):
     received_qty: Decimal
     pending_qty: Decimal
     rate: Decimal | None = None
+    # How the ORDER asks for it to be packed — the starting point for a receipt that
+    # has no despatch note to declare the packing.
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown,):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
 class PoPrefill(BaseModel):
@@ -1156,6 +1206,19 @@ class PutawayRead(_Read):
     #: Every rung this item could be put away in, so the screen can offer the choice
     #: without a second round trip.
     packs: list["HandlingUnit"] = Field(default_factory=list)
+    # Packing (2026-10-08): the receipt's hierarchy (fixed), the packing arriving
+    # from the receipt (what was counted at the gate) and, once confirmed, how it was
+    # shelved. `pack_levels` is the hierarchy's ladder for the re-pack picker.
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    received_pack_breakdown: list[dict] | None = None
+    received_pack_text: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_levels: list[dict] = Field(default_factory=list)
+    #: True when the item's codes are minted per pack: the shelved levels decide the
+    #: smallest pack this stock can ever be split into without a break bulk.
+    codes_per_pack: bool = False
     # Filled only on the response to `confirm`: what the shelf looked like at the
     # moment of the press, including an overflow if there was one. A full bin never
     # stops a putaway, so this is how the screen gets to say it happened.
@@ -1306,6 +1369,10 @@ class PutawayConfirm(BaseModel):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    # How the goods are shelved (2026-10-08). The hierarchy is the receipt's and is
+    # fixed; the levels may change — a carton opened into its boxes, loose strips
+    # boxed. Must add up to `qty`. One `whs_handling_units` row is made per pack.
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class StockMovementWrite(BaseModel):
@@ -1541,6 +1608,12 @@ class IssueItemWrite(BaseModel):
     remarks: str | None = None
     serial_numbers: Annotated[list[str], SerialList] | None = None
     imei_numbers: Annotated[list[str], SerialList] | None = None
+    # Issue in packs (2026-10-08): "2 Box + 5 Strip". When given, the issue quantity
+    # is its total — the server works it out. `break_bulk` opens a coded pack to give
+    # part of it, and needs `issue.break_bulk`.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+    break_bulk: bool = False
 
 
 class IssueWrite(BaseModel):
@@ -1621,6 +1694,25 @@ class IssueItemRead(_Read):
     # The item's `requires_qi`: does this line go on the outward QC sheet. A line that
     # does not goes to logistics at its issued quantity — see `post_issue`.
     requires_qc: bool = False
+    # Packing (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    break_bulk: bool = False
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown,):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
 class UnitSupplyPick(BaseModel):
@@ -4081,6 +4173,34 @@ class DespatchPrefillLine(BaseModel):
     batch_no: str | None = None
     mfg_date: date | None = None
     expiry_date: date | None = None
+    # The supplier's packing, DECLARED and read-only on the receipt (2026-10-08).
+    despatch_note_item_id: int | None = None
+    pack_hierarchy_id: int | None = None
+    pack_hierarchy_name: str | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    # When the supplier sent a different hierarchy from the order's: the buyer's
+    # answer, so the gate knows before booking it in.
+    pack_change_status: str | None = None
+    ordered_pack_hierarchy_name: str | None = None
+    pack_change_reason: str | None = None
+    pack_change_note: str | None = None
+    #: The count the receipt starts from: the declared packing, read inside what the
+    #: order still owes when that is less.
+    counted_pack_breakdown: list[dict] | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if not getattr(self, "pack_hierarchy_name", None):
+            for src in (self.pack_breakdown,):
+                name = next((e.get("hierarchy") for e in src or []
+                             if e.get("hierarchy")), None)
+                if name:
+                    self.pack_hierarchy_name = name
+                    break
+        return self
 
 
 class DespatchPrefill(BaseModel):
@@ -4417,3 +4537,27 @@ class ProjectLotRead(BaseModel):
     held_qty: Decimal
     holds: list[ProjectLotHold] = []
     is_unit_tracked: bool = False
+    # Packing (2026-10-08): the balance row's project — part of its key — and how
+    # the quantity is bagged, as a sentence and as the outermost packs.
+    project_id: int | None = None
+    pack_text: str | None = None
+    packs: list[dict] = []
+    loose_qty: Decimal | None = None
+    pack_unreconciled: bool = False
+    # Part packs here, and how many are under their level's minimum — allowed, but
+    # flagged until somebody repacks them (2026-10-11).
+    pack_below_min: int = 0
+    pack_part_packs: int = 0
+
+
+class PackSummaryIn(BaseModel):
+    """Which stock rows a screen wants the packing of — by `stk_balance` id."""
+    stock_ids: Annotated[list[int], BatchIds]
+
+
+class RepackIn(BaseModel):
+    """How one stock row should be packed afterwards: a breakdown in ONE of the
+    item's hierarchies, holding exactly what the row holds (loose included)."""
+    pack_hierarchy_id: int
+    target: Annotated[list[PackEntryIn], Field(min_length=1, max_length=12)]
+    reason: str | None = Field(default=None, max_length=300)

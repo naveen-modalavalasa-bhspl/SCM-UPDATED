@@ -36,12 +36,14 @@ from app.modules.warehouse import project_holds
 from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
+from app.modules.warehouse import packing as wh_packing
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
     STOCK_PROJECT_HOLD_MANAGE, STOCK_PROJECT_HOLD_OVERRIDE, STOCK_PROJECT_HOLD_VIEW,
     INDENT_ACKNOWLEDGE, INDENT_VIEW, STOCK_TRANSFER_ISSUE, STOCK_TRANSFER_ISSUE_POST, STOCK_TRANSFER_QC,
     STOCK_TRANSFER_QC_APPROVE, STOCK_TRANSFER_RECEIVE, STOCK_TRANSFER_VIEW,
     ADMIN_SETTINGS_MANAGE, TRANSPORT_CREATE, TRANSPORT_TRACK, TRANSPORT_VIEW,
+    STOCK_REPACK,
 )
 from app.modules.warehouse.enums import (
     DISPATCH_ACKNOWLEDGE, DISPATCH_APPROVE, DISPATCH_CREATE, DISPATCH_DELETE,
@@ -1294,6 +1296,38 @@ async def serial_codes(payload: s.UnitCodeQuery, db: AsyncSession = Depends(get_
     The stock ledger names the units that MOVED and needs their codes; the codes live
     on this module's per-unit rows, which inventory may not read (rule 5)."""
     return {"items": await service.unit_codes(db, payload.codes, user=user)}
+
+
+# --- Packs on the shelf (2026-10-08) -------------------------------------------------
+
+@router.post("/packs/summary")
+async def pack_summary(body: s.PackSummaryIn, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(STOCK_VIEW))):
+    """How each of these stock rows is packed: "2 Carton + 3 Box + 14 loose TAB"."""
+    return {"items": await wh_packing.summary_for_stock(db, body.stock_ids)}
+
+
+@router.get("/packs/lots/{stock_id}")
+async def lot_packs(stock_id: int, db: AsyncSession = Depends(get_db),
+                    user=Depends(require_permission(STOCK_VIEW))):
+    """One stock row pack by pack, with each hierarchy's levels and the smallest
+    level a repack may choose — what the repack screen draws."""
+    return await wh_packing.lot_packs_by_stock(db, stock_id)
+
+
+@router.post("/packs/lots/{stock_id}/repack")
+async def repack_lot(stock_id: int, body: s.RepackIn, db: AsyncSession = Depends(get_db),
+                     user=Depends(require_permission(STOCK_REPACK))):
+    """Change the pack levels of stock on the shelf. Never the quantity, never the
+    hierarchy, never below the level a code was minted at."""
+    return await wh_packing.repack_stock(db, stock_id, body, user)
+
+
+@router.get("/packs/code/{code}")
+async def pack_by_code(code: str, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission(STOCK_VIEW))):
+    """A scanned pack code and every unit inside it, at any depth."""
+    return await wh_packing.pack_by_code(db, code)
 
 
 # --- Project Lots (Stock Segregation tab): set a lot aside for one project ---------

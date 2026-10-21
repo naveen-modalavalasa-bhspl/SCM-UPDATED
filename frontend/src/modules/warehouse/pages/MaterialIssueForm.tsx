@@ -1,4 +1,5 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { usePackOptions } from "@/shared/packing";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -357,6 +358,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         issued_qty: num(l.issued_qty),
         rate: l.rate,
         remarks: l.remarks,
+        pack_hierarchy_id: l.pack_hierarchy_id ?? null,
+        pack_breakdown: l.pack_breakdown ?? null,
+        break_bulk: !!l.break_bulk,
         // Stated in the currency the item is validated on — the serial for a
         // serialized item, the IMEI for a handset, the asset/consumable code
         // otherwise. The backend resolves any of the three back to the same unit.
@@ -696,6 +700,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const unitsHidden = direction === "OUT"
     && (!doc || doc.status === "DRAFT" || doc.status === "PENDING_APPROVAL");
   const serialsLocked = unitsHidden || (locked && !(awaitingIssue && doc?.can_issue_from_stock));
+  // Pack hierarchies of every item on the issue, in one call (2026-10-08).
+  const packOptions = usePackOptions(form.items.map((line) => line.item_id));
   const payload = (): IssueWrite => ({
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
@@ -1411,6 +1417,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           renderItemPicker={renderItemPicker}
           onAddItem={locked ? undefined : addItem}
           onRemoveGroup={locked ? undefined : removeGroup}
+          packOptionsByItem={packOptions.data}
         />
 
         <div className="mt-3 flex flex-wrap justify-end gap-x-6 gap-y-1 rounded-2xl border border-line/70 bg-content2/50 px-3 py-2 text-sm">

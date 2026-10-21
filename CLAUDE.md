@@ -573,6 +573,124 @@ there is a picture, green after, with the shots themselves at thumbnail size and
 `capture="environment"` press that opens the rear camera on a phone.
 
 
+### Pack hierarchies: one item, several ways to pack it, counted in one unit (2026-10-08)
+
+A tablet is bought in strips of 10 and in strips of 15 at the same time. Each is a
+**pack hierarchy** (`mst_pack_hierarchies`, "Strip of 10") whose **levels** are the
+`mst_item_packaging` rungs that name it (Strip = 10 TAB → Box = 10 Strip → Carton =
+12 Box). A pack never changes hierarchy — a tablet cannot leave a 10-strip for a
+15-strip without a factory — so every document line names ONE hierarchy and a
+**breakdown** inside it: "1 Carton + 10 Box + 20 Strip". Level 0 is LOOSE.
+
+**Every quantity column still means base units.** PO, despatch, GRN, stock, ledger,
+reservations, indents: unchanged. The breakdown (`pack_hierarchy_id` + `pack_breakdown`
+JSON on PO, despatch-note, GRN, putaway and issue lines) is HOW those units are
+bagged, and the server makes it add up — a client never states a pack size. Entries
+are snapshotted (`name`, `size`, `hierarchy`), so a document reads the same after the
+master is edited. The arithmetic is `shared/packing.py` (pure, mirrored by
+`frontend/src/shared/packing/packing.ts`); the ladders come from
+`shared/masters/packs.py`, two queries for any number of items.
+
+Master rules, all PER HIERARCHY (`apply_item_packaging`): levels contiguous; a
+container type at most once (across hierarchies it is fine — both go into a Box); one
+default putaway unit. One default hierarchy per item. A rung's size cannot change, and
+a rung or hierarchy cannot be retired, while live packs on the shelf use it.
+
+**The flow, door by door:**
+
+- **PO** — each line is described in a hierarchy (the buyer's choice, else the item's
+  default in whole packs). `procurement/packing.sync_po_packing` runs on EVERY write
+  that creates lines or moves a quantity (all three creation paths, amend, approver
+  trim, revert); a trimmed line is rescaled in the same hierarchy.
+- **Despatch note** — the supplier states packs; `despatched_qty` is their total.
+  Other levels of the order's hierarchy are free. A DIFFERENT hierarchy is allowed,
+  must carry `pack_change_reason`, goes PENDING (`PackChangeStatus`) and notifies the
+  buyer on submit. The buyer answers on the PO (`/pos/{id}/pack-changes/...`,
+  `po.pack_change`): ACCEPT rewrites the PO line's hierarchy, DECLINE tells the
+  supplier why. Neither blocks the gate — goods at the gate are goods at the gate —
+  but the receipt shows the answer.
+- **GRN** — `warehouse/packing.receipt_line_packing`. Against a despatch-note line the
+  packing is DECLARED: copied from the note, never from the client, and fixed. The
+  count may only come up SHORT, level by level (`packing.assert_within`), and
+  `received_qty` is the count's total. This runs BEFORE `_assert_po_fulfilment`, which
+  must cap the counted quantity, not the typed one.
+- **Putaway** — the hierarchy is the receipt's (fixed); the levels may change (a carton
+  opened into boxes). `shelve` makes one `whs_handling_units` row per pack and links the
+  units it placed (`whs_serial_numbers.handling_unit_id`). It runs BEFORE `move_stock`
+  so the ledger row can carry `pack_text`.
+- **Stock** — loose is NEVER stored: it is `total_qty` minus what the live packs hold.
+  `pack_summary` serves "2 Carton + 3 Box + 14 loose TAB" to the Lots tab, Stock
+  Balance and anything else (`POST /api/warehouse/packs/summary`, by `stk_balance` id).
+  Packs claiming more than the balance (stock moved by a path that knows no packs) are
+  capped on read and flagged `unreconciled`; `reconcile_key` puts the rows right.
+- **Repack** (Lots tab, `stock.repack`, `packing.plan_repack`) — keeps every pack it can
+  so codes survive, opens the rest, carves a pack shelved whole into its children,
+  forms new parents bottom-up. Never the quantity, never the hierarchy. Not a stock
+  movement: no ledger row; the audit row is the record.
+- **Issue** — a pick may be stated in packs (its quantity is their total). After
+  posting, `settle_issue` settles the packs off the units that actually left.
+
+**Codes: a coded pack is an ATOM.** For a code-tracked, unserialised item at a
+warehouse, each pack shelved gets the item's own asset/consumable code (formula +
+`-BOX`) and `is_atom`. An atom may be WRAPPED (the new carton gets its own code, the
+boxes keep theirs inside it) and unwrapped back to its own level — never split below
+it, because a code names everything inside it. The one exception is **break bulk** at
+the issue desk: the line says `break_bulk` AND the person holds `issue.break_bulk`
+(granted, never inherited), checked by `assert_issue_packs` on every save. At posting
+the pack is OPENED, its code retires for good, and what stays behind is packed again
+as smaller whole packs under NEW codes, plus loose. Serial and IMEI items are never
+atoms — the serial is the identity and the box is only a box — but their pick count is
+still strict per base unit, exactly as before. Unit rows and their per-unit codes are
+untouched by all of this, so every downstream reader (QC, consignment,
+acknowledgement) keeps working per unit.
+
+What fails SILENTLY if narrowed: `_claim_units` orders loose units first, then PART
+packs, then pack by pack (packs are created smallest-first, so ids climb with size) —
+order by plain id and an automatic pick lands in the middle of a coded pack and trips
+break bulk on a quantity that was whole packs all along. For a CODED pack,
+`settle_issue` opens every pack AROUND a changed one: a carton that lost a box no
+longer holds what its code says.
+
+Scenario tests: `shared/tests/test_packing.py` (pure), `warehouse/tests/
+test_packing_shelf.py` and `procurement/tests/test_po_packing.py` (DB).
+
+### Part packs: the size is a ceiling, not a rule (2026-10-11)
+
+A level's size is the STANDARD — the most one pack holds. A carton of 600 may really
+hold 500: a breakdown entry says so with `fill` ("1 Carton (500 of 600)", `qty` packs
+each holding `fill`), and `base_of` is `sum(qty x held)`. On the shelf it is
+`whs_handling_units.content_qty` (NULL = full); read it through `packing.held(hu)`,
+never `pack_size` alone. Migration `c8e0a2b4d6f9`.
+
+- **One line stays one line.** The remainder is a part pack INSIDE the line's packing,
+  never a second document line — every per-line rule (PO received-by-line, indent
+  "on order", the issue guards) keeps counting what it always counted.
+- **Packing never changes an ordered quantity.** On the PO (form and detail) the
+  quantity is typed; the hierarchy and level only describe it, the remainder as one
+  part pack (`greedyWithPart`). `repack_po_line` refuses any breakdown that does not
+  add up to the line.
+- **Minimum fill** (`mst_item_packaging.min_fill_qty`, base units, never above the
+  level's size). Refused where a pack is MADE — PO (`stamp_line`, `repack_po_line`),
+  putaway (`shelve` with the storekeeper's packs), a repack's NEW part packs. Only
+  warned where it is a fact — despatch note, GRN count (`packing.warnings`), and a
+  putaway fed from such a count falls back to whole packs + loose.
+- **Taking from a plain pack shrinks it in place** (`settle_issue`, `reconcile_key`
+  via `_take_inside`): it stays the pack it was, every pack around it shrinks too, and
+  one under its floor is flagged (`below_min` on `pack_summary` / `lot_packs`) until
+  somebody repacks it. It is never broken up on its own. CODED packs (atoms) keep the
+  break-bulk rule unchanged.
+- **Repack** keeps a part pack only where the target names one of that level holding
+  exactly that (`packing.split_target` → `plan_repack(partial=)`); otherwise it opens
+  and is carved into the whole packs below it plus loose.
+- Two part packs of one level on one line: warned, never refused.
+
+On screen: `PackQty` is the quantity cell everywhere a line is packed (the packs, the
+base quantity in the item's own UOM under them, and a Hierarchy button opening
+`HierarchyLadder`); `PackBreakdownEditor` lists part packs under the tiles. Every lot
+on Stock Segregation > Lots carries Repack (amber when a pack is under its floor). The
+supplier portal's Profile > Packing tab (`GET /api/supplier/items/packing`) lists the
+hierarchies of the vendor's own mapped items only, scoped on the token.
+
 ### The outward leg (doc Phase D+E), under Logistics
 
 Logistics runs the whole outward leg, in the order it happens:

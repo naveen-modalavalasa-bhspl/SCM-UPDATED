@@ -68,6 +68,7 @@ LABELS: dict[str, str] = {
     "is_bin_managed": "Uses storage locations",
     "is_blacklisted": "Blacklisted",
     "is_default_putaway_unit": "Default put-away pack",
+    "min_fill_qty": "Minimum fill",
     "is_imei_tracked": "IMEI tracked",
     "is_preferred": "Preferred vendor",
     "is_required": "Required",
@@ -156,6 +157,8 @@ HINTS: dict[str, str] = {
     "pincode": "6 digits.",
     "factor": "How many of the 'to' unit make one 'from' unit.",
     "is_default_putaway_unit": "The pack this item is normally shelved in.",
+    "min_fill_qty": ("The least one pack of this level may be made with, in the item's "
+                     "own unit. Blank means no minimum."),
 }
 
 ACRONYMS = {"gst": "GST", "hsn": "HSN", "uom": "UOM", "imei": "IMEI", "pan": "PAN",

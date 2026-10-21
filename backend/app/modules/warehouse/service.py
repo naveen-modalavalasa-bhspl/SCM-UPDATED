@@ -90,6 +90,9 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
+from app.shared import packing as shared_packing
+from app.shared.masters.packs import ladders as pack_ladders_for
+from app.modules.warehouse import packing as wh_packing
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.limits import UNIT_MINT_CHUNK, limit as unit_limit
 
@@ -1541,6 +1544,17 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
     inbound_transfer = (receipt.transfer_id is not None
                         or receipt.receipt_type == ReceiptType.DISPATCH.value)
 
+    # Packing first (2026-10-08). A line counted in packs carries its own total, and
+    # a despatch-note line's packing is the supplier's, fixed — so the quantity each
+    # line really claims is only known after this, and the PO cap below must read it.
+    line_packing = []
+    for line in lines:
+        packed = await wh_packing.receipt_line_packing(
+            db, item=await _item_snapshot(db, line.item_id), line_in=line,
+            received=line.received_qty)
+        line.received_qty = packed["received"]
+        line_packing.append(packed)
+
     # Does the order still owe what this receipt claims to be taking off it? Checked
     # before a single line is written, so an over-receipt is refused whole rather than
     # half-applied. See `_assert_po_fulfilment`.
@@ -1701,6 +1715,10 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             remarks=line.remarks,
             serial_numbers=serials or None,
             imei_numbers=imeis or None,
+            pack_hierarchy_id=line_packing[index - 1]["pack_hierarchy_id"],
+            declared_pack_breakdown=line_packing[index - 1]["declared_pack_breakdown"],
+            pack_breakdown=line_packing[index - 1]["pack_breakdown"],
+            despatch_note_item_id=line_packing[index - 1]["despatch_note_item_id"],
         )
         row = _take_existing(line, item.id)
         if row is None:
@@ -3382,6 +3400,17 @@ async def _prepare_receipt_line(
             qty=_d(line.accepted_qty),
         )
 
+    # A site with no bins still holds packs (2026-10-08): the receipt's count is
+    # shelved as it arrived, at the bulk location.
+    shelved = await wh_packing.shelve(
+        db, item=item,
+        key={"item_id": line.item_id, "warehouse_id": receipt.warehouse_id,
+             "bin_id": m.NO_BIN, "batch_id": line.batch_id or m.NO_BATCH,
+             "project_id": receipt.project_id or 0},
+        qty=_d(line.accepted_qty), hierarchy_id=line.pack_hierarchy_id,
+        entries_in=None, default_entries=line.pack_breakdown,
+        source=("RECEIPT", receipt.id, receipt.grn_no), user=user)
+
     stock = await move_stock(
         db,
         item_id=line.item_id,
@@ -3401,10 +3430,12 @@ async def _prepare_receipt_line(
         # What THIS receipt brought in — never the lot as it stands afterwards. Empty
         # stays None so a leg that genuinely named no units keeps the old fallback.
         serial_numbers=_ledger_units(moved_units),
+        pack_text=shared_packing.describe(shelved, item.uom_code) if shelved else None,
     )
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
+
 
     if not units and not countable:
         await _code_lot(db, stock, item=item, warehouse_id=receipt.warehouse_id)
@@ -3450,6 +3481,8 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         # so an item without a unit still gets a task rather than blocking the putaway.
         uom_id=item.uom_id or 0,
         qty=_d(line.accepted_qty),
+        # The receipt's hierarchy, fixed for the life of the stock (2026-10-08).
+        pack_hierarchy_id=line.pack_hierarchy_id,
         # No suggestion, and therefore not system-directed: the storekeeper decides
         # where this goes, at any rung of the tree. See the note where `_suggest_bin`
         # stood.
@@ -3618,6 +3651,8 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
         rate=rates.get(key),
         batch_no=line.batch_no, mfg_date=line.mfg_date,
         expiry_date=line.expiry_date,
+        # How the supplier packed it, declared and fixed; and the count to start from.
+        **wh_packing.despatch_prefill_packing(line, sent),
     )
 
 
@@ -3730,6 +3765,17 @@ async def _po_receipts_naming(db: AsyncSession, po_id: int, po_item_id: int,
                      for grn_no, status, qty in rows)
 
 
+def _po_line_packing(ladders, hierarchy_id, pending) -> dict:
+    ladder = next((row for row in ladders if row.hierarchy_id == hierarchy_id), None) \
+        or (ladders[0] if ladders else None)
+    if ladder is None or ladder.top == 0:
+        return {}
+    entries = shared_packing.greedy(ladder, pending)
+    for entry in entries:
+        entry["hierarchy"] = ladder.hierarchy_name
+    return {"pack_hierarchy_id": ladder.hierarchy_id, "pack_breakdown": entries}
+
+
 async def po_lines(db: AsyncSession, po_id: int,
                    *, receipt_id: int | None = None) -> dict:
     """What is still OWED on a purchase order, so a GRN fills itself from the order.
@@ -3759,8 +3805,10 @@ async def po_lines(db: AsyncSession, po_id: int,
 
     items = (await db.execute(
         select(POItem.id, POItem.item_id, POItem.item_code, POItem.item_name,
-               POItem.uom_code, POItem.quantity, POItem.rate, POItem.indent_item_id)
+               POItem.uom_code, POItem.quantity, POItem.rate, POItem.indent_item_id,
+               POItem.pack_hierarchy_id)
         .where(POItem.po_id == po_id).order_by(POItem.id))).all()
+    ladders = await pack_ladders_for(db, {line.item_id for line in items})
     received = await po_received_by_line(db, po_id, exclude_receipt_id=receipt_id)
     # Who has already had it. An empty line list is only useful with this beside it:
     # "nothing pending" and "REC0031 took all nineteen lines on 7 September" are the
@@ -3793,6 +3841,10 @@ async def po_lines(db: AsyncSession, po_id: int,
             "received_qty": already,
             "pending_qty": pending,
             "rate": line.rate,
+            # What is still owed, in whole packs of the order's hierarchy — the
+            # count a receipt with no despatch note starts from.
+            **_po_line_packing(ladders.get(line.item_id) or [], line.pack_hierarchy_id,
+                               pending),
         })
 
     return {
@@ -4450,7 +4502,10 @@ async def get_putaway(db: AsyncSession, task_id: int, user=None) -> dict:
     await _assert_in_scope(db, user, m.PutawayTask, task,
                            warehouse_col=m.PutawayTask.warehouse_id,
                            label="Putaway task")
-    return await _decorate_putaway(db, task)
+    # Packing only on the single task (2026-10-08): the queue lists twenty at a time
+    # and only the confirm screen offers a re-pack.
+    return {**await _decorate_putaway(db, task),
+            **await wh_packing.putaway_packing(db, task)}
 
 
 async def putaway_codes(db: AsyncSession, task_id: int, user=None) -> dict:
@@ -4896,6 +4951,28 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
     moved_units = await _place_serials(db, task, target, primary_list, receipt, receipt_item,
                                        qty=qty)
 
+    # The packs (2026-10-08). One `whs_handling_units` row per physical pack on this
+    # shelf, in the receipt's hierarchy, at the levels the storekeeper chose — or as
+    # they arrived. The units just placed are linked to the packs they are in, and a
+    # code-tracked item's packs are named with its own code: an ATOM, which a repack
+    # may wrap but never split.
+    shelved = await wh_packing.shelve(
+        db, item=item,
+        key={"item_id": task.item_id, "warehouse_id": task.warehouse_id,
+             "bin_id": target.id, "batch_id": task.batch_id or m.NO_BATCH,
+             "project_id": project_id},
+        qty=qty,
+        hierarchy_id=task.pack_hierarchy_id or (
+            receipt_item.pack_hierarchy_id if receipt_item else None),
+        entries_in=data.pack_breakdown,
+        default_entries=(receipt_item.pack_breakdown if receipt_item else None),
+        lot_no=task.lot_no,
+        source=("PUTAWAY", task.id, task.putaway_no), user=user)
+    if shelved:
+        task.pack_hierarchy_id = task.pack_hierarchy_id or (
+            receipt_item.pack_hierarchy_id if receipt_item else None)
+        task.pack_breakdown = shelved
+
     stock = await move_stock(db, item_id=task.item_id, qty=qty, direction=StockDirection.IN.value,
                              ref_type=InventoryRefType.RECEIPT.value,
                              ref_id=receipt.id if receipt else task.id,
@@ -4921,11 +4998,14 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                              # a serial-tracked line the two are the same list, and for
                              # an unserialised one it is the codes just minted, which
                              # `serials` never held.
-                             serial_numbers=_ledger_units(moved_units))
+                             serial_numbers=_ledger_units(moved_units),
+                             pack_text=(shared_packing.describe(shelved, item.uom_code)
+                                        if shelved else None))
     if batch is not None:
         stock.batch_no = batch.batch_no
         stock.expiry_date = batch.expiry_date
     stock.bin_code = target.code
+
 
     # A continuous item has no unit to name, so its identity goes on the LOT — the same
     # rule the bulk-receipt path applies. Without this a bin-managed putaway of grams or
@@ -4970,6 +5050,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             item_packaging_id=task.item_packaging_id,
             package_id=task.package_id,
             package_name=task.package_name,
+            pack_hierarchy_id=task.pack_hierarchy_id,
             handling_units=capacity.space_for(
                 capacity.choose_pack(
                     (await capacity.pack_ladders(db, [task.item_id]))
@@ -8170,6 +8251,11 @@ async def _auto_fill_codes(
     wanted = int(_d(line.issued_qty))
     if wanted <= 0:
         return
+    # A line stated in packs takes THOSE packs first (2026-10-08) — see
+    # `packing.reserve_named_packs`. Whatever they do not cover is topped up below.
+    await wh_packing.reserve_named_packs(
+        db, warehouse_id=issue.warehouse_id, line=line, marker=marker,
+        claimed_prefixes=_CLAIMED_REMARK_PREFIXES)
     rows = await _claim_units(
         db,
         item_id=line.item_id,
@@ -9487,6 +9573,16 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             raise ValidationError(
                 f"{location.code} is inactive and cannot be issued from")
 
+    # A line stated in packs ("2 Box + 5 Strip") issues exactly that many units; the
+    # server works the quantity out before anything below reads it (2026-10-08).
+    line_packs = []
+    for line in lines:
+        hid, entries, base = await wh_packing.issue_line_packing(
+            db, item=await _item_snapshot(db, line.item_id), line_in=line)
+        if base is not None:
+            line.issued_qty = base
+        line_packs.append((hid, entries))
+
     # Does the shelf actually hold what every pick claims, and is a swapped batch one
     # FEFO cannot tell apart from the one that was allocated? Both refused here, on
     # the draft, while the batch and the location are still the storekeeper's to
@@ -9551,6 +9647,9 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             requested_qty=requested, issued_qty=issued, returned_qty=ZERO,
             rate=rate or None, amount=(issued * rate) if rate else None,
             remarks=line.remarks,
+            pack_hierarchy_id=line_packs[index - 1][0],
+            pack_breakdown=line_packs[index - 1][1],
+            break_bulk=bool(getattr(line, "break_bulk", False)),
         ))
     _issue_totals(issue)
     # Flushed so every line has an id before `_reserve_issue_serials` stamps units
@@ -10231,6 +10330,9 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
     # A direct issue has no allocation holding its stock — it holds its own.
     await _hold_direct_issue_stock(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
+    # A coded pack leaves whole unless the line says break bulk (2026-10-08).
+    await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
+                                        user)
     if original:
         _validate_issue_return(issue, original)
     if picking:
@@ -10641,6 +10743,9 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     # line may only land on a bay this user's position actually covers.
     await _assert_issue_floor_access(db, issue, user)
     await _reserve_issue_serials(db, issue, data.items)
+    # A coded pack leaves whole unless the line says break bulk (2026-10-08).
+    await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
+                                        user)
     if issue.direction == IssueDirection.IN.value and issue.original_issue_id:
         original = await get_issue(db, issue.original_issue_id)
         _validate_issue_return(issue, original)
@@ -11545,6 +11650,7 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
             batch_id=line.batch_id,
             bin_id=line.bin_id,
             remarks=line.remarks,
+            break_bulk=bool(getattr(line, "break_bulk", False)),
             # `unit_keys`, not `serial_numbers`: an untouched line is restated in the
             # currency its item is validated on, so an IMEI-named unit is not looked
             # up by a serial the IMEI lookup cannot see.
@@ -11557,6 +11663,8 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     ]
     await _clear_issue_serial_reservations(db, issue.id)
     await _reserve_issue_serials(db, issue, inputs)
+    await wh_packing.assert_issue_packs(db, issue, await _issue_units_by_line(db, issue),
+                                        user)
 
     await write_audit(db, entity="out_issues", entity_id=issue.id,
                       entity_no=issue.issue_no, action=AuditAction.UPDATE, actor=user,
@@ -11720,6 +11828,17 @@ async def _raise_outbound_inspection_for(
     _outbound_inspection_totals(inspection)
     await db.flush()
     return inspection
+
+
+def _ledger_packs(line, qty) -> str | None:
+    """The packs an issue line went out as, for the ledger row of one slice of it.
+    A line drawn from several balance rows writes several ledger rows; each says it is
+    PART of the line's packing rather than claiming all of it (2026-10-08)."""
+    entries = getattr(line, "pack_breakdown", None)
+    if not entries:
+        return None
+    text = shared_packing.describe(entries, getattr(line, "uom_code", None))
+    return text if _d(qty) == _d(line.issued_qty) else f"Part of {text}"
 
 
 async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
@@ -11921,6 +12040,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
                         project_id=stock.project_id,
                         serial_numbers=take_units(units, stock.quantity),
+                        pack_text=_ledger_packs(line, stock.quantity),
                     )
                 qty -= sum((row.quantity for row in slices), ZERO)
                 if qty <= ZERO:
@@ -11945,6 +12065,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     warehouse_id=stock.warehouse_id, bin_id=stock.bin_id,
                     batch_id=stock.batch_id, project_id=stock.project_id,
                     serial_numbers=take_units(units, stock.quantity),
+                    pack_text=_ledger_packs(line, stock.quantity),
                 )
             qty -= sum((row.quantity for row in held_slices), ZERO)
             if qty <= ZERO:
@@ -11977,6 +12098,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     bin_id=source_bin, batch_id=source_batch,
                     project_id=source_project,
                     serial_numbers=take_units(units, slice_qty),
+                    pack_text=_ledger_packs(line, slice_qty),
                 )
         else:
             await move_stock(
@@ -11989,6 +12111,12 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
             )
 
     await _mark_serials(db, issue, outward)
+    if outward:
+        # The packs follow the units out (2026-10-08): emptied packs are consumed, a
+        # part-taken one is opened and what stays is packed again, and every pack
+        # around a changed one opens.
+        await wh_packing.settle_issue(db, issue, await _issue_units_by_line(db, issue),
+                                      user)
     if outward and issue.project_id:
         from app.modules.warehouse.project_holds import clear_spent_unit_stamps
         await clear_spent_unit_stamps(
@@ -12178,7 +12306,17 @@ async def _claim_units(
             or_(m.SerialNumber.remarks.is_(None),
                 and_(*[~m.SerialNumber.remarks.startswith(prefix)
                        for prefix in _CLAIMED_REMARK_PREFIXES])),
-        ).order_by(m.SerialNumber.id)
+        # Loose units first, then PART packs (2026-10-11 — a carton already short is
+        # used up before a full one is touched), then pack by pack (2026-10-08). Packs
+        # are created smallest-first at putaway, so this empties strips before it
+        # opens a box and takes whole packs wherever the quantity allows — a pick lands
+        # on at most one part pack, which is the one a coded item's break bulk has to
+        # answer for.
+        ).order_by(m.SerialNumber.handling_unit_id.is_not(None),
+                   select(case((m.HandlingUnit.content_qty.is_(None), 1), else_=0))
+                   .where(m.HandlingUnit.id == m.SerialNumber.handling_unit_id)
+                   .correlate(m.SerialNumber).scalar_subquery(),
+                   m.SerialNumber.handling_unit_id, m.SerialNumber.id)
         .limit(wanted - len(mine))
         .with_for_update()
     )).scalars().all()
