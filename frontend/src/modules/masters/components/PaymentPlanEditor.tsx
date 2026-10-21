@@ -29,8 +29,6 @@ export function PaymentPlanEditor({
 
   return (
     <div className="space-y-3">
-      <PlanGuide />
-
       <AllocationBar values={values} total={total} />
 
       {PAYMENT_STAGES.map((stage) => (
@@ -63,6 +61,8 @@ export function PaymentPlanEditor({
         </div>
         <PaymentPlanPreview instalments={planInstalments(values)} amount={amount} />
       </div>
+
+      <PlanGuide />
     </div>
   );
 }

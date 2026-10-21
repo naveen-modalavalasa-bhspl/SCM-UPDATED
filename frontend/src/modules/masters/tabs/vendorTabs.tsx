@@ -157,8 +157,6 @@ export function PaymentTermsTab() {
         { key: "code", label: "Short code", required: true, maxLength: 20,
           placeholder: "e.g. ADV20-D4M", half: true,
           hint: "The code is printed first on every PO that uses this term, so keep it short and readable." },
-        { key: "description", label: "Notes for buyers (optional)", maxLength: 300,
-          placeholder: "When should a buyer pick this term?" },
         { key: "plan", label: "Payment plan", type: "custom",
           render: ({ values, patch, error }) => (
             <PaymentPlanEditor values={values} onPatch={(p) => patch(p as typeof values)}
@@ -166,6 +164,8 @@ export function PaymentTermsTab() {
           ),
           validate: (_v, all) => planProblem(all),
           payload: (all) => planPayload(all) as Record<string, string | number | null> },
+        { key: "description", label: "Notes for buyers (optional)", maxLength: 300,
+          placeholder: "When should a buyer pick this term?" },
         { key: "is_active", label: "Active — buyers can pick it on a PO", type: "switch" },
       ]}
       emptyForm={{ name: "", code: "", description: "", ...planForm(), is_active: true }}
