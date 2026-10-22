@@ -1830,11 +1830,11 @@ async def _load_indent_task(
         Pending.stage_sequence == instance.current_sequence,
         Pending.approver_id == user.id,
     ))
-    if not assigned:
-        from app.platform.workflow.engine import is_workflow_admin
-        if not await is_workflow_admin(db, user):
-            raise PermissionError_("This indent is not assigned to you at the current stage")
-    if indent.requested_by_id == user.id:
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user)
+    if not assigned and not is_admin:
+        raise PermissionError_("This indent is not assigned to you at the current stage")
+    if indent.requested_by_id == user.id and not is_admin:
         raise ValidationError("Requester cannot approve or reject their own indent")
 
     has_previous = await _has_previous_approval(db, instance, indent)

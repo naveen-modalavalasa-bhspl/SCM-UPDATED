@@ -791,12 +791,12 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
             Pending.stage_sequence == instance.current_sequence,
         )
     )).scalars().all()
+    is_admin = await is_workflow_admin(db, user)
     is_admin_override = False
-    if user.id not in {row.approver_id for row in pending}:
-        if await is_workflow_admin(db, user):
-            is_admin_override = True
-        else:
-            raise PermissionError_("You are not a valid approver for the current stage")
+    if is_admin:
+        is_admin_override = True
+    elif user.id not in {row.approver_id for row in pending}:
+        raise PermissionError_("You are not a valid approver for the current stage")
 
     # Someone holding two posts must act under one the ladder picked. A delegate never
     # holds one, so the check applies only to the rung's own holders. Any post the
@@ -1185,12 +1185,12 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         ] if employee is not None
     ]
     approver_ids = {a.id for a in approvers}
+    is_admin = await is_workflow_admin(db, user)
     is_admin_override = False
-    if user.id not in pending_ids:
-        if await is_workflow_admin(db, user):
-            is_admin_override = True
-        else:
-            raise PermissionError_("You are not a valid approver for the current stage")
+    if is_admin:
+        is_admin_override = True
+    elif user.id not in pending_ids:
+        raise PermissionError_("You are not a valid approver for the current stage")
     active_position_id = getattr(user, "active_position_id", None)
     # The position checks below stop someone approving from the wrong hat. They are
     # meaningless when the fallback picked this stage's approvers — it chose people

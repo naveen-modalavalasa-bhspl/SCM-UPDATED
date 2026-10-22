@@ -1923,13 +1923,14 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
     for the approvers above to decide.
     """
     indent = await get_indent(db, indent_id, user)
-    if indent.status == IndentStatus.RETURNED_FOR_CORRECTION.value:
-        raise ValidationError("Indent is returned for correction")
     if indent.status != IndentStatus.PENDING_APPROVAL.value:
         raise ValidationError(f"Indent is not awaiting approval (status {indent.status})")
-    if indent.requested_by_id == user.id:
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user)
+    if indent.requested_by_id == user.id and not is_admin:
         raise ValidationError("Requester cannot approve or reject their own indent")
-    await _assert_active_workflow_task(db, indent.id, user.id, user=user)
+    if not is_admin:
+        await _assert_active_workflow_task(db, indent.id, user.id, user=user)
     if action == ApprovalAction.REJECTED:
         comments = (comments or "").strip()
         if not comments:

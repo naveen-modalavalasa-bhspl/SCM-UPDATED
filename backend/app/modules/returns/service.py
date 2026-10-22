@@ -2588,7 +2588,9 @@ async def act_on_return(db: AsyncSession, return_id: int, action: str, comments:
         raise ValidationError("A return can only be approved or rejected")
     if action == ApprovalAction.REJECTED.value and not (comments or "").strip():
         raise ValidationError("Tell the returner why this was rejected")
-    if doc.requested_by_id == getattr(user, "id", None):
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user)
+    if not is_admin and doc.requested_by_id == getattr(user, "id", None):
         raise ValidationError("You cannot approve your own return")
 
     if phase == PHASE_LOGISTICS:
