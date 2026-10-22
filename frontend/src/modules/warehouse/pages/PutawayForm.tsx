@@ -9,7 +9,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import { ArrowLeft, ScanLine, Tags } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
-import { PackSelector } from "../components/PackSelector";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
 import { SerialNumbersModal } from "../components/SerialNumbersModal";
@@ -52,12 +51,13 @@ export default function PutawayForm() {
 
   const [binId, setBinId] = useState<number | "">("");
   const [qty, setQty] = useState<number>(0);
-  // WHICH pack is being put away. A bin is checked against handling units, so "3 cases"
-  // and "1500 eaches" are different questions about the same quantity — and only the
-  // person holding the goods knows which one landed on the dock.
-  const [packId, setPackId] = useState<number | null>(null);
   // How the goods go on the shelf, in the receipt's hierarchy (2026-10-08).
   const [shelfPacks, setShelfPacks] = useState<PackEntry[] | null>(null);
+  // WHICH pack the bin is checked against — the biggest one actually going on the
+  // shelf (2026-10-21). It used to be a second picker of its own ("Handling unit —
+  // what is being put away") restating the shelf packs above it and free to disagree
+  // with them: 1 carton shelved, the bin measured as 100 strips. No shelf packs: the
+  // rung the task was raised with, else null and the server takes the default.
   const [remarks, setRemarks] = useState("");
   const [serials, setSerials] = useState<string[]>([]);
   const [scan, setScan] = useState("");
@@ -69,6 +69,11 @@ export default function PutawayForm() {
     queryKey: ["wh-putaway", id],
     queryFn: () => getPutaway(taskId),
   });
+
+  const biggestShelfPack = (shelfPacks ?? [])
+    .filter((e) => e.level > 0 && packNum(e.qty) > 0 && e.item_packaging_id)
+    .sort((a, b) => b.level - a.level)[0];
+  const packId = biggestShelfPack?.item_packaging_id ?? task?.item_packaging_id ?? null;
 
   /**
    * What this putaway does to the chosen location. Keyed on the bin AND the quantity
@@ -100,9 +105,6 @@ export default function PutawayForm() {
     // name.
     setBinId(task.actual_bin_id ?? "");
     setSerials(parseCodes(task.serial_numbers) ?? []);
-    // Whatever the task was raised with, else the item's default putaway unit — both
-    // already resolved by the server, so the screen never picks a rung of its own.
-    setPackId(task.item_packaging_id ?? null);
     setShelfPacks(task.pack_breakdown ?? task.received_pack_breakdown ?? null);
   }, [task]);
 
@@ -391,20 +393,6 @@ export default function PutawayForm() {
               )}
             </div>
           )}
-
-          {/* WHICH pack. Chosen before the bin, because it changes what "does this fit"
-            * even means: the same 1500 eaches are three pallets or thirty cartons, and
-            * a bay that takes one takes neither of the others. */}
-          <div className="mt-4">
-            <PackSelector
-              packs={task.packs ?? []}
-              value={packId}
-              onChange={setPackId}
-              qty={qty}
-              uom={task.uom_code}
-              itemLabel={task.item_name ?? task.item_code ?? "This item"}
-            />
-          </div>
 
           {/* The whole hierarchy this warehouse was configured with, one dropdown per
             * level. A scan or a suggested-bin chip drives it too, so there is one

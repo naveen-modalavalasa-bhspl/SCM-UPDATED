@@ -115,6 +115,9 @@ def _write(w, wh, picks, *, indent=True):
         issue_type="INDENT_BASED" if indent else "DIRECT",
         issue_date=TODAY, warehouse_id=wh.id,
         indent_id=w.indent.id if indent else None,
+        # A direct issue must say where it goes and who takes it (2026-10-21).
+        destination_warehouse_id=None if indent else w.mdp.id,
+        issued_to_id=None if indent else w.user.id,
         items=[s.IssueItemWrite(
             indent_item_id=w.line.id if indent else None, item_id=w.item.id,
             bin_id=bay.id if bay else None, batch_id=batch.id if batch else None,

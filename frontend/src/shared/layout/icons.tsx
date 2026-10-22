@@ -86,6 +86,7 @@ const MAP: Record<string, LucideIcon> = {
   "trending-up": TrendingUp,
   briefcase: Briefcase,
   building: Building2,
+  "building-2": Building2,
   braces: Braces,
   inbox: Inbox,
   receipt: Receipt,

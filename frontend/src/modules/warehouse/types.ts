@@ -2819,6 +2819,10 @@ export interface DespatchPrefillLine {
   batch_no?: string | null;
   mfg_date?: string | null;
   expiry_date?: string | null;
+  /** Off the item master: what the unit needs at the gate (2026-10-21). */
+  is_asset?: boolean;
+  is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   /** The supplier's packing, declared and fixed, and the count to start from. */
   despatch_note_item_id?: number | null;
   pack_hierarchy_id?: number | null;
@@ -2861,6 +2865,10 @@ export interface PoLineOption {
   received_qty: number;
   pending_qty: number;
   rate?: number | null;
+  /** Off the item master: what the unit needs at the gate (2026-10-21). */
+  is_asset?: boolean;
+  is_serial_tracked?: boolean;
+  is_imei_tracked?: boolean;
   indent_id?: number | null;
   indent_no?: string | null;
   /** What is still owed, in whole packs of the order's hierarchy. */

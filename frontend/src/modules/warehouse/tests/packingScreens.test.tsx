@@ -62,10 +62,16 @@ function GateLine(extra: Partial<ReceiptItemWrite> = {}) {
 }
 
 describe("receipt line packing (the gate)", () => {
-  it("shows the declared packing locked and counts only what was sent", () => {
+  // The editor lives in a popup behind one press (2026-10-21); the line carries only
+  // a summary of what was sent and what was counted.
+  const openCount = () => fireEvent.click(screen.getByRole("button", { name: /count packs/i }));
+
+  it("shows the declared packing locked and counts only what was sent", async () => {
     render(<GateLine />);
-    expect(screen.getByText(/Supplier sent/)).toBeTruthy();
-    expect(screen.getByText(/from the despatch note, fixed/)).toBeTruthy();
+    expect(screen.getByText(/Supplier sent 750 TAB/)).toBeTruthy();
+    openCount();
+    expect(await screen.findByText(/From the supplier's despatch note, so the packing is fixed/))
+      .toBeTruthy();
     // Only the declared level (Box) and loose are offered — no Strip, no Carton.
     expect(screen.queryByLabelText("Strip count")).toBeNull();
     expect(screen.queryByLabelText("Carton count")).toBeNull();
@@ -73,17 +79,24 @@ describe("receipt line packing (the gate)", () => {
     expect(screen.getByRole("button", { name: "One more Box" })).toBeDisabled();
   });
 
-  it("makes the received quantity the count, and says what is short", () => {
+  it("makes the received quantity the count once it is used, and says what is short", async () => {
     render(<GateLine />);
-    fireEvent.click(screen.getByRole("button", { name: "One fewer Box" }));
-    expect(screen.getByTestId("received").textContent).toBe("600");
+    openCount();
+    fireEvent.click(await screen.findByRole("button", { name: "One fewer Box" }));
     expect(screen.getByText(/Short of the despatch note by 150 TAB/)).toBeTruthy();
+    // A count being typed is not yet the line's: Cancel must leave it as it was.
+    expect(screen.getByTestId("received").textContent).toBe("750");
+    fireEvent.click(screen.getByRole("button", { name: /Use this count/ }));
+    await waitFor(() => expect(screen.getByTestId("received").textContent).toBe("600"));
+    expect(screen.getByText(/Short 150 TAB/)).toBeTruthy();
   });
 
-  it("tells the gate when the buyer declined the supplier's packing", () => {
+  it("tells the gate when the buyer declined the supplier's packing", async () => {
     render(<GateLine pack_change_status="DECLINED" ordered_pack_hierarchy_name="Strip of 10"
                      pack_change_note="Different MRP" />);
-    expect(screen.getByText(/The buyer DECLINED this packing/)).toBeTruthy();
+    expect(screen.getByText(/Packing change declined/)).toBeTruthy();
+    openCount();
+    expect(await screen.findByText(/The buyer DECLINED this packing/)).toBeTruthy();
     expect(screen.getByText(/Different MRP/)).toBeTruthy();
   });
 });

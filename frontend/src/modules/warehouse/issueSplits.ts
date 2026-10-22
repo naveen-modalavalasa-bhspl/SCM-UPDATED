@@ -113,6 +113,10 @@ export interface IssueGroup {
   pickable: boolean;
   isBatchTracked: boolean;
   splits: IssueSplit[];
+  /** No pick of this item answers an indent line: a direct issue (2026-10-21). There
+   *  is nothing being asked for, so the ask IS what is issued — never shown, never
+   *  checked, and sent to the server as requested = issued per pick. */
+  direct: boolean;
   /** The whole ask, summed over the splits — the indent's number, redistributed. */
   requested: number;
   issued: number;
@@ -198,6 +202,7 @@ export function groupIssueLines(
         pickable: isPickable(line),
         isBatchTracked: !!line.is_batch_tracked,
         splits: [],
+        direct: true,
         requested: 0,
         issued: 0,
         codes: 0,
@@ -252,6 +257,7 @@ export function groupIssueLines(
     });
     group.requested += num(line.requested_qty);
     group.issued += issued;
+    if (line.indent_item_id) group.direct = false;
     group.codes += codes;
     // A group's identity comes from whichever of its lines the backend has already
     // described. A freshly added split carries no `tracking_type` yet and must not
@@ -263,6 +269,8 @@ export function groupIssueLines(
   });
 
   for (const group of groups) {
+    // Direct: what is issued is the whole of it — no ask to fall short of or pass.
+    if (group.direct) group.requested = group.issued;
     group.remaining = Math.max(round(group.requested - group.issued), 0);
     const today = new Date().toISOString().slice(0, 10);
     const all = (sourcesByItem[group.itemId] ?? []).filter(

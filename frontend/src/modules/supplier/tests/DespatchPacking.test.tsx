@@ -18,13 +18,13 @@ const ladder = (id: number, name: string, strip: number): PackHierarchy => ({
 const TEN = ladder(1, "Strip of 10", 10);
 const FIFTEEN = ladder(2, "Strip of 15", 15);
 
-function Line() {
+function Line({ inline = true }: { inline?: boolean }) {
   const [line, setLine] = useState<{ hierarchy: number; packs: PackEntry[]; reason: string | null;
                                      qty: number }>({
     hierarchy: 1, packs: greedy(TEN, 800), reason: null, qty: 800 });
   return (
     <>
-      <DespatchPacking hierarchies={[TEN, FIFTEEN]} orderedId={1} hierarchyId={line.hierarchy}
+      <DespatchPacking inline={inline} hierarchies={[TEN, FIFTEEN]} orderedId={1} hierarchyId={line.hierarchy}
                        breakdown={line.packs} reason={line.reason} uom="TAB" owed={800}
                        onChange={(p) => setLine({ hierarchy: p.pack_hierarchy_id ?? 1,
                                                   packs: p.pack_breakdown ?? [],
@@ -37,7 +37,7 @@ function Line() {
 
 describe("how the supplier packed a despatch line", () => {
   it("offers the order's hierarchy first and lets any of its levels make the quantity", () => {
-    render(<Line />);
+    render(<Line inline={true} />);
     expect(screen.getByText("As ordered")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "One fewer Box" }));
     fireEvent.change(screen.getByLabelText("Strip count"), { target: { value: "10" } });
@@ -46,15 +46,25 @@ describe("how the supplier packed a despatch line", () => {
   });
 
   it("asks why when the supplier switches hierarchy, and says the buyer decides", () => {
-    render(<Line />);
+    render(<Line inline={true} />);
     fireEvent.click(screen.getByRole("radio", { name: /Strip of 15/ }));
     expect(screen.getByText(/The buyer is asked to accept the change/)).toBeTruthy();
     expect(screen.getByText("Why the packing changed")).toBeTruthy();
   });
 
   it("says when the packs are more than the order still owes", () => {
-    render(<Line />);
+    render(<Line inline={true} />);
     fireEvent.click(screen.getByRole("button", { name: "One more Strip" }));
     expect(screen.getByText(/10 TAB more than the order still owes/)).toBeTruthy();
+  });
+
+  it("shows compact packaging with Change packaging button by default, opening modal on click", () => {
+    render(<Line inline={false} />);
+    expect(screen.getByRole("button", { name: /Change packaging/i })).toBeTruthy();
+    expect(screen.getByText("As Ordered")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Change packaging/i }));
+    expect(screen.getByText("Configure Dispatch Packaging & Pack Hierarchy")).toBeTruthy();
+    expect(screen.getByText("1. Packaging Hierarchy Architecture")).toBeTruthy();
+    expect(screen.getByText("2. Container & Pack Quantity Distribution")).toBeTruthy();
   });
 });

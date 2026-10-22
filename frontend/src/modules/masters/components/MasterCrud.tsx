@@ -43,7 +43,7 @@ export interface FormField {
   /** Anything the rules above cannot express. Return a message, or null to pass. */
   validate?: (value: Values[string], all: Values) => string | null;
   /** Lets one field update local state owned by the tab, e.g. dependent dropdowns. */
-  onChange?: (value: Values[string], all: Values) => void;
+  onChange?: (value: Values[string], all: Values, patch?: (updates: Partial<Values>) => void) => Partial<Values> | void;
   /** Clears dependent fields when this field changes. */
   clearOnChange?: string[];
   /** `custom` only: draws an editor that may own several form keys at once (a
@@ -362,8 +362,14 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     if (k === "code") codeTouched.current = String(v ?? "") !== "";
     const nextValues = { ...values, [k]: v };
     for (const dependent of f.clearOnChange ?? []) nextValues[dependent] = null;
+    const patch = (updates: Partial<Values>) => {
+      setValues((curr) => ({ ...curr, ...updates }));
+    };
+    const updates = f.onChange?.(v, nextValues, patch);
+    if (updates && typeof updates === "object") {
+      Object.assign(nextValues, updates);
+    }
     setValues(nextValues);
-    f.onChange?.(v, nextValues);
     setFieldErrors((e) => {
       const next = { ...e };
       delete next[k];
@@ -406,11 +412,20 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
       );
     }
     if (f.type === "switch") {
+      const isLockedOn = f.key === "is_bin_managed" && values.warehouse_type === "MAIN";
+      const isChecked = isLockedOn ? true : Boolean(val);
       return (
         <div key={f.key} className="py-1">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-body">{f.label}</span>
-            <Switch isSelected={Boolean(val)} onValueChange={(b) => set(f, b)}
+            <span className="flex items-center gap-2">
+              <span className="text-sm font-medium text-body">{f.label}</span>
+              {isLockedOn && (
+                <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-700 ring-1 ring-emerald-200">
+                  Always On for Main Store
+                </span>
+              )}
+            </span>
+            <Switch isSelected={isChecked} isDisabled={isLockedOn} onValueChange={(b) => set(f, b)}
                     color="primary" size="sm" />
           </div>
           {hint && <p className="mt-1 text-xs text-muted">{hint}</p>}

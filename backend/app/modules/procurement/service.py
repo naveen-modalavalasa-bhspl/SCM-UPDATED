@@ -1495,6 +1495,9 @@ async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
         po.remarks = data.remarks
     await _apply_po_header(db, po, data)
 
+    # Lines were added and quantities moved: their packing must follow (2026-10-08).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     lines = list((await db.execute(
         select(POItem).where(POItem.po_id == po.id))).scalars().all())
     sub_total = tax_total = Decimal("0")
@@ -1511,9 +1514,13 @@ async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
                "total_amount": float(po.total_amount or 0)},
         summary=summary,
     )
+    # Expire only the order, so its lines are re-read. `expire_all` also expired the
+    # signed-in employee, and the scope check then read `user.id` synchronously —
+    # which an async session refuses (MissingGreenlet).
+    po_id = po.id
     await db.commit()
-    db.expire_all()
-    return await get_po_detail(db, po.id, user)
+    db.expire(po)
+    return await get_po_detail(db, po_id, user)
 
 
 async def pass_po_correction_down(db: AsyncSession, po_id: int, comments: str,

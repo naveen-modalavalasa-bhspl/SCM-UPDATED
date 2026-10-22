@@ -482,6 +482,13 @@ async def test_create_warehouse(client, admin):
     assert body["is_bin_managed"] is True
 
 
+async def test_main_warehouse_type_automatically_bin_managed(client, admin):
+    res = (await client.post("/api/warehouses", json={
+        "code": "WH-AUTO-MAIN", "name": "Auto Main Store", "warehouse_type": WarehouseType.MAIN.value,
+        "is_bin_managed": False}, headers=admin)).json()
+    assert res["is_bin_managed"] is True
+
+
 async def test_invalid_warehouse_type_is_rejected(client, admin):
     r = await client.post("/api/warehouses", json={
         "code": "X", "name": "X", "warehouse_type": "MOON"}, headers=admin)

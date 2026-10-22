@@ -191,11 +191,20 @@ export function RFQDetailPage() {
   // mutations only carry the press.
   const freeze = useMutation({
     mutationFn: () => rfqApi.freeze(rfqId),
-    onSuccess: () => refresh("Prices frozen — suppliers can no longer change their quotes")(),
+    // The dialog closes itself on success: left open over a frozen tender, a second
+    // press is refused with "already frozen".
+    onSuccess: () => {
+      setFreezeOpen(false);
+      refresh("Prices frozen — suppliers can no longer change their quotes")();
+    },
   });
   const unfreeze = useMutation({
     mutationFn: (reason: string) => rfqApi.unfreeze(rfqId, reason),
-    onSuccess: () => refresh("Bidding reopened — suppliers can quote again")(),
+    onSuccess: () => {
+      setUnfreezeOpen(false);
+      setUnfreezeReason("");
+      refresh("Bidding reopened — suppliers can quote again")();
+    },
   });
 
   const busy = submit.isPending || approve.isPending || reject.isPending

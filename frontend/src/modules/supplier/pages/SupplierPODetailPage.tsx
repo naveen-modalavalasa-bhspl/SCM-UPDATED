@@ -272,9 +272,12 @@ export function SupplierPODetailPage() {
       const options = source.pack_options ?? [];
       const currentHid = source.pack_hierarchy_id;
       const otherHierarchy = options.find((h) => h.hierarchy_id !== currentHid);
+      // New batch defaults strictly to buyer-requested packaging hierarchy; split-packaging tries alternate hierarchy
       const nextHierarchy = (sameBatch && otherHierarchy)
         ? otherHierarchy
-        : (options.find((h) => h.hierarchy_id === currentHid) ?? options[0]);
+        : (options.find((h) => h.hierarchy_id === source.ordered_hierarchy_id)
+           ?? options.find((h) => h.hierarchy_id === currentHid)
+           ?? options[0]);
 
       const packBreakdown = nextHierarchy && remaining > 0 ? greedyWithPart(nextHierarchy, remaining) : null;
 
@@ -816,26 +819,6 @@ export function SupplierPODetailPage() {
                               </span>
                             )}
                           </div>
-
-                          {/* Split actions */}
-                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                            <button
-                              type="button"
-                              onClick={() => addSplitLine(index, true)}
-                              className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-brand/30 bg-brand-050/60 px-2.5 py-1 text-xs font-semibold text-brand hover:border-brand hover:bg-brand-050 transition-all shadow-xs"
-                              title="Add another packaging hierarchy row for the same batch"
-                            >
-                              <Layers size={13} className="text-brand" /> + Split Packaging (Same Batch)
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => addSplitLine(index, false)}
-                              className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-line bg-content1 px-2.5 py-1 text-xs font-semibold text-ink-700 hover:border-brand/40 hover:bg-brand-050/20 transition-all shadow-xs"
-                              title="Add another batch with its own packaging"
-                            >
-                              <Plus size={13} /> + Add New Batch
-                            </button>
-                          </div>
                         </div>
                       ) : (
                         <div className="space-y-1.5 pl-3 border-l-2 border-brand/40">
@@ -853,7 +836,7 @@ export function SupplierPODetailPage() {
                                   <button
                                     type="button"
                                     onClick={() => copyBatchFromSplit(index, primaryLineIndex)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-line bg-content1 px-1.5 py-0.5 text-[10px] font-semibold text-muted hover:text-brand hover:border-brand/40 transition-colors"
+                                    className="inline-flex items-center gap-1 rounded-md border border-line bg-content1 px-1.5 py-0.5 text-[10px] font-semibold text-muted hover:text-brand hover:border-brand/40 transition-colors cursor-pointer"
                                     title="Copy batch & dates from Split #1"
                                   >
                                     <Copy size={10} /> Use Split #1 batch
@@ -864,17 +847,58 @@ export function SupplierPODetailPage() {
                             <button
                               type="button"
                               onClick={() => removeLine(index)}
-                              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold text-muted hover:text-bad hover:bg-bad-bg/40 transition-colors"
+                              className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold text-muted hover:text-bad hover:bg-bad-bg/40 transition-colors cursor-pointer"
                               title="Remove this split"
                             >
-                              <Trash2 size={12} /> Remove
+                              <Trash2 size={12} /> Remove Split
                             </button>
                           </div>
-                          <p className="text-[11px] text-muted">
-                            Can have its own package hierarchy, batch number, and quantity.
-                          </p>
                         </div>
                       )}
+
+                      {/* Packaging Section (displays in buyer-requested packages with modal popup, as in PO page) */}
+                      {!!line.pack_options?.length && (
+                        <div className="mt-2.5 pt-2 border-t border-line/40">
+                          <DespatchPacking
+                            hierarchies={line.pack_options}
+                            orderedId={line.ordered_hierarchy_id}
+                            hierarchyId={line.pack_hierarchy_id}
+                            breakdown={line.pack_breakdown}
+                            reason={line.pack_change_reason}
+                            uom={line.uom_code}
+                            owed={line.pending_qty}
+                            targetQty={line.despatched_qty}
+                            itemName={line.item_name}
+                            itemCode={line.item_code}
+                            batchNo={line.batch_no}
+                            splitNo={splitNo}
+                            totalSplits={totalSplits}
+                            onChange={(patch) => setLine(index, patch)}
+                          />
+                        </div>
+                      )}
+
+                      {/* Batch Actions: rendered down after EVERY batch addition row */}
+                      <div className="flex flex-wrap items-center gap-1.5 pt-2.5 border-t border-line/30">
+                        <button
+                          type="button"
+                          onClick={() => addSplitLine(index, false)}
+                          className="group inline-flex min-h-7 items-center gap-1.5 rounded-lg border border-brand/30 bg-brand-050/70 px-2.5 py-1 text-xs font-semibold text-brand hover:border-brand hover:bg-brand hover:text-white transition-all shadow-2xs hover:shadow-xs active:scale-95 cursor-pointer"
+                          title="Add another batch/lot for this item"
+                        >
+                          <Plus size={13} className="transition-transform group-hover:rotate-90" />
+                          <span>+ Add New Batch</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addSplitLine(index, true)}
+                          className="inline-flex min-h-7 items-center gap-1.5 rounded-lg border border-line bg-content1 px-2.5 py-1 text-xs font-semibold text-ink-700 hover:border-brand/40 hover:bg-brand-050/30 transition-all shadow-2xs hover:shadow-xs active:scale-95 cursor-pointer"
+                          title="Add another packaging hierarchy row for the same batch"
+                        >
+                          <Layers size={13} className="text-brand" />
+                          <span>+ Split Packaging (Same Batch)</span>
+                        </button>
+                      </div>
                     </td>
                     <td className="p-2 text-right align-top w-36">
                       <Input
@@ -887,7 +911,7 @@ export function SupplierPODetailPage() {
                       />
                       {!!line.pack_options?.length && (
                         <span className="mt-1 block text-[11px] font-medium text-brand">
-                          {line.despatched_qty > 0 ? "⚡ Auto-packs below" : "Type qty to auto-pack"}
+                          {line.despatched_qty > 0 ? "⚡ Auto-packs in ladder" : "Type qty to auto-pack"}
                         </span>
                       )}
                     </td>
@@ -918,34 +942,6 @@ export function SupplierPODetailPage() {
                       />
                     </td>
                   </tr>
-                  {!!line.pack_options?.length && (
-                    <tr className={!isFirst ? "bg-surface-2/10" : ""}>
-                      <td colSpan={5} className="px-3 pb-3 pt-0">
-                        <div className="space-y-1 pt-1">
-                          {totalSplits > 1 && (
-                            <div className="flex items-center justify-between text-[11px] font-semibold text-muted px-1">
-                              <span className="flex items-center gap-1 text-brand">
-                                <Layers size={12} /> Packaging for Split #{splitNo} ({line.despatched_qty} {line.uom_code ?? "units"})
-                              </span>
-                              <span>
-                                Hierarchy: <b className="text-ink">{line.pack_options.find(h => h.hierarchy_id === line.pack_hierarchy_id)?.name ?? "Selected"}</b>
-                              </span>
-                            </div>
-                          )}
-                          <DespatchPacking
-                            hierarchies={line.pack_options}
-                            orderedId={line.ordered_hierarchy_id}
-                            hierarchyId={line.pack_hierarchy_id}
-                            breakdown={line.pack_breakdown}
-                            reason={line.pack_change_reason}
-                            uom={line.uom_code}
-                            owed={line.pending_qty}
-                            onChange={(patch) => setLine(index, patch)}
-                          />
-                        </div>
-                      </td>
-                    </tr>
-                  )}
                   </Fragment>
                   );
                 })}

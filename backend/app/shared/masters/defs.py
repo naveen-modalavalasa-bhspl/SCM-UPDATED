@@ -615,7 +615,7 @@ class WarehouseIn(BaseModel):
     warehouse_type: str = "MAIN"
     address: str | None = None
     incharge_id: int | None = None
-    is_bin_managed: bool = False
+    is_bin_managed: bool = True
     # Blank = follow the company default (warehouse.requires_inward_default). True
     # means arrivals here go through Material Inward -> GRN -> QC before they count.
     requires_inward: bool | None = None
@@ -663,6 +663,8 @@ async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> 
         raise ValidationError(
             f"Warehouse type: “{data.warehouse_type}” is not one of the choices. "
             f"Pick one of: {', '.join(t.value for t in WarehouseType)}.")
+    if data.warehouse_type == "MAIN":
+        data.is_bin_managed = True
     facility = await db.get(HcmFacility, data.facility_id) if data.facility_id else None
     if data.facility_id is not None and facility is None:
         raise ValidationError("Facility: that facility does not exist. Pick one from the list.")

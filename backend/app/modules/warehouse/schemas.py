@@ -931,6 +931,11 @@ class PoLineOption(BaseModel):
     received_qty: Decimal
     pending_qty: Decimal
     rate: Decimal | None = None
+    # What the unit needs at the gate, off the item master (2026-10-21): without these
+    # a prefilled line read as untracked and the serial/IMEI capture never appeared.
+    is_asset: bool = False
+    is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
     # How the ORDER asks for it to be packed — the starting point for a receipt that
     # has no despatch note to declare the packing.
     pack_hierarchy_id: int | None = None
@@ -4282,6 +4287,11 @@ class DespatchPrefillLine(BaseModel):
     batch_no: str | None = None
     mfg_date: date | None = None
     expiry_date: date | None = None
+    # What the unit needs at the gate, off the item master (2026-10-21): without these
+    # a prefilled line read as untracked and the serial/IMEI capture never appeared.
+    is_asset: bool = False
+    is_serial_tracked: bool = False
+    is_imei_tracked: bool = False
     # The supplier's packing, DECLARED and read-only on the receipt (2026-10-08).
     despatch_note_item_id: int | None = None
     pack_hierarchy_id: int | None = None

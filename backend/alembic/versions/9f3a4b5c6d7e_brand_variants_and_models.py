@@ -4,14 +4,14 @@
 Model), managed on Masters › Brands › Variants / Models. Codes are unique within
 the parent. Idempotent, like its neighbours.
 
-Revision ID: 8e2f3a4b5c6d
-Revises: 7d1e2f3a4b5c
+Revision ID: 9f3a4b5c6d7e
+Revises: 8e2f3a4b5c6d (re-keyed: it shared 8e2f3a4b5c6d with po_copied_from)
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "8e2f3a4b5c6d"
-down_revision = "7d1e2f3a4b5c"
+revision = "9f3a4b5c6d7e"
+down_revision = "8e2f3a4b5c6d"
 branch_labels = None
 depends_on = None
 

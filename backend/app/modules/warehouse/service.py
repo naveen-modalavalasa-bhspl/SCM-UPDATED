@@ -498,6 +498,8 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
         raise ValidationError(f"Warehouse code {data.code} is already in use")
 
     values = data.model_dump()
+    if (data.warehouse_type or "").strip().upper() == "MAIN":
+        values["is_bin_managed"] = True
     if data.latitude is not None:
         values.update(coordinate_source="MANUAL", coordinate_label=data.name,
                       coordinate_confidence=Decimal("1"))
@@ -514,6 +516,8 @@ async def create_warehouse(db: AsyncSession, data: s.WarehouseWrite, user) -> Wa
 async def update_warehouse(db: AsyncSession, warehouse_id: int, data: s.WarehouseWrite,
                            user) -> Warehouse:
     wh = await _get(db, Warehouse, warehouse_id, "Warehouse")
+    if (data.warehouse_type or "").strip().upper() == "MAIN":
+        data.is_bin_managed = True
     before = {c: getattr(wh, c) for c in data.model_dump()}
 
     if data.code != wh.code:
@@ -1648,23 +1652,30 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         received = _d(line.received_qty)
         if received < ZERO:
             raise ValidationError(f"Line {index}: received quantity cannot be negative")
-        # One line per item per batch. A second line for the same pair is the same
-        # goods entered twice, and each one would post its own stock movement.
-        # Mirrored by `duplicateLines` on the form, which says it before the press.
-        batch_key = (line.batch_no or "").strip().lower()
+        # One line per item per batch PER PACK HIERARCHY. A second line for the same
+        # three is the same goods entered twice, and each would post its own stock
+        # movement. A different hierarchy is NOT a duplicate (2026-10-21): one batch
+        # sent as "Box of 10" and "Box of 20" is two despatch-note lines, two sets of
+        # packs on the shelf, and combining them would leave one line describing two
+        # ladders. The hierarchy read here is the one packing settled above — for a
+        # despatch-note line that is the note's, never the client's.
+        # Mirrored by `lineProblems` on the form, which says it before the press.
+        batch_key = ((line.batch_no or "").strip().lower(),
+                     line_packing[index - 1].get("pack_hierarchy_id") or 0)
         claimed = seen_batch_by_item.setdefault(item.id, {})
         if batch_key in claimed:
             where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
             if at_gate or receipt.receipt_type == "GATE_ENTRY" or not line.batch_no:
                 raise ValidationError(
-                    f"Line {index} is a duplicate: {item.code} is already on line "
-                    f"{claimed[batch_key]} of this Material Inward. Duplicate item entries are not "
-                    f"allowed on Material Inward — combine the quantity onto line "
-                    f"{claimed[batch_key]}, or remove line {index}."
+                    f"Line {index} is a duplicate: {item.code} in the same batch and "
+                    f"packing is already on line {claimed[batch_key]} of this Material "
+                    f"Inward — combine the quantity onto line {claimed[batch_key]}, or "
+                    f"remove line {index}."
                 )
             raise ValidationError(
-                f"Line {index} is a duplicate: {item.code} with {where} is already "
-                f"on line {claimed[batch_key]} of this Material Inward. Remove line "
+                f"Line {index} is a duplicate: {item.code} with {where}, in the same "
+                f"packing, is already on line {claimed[batch_key]} of this Material "
+                f"Inward. Remove line "
                 f"{index} and add its quantity to line {claimed[batch_key]}, or enter "
                 f"a different batch number on it."
             )
@@ -3699,6 +3710,7 @@ async def despatch_note_prefill(db: AsyncSession, note_id: int,
         )).scalar_one_or_none()
 
     taken = dict(already)   # consumed line by line — see _despatch_prefill_line
+    tracking = await _unit_tracking(db, {line.item_id for line in lines})
     return s.DespatchPrefill(
         despatch_note_id=note.id, despatch_note_no=note.dn_no,
         po_id=note.po_id, po_no=note.po_no,
@@ -3708,13 +3720,28 @@ async def despatch_note_prefill(db: AsyncSession, note_id: int,
         vehicle_no=note.vehicle_no, transporter_name=note.transporter_name,
         lr_no=note.lr_no,
         lines=[row for row in (_despatch_prefill_line(
-            line, ordered=ordered, rates=rates, already=taken) for line in lines)
+            line, ordered=ordered, rates=rates, already=taken, tracking=tracking)
+            for line in lines)
             if row is not None],
     )
 
 
+async def _unit_tracking(db: AsyncSession, item_ids: set[int]) -> dict[int, dict]:
+    """`is_asset` / `is_serial_tracked` / `is_imei_tracked` per item, in one query, for
+    the two receipt prefills. A prefilled line without them reads as untracked, and the
+    gate was never asked for the serials the save then refused to go without."""
+    if not item_ids:
+        return {}
+    rows = (await db.execute(
+        select(Item.id, Item.is_asset, Item.is_serial_tracked, Item.is_imei_tracked)
+        .where(Item.id.in_(item_ids)))).all()
+    return {row[0]: {"is_asset": bool(row[1]), "is_serial_tracked": bool(row[2]),
+                     "is_imei_tracked": bool(row[3])} for row in rows}
+
+
 def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
-                           already: dict) -> "s.DespatchPrefillLine | None":
+                           already: dict,
+                           tracking: dict | None = None) -> "s.DespatchPrefillLine | None":
     """One note line, capped at what its order line still owes.
 
     `None` where the order owes nothing: the goods on that line are already on a
@@ -3743,6 +3770,7 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
         rate=rates.get(key),
         batch_no=line.batch_no, mfg_date=line.mfg_date,
         expiry_date=line.expiry_date,
+        **((tracking or {}).get(line.item_id) or {}),
         # How the supplier packed it, declared and fixed; and the count to start from.
         **wh_packing.despatch_prefill_packing(line, sent),
     )
@@ -3915,6 +3943,7 @@ async def po_lines(db: AsyncSession, po_id: int,
             .order_by(m.Receipt.id).limit(10))).all()
     ]
 
+    tracking = await _unit_tracking(db, {line.item_id for line in items})
     lines = []
     settled = []
     for line in items:
@@ -3932,6 +3961,7 @@ async def po_lines(db: AsyncSession, po_id: int,
             "received_qty": already,
             "pending_qty": pending,
             "rate": line.rate,
+            **(tracking.get(line.item_id) or {}),
             # What is still owed, in whole packs of the order's hierarchy — the
             # count a receipt with no despatch note starts from.
             **_po_line_packing(ladders.get(line.item_id) or [], line.pack_hierarchy_id,
@@ -10606,6 +10636,26 @@ async def _fill_from_employee(db: AsyncSession, data: s.IssueWrite) -> s.IssueWr
     })
 
 
+def _assert_direct_issue_parties(data: s.IssueWrite, *, for_sto: bool = False) -> None:
+    """A DIRECT outward issue — no indent on the header or on any line, no stock
+    transfer order, no pick list behind it — must name where the goods go and who
+    takes them (2026-10-21). With nothing requesting the stock, those two are the only
+    record of why it left; an indent-backed issue carries both on the indent."""
+    if data.direction == IssueDirection.IN or for_sto or data.indent_id or data.picking_id:
+        return
+    if any(getattr(line, "indent_id", None) or getattr(line, "indent_item_id", None)
+           for line in data.items):
+        return
+    missing = [label for label, value in (
+        ("a destination", data.destination_warehouse_id),
+        ("the person it is issued to", data.issued_to_id),
+    ) if not value]
+    if missing:
+        raise ValidationError(
+            f"A direct issue needs {' and '.join(missing)}. Pick "
+            f"{'them' if len(missing) > 1 else 'it'} under Issue details.")
+
+
 async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
                        for_sto: bool = False,
                        forwarding: bool = False) -> m.MaterialIssue:
@@ -10618,6 +10668,8 @@ async def _build_issue(db: AsyncSession, data: s.IssueWrite, user, *,
     wh = await _warehouse(db, data.warehouse_id)
     from app.modules.indents.models import Indent
     indent = await db.get(Indent, data.indent_id) if data.indent_id else None
+    if not forwarding:
+        _assert_direct_issue_parties(data, for_sto=for_sto)
 
     if data.direction != IssueDirection.IN and data.items:
         # An indent is served over several issues: one per warehouse when the
@@ -11110,6 +11162,12 @@ async def create_issue(db: AsyncSession, data: s.IssueWrite, user) -> m.Material
 async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user) -> m.MaterialIssue:
     issue = await get_issue(db, issue_id)
     _guard(issue.status, {IssueStatus.DRAFT.value}, "edit", "issue")
+    # The same rule as on create. An STO's own issue is exempt: the transfer order is
+    # its request, and names the destination itself.
+    from app.modules.inventory.models import StockTransferOrder
+    from_sto = await db.scalar(select(StockTransferOrder.id).where(
+        StockTransferOrder.issue_id == issue.id).limit(1))
+    _assert_direct_issue_parties(data, for_sto=bool(from_sto))
 
     before = {"total_qty": str(issue.total_qty)}
     wh = await _warehouse(db, data.warehouse_id)

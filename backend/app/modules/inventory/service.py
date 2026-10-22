@@ -2043,9 +2043,12 @@ async def correct_mr(db: AsyncSession, mr_id: int, data: dict, user) -> Material
         after={"lines": len(lines), "priority": mr.priority},
         summary="Corrected material request after it was sent back",
     )
+    # Expire only the request: `expire_all` also expired `mr.id` and the signed-in
+    # employee, and reading either afterwards is a synchronous reload (MissingGreenlet).
+    mr_id = mr.id
     await db.commit()
-    db.expire_all()
-    return await get_mr(db, mr.id, user=user)
+    db.expire(mr)
+    return await get_mr(db, mr_id, user=user)
 
 
 async def pass_mr_correction_down(db: AsyncSession, mr_id: int, comments: str,

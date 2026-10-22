@@ -936,6 +936,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // A point with no service area code (an MDP, a main warehouse) says "None" there.
   const pointHasNoSac = !!destPoint && !destPoint.sac;
   const direct = !form.indent_id && direction === "OUT";
+  // A direct issue must say where the goods go and who takes them (2026-10-21): with
+  // no indent behind it, these two are the only record of it. The server refuses the
+  // same (`_build_issue`); this says it on the field before the press.
+  const missingDestination = direct && !form.destination_warehouse_id;
+  const missingIssuedTo = direct && !form.issued_to_id;
 
   const pullEmployee = useMutation({
     mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
@@ -1233,7 +1238,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   variant="subtle"
                   onClick={() => {
                     setTouched(true);
-                    if (form.warehouse_id && form.items.length && blocking.length === 0) {
+                    if (form.warehouse_id && form.items.length && blocking.length === 0
+                        && !missingDestination && !missingIssuedTo) {
                       save.mutate();
                     }
                   }}
@@ -1357,6 +1363,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       )}
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
+      {touched && (missingDestination || missingIssuedTo) && (
+        <ErrorBanner error={`A direct issue needs ${[
+          missingDestination && "a destination", missingIssuedTo && "the person it is issued to",
+        ].filter(Boolean).join(" and ")} — pick ${missingDestination && missingIssuedTo ? "them" : "it"} under Issue details.`} />
+      )}
 
       {doc && (
         <MetaCard title="Document">
@@ -1486,6 +1497,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               <div className="sm:col-span-2">
                 <SearchPicker<IssueDestinationOption>
                   label="Destination"
+                  required
+                  error={touched && missingDestination
+                    ? "Pick where the goods are going — a direct issue needs a destination." : null}
                   hint="Any warehouse, MDP or LIP but your own. Search a name, a SAC or a vehicle number."
                   placeholder={destination || "Search warehouse, MDP or LIP"}
                   value={destPoint ? pointRow(destPoint) : null}
@@ -1531,6 +1545,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               <div className="sm:col-span-2">
                 <SearchPicker<IssueEmployeeOption>
                   label="Issued to"
+                  required
+                  error={touched && missingIssuedTo
+                    ? "Pick who is taking the goods — a direct issue needs a person." : null}
                   hint={destPoint?.office_id && !everyone
                     ? "People at the destination. Choosing one fills Department and Project."
                     : "Search every employee by name, code, office or department."}
@@ -1780,9 +1797,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {groups.length} item{groups.length === 1 ? "" : "s"}
             {totals.lines > groups.length && ` · ${totals.lines} picks`}
           </span>
-          <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+          {/* A direct issue asks for nothing, so it has no "requested" and nothing
+            * to be short of (2026-10-21). */}
+          {form.indent_id && (
+            <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+          )}
           <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
-          {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
+          {form.indent_id && short > 0 && (
+            <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>
+          )}
           {/* What leaving the shelves gives back. Only shown once it is knowable —
             * a zero here would claim the issue frees nothing, when the truth is
             * usually that the items have not been measured. */}

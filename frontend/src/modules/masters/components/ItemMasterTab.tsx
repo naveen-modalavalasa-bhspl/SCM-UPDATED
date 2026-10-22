@@ -16,7 +16,7 @@ import { MASTER_PAGE_SIZE } from "./MasterCrud";
 import type {
   MasterBrand, MasterBrandItemMapping, MasterBrandManufacturer, MasterCategoryTag,
   MasterGeneralName, MasterItem, MasterItemComponent,
-  MasterItemPackaging, MasterPackHierarchy, NamedMaster, PackagingBreakdown, UomClass,
+  MasterItemPackaging, MasterPackaging, MasterPackHierarchy, NamedMaster, PackagingBreakdown, UomClass,
 } from "../types";
 
 export const ITEM_SECTIONS = [
@@ -182,7 +182,7 @@ function ItemPhotos({ itemId }: { itemId: number }) {
       }).catch(() => undefined);
     }
     return () => { live = false; };
-  }, [photos.data, itemId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [photos.data, itemId]);
   const refresh = () => Promise.all([
     qc.invalidateQueries({ queryKey: ["masters", "item-photos", itemId] }),
     qc.invalidateQueries({ queryKey: ["masters", "items"] }),
@@ -669,9 +669,9 @@ export function ItemMasterTab() {
                        : nextCode.isPending ? "Fetching the next serial…"
                        : "Live next serial — confirmed on save"}>
                 <Input value={preview} disabled /></Field>
-              <Field label="Item Name"><Input value={form.name}
+              <Field label="Item Name"><Input value={form.name ?? ""}
                 onChange={(e) => set("name", e.target.value)} /></Field>
-              <Field label="Short Name"><Input value={form.short_name}
+              <Field label="Short Name"><Input value={form.short_name ?? ""}
                 onChange={(e) => set("short_name", e.target.value)} /></Field>
               <Field label="Ownership Department *"
                      hint="HCM department responsible for tickets and other item-related work">
@@ -680,7 +680,7 @@ export function ItemMasterTab() {
                   onChange={(v) => set("owner_department_id", v)}
                   placeholder="Select responsible department" />
               </Field>
-              <div className="md:col-span-3"><Field label="Description"><Input value={form.description}
+              <div className="md:col-span-3"><Field label="Description"><Input value={form.description ?? ""}
                 onChange={(e) => set("description", e.target.value)} /></Field></div>
             </div>}
 
@@ -768,7 +768,7 @@ export function ItemMasterTab() {
               <Field label="Barcode Type"><Select value={form.barcode_type}
                 options={[{value:"AUTO",label:"Auto Generate"},{value:"MANUAL",label:"Manual"}]}
                 onChange={(v) => set("barcode_type", v)} /></Field>
-              <Field label="Barcode Value"><Input value={form.barcode_value}
+              <Field label="Barcode Value"><Input value={form.barcode_value ?? ""}
                 onChange={(e) => set("barcode_value", e.target.value)} /></Field>
             </div>}
 
@@ -793,11 +793,11 @@ export function ItemMasterTab() {
                 onChange={(v) => set("valuation_method", v)} /></Field>
               <Toggle label="Requires Special Storage" value={form.requires_special_storage}
                 onChange={(v) => set("requires_special_storage", v)} />
-              <Field label="Storage Conditions"><Input value={form.storage_conditions}
+              <Field label="Storage Conditions"><Input value={form.storage_conditions ?? ""}
                 onChange={(e) => set("storage_conditions", e.target.value)} /></Field>
               <Toggle label="Requires Special Transport" value={form.requires_special_transport}
                 onChange={(v) => set("requires_special_transport", v)} />
-              <Field label="Transport Conditions"><Input value={form.transport_conditions}
+              <Field label="Transport Conditions"><Input value={form.transport_conditions ?? ""}
                 onChange={(e) => set("transport_conditions", e.target.value)} /></Field>
             </div>}
           </ModalBody>
@@ -1128,6 +1128,48 @@ export function packagingBreakupText(
   return `${packages.join(" = ")} = ${product}${itemName ? ` of ${itemName}` : ""}`;
 }
 
+/** The same multiplication `packaging_breakdown` does on the server, off the rungs and
+ *  container types the screen already holds — so the ladder reads in full the moment
+ *  it loads, instead of waiting on a second round trip. The server's answer replaces
+ *  it when it arrives. Returns nothing for a ladder with a gap, as the server refuses. */
+export function localPackagingBreakdown(
+  rungs: MasterItemPackaging[], containers: MasterPackaging[], baseUom?: string | null,
+): PackagingBreakdown[] {
+  const rows = [...rungs].sort((a, b) => a.level - b.level);
+  if (rows.some((row, index) => row.level !== index + 1)) return [];
+  const byId = new Map(containers.map((c) => [c.id, c]));
+  let running = 1;
+  return rows.map((row, index) => {
+    running *= Number(row.quantity) || 0;
+    const package_breakup: PackagingBreakdown["package_breakup"] = [];
+    let count = 1;
+    for (let lower = index; lower >= 0; lower -= 1) {
+      package_breakup.push({ package_id: rows[lower].package_id,
+        package_name: rows[lower].package_name, quantity: count });
+      if (lower > 0) count *= Number(rows[lower].quantity) || 0;
+    }
+    const container = byId.get(row.package_id);
+    const own = row.length_cm != null && row.width_cm != null && row.height_cm != null;
+    const sides = own ? [row.length_cm, row.width_cm, row.height_cm]
+      : container ? [container.length_cm, container.width_cm, container.height_cm]
+      : [null, null, null];
+    const measured = sides.every((v) => v != null);
+    return {
+      level: row.level, package_id: row.package_id, package_name: row.package_name,
+      quantity: Number(row.quantity), uom_code: row.uom_code, package_breakup,
+      base_quantity: running, base_uom_code: baseUom,
+      length_cm: sides[0], width_cm: sides[1], height_cm: sides[2],
+      volume_cbm: measured
+        ? Number(sides[0]) * Number(sides[1]) * Number(sides[2]) / 1e6 : null,
+      dims_from: own ? "RUNG" : measured ? "PACKAGE" : null,
+      gross_weight_kg: row.gross_weight_kg, tare_weight_kg: container?.weight_kg ?? null,
+      max_stack_tiers: row.max_stack_tiers ?? container?.max_stack_tiers ?? null,
+      is_default_putaway_unit: !!row.is_default_putaway_unit,
+      min_fill_qty: row.min_fill_qty ?? null,
+    };
+  });
+}
+
 /** An item's pack hierarchies (2026-10-08): the named families it is packed in —
  *  "Strip of 10" and "Strip of 15" at the same time — each with its own ladder of
  *  levels. A container type is used at most once per hierarchy; across hierarchies it
@@ -1150,6 +1192,16 @@ export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
   const list = hierarchies.data ?? [];
   const current = list.find((h) => h.id === selected)
     ?? list.find((h) => h.is_default) ?? list[0];
+  // Every hierarchy's levels are fetched up front, so switching between them in the
+  // dropdown draws from cache instead of a spinner. Same keys as ItemPackagingLadder.
+  useEffect(() => {
+    for (const h of list) {
+      qc.prefetchQuery({
+        queryKey: ["masters", "item-packaging", itemId, h.id],
+        queryFn: () => fetchItemRungs(itemId, h.id),
+      });
+    }
+  }, [qc, itemId, list.map((h) => h.id).join(",")]);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["masters", "pack-hierarchies", itemId] });
     qc.invalidateQueries({ queryKey: ["pack-options"] });
@@ -1251,6 +1303,12 @@ export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
   );
 }
 
+function fetchItemRungs(itemId: number, hierarchyId: number) {
+  return mastersApi.itemPackaging
+    .list({ item_id: itemId, hierarchy_id: hierarchyId, size: 50, include_inactive: true })
+    .then((r) => r.items);
+}
+
 /** One hierarchy's ladder. Level 1 holds the item's UOM directly; each level above
  *  contains a whole number of the package immediately below it. */
 function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, baseUom }: {
@@ -1271,9 +1329,7 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
 
   const rungs = useQuery({
     queryKey: ["masters", "item-packaging", itemId, hierarchyId],
-    queryFn: () => mastersApi.itemPackaging
-      .list({ item_id: itemId, hierarchy_id: hierarchyId, size: 50, include_inactive: true })
-      .then((r) => r.items),
+    queryFn: () => fetchItemRungs(itemId, hierarchyId),
   });
   const breakdown = useQuery({
     queryKey: ["masters", "packaging-breakdown", itemId, hierarchyId],
@@ -1285,10 +1341,17 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
   });
 
   const activeRungs = (rungs.data ?? []).filter((rung) => rung.is_active);
+  // Drawn from the rungs at once; the server's figures take over when they arrive.
+  // A server answer covering fewer levels than are listed (still refetching after an
+  // add, or failed) is not used: the local rows cover every rung shown.
+  const breakdownRows = breakdown.data && breakdown.data.length === activeRungs.length
+    ? breakdown.data
+    : localPackagingBreakdown(activeRungs, packages.data ?? [], baseUom);
+  const breakdownFor = (level: number) => breakdownRows.find((b) => b.level === level);
   // A container is used at most once per hierarchy — the server refuses it too.
   const usedPackages = new Set(activeRungs.map((rung) => rung.package_id));
   const nextLevel = Math.max(0, ...activeRungs.map((rung) => rung.level)) + 1;
-  const below = breakdown.data?.find((row) => row.level === nextLevel - 1);
+  const below = breakdownFor(nextLevel - 1);
   const inactiveAtNextLevel = (rungs.data ?? [])
     .find((rung) => rung.level === nextLevel && !rung.is_active);
   const selectedPackage = (packages.data ?? [])
@@ -1382,6 +1445,34 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
     },
     onError: (reason: Error) => setError(reason.message),
   });
+  // The size and loaded weight of one pack of a level, edited in place after the
+  // level exists (2026-10-21). These are what a putaway's bin check measures when this
+  // level is the pack going on the shelf (`capacity.item_packs`): the level's own box,
+  // else its container type's. `sides` null clears the override back to the container.
+  const setShape = useMutation({
+    mutationFn: ({ rung, sides, gross }: {
+      rung: MasterItemPackaging;
+      sides: { length_cm: number; width_cm: number; height_cm: number } | null;
+      gross: number | null;
+    }) =>
+      mastersApi.itemPackaging.update(rung.id, {
+        item_id: rung.item_id, hierarchy_id: hierarchyId, level: rung.level,
+        package_id: rung.package_id, quantity: rung.quantity,
+        length_cm: sides?.length_cm ?? null, width_cm: sides?.width_cm ?? null,
+        height_cm: sides?.height_cm ?? null,
+        gross_weight_kg: gross,
+        max_stack_tiers: rung.max_stack_tiers ?? null,
+        is_default_putaway_unit: !!rung.is_default_putaway_unit,
+        min_fill_qty: rung.min_fill_qty ?? null, is_active: true,
+      }),
+    onSuccess: () => {
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["masters", "item-packaging", itemId] });
+      qc.invalidateQueries({ queryKey: ["masters", "packaging-breakdown", itemId] });
+      qc.invalidateQueries({ queryKey: ["pack-options"] });
+    },
+    onError: (reason: Error) => setError(reason.message),
+  });
   const remove = useMutation({
     mutationFn: (id: number) => mastersApi.itemPackaging.deactivate(id),
     onSuccess: () => {
@@ -1397,11 +1488,11 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
   const columns: Column<MasterItemPackaging>[] = [
     { key: "level", header: "Level", render: (r) => r.level },
     { key: "breakup", header: "Packaging breakup", render: (r) => {
-        const row = breakdown.data?.find((b) => b.level === r.level);
-        return row ? packagingBreakupText(row, baseUom, itemName) : "Calculating…";
+        const row = breakdownFor(r.level);
+        return row ? packagingBreakupText(row, baseUom, itemName) : "—";
       } },
     { key: "end", header: "End product", hideOnNarrow: true, render: (r) => {
-        const row = breakdown.data?.find((b) => b.level === r.level);
+        const row = breakdownFor(r.level);
         return row
           ? `${amount(row.base_quantity)} ${row.base_uom_code ?? baseUom ?? "units"}`
           : "—";
@@ -1409,34 +1500,14 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
     // The half the warehouse reads. A rung with no box is a rung no bin can check, and
     // the ladder is the only screen where that is fixable — so it says so here rather
     // than leaving a storekeeper to discover it at the putaway.
-    { key: "space", header: "Shelf space", render: (r) => {
-        const row = breakdown.data?.find((b) => b.level === r.level);
-        if (!row) return "—";
-        if (row.volume_cbm == null) {
-          return (
-            <span className="text-xs text-warn">
-              Not measured — no bin can check it
-            </span>
-          );
-        }
-        return (
-          <span className="text-xs">
-            <span className="tabular font-semibold text-ink">
-              {row.volume_cbm.toPrecision(3)} m³
-            </span>
-            <span className="text-muted">
-              {" "}· {amount(Number(row.length_cm))} × {amount(Number(row.width_cm))} ×{" "}
-              {amount(Number(row.height_cm))} cm
-              {row.dims_from === "PACKAGE" ? " (container type)" : ""}
-              {row.gross_weight_kg != null ? ` · ${amount(row.gross_weight_kg)} kg` : ""}
-            </span>
-          </span>
-        );
-      } },
+    { key: "space", header: "Shelf space", render: (r) => (
+        <ShelfSpaceCell rung={r} row={breakdownFor(r.level)} busy={setShape.isPending}
+                        onSave={(sides, gross) => setShape.mutate({ rung: r, sides, gross })} />
+      ) },
     // The size is the most one pack holds; this is the least one may be MADE with. A
     // pack that falls under it later (stock issued out of it) is flagged for a repack.
     { key: "min", header: "Minimum fill", render: (r) => {
-        const row = breakdown.data?.find((b) => b.level === r.level);
+        const row = breakdownFor(r.level);
         return (
           <MinFillCell value={r.min_fill_qty ?? null} max={row?.base_quantity}
                        uom={baseUom} busy={setFloor.isPending}
@@ -1555,12 +1626,115 @@ function ItemPackagingLadder({ itemId, hierarchyId, hierarchyName, itemName, bas
             <div className="text-sm text-body">Level {r.level} · {r.package_name}</div>
             <div className="text-xs text-muted">
               {(() => {
-                const row = breakdown.data?.find((b) => b.level === r.level);
-                return row ? packagingBreakupText(row, baseUom, itemName) : "Calculating…";
+                const row = breakdownFor(r.level);
+                return row ? packagingBreakupText(row, baseUom, itemName) : "—";
               })()}
             </div>
           </div>
         )} />
+    </div>
+  );
+}
+
+/** One level's size and loaded weight, read and edited in place (2026-10-21).
+ *
+ *  The volume is never typed: it is length × width × height, worked out on the server
+ *  on every read so it cannot drift from the sides. Blank sides mean "the container
+ *  type's own box" — the ordinary case — and all three or none, because two sides
+ *  describe nothing a bin check can use (the server refuses it too). */
+function ShelfSpaceCell({ rung, row, busy, onSave }: {
+  rung: MasterItemPackaging;
+  row?: PackagingBreakdown;
+  busy: boolean;
+  onSave: (sides: { length_cm: number; width_cm: number; height_cm: number } | null,
+           gross: number | null) => void;
+}) {
+  const { can } = useAuth();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ length_cm: "", width_cm: "", height_cm: "", gross: "" });
+  const manage = can("master.packaging.manage");
+
+  if (!editing) {
+    const measured = row?.volume_cbm != null;
+    const summary = measured ? (
+      <span className="text-xs">
+        <span className="tabular font-semibold text-ink">{row!.volume_cbm!.toPrecision(3)} m³</span>
+        <span className="text-muted">
+          {" "}· {amount(Number(row!.length_cm))} × {amount(Number(row!.width_cm))} ×{" "}
+          {amount(Number(row!.height_cm))} cm
+          {row!.dims_from === "PACKAGE" ? " (container type)" : ""}
+          {row!.gross_weight_kg != null ? ` · ${amount(row!.gross_weight_kg)} kg` : ""}
+        </span>
+      </span>
+    ) : (
+      <span className="text-xs text-warn">Not measured — no bin can check it</span>
+    );
+    if (!manage) return summary;
+    return (
+      <button
+        type="button"
+        title="Set this level's size and weight — what a putaway checks the bin against"
+        onClick={() => {
+          setDraft({
+            length_cm: rung.length_cm != null ? String(rung.length_cm) : "",
+            width_cm: rung.width_cm != null ? String(rung.width_cm) : "",
+            height_cm: rung.height_cm != null ? String(rung.height_cm) : "",
+            gross: rung.gross_weight_kg != null ? String(rung.gross_weight_kg) : "",
+          });
+          setEditing(true);
+        }}
+        className="group -mx-2 flex min-h-9 flex-col items-start rounded-md px-2 py-1 text-left hover:bg-brand-050"
+      >
+        {summary}
+        <span className="text-[11px] font-semibold text-brand opacity-70 group-hover:opacity-100">
+          {measured ? "Edit size" : "Measure it"}
+        </span>
+      </button>
+    );
+  }
+
+  const sides = [draft.length_cm, draft.width_cm, draft.height_cm];
+  const filled = sides.filter((v) => v !== "").length;
+  const bad = sides.some((v) => v !== "" && !(Number(v) > 0))
+    || (draft.gross !== "" && !(Number(draft.gross) >= 0));
+  const half = filled > 0 && filled < 3;
+  const cube = filled === 3 && !bad
+    ? sides.reduce((product, v) => product * Number(v), 1) / 1e6 : null;
+  const field = (key: keyof typeof draft, label: string) => (
+    <Input type="number" min={0} step="0.1" value={draft[key]} placeholder={label}
+           aria-label={label} className="w-20"
+           onChange={(e) => setDraft({ ...draft, [key]: e.target.value })} />
+  );
+  return (
+    <div className="space-y-1.5 py-1">
+      <div className="flex flex-wrap items-center gap-1">
+        {field("length_cm", "L cm")}<span className="text-muted">×</span>
+        {field("width_cm", "W cm")}<span className="text-muted">×</span>
+        {field("height_cm", "H cm")}
+        <span className="ml-1">{field("gross", "kg")}</span>
+      </div>
+      <div className="text-[11px]">
+        {half ? (
+          <span className="font-medium text-bad">Enter all three sides, or none to use the container type's.</span>
+        ) : bad ? (
+          <span className="font-medium text-bad">Sides must be more than 0.</span>
+        ) : cube != null ? (
+          <span className="text-ink">One pack: <b className="tabular">{cube.toPrecision(3)} m³</b></span>
+        ) : (
+          <span className="text-muted">Blank sides use the container type's size.</span>
+        )}
+      </div>
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" className="text-xs" disabled={busy || half || bad}
+                onClick={() => {
+                  onSave(filled === 3 ? {
+                    length_cm: Number(draft.length_cm), width_cm: Number(draft.width_cm),
+                    height_cm: Number(draft.height_cm),
+                  } : null, draft.gross === "" ? null : Number(draft.gross));
+                  setEditing(false);
+                }}>Save</Button>
+        <Button variant="ghost" className="text-xs" onClick={() => setEditing(false)}>Cancel</Button>
+      </div>
     </div>
   );
 }

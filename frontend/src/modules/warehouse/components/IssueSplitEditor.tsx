@@ -424,8 +424,11 @@ function ItemRow(props: ItemProps) {
   // Strict FEFO (2026-10-12): only the batches the ask needs, earliest expiry first.
   // The batch already on a line stays listed so a saved pick never renders empty; if
   // the plan no longer names it, the row says so (`splitProblems`).
+  // A direct issue answers no indent, so no plan limits it: every batch is offered,
+  // oldest first, and the hint below carries the FEFO advice (CLAUDE.md: a manual
+  // issue is not held to the same-day rule).
   const batches = batchChoices(sources, allowed, group.codedSwap).filter(
-    (choice) => group.required.has(choice.batchId ?? 0)
+    (choice) => group.direct || group.required.has(choice.batchId ?? 0)
       || group.splits.some((s) => (s.line.batch_id ?? 0) === (choice.batchId ?? 0) && choice.batchId));
   // The oldest batch that still has stock, when this item is not taking from it.
   // Advice on a manual line, never a refusal: the storekeeper can see which pallet is
@@ -487,7 +490,7 @@ function ItemRow(props: ItemProps) {
           )}
 
           <dl className="mt-2.5 flex flex-wrap items-end gap-x-5 gap-y-2">
-            <div>
+            {!group.direct && <div>
               <dt className={HEAD}>Requested</dt>
               <dd className="tabular text-sm font-semibold text-ink">
                 {askEditable ? (
@@ -502,14 +505,16 @@ function ItemRow(props: ItemProps) {
                   fmtQty(group.requested)
                 )}
               </dd>
-            </div>
+            </div>}
             <div>
               <dt className={HEAD}>Issuing</dt>
               <dd className={`tabular text-sm font-semibold ${
                 over ? "text-bad" : settled ? "text-ok" : "text-ink"
               }`}>
                 {fmtQty(group.issued)}
-                <span className="font-normal text-muted"> / {fmtQty(group.requested)}</span>
+                {!group.direct && (
+                  <span className="font-normal text-muted"> / {fmtQty(group.requested)}</span>
+                )}
               </dd>
             </div>
             {tracked && (
@@ -534,7 +539,9 @@ function ItemRow(props: ItemProps) {
             </div>
           ) : group.requested <= 0 && group.issued <= 0 ? (
             <div className="mt-2 text-xs text-muted">
-              Enter requested quantity to issue
+              {group.direct
+                ? "Pick a batch and location, then enter the quantity to issue"
+                : "Enter requested quantity to issue"}
             </div>
           ) : (
             <div className="mt-2 text-xs font-semibold">
@@ -545,7 +552,7 @@ function ItemRow(props: ItemProps) {
               ) : settled ? (
                 <span className="inline-flex items-center gap-1 text-ok">
                   <Check className="h-3.5 w-3.5" />
-                  Fully allocated
+                  {group.direct ? "Ready to issue" : "Fully allocated"}
                   {group.splits.length > 1 && (
                     <span className="font-normal text-muted">
                       ({group.splits.length} locations)
