@@ -987,9 +987,21 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
+    mutationFn: async (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
       const numId = Number(id);
-      if (what === "submit") return submitIssue(numId);
+      if (what === "submit") {
+        // Submit carries no line data of its own (`POST .../submit` takes only the
+        // id) — it approves whatever is already in the database. The grid is still
+        // editable right up to this press, so an edit made after the last Save was
+        // being silently discarded: the chain advanced on the STALE saved copy, and
+        // if that stale copy happened to be valid the document went straight to
+        // approved while the edit on screen vanished on the refetch — with no error
+        // at all, or a status-guard error on a second press that had nothing to do
+        // with what was actually wrong. Saving here first means submit always acts
+        // on what the user is looking at.
+        await save.mutateAsync();
+        return submitIssue(numId);
+      }
       if (what === "approve") return approveIssue(numId, reason);
       if (what === "reject") return rejectIssue(numId, reason);
       if (what === "post") return postIssue(numId);
