@@ -1,6 +1,7 @@
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Can, ErrorBanner, PageHeader, ResponsiveList, StatusPill, useToast, type Column } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { approvalTrailApi, approvalTrailKey, requisitionApi } from "../api";
@@ -77,7 +78,9 @@ export function RequisitionDetailPage() {
   // from the person who IS supposed to approve. Falling back to the old status check
   // means the worst case is the pre-2026-08-20 behaviour (a button that 403s), never
   // a document nobody can sign.
-  const canDecide = req?.awaiting_me ?? isPending;
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  const canDecide = isPending && (Boolean(req?.awaiting_me) || isAdmin);
   const isApproved = req?.status === "APPROVED";
 
   const columns: Column<ReqItem>[] = [
@@ -115,11 +118,18 @@ export function RequisitionDetailPage() {
               * it. The rung comes off the engine's own trail, so a ladder renamed on
               * Settings > Approvals Config renames this badge too. */}
             {req && (
-              <StatusPill
-                status={isPending && trail.data?.stage_name
-                  ? `Pending at ${trail.data.stage_name}`
-                  : req.status}
-              />
+              <div className="flex items-center gap-2">
+                <StatusPill
+                  status={isPending && trail.data?.stage_name
+                    ? `Pending at ${trail.data.stage_name}`
+                    : req.status}
+                />
+                {isAdmin && isPending && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/10 text-purple-700 border border-purple-500/20">
+                    Admin Override
+                  </span>
+                )}
+              </div>
             )}
             <Button variant="subtle" onClick={() => nav("/procurement/requisitions")}>
               Back
@@ -137,15 +147,15 @@ export function RequisitionDetailPage() {
                 </Button>
               </Can>
             )}
-            {canDecide && (
-              <Can do="requisition.approve">
+            {canDecide && (can("requisition.approve") || isAdmin) && (
+              <>
                 <Button className={TONE_REJECT} variant="subtle" disabled={busy} onClick={() => reject.mutate()}>
                   Reject
                 </Button>
                 <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
-                  Approve
+                  {isAdmin && !req?.awaiting_me ? "Approve (Admin Override)" : "Approve"}
                 </Button>
-              </Can>
+              </>
             )}
             {/* Explicit, never automatic: approving a requisition does not send it
               * out. A buyer decides who is asked and when, and the form opens

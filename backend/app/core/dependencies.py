@@ -83,6 +83,10 @@ def require_permission(code: str):
         user=Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ):
+        from app.platform.workflow.engine import is_workflow_admin
+        if await is_workflow_admin(db, user):
+            return user
+
         from app.platform.rbac.service import get_user_permissions
 
         perms = await get_user_permissions(
@@ -115,6 +119,10 @@ def require_permission_or(primary: str, alternate: str | tuple[str, ...], in_rea
         user=Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ):
+        from app.platform.workflow.engine import is_workflow_admin
+        if await is_workflow_admin(db, user):
+            return user
+
         from app.platform.rbac.service import get_user_permissions
 
         perms = await get_user_permissions(

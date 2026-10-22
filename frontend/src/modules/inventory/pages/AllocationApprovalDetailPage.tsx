@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { LoadingRows } from "../components/PageStates";
 import {
   approveAllocation, getAllocation, getAllocationAvailability, getAllocationHistory,
@@ -70,15 +71,18 @@ export function AllocationApprovalDetailPage() {
   // still PENDING_APPROVAL after the first signature, and it was still offering
   // Approve to the person who had just signed it — a button whose only outcome was
   // the server's refusal. The inbox is the authority on whose turn it is.
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+
   const pending = useQuery({
     queryKey: ["inventory", "allocation-pending-mine"],
     queryFn: getPendingInventoryApprovals,
   });
-  const waitingOnMe = (pending.data ?? []).some((row) => row.doc_id === allocationId);
-
-  const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/fulfilment?tab=approvals");
 
   const a = allocation.data;
+  const waitingOnMe = (pending.data ?? []).some((row) => row.doc_id === allocationId) || (isAdmin && a?.status === "PENDING_APPROVAL");
+
+  const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/fulfilment?tab=approvals");
 
   // A revision only counts if the number actually changed — retyping 40 over 40 is
   // not a decision and must not read as one in the audit trail.
@@ -397,7 +401,7 @@ export function AllocationApprovalDetailPage() {
                     decides whose turn it is. This is the job profile talking. Reject
                     stays outside it on purpose: an approver must never be left with a
                     document they can neither sign nor refuse. */}
-                <Can do="allocation.approve_reserve">
+                {(can("allocation.approve_reserve") || isAdmin) && (
                   <Button
                     className={TONE_APPROVE}
                     disabled={act.isPending || overCap}
@@ -411,9 +415,9 @@ export function AllocationApprovalDetailPage() {
                     })()}
                   >
                     <CheckCircle2 className="h-4 w-4" />
-                    {approveLabel}
+                    {isAdmin && !waitingOnMe ? `${approveLabel} (Admin Override)` : approveLabel}
                   </Button>
-                </Can>
+                )}
               </div>
             </Card>
           )}
