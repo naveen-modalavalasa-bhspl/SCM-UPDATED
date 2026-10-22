@@ -630,26 +630,40 @@ a rung or hierarchy cannot be retired, while live packs on the shelf use it.
 - **Issue** — a pick may be stated in packs (its quantity is their total). After
   posting, `settle_issue` settles the packs off the units that actually left.
 
-**Codes: a coded pack is an ATOM.** For a code-tracked, unserialised item at a
-warehouse, each pack shelved gets the item's own asset/consumable code (formula +
-`-BOX`) and `is_atom`. An atom may be WRAPPED (the new carton gets its own code, the
-boxes keep theirs inside it) and unwrapped back to its own level — never split below
-it, because a code names everything inside it. The one exception is **break bulk** at
-the issue desk: the line says `break_bulk` AND the person holds `issue.break_bulk`
-(granted, never inherited), checked by `assert_issue_packs` on every save. At posting
-the pack is OPENED, its code retires for good, and what stays behind is packed again
-as smaller whole packs under NEW codes, plus loose. Serial and IMEI items are never
-atoms — the serial is the identity and the box is only a box — but their pick count is
-still strict per base unit, exactly as before. Unit rows and their per-unit codes are
-untouched by all of this, so every downstream reader (QC, consignment,
-acknowledgement) keeps working per unit.
+**Codes belong to the BASE UNIT, never to a pack (2026-10-22).** Every unit of a
+code-tracked item is coded at putaway, exactly as before; a pack is only a labelled
+container around units (`PK-…`), shown as packs everywhere and issued, counted and
+coded per unit. `packing.codes_per_pack` is always False — the one switch every caller
+asks. This REVERSED the 2026-10-08 "coded pack is an atom" rule: an atom could be
+wrapped but never split, so most repacks of code-tracked stock were refused and any
+part of a pack needed a break bulk at the issue desk. Do not bring it back.
+`scripts.unatom_packs` (`--apply`) turned the live atoms into plain packs, keeping
+their codes so labels already on cartons still scan. `break_bulk` and
+`issue.break_bulk` remain in the schema and do nothing.
+
+**An issue pick's QUANTITY is the truth; its packs describe it.** `issue_line_packing`
+never changes `issued_qty`: packs that add up are kept, stale ones are worked out again
+in the same hierarchy, a pick with none is stated in the item's default hierarchy.
+`IssuePickPacking` keeps them in step on screen; "Change packing" changes the mix,
+never the total.
+
+**Downstream reads the issue line, derived on read** — no packing columns on the
+consignment, outward QC or acknowledgement. `packing.issue_line_packs` gives a line's
+packs for any quantity (its own when it is all of it, else whole packs of the same
+hierarchy); `merge_breakdowns` adds several lines' up. A consignment stores one row
+PER UNIT for a coded item, so its packs are served once per issue line as
+`DispatchDetail.line_packs`, never per row. `_receipt_lines_packed` puts the sent packs
+on a receiving point's GRN lines (one hierarchy per line, else left loose), so the
+destination shelves the same cartons and its stock balance shows them.
+
+**A lot may hold packs of several hierarchies at once.** The repack screen shows all
+of them and repacks the one picked, over its own packs plus everything loose; the
+others are untouched.
 
 What fails SILENTLY if narrowed: `_claim_units` orders loose units first, then PART
 packs, then pack by pack (packs are created smallest-first, so ids climb with size) —
-order by plain id and an automatic pick lands in the middle of a coded pack and trips
-break bulk on a quantity that was whole packs all along. For a CODED pack,
-`settle_issue` opens every pack AROUND a changed one: a carton that lost a box no
-longer holds what its code says.
+order by plain id and an automatic pick opens a full pack while loose units stand
+beside it.
 
 Scenario tests: `shared/tests/test_packing.py` (pure), `warehouse/tests/
 test_packing_shelf.py` and `procurement/tests/test_po_packing.py` (DB).

@@ -1191,6 +1191,10 @@ class OutboundInspectionItemRead(_Read):
     # proof, 32 occurrences in sys_app_logs). A read model must be able to render what
     # the column actually holds; the WRITE side still takes strings and is unchanged.
     serial_numbers: dict[str, list[str]] | list[str] | list[dict] | None = None
+    # The packs this quantity travels in, read off the issue line (2026-10-22).
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+
 
 class OutboundInspectionRead(_Read):
     id: int
@@ -2207,6 +2211,22 @@ class DispatchItemRead(_Read):
     remarks: str | None = None
 
 
+class DispatchLinePacks(BaseModel):
+    """One issue line's packs on a consignment — sent, and arrived (2026-10-22)."""
+    issue_item_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    batch_no: str | None = None
+    quantity: Decimal
+    delivered_qty: Decimal = Decimal("0")
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    delivered_pack_breakdown: list[dict] | None = None
+    delivered_pack_text: str | None = None
+
+
 class DispatchPackageRead(_Read):
     id: int
     dispatch_id: int
@@ -2328,6 +2348,8 @@ class DispatchDetail(DispatchRead):
     can_approve: bool = False
     #: Opaque signed capability printed in the QR; it reveals no application route.
     public_scan_token: str | None = None
+    #: Each issue line's packs, once per line — the rows are one per unit.
+    line_packs: list[DispatchLinePacks] = []
 
 
 # ---------------------------------------------------------------------------
@@ -4092,6 +4114,9 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     # serial -> IMEI, so the packing screen shows the handset's number beside the
     # unit it belongs to rather than making the receiving point retype it.
     imei_by_serial: dict[str, str] = {}
+    # The packs this quantity travels in, read off the issue line (2026-10-22).
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
 
 
 class IssueDispatchSource(BaseModel):

@@ -28,6 +28,7 @@ balance holds, the read caps them and `reconcile_key` puts the rows right.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from decimal import Decimal
@@ -38,7 +39,6 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
-from app.modules.inventory import locations as stock_locations
 from app.modules.inventory.models import Stock
 from app.modules.warehouse import models as m
 from app.modules.warehouse.enums import (
@@ -48,17 +48,16 @@ from app.platform.rbac import permissions as perms
 from app.platform.settings import codeformat
 from app.platform.settings.service import write_audit
 from app.shared import packing
-from app.shared.enums import AuditAction, UomClass
+from app.shared.enums import AuditAction
 from app.shared.limits import MAX_PACKS_PER_REQUEST
 from app.shared.masters import packs
 from app.shared.models.base import utcnow
-from app.shared.models.master import Item, Uom
+from app.shared.models.master import Item
 from app.shared.models.warehouse import Warehouse
 
 logger = logging.getLogger(__name__)
 
 ZERO = Decimal("0")
-_COUNTABLE = {UomClass.COUNT.value, UomClass.PACKAGING.value}
 
 
 def _d(value) -> Decimal:
@@ -118,32 +117,19 @@ def serialised(item) -> bool:
                 or getattr(item, "is_imei_tracked", False))
 
 
-async def _countable(db: AsyncSession, item) -> bool:
-    if not getattr(item, "uom_id", None):
-        return True
-    uom = await db.get(Uom, item.uom_id)
-    return (getattr(uom, "uom_class", None) or "").upper() in _COUNTABLE
-
-
 async def codes_per_pack(db: AsyncSession, item, warehouse, config=None) -> bool:
-    """True when a pack of this item at this point is an ATOM: its code is the item's
-    asset / consumable code, minted at the level it was shelved in, and it may be
-    wrapped but never split.
+    """Whether a pack of this item carries the item's own asset / consumable code.
 
-    Same three tests the unit coder applies — code-tracked, countable, and at a
-    WAREHOUSE (codes are minted once, where goods enter the company) — plus one more:
-    not serial- or IMEI-tracked, because there the serial is the identity and a box is
-    only a box around it.
+    NEVER, since 2026-10-22. Codes belong to the BASE UNIT: every unit is coded at
+    putaway (the unit coder), and a pack is only a labelled container around units,
+    shown as packs but issued, counted and coded per unit. A coded pack used to be an
+    ATOM — wrapped, never split — which refused most repacks of code-tracked stock and
+    forced a break bulk at the issue desk for anything less than a whole pack.
+
+    Kept as the one switch every caller asks, so nothing else decides it.
+    `scripts.unatom_packs` turns the packs coded before this into plain packs.
     """
-    if item is None or serialised(item):
-        return False
-    tier = stock_locations.tier_of(getattr(warehouse, "warehouse_type", None))
-    if tier is not stock_locations.LocationTier.WAREHOUSE:
-        return False
-    if not await _countable(db, item):
-        return False
-    config = config or await codeformat.code_settings(db)
-    return codeformat.is_code_tracked(item, config)
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -853,16 +839,98 @@ async def repack(db: AsyncSession, data, user) -> dict:
 # --------------------------------------------------------------------------- #
 
 async def issue_line_packing(db: AsyncSession, *, item, line_in):
-    """`(hierarchy_id, breakdown, base_qty)` for an issue line stated in packs, or
-    three Nones. The server works the quantity out; a client never says it."""
+    """`(hierarchy_id, breakdown, None)` — how an issue pick is packed (2026-10-22).
+
+    The pick's QUANTITY, in the item's base unit, is the truth: stock, unit codes and
+    every guard read it, and this never changes it (the third value stays None for the
+    caller that used to take the quantity from the packs). The packs only describe it
+    and travel downstream: kept when they add up to the quantity, worked out again in
+    the SAME hierarchy when they do not, and stated in the item's default hierarchy for
+    a pick that named none. An item with no pack levels gives `(None, None, None)`.
+    """
+    qty = getattr(line_in, "issued_qty", None)
+    if qty is None:
+        qty = getattr(line_in, "requested_qty", None)
+    qty = _d(qty)
+    if qty <= ZERO:
+        return None, None, None
     entries = [e.model_dump() if hasattr(e, "model_dump") else dict(e)
                for e in (getattr(line_in, "pack_breakdown", None) or [])]
-    if not entries:
+    hierarchy_id = getattr(line_in, "pack_hierarchy_id", None)
+    ladder = await packs.ladder(db, item.id, hierarchy_id)
+    if ladder.top == 0:
         return None, None, None
-    hid, out = await packs.snapshot(db, item_id=item.id,
-                                    hierarchy_id=getattr(line_in, "pack_hierarchy_id", None),
-                                    entries=entries)
-    return hid, out, packing.base_of(out)
+    if entries:
+        try:
+            hid, out = await packs.snapshot(db, item_id=item.id, hierarchy_id=hierarchy_id,
+                                            entries=entries)
+            if packing.base_of(out) == qty:
+                return hid, out, None
+        except ValidationError:
+            pass                       # stale packs: say the quantity again below
+    hid, out = await packs.snapshot(db, item_id=item.id, hierarchy_id=ladder.hierarchy_id,
+                                    entries=None, base_qty=qty)
+    return hid, out, None
+
+
+async def issue_line_packs(db: AsyncSession, wanted: dict) -> dict[int, dict]:
+    """How a quantity of each issue line is packed, read back off the issue line
+    (2026-10-22): `{issue_item_id: {pack_breakdown, pack_text}}`.
+
+    The consignment, outward QC, dispatch and acknowledgement all carry an issue
+    line's goods without packing columns of their own; they show the line's packs —
+    the line's own when the quantity is all of it, else that quantity in whole packs
+    of the SAME hierarchy, biggest first. Derived on read, so there is no copy to
+    drift. A line issued loose, or an item with no packing, is left out.
+    """
+    ids = [int(i) for i in wanted if i]
+    if not ids:
+        return {}
+    rows = (await db.execute(select(
+        m.MaterialIssueLine.id, m.MaterialIssueLine.item_id,
+        m.MaterialIssueLine.pack_hierarchy_id, m.MaterialIssueLine.pack_breakdown,
+        m.MaterialIssueLine.uom_code).where(m.MaterialIssueLine.id.in_(ids)))).all()
+    out: dict[int, dict] = {}
+    for line_id, item_id, hierarchy_id, breakdown, uom in rows:
+        if isinstance(breakdown, str):
+            breakdown = json.loads(breakdown or "null")
+        if not breakdown:
+            continue
+        qty = _d(wanted.get(line_id))
+        if qty <= ZERO:
+            continue
+        if packing.base_of(breakdown) == qty:
+            entries = breakdown
+        else:
+            try:
+                _hid, entries = await packs.snapshot(db, item_id=item_id,
+                                                     hierarchy_id=hierarchy_id,
+                                                     entries=None, base_qty=qty)
+            except ValidationError:      # the hierarchy has since been retired
+                entries = packing.shrink_snapshot(breakdown, qty)
+        out[line_id] = {"pack_breakdown": entries,
+                        "pack_text": packing.describe(entries, uom)}
+    return out
+
+
+def merge_breakdowns(parts: list[list[dict]], uom: str | None = None) -> dict | None:
+    """Several issue lines' packs, as one line's: "1 Box" + "1 Box + 5 loose" reads
+    "2 Box + 5 loose". Added level by level within each hierarchy (a part pack keeps
+    its fill); `None` when none of them was packed."""
+    merged: dict[tuple, dict] = {}
+    for entries in parts:
+        for e in entries or []:
+            key = (e.get("hierarchy"), int(e.get("level") or 0), str(e.get("fill") or ""))
+            had = merged.get(key)
+            if had:
+                had["qty"] = packing.plain(_d(had["qty"]) + _d(e.get("qty")))
+            else:
+                merged[key] = dict(e)
+    if not merged:
+        return None
+    out = sorted(merged.values(), key=lambda e: (str(e.get("hierarchy") or ""),
+                                                 -int(e.get("level") or 0)))
+    return {"pack_breakdown": out, "pack_text": packing.describe(out, uom)}
 
 
 async def assert_issue_packs(db: AsyncSession, issue, units_by_line: dict, user) -> None:

@@ -1,103 +1,131 @@
-import { useState } from "react";
-import { Boxes, PackageOpen } from "lucide-react";
-import { Can } from "@/shared/components";
+import { useEffect, useState } from "react";
+import { Boxes, Layers, Package } from "lucide-react";
 import {
   PackBreakdownEditor, PackHierarchyPicker, PackQty, baseOf, greedy, num,
   type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
 import type { IssueItemWrite } from "../types";
+import { ModalCancel, ModalConfirm, PackBalance, PackModal, PackSection } from "./PackModal";
 
 /**
- * Issue in packs (2026-10-08): "2 Box + 5 Strip" instead of "25".
+ * The packs a pick leaves in (2026-10-22).
  *
- * The packs ARE the quantity — choosing them sets the pick's issue qty, exactly as
- * typing it would, and trims surplus identifiers the same way. For a serial / IMEI item
- * the identifiers are then picked against that many units, as before.
+ * The ISSUE QUANTITY is in the item's base unit and is the only number that decides
+ * anything: stock, codes (one per base unit) and every check. The packs DESCRIBE it —
+ * "15 NOS = 1 Box + 5 loose" — and travel with the pick onto the consignment, outward
+ * QC, the dispatch and the acknowledgement, so every desk downstream sees the same
+ * cartons. They follow the quantity, never the other way round: "Change packing"
+ * changes the mix, not the total.
  *
- * A code-tracked item's packs carry ONE code each, so a pick that leaves part of a
- * coded pack behind is refused at save unless it says BREAK BULK — which opens the
- * pack, retires its code and gives what stays behind new codes. That needs its own
- * permission, so the switch is only drawn for people who hold it.
+ * Codes belong to units, so there is no coded pack and no break bulk.
  */
-export function IssuePickPacking({ line, hierarchies, codesPerPack, locked, uom, onChange }: {
+export function IssuePickPacking({ line, hierarchies, locked, uom, onChange }: {
   line: IssueItemWrite;
   hierarchies: PackHierarchy[];
-  /** Asset / consumable codes: packs are coded, so a part pack is a break bulk. */
-  codesPerPack: boolean;
   locked: boolean;
   uom?: string | null;
-  onChange: (patch: Partial<IssueItemWrite>, qty?: number) => void;
+  onChange: (patch: Partial<IssueItemWrite>) => void;
 }) {
   const [open, setOpen] = useState(false);
   const hierarchy = hierarchies.find((h) => h.hierarchy_id === line.pack_hierarchy_id)
     ?? hierarchies[0];
-  if (!hierarchy) return null;
-  const packed = !!line.pack_breakdown?.length;
+  const qty = num(line.issued_qty);
+  const packs = line.pack_breakdown ?? null;
+  const inStep = !!packs?.length && Math.abs(baseOf(packs) - qty) < 1e-6;
 
-  const set = (packs: PackEntry[] | null, hierarchyId = hierarchy.hierarchy_id) => {
-    onChange({ pack_hierarchy_id: packs ? hierarchyId : null, pack_breakdown: packs },
-             packs ? baseOf(packs) : undefined);
-  };
+  // Keep the packs saying what the quantity says, in the line's own hierarchy.
+  useEffect(() => {
+    if (locked || !hierarchy) return;
+    if (qty <= 0) {
+      if (packs?.length) onChange({ pack_breakdown: null });
+      return;
+    }
+    if (!inStep) {
+      onChange({ pack_hierarchy_id: hierarchy.hierarchy_id, pack_breakdown: greedy(hierarchy, qty) });
+    }
+  }, [qty, hierarchy?.hierarchy_id, inStep, locked]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!hierarchy) return null;
+  const unit = uom ?? hierarchy.base_uom ?? "units";
 
   return (
-    <div className="mt-1.5 border-t border-line/50 pt-1.5">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-semibold uppercase tracking-wider text-ink-700">Issue as</span>
-        {packed
-          // The packs, the quantity in the item's own unit under them and the whole
-          // hierarchy one press away (2026-10-11). A part carton picked here reads
-          // "1 Carton (350/500)".
-          ? <PackQty entries={line.pack_breakdown} qty={line.issued_qty} uom={uom}
-                     hierarchies={hierarchies} />
-          : <span className="text-muted">{num(line.issued_qty)} loose {uom ?? "units"}</span>}
-        {!locked && (
-          <button type="button" onClick={() => {
-                    if (!open && !packed) set(greedy(hierarchy, num(line.issued_qty)));
-                    setOpen(!open);
-                  }}
-                  className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 font-semibold text-brand hover:bg-brand-050">
-            <Boxes className="h-3.5 w-3.5" aria-hidden />
-            {open ? "Done" : packed ? "Change packs" : "Issue in packs"}
-          </button>
-        )}
-        {!locked && packed && (
-          <button type="button" onClick={() => { set(null); setOpen(false); }}
-                  className="min-h-8 rounded-md px-2 text-muted hover:text-bad">
-            Issue loose
-          </button>
-        )}
-        {codesPerPack && (
-          <Can do="issue.break_bulk">
-            <label className={`ml-auto inline-flex min-h-8 items-center gap-1.5 rounded-md px-2 ${
-              line.break_bulk ? "bg-warn-bg text-warn" : "text-muted"}`}
-                   title="Open a coded pack to issue part of it. Its code retires; what stays behind gets new codes.">
-              <input type="checkbox" checked={!!line.break_bulk} disabled={locked}
-                     onChange={(e) => onChange({ break_bulk: e.target.checked })} />
-              <PackageOpen className="h-3.5 w-3.5" aria-hidden /> Break bulk
-            </label>
-          </Can>
-        )}
-      </div>
-      {line.break_bulk && (
-        <p className="mt-1 text-[11px] text-warn">
-          A coded pack this pick takes part of will be opened: its code retires and the
-          units left behind are packed again under new codes.
-        </p>
+    <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-line/50 pt-1.5 text-xs">
+      <span className="font-semibold uppercase tracking-wider text-ink-700">Packs</span>
+      {qty > 0 && packs?.length
+        ? <PackQty entries={packs} qty={qty} uom={unit} hierarchies={hierarchies} />
+        : <span className="text-muted">—</span>}
+      {!locked && qty > 0 && (
+        <button type="button" onClick={() => setOpen(true)}
+                className="group inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-brand/25 bg-brand-050/60 px-2.5 py-1 font-semibold text-brand transition-all hover:border-brand hover:bg-brand hover:text-white active:scale-95">
+          <Boxes className="h-3.5 w-3.5 transition-transform group-hover:scale-110" aria-hidden />
+          Change packing
+        </button>
       )}
-      {open && !locked && (
-        <div className="mt-2 space-y-2">
-          {hierarchies.length > 1 && (
-            <PackHierarchyPicker hierarchies={hierarchies} value={hierarchy.hierarchy_id}
-                                 uom={uom}
-                                 onChange={(id) => {
-                                   const next = hierarchies.find((h) => h.hierarchy_id === id);
-                                   if (next) set(greedy(next, num(line.issued_qty)), id);
-                                 }} />
-          )}
-          <PackBreakdownEditor hierarchy={hierarchy} value={line.pack_breakdown} uom={uom}
-                               onChange={(packs) => set(packs)} />
-        </div>
+      {open && (
+        <ChangePacking hierarchies={hierarchies} hierarchy={hierarchy} packs={packs} qty={qty}
+                       unit={unit} itemLabel={line.item_name ?? line.item_code ?? "Item"}
+                       batch={line.batch_no} onClose={() => setOpen(false)}
+                       onApply={(hid, next) => {
+                         onChange({ pack_hierarchy_id: hid, pack_breakdown: next });
+                         setOpen(false);
+                       }} />
       )}
     </div>
+  );
+}
+
+function ChangePacking({ hierarchies, hierarchy, packs, qty, unit, itemLabel, batch, onClose, onApply }: {
+  hierarchies: PackHierarchy[];
+  hierarchy: PackHierarchy;
+  packs: PackEntry[] | null;
+  qty: number;
+  unit: string;
+  itemLabel: string;
+  batch?: string | null;
+  onClose: () => void;
+  onApply: (hierarchyId: number, packs: PackEntry[]) => void;
+}) {
+  const [hid, setHid] = useState(hierarchy.hierarchy_id);
+  const [draft, setDraft] = useState<PackEntry[] | null>(packs ?? greedy(hierarchy, qty));
+  const current = hierarchies.find((h) => h.hierarchy_id === hid) ?? hierarchy;
+  const packed = baseOf(draft);
+  return (
+    <PackModal
+      title="Change packing"
+      subtitle={<><span className="font-semibold text-ink">{itemLabel}</span>{batch ? ` · Batch ${batch}` : ""}</>}
+      badge={
+        <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-bold text-emerald-700 ring-1 ring-emerald-200">
+          {qty.toLocaleString("en-IN")} {unit}
+        </span>
+      }
+      onClose={onClose}
+      footer={
+        <>
+          <ModalCancel onClick={onClose} />
+          <ModalConfirm onClick={() => draft && onApply(current.hierarchy_id!, draft)}
+                        disabled={!draft || Math.abs(packed - qty) > 1e-6}>
+            Apply
+          </ModalConfirm>
+        </>
+      }
+    >
+      {hierarchies.length > 1 && (
+        <PackSection n={1} title="Hierarchy" icon={<Layers className="h-4 w-4 text-brand" />}>
+          <PackHierarchyPicker hierarchies={hierarchies} value={current.hierarchy_id} uom={unit}
+                               onChange={(id) => {
+                                 const next = hierarchies.find((h) => h.hierarchy_id === id);
+                                 if (!next) return;
+                                 setHid(id);
+                                 setDraft(greedy(next, qty));
+                               }} />
+        </PackSection>
+      )}
+      <PackSection n={hierarchies.length > 1 ? 2 : 1} title="Packs"
+                   icon={<Package className="h-4 w-4 text-brand" />}>
+        <PackBreakdownEditor hierarchy={current} value={draft} target={qty} uom={unit}
+                             onChange={setDraft} />
+      </PackSection>
+      <PackBalance packed={packed} target={qty} uom={unit} />
+    </PackModal>
   );
 }

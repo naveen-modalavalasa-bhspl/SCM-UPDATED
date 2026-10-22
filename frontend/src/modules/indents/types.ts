@@ -1,3 +1,4 @@
+import type { PackEntry } from "@/shared/packing";
 export interface IndentItem {
   id: number;
   item_id: number;
@@ -189,6 +190,9 @@ export interface FulfilmentStep {
 
 /** One line of an indent on the "what am I still owed" screen. */
 export interface AcknowledgementLine {
+  /** The packs it was sent in, merged over its issue lines (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   indent_item_id: number;
   item_code?: string | null;
   item_name?: string | null;

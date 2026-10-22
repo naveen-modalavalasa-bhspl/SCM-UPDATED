@@ -13949,6 +13949,8 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
         .order_by(TransportRequest.id.desc())
     )).scalars().all())
 
+    line_packs = await wh_packing.issue_line_packs(
+        db, {line.id: _d(line.issued_qty) - _d(line.returned_qty) for line in lines})
     out_lines = []
     for line in lines:
         sent = _d(line.issued_qty) - _d(line.returned_qty)
@@ -13970,6 +13972,7 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
             "package_quantities": [
                 {**pack, "quantity": min(pack["quantity"], float(sent))}
                 for pack in packages_by_item.get(line.item_id, [])],
+            **line_packs.get(line.id, {}),
             "pending_with": None,
         })
     return {
@@ -14711,6 +14714,44 @@ async def list_consignments(db: AsyncSession, params: PageParams, *, status: str
     )
 
 
+async def _dispatch_line_packs(db: AsyncSession, dispatch: m.Dispatch) -> list[dict]:
+    """The packs each issue line travels in on this consignment (2026-10-22).
+
+    A consignment holds one row PER UNIT for a coded item, so packs on a row would be
+    "1 loose" fifteen times over. They are said once per issue line: what was sent,
+    and — once the destination has acknowledged — what arrived. Codes stay on the
+    unit rows; the packs only describe them.
+    """
+    sent: dict[int, Decimal] = {}
+    arrived: dict[int, Decimal] = {}
+    first: dict[int, m.DispatchItem] = {}
+    for row in dispatch.items:
+        if not row.issue_item_id:
+            continue
+        sent[row.issue_item_id] = sent.get(row.issue_item_id, ZERO) + _d(row.quantity)
+        arrived[row.issue_item_id] = (arrived.get(row.issue_item_id, ZERO)
+                                      + _d(row.delivered_qty))
+        first.setdefault(row.issue_item_id, row)
+    if not sent:
+        return []
+    packed = await wh_packing.issue_line_packs(db, sent)
+    landed = await wh_packing.issue_line_packs(
+        db, {k: v for k, v in arrived.items() if v > ZERO})
+    out = []
+    for line_id, row in first.items():
+        if line_id not in packed:
+            continue
+        out.append({
+            "issue_item_id": line_id, "item_id": row.item_id, "item_code": row.item_code,
+            "item_name": row.item_name, "uom_code": row.uom_code, "batch_no": row.batch_no,
+            "quantity": sent[line_id], "delivered_qty": arrived[line_id],
+            **packed[line_id],
+            "delivered_pack_breakdown": landed.get(line_id, {}).get("pack_breakdown"),
+            "delivered_pack_text": landed.get(line_id, {}).get("pack_text"),
+        })
+    return out
+
+
 async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispatch:
     dispatch = await _load(db, m.Dispatch, dispatch_id, "Dispatch",
                            m.Dispatch.items, m.Dispatch.packages, m.Dispatch.events,
@@ -14720,6 +14761,7 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     # Detail only: the relay hop needs the Forward button on the consignment it just
     # signed for, and answering this costs three queries — too much for a 50-row board.
     setattr(dispatch, "can_forward", await can_forward_dispatch(db, dispatch))
+    setattr(dispatch, "line_packs", await _dispatch_line_packs(db, dispatch))
     setattr(dispatch, "public_scan_token", public_label_token("d", dispatch.id))
     for package in dispatch.packages:
         setattr(package, "public_scan_token", public_label_token("p", package.id))
@@ -23112,6 +23154,25 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     )).all()
     dispatched_by_line = {row[0]: _d(row[1]) for row in dispatched_rows}
 
+    # The packs those dispatched lines travel in, per indent line (2026-10-22): the
+    # same issue lines as the total above, merged when several served one line.
+    sent_lines = (await db.execute(
+        select(m.MaterialIssueLine.id, m.MaterialIssueLine.indent_item_id,
+               m.MaterialIssueLine.issued_qty - func.coalesce(m.MaterialIssueLine.returned_qty, 0))
+        .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+        .join(m.Dispatch, _carries_issue(m.MaterialIssue.id))
+        .where(m.MaterialIssue.indent_id.in_(indent_ids),
+               m.MaterialIssue.is_stock_posted.is_(True),
+               m.Dispatch.status.in_(_ON_THE_ROAD),
+               m.MaterialIssueLine.indent_item_id.isnot(None),
+               ~relayed)
+        .distinct())).all()
+    sent_packs = await wh_packing.issue_line_packs(db, {r[0]: _d(r[2]) for r in sent_lines})
+    packs_by_indent_line: dict[int, list] = defaultdict(list)
+    for line_id, indent_item_id, _qty in sent_lines:
+        if line_id in sent_packs:
+            packs_by_indent_line[indent_item_id].append(sent_packs[line_id]["pack_breakdown"])
+
     # Preserve the physical packing split for the requester. This query is scoped to
     # the same visible indents and posted outbound issues as the delivery totals above;
     # it does not widen RBAC access, it only describes packages already in those rows.
@@ -23371,6 +23432,9 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 # is exactly what got a procurement line labelled "on the way".
                 "on_order_quantity": float(on_order),
                 "package_quantities": packages_by_line.get(item.id, []),
+                # The packs it was sent in, merged over its issue lines (2026-10-22).
+                **(wh_packing.merge_breakdowns(packs_by_indent_line.get(item.id, []),
+                                               item.uom_code) or {}),
                 "pending_with": _pending_with(approved, issued, dispatched, received,
                                               indent.status, on_order),
             })
@@ -24686,6 +24750,7 @@ async def dispatch_receipt_source(
     } if tracked_item_ids else {}
 
     items = _group_dispatch_lines(dispatch.items, serial_batch, batches, tracking)
+    await _receipt_lines_packed(db, items)
 
     return {
         "dispatch_id": dispatch.id,
@@ -24703,6 +24768,40 @@ async def dispatch_receipt_source(
         "indent_no": indent_no,
         "items": items,
     }
+
+
+async def _receipt_lines_packed(db: AsyncSession, items: list[dict]) -> None:
+    """Put the packs the goods were SENT in onto the receiving point's GRN lines
+    (2026-10-22), so the destination books them in — and shelves them — as the same
+    cartons, and its stock balance shows them. One hierarchy per line: a row fed by
+    issue lines packed two different ways is left loose rather than guessed at."""
+    wanted: dict[int, Decimal] = {}
+    for row in items:
+        for line_id, qty in (row.get("_issue_lines") or {}).items():
+            wanted[line_id] = wanted.get(line_id, ZERO) + _d(qty)
+    packs = await wh_packing.issue_line_packs(db, wanted)
+    hierarchy = dict((await db.execute(
+        select(m.MaterialIssueLine.id, m.MaterialIssueLine.pack_hierarchy_id)
+        .where(m.MaterialIssueLine.id.in_(list(packs) or [0])))).all())
+    for row in items:
+        lines = row.pop("_issue_lines", None) or {}
+        if not lines or any(line_id not in packs for line_id in lines):
+            continue
+        hids = {hierarchy.get(line_id) for line_id in lines}
+        if len(hids) != 1 or None in hids:
+            continue
+        # Each issue line's packs for the share of it on THIS row.
+        parts = []
+        for line_id, qty in lines.items():
+            if _d(qty) == wanted[line_id]:
+                parts.append(packs[line_id]["pack_breakdown"])
+            else:
+                share = await wh_packing.issue_line_packs(db, {line_id: qty})
+                parts.append((share.get(line_id) or {}).get("pack_breakdown") or [])
+        merged = wh_packing.merge_breakdowns(parts, row.get("uom_code"))
+        if merged:
+            row["pack_hierarchy_id"] = hids.pop()
+            row["pack_breakdown"] = merged["pack_breakdown"]
 
 
 def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
@@ -24734,6 +24833,9 @@ def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
         if existing is not None:
             for field in ("ordered_qty", "received_qty", "accepted_qty"):
                 existing[field] = _d(existing[field]) + _d(line.quantity)
+            if getattr(line, "issue_item_id", None):
+                sent = existing.setdefault("_issue_lines", {})
+                sent[line.issue_item_id] = _d(sent.get(line.issue_item_id)) + _d(line.quantity)
             if line.serial_no:
                 existing["serial_numbers"] = (existing["serial_numbers"] or []) + [
                     line.serial_no]
@@ -24773,6 +24875,10 @@ def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
                 getattr(tracking.get(line.item_id), "is_serial_tracked", False)),
             "is_imei_tracked": bool(
                 getattr(tracking.get(line.item_id), "is_imei_tracked", False)),
+            # Which issue lines this row carries, and how much of each — read by the
+            # caller to put the packs on it, then dropped (2026-10-22).
+            "_issue_lines": ({line.issue_item_id: _d(line.quantity)}
+                             if getattr(line, "issue_item_id", None) else {}),
         }
         grouped[key] = row
         items.append(row)
@@ -25513,6 +25619,9 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
 
     mr_rows = await _issue_mr_sources(db, issue)
     line_mr = mr_rows[0] if len(mr_rows) == 1 else {}
+    # The issue line's packs, cut to what this consignment takes of it (2026-10-22).
+    line_packs = await wh_packing.issue_line_packs(
+        db, {line.id: _d(qc_accepted.get(line.id, line.issued_qty)) for line in issue.items})
 
     return {
         "issue_id": issue.id,
@@ -25580,6 +25689,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "quantity": _d(qc_accepted.get(line.id, line.issued_qty)),
                 "rate": line.rate,
                 "remarks": line.remarks,
+                **line_packs.get(line.id, {}),
             }
             for line in issue.items
             if _d(qc_accepted.get(line.id, line.issued_qty)) > ZERO
@@ -26675,6 +26785,14 @@ async def get_outbound_inspection(db: AsyncSession, inspection_id: int) -> m.Out
                              m.OutboundInspection.items)
     setattr(inspection, "is_stock_transfer",
             await is_stock_transfer_issue(db, inspection.issue_id))
+    # Each line's packs, for what was inspected (2026-10-22).
+    packs = await wh_packing.issue_line_packs(
+        db, {it.issue_item_id: _d(it.inspected_qty) for it in inspection.items
+             if it.issue_item_id})
+    for it in inspection.items:
+        found = packs.get(it.issue_item_id) or {}
+        setattr(it, "pack_breakdown", found.get("pack_breakdown"))
+        setattr(it, "pack_text", found.get("pack_text"))
     return inspection
 
 def _outbound_inspection_totals(inspection: m.OutboundInspection) -> None:

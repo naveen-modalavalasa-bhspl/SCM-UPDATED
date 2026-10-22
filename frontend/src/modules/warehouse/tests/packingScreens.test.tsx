@@ -102,72 +102,85 @@ describe("receipt line packing (the gate)", () => {
 });
 
 /* -------------------------------------------------------------------- the issue -- */
-function Pick({ codes = true, locked = false }: { codes?: boolean; locked?: boolean }) {
-  const [line, setLine] = useState<IssueItemWrite>({ item_id: 1, requested_qty: 150, issued_qty: 150 });
+// The issue quantity is in base units and decides everything; the packs follow it
+// (2026-10-22). No coded pack, so no break bulk.
+function Pick({ locked = false, qty = 150 }: { locked?: boolean; qty?: number }) {
+  const [line, setLine] = useState<IssueItemWrite>({ item_id: 1, requested_qty: qty, issued_qty: qty });
   return (
     <>
-      <IssuePickPacking line={line} hierarchies={[STRIP_OF_15]} codesPerPack={codes}
-                        locked={locked} uom="TAB"
-                        onChange={(patch, qty) => setLine((l) => ({
-                          ...l, ...patch, ...(qty !== undefined ? { issued_qty: qty } : {}) }))} />
+      <IssuePickPacking line={line} hierarchies={[STRIP_OF_15]} locked={locked} uom="TAB"
+                        onChange={(patch) => setLine((l) => ({ ...l, ...patch }))} />
+      <button type="button" onClick={() => setLine((l) => ({ ...l, issued_qty: 165, pack_breakdown: null }))}>
+        set 165
+      </button>
       <output data-testid="qty">{String(line.issued_qty)}</output>
     </>
   );
 }
 
-describe("issue a pick in packs", () => {
-  it("lets the packs set the issue quantity", () => {
+describe("issue a pick in base units, shown in packs", () => {
+  it("works the packs out from the quantity, and again when it changes", async () => {
     render(<Pick />);
-    fireEvent.click(screen.getByRole("button", { name: /Issue in packs/ }));
-    // Whole packs of what was asked: 150 = 1 Box.
-    expect(screen.getAllByText(/1 Box/).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "One more Strip" }));
+    // 150 = 1 Box.
+    expect(await screen.findByText(/1 Box/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "set 165" }));
+    // 165 = 1 Box + 1 Strip, and the quantity stays what was typed.
+    expect(await screen.findByText(/1 Strip/)).toBeTruthy();
     expect(screen.getByTestId("qty").textContent).toBe("165");
   });
 
-  it("offers break bulk only to someone who holds the permission", () => {
-    const { unmount } = render(<Pick />);
-    expect(screen.queryByText("Break bulk")).toBeNull();
-    unmount();
-    granted.add("issue.break_bulk");
+  it("changes the mix of packs, never the quantity", async () => {
     render(<Pick />);
-    fireEvent.click(screen.getByRole("checkbox"));
-    expect(screen.getByText(/its code retires/)).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /Change packing/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "One more Strip" }));
+    expect(screen.getByRole("button", { name: /Apply/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "One fewer Box" }));
+    fireEvent.change(screen.getByLabelText("Strip count"), { target: { value: "10" } });
+    expect(screen.getByRole("button", { name: /Apply/ })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /Apply/ }));
+    expect(screen.getByTestId("qty").textContent).toBe("150");
   });
 
-  it("never offers break bulk where packs carry no code", () => {
+  it("offers no break bulk", () => {
     granted.add("issue.break_bulk");
-    render(<Pick codes={false} />);
-    expect(screen.queryByText("Break bulk")).toBeNull();
+    render(<Pick />);
+    expect(screen.queryByText(/Break bulk/)).toBeNull();
   });
 });
 
 /* ------------------------------------------------------------------ the repack -- */
+// Codes belong to units, so no pack is locked (2026-10-22).
 const LOT: LotPacks = {
   stock_id: 9, item_id: 1, warehouse_id: 1, bin_id: 5, batch_id: 0, project_id: 0,
   item_code: "TAB-0001", item_name: "Paracetamol", uom_code: "TAB", bin_code: "F1-B1",
   total_qty: 735, available_qty: 735, reserved_qty: 0, loose_qty: 0,
-  pack_text: "3 Box + 19 Strip = 735 TAB", codes_per_pack: true, serialised: false,
+  pack_text: "3 Box + 19 Strip = 735 TAB", codes_per_pack: false, serialised: false,
   hierarchies: [{
-    ...STRIP_OF_15, in_use: true, coded_floor: 1, top_counts: { "1": 19, "2": 3, "3": 0 },
-    packs: [{ id: 20, hu_code: "TAB-0001-20-BOX", code_kind: "CONSUMABLE", level: 2,
-              pack_name: "Box", pack_size: 150, is_atom: true, status: "SEALED",
+    ...STRIP_OF_15, in_use: true, coded_floor: 0, top_counts: { "1": 19, "2": 3, "3": 0 },
+    packs: [{ id: 20, hu_code: "PK-WH-0000020", code_kind: "PACK", level: 2,
+              pack_name: "Box", pack_size: 150, is_atom: false, status: "SEALED",
               contents: [] }],
   }],
 };
 
+const BOX_OF_20: PackHierarchy = {
+  hierarchy_id: 7, name: "Box of 20", base_uom: "TAB",
+  levels: [
+    { item_packaging_id: null, level: 0, name: "Loose TAB", size: 1, ratio: 1, label: "Loose TAB" },
+    { item_packaging_id: 71, level: 1, name: "Box", size: 20, ratio: 20, label: "Box (20 TAB)" },
+  ],
+};
+
 describe("repack a lot", () => {
-  it("shows what is on the shelf, locks below the coded level, and sends the target", async () => {
+  it("shows what is on the shelf, opens any level, and sends the target", async () => {
     lotPacks.mockResolvedValue(LOT);
     repackLot.mockResolvedValue({ ...LOT, pack_text: "1 Carton + 9 Strip = 735 TAB" });
     const done = vi.fn();
     render(wrap(<RepackDialog stockId={9} onClose={vi.fn()} onDone={done} />));
-    await screen.findByText("TAB-0001-20-BOX");
-    // Coded as strips: loose tablets cannot be chosen.
-    expect(screen.getByLabelText("Loose count")).toBeDisabled();
-    expect(screen.getByText(/never\s+into anything smaller than a Strip/)).toBeTruthy();
-    // Starts at what is there, which adds up; one more box no longer does.
-    const confirm = () => screen.getByRole("button", { name: "Repack" });
+    await screen.findByText("Strip of 15");
+    // Nothing is coded per pack, so loose is a level like any other.
+    expect(screen.getByLabelText("Loose count")).not.toBeDisabled();
+    const confirm = () => screen.getByRole("button", { name: /Repack$/ });
     fireEvent.click(screen.getByRole("button", { name: "One more Box" }));
     expect(confirm()).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "One fewer Box" }));
@@ -184,5 +197,30 @@ describe("repack a lot", () => {
                { item_packaging_id: 21, level: 1, qty: 9 }],
     });
     await waitFor(() => expect(done).toHaveBeenCalled());
+  });
+
+  it("shows every hierarchy on the lot and repacks the one picked, over its own packs", async () => {
+    // 735 in strips of 15 plus 100 in boxes of 20, on one lot.
+    lotPacks.mockResolvedValue({
+      ...LOT, total_qty: 835, available_qty: 835,
+      hierarchies: [...LOT.hierarchies, {
+        ...BOX_OF_20, in_use: true, coded_floor: 0, top_counts: { "1": 5 },
+        packs: [{ id: 30, hu_code: "PK-WH-0000030", code_kind: "PACK", level: 1,
+                  pack_name: "Box", pack_size: 20, is_atom: false, status: "SEALED",
+                  contents: [] }],
+      }],
+    });
+    repackLot.mockResolvedValue(LOT);
+    render(wrap(<RepackDialog stockId={9} onClose={vi.fn()} onDone={vi.fn()} />));
+    await screen.findAllByText("Strip of 15");
+    expect(screen.getAllByText("Box of 20").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("radio", { name: /Box of 20/ }));
+    // Its own 100 — never the other hierarchy's 735.
+    expect(await screen.findByText(/100 TAB — matches/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Box count"), { target: { value: "4" } });
+    fireEvent.change(screen.getByLabelText("Loose count"), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: /Repack$/ }));
+    await waitFor(() => expect(repackLot).toHaveBeenCalled());
+    expect(repackLot.mock.calls[0][1].pack_hierarchy_id).toBe(7);
   });
 });

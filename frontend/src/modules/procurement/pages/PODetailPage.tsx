@@ -75,6 +75,10 @@ export function PODetailPage() {
   });
 
   const [amending, setAmending] = useState(false);
+  // A draft is read in its own cards and edited IN them: Edit swaps the cards for the
+  // form in the same place, Save or Cancel swaps them back. It used to show both at
+  // once — every figure twice, the saved copy above the form editing it.
+  const [editingDraft, setEditingDraft] = useState(false);
   const [amendReason, setAmendReason] = useState("");
   const [amendLines, setAmendLines] = useState<DraftLine[]>([]);
   const startAmending = () => {
@@ -346,8 +350,14 @@ export function PODetailPage() {
               )}
               {isDraft && (
                 <Can do="po.edit">
-                  <Button variant="subtle" onClick={() => document.getElementById("edit-draft")?.scrollIntoView({ behavior: "smooth" })} className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
-                    <FilePen className="h-4 w-4" /> Edit
+                  <Button variant="subtle" disabled={editingDraft}
+                          onClick={() => {
+                            setEditingDraft(true);
+                            requestAnimationFrame(() => document.getElementById("edit-draft")
+                              ?.scrollIntoView({ behavior: "smooth", block: "start" }));
+                          }}
+                          className="!border-white/20 !bg-black/20 !text-slate-50 backdrop-blur hover:!bg-black/40">
+                    <FilePen className="h-4 w-4" /> {editingDraft ? "Editing" : "Edit"}
                   </Button>
                 </Can>
               )}
@@ -390,6 +400,19 @@ export function PODetailPage() {
         <p className="rounded-2xl bg-red-50 p-4 text-sm text-red-700 ring-1 ring-red-200">{((submit.error ?? send.error) as Error).message}</p>
       )}
 
+      {/* ── A draft being edited: the form stands where its cards stand ── */}
+      {isDraft && editingDraft && (
+        <Can do="po.edit">
+          <div id="edit-draft" className="scroll-mt-4">
+            <POCorrectionForm key={`draft-${po.data.id}-${po.data.total_amount}-${po.data.items.length}`}
+                              po={po.data} mode="draft"
+                              onSaved={() => { refresh(); setEditingDraft(false); }}
+                              onCancel={() => setEditingDraft(false)} />
+          </div>
+        </Can>
+      )}
+
+      {!(isDraft && editingDraft) && (<>
       {/* ── Order facts — amber block ─────────────────────────────── */}
       <div className="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 via-orange-50 to-white shadow-sm">
         <div className="h-1 w-full bg-gradient-to-r from-amber-400 via-orange-400 to-amber-500" />
@@ -561,9 +584,12 @@ export function PODetailPage() {
         </div>
       </div>
 
+      </>)}
+
       {/* ── Chat — approver <=> raiser ───────────────────────────── */}
       <POApprovalChat poId={poId} />
 
+      {!(isDraft && editingDraft) && (<>
       {/* ── Totals — blue block ───────────────────────────────────── */}
       <div className="overflow-hidden rounded-2xl border border-blue-200 bg-gradient-to-br from-blue-50 via-indigo-50 to-white shadow-sm">
         <div className="h-1 w-full bg-gradient-to-r from-blue-500 via-indigo-500 to-sky-500" />
@@ -655,22 +681,14 @@ export function PODetailPage() {
         </div>
       </div>
 
+      </>)}
+
       {!isDraft && <POPaymentsPanel poId={poId} />}
 
       {canFix && (
         <POCorrectionForm key={`${po.data.id}-${po.data.total_amount}-${po.data.items.length}`} po={po.data} onSaved={refresh} />
       )}
 
-      {/* The whole draft is editable — vendor, date, lines and header — with the same
-        * form a sent-back order uses. It used to be the header block alone. */}
-      {isDraft && (
-        <Can do="po.edit">
-          <div id="edit-draft" className="scroll-mt-4">
-            <POCorrectionForm key={`draft-${po.data.id}-${po.data.total_amount}-${po.data.items.length}`}
-                              po={po.data} onSaved={refresh} mode="draft" />
-          </div>
-        </Can>
-      )}
 
       {(po.data.revision_no ?? 0) > 0 && (
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm">

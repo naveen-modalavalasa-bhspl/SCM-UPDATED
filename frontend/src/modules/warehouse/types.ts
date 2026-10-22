@@ -879,6 +879,9 @@ export interface OutboundInspection {
 }
 
 export interface OutboundInspectionItem {
+  /** The packs this quantity travels in, read off the issue line (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   id: number;
   inspection_id: number;
   issue_item_id?: number | null;
@@ -1606,6 +1609,23 @@ export interface Dispatch {
   sources?: DispatchSource[];
   /** See Issue.can_approve — whose turn it is, not who holds the permission. */
   can_approve?: boolean;
+  /** Each issue line's packs, once per line — rows are one per unit (2026-10-22). */
+  line_packs?: DispatchLinePacks[];
+}
+
+export interface DispatchLinePacks {
+  issue_item_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  batch_no?: string | null;
+  quantity: number;
+  delivered_qty: number;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  delivered_pack_breakdown?: PackEntry[] | null;
+  delivered_pack_text?: string | null;
 }
 
 /** `out_dispatch_items`. */
@@ -1806,6 +1826,9 @@ export interface ConsignmentWrite {
 }
 
 export interface IssueDispatchSourceItem extends DispatchItemWrite {
+  /** The packs this quantity travels in, read off the issue line (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   indent_no?: string | null;
   issue_id?: number | null;
   issue_no?: string | null;

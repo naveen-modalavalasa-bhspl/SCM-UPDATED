@@ -1077,9 +1077,10 @@ function PickRow(props: PickProps) {
             onChange={(value) => onPatch(split.index, {
               issued_qty: value,
               serial_numbers: trimUnits(line, num(value)),
-              // Packs that no longer make the quantity no longer describe the pick.
+              // The packs follow the quantity: dropped here, worked out again in the
+              // same hierarchy by `IssuePickPacking` (2026-10-22).
               ...(line.pack_breakdown?.length && baseOf(line.pack_breakdown) !== num(value)
-                ? { pack_breakdown: null, pack_hierarchy_id: null } : {}),
+                ? { pack_breakdown: null } : {}),
             })}
           />
         </div>
@@ -1216,14 +1217,9 @@ function PickRow(props: PickProps) {
         <IssuePickPacking
           line={line}
           hierarchies={packOptions}
-          codesPerPack={autoCodes}
           locked={locked}
           uom={packOptions[0]?.base_uom}
-          onChange={(change, qty) => onPatch(split.index, {
-            ...change,
-            ...(qty !== undefined
-              ? { issued_qty: qty, serial_numbers: trimUnits(line, qty) } : {}),
-          })}
+          onChange={(change) => onPatch(split.index, change)}
         />
       )}
 

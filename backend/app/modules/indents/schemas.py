@@ -330,6 +330,10 @@ class AcknowledgementLineRow(BaseModel):
     #: Physical package split for this line. The acknowledgement itself is still per
     #: indent line, but the receipt desk has to open the packages warehouse labelled.
     package_quantities: list[AcknowledgementPackageQuantityRow] = Field(default_factory=list)
+    #: The packs the line was sent in — "1 Box + 5 loose" — read off its issue lines
+    #: (2026-10-22). Codes stay per unit; this only describes them.
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
     # Plain-English answer to "why hasn't my stuff come yet", derived at read time from
     # the issue and dispatch state — never stored, so it cannot go stale.
     pending_with: str | None = None

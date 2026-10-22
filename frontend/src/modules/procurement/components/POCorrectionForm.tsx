@@ -32,8 +32,10 @@ const money = (value: number) =>
  * `mode="draft"` is the same edit on a DRAFT order (2026-10-19) — same fields, same
  * rules, saved through `PUT /api/pos/{id}/draft` instead of the correction route.
  */
-export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
+export function POCorrectionForm({ po, onSaved, onCancel, mode = "correction" }: {
   po: PurchaseOrder; onSaved: () => void; mode?: "correction" | "draft";
+  /** Leaves the form without saving — the order's own cards come back in its place. */
+  onCancel?: () => void;
 }) {
   const toast = useToast();
   const vendorLocked = Boolean(po.quotation_no);
@@ -172,7 +174,10 @@ export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
           ))}
         </dl>
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {onCancel && (
+            <Button variant="ghost" disabled={save.isPending} onClick={onCancel}>Cancel</Button>
+          )}
           <Button disabled={save.isPending} onClick={submit}>
             <Save className="h-4 w-4" /> {save.isPending ? "Saving…" : "Save changes"}
           </Button>

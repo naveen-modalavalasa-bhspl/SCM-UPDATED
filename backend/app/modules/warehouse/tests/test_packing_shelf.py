@@ -171,8 +171,25 @@ async def _coded_units(db, w, bay, batch, n):
     await db.commit()
 
 
+# Codes belong to the BASE UNIT (2026-10-22): a code-tracked item's packs are plain
+# containers around coded units. No pack is an atom, so a repack may open any of them
+# and an issue takes units out of a box with no break bulk.
+async def _box_of_12(db, w, box) -> PackHierarchy:
+    h = PackHierarchy()
+    await defs.apply_pack_hierarchy(db, h, defs.PackHierarchyIn(
+        item_id=w.item.id, name="Box of 12"))
+    db.add(h)
+    await db.flush()
+    rung = ItemPackaging()
+    await defs.apply_item_packaging(db, rung, defs.ItemPackagingIn(
+        item_id=w.item.id, hierarchy_id=h.id, level=1, package_id=box.id, quantity=12))
+    db.add(rung)
+    await db.commit()
+    return h
+
+
 @pytest.mark.asyncio
-async def test_a_coded_pack_can_be_wrapped_but_never_split(db):
+async def test_a_code_tracked_items_packs_are_plain_and_any_repack_opens_them(db):
     w = await _world(db)
     await codeformat.set_item_tracked(db, w.item.code, True)
     lad = await _ladder(db, w)
@@ -187,23 +204,27 @@ async def test_a_coded_pack_can_be_wrapped_but_never_split(db):
     await db.commit()
     boxes = (await db.execute(m.HandlingUnit.__table__.select().where(
         m.HandlingUnit.status == HUS.SEALED.value))).all()
-    assert len(boxes) == 5 and all(b.is_atom for b in boxes)
-    assert all(b.hu_code.endswith("-BOX") for b in boxes)
+    assert len(boxes) == 5 and not any(b.is_atom for b in boxes)
+    assert all(b.hu_code.startswith("PK-") and b.code_kind == "PACK" for b in boxes)
 
     stock_id = (await wh_packing._balance(db, key)).id
     wrapped = await wh_packing.repack_stock(db, stock_id, SimpleNamespace(
         pack_hierarchy_id=lad.h.id, target=[PackEntryIn(level=2, qty=D(1))],
         reason=None), w.user)
     assert wrapped["pack_text"] == "1 Carton = 50 NOS"
-
-    with pytest.raises(ValidationError, match="cannot be split"):
-        await wh_packing.repack_stock(db, stock_id, SimpleNamespace(
-            pack_hierarchy_id=lad.h.id, target=[PackEntryIn(level=0, qty=D(50))],
-            reason=None), w.user)
+    # Opened all the way down to loose — refused while packs were coded atoms.
+    opened = await wh_packing.repack_stock(db, stock_id, SimpleNamespace(
+        pack_hierarchy_id=lad.h.id, target=[PackEntryIn(level=0, qty=D(50))],
+        reason=None), w.user)
+    assert opened["loose_qty"] == 50
+    # Every unit kept its own code.
+    codes = (await db.execute(m.SerialNumber.__table__.select().where(
+        m.SerialNumber.item_id == w.item.id))).all()
+    assert len({c.consumable_code for c in codes}) == 50
 
 
 @pytest.mark.asyncio
-async def test_leaving_part_of_a_coded_pack_needs_break_bulk_and_the_permission(db):
+async def test_an_issue_takes_units_out_of_a_box_with_no_break_bulk(db):
     w = await _world(db)
     await codeformat.set_item_tracked(db, w.item.code, True)
     lad = await _ladder(db, w)
@@ -217,63 +238,43 @@ async def test_leaving_part_of_a_coded_pack_needs_break_bulk_and_the_permission(
         user=w.user)
     await db.commit()
 
-    # A whole box leaves whole: fine.
     issue = await service.create_issue(
-        db, _write(w, w.main, [(bay, w.old, 10)], indent=False), w.user)
-    assert len(issue.items[0].unit_keys) == 10
-
-    # Both requests are built up front: a rollback expires every loaded row.
-    plain = _write(w, w.main, [(bay, w.old, 4)], indent=False)
-    flagged = _write(w, w.main, [(bay, w.old, 4)], indent=False)
-    flagged.items[0].break_bulk = True
-
-    # Four units out of a coded box: refused without break bulk...
-    with pytest.raises(ValidationError, match="leaves whole"):
-        await service.create_issue(db, plain, w.user)
-    await db.rollback()
-    await db.refresh(w.user)
-
-    # ...and refused WITH it when the person has no break-bulk permission.
-    with pytest.raises(ValidationError, match="Break bulk permission"):
-        await service.create_issue(db, flagged, w.user)
-
-
-@pytest.mark.asyncio
-async def test_a_break_bulk_retires_the_code_and_leaves_the_rest_on_the_shelf(
-        db, monkeypatch):
-    from app.platform.rbac import permissions as perms
-    from app.platform.rbac import service as rbac_service
-
-    async def granted(*_args, **_kwargs):
-        return {perms.ISSUE_BREAK_BULK}
-    monkeypatch.setattr(rbac_service, "get_user_permissions", granted)
-
-    w = await _world(db)
-    await codeformat.set_item_tracked(db, w.item.code, True)
-    lad = await _ladder(db, w)
-    bay = w.floors["F1"]
-    await _stock(db, w.user, w.item, w.main, 20, bay.id, w.old.id)
-    await _coded_units(db, w, bay, w.old, 20)
-    key = _key(w, bay, w.old)
-    await wh_packing.shelve(
-        db, item=w.item, key=key, qty=D(20), hierarchy_id=lad.h.id,
-        entries_in=[PackEntryIn(level=1, qty=D(2))], source=("TEST", 0, None),
-        user=w.user)
-    await db.commit()
-
-    data = _write(w, w.main, [(bay, w.old, 4)], indent=False)
-    data.items[0].break_bulk = True
-    issue = await service.create_issue(db, data, w.user)
+        db, _write(w, w.main, [(bay, w.old, 4)], indent=False), w.user)
+    assert len(issue.items[0].unit_keys) == 4
     await _approve(db, issue.id)
     await service.post_issue(db, issue.id, w.user)
+    assert (await wh_packing._balance(db, key)).total_qty == D(16)
 
-    # The opened box's code is retired with a reason; the other box is untouched and
-    # the six units left behind stand loose, each still carrying its own unit code.
-    rows = (await db.execute(m.HandlingUnit.__table__.select().order_by(
-        m.HandlingUnit.id))).all()
-    assert [r.status for r in rows] == [HUS.OPENED.value, HUS.SEALED.value]
-    assert rows[0].closed_reason.startswith("Break bulk on")
-    assert await _text(db, key, 16) == "1 Box + 6 loose NOS = 16 NOS"
+
+@pytest.mark.asyncio
+async def test_one_lot_in_two_hierarchies_repacks_one_and_leaves_the_other(db):
+    w = await _world(db)
+    lad = await _ladder(db, w)
+    twelve = await _box_of_12(db, w, lad.box)
+    bay = w.floors["F1"]
+    await _stock(db, w.user, w.item, w.main, 74, bay.id, w.old.id)
+    key = _key(w, bay, w.old)
+    await wh_packing.shelve(
+        db, item=w.item, key=key, qty=D(50), hierarchy_id=lad.h.id,
+        entries_in=[PackEntryIn(level=1, qty=D(5))], source=("TEST", 0, None),
+        user=w.user)
+    await wh_packing.shelve(
+        db, item=w.item, key=key, qty=D(24), hierarchy_id=twelve.id,
+        entries_in=[PackEntryIn(level=1, qty=D(2))], source=("TEST", 0, None),
+        user=w.user)
+    await db.commit()
+
+    stock_id = (await wh_packing._balance(db, key)).id
+    lot = await wh_packing.lot_packs(db, key)
+    assert sorted(h["name"] for h in lot["hierarchies"] if h["in_use"]) == [
+        "Box of 10", "Box of 12"]
+    # The boxes of 12 opened to loose; the five boxes of 10 are untouched.
+    after = await wh_packing.repack_stock(db, stock_id, SimpleNamespace(
+        pack_hierarchy_id=twelve.id, target=[PackEntryIn(level=0, qty=D(24))],
+        reason=None), w.user)
+    assert after["loose_qty"] == 24
+    ten = next(h for h in after["hierarchies"] if h["hierarchy_id"] == lad.h.id)
+    assert ten["top_counts"]["1"] == 5
 
 
 # --------------------------------------------------------------------------------- #

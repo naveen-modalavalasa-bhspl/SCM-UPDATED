@@ -12,6 +12,7 @@ import {
   Button, Card, EmptyState, ErrorBanner, Input, PageHeader, SharedAttachmentViewer,
 } from "@/shared/components";
 import { alerts } from "@/modules/alerts";
+import { PackQty, baseOf, shrinkWithin, type PackEntry } from "@/shared/packing";
 import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
 import { TrackingBadge, useTrackingMeta } from "@/modules/warehouse/components/TrackingBadge";
 import type { TrackingType } from "@/modules/warehouse/types";
@@ -2193,6 +2194,11 @@ function PackageLineRow({
                 {line.item_name ?? line.item_code}
               </div>
               <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+              {/* The packs this package holds of it — codes stay per unit (2026-10-22). */}
+              {packsFor(line.pack_breakdown, max) && (
+                <PackQty entries={packsFor(line.pack_breakdown, max)} qty={max}
+                         uom={line.uom_code} className="mt-1.5" />
+              )}
             </div>
           </div>
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
@@ -2789,6 +2795,13 @@ function InProcessPanel({ lines }: { lines: AcknowledgementLine[] }) {
   );
 }
 
+/** A line's packs cut to the quantity being shown — the line was sent as one set of
+ *  packs and may arrive split over several cartons (2026-10-22). */
+function packsFor(packs: PackEntry[] | null | undefined, qty: number): PackEntry[] | null {
+  if (!packs?.length || qty <= 0) return null;
+  return Math.abs(baseOf(packs) - qty) < 1e-6 ? packs : shrinkWithin(packs, qty);
+}
+
 function InProcessLine({ line }: { line: AcknowledgementLine }) {
   const stage = lineStage(line);
   const { label, tone, icon: StageIcon, caption } = STAGE[stage];
@@ -2800,6 +2813,10 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
           {line.item_name ?? line.item_code}
         </div>
         <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+        {packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0)) && (
+          <PackQty entries={packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0))}
+                   qty={line.dispatched_quantity} uom={line.uom_code} className="mt-1.5" />
+        )}
         <div className="mt-1.5 text-xs text-muted">
           {qty(line.approved_quantity)} approved
           {/* Only where there is one: a zero on every other row is noise, and on the

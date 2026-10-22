@@ -1,3 +1,4 @@
+import { PackQty } from "@/shared/packing";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
@@ -1427,7 +1428,11 @@ export default function ConsignmentForm() {
                               <td className="px-3 py-2"><BatchPlace line={line} /></td>
                               <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
                               <td className="px-3 py-2 text-xs text-muted">{line.expiry_date ?? "—"}</td>
-                              <td className="px-3 py-2.5 text-right tabular text-ink">{fmtQty(line.quantity)} {line.uom_code ?? ""}</td>
+                              <td className="px-3 py-2.5 text-right tabular text-ink">
+                                {/* The issue's packs, the base quantity under them (2026-10-22). */}
+                                <PackQty entries={line.pack_breakdown} qty={line.quantity} uom={line.uom_code}
+                                         itemId={line.item_id} align="right" />
+                              </td>
                               <td className={`px-3 py-2.5 text-right font-semibold tabular ${remaining === 0 ? "text-ok" : "text-ink"}`}>
                                 {fmtQty(remaining)}
                               </td>
@@ -1634,7 +1639,11 @@ export default function ConsignmentForm() {
                             <td className="px-3 py-2"><BatchPlace line={line} /></td>
                             <td className="px-3 py-2 text-xs text-muted">{line.mfg_date ?? "—"}</td>
                             <td className="px-3 py-2 text-xs text-muted">{line.expiry_date ?? "—"}</td>
-                            <td className="px-3 py-2.5 text-right tabular text-ink">{fmtQty(line.quantity)} {line.uom_code ?? ""}</td>
+                            <td className="px-3 py-2.5 text-right tabular text-ink">
+                              {/* The issue's packs, the base quantity under them (2026-10-22). */}
+                              <PackQty entries={line.pack_breakdown} qty={line.quantity} uom={line.uom_code}
+                                       itemId={line.item_id} align="right" />
+                            </td>
                             <td className={`px-3 py-2.5 text-right font-semibold tabular ${outstanding === 0 ? "text-ok" : "text-ink"}`}>
                               {fmtQty(outstanding)}
                             </td>

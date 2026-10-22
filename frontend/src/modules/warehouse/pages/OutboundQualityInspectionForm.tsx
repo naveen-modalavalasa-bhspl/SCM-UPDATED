@@ -16,6 +16,7 @@ import {
   updateOutboundInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
+import { PackQty, baseOf, shrinkWithin } from "@/shared/packing";
 import { resolveAcceptedUnits, unitsForAccepted, unitsStillToReject } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
 import type {
@@ -185,6 +186,15 @@ export default function OutboundQualityInspectionForm({
   }, [doc, pulled]);
 
   const delivery = issueDoc ?? pulled;
+
+  /** The issue line's packs, cut to the quantity inspected (2026-10-22) — the same
+   *  reading the server gives a saved line. Codes stay per unit. */
+  const packsOf = (issueItemId: number | null | undefined, qty: number) => {
+    const line = (delivery?.items ?? []).find((x) => x.id === issueItemId);
+    const packs = line?.pack_breakdown;
+    if (!packs?.length || qty <= 0) return null;
+    return Math.abs(baseOf(packs) - qty) < 1e-6 ? packs : shrinkWithin(packs, qty);
+  };
 
   const deliveryMeta = useMemo(() => {
     const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[] }>();
@@ -457,6 +467,13 @@ export default function OutboundQualityInspectionForm({
               {saved?.item_name ?? l.item_name ?? "—"}
               {l.batch_no ? ` · batch ${l.batch_no}` : ""}
             </div>
+            {(() => {
+              const packs = saved?.pack_breakdown ?? packsOf(l.issue_item_id, num(l.inspected_qty));
+              return packs?.length ? (
+                <PackQty entries={packs} qty={l.inspected_qty} uom={saved?.uom_code ?? (delivery?.items ?? []).find((x) => x.id === l.issue_item_id)?.uom_code}
+                         itemId={l.item_id} className="mt-1" />
+              ) : null;
+            })()}
           </div>
         );
       },
