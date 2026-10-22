@@ -299,6 +299,9 @@ class AcknowledgementPackageQuantityRow(BaseModel):
     is_temp_controlled: bool = False
     packed_by_name: str | None = None
     packed_at: datetime | None = None
+    #: The packs THIS package holds of the line, as the packer left them (2026-10-22).
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
 
 
 class AcknowledgementLineRow(BaseModel):

@@ -1,4 +1,5 @@
-import { PackQty } from "@/shared/packing";
+import { PackQty, hierarchyOf, packable, usePackOptions } from "@/shared/packing";
+import { IssuePickPacking } from "../components/IssuePickPacking";
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
@@ -31,6 +32,7 @@ import type {
   Dispatch,
   IssueDispatchSource,
   IssueDispatchSourceItem,
+  IssueItemWrite,
 } from "../types";
 
 const PACKAGE_TYPES = [
@@ -469,6 +471,16 @@ export default function ConsignmentForm() {
             quantity: num(existing?.quantity) + num(line.quantity),
             rate: line.rate ?? existing?.rate ?? null,
             remarks: line.remarks ?? existing?.remarks ?? null,
+            // The packs the packer left in THIS carton (2026-10-22).
+            ...(() => {
+              const packed = (pkg.item_packs ?? []).find((row) =>
+                (line.issue_item_id && row.issue_item_id === line.issue_item_id)
+                || (!line.issue_item_id && row.item_id === line.item_id));
+              return packed
+                ? { pack_hierarchy_id: packed.pack_hierarchy_id ?? null,
+                    pack_breakdown: packed.pack_breakdown ?? null }
+                : {};
+            })(),
           });
         });
       return {
@@ -1010,6 +1022,15 @@ export default function ConsignmentForm() {
         };
       }),
     );
+  };
+
+  /** The item's hierarchies, the one it was ISSUED in first — a carton's share is
+   *  stated in the same family unless the packer changes it. */
+  const packOptions = usePackOptions((source?.items ?? []).map((line) => line.item_id));
+  const cartonHierarchies = (line: IssueDispatchSourceItem) => {
+    const all = packable(packOptions.data?.[line.item_id]);
+    const issuedIn = hierarchyOf(line.pack_breakdown);
+    return [...all].sort((a, b) => Number(b.name === issuedIn) - Number(a.name === issuedIn));
   };
 
   const packageLine = (pkg: PackageDraft, sourceLine: IssueDispatchSourceItem) =>
@@ -1689,6 +1710,31 @@ export default function ConsignmentForm() {
                               />
                               {needsQty && (
                                 <div className="mt-1 text-[11px] font-semibold text-warn">Enter a quantity</div>
+                              )}
+                              {/* This carton's own packs of the line — its share, not the
+                                * issued packs repeated (2026-10-22). Same "Change packing"
+                                * as the material issue; the quantity never moves. */}
+                              {thisQty > 0 && cartonHierarchies(line).length > 0 && (
+                                <div className="mt-1 text-left">
+                                  <IssuePickPacking
+                                    line={{
+                                      item_id: line.item_id, item_code: line.item_code,
+                                      item_name: line.item_name, batch_no: line.batch_no,
+                                      requested_qty: thisQty, issued_qty: thisQty,
+                                      pack_hierarchy_id: current?.pack_hierarchy_id
+                                        ?? cartonHierarchies(line)[0]?.hierarchy_id ?? null,
+                                      pack_breakdown: current?.pack_breakdown ?? null,
+                                    } as IssueItemWrite}
+                                    hierarchies={cartonHierarchies(line)}
+                                    locked={pkgLocked}
+                                    uom={line.uom_code}
+                                    onChange={(change) => patchPackageLine(packageIndex, line, {
+                                      pack_hierarchy_id: change.pack_hierarchy_id
+                                        ?? current?.pack_hierarchy_id ?? null,
+                                      pack_breakdown: change.pack_breakdown ?? null,
+                                    }, true)}
+                                  />
+                                </div>
                               )}
                             </td>
                             <td className="px-3 py-2">

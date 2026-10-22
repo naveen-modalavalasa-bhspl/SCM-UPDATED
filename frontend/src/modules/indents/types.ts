@@ -233,6 +233,9 @@ export interface AcknowledgementLine {
  * package weighing zero.
  */
 export interface AcknowledgementPackageQuantity {
+  /** The packs THIS package holds of the line, as packed (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   dispatch_id?: number | null;
   dispatch_no?: string | null;
   package_id?: number | null;

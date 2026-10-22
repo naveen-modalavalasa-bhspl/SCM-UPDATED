@@ -740,6 +740,11 @@ class DispatchPackage(Base):
     status = Column(String(30), nullable=False, default=PackageStatus.PACKED.value)
     packed_by_name = Column(String(200), nullable=True)
     packed_at = Column(DateTime, nullable=True)
+    # Per issue line packed into this carton: the hierarchy and the packs it holds of
+    # it — [{issue_item_id, item_id, batch_id, quantity, pack_hierarchy_id,
+    # pack_breakdown, pack_text}] (2026-10-22). Shown at acknowledgement, shelved at
+    # the destination. NULL: nothing in it is packed.
+    item_packs = Column(JSON, nullable=True)
 
     dispatch = relationship("Dispatch", back_populates="packages")
 

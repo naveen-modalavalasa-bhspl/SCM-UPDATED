@@ -2160,6 +2160,11 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
             db, markers=markers, item_id=item_id, qty=delta,
             to_warehouse_id=dispatch.to_warehouse_id, ref_no=dispatch.dispatch_no,
         )
+        # The cartons' packs land with them (2026-10-22): the destination's stock
+        # balance reads "3 Box + 5 loose", not a bare number.
+        await _shelve_arrival_packs(
+            db, dispatch, item_id=item_id, batch_id=batch_id or m.NO_BATCH,
+            qty=delta, already=credited.get(lot_key, ZERO), user=user)
         await move_stock(
             db, item_id=item_id, qty=delta,
             direction=StockDirection.IN.value,
@@ -2170,6 +2175,52 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
             project_id=dispatch.project_id or 0,
             serial_numbers=units or None,
         )
+
+
+async def _shelve_arrival_packs(db: AsyncSession, dispatch: m.Dispatch, *, item_id: int,
+                                batch_id: int, qty: Decimal, already: Decimal,
+                                user) -> None:
+    """Shelve, at the destination, the packs a consignment's cartons held of one lot.
+
+    The cartons' packs (`out_dispatch_packages.item_packs`) are grouped per hierarchy
+    and taken in order; this credit takes the window `[already, already + qty)` of
+    them, so a delivery confirmed 6 now and 4 next week shelves each carton's packs
+    once. What no carton describes stays loose.
+    """
+    rows = (await db.execute(
+        select(m.DispatchPackage.item_packs)
+        .where(m.DispatchPackage.dispatch_id == dispatch.id)
+        .order_by(m.DispatchPackage.id))).scalars().all()
+    groups: dict[int, dict] = {}
+    for entries in rows:
+        if isinstance(entries, str):
+            entries = json.loads(entries or "null")
+        for row in entries or []:
+            if (int(row.get("item_id") or 0) != item_id
+                    or int(row.get("batch_id") or m.NO_BATCH) != batch_id
+                    or not row.get("pack_hierarchy_id")):
+                continue
+            group = groups.setdefault(int(row["pack_hierarchy_id"]),
+                                      {"qty": ZERO, "parts": []})
+            group["qty"] += _d(row.get("quantity"))
+            group["parts"].append(row.get("pack_breakdown") or [])
+    if not groups:
+        return
+    item = await _item_snapshot(db, item_id)
+    key = {"item_id": item_id, "warehouse_id": dispatch.to_warehouse_id,
+           "bin_id": m.NO_BIN, "batch_id": batch_id, "project_id": dispatch.project_id or 0}
+    start, end, cursor = _d(already), _d(already) + _d(qty), ZERO
+    for hierarchy_id, group in groups.items():
+        lo, hi = cursor, cursor + group["qty"]
+        cursor = hi
+        take = min(hi, end) - max(lo, start)
+        if take <= ZERO:
+            continue
+        merged = (wh_packing.merge_breakdowns(group["parts"], item.uom_code) or {})
+        await wh_packing.shelve(
+            db, item=item, key=key, qty=take, hierarchy_id=hierarchy_id, entries_in=None,
+            default_entries=merged.get("pack_breakdown"),
+            source=("DISPATCH", dispatch.id, dispatch.dispatch_no), user=user)
 
 
 def _lands_on_internal_shelf(dispatch: m.Dispatch) -> bool:
@@ -13913,6 +13964,7 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
                 "is_temp_controlled": bool(pack.is_temp_controlled),
                 "packed_by_name": pack.packed_by_name, "packed_at": pack.packed_at,
             })
+        await _package_rows_packed(db, packages_by_item, by="item")
 
     # Which units left, by every stamp a unit of this issue may be wearing now —
     # the same markers `_delivery_rows` reads for an indent.
@@ -14437,6 +14489,7 @@ async def _apply_consignment_packages(
         )
         dispatch.packages.append(package)
         await db.flush()
+        carton_packs: list[dict] = []
 
         for item_data in package_data.items:
             source_issue_id = item_data.issue_id or default_issue_id
@@ -14494,6 +14547,21 @@ async def _apply_consignment_packages(
                         raise ValidationError(
                             f"{item.code} {where}: {', '.join(stray[:5])} did not go out "
                             "from this location. Pick this row's own codes.")
+
+            # The packs THIS carton holds of the line — its own share, never the
+            # whole line's packs repeated in every carton (2026-10-22).
+            try:
+                packed = await wh_packing.package_line_packs(
+                    db, item=item, issue_line=issue_line, qty=qty,
+                    hierarchy_id=getattr(item_data, "pack_hierarchy_id", None),
+                    entries=getattr(item_data, "pack_breakdown", None))
+            except ValidationError as exc:
+                raise ValidationError(f"{package_no}: {item.code} — {exc}") from exc
+            if packed:
+                carton_packs.append({
+                    "issue_item_id": issue_line.id if issue_line else None,
+                    "item_id": item.id, "batch_id": batch_id, "quantity": str(qty),
+                    **packed})
 
             key = (source_issue.id, item.id, batch_id)
             packed_by_key[key] = packed_by_key.get(key, ZERO) + qty
@@ -14588,6 +14656,8 @@ async def _apply_consignment_packages(
                     remarks=item_data.remarks,
                 ))
                 line_no += 1
+
+        package.item_packs = carton_packs or None
 
     # A line named on any row must be packed in full: half of one bay plus all of the
     # other adds up to the batch total and still leaves goods on the dock.
@@ -23111,6 +23181,39 @@ def _relayed_onward():
     )
 
 
+async def _package_rows_packed(db: AsyncSession, rows_by_line: dict, *, by: str) -> None:
+    """Put each package's OWN packs of a line on its acknowledgement row (2026-10-22)
+    — what the packer put in that carton, not the issued packs repeated. `by` says
+    what the rows are keyed on: an indent line, or (direct issue) the item."""
+    package_ids = {p["package_id"] for rows in rows_by_line.values() for p in rows
+                   if p.get("package_id")}
+    if not package_ids:
+        return
+    packs_by_package: dict[int, list] = {}
+    for package_id, entries in (await db.execute(
+            select(m.DispatchPackage.id, m.DispatchPackage.item_packs)
+            .where(m.DispatchPackage.id.in_(package_ids)))).all():
+        if isinstance(entries, str):
+            entries = json.loads(entries or "null")
+        packs_by_package[package_id] = entries or []
+    issue_line_ids = {int(e["issue_item_id"]) for entries in packs_by_package.values()
+                      for e in entries if e.get("issue_item_id")}
+    column = {"indent_item": m.MaterialIssueLine.indent_item_id,
+              "item": m.MaterialIssueLine.item_id}[by]
+    owner = dict((await db.execute(
+        select(m.MaterialIssueLine.id, column)
+        .where(m.MaterialIssueLine.id.in_(issue_line_ids or {0})))).all())
+    for line_key, rows in rows_by_line.items():
+        for row in rows:
+            parts = [e.get("pack_breakdown") or []
+                     for e in packs_by_package.get(row.get("package_id"), [])
+                     if e.get("issue_item_id") and owner.get(int(e["issue_item_id"])) == line_key]
+            merged = wh_packing.merge_breakdowns(parts) if parts else None
+            if merged:
+                row["pack_breakdown"] = merged["pack_breakdown"]
+                row["pack_text"] = merged["pack_text"]
+
+
 async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
     """Approved / issued / dispatched / received per line, for a set of indents.
 
@@ -23254,6 +23357,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             "packed_by_name": row[14],
             "packed_at": row[15],
         })
+    await _package_rows_packed(db, packages_by_line, by="indent_item")
 
     # ------------------------------------------------------------------
     # Which physical units left for each (indent, item)
@@ -24750,7 +24854,7 @@ async def dispatch_receipt_source(
     } if tracked_item_ids else {}
 
     items = _group_dispatch_lines(dispatch.items, serial_batch, batches, tracking)
-    await _receipt_lines_packed(db, items)
+    await _receipt_lines_packed(db, items, dispatch_id=dispatch.id)
 
     return {
         "dispatch_id": dispatch.id,
@@ -24770,11 +24874,36 @@ async def dispatch_receipt_source(
     }
 
 
-async def _receipt_lines_packed(db: AsyncSession, items: list[dict]) -> None:
+async def _receipt_lines_packed(db: AsyncSession, items: list[dict], *,
+                                dispatch_id: int | None = None) -> None:
     """Put the packs the goods were SENT in onto the receiving point's GRN lines
     (2026-10-22), so the destination books them in — and shelves them — as the same
     cartons, and its stock balance shows them. One hierarchy per line: a row fed by
     issue lines packed two different ways is left loose rather than guessed at."""
+    # What the cartons said, first (2026-10-22): the packer may have changed it.
+    carton: dict[int, list] = {}
+    if dispatch_id:
+        for entries in (await db.execute(
+                select(m.DispatchPackage.item_packs)
+                .where(m.DispatchPackage.dispatch_id == dispatch_id))).scalars().all():
+            if isinstance(entries, str):
+                entries = json.loads(entries or "null")
+            for row in entries or []:
+                if row.get("issue_item_id") and row.get("pack_hierarchy_id"):
+                    carton.setdefault(int(row["issue_item_id"]), []).append(row)
+    if carton:
+        for row in items:
+            lines = row.get("_issue_lines") or {}
+            got = [c for line_id in lines for c in carton.get(line_id, [])]
+            hids = {c["pack_hierarchy_id"] for c in got}
+            if got and all(line_id in carton for line_id in lines) and len(hids) == 1:
+                merged = wh_packing.merge_breakdowns(
+                    [c.get("pack_breakdown") or [] for c in got], row.get("uom_code"))
+                if merged:
+                    row["pack_hierarchy_id"] = hids.pop()
+                    row["pack_breakdown"] = merged["pack_breakdown"]
+                    row["_issue_lines"] = {}
+
     wanted: dict[int, Decimal] = {}
     for row in items:
         for line_id, qty in (row.get("_issue_lines") or {}).items():

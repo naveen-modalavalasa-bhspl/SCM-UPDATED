@@ -1680,6 +1680,12 @@ export interface DispatchPackage {
   packed_by_name?: string | null;
   packed_at?: string | null;
   public_scan_token?: string | null;
+  /** The packs this carton holds, per issue line (2026-10-22). */
+  item_packs?: Array<{
+    issue_item_id?: number | null; item_id: number; batch_id?: number | null;
+    quantity: string | number; pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntry[] | null; pack_text?: string | null;
+  }> | null;
 }
 
 /** `out_dispatch_events` — the custody/cold-chain trail. */
@@ -1785,6 +1791,10 @@ export interface ConsignmentPackageItemWrite {
   quantity: number;
   rate?: number | null;
   remarks?: string | null;
+  /** How THIS carton holds the line (2026-10-22): its own share in packs, worked out
+   *  for its quantity and changeable with "Change packing". */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
 }
 
 export interface ConsignmentPackageWrite {

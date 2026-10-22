@@ -684,6 +684,8 @@ type ReceiptPackageLine = AcknowledgementLine & {
   package_id?: number | null;
   package_no?: string | null;
   package_quantity?: number | null;
+  /** What the packer put in this package of the line (2026-10-22). */
+  package_pack_breakdown?: PackEntry[] | null;
 };
 
 interface ReceiptPackage {
@@ -867,6 +869,7 @@ function receiptPackageLine(
     package_id: part.package_id,
     package_no: part.package_no,
     package_quantity: packageQuantity,
+    package_pack_breakdown: part.pack_breakdown ?? null,
     serial_numbers: packageSerials.length > 0 ? packageSerials : line.serial_numbers,
   };
 }
@@ -2194,10 +2197,12 @@ function PackageLineRow({
                 {line.item_name ?? line.item_code}
               </div>
               <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
-              {/* The packs this package holds of it — codes stay per unit (2026-10-22). */}
-              {packsFor(line.pack_breakdown, max) && (
-                <PackQty entries={packsFor(line.pack_breakdown, max)} qty={max}
-                         uom={line.uom_code} className="mt-1.5" />
+              {/* The packs this package holds of it, as the packer left them — codes
+                  stay per unit (2026-10-22). Older consignments fall back to the
+                  line's packs cut to this package's quantity. */}
+              {packsFor(line.package_pack_breakdown ?? line.pack_breakdown, max) && (
+                <PackQty entries={packsFor(line.package_pack_breakdown ?? line.pack_breakdown, max)}
+                         qty={max} uom={line.uom_code} className="mt-1.5" />
               )}
             </div>
           </div>

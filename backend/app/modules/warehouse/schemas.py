@@ -2102,6 +2102,10 @@ class ConsignmentPackageItemWrite(BaseModel):
     quantity: Decimal
     rate: Decimal | None = None
     remarks: str | None = None
+    # How THIS carton holds the line, when the packer changed it (2026-10-22). Blank:
+    # worked out for this quantity in the issue line's hierarchy. Must add up.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class ConsignmentPackageWrite(BaseModel):
@@ -2243,6 +2247,8 @@ class DispatchPackageRead(_Read):
     packed_by_name: str | None = None
     packed_at: datetime | None = None
     public_scan_token: str | None = None
+    #: The packs this carton holds, per issue line (2026-10-22).
+    item_packs: list[dict] | None = None
 
 
 class DispatchEventRead(_Read):

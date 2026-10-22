@@ -913,6 +913,27 @@ async def issue_line_packs(db: AsyncSession, wanted: dict) -> dict[int, dict]:
     return out
 
 
+async def package_line_packs(db: AsyncSession, *, item, issue_line, qty,
+                             hierarchy_id=None, entries=None) -> dict | None:
+    """How ONE consignment package holds part of an issue line (2026-10-22).
+
+    A line issued as "2 Box" and packed 15 + 5 over two cartons is two smaller sets of
+    packs, not "2 Box" in each: blank, the carton's share is stated in whole packs of
+    the issue line's hierarchy, biggest first, the rest loose. The packer may change
+    it ("Change packing", like the issue) to any hierarchy of the item — it must add
+    up to the carton's quantity, which never moves. `None` for an item with no packs.
+    """
+    hid = hierarchy_id or (getattr(issue_line, "pack_hierarchy_id", None) if issue_line else None)
+    ladder = await packs.ladder(db, item.id, hid)
+    if ladder.top == 0:
+        return None
+    rows = [e.model_dump() if hasattr(e, "model_dump") else dict(e) for e in (entries or [])]
+    hid, out = await packs.snapshot(db, item_id=item.id, hierarchy_id=ladder.hierarchy_id,
+                                    entries=rows or None, base_qty=_d(qty))
+    return {"pack_hierarchy_id": hid, "pack_breakdown": out,
+            "pack_text": packing.describe(out, item.uom_code)}
+
+
 def merge_breakdowns(parts: list[list[dict]], uom: str | None = None) -> dict | None:
     """Several issue lines' packs, as one line's: "1 Box" + "1 Box + 5 loose" reads
     "2 Box + 5 loose". Added level by level within each hierarchy (a part pack keeps
