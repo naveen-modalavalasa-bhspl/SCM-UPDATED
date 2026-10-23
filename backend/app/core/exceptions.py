@@ -434,21 +434,28 @@ async def integrity_error_handler(request: Request, exc: Exception):
 
 async def operational_error_handler(request: Request, exc: Exception):
     """Database driver/connection failure or timeout: lock wait, disconnect, server gone."""
-    raw = str(getattr(exc, "orig", exc))
+    orig = getattr(exc, "orig", exc)
+    raw = str(orig)
     lowered = raw.lower()
-    if "lock wait timeout" in lowered or "1205" in lowered or "deadlock" in lowered or "1213" in lowered:
+
+    errno = None
+    orig_args = getattr(orig, "args", None)
+    if orig_args and len(orig_args) > 0 and isinstance(orig_args[0], int):
+        errno = orig_args[0]
+
+    if errno in (1205, 1213) or "lock wait timeout" in lowered or "deadlock" in lowered:
         status, code, title = 409, "LOCK_TIMEOUT", "Record temporarily locked"
         message = (
             "This record is currently being updated by another operation or user. "
             "Please wait a moment and try again."
         )
-    elif "can't connect" in lowered or "connection refused" in lowered or "2003" in lowered or "2006" in lowered or "lost connection" in lowered:
+    elif errno in (2003, 2006, 2013) or "can't connect" in lowered or "connection refused" in lowered or "lost connection" in lowered:
         status, code, title = 503, "DATABASE_UNAVAILABLE", "Database server unavailable"
         message = (
             "Unable to connect to the database server. Please verify network connectivity "
             "or contact system administration if the database is restarting."
         )
-    elif "statement timeout" in lowered or "query timeout" in lowered:
+    elif errno == 3024 or "statement timeout" in lowered or "query timeout" in lowered or "max_execution_time" in lowered:
         status, code, title = 504, "DATABASE_TIMEOUT", "Database query timed out"
         message = (
             "The database query took too long to complete. Please try narrowing your search "
@@ -460,7 +467,7 @@ async def operational_error_handler(request: Request, exc: Exception):
             "A database operation could not be completed. Please retry, or contact system "
             "administration if the problem persists."
         )
-    log.error("Database operational error: %s", raw)
+    log.error("Database operational error: %s (errno=%s)", raw, errno)
     await _report(request, exc, status, message)
     return JSONResponse(
         status_code=status,

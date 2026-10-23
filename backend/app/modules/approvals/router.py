@@ -164,57 +164,36 @@ async def bulk_reject(body: BulkActionIn, db: AsyncSession = Depends(get_db),
     )
 
 
-def require_approval_permission(code: str):
-    """Gated on permission, but also allows workflow admins for master override."""
-    async def checker(
-        user=Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
-    ):
-        from app.platform.rbac.service import get_user_permissions
-        from app.platform.workflow.engine import is_workflow_admin
-        if await is_workflow_admin(db, user):
-            return user
-        user_perms = await get_user_permissions(
-            db, user, getattr(user, "active_position_id", None),
-        )
-        if code not in user_perms:
-            from app.core.exceptions import PermissionError_
-            raise PermissionError_(f"Missing permission: {code}")
-        return user
-
-    return checker
-
-
 @router.get("/indents/{indent_id}", response_model=ApprovalIndentOut)
 async def get_indent(indent_id: int, db: AsyncSession = Depends(get_db),
-                     user=Depends(require_approval_permission(perms.INDENT_APPROVE))):
+                     user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.get_indent_for_approval(db, indent_id, user)
 
 
 @router.post("/indents/{indent_id}/approve", response_model=ApprovalIndentOut)
 async def approve_indent(indent_id: int, body: IndentApprovalActionIn,
                          db: AsyncSession = Depends(get_db),
-                         user=Depends(require_approval_permission(perms.INDENT_APPROVE))):
+                         user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.approve_indent(db, indent_id, body.items, body.comments, user)
 
 
 @router.post("/indents/{indent_id}/reject", response_model=ApprovalIndentOut)
 async def reject_indent(indent_id: int, body: IndentRejectionIn,
                          db: AsyncSession = Depends(get_db),
-                         user=Depends(require_approval_permission(perms.INDENT_REJECT))):
+                         user=Depends(require_permission(perms.INDENT_REJECT))):
     return await service.reject_indent(db, indent_id, body.comments, user)
 
 
 @router.post("/indents/{indent_id}/return", response_model=ApprovalIndentOut)
 async def return_indent(indent_id: int, body: IndentReturnIn,
                         db: AsyncSession = Depends(get_db),
-                        user=Depends(require_approval_permission(perms.INDENT_APPROVE))):
+                        user=Depends(require_permission(perms.INDENT_APPROVE))):
     return await service.return_indent(db, indent_id, body.comments, user)
 
 
 @router.get("/indents/{indent_id}/availability")
 async def indent_availability(indent_id: int, db: AsyncSession = Depends(get_db),
-                              user=Depends(require_approval_permission(perms.INDENT_APPROVE))):
+                              user=Depends(require_permission(perms.INDENT_APPROVE))):
     """What is still owed per line, and what this approver holds against it."""
     return await fulfilment.availability_for_indent(db, indent_id, user)
 

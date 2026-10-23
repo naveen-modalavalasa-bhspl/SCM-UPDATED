@@ -2460,13 +2460,13 @@ async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, u
             adjustment.current_approver_name = await engine.current_approver_label(
                 db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
     else:
-        from app.platform.workflow.engine import is_workflow_admin
-        is_admin = await is_workflow_admin(db, user)
-        if not is_admin and actor_id is not None and actor_id == adjustment.created_by_id:
+        if actor_id is not None and actor_id == adjustment.created_by_id:
             raise PermissionError_(
                 "You raised this stock audit, so you cannot approve or reject it. "
                 "Ask another storekeeper or the warehouse in-charge to action it."
             )
+        from app.platform.workflow.engine import is_workflow_admin
+        is_admin = await is_workflow_admin(db, user)
         if action == "APPROVE":
             _mark_adjustment_approved(adjustment, user)
             await _post_adjustment_lines(db, adjustment, adjustment.items, user)

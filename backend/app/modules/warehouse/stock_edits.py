@@ -500,7 +500,7 @@ async def act_on_edit(db: AsyncSession, edit_id: int, action: str, user,
     else:
         from app.platform.workflow.engine import is_workflow_admin
         is_admin = await is_workflow_admin(db, user)
-        if not is_admin and getattr(user, "id", None) == edit.created_by_id:
+        if getattr(user, "id", None) == edit.created_by_id:
             raise PermissionError_(
                 "You raised this correction, so you cannot approve or reject it. "
                 "Ask another holder of stock-correction approval to action it.")

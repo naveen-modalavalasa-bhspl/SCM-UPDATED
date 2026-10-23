@@ -1927,7 +1927,7 @@ async def act_on_indent(db: AsyncSession, indent_id: int, action: ApprovalAction
         raise ValidationError(f"Indent is not awaiting approval (status {indent.status})")
     from app.platform.workflow.engine import is_workflow_admin
     is_admin = await is_workflow_admin(db, user)
-    if indent.requested_by_id == user.id and not is_admin:
+    if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")
     if not is_admin:
         await _assert_active_workflow_task(db, indent.id, user.id, user=user)
