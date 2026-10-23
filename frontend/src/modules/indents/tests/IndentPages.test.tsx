@@ -3101,6 +3101,7 @@ describe("indent UI shell", () => {
       items: [{
         id: 42,
         indent_no: "IND/2026/0042",
+        indent_type: "REGULAR",
         requested_by_name: requester,
         department_name: department,
         region_id: 654,
@@ -3123,16 +3124,19 @@ describe("indent UI shell", () => {
     const headers = within(table).getAllByRole("columnheader");
     const row = within(table).getByRole("row", { name: /IND\/2026\/0042/ });
     const cells = Array.from(row.querySelectorAll("td"));
-    // Indent, Requested by, Department, Region, Items, Status, Raised. The lg widths
-    // still add up to 100 with Region among them.
+    // Indent, Indent Type, Requested by, Department, Region, Items, Status, Raised,
+    // Age. The lg widths still add up to 100 with every column among them (SCM_0051
+    // added Indent Type and rebalanced the rest).
     const columnClasses = [
-      ["w-[26%]", "lg:w-[16%]", "text-left"],
-      ["w-0", "lg:w-[16%]", "text-left"],
-      ["w-[30%]", "lg:w-[16%]", "text-left"],
-      ["w-0", "lg:w-[16%]", "text-left"],
-      ["w-[12%]", "lg:w-[8%]", "text-center"],
-      ["w-[32%]", "lg:w-[16%]", "text-left"],
+      ["w-[26%]", "lg:w-[14%]", "text-left"],
+      ["w-0", "lg:w-[10%]", "text-left"],
+      ["w-0", "lg:w-[14%]", "text-left"],
+      ["w-[26%]", "lg:w-[13%]", "text-left"],
       ["w-0", "lg:w-[12%]", "text-left"],
+      ["w-[12%]", "lg:w-[7%]", "text-center"],
+      ["w-[36%]", "lg:w-[14%]", "text-left"],
+      ["w-0", "lg:w-[9%]", "text-left"],
+      ["w-0", "lg:w-[7%]", "text-left"],
     ];
 
     expect(table).toHaveClass("table-fixed");
@@ -3142,11 +3146,14 @@ describe("indent UI shell", () => {
       expect(headers[index]).toHaveClass("px-4", "align-middle", ...classes);
       expect(cells[index]).toHaveClass("px-4", "align-middle", ...classes);
     });
-    expect(within(cells[1]).getByText(requester)).toHaveClass("block", "truncate");
-    expect(within(cells[2]).getByText(department)).toHaveClass("block", "truncate");
-    expect(within(cells[3]).getByText(region)).toHaveClass("block", "truncate");
-    expect(within(cells[4]).getByText("17")).toHaveClass("block", "tabular-nums");
-    expect(within(cells[5]).getByText("AWAITING ALLOCATION")).toHaveClass("inline-flex");
+    expect(within(cells[1]).getByText("Regular")).toBeInTheDocument();
+    expect(within(cells[2]).getByText(requester)).toHaveClass("block", "truncate");
+    expect(within(cells[3]).getByText(department)).toHaveClass("block", "truncate");
+    expect(within(cells[4]).getByText(region)).toHaveClass("block", "truncate");
+    expect(within(cells[5]).getByText("17")).toHaveClass("block", "tabular-nums");
+    const statusText = within(cells[6]).getByText("AWAITING ALLOCATION");
+    expect(statusText).toHaveClass("block", "max-w-full", "truncate");
+    expect(statusText.parentElement).toHaveClass("inline-flex");
   });
 
   it("shows the Region column on All Requests and a dash when HCM has no location", async () => {

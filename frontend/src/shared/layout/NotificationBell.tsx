@@ -3,7 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Popover, PopoverContent, PopoverTrigger } from "@heroui/react";
 import { Bell, CheckCheck } from "lucide-react";
-import { api } from "@/shared/api/client";
+import {
+  notificationKeys, notificationsApi, type NotificationRow,
+} from "@/shared/api/notifications";
 
 /**
  * Unread alerts for the signed-in person, from `sys_notifications`.
@@ -12,22 +14,15 @@ import { api } from "@/shared/api/client";
  * minimum, warehouse raises one when a document needs someone — with nowhere in the
  * app to read it. Rows accumulated and nobody ever saw them.
  *
- * Reads `/api/notifications`, which is scoped to the caller and needs only a login.
- * The warehouse module's copy of these routes is gated on `stock.view`, so the shell
- * cannot use it: a requester would get a 403 on their own alerts.
+ * Reads `shared/api/notifications`, which hits `/api/notifications` — scoped to the
+ * caller and needs only a login. The warehouse module's copy of these routes is gated
+ * on `stock.view`, so the shell cannot use it: a requester would get a 403 on their
+ * own alerts. SCM_0056: the full Alerts & Notifications page (`modules/notifications`)
+ * reads the exact same module, so a notification shown here is never invisible there.
  */
 
-interface NotificationRow {
-  id: number;
-  title: string;
-  body?: string | null;
-  deep_link?: string | null;
-  is_read: boolean;
-  created_at: string;
-}
-
-const KEY = ["notifications"];
-const COUNT_KEY = ["notifications", "unread-count"];
+const KEY = notificationKeys.list({ size: 20 });
+const COUNT_KEY = notificationKeys.unreadCount;
 
 const ago = (iso: string) => {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
@@ -46,8 +41,7 @@ export function NotificationBell() {
   // count is fine for a stock alert. Swap for a subscription if that changes.
   const { data: unread } = useQuery({
     queryKey: COUNT_KEY,
-    queryFn: () => api.get<{ count: number }>("/api/notifications/unread-count")
-      .then((r) => r.data.count),
+    queryFn: notificationsApi.unreadCount,
     refetchInterval: 60_000,
     refetchOnWindowFocus: true,
   });
@@ -55,23 +49,22 @@ export function NotificationBell() {
   // Only fetched once the panel is opened — the badge alone needs just the count.
   const { data: rows = [], isLoading } = useQuery({
     queryKey: KEY,
-    queryFn: () => api.get<{ items: NotificationRow[] }>("/api/notifications", {
-      params: { size: 20 },
-    }).then((r) => r.data.items ?? []),
+    queryFn: () => notificationsApi.list({ size: 20 }).then((r) => r.items ?? []),
     enabled: open,
   });
 
   const refresh = () => {
-    qc.invalidateQueries({ queryKey: KEY });
-    qc.invalidateQueries({ queryKey: COUNT_KEY });
+    // Every list this module feeds — the bell's own 20 and the full page's — so
+    // reading one here can never leave the other showing a stale unread flag.
+    qc.invalidateQueries({ queryKey: ["notifications"] });
   };
 
   const markRead = useMutation({
-    mutationFn: (id: number) => api.post(`/api/notifications/${id}/read`),
+    mutationFn: notificationsApi.markRead,
     onSuccess: refresh,
   });
   const markAll = useMutation({
-    mutationFn: () => api.post("/api/notifications/read-all"),
+    mutationFn: notificationsApi.markAllRead,
     onSuccess: refresh,
   });
 
@@ -136,6 +129,15 @@ export function NotificationBell() {
             </button>
           ))}
         </div>
+
+        {/* SCM_0056: the full inbox, same data as above — this panel only ever
+            offered the newest 20 with no way to search or page through the rest. */}
+        <button
+          onClick={() => { setOpen(false); nav("/notifications"); }}
+          className="block w-full border-t border-line px-4 py-2.5 text-center text-sm font-medium text-brand hover:bg-content2 hover:underline"
+        >
+          View all
+        </button>
       </PopoverContent>
     </Popover>
   );

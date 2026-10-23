@@ -45,7 +45,7 @@ interface BtnProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "color"
   variant?: Variant;
 }
 
-export function Button({ variant = "primary", onClick, disabled, type, className, children }: BtnProps) {
+export function Button({ variant = "primary", onClick, disabled, type, className, title, children }: BtnProps) {
   return (
     <HButton
       {...VARIANT[variant]}
@@ -54,6 +54,7 @@ export function Button({ variant = "primary", onClick, disabled, type, className
       isDisabled={disabled}
       onPress={onClick as any}
       className={`min-h-11 font-semibold ${className ?? ""}`}
+      title={title}
     >
       {children}
     </HButton>

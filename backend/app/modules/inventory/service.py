@@ -1467,7 +1467,31 @@ async def get_mr(db: AsyncSession, mr_id: int, user=None) -> MaterialRequest:
         # while the request IS in approval — there is no turn to be yours otherwise.
         if user is not None:
             mr.can_act = await engine.can_act_now(db, DocType.MR.value, mr.id, user)
-            
+
+    # Sent back: who it went to, by whom and why, and whether this login resubmits it.
+    mr.correction = None
+    mr.can_resubmit_correction = False
+    mr.can_edit_correction = False
+    mr.can_pass_correction_down = False
+    if mr.status == MRStatus.RETURNED_FOR_CORRECTION.value:
+        state = await engine.get_correction_state(db, DocType.MR.value, mr.id)
+        if state:
+            mr.correction = {
+                "owner_name": state.get("correction_owner_name"),
+                "returned_by_name": state.get("returned_by_name"),
+                "returned_from_stage": state.get("returned_from_stage"),
+                "returned_at": state.get("returned_at"),
+                "reason": state.get("correction_comment"),
+            }
+            mr.can_resubmit_correction = bool(
+                user is not None
+                and int(state.get("correction_owner_employee_id") or 0) == int(user.id))
+            # Back at the first rung means it is with whoever raised it: only then may
+            # it be edited. An approver holding it resubmits or passes it further down.
+            at_raiser = int(state.get("returned_from_sequence") or 0) <= 1
+            mr.can_edit_correction = mr.can_resubmit_correction and at_raiser
+            mr.can_pass_correction_down = mr.can_resubmit_correction and not at_raiser
+
     if mr.status == MRStatus.APPROVED.value:
         claimed = await db.execute(text(
             "SELECT 1 FROM pro_requisition_sources s "
@@ -1886,6 +1910,10 @@ async def act_on_mr(db: AsyncSession, mr_id: int, action: str, user,
         raise ValidationError(
             f"Material request is not awaiting approval (status {mr.status})")
 
+    # A rejection ends the request, so the raiser must be told why.
+    if action.upper().startswith("REJECT") and not (comments or "").strip():
+        raise ValidationError("A reason is required to reject this material request")
+
     before = mr.status
     instance = await engine.act(
         db, DocType.MR.value, mr.id, action, user, comments,
@@ -1934,6 +1962,178 @@ async def act_on_mr(db: AsyncSession, mr_id: int, action: str, user,
     if mr.status == MRStatus.APPROVED.value:
         await hooks.fire_mr_approved(db, mr, user)
     return mr
+
+
+async def _mr_correction_state(db: AsyncSession, mr: MaterialRequest, user) -> dict:
+    """The correction this login holds on a sent-back MR, or a refusal."""
+    if mr.status != MRStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(
+            f"Material request is not sent back for correction (status {mr.status})")
+    state = await engine.get_correction_state(db, DocType.MR.value, mr.id) or {}
+    if int(state.get("correction_owner_employee_id") or 0) != int(user.id):
+        raise ValidationError("This material request was not sent back to you")
+    return state
+
+
+async def correct_mr(db: AsyncSession, mr_id: int, data: dict, user) -> MaterialRequest:
+    """The raiser's full edit of an MR sent back to them - the same fields the create
+    form asks: items and quantities (add, change, remove), priority, required-by and
+    remarks. Only once it is back with the raiser (the first rung)."""
+    mr = await get_mr(db, mr_id)
+    state = await _mr_correction_state(db, mr, user)
+    if int(state.get("returned_from_sequence") or 0) > 1:
+        raise ValidationError(
+            "Only the raiser can edit a sent-back material request. An approver it was "
+            "sent back to can resubmit it or send it further back.")
+    lines = data.get("items") or []
+    if not lines:
+        raise ValidationError("A material request needs at least one line")
+    item_ids = [int(line["item_id"]) for line in lines]
+    if len(item_ids) != len(set(item_ids)):
+        raise ValidationError("The same item is on the request twice - merge the lines")
+    items = {row.id: row for row in (await db.execute(
+        select(Item).where(Item.id.in_(item_ids)))).scalars().all()}
+    by_id = {line.id: line for line in mr.items}
+    kept: set[int] = set()
+    for line_no, incoming in enumerate(lines, start=1):
+        item = items.get(int(incoming["item_id"]))
+        if item is None:
+            raise ValidationError(f"Unknown item id: {incoming['item_id']}")
+        quantity = _d(incoming["quantity"])
+        if quantity <= 0:
+            raise ValidationError(f"{item.code}: quantity must be more than zero")
+        line_id = incoming.get("id")
+        existing = by_id.get(line_id) if line_id else None
+        if line_id and existing is None:
+            raise ValidationError(f"Unknown line id {line_id}")
+        if existing is not None:
+            kept.add(existing.id)
+            existing.line_no = line_no
+            if existing.item_id != item.id:
+                existing.item_id = item.id
+                existing.item_code = item.code
+                existing.item_name = item.name
+                existing.uom_code = getattr(item, "uom_code", None)
+                existing.indent_item_id = None
+            existing.quantity = quantity
+        else:
+            db.add(MaterialRequestItem(
+                mr_id=mr.id, line_no=line_no, item_id=item.id, item_code=item.code,
+                item_name=item.name, uom_code=getattr(item, "uom_code", None),
+                quantity=quantity, project_id=mr.project_id or NO_PROJECT,
+            ))
+    for line in list(mr.items):
+        if line.id not in kept:
+            await db.delete(line)
+    if data.get("priority"):
+        mr.priority = data["priority"]
+    if "required_by" in data:
+        mr.required_by = data["required_by"]
+    if "remarks" in data:
+        mr.remarks = data["remarks"]
+    await write_audit(
+        db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
+        action=AuditAction.UPDATE, actor=user,
+        after={"lines": len(lines), "priority": mr.priority},
+        summary="Corrected material request after it was sent back",
+    )
+    await db.commit()
+    db.expire_all()
+    return await get_mr(db, mr.id, user=user)
+
+
+async def pass_mr_correction_down(db: AsyncSession, mr_id: int, comments: str,
+                                  user) -> MaterialRequest:
+    """An approver an MR was sent back to passes it one rung further down. Reason
+    compulsory."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this material request back")
+    mr = await get_mr(db, mr_id)
+    await _mr_correction_state(db, mr, user)
+    await engine.pass_correction_down(
+        db, DocType.MR.value, mr.id, user, reason, context=_mr_workflow_context(mr))
+    correction = await engine.get_correction_state(db, DocType.MR.value, mr.id) or {}
+    mr.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": mr.status}, after={"status": mr.status},
+        summary=f"Sent material request further back to "
+                f"{mr.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{mr.mr_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="MR", entity_id=mr.id,
+            deep_link=f"/inventory/material-requests/{mr.id}")
+    await db.commit()
+    return await get_mr(db, mr.id)
+
+
+def _mr_workflow_context(mr: MaterialRequest) -> dict:
+    return {"doc_no": mr.mr_no, "department_id": mr.department_id,
+            "project_id": mr.project_id}
+
+
+async def send_back_mr(db: AsyncSession, mr_id: int, comments: str,
+                       user) -> MaterialRequest:
+    """Send an MR back ONE rung for correction: to the approver who signed just below,
+    or to whoever raised it at the first rung. The reason is compulsory."""
+    reason = (comments or "").strip()
+    if not reason:
+        raise ValidationError("A reason is required to send this material request back")
+    mr = await get_mr(db, mr_id)
+    if mr.status != MRStatus.PENDING_APPROVAL.value:
+        raise ValidationError(
+            f"Material request is not awaiting approval (status {mr.status})")
+    await engine.return_for_correction(
+        db, DocType.MR.value, mr.id, user, reason, context=_mr_workflow_context(mr))
+    correction = await engine.get_correction_state(db, DocType.MR.value, mr.id) or {}
+    before = mr.status
+    mr.status = MRStatus.RETURNED_FOR_CORRECTION.value
+    mr.current_approver_name = correction.get("correction_owner_name")
+    await write_audit(
+        db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before}, after={"status": mr.status},
+        summary=f"Sent material request back to "
+                f"{mr.current_approver_name or 'previous approver'}: {reason}",
+    )
+    owner_id = correction.get("correction_owner_employee_id")
+    if owner_id:
+        await notifications.notify(
+            db, [int(owner_id)], title=f"{mr.mr_no} sent back to you",
+            body=f"{user.full_name}: {reason}",
+            entity_type="MR", entity_id=mr.id,
+            deep_link=f"/inventory/material-requests/{mr.id}")
+    await db.commit()
+    return await get_mr(db, mr.id)
+
+
+async def resubmit_mr_correction(db: AsyncSession, mr_id: int, user,
+                                 comments: str = "") -> MaterialRequest:
+    """Hand a sent-back MR up again; it reopens at the rung that sent it back."""
+    mr = await get_mr(db, mr_id)
+    if mr.status != MRStatus.RETURNED_FOR_CORRECTION.value:
+        raise ValidationError(
+            f"Material request is not sent back for correction (status {mr.status})")
+    await engine.resubmit_correction(
+        db, DocType.MR.value, mr.id, user, context=_mr_workflow_context(mr))
+    before = mr.status
+    mr.status = MRStatus.PENDING_APPROVAL.value
+    await _refresh_mr_approver(db, mr)
+    await write_audit(
+        db, entity="inv_material_requests", entity_id=mr.id, entity_no=mr.mr_no,
+        action=AuditAction.UPDATE, actor=user,
+        before={"status": before}, after={"status": mr.status},
+        summary="Resubmitted material request after correction"
+                + (f": {comments.strip()}" if (comments or "").strip() else ""),
+    )
+    await db.commit()
+    return await get_mr(db, mr.id)
 
 
 async def revise_mr_items(db: AsyncSession, mr_id: int, lines: list[dict], user,

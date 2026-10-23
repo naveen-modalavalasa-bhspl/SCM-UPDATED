@@ -1154,7 +1154,11 @@ export default function ConsignmentForm() {
             )}
             {!locked && (
               <Can do="dispatch.create">
-                <Button onClick={() => save.mutate()} disabled={save.isPending || formIssues.length > 0}>
+                <Button
+                  onClick={() => save.mutate()}
+                  disabled={save.isPending || formIssues.length > 0}
+                  title={formIssues.length > 0 ? formIssues[0] : undefined}
+                >
                   {save.isPending ? "Saving..." : "Save consignment"}
                 </Button>
               </Can>

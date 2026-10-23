@@ -75,7 +75,7 @@ _LABELS = {"doc_type": "Document type", "fiscal_year": "Fiscal year",
            "prefix": "Prefix", "pattern": "Pattern"}
 
 
-def _validate(data) -> None:
+def _validate(data, current_doc_type: str | None = None) -> None:
     for field, limit in _LIMITS.items():
         value = getattr(data, field, None) or ""
         if len(value) > limit:
@@ -89,7 +89,12 @@ def _validate(data) -> None:
         raise ValidationError(
             "Prefix is plain text, e.g. IND — it is not expanded. Put "
             "{COMPANY}, {PROJECT} or a date token in Pattern instead")
-    if data.doc_type not in {t.value for t in DocType}:
+    # A row's OWN doc type is always accepted on edit. `next_number` auto-creates
+    # series under the caller's key ("mr", "po", "lot", "adj"), most of them lowercase
+    # and some not in DocType at all, so checking them against the enum made those
+    # rows impossible to edit — their pattern could never be changed from the screen.
+    if (data.doc_type != current_doc_type
+            and data.doc_type not in {t.value for t in DocType}):
         raise ValidationError(
             f"doc_type must be one of {', '.join(t.value for t in DocType)}")
     if data.reset_policy not in {p.value for p in ResetPolicy}:
@@ -148,7 +153,7 @@ async def update_series(db: AsyncSession, series_id: int, data, actor) -> dict:
     row = await db.get(DocSeries, series_id)
     if row is None:
         raise NotFoundError("Document series not found")
-    _validate(data)
+    _validate(data, current_doc_type=row.doc_type)
     before = series_out(row)
     # last_number is intentionally absent from the payload: see the module docstring.
     for key, value in data.model_dump().items():

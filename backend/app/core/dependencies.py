@@ -77,9 +77,40 @@ async def get_current_vendor(
     return account
 
 
+async def _log_permission_denial(db: AsyncSession, user, code: str, request: Request) -> None:
+    """One row on `sys_audit_log` for a refusal, not a document change (rule 9 is
+    about state changes; nothing changed here) — so an admin reviewing "who got
+    refused, and for what" can grant the right permission from Job Profiles instead
+    of reconstructing it from a support ticket or a screenshot.
+
+    `entity_no` carries the permission CODE, not a sentence (it is String(50) and a
+    code is what the admin actually acts on — Settings > Job Profiles grants codes,
+    not sentences). The method and path go in `changed_fields` instead, which is
+    JSON and unbounded, for whoever wants the full picture.
+
+    Commits on its own: the request is about to be aborted by the exception this
+    always precedes, so there is no later success to join. `write_audit` itself
+    never commits — it is written to join a caller's transaction — which is exactly
+    why a refusal needs its own, or the row would roll back with the request that
+    never happened. Never raises: a denial that could not be logged must still deny.
+    """
+    from app.platform.settings.service import write_audit
+    from app.shared.enums import AuditAction
+    try:
+        await write_audit(
+            db, entity="permission", entity_no=code, action=AuditAction.PERMISSION_DENIED,
+            actor=user,
+            after={"method": request.method, "path": request.url.path},
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — logging the refusal must never replace it
+        await db.rollback()
+
+
 def require_permission(code: str):
     """Endpoint guard: 403 unless the user holds the permission code."""
     async def checker(
+        request: Request,
         user=Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ):
@@ -89,6 +120,7 @@ def require_permission(code: str):
             db, user, getattr(user, "active_position_id", None),
         )
         if code not in perms:
+            await _log_permission_denial(db, user, code, request)
             raise PermissionError_(f"Missing permission: {code}")
         return user
 
@@ -127,6 +159,7 @@ def require_permission_or(primary: str, alternate: str | tuple[str, ...], in_rea
             # scoped grant sees (a list, a create) — see `via_scoped_grant`.
             db.info.setdefault(_SCOPED_GRANTS, set()).add(primary)
             return user
+        await _log_permission_denial(db, user, primary, request)
         raise PermissionError_(f"Missing permission: {primary}")
 
     return checker

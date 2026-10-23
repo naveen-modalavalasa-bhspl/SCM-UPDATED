@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { INDENT_PRIORITY_OPTIONS, INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
+import { INDENT_LIST_TYPES, INDENT_PRIORITY_OPTIONS, INDENT_REQUEST_STATUS_FILTER_OPTIONS } from "../constants";
 import type {
   DatePreset,
   IndentFilterContextType,
@@ -20,6 +20,9 @@ const ALLOWED_STATUSES = new Set(
 const ALLOWED_PRIORITIES = new Set(
   INDENT_PRIORITY_OPTIONS.map((option) => option.value),
 );
+// SCM_0051: narrows within the types this screen already lists (never adds STR back
+// in — that lives on Inventory > Stock Transfer, see INDENT_LIST_TYPES).
+const ALLOWED_TYPES = new Set(INDENT_LIST_TYPES);
 const RAISED_PRESETS = new Set<DatePreset>([
   "today",
   "this_week",
@@ -45,6 +48,9 @@ interface ParsedAllRequestsState {
   selectedPriorities: string[];
   selectedRegions: number[];
   includeUnassignedRegion: boolean;
+  /** "" means every type this screen lists (`INDENT_LIST_TYPES`) — not part of
+   *  `IndentFilterContextType`, since only this screen offers it today. */
+  indentType: string;
   page: number;
   size: number;
 }
@@ -109,6 +115,8 @@ export function normalizeAllRequestsSearch(
   const selectedPriorities = uniqueAllowed(source.getAll("priority"), ALLOWED_PRIORITIES);
   const selectedRegions = parseRegionIds(source.getAll("region_id"));
   const includeUnassignedRegion = source.get("region_unassigned") === "1";
+  const rawType = source.get("type");
+  const indentType = rawType && ALLOWED_TYPES.has(rawType) ? rawType : "";
   const raisedRange = validRange(source, "created_date_from", "created_date_to");
   const requiredByRange = validRange(source, "required_by_from", "required_by_to");
   const rawRaisedPreset = source.get("raised_preset") as DatePreset | null;
@@ -129,6 +137,7 @@ export function normalizeAllRequestsSearch(
   selectedPriorities.forEach((priority) => params.append("priority", priority));
   selectedRegions.forEach((regionId) => params.append("region_id", String(regionId)));
   if (includeUnassignedRegion) params.set("region_unassigned", "1");
+  if (indentType) params.set("type", indentType);
   if (raisedRange.from) {
     params.set("raised_preset", datePreset);
     params.set("created_date_from", raisedRange.from);
@@ -156,6 +165,7 @@ export function normalizeAllRequestsSearch(
       selectedPriorities,
       selectedRegions,
       includeUnassignedRegion,
+      indentType,
       page,
       size,
     },
@@ -223,6 +233,10 @@ export function useAllRequestsUrlState(): {
   size: number;
   listUrl: string;
   replacePage: (page: number) => void;
+  /** SCM_0051: "" means every type this screen lists. Kept outside `filters` —
+   *  `IndentFilterContextType` is shared by screens that have no use for it. */
+  indentType: string;
+  setIndentType: (value: string) => void;
 } {
   const [searchParams, setSearchParams] = useSearchParams();
   const normalized = useMemo(
@@ -395,7 +409,8 @@ export function useAllRequestsUrlState(): {
       + state.selectedStatuses.length
       + state.selectedPriorities.length
       + state.selectedRegions.length
-      + (state.includeUnassignedRegion ? 1 : 0),
+      + (state.includeUnassignedRegion ? 1 : 0)
+      + (state.indentType ? 1 : 0),
   }), [
     clearRaisedDate,
     clearRequiredByDate,
@@ -407,10 +422,19 @@ export function useAllRequestsUrlState(): {
     updateFilter,
   ]);
 
+  const setIndentType = useCallback((value: string) => {
+    updateFilter((params) => {
+      if (value && ALLOWED_TYPES.has(value)) params.set("type", value);
+      else params.delete("type");
+    });
+  }, [updateFilter]);
+
   return {
     filters,
     size: state.size,
     listUrl: relativeAllRequestsUrl(normalized.params),
     replacePage,
+    indentType: state.indentType,
+    setIndentType,
   };
 }

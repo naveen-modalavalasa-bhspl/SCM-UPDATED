@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Snowflake } from "lucide-react";
+import { Lock, Snowflake } from "lucide-react";
 import {
   Card, ErrorBanner, PageHeader, Select, StatusPill, useToast,
 } from "@/shared/components";
+import { Button } from "../components/ActionButton";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { errorMessage } from "@/shared/api/errors";
 import { poApi, rfqApi } from "../api";
@@ -81,6 +83,8 @@ export function PriceComparePage() {
   const nav = useNavigate();
   const toast = useToast();
   const queryClient = useQueryClient();
+  const { can } = useAuth();
+  const canFreeze = can("rfq.approve");
   const [params, setParams] = useSearchParams();
   const rfqId = Number(params.get("rfq") ?? 0);
   const [method, setMethod] = useState("");
@@ -185,6 +189,19 @@ export function PriceComparePage() {
     onError: (e: unknown) => toast.error(errorMessage(e)),
   });
 
+  // Freeze Prices (SCM_0057): awarding and raising a PO both refuse an unfrozen
+  // tender (`award_rfq` on the server), but this screen used to have no way to
+  // freeze — only a badge once it already was, and a dead-end warning pointing
+  // the buyer back to the RFQ page. Same mutation RFQDetailPage already uses.
+  const freeze = useMutation({
+    mutationFn: () => rfqApi.freeze(rfqId),
+    onSuccess: () => {
+      refresh();
+      toast.success("Prices frozen — suppliers can no longer change their quotes");
+    },
+    onError: (e: unknown) => toast.error(errorMessage(e)),
+  });
+
   return (
     <div>
       <PageHeader
@@ -195,6 +212,14 @@ export function PriceComparePage() {
           <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700">
             <Snowflake className="h-3.5 w-3.5" /> Frozen
           </span>
+        ) : rfqId > 0 && canFreeze ? (
+          <Button
+            className="bg-amber-600 hover:bg-amber-700 text-white font-medium shadow-sm inline-flex items-center gap-1.5"
+            disabled={freeze.isPending}
+            onClick={() => freeze.mutate()}
+          >
+            <Lock className="h-4 w-4" /> {freeze.isPending ? "Freezing…" : "Freeze prices"}
+          </Button>
         ) : undefined}
       />
 
@@ -232,7 +257,7 @@ export function PriceComparePage() {
         </div>
       </Card>
 
-      <ErrorBanner error={comparison.error} />
+      <ErrorBanner error={comparison.error ?? freeze.error} />
 
       {rfqId > 0 && comparison.data && (
         <>
@@ -241,7 +266,7 @@ export function PriceComparePage() {
             comparison={comparison.data}
             awardedQuotationIds={awardedQuoteIds}
             purchaseOrders={rfq?.purchase_orders ?? []}
-            busy={busy || award.isPending || awardSplit.isPending || raisePo.isPending}
+            busy={busy || award.isPending || awardSplit.isPending || raisePo.isPending || freeze.isPending}
             reawardable={rfq?.status === "AWARDED"}
             liveAllocatedQuantities={Object.fromEntries(
               (rfq?.vendors ?? [])
@@ -256,8 +281,11 @@ export function PriceComparePage() {
           />
           {!rfq?.is_price_frozen && (
             <p className="mt-3 rounded-lg border border-warn/30 bg-warn-bg px-3 py-2 text-sm text-warn">
-              Prices on this tender are not frozen yet — freeze them on the RFQ page
-              before awarding or raising purchase orders.
+              {canFreeze
+                ? "Prices on this tender are not frozen yet — freeze them above before "
+                  + "awarding or raising purchase orders."
+                : "Prices on this tender are not frozen yet — ask a buyer with approval "
+                  + "rights to freeze them before awarding or raising purchase orders."}
             </p>
           )}
         </>

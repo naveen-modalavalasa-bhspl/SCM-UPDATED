@@ -987,9 +987,21 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   });
 
   const act = useMutation({
-    mutationFn: (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
+    mutationFn: async (what: "submit" | "approve" | "reject" | "post" | "ack" | "cancel") => {
       const numId = Number(id);
-      if (what === "submit") return submitIssue(numId);
+      if (what === "submit") {
+        // Submit carries no line data of its own (`POST .../submit` takes only the
+        // id) — it approves whatever is already in the database. The grid is still
+        // editable right up to this press, so an edit made after the last Save was
+        // being silently discarded: the chain advanced on the STALE saved copy, and
+        // if that stale copy happened to be valid the document went straight to
+        // approved while the edit on screen vanished on the refetch — with no error
+        // at all, or a status-guard error on a second press that had nothing to do
+        // with what was actually wrong. Saving here first means submit always acts
+        // on what the user is looking at.
+        await save.mutateAsync();
+        return submitIssue(numId);
+      }
       if (what === "approve") return approveIssue(numId, reason);
       if (what === "reject") return rejectIssue(numId, reason);
       if (what === "post") return postIssue(numId);
@@ -1016,6 +1028,17 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       setReason("");
     },
   });
+
+  // SCM_0063: `act` is shared across every action this form confirms (submit,
+  // approve, reject, post, ack, cancel). Without this, an error left over from a
+  // PREVIOUS press stayed on `act.error` and the ConfirmModal for the NEXT press
+  // showed it immediately — reading as "this press failed" on a request that was
+  // never actually sent, even while the earlier press's real effect (e.g. an
+  // approval that went through) was already reflected in the document.
+  useEffect(() => {
+    if (confirming) act.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirming]);
 
   // Raised, then every rung the engine recorded, then where it is waiting now, then
   // what happened to the stock. The approvals come from wf_actions rather than the
