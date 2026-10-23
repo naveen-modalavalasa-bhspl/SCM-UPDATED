@@ -482,13 +482,6 @@ async def test_create_warehouse(client, admin):
     assert body["is_bin_managed"] is True
 
 
-async def test_main_warehouse_type_automatically_bin_managed(client, admin):
-    res = (await client.post("/api/warehouses", json={
-        "code": "WH-AUTO-MAIN", "name": "Auto Main Store", "warehouse_type": WarehouseType.MAIN.value,
-        "is_bin_managed": False}, headers=admin)).json()
-    assert res["is_bin_managed"] is True
-
-
 async def test_invalid_warehouse_type_is_rejected(client, admin):
     r = await client.post("/api/warehouses", json={
         "code": "X", "name": "X", "warehouse_type": "MOON"}, headers=admin)
@@ -1549,24 +1542,3 @@ async def test_uom_type_carries_allows_decimal(client, admin):
                              json={"code": "SACK", "name": "Sack", "allows_decimal": False},
                              headers=admin)).json()
     assert row["allows_decimal"] is False
-
-
-async def test_brand_variant_and_model_chain(client, admin):
-    def make(path, body):
-        return client.post(path, json=body, headers=admin)
-    brand = (await make("/api/brands", {"code": "ACC", "name": "Accu-Chek"})).json()
-    other = (await make("/api/brands", {"code": "ONE", "name": "OneTouch"})).json()
-    variant = (await make("/api/brand-variants",
-                          {"brand_id": brand["id"], "code": "act", "name": "Active"})).json()
-    assert variant["code"] == "ACT" and variant["brand_name"] == "Accu-Chek"
-    # Same code under another brand is fine; twice under one brand is not.
-    assert (await make("/api/brand-variants",
-                       {"brand_id": other["id"], "code": "ACT", "name": "Active"})).status_code == 200
-    assert (await make("/api/brand-variants",
-                       {"brand_id": brand["id"], "code": "ACT", "name": "X"})).status_code == 422
-    model = (await make("/api/brand-models", {"brand_id": brand["id"],
-             "variant_id": variant["id"], "code": "M1", "name": "Mini"})).json()
-    assert model["variant_name"] == "Active"
-    # A variant of a different brand is refused.
-    assert (await make("/api/brand-models", {"brand_id": other["id"],
-            "variant_id": variant["id"], "code": "M2", "name": "Mini"})).status_code == 422

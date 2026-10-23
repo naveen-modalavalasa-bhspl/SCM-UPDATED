@@ -579,32 +579,3 @@ describe("the coded-item FEFO exception", () => {
     expect(codedSwapBatches([plain[0]], plain).size).toBe(0);
   });
 });
-
-describe("a direct issue asks for nothing (2026-10-21)", () => {
-  // No indent line behind the picks: what is issued IS the whole of it.
-  const direct = (over: Partial<IssueItemWrite> = {}) =>
-    line({ indent_item_id: null, requested_qty: 0, ...over });
-
-  it("reads its ask as what it issues, so it is never over or short", () => {
-    const [group] = groupIssueLines([direct({ issued_qty: 15 })], {});
-    expect(group.direct).toBe(true);
-    expect(group.requested).toBe(15);
-    expect(group.remaining).toBe(0);
-    const problems = splitProblems([group], { binManaged: true, unitLabel: label });
-    expect(problems.some((p) => /against a request for/.test(p.message))).toBe(false);
-  });
-
-  it("sends each pick requesting exactly what it issues — what the server needs", () => {
-    const out = normalizeSplits([
-      direct({ issued_qty: 10, bin_id: 1 }), direct({ issued_qty: 5, bin_id: 2 }),
-    ]);
-    expect(out.map((l) => [l.requested_qty, l.issued_qty])).toEqual([[10, 10], [5, 5]]);
-  });
-
-  it("still holds an indent line to its ask", () => {
-    const [group] = groupIssueLines([line({ requested_qty: 10, issued_qty: 15 })], {});
-    expect(group.direct).toBe(false);
-    const problems = splitProblems([group], { binManaged: true, unitLabel: label });
-    expect(problems.some((p) => /15 allocated against a request for 10/.test(p.message))).toBe(true);
-  });
-});

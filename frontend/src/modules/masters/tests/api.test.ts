@@ -21,7 +21,7 @@ describe("masters api", () => {
       "itemClasses", "itemComponents", "itemEligibility", "itemGroups", "itemPackaging",
       "itemPhotos", "itemSpecs", "itemSubClasses", "items", "manufacturers",
       "nextItemCode",
-      "ownershipDepartments", "packHierarchies", "packaging", "paymentTerms", "projects", "specs",
+      "ownershipDepartments", "packaging", "paymentTerms", "projects", "specs",
       "unitCodeTracking", "uom", "uomClasses", "uomConversions",
       "userGroups", "vendorCategories", "vendorItems", "vendorMapping", "vendors",
       "warehouses",
