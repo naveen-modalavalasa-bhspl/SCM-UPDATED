@@ -28,18 +28,19 @@ async def pending(params: PageParams = Depends(), db: AsyncSession = Depends(get
                   doc_type: str = "", overdue_only: bool = False,
                   raised_from: datetime | None = Query(None),
                   raised_to: datetime | None = Query(None),
-                  sort: str = "oldest"):
+                  sort: str = "oldest", scope: str = Query("mine")):
     return await service.pending_page(
         db, user, params.page, params.size, search=search, doc_type=doc_type,
         overdue_only=overdue_only, raised_from=raised_from, raised_to=raised_to,
-        sort=sort,
+        sort=sort, scope=scope,
     )
 
 
 @router.get("/pending/summary")
 async def pending_summary(db: AsyncSession = Depends(get_db),
-                          user=Depends(get_current_user)):
-    return await service.pending_summary(db, user)
+                          user=Depends(get_current_user),
+                          scope: str = Query("mine")):
+    return await service.pending_summary(db, user, scope=scope)
 
 
 @router.get("/my-decisions")
@@ -178,8 +179,8 @@ async def approve_indent(indent_id: int, body: IndentApprovalActionIn,
 
 @router.post("/indents/{indent_id}/reject", response_model=ApprovalIndentOut)
 async def reject_indent(indent_id: int, body: IndentRejectionIn,
-                        db: AsyncSession = Depends(get_db),
-                        user=Depends(require_permission(perms.INDENT_REJECT))):
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(require_permission(perms.INDENT_REJECT))):
     return await service.reject_indent(db, indent_id, body.comments, user)
 
 

@@ -187,6 +187,9 @@ async def _can_act(db: AsyncSession, payment: VendorPayment, user,
                    granted: set | None = None) -> bool:
     if user is None or payment.status != VendorPaymentStatus.PENDING_APPROVAL.value:
         return False
+    from app.platform.workflow.engine import is_workflow_admin
+    if await is_workflow_admin(db, user):
+        return True
     instance = await _instance(db, payment.id)
     if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
         return await engine.can_act_now(db, DOC, payment.id, user)
@@ -558,8 +561,10 @@ async def act_on_payment(db: AsyncSession, payment_id: int, action: str, user,
             raise PermissionError_(
                 "You recorded this payment, so you cannot approve or reject it. "
                 "Ask another holder of payment approval to action it.")
+        from app.platform.workflow.engine import is_workflow_admin
+        is_admin = await is_workflow_admin(db, user)
         granted = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
-        if perms.ACCOUNTS_APPROVE not in granted:
+        if not is_admin and perms.ACCOUNTS_APPROVE not in granted:
             raise PermissionError_("You cannot approve vendor payments.")
         if action == "APPROVE":
             _mark_paid(payment, user)

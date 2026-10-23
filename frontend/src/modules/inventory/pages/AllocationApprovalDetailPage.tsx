@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckCircle2, RefreshCw, XCircle } from "lucide-react";
-import { Button, Can, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { Button, Card, Field, Input, PageHeader, StatusPill } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { LoadingRows } from "../components/PageStates";
 import {
   approveAllocation, getAllocation, getAllocationAvailability, getAllocationHistory,
@@ -70,15 +71,18 @@ export function AllocationApprovalDetailPage() {
   // still PENDING_APPROVAL after the first signature, and it was still offering
   // Approve to the person who had just signed it — a button whose only outcome was
   // the server's refusal. The inbox is the authority on whose turn it is.
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+
   const pending = useQuery({
     queryKey: ["inventory", "allocation-pending-mine"],
     queryFn: getPendingInventoryApprovals,
   });
-  const waitingOnMe = (pending.data ?? []).some((row) => row.doc_id === allocationId);
-
-  const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/fulfilment?tab=approvals");
 
   const a = allocation.data;
+  const waitingOnMe = (pending.data ?? []).some((row) => row.doc_id === allocationId) || (isAdmin && a?.status === "PENDING_APPROVAL");
+
+  const goBack = () => nav(decisionView ? "/approvals/decisions" : "/inventory/fulfilment?tab=approvals");
 
   // A revision only counts if the number actually changed — retyping 40 over 40 is
   // not a decision and must not read as one in the audit trail.
@@ -215,106 +219,106 @@ export function AllocationApprovalDetailPage() {
               </Button>
             </div>
             <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-content2 text-xs text-muted">
-                <tr>
-                  <th className="p-3">Item</th>
-                  <th className="p-3">Requested</th>
-                  <th className="p-3">Give</th>
-                  <th className="p-3">Free now</th>
-                  <th className="p-3">Warehouse</th>
-                  <th className="p-3">Shortage</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {a.items.map((item) => {
-                  const live = freeFor(item.id);
-                  const typed = edits[item.id];
-                  const give = typed === undefined || typed === ""
-                    ? Number(item.quantity) : Number(typed);
-                  const cap = capFor(item);
-                  const tooMuch = cap !== undefined && give > cap;
-                  const group = groupOf(item);
-                  // Requested and shortage are said once, on the line's first row.
-                  const firstOfLine = groupRows(group)[0]?.id === item.id;
-                  // Nothing free at any point this login can draw from: there is no
-                  // number to type. The box stayed editable and accepted one, and the
-                  // server then refused the approval — the shelf is the answer, not a
-                  // matter of what the approver would like to give. Only once the live
-                  // re-check has actually come back (`live`), so a slow request never
-                  // greys out a line that does have stock.
-                  // The SHELF, not the cap: a cap of 0 also means "the line's other rows
-                  // already cover the request", which is not the same as nothing free.
-                  const nothingFree = live !== undefined && live.free <= 0 && give <= 0;
-                  return (
-                    <tr key={item.id}>
-                      <td className="p-3">
-                        <div className="font-medium text-ink">{item.item_name}</div>
-                        <div className="text-xs text-muted">{item.item_code}</div>
-                      </td>
-                      <td className="p-3">
-                        {firstOfLine
-                          ? <>{fmt(askedFor(group))} {item.uom_code}</>
-                          : <span className="text-xs text-muted">same line, another point</span>}
-                      </td>
-                      <td className="p-3">
-                        {waitingOnMe ? (
-                          <div className="w-32">
-                            <Input
-                              type="number"
-                              min={0}
-                              max={cap}
-                              step="any"
-                              disabled={nothingFree}
-                              value={nothingFree ? "0" : (typed ?? String(item.quantity))}
-                              onChange={(event) => setEdits((prev) => ({
-                                ...prev, [item.id]: event.target.value,
-                              }))}
-                              aria-label={`Give quantity for ${item.item_name ?? item.item_code}`}
-                            />
-                            {nothingFree ? (
-                              <p className="mt-1 text-[11px] text-muted">
-                                Nothing free — the whole line goes to procurement.
-                              </p>
-                            ) : tooMuch && (
-                              <p className="mt-1 text-[11px] text-bad">
-                                Max {fmt(cap!)} {item.uom_code}
-                              </p>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="font-semibold text-ok">
-                            {fmt(item.quantity)} {item.uom_code}
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-3">
-                        {availability.isLoading || !live ? (
-                          <span className="text-xs text-muted">…</span>
-                        ) : (
-                          <div>
-                            <div className={live.free < give ? "font-semibold text-bad" : "text-ink"}>
-                              {fmt(live.free)} {item.uom_code}
+              <table className="w-full text-left text-sm">
+                <thead className="bg-content2 text-xs text-muted">
+                  <tr>
+                    <th className="p-3">Item</th>
+                    <th className="p-3">Requested</th>
+                    <th className="p-3">Give</th>
+                    <th className="p-3">Free now</th>
+                    <th className="p-3">Warehouse</th>
+                    <th className="p-3">Shortage</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {a.items.map((item) => {
+                    const live = freeFor(item.id);
+                    const typed = edits[item.id];
+                    const give = typed === undefined || typed === ""
+                      ? Number(item.quantity) : Number(typed);
+                    const cap = capFor(item);
+                    const tooMuch = cap !== undefined && give > cap;
+                    const group = groupOf(item);
+                    // Requested and shortage are said once, on the line's first row.
+                    const firstOfLine = groupRows(group)[0]?.id === item.id;
+                    // Nothing free at any point this login can draw from: there is no
+                    // number to type. The box stayed editable and accepted one, and the
+                    // server then refused the approval — the shelf is the answer, not a
+                    // matter of what the approver would like to give. Only once the live
+                    // re-check has actually come back (`live`), so a slow request never
+                    // greys out a line that does have stock.
+                    // The SHELF, not the cap: a cap of 0 also means "the line's other rows
+                    // already cover the request", which is not the same as nothing free.
+                    const nothingFree = live !== undefined && live.free <= 0 && give <= 0;
+                    return (
+                      <tr key={item.id}>
+                        <td className="p-3">
+                          <div className="font-medium text-ink">{item.item_name}</div>
+                          <div className="text-xs text-muted">{item.item_code}</div>
+                        </td>
+                        <td className="p-3">
+                          {firstOfLine
+                            ? <>{fmt(askedFor(group))} {item.uom_code}</>
+                            : <span className="text-xs text-muted">same line, another point</span>}
+                        </td>
+                        <td className="p-3">
+                          {waitingOnMe ? (
+                            <div className="w-32">
+                              <Input
+                                type="number"
+                                min={0}
+                                max={cap}
+                                step="any"
+                                disabled={nothingFree}
+                                value={nothingFree ? "0" : (typed ?? String(item.quantity))}
+                                onChange={(event) => setEdits((prev) => ({
+                                  ...prev, [item.id]: event.target.value,
+                                }))}
+                                aria-label={`Give quantity for ${item.item_name ?? item.item_code}`}
+                              />
+                              {nothingFree ? (
+                                <p className="mt-1 text-[11px] text-muted">
+                                  Nothing free — the whole line goes to procurement.
+                                </p>
+                              ) : tooMuch && (
+                                <p className="mt-1 text-[11px] text-bad">
+                                  Max {fmt(cap!)} {item.uom_code}
+                                </p>
+                              )}
                             </div>
-                            {live.pledged_elsewhere > 0 && (
-                              <div className="text-[11px] text-muted">
-                                {fmt(live.on_shelf)} on shelf · {fmt(live.pledged_elsewhere)} promised
+                          ) : (
+                            <span className="font-semibold text-ok">
+                              {fmt(item.quantity)} {item.uom_code}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          {availability.isLoading || !live ? (
+                            <span className="text-xs text-muted">…</span>
+                          ) : (
+                            <div>
+                              <div className={live.free < give ? "font-semibold text-bad" : "text-ink"}>
+                                {fmt(live.free)} {item.uom_code}
                               </div>
-                            )}
-                          </div>
-                        )}
-                      </td>
-                      <td className="p-3">{item.warehouse_name ?? "Not allocated"}</td>
-                      <td className="p-3 text-warn">
-                        {firstOfLine
-                          ? <>{fmt(Math.max(0, askedFor(group) - givenFor(group)))} {item.uom_code}</>
-                          : <span className="text-xs text-muted">—</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                              {live.pledged_elsewhere > 0 && (
+                                <div className="text-[11px] text-muted">
+                                  {fmt(live.on_shelf)} on shelf · {fmt(live.pledged_elsewhere)} promised
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-3">{item.warehouse_name ?? "Not allocated"}</td>
+                        <td className="p-3 text-warn">
+                          {firstOfLine
+                            ? <>{fmt(Math.max(0, askedFor(group) - givenFor(group)))} {item.uom_code}</>
+                            : <span className="text-xs text-muted">—</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </Card>
 
@@ -322,7 +326,7 @@ export function AllocationApprovalDetailPage() {
             <h3 className="mb-2 text-sm font-semibold text-ink">Approval history</h3>
             <div className="divide-y divide-line rounded-xl border border-line">
               {history.isLoading && (
-                 <LoadingRows rows={3} className="p-0" />
+                <LoadingRows rows={3} className="p-0" />
               )}
               {(history.data ?? []).map((row, index) => (
                 <div key={`${row.stage_sequence}-${index}`} className="p-3">
@@ -397,7 +401,7 @@ export function AllocationApprovalDetailPage() {
                     decides whose turn it is. This is the job profile talking. Reject
                     stays outside it on purpose: an approver must never be left with a
                     document they can neither sign nor refuse. */}
-                <Can do="allocation.approve_reserve">
+                {(can("allocation.approve_reserve") || isAdmin) && (
                   <Button
                     className={TONE_APPROVE}
                     disabled={act.isPending || overCap}
@@ -411,9 +415,9 @@ export function AllocationApprovalDetailPage() {
                     })()}
                   >
                     <CheckCircle2 className="h-4 w-4" />
-                    {approveLabel}
+                    {isAdmin && !waitingOnMe ? `${approveLabel} (Admin Override)` : approveLabel}
                   </Button>
-                </Can>
+                )}
               </div>
             </Card>
           )}

@@ -121,7 +121,7 @@ async def pending_for_user(db: AsyncSession, user) -> list[dict]:
     return rows
 
 
-async def pending_summary(db: AsyncSession, user) -> dict:
+async def pending_summary(db: AsyncSession, user, scope: str = "mine") -> dict:
     """The tiles and the doc-type chips above the approval inbox, counted in SQL.
 
     The screen used to answer these by fetching its whole queue a second time (page 1
@@ -130,21 +130,38 @@ async def pending_summary(db: AsyncSession, user) -> dict:
     a queue passes 500 rows.
     """
     now = ist_now()
-    conditions = [
-        Pending.approver_id == user.id,
-        Instance.status == InstanceStatus.IN_PROGRESS.value,
-    ]
-    # Same hat rule the list below applies, or the tiles would keep counting work the
-    # list no longer shows (see engine.instances_for_other_hats).
-    other_hat = await engine.other_hat_condition(db, user)
-    if other_hat is not None:
-        conditions.append(other_hat)
+    if scope == "company":
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("Admin permission required to view company-wide approval queue")
+        conditions = [
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+    else:
+        conditions = [
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+        # Same hat rule the list below applies, or the tiles would keep counting work the
+        # list no longer shows (see engine.instances_for_other_hats).
+        other_hat = await engine.other_hat_condition(db, user)
+        if other_hat is not None:
+            conditions.append(other_hat)
     base = (
         select(Pending.doc_type, Pending.doc_id, Pending.due_at, Pending.created_at)
         .join(Instance, Instance.id == Pending.instance_id)
         .where(*conditions)
     )
     rows = (await db.execute(base)).all()
+    if scope == "company":
+        seen_docs: set[tuple[str, int]] = set()
+        deduped_rows = []
+        for r in rows:
+            doc_key = (r.doc_type, r.doc_id)
+            if doc_key not in seen_docs:
+                seen_docs.add(doc_key)
+                deduped_rows.append(r)
+        rows = deduped_rows
 
     # Monthly indents are approved as consolidated batches on another screen, so they
     # are not in this queue — the same exclusion pending_page applies to the list.
@@ -179,21 +196,29 @@ async def pending_page(
     db: AsyncSession, user, page: int, size: int, *, search: str = "",
     doc_type: str = "", overdue_only: bool = False,
     raised_from: datetime | None = None, raised_to: datetime | None = None,
-    sort: str = "oldest",
+    sort: str = "oldest", scope: str = "mine",
 ) -> dict:
     # Same rule the engine applies in pending_for_user: a task whose workflow has
     # finished is not work, whatever the row says. Without it a cancelled document
     # kept a live-looking task in the queue and in every count above it.
-    conditions = [
-        Pending.approver_id == user.id,
-        Instance.status == InstanceStatus.IN_PROGRESS.value,
-    ]
-    # A task belongs to the POST the ladder resolved to, not merely to the person
-    # holding it. Someone wearing two District Manager hats must not be shown the other
-    # district's work — they cannot sign it, and acting on it half-succeeded.
-    other_hat = await engine.other_hat_condition(db, user)
-    if other_hat is not None:
-        conditions.append(other_hat)
+    if scope == "company":
+        from app.platform.workflow.engine import is_workflow_admin
+        if not await is_workflow_admin(db, user):
+            raise PermissionError_("Admin permission required to view company-wide approval queue")
+        conditions = [
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+    else:
+        conditions = [
+            Pending.approver_id == user.id,
+            Instance.status == InstanceStatus.IN_PROGRESS.value,
+        ]
+        # A task belongs to the POST the ladder resolved to, not merely to the person
+        # holding it. Someone wearing two District Manager hats must not be shown the other
+        # district's work — they cannot sign it, and acting on it half-succeeded.
+        other_hat = await engine.other_hat_condition(db, user)
+        if other_hat is not None:
+            conditions.append(other_hat)
     now = ist_now()
     term = search.strip()
     if term:
@@ -227,51 +252,116 @@ async def pending_page(
         Pending.doc_type != DocType.INDENT.value,
         Indent.indent_type != IndentType.MONTHLY.value,
     ))
-    joined = (
-        select(Pending, Instance, Indent.indent_type)
-        .join(Instance, Instance.id == Pending.instance_id)
-        .outerjoin(Indent, indent_join)
-    )
-    total = int(await db.scalar(
-        select(func.count(Pending.id))
-        .select_from(Pending).join(Instance, Instance.id == Pending.instance_id)
-        .outerjoin(Indent, indent_join)
-        .where(*conditions)
-    ) or 0)
     order = {
         "newest": Pending.created_at.desc(),
         "due": Pending.due_at.asc(),
         "value": Pending.amount.desc(),
     }.get(sort, Pending.created_at.asc())
-    rows = (await db.execute(
-        joined.where(*conditions)
-        .order_by(order, Pending.id.desc())
-        .offset((page - 1) * size)
-        .limit(size)
-    )).all()
+
+    if scope == "company":
+        # Group by instance_id so multiple approvers sharing a stage only show the document once
+        subq = (
+            select(func.min(Pending.id).label("min_pending_id"))
+            .select_from(Pending)
+            .join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+            .where(*conditions)
+            .group_by(Pending.instance_id)
+        ).subquery()
+
+        total = int(await db.scalar(
+            select(func.count(subq.c.min_pending_id))
+        ) or 0)
+
+        joined = (
+            select(Pending, Instance, Indent.indent_type)
+            .join(subq, Pending.id == subq.c.min_pending_id)
+            .join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+        )
+        rows = (await db.execute(
+            joined.order_by(order, Pending.id.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )).all()
+    else:
+        total = int(await db.scalar(
+            select(func.count(Pending.id))
+            .select_from(Pending).join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+            .where(*conditions)
+        ) or 0)
+        joined = (
+            select(Pending, Instance, Indent.indent_type)
+            .join(Instance, Instance.id == Pending.instance_id)
+            .outerjoin(Indent, indent_join)
+        )
+        rows = (await db.execute(
+            joined.where(*conditions)
+            .order_by(order, Pending.id.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )).all()
+
     numbers = await _document_numbers(db, _missing_numbers(
         (pending.doc_type, pending.doc_id, pending.doc_no) for pending, _, _ in rows
     ))
-    items = [{
-        "instance_id": pending.instance_id,
-        "doc_type": pending.doc_type,
-        "indent_type": indent_type,
-        "display_doc_type": _display_doc_type(pending.doc_type, indent_type),
-        "doc_id": pending.doc_id,
-        "stage_sequence": pending.stage_sequence,
-        "doc_no": pending.doc_no or numbers.get((pending.doc_type, pending.doc_id)),
-        "summary": pending.doc_summary,
-        "requested_by_name": pending.requested_by_name,
-        "amount": float(pending.amount) if pending.amount is not None else None,
-        "waiting_since": pending.created_at.isoformat() if pending.created_at else None,
-        "due_at": pending.due_at.isoformat() if pending.due_at else None,
-        # Decided here, against the same clock the `overdue_only` filter uses. These
-        # timestamps go out naive, so a browser reading them as local time answered a
-        # different question: "Past due 0" above a filter that returned a row.
-        "overdue": bool(pending.due_at and pending.due_at < now),
-        "current_stage_name": instance.current_stage_name,
-        "approver_name": user.full_name,
-    } for pending, instance, indent_type in rows]
+
+    instance_ids = [pending.instance_id for pending, _, _ in rows]
+    approver_names_by_instance: dict[int, list[str]] = {}
+    if instance_ids and scope == "company":
+        emp_rows = (await db.execute(
+            select(Pending.instance_id, HcmEmployee.full_name)
+            .join(HcmEmployee, HcmEmployee.id == Pending.approver_id)
+            .where(Pending.instance_id.in_(instance_ids))
+        )).all()
+        for inst_id, emp_name in emp_rows:
+            if emp_name:
+                approver_names_by_instance.setdefault(inst_id, []).append(emp_name)
+
+    overridden_instance_ids: set[int] = set()
+    if instance_ids:
+        overridden_rows = (await db.execute(
+            select(Action.instance_id)
+            .where(
+                Action.instance_id.in_(instance_ids),
+                or_(
+                    Action.comments.ilike("%[Admin Override%"),
+                    Action.actor_name.ilike("%(Admin Override)%"),
+                ),
+            )
+        )).scalars().all()
+        overridden_instance_ids = set(overridden_rows)
+
+    items = []
+    for pending, instance, indent_type in rows:
+        if scope == "company":
+            names = approver_names_by_instance.get(pending.instance_id, [])
+            approver_disp = ", ".join(names) if names else user.full_name
+        else:
+            approver_disp = user.full_name
+
+        items.append({
+            "instance_id": pending.instance_id,
+            "doc_type": pending.doc_type,
+            "indent_type": indent_type,
+            "display_doc_type": _display_doc_type(pending.doc_type, indent_type),
+            "doc_id": pending.doc_id,
+            "stage_sequence": pending.stage_sequence,
+            "doc_no": pending.doc_no or numbers.get((pending.doc_type, pending.doc_id)),
+            "summary": pending.doc_summary,
+            "requested_by_name": pending.requested_by_name,
+            "amount": float(pending.amount) if pending.amount is not None else None,
+            "waiting_since": pending.created_at.isoformat() if pending.created_at else None,
+            "due_at": pending.due_at.isoformat() if pending.due_at else None,
+            # Decided here, against the same clock the `overdue_only` filter uses. These
+            # timestamps go out naive, so a browser reading them as local time answered a
+            # different question: "Past due 0" above a filter that returned a row.
+            "overdue": bool(pending.due_at and pending.due_at < now),
+            "current_stage_name": instance.current_stage_name,
+            "approver_name": approver_disp,
+            "is_overridden": pending.instance_id in overridden_instance_ids,
+        })
     return {"items": items, "total": total, "page": page, "size": size}
 
 
@@ -1804,7 +1894,9 @@ async def _load_indent_task(
         Pending.stage_sequence == instance.current_sequence,
         Pending.approver_id == user.id,
     ))
-    if not assigned:
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user)
+    if not assigned and not is_admin:
         raise PermissionError_("This indent is not assigned to you at the current stage")
     if indent.requested_by_id == user.id:
         raise ValidationError("Requester cannot approve or reject their own indent")

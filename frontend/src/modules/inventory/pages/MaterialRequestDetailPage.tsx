@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { ShoppingCart } from "lucide-react";
+import { Check, ShieldAlert, ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  PageHeader, Button, Can, Card, Field, Input, ResponsiveList, StatusPill, useToast,
+  PageHeader, Button, Card, Field, Input, ResponsiveList, StatusPill, useToast,
   type Column,
 } from "@/shared/components";
 import {
@@ -40,7 +40,8 @@ export function MaterialRequestDetailPage() {
   const mrId = Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
-  const { can } = useAuth();
+  const { can, me, isAdmin: isSystemAdmin } = useAuth();
+  const isAdmin = isSystemAdmin || can("admin.workflow.manage") || Boolean(me?.roles?.includes("ADMIN")) || Boolean(me?.roles?.includes("SUPERUSER"));
   const toast = useToast();
   const [comments, setComments] = useState("");
   // Only the lines actually touched, keyed by line id. Absent means "unchanged" —
@@ -209,14 +210,7 @@ export function MaterialRequestDetailPage() {
   if (!data) return null;
 
   const open = data.status === "PENDING_APPROVAL";
-  // FIXED 2026-08-23 — the decision block used to render off `open` alone, so anybody
-  // who could READ a request in approval was shown live Approve and Reject buttons.
-  // For the common case where one person holds two rungs of the same ladder — an
-  // inventory manager who is also the SCM head — those buttons could only ever answer
-  // "Switch to the approval position before acting". The screen already knew; it just
-  // was not asking. `can_act` is the server's own answer to the same question
-  // `engine.act` decides on, so the two cannot drift.
-  const mine = open && data.can_act === true;
+  const mine = open && (data.can_act === true || isAdmin);
 
   /** What the box should show: the pending edit if there is one, else the saved value. */
   const shown = (row: MaterialRequestItem) =>
@@ -471,6 +465,18 @@ export function MaterialRequestDetailPage() {
         </p>
       )}
 
+      {open && !data.can_act && isAdmin && (
+        <div className="mt-4 flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-amber-900 dark:text-amber-200">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-500/20 text-amber-700 dark:text-amber-300">
+            <ShieldAlert className="h-5 w-5" />
+          </span>
+          <div className="text-sm">
+            <span className="font-bold">Admin Override Active: </span>
+            Currently waiting on {data.current_stage_name ?? "assigned approver"} {data.current_approver_name ? `(${data.current_approver_name})` : ""}, but as Administrator you have full authority to review, adjust quantities, approve, or reject.
+          </div>
+        </div>
+      )}
+
       {data.status === "RETURNED_FOR_CORRECTION" && (
         <Card className="mt-4 border border-warn/40 bg-warn-bg/40 p-4 text-sm">
           <p className="font-semibold text-ink">
@@ -539,25 +545,26 @@ export function MaterialRequestDetailPage() {
           {save.error && <p className="text-danger">{(save.error as Error).message}</p>}
           {sendBack.error && <p className="text-danger">{(sendBack.error as Error).message}</p>}
           <div className="flex flex-wrap gap-2">
-            <Can do="mr.approve">
+            {(can("mr.approve") || isAdmin) && (
               <Button variant="subtle" onClick={sendBackWithReason}
                 disabled={act.isPending || sendBack.isPending}>
                 Send back
               </Button>
-            </Can>
-            <Can do="mr.approve">
+            )}
+            {(can("mr.approve") || isAdmin) && (
               <Button className={TONE_APPROVE}
                 onClick={() => void decide(true)}
                 disabled={act.isPending || save.isPending || problems.length > 0}
               >
-                {save.isPending ? "Saving…" : "Approve"}
+                <Check className="h-4 w-4" />
+                {save.isPending ? "Saving…" : (!data.can_act && isAdmin ? "Approve (Admin Override)" : "Approve")}
               </Button>
-            </Can>
-            <Can do="mr.reject">
+            )}
+            {(can("mr.reject") || isAdmin) && (
               <Button className={TONE_REJECT} variant="subtle" onClick={() => void decide(false)} disabled={act.isPending}>
                 Reject
               </Button>
-            </Can>
+            )}
           </div>
         </div>
       )}

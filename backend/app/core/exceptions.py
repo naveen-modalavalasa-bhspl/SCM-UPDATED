@@ -432,11 +432,60 @@ async def integrity_error_handler(request: Request, exc: Exception):
     )
 
 
+async def operational_error_handler(request: Request, exc: Exception):
+    """Database driver/connection failure or timeout: lock wait, disconnect, server gone."""
+    orig = getattr(exc, "orig", exc)
+    raw = str(orig)
+    lowered = raw.lower()
+
+    errno = None
+    orig_args = getattr(orig, "args", None)
+    if orig_args and len(orig_args) > 0 and isinstance(orig_args[0], int):
+        errno = orig_args[0]
+
+    if errno in (1205, 1213) or "lock wait timeout" in lowered or "deadlock" in lowered:
+        status, code, title = 409, "LOCK_TIMEOUT", "Record temporarily locked"
+        message = (
+            "This record is currently being updated by another operation or user. "
+            "Please wait a moment and try again."
+        )
+    elif errno in (2003, 2006, 2013) or "can't connect" in lowered or "connection refused" in lowered or "lost connection" in lowered:
+        status, code, title = 503, "DATABASE_UNAVAILABLE", "Database server unavailable"
+        message = (
+            "Unable to connect to the database server. Please verify network connectivity "
+            "or contact system administration if the database is restarting."
+        )
+    elif errno == 3024 or "statement timeout" in lowered or "query timeout" in lowered or "max_execution_time" in lowered:
+        status, code, title = 504, "DATABASE_TIMEOUT", "Database query timed out"
+        message = (
+            "The database query took too long to complete. Please try narrowing your search "
+            "or filter criteria and retry."
+        )
+    else:
+        status, code, title = 500, "DATABASE_ERROR", "Database operation error"
+        message = (
+            "A database operation could not be completed. Please retry, or contact system "
+            "administration if the problem persists."
+        )
+    log.error("Database operational error: %s (errno=%s)", raw, errno)
+    await _report(request, exc, status, message)
+    return JSONResponse(
+        status_code=status,
+        content=_envelope(message, code=code, title=title),
+    )
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception):
     # `error` is fixed on purpose, and `detail` is the sentence a screen shows.
     # Whatever went wrong is in the log with its traceback; anything derived from
     # the exception itself risks carrying a connection string, a query or a path
     # out to the browser.
+    request_id = getattr(request.state, "request_id", None)
+    ref = f" (Ref: {request_id})" if request_id else ""
+    user_detail = (
+        f"We couldn't complete this request due to an unexpected server issue{ref}. "
+        "Please try again in a moment, or contact support with this reference if it persists."
+    )
     await _report(request, exc, 500, "Internal server error")
     return JSONResponse(
         status_code=500,
@@ -445,7 +494,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             code="SERVER_ERROR",
             title="Something went wrong on our side",
         ) | {
-            "detail": "We couldn't complete this request due to a server problem. "
-                      "Please try again in a moment.",
+            "detail": user_detail,
         },
     )
+

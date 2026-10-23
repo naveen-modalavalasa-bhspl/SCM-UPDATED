@@ -62,13 +62,13 @@ export function RFQDetailPage() {
 
   // Editable only while nobody outside has seen it, and only for the person who signs
   // it. The endpoint enforces both again — hiding the boxes is courtesy, not the guard.
-  const { can } = useAuth();
-  // Editing the asked-for quantity is part of approving it, so it follows the
-  // same gate — an approver who cannot sign must not be able to change the ask.
-  const canDecide = rfq?.awaiting_me ?? (rfq?.status === "PENDING_APPROVAL");
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  // In PENDING_APPROVAL, allowed to decide if assigned to me OR if user has Admin override power
+  const canDecide = rfq?.status === "PENDING_APPROVAL" && (Boolean(rfq?.awaiting_me) || isAdmin);
   // Editing the asked-for quantity is part of approving it, so it follows the
   // same gate — an approver who cannot sign must not change the ask.
-  const editableQty = !!canDecide && can("rfq.approve");
+  const editableQty = canDecide && (can("rfq.approve") || isAdmin);
 
   // Auto-expand line items when the approver can edit — the quantities ARE the decision
   useEffect(() => {
@@ -322,6 +322,11 @@ export function RFQDetailPage() {
                     ? `Pending at ${trail.data.stage_name}`
                     : rfq.status}
                 />
+                {isAdmin && rfq.status === "PENDING_APPROVAL" && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/10 text-purple-700 border border-purple-500/20">
+                    Admin Override
+                  </span>
+                )}
                 {rfq.is_price_frozen ? (
                   <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-700 border border-amber-500/20">
                     <Lock className="h-3.5 w-3.5" /> Locked (Prices Frozen)
@@ -344,8 +349,8 @@ export function RFQDetailPage() {
                 </Button>
               </Can>
             )}
-            {canDecide && (
-              <Can do="rfq.approve">
+            {canDecide && (can("rfq.approve") || isAdmin) && (
+              <>
                 <Button variant="subtle" disabled={busy} onClick={() => setReasonFor("send_back")}>
                   Send back
                 </Button>
@@ -353,9 +358,9 @@ export function RFQDetailPage() {
                   Reject
                 </Button>
                 <Button className={TONE_APPROVE} disabled={busy} onClick={() => approve.mutate()}>
-                  Approve &amp; publish
+                  {isAdmin && !rfq?.awaiting_me ? "Approve (Admin Override)" : "Approve & publish"}
                 </Button>
-              </Can>
+              </>
             )}
             {rfq?.status === "PUBLISHED" && (
               <Can do="rfq.create">

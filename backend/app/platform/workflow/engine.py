@@ -82,6 +82,25 @@ def _normalize_action(action: str) -> str:
     return _ACTION_ALIASES.get(a, a)
 
 
+async def is_workflow_admin(db: AsyncSession, user) -> bool:
+    """Whether user holds ADMIN_WORKFLOW_MANAGE or the ADMIN role, granting override power."""
+    if not user or not getattr(user, "id", None):
+        return False
+    from app.platform.rbac import permissions as perms
+    from app.platform.rbac.service import get_user_permissions, get_user_roles
+    from app.shared.enums import UserRole
+    try:
+        user_perms = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
+        if perms.ADMIN_WORKFLOW_MANAGE in user_perms:
+            return True
+        roles = await get_user_roles(db, user.id, getattr(user, "active_position_id", None))
+        return any(getattr(r, "code", "") in (UserRole.ADMIN.value, "ADMIN", "SUPERADMIN") for r in roles)
+    except Exception as exc:
+        logger.warning("Could not check workflow admin permissions for user %s: %s", getattr(user, "id", None), exc)
+        return False
+
+
+
 async def _active_workflow(db: AsyncSession, doc_type: str) -> tuple[Workflow, bool]:
     """The configured workflow, or the hardcoded ladder materialised as one.
 
@@ -201,13 +220,21 @@ async def _open_instance(db: AsyncSession, doc_type: str, doc_id: int,
 
 async def _stage_satisfied(db, instance, stage, approver_ids: set[int]) -> bool:
     approved = (await db.execute(
-        select(Action.actor_id).where(
+        select(Action.actor_id, Action.actor_name).where(
             Action.instance_id == instance.id,
             Action.stage_sequence == stage.sequence,
             Action.action == ApprovalAction.APPROVED.value,
         )
-    )).scalars().all()
-    count = len({a for a in approved if a in approver_ids})
+    )).all()
+    # Only the stage's own approvers count, once each. An admin override stands in for
+    # exactly one pending approver (see act()), so each override is one signature and
+    # never more — counting every approval would let anyone outside the stage tip a quorum.
+    signed = {actor for actor, _ in approved if actor in approver_ids}
+    overrides = sum(
+        1 for actor, name in approved
+        if actor not in approver_ids and (name or "").endswith("(Admin Override)")
+    )
+    count = len(signed) + overrides
     total = len(approver_ids)
     mode = stage.approval_mode
     if mode == ApprovalMode.ALL.value:
@@ -810,12 +837,28 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
             Pending.stage_sequence == instance.current_sequence,
         )
     )).scalars().all()
-    if user.id not in {row.approver_id for row in pending}:
-        await _log_ladder_denial(
-            db, instance, user, link.get("role_name"),
-            link.get("approver_names"), {row.approver_id for row in pending},
-        )
-        raise PermissionError_("You are not a valid approver for the current stage")
+    if instance.started_by_id and instance.started_by_id == user.id:
+        raise PermissionError_("Requester cannot approve their own document")
+
+    pending_approver_ids = {row.approver_id for row in pending}
+    is_admin = await is_workflow_admin(db, user)
+    is_admin_override = False
+    if user.id not in pending_approver_ids:
+        if is_admin:
+            is_admin_override = True
+        else:
+            await _log_ladder_denial(
+                db, instance, user, link.get("role_name"),
+                link.get("approver_names"), pending_approver_ids,
+            )
+            raise PermissionError_("You are not a valid approver for the current stage")
+
+    bypassed_names = []
+    if is_admin_override:
+        for row in pending:
+            emp = await hcm_service.get_employee(db, row.approver_id)
+            if emp and emp.full_name:
+                bypassed_names.append(emp.full_name)
 
     # Someone holding two posts must act under one the ladder picked. A delegate never
     # holds one, so the check applies only to the rung's own holders. Any post the
@@ -826,19 +869,29 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
     # fallback exists to prevent.
     active_position_id = getattr(user, "active_position_id", None)
     allowed_positions = ladder.allowed_position_ids(link)
-    if (allowed_positions
+    if not is_admin_override and (allowed_positions
             and user.id in link.get("approver_ids", [])
             and active_position_id not in allowed_positions):
         raise PermissionError_("Switch to the approval position before acting")
 
     active_position = await hcm_service.get_position(
         db, active_position_id) if active_position_id else None
+
+    comment_text = comments or ""
+    if is_admin_override:
+        if bypassed_names and "[Admin Override" not in comment_text:
+            comment_text = f"[Admin Override: bypassed {', '.join(bypassed_names)}] {comment_text}".strip()
+        elif "[Admin Override" not in comment_text:
+            comment_text = f"[Admin Override] {comment_text}".strip()
+    actor_name = f"{user.full_name} (Admin Override)" if is_admin_override else user.full_name
+    actor_pos = active_position.name if active_position else ("Administrator" if is_admin_override else None)
+
     db.add(Action(
         instance_id=instance.id, stage_sequence=instance.current_sequence,
         stage_name=link["role_name"],
-        actor_id=user.id, actor_name=user.full_name,
-        actor_position=active_position.name if active_position else None,
-        action=action, comments=comments,
+        actor_id=user.id, actor_name=actor_name,
+        actor_position=actor_pos,
+        action=action, comments=comment_text,
     ))
     await db.flush()
 
@@ -902,16 +955,20 @@ async def return_for_correction(
             Pending.stage_sequence == instance.current_sequence,
         )
     )).scalars().all()
+    is_admin_override = False
     if user.id not in {row.approver_id for row in pending}:
-        await _log_ladder_denial(
-            db, instance, user, link.get("role_name"),
-            link.get("approver_names"), {row.approver_id for row in pending},
-        )
-        raise PermissionError_("You are not a valid approver for the current stage")
+        if await is_workflow_admin(db, user):
+            is_admin_override = True
+        else:
+            await _log_ladder_denial(
+                db, instance, user, link.get("role_name"),
+                link.get("approver_names"), {row.approver_id for row in pending},
+            )
+            raise PermissionError_("You are not a valid approver for the current stage")
 
     active_position_id = getattr(user, "active_position_id", None)
     allowed_positions = ladder.allowed_position_ids(link)
-    if (allowed_positions
+    if not is_admin_override and (allowed_positions
             and user.id in link.get("approver_ids", [])
             and active_position_id not in allowed_positions):
         raise PermissionError_("Switch to the approval position before acting")
@@ -1281,45 +1338,74 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         ] if employee is not None
     ]
     approver_ids = {a.id for a in approvers}
+    if instance.started_by_id and instance.started_by_id == user.id:
+        raise PermissionError_("Requester cannot approve their own document")
+
+    is_admin = await is_workflow_admin(db, user)
+    is_admin_override = False
     if user.id not in pending_ids:
-        await _log_ladder_denial(
-            db, instance, user, getattr(stage, "name", None),
-            [a.full_name for a in approvers], pending_ids,
-        )
-        raise PermissionError_("You are not a valid approver for the current stage")
+        if is_admin:
+            is_admin_override = True
+        else:
+            await _log_ladder_denial(
+                db, instance, user, getattr(stage, "name", None),
+                [a.full_name for a in approvers], pending_ids,
+            )
+            raise PermissionError_("You are not a valid approver for the current stage")
+
+    bypassed_names = []
+    if is_admin_override:
+        for row in pending:
+            emp = await hcm_service.get_employee(db, row.approver_id)
+            if emp and emp.full_name:
+                bypassed_names.append(emp.full_name)
+
     active_position_id = getattr(user, "active_position_id", None)
     # The position checks below stop someone approving from the wrong hat. They are
     # meaningless when the fallback picked this stage's approvers — it chose people
     # precisely BECAUSE the configured position produced nobody, so requiring them to
     # hold that position would lock the document again, which is what the fallback
     # exists to prevent. Authority is still enforced: user.id must be in pending_ids.
-    if await _stage_used_fallback(db, instance, stage):
-        pass
-    elif stage.approver_type == ApproverType.POSITION.value:
-        if active_position_id != stage.position_id:
-            raise PermissionError_("Switch to the approval position before acting")
-    elif stage.approver_type == ApproverType.REPORTING_MANAGER.value:
-        if not await _approver_is_above_requester(
-            db, instance, context, active_position_id,
-        ):
-            raise PermissionError_("Switch to the reporting-manager position before acting")
+    if not is_admin_override:
+        if await _stage_used_fallback(db, instance, stage):
+            pass
+        elif stage.approver_type == ApproverType.POSITION.value:
+            if active_position_id != stage.position_id:
+                raise PermissionError_("Switch to the approval position before acting")
+        elif stage.approver_type == ApproverType.REPORTING_MANAGER.value:
+            if not await _approver_is_above_requester(
+                db, instance, context, active_position_id,
+            ):
+                raise PermissionError_("Switch to the reporting-manager position before acting")
 
     active_position = await hcm_service.get_position(
         db, active_position_id,
     ) if active_position_id else None
+    comment_text = comments or ""
+    if is_admin_override:
+        if bypassed_names and "[Admin Override" not in comment_text:
+            comment_text = f"[Admin Override: bypassed {', '.join(bypassed_names)}] {comment_text}".strip()
+        elif "[Admin Override" not in comment_text:
+            comment_text = f"[Admin Override] {comment_text}".strip()
+    actor_name = f"{user.full_name} (Admin Override)" if is_admin_override else user.full_name
+    actor_pos = active_position.name if active_position else ("Administrator" if is_admin_override else None)
     db.add(Action(
         instance_id=instance.id, stage_sequence=stage.sequence,
         stage_name=instance.current_stage_name or stage.name,
-        actor_id=user.id, actor_name=user.full_name,
-        actor_position=active_position.name if active_position else None,
-        action=action, comments=comments,
+        actor_id=user.id, actor_name=actor_name,
+        actor_position=actor_pos,
+        action=action, comments=comment_text,
     ))
     await db.flush()
 
     if action == ApprovalAction.APPROVED.value:
-        for row in pending:
-            if row.approver_id == user.id:
-                await db.delete(row)
+        if is_admin_override:
+            if pending:
+                await db.delete(pending[0])
+        else:
+            for row in pending:
+                if row.approver_id == user.id:
+                    await db.delete(row)
 
     if action == ApprovalAction.REJECTED.value:
         instance.status = InstanceStatus.REJECTED.value
@@ -1594,13 +1680,12 @@ async def can_act_now(db, doc_type: str, doc_id: int, user) -> bool:
     """
     try:
         instance = await _load_instance(db, doc_type, doc_id)
-        # Only a ladder document can answer this: `_link` reads the frozen
-        # `resolved_chain`, which is what `_act_ladder` guards against. A stage-based
-        # instance has no position pinning to check, so it falls through to the
-        # permission the route already carries.
         if (instance is None
-                or instance.status != InstanceStatus.IN_PROGRESS.value
-                or not instance.resolved_chain):
+                or instance.status != InstanceStatus.IN_PROGRESS.value):
+            return False
+        if await is_workflow_admin(db, user):
+            return True
+        if not instance.resolved_chain:
             return False
         link = _link(instance)
     except Exception:  # noqa: BLE001 - a UI hint is not worth failing a read
@@ -1914,6 +1999,18 @@ async def actionable_doc_ids(db, doc_type, doc_ids: list[int], user) -> set[int]
     """
     if not doc_ids:
         return set()
+
+    if await is_workflow_admin(db, user):
+        admin_rows = (await db.execute(
+            select(Instance.doc_id)
+            .where(
+                Instance.doc_type.in_(
+                    [doc_type] if isinstance(doc_type, str) else list(doc_type)),
+                Instance.doc_id.in_(doc_ids),
+                Instance.status == InstanceStatus.IN_PROGRESS.value,
+            )
+        )).scalars().all()
+        return set(admin_rows)
 
     rows = (await db.execute(
         select(Pending.doc_id, Instance)

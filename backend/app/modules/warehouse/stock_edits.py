@@ -456,6 +456,9 @@ async def _can_act(db: AsyncSession, edit: m.StockEdit, user) -> bool:
     instance = await inv_service.engine_instance_for(db, DOC, edit.id)
     if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
         return await engine.can_act_now(db, DOC, edit.id, user)
+    from app.platform.workflow.engine import is_workflow_admin
+    if await is_workflow_admin(db, user):
+        return True
     if getattr(user, "id", None) == edit.created_by_id:
         return False
     granted = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
@@ -495,13 +498,15 @@ async def act_on_edit(db: AsyncSession, edit_id: int, action: str, user,
         else:
             edit.current_approver_name = await engine.current_approver_label(db, DOC, edit.id)
     else:
+        from app.platform.workflow.engine import is_workflow_admin
+        is_admin = await is_workflow_admin(db, user)
         if getattr(user, "id", None) == edit.created_by_id:
             raise PermissionError_(
                 "You raised this correction, so you cannot approve or reject it. "
                 "Ask another holder of stock-correction approval to action it.")
         granted = await get_user_permissions(
             db, user, getattr(user, "active_position_id", None))
-        if perms.STOCK_EDIT_APPROVE not in granted:
+        if not is_admin and perms.STOCK_EDIT_APPROVE not in granted:
             raise PermissionError_("You cannot approve stock corrections")
         if action == "APPROVE":
             _mark_approved(edit, user)

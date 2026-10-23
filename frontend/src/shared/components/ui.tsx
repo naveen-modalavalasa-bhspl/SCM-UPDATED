@@ -171,8 +171,8 @@ function stopLabelReopeningSelect(event: MouseEvent<HTMLLabelElement>) {
 }
 
 export function Field(
-  { label, children, hint, required }:
-  { label: string; children: ReactNode; hint?: string; required?: boolean },
+  { label, children, hint, required, error }:
+  { label: string; children: ReactNode; hint?: string; required?: boolean; error?: string | null },
 ) {
   return (
     <label className="block" onClick={stopLabelReopeningSelect}>
@@ -189,7 +189,8 @@ export function Field(
         )}
       </span>
       {children}
-      {hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
+      {error && <span className="mt-1 block text-xs font-semibold text-danger">{error}</span>}
+      {hint && !error && <span className="mt-1 block text-xs text-muted">{hint}</span>}
     </label>
   );
 }
