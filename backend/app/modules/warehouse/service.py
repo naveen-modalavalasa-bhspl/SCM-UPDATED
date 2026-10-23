@@ -1668,14 +1668,21 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             raise ValidationError(
                 f"Line {index}: serialized quantity must be a whole number"
             )
-        # More serials than units is always wrong. FEWER is not: goods arrive
-        # unlabelled, and the units nobody could read a number off are given one from
-        # the Serial format (Settings > Code Formats) when the receipt is submitted.
-        # Demanding the full set here is what stopped those lorries at the gate.
+        # SCM_0086: every unit still has to be named here today — there is no
+        # mechanism yet that assigns an unlabelled unit a code later (at QC or
+        # put-away), so relaxing this to "fewer is fine" would land stock with
+        # units nobody can ever tell apart. The message at least says how many
+        # are short or extra and where, rather than a bare "exactly N" that sent
+        # the gate hunting for which of several cartons was the one short.
         if item.is_serial_tracked and len(serials) != int(received):
+            gap = int(received) - len(serials)
+            what = (f"{gap} more serial number{'s' if gap != 1 else ''}"
+                    if gap > 0
+                    else f"{-gap} too many serial number{'s' if -gap != 1 else ''}")
             raise ValidationError(
-                f"Line {index}: Please provide exactly {int(received)} serial numbers for "
-                f"received units of {item.code}"
+                f"Line {index}: {item.code} — {received} received units need "
+                f"{int(received)} serial numbers, and {len(serials)} are entered on this "
+                f"line. Add {what} before saving."
             )
         if serials:
             seen_for_item = seen_serials_by_item.setdefault(item.id, set())
@@ -7621,6 +7628,33 @@ def _issue_reservation_clause(issue_id: int):
                m.SerialNumber.remarks.like(f"{base} line %"))
 
 
+_ISSUE_MARKER_RE = re.compile(r"^Reserved for issue (\d+)")
+
+
+async def _other_issue_claim_hint(db: AsyncSession, remarks: str,
+                                  this_creator_id: int | None) -> str:
+    """What to say about the issue that already holds this unit (SCM_0083).
+
+    A storekeeper's own earlier create that only partly went through — a draft he
+    never opened again — reserved the unit and left it holding nothing he could
+    see; the generic "reserved by another issue" then sent him hunting for a
+    document that, to him, did not exist. Naming it and saying it is his own draft
+    is the one case the hint is specific about; any other holder stays generic —
+    a stranger's in-flight issue is not this storekeeper's to open or cancel.
+    """
+    match = _ISSUE_MARKER_RE.match(remarks)
+    if not match:
+        return "open Issues to find which one"
+    other = await db.get(m.MaterialIssue, int(match.group(1)))
+    if other is None:
+        return "open Issues to find which one"
+    if (other.status == IssueStatus.DRAFT.value and this_creator_id is not None
+            and other.created_by_id == this_creator_id):
+        return (f"it is held by your own draft {other.issue_no}. Open it, "
+                f"release or complete that line, then come back to this one")
+    return f"it is held by {other.issue_no}"
+
+
 async def _project_name(db: AsyncSession, project_id: int | None) -> str | None:
     """The project's display name, snapshotted beside its id (rule 10)."""
     from app.shared.models.master import Project
@@ -8038,9 +8072,12 @@ async def _reserve_issue_serials(
                 # got for a unit he had picked himself two rows up, and it sent
                 # him looking for a document that does not exist.
                 other = line_no_by_marker.get(row.remarks)
+                if other:
+                    raise ValidationError(
+                        f"{value} is already named on line {other} of this issue")
                 raise ValidationError(
-                    f"{value} is already named on line {other} of this issue"
-                    if other else f"{value} is reserved by another issue")
+                    f"{value} is reserved by another issue — "
+                    f"{await _other_issue_claim_hint(db, row.remarks, issue.created_by_id)}")
         # Stamped as a SET, once every unit on the line has passed its checks. The
         # per-row assignment this replaces was one UPDATE per serial at flush; it also
         # means nothing is written until the whole line validates, which is the
@@ -9567,12 +9604,21 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
         if issued > requested:
             raise ValidationError(
                 f"Line {index}: cannot issue {issued} against a request for {requested}")
-        if decimals.get(item.uom_code, uom_rules.MAX_DECIMALS) == 0 and (
-                issued != issued.to_integral_value()
-                or requested != requested.to_integral_value()):
-            raise ValidationError(
-                f"Line {index}: {item.code} is counted in {item.uom_code} — "
-                f"{issued} is not a whole number. Issue whole units only.")
+        if decimals.get(item.uom_code, uom_rules.MAX_DECIMALS) == 0:
+            # Name whichever figure is actually fractional — not always `issued`.
+            # A request of 10.05 issued as 10 used to be refused with "10 is not
+            # a whole number", which sends a storekeeper hunting for a fraction
+            # in the number that is already whole (SCM_0080/SCM_0083).
+            bad_field, bad_value = (
+                ("requested", requested) if requested != requested.to_integral_value()
+                else ("issued", issued) if issued != issued.to_integral_value()
+                else (None, None)
+            )
+            if bad_field:
+                raise ValidationError(
+                    f"Line {index}: {item.code} is counted in {item.uom_code} — "
+                    f"the {bad_field} quantity {bad_value} is not a whole number. "
+                    f"Issue whole units only.")
 
         batch = await db.get(m.Batch, line.batch_id) if line.batch_id else None
         rate = _d(line.rate)
@@ -9690,6 +9736,13 @@ async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
 async def get_issue(db: AsyncSession, issue_id: int, user=None) -> m.MaterialIssue:
     issue = await _load(db, m.MaterialIssue, issue_id, "Issue", m.MaterialIssue.items)
     issue = await _decorate_issue_serials(db, issue)
+    # How many decimals each line's unit allows, served onto the line so the form
+    # can refuse a typed fraction for a whole-unit item (NOS, Box…) before save,
+    # the same rule `_apply_issue_lines` enforces on the server (SCM_0080).
+    line_decimals = await uom_rules.decimals_by_code(
+        db, {it.uom_code for it in issue.items})
+    for it in issue.items:
+        setattr(it, "qty_decimals", line_decimals.get(it.uom_code, uom_rules.MAX_DECIMALS))
     # The doc type the issue actually runs under, not a hardcoded WH_ISSUE: one that
     # left a point the submitter holds runs under OWN_STOCK_ISSUE, and asking the
     # engine for the wrong type finds no instance, returns no approvers, and hides the
@@ -23496,11 +23549,17 @@ async def item_options(db: AsyncSession, search: str | None = None, *,
             stmt = stmt.where(Item.id.in_(held.keys() or {0}))
 
     rows = (await db.execute(stmt.order_by(Item.code).limit(LOOKUP_LIMIT))).scalars().all()
+    # How many decimals each row's unit allows — the same rule `_apply_issue_lines`
+    # enforces on save (SCM_0080). Served here so the issue form can stop a
+    # fractional quantity being TYPED for a whole-unit item, rather than only
+    # refusing it after the fact.
+    decimals = await uom_rules.decimals_by_code(db, {r.uom_code for r in rows})
     return [{
         "id": r.id,
         "code": r.code,
         "name": r.name,
         "uom_code": r.uom_code,
+        "qty_decimals": decimals.get(r.uom_code, uom_rules.MAX_DECIMALS),
         "is_batch_tracked": bool(r.is_batch_tracked),
         "is_serial_tracked": bool(r.is_serial_tracked),
         # The GRN form reads this to decide whether to show the IMEI column, the

@@ -123,12 +123,24 @@ export function PODetailPage() {
       refresh();
       if (approvalView || decisionView) nav("/approvals");
     },
+    // The approval itself can have gone through even though this request came
+    // back as an error (e.g. a courtesy vendor email failed after the decision
+    // was committed) — refetch so the screen shows what actually happened
+    // instead of leaving the old status up next to an error toast.
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not record the decision. Checking the latest status…");
+      refresh();
+    },
   });
 
   const submit = useMutation({
     mutationFn: () => poApi.submit(poId),
     onSuccess: () => {
       void alerts.success("po.submitted", { number: formatPONo(po.data?.po_no, po.data?.revision_no) });
+      refresh();
+    },
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not submit the order. Checking the latest status…");
       refresh();
     },
   });
@@ -138,6 +150,10 @@ export function PODetailPage() {
     onSuccess: () => {
       const number = formatPONo(po.data?.po_no, po.data?.revision_no);
       void alerts.success("po.sent_to_vendor", { number, vendor: po.data?.vendor_name ?? "the vendor" });
+      refresh();
+    },
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not send the order to the vendor. Checking the latest status…");
       refresh();
     },
   });

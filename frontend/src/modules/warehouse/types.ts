@@ -1230,6 +1230,9 @@ export interface IssueItem {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
+  /** How many decimal places this line's unit allows — 0 for a whole-unit UOM.
+   *  Set by `get_issue`; `null` wherever the line was read without it. */
+  qty_decimals?: number | null;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;
   bin_id?: number | null;
@@ -1372,6 +1375,10 @@ export interface IssueItemWrite {
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
+  /** How many decimal places this item's unit allows — 0 for a whole-unit UOM
+   *  (Nos, Box…). Carried so the quantity inputs can refuse a typed fraction
+   *  before save (SCM_0080); stripped before the write. */
+  qty_decimals?: number | null;
   is_serial_tracked?: boolean;
   unit_mode?: UnitMode | null;
   tracking_type?: TrackingType | null;
@@ -2738,6 +2745,9 @@ export interface DispatchReceiptSource {
 
 export interface ItemOption extends Option {
   uom_code?: string | null;
+  /** How many decimal places this item's unit allows — 0 for a whole-unit UOM
+   *  (Nos, Box…). Lets the issue form refuse a typed fraction before save. */
+  qty_decimals?: number | null;
   is_batch_tracked?: boolean;
   is_serial_tracked?: boolean;
   is_imei_tracked?: boolean;

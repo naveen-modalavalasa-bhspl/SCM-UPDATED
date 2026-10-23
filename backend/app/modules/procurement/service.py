@@ -2049,27 +2049,38 @@ async def email_po_copy(db: AsyncSession, po: PurchaseOrder, user) -> bool:
     No new permission: this is a side effect of `po.send` and `po.edit`, never its own
     route, so nothing here widens what anybody can do.
     """
+    # Read into plain locals BEFORE anything that touches the session below: a
+    # failed flush/commit inside `send_mail` can leave the session needing a
+    # rollback, and `po` has `expire_on_commit` attributes that would then try
+    # to re-fetch from that dead session — turning "the mail failed" into a
+    # second, unrelated 500 from this very except block (SCM_0076/SCM_0072).
+    po_no = po.po_no
+    revision_no = po.revision_no or 0
     try:
         vendor = await db.get(Vendor, po.vendor_id) if po.vendor_id else None
         address = (getattr(vendor, "email", None) or "").strip()
         if not address:
             logger.info("no email on file for vendor %s; %s not sent",
-                        po.vendor_name or po.vendor_id, po.po_no)
+                        po.vendor_name or po.vendor_id, po_no)
             return False
-        subject = f"Purchase order {po.po_no}"
-        if (po.revision_no or 0) > 0:
-            subject += f" — revision {po.revision_no}"
+        subject = f"Purchase order {po_no}"
+        if revision_no > 0:
+            subject += f" — revision {revision_no}"
         company = mail_template.Company.of(await get_company_letterhead(db))
         portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
                       f"?next=/supplier/pos/{po.id}")
         text, html = _po_copy_parts(po, company, portal_url)
         await mail_service.send_mail(
             db, MailSendIn(to=[address], subject=subject, body=text, html=html), user,
-            attachments=[(f"{po.po_no}.pdf", vendor_documents.po_pdf(po, company), "application/pdf")])
-        logger.info("%s emailed to %s", po.po_no, address)
+            attachments=[(f"{po_no}.pdf", vendor_documents.po_pdf(po, company), "application/pdf")])
+        logger.info("%s emailed to %s", po_no, address)
         return True
     except Exception as exc:  # noqa: BLE001 - a courtesy must not cost the order
-        logger.warning("could not email %s to the vendor: %s", po.po_no, exc)
+        # The real change (SENT_TO_VENDOR) is already committed by the caller.
+        # Roll back here so a session left "pending rollback" by the failure
+        # above doesn't poison whatever the caller reads next.
+        await db.rollback()
+        logger.warning("could not email %s to the vendor: %s", po_no, exc)
         return False
 
 
@@ -4085,42 +4096,50 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
 
 async def email_rfq_copies(db: AsyncSession, rfq: RFQ, user) -> None:
     """Email each vendor's RFQ after its approved publication is committed."""
+    # Plain local, read before any vendor's send can leave the session needing
+    # a rollback — `rfq.rfq_no` after that is an expired attribute and a second
+    # fetch from a dead session, not a log line (SCM_0087).
+    rfq_no = rfq.rfq_no
+    due_date = str(rfq.due_date or "")
     for invited in rfq.vendors:
         address = (invited.vendor_email or "").strip()
         if not address:
-            logger.warning("%s not emailed to %s: no vendor email", rfq.rfq_no,
+            logger.warning("%s not emailed to %s: no vendor email", rfq_no,
                            invited.vendor_name or invited.vendor_id)
             continue
-        portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
-                      f"?next=/supplier/rfqs/{rfq.id}")
-        subject = f"Request for quotation {rfq.rfq_no}"
-        text = (f"Hello {invited.vendor_name or 'Supplier'},\n\n"
-                f"Your RFQ copy is attached. Sign in with your supplier username and "
-                f"password to submit your quotation.\n\nSupplier Portal: {portal_url}")
-        company = await mail_service._company(db)
-        html = mail_template.render(
-            subject=subject, eyebrow="Request for quotation", heading=subject,
-            preheader=f"Quotation requested from {invited.vendor_name or 'supplier'}.",
-            blocks=[
-                mail_template.paragraph(f"Hello {invited.vendor_name or 'Supplier'},"),
-                mail_template.paragraph(
-                    "Your RFQ copy is attached. Sign in with your supplier username "
-                    "and password to submit your quotation."),
-                mail_template.facts([("RFQ", rfq.rfq_no), ("Due date", str(rfq.due_date or ""))]),
-                mail_template.button("Open Supplier Portal", portal_url),
-            ], company=company,
-            footer_note="Use your existing supplier username and password to sign in.")
         try:
+            portal_url = (f"{settings.APP_BASE_URL.rstrip('/')}/supplier/login"
+                          f"?next=/supplier/rfqs/{rfq.id}")
+            subject = f"Request for quotation {rfq_no}"
+            text = (f"Hello {invited.vendor_name or 'Supplier'},\n\n"
+                    f"Your RFQ copy is attached. Sign in with your supplier username and "
+                    f"password to submit your quotation.\n\nSupplier Portal: {portal_url}")
+            company = await mail_service._company(db)
+            html = mail_template.render(
+                subject=subject, eyebrow="Request for quotation", heading=subject,
+                preheader=f"Quotation requested from {invited.vendor_name or 'supplier'}.",
+                blocks=[
+                    mail_template.paragraph(f"Hello {invited.vendor_name or 'Supplier'},"),
+                    mail_template.paragraph(
+                        "Your RFQ copy is attached. Sign in with your supplier username "
+                        "and password to submit your quotation."),
+                    mail_template.facts([("RFQ", rfq_no), ("Due date", due_date)]),
+                    mail_template.button("Open Supplier Portal", portal_url),
+                ], company=company,
+                footer_note="Use your existing supplier username and password to sign in.")
             await mail_service.send_mail(
                 db, MailSendIn(to=[address], subject=subject, body=text, html=html), user,
-                attachments=[(f"{rfq.rfq_no}.pdf",
+                attachments=[(f"{rfq_no}.pdf",
                               vendor_documents.rfq_pdf(
                                   rfq, invited.vendor_name or "Supplier", company,
                                   invited.mapped_item_ids or [],
                                   invited.item_quantities or {}),
                               "application/pdf")])
         except Exception as exc:  # delivery cannot unpublish an approved RFQ
-            logger.warning("could not email %s to %s: %s", rfq.rfq_no, address, exc)
+            # The publish/approval is already committed; a dead session from a
+            # failed send must not poison the caller's next statement.
+            await db.rollback()
+            logger.warning("could not email %s to %s: %s", rfq_no, address, exc)
 
 
 async def close_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:

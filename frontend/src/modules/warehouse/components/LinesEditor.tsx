@@ -187,7 +187,8 @@ export function QtyInput({
   disabled,
   invalid,
   ariaLabel,
-  step = "0.01",
+  step,
+  decimals,
 }: {
   value: number | string;
   onChange: (value: any) => void;
@@ -195,11 +196,21 @@ export function QtyInput({
   disabled?: boolean;
   invalid?: boolean;
   ariaLabel: string;
-  /** Warehouse quantities and money are entered at two decimal places. */
+  /** Warehouse quantities and money are entered at two decimal places by
+   *  default. Overridden by `decimals` when the item's own unit is whole. */
   step?: string;
+  /** How many decimal places this quantity's unit allows. 0 means a
+   *  whole-unit UOM (Nos, Box…) — the input then blocks "." entirely and
+   *  rounds on blur, instead of letting a fraction through for the server to
+   *  refuse afterwards (SCM_0080). `undefined`/`null` keeps the old 2-dp
+   *  behaviour for a line whose unit is not yet known. */
+  decimals?: number | null;
 }) {
+  const places = decimals === 0 ? 0 : 2;
+  const effectiveStep = step ?? (places === 0 ? "1" : "0.01");
+  const fmt = (n: number) => n.toFixed(places);
   const [local, setLocal] = useState<string>(
-    value === 0 ? "0.00" : value === "" || value == null ? "" : Number(value).toFixed(2)
+    value === 0 ? fmt(0) : value === "" || value == null ? "" : fmt(Number(value))
   );
 
   useEffect(() => {
@@ -209,21 +220,26 @@ export function QtyInput({
       const currentNum = Number(local);
       const newNum = Number(value);
       if (currentNum !== newNum && !(Number.isNaN(currentNum) && Number.isNaN(newNum))) {
-        setLocal(Number(value).toFixed(2));
+        setLocal(fmt(Number(value)));
       }
     }
-  }, [value, local]);
+  }, [value, local, places]);
 
   return (
     <input
       type="number"
-      inputMode="decimal"
+      inputMode={places === 0 ? "numeric" : "decimal"}
       min={0}
       max={max}
-      step={step}
+      step={effectiveStep}
       value={local}
       disabled={disabled}
       aria-label={ariaLabel}
+      onKeyDown={(e) => {
+        // Whole-unit items (Nos, Box…) never take a fraction — refuse the
+        // decimal point at the keyboard rather than only on blur or save.
+        if (places === 0 && (e.key === "." || e.key === ",")) e.preventDefault();
+      }}
       onChange={(e) => {
         setLocal(e.target.value);
         onChange(e.target.value === "" ? "" : e.target.value);
@@ -232,7 +248,7 @@ export function QtyInput({
         if (e.target.value !== "") {
           const num = Number(e.target.value);
           if (!Number.isNaN(num)) {
-            const formatted = num.toFixed(2);
+            const formatted = fmt(num);
             setLocal(formatted);
             onChange(formatted);
           }

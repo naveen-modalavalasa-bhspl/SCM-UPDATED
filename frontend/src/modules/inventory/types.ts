@@ -1279,6 +1279,9 @@ export interface FulfilmentBatch {
   total_qty: number;
   totals_by_uom?: UomTotal[];
   oldest_raised_at?: string | null;
+  /** The most recent indent's created_at in this cycle — together with
+   *  `oldest_raised_at` this is a RANGE, not one date (SCM_0082). */
+  newest_raised_at?: string | null;
 }
 
 export interface BatchDemand {
