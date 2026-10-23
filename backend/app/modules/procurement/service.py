@@ -294,6 +294,43 @@ def tax_region(company_gstin: str | None, vendor_gstin: str | None) -> str:
     return "INTER"
 
 
+async def _attach_po_tax_context(db: AsyncSession, po) -> None:
+    """Tell the order which tax applies and split each line's tax into it.
+
+    The PO gap this closes: a quotation already derives `tax_region` the moment a
+    vendor submits (`_attach_tax_context`), but nothing carried it onto the order
+    raised from that quotation, and a PO raised cold never computed it at all — so
+    `vendor_gstin` sat on the order with no CGST/SGST/IGST split to go with it, and
+    the printed order showed a flat tax percent with no state-wise breakup at all.
+
+    Transient, same as `_attach_tax_context`: the company's own GSTIN can be
+    corrected on Settings > Company, and re-reading an old order should answer for
+    the CURRENT GSTIN, not freeze whatever was true the day it was raised. Storing
+    the region would be storing an answer that can go stale without anybody editing
+    the order.
+    """
+    company_gstin = await _company_gstin(db)
+    region = tax_region(company_gstin, po.vendor_gstin)
+    po.tax_region = region
+    po.company_gstin = company_gstin
+    for line in po.items:
+        tax_amount = _d(line.amount) * _d(line.tax_percent or 0) / _d(100)
+        if region == "INTRA":
+            half_percent = _d(line.tax_percent or 0) / _d(2)
+            half_amount = tax_amount / _d(2)
+            line.cgst_percent = line.sgst_percent = float(half_percent)
+            line.cgst_amount = line.sgst_amount = float(half_amount)
+            line.igst_percent = 0.0
+            line.igst_amount = 0.0
+        else:
+            line.cgst_percent = 0.0
+            line.sgst_percent = 0.0
+            line.cgst_amount = 0.0
+            line.sgst_amount = 0.0
+            line.igst_percent = float(line.tax_percent or 0)
+            line.igst_amount = float(tax_amount)
+
+
 async def _hsn_ceilings(db: AsyncSession, item_ids: list[int]) -> dict[int, dict]:
     """Per item: the HSN code and the GST rate it notifies. The quote may not exceed it.
 
@@ -1121,7 +1158,8 @@ async def get_po(db: AsyncSession, po_id: int, user=None, *,
         vendor_name = (await db.execute(select(Vendor.name).where(Vendor.id == po.vendor_id))).scalar_one_or_none()
         if vendor_name:
             po.vendor_name = vendor_name
-            
+
+    await _attach_po_tax_context(db, po)
     return po
 
 
@@ -3471,6 +3509,31 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
     ))).scalar_one_or_none()
     if not rfq:
         raise NotFoundError(f"RFQ {rfq_id} not found")
+    # This enrichment is read-only context for the response — never the reason an
+    # action that already committed gets reported as failed. `act_on_rfq` calls this
+    # AFTER its own `db.commit()`, purely to build the reply; a buyer who pressed
+    # Approve and watched it error, then pressed it again and was told the RFQ was
+    # "not awaiting approval" (SCM_0071/SCM_0072), had their approval go through both
+    # times — it was THIS lookup that failed, after the state change it was reporting
+    # on had already succeeded. Same rule as `email_rfq_copies`: a secondary failure
+    # must never undo, or look like it undid, the primary one.
+    try:
+        await _attach_rfq_context(db, rfq)
+    except Exception:
+        logger.exception(
+            "Could not attach PO/requisition context to RFQ %s; returning the bare "
+            "document rather than reporting the caller's own action as failed.",
+            rfq.rfq_no)
+        rfq.po_id = rfq.po_no = rfq.po_status = None
+        rfq.purchase_orders = []
+        for invitation in rfq.vendors:
+            invitation.live_allocated_quantities = None
+        rfq.priority = rfq.requisition_status = None
+        rfq.source_indent_nos = []
+    return rfq
+
+
+async def _attach_rfq_context(db: AsyncSession, rfq: RFQ) -> None:
     # The order this award already became, if it became one. Transient attributes off a
     # lookup rather than columns on pro_rfqs: the PO already points backward at the RFQ,
     # and a second copy of that link on the RFQ is a second thing that can go stale.
@@ -3553,7 +3616,43 @@ async def get_rfq(db: AsyncSession, rfq_id: int, user=None, *,
             .order_by(RequisitionItem.line_no)
         )).scalars().all()
     ) if requisition else []
-    return rfq
+
+
+# --------------------------------------------------------------------------- #
+#  The Approved Requisitions tab (SCM_0058) — what the RFQ screen offers before
+#  anybody has pressed Create RFQ
+# --------------------------------------------------------------------------- #
+#  An approved requisition used to be invisible from the RFQ screen until a buyer
+#  opened it from the Requisitions register and pressed Create RFQ there — the one
+#  press this tab is a second doorway onto. Same shape as `consolidation.candidates`,
+#  for the same reason: filtered in the query, not in Python, because the register is
+#  thousands of rows on a live database and loading them all to drop the converted
+#  ones puts the whole history through the app for a screen that shows twenty.
+
+async def rfq_candidates(db: AsyncSession, params: PageParams,
+                         project_id: int | None = None) -> dict:
+    """Approved requisitions with neither a live RFQ nor a live consolidation sheet
+    against them yet — what the Approved Requisitions tab offers.
+
+    Not CONSOLIDATED: once a requisition is folded into a sheet it is bought through
+    the sheet's own tender, not tendered again on its own, so it drops off this list
+    the same way it drops off the consolidation candidates list.
+    """
+    taken_by_sheet = select(PurchaseConsolidationSource.requisition_id).join(
+        PurchaseConsolidation,
+        PurchaseConsolidation.id == PurchaseConsolidationSource.consolidation_id
+    ).where(PurchaseConsolidation.status.notin_([
+        ConsolidationStatus.CANCELLED.value, ConsolidationStatus.REJECTED.value]))
+    taken_by_rfq = select(RFQ.requisition_id).where(
+        RFQ.requisition_id.isnot(None), RFQ.status != RFQStatus.CANCELLED.value)
+    stmt = (select(Requisition)
+            .where(Requisition.status == RequisitionStatus.APPROVED.value,
+                   Requisition.id.notin_(taken_by_sheet),
+                   Requisition.id.notin_(taken_by_rfq))
+            .order_by(Requisition.created_at.desc()))
+    if project_id:
+        stmt = stmt.where(Requisition.project_id == project_id)
+    return await paginate(db, stmt, params)
 
 
 async def list_rfqs(db: AsyncSession, params: PageParams, status: str | None = None,
@@ -4156,6 +4255,11 @@ async def get_quotation(db: AsyncSession, quote_id: int, user=None) -> Quotation
         db, quote.rfq_id, quote.vendor_id,
         invited.mapped_item_ids if invited is not None else None)
     _apply_vendor_quote_scope(quote, allowed)
+    # FIXED: `tax_region`/`company_gstin` are derived, never stored (see
+    # `_attach_tax_context`) — the supplier portal's own reads already call it, but
+    # the buyer's Quotation Detail screen never did, so it showed the tax split only
+    # in the instant right after a vendor submitted and blank on every later reload.
+    await _attach_tax_context(db, quote)
     return quote
 
 

@@ -173,6 +173,11 @@ class TransportRequest(Base):
 
     from_warehouse_id = Column(BigInteger, index=True, nullable=True)
     from_warehouse_name = Column(String(200), nullable=True)
+    # SCM_0053: the DC/DOD gate pass named the origin but never its address — this
+    # is where that address comes from. Snapshotted off the consignment's own
+    # `warehouse_address` at the moment the leg is raised, same rule as
+    # from_warehouse_name itself.
+    from_warehouse_address = Column(String(500), nullable=True)
     to_location_name = Column(String(200), nullable=True)
     delivery_address = Column(String(500), nullable=True)
     contact_person = Column(String(200), nullable=True)

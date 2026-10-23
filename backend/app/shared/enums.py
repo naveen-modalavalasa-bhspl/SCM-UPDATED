@@ -772,6 +772,13 @@ class AuditAction(str, Enum):
     LOGIN = "LOGIN"
     ACCESS_GRANTED = "ACCESS_GRANTED"
     ACCESS_REVOKED = "ACCESS_REVOKED"
+    # A press refused for lacking a grant or an approver seat — never a document
+    # state change, so it never went through write_audit's normal door (rule 9 is
+    # about state changes; a refusal changes nothing). Written so an admin reviewing
+    # "who got refused, and for what" can grant the right permission instead of
+    # guessing from a support ticket. `sys_audit_log.action` is a plain String(30),
+    # so no migration is owed — same note as DELETE above.
+    PERMISSION_DENIED = "PERMISSION_DENIED"
 
 
 class ResetPolicy(str, Enum):

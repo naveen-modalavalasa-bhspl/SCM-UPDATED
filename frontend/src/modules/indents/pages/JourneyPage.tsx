@@ -15,7 +15,7 @@ import { INDENT_STATUS, STR_BASE, STR_HOME } from "../constants";
 import { formatIndentDate, formatIndentDateTime, parseIndentTimestamp } from "../dateTime";
 import {
   buildJourneyTracks, isOccurredJourneyStage, isResubmissionStage, isUpcomingJourneyStage,
-  journeySteps, sortOccurredStages, stageStatus,
+  journeySteps, journeyTrackKey, sortOccurredStages, stageStatus,
 } from "../journeyModel";
 import type { JourneyTrack, JourneyTrackState } from "../journeyModel";
 import type { IndentJourneyHistoryEvent, IndentJourneyStage } from "../types";
@@ -57,6 +57,30 @@ function stageTone(stage: IndentJourneyStage, isAllocationPending = false) {
   return "border-line bg-white text-muted";
 }
 
+function pendingStageLabel(stage: IndentJourneyStage): string {
+  const stageType = String(stage.stage_type ?? "").trim().toLowerCase();
+  if (stageType === "draft") return "Draft";
+  if (stageType === "submission") return "Awaiting submission";
+
+  const track = journeyTrackKey(stageType);
+  if (track === "approvals") return "Awaiting approval";
+  if (track === "allocation") return "Awaiting allocation";
+  if (track === "warehouse") return "Pending warehouse";
+  if (track === "delivery") return "In transit";
+  if (track === "acknowledgement") return "Awaiting acknowledgement";
+
+  const title = String(stage.title ?? "").trim().toLowerCase();
+  if (title.includes("draft")) return "Draft";
+  if (title.includes("submit")) return "Awaiting submission";
+  if (title.includes("approv")) return "Awaiting approval";
+  if (title.includes("allocat")) return "Awaiting allocation";
+  if (title.includes("warehouse") || title.includes("issue") || title.includes("pick")) return "Pending warehouse";
+  if (title.includes("transit") || title.includes("dispatch") || title.includes("deliver")) return "In transit";
+  if (title.includes("ack") || title.includes("receipt")) return "Awaiting acknowledgement";
+
+  return "Pending";
+}
+
 function statusLabel(stage: IndentJourneyStage, isAllocationPending = false) {
   if (stage.is_current) return "Current";
   const status = stageStatus(stage);
@@ -67,6 +91,9 @@ function statusLabel(stage: IndentJourneyStage, isAllocationPending = false) {
   if (isWaitingAllocationStage(stage, isAllocationPending)) {
     return "Waiting for allocation";
   }
+  if (status === "PENDING") {
+    return pendingStageLabel(stage);
+  }
   const labels: Record<string, string> = {
     SUBMITTED: "Submitted",
     APPROVED: "Approved",
@@ -74,7 +101,6 @@ function statusLabel(stage: IndentJourneyStage, isAllocationPending = false) {
     AWAITING_ALLOCATION: "Waiting for allocation",
     ACKNOWLEDGED: "Acknowledged",
     REJECTED: "Rejected",
-    PENDING: "Pending",
     NOT_REQUIRED: "Not required",
     RETURNED: "Returned for correction",
     RETURNED_FOR_CORRECTION: "Returned for correction",

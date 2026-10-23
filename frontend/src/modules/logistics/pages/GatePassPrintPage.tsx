@@ -84,28 +84,35 @@ export function GatePassPrintPage() {
       status={doc.status}
       itemsTitle="The load"
       /* Which papers this one pass answers for. A gate pass with no consignment
-         number on it cannot be checked against the packing list at the gate. */
+         number on it cannot be checked against the packing list at the gate.
+         Indent, Project and Distance dropped (SCM_0053): none of the three is
+         something a guard checks the load against, and they crowded out the
+         fields that are. The indent and project still print on the indent's own
+         paperwork; the distance is still on the shipment's own detail screen. */
       metadata={[
         { label: "Shipment", value: dash(doc.tr_no), mono: true },
         { label: "Consignment", value: dash(doc.consignment_no), mono: true },
-        { label: "Indent", value: dash(doc.indent_no), mono: true },
-        { label: "Project", value: dash(doc.project_name) },
         { label: "Carriage", value: carriageLabel(doc.carriage_mode) },
         { label: "Arrangement", value: modeLabel(doc.mode) },
-        { label: "Distance", value: doc.distance_km ? `${doc.distance_km} km` : "—" },
         { label: "Expected delivery", value: doc.expected_delivery ? fmtDate(doc.expected_delivery) : "—" },
       ]}
       blocks={[
         {
+          // SCM_0053: both the LIP/MDP/Warehouse name AND its full address, on both
+          // sides — "From" used to name only the origin, with no address a guard or
+          // a receiving site could actually check the load against.
           title: "Where it is going",
           columns: 2,
           fields: [
             { label: "From", value: dash(doc.from_warehouse_name) },
+            {
+              label: "From address",
+              value: <span className="whitespace-pre-line break-words">{dash(doc.from_warehouse_address)}</span>,
+            },
             { label: "To", value: dash(doc.to_location_name) },
             {
-              label: "Delivery address",
+              label: "To address",
               value: <span className="whitespace-pre-line break-words">{dash(doc.delivery_address)}</span>,
-              fullWidth: true,
             },
             { label: "Contact", value: dash(doc.contact_person) },
             { label: "Contact phone", value: dash(doc.contact_phone) },

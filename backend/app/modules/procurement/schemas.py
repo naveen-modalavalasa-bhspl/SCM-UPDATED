@@ -248,6 +248,16 @@ class POItemOut(BaseModel):
     # Days the vendor quoted for this line; None on a PO with no quotation behind it.
     delivery_days: int | None = None
     received_quantity: float
+    # Which half of `tax_percent` is law, not a choice — see service.tax_region.
+    # Derived at read time off the order's own `tax_region`, never stored: only one
+    # pair is ever non-zero on a given order, decided by the company's and vendor's
+    # GSTIN state codes, not by the line.
+    cgst_percent: float = 0
+    sgst_percent: float = 0
+    igst_percent: float = 0
+    cgst_amount: float = 0
+    sgst_amount: float = 0
+    igst_amount: float = 0
     # Packing, served with its sentence so no screen composes it (2026-10-08).
     pack_hierarchy_id: int | None = None
     pack_breakdown: list[dict] | None = None
@@ -307,6 +317,14 @@ class POOut(BaseModel):
     copied_from_po_no: str | None = None
     vendor_id: int
     vendor_name: str | None = None
+    # Stored snapshot (vendor_gstin) plus the two facts it decides, derived at read
+    # time — never stored, see service.tax_region. The company's own GSTIN can change
+    # (e.g. a correction on Settings > Company) without rewriting what an existing
+    # order already read it as at the time; re-reading this field always answers for
+    # the company's CURRENT GSTIN, same as the quotation this order may have come from.
+    vendor_gstin: str | None = None
+    tax_region: str | None = None
+    company_gstin: str | None = None
     facility_id: int | None = None
     facility_name: str | None = None
     project_id: int | None = None

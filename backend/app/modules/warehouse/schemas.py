@@ -2291,6 +2291,10 @@ class DispatchRead(_Read):
     dispatch_date: date
     warehouse_id: int
     warehouse_name: str | None = None
+    # SCM_0053: snapshotted off the warehouse at the moment this consignment was
+    # raised — what the Dispatch screen carries into a transport leg's own
+    # from_warehouse_address, which is what the gate pass prints.
+    warehouse_address: str | None = None
     to_warehouse_id: int | None = None
     to_warehouse_name: str | None = None
     customer_id: int | None = None

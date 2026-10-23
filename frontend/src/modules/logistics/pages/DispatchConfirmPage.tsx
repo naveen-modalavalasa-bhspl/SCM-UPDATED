@@ -327,6 +327,9 @@ function DispatchOutcome({
           <p className="mt-1 text-sm font-semibold text-ink">
             {doc?.from_warehouse_name || "—"}
           </p>
+          {doc?.from_warehouse_address && (
+            <p className="mt-0.5 text-xs leading-snug text-muted">{doc.from_warehouse_address}</p>
+          )}
         </div>
         <ArrowRight className="mt-6 hidden h-4 w-4 shrink-0 text-muted sm:block" aria-hidden />
         <div className="min-w-0">

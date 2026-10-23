@@ -15,6 +15,15 @@ export interface POItem {
    *  a PO raised from an indent — nobody quoted, so nobody promised. */
   delivery_days?: number | null;
   received_quantity: number;
+  /** Which half of `tax_percent` is law, decided by the order's own `tax_region` —
+   *  only one pair is ever non-zero on a given order. Derived server-side, never
+   *  typed here. */
+  cgst_percent?: number;
+  sgst_percent?: number;
+  igst_percent?: number;
+  cgst_amount?: number;
+  sgst_amount?: number;
+  igst_amount?: number;
   /** How the line is to be packed (2026-10-08), with its sentence served. */
   pack_hierarchy_id?: number | null;
   pack_breakdown?: PackEntry[] | null;
@@ -70,6 +79,11 @@ export interface PurchaseOrder {
   copied_from_po_no?: string | null;
   vendor_id: number;
   vendor_name?: string | null;
+  // Stored snapshot (vendor_gstin), plus the two facts it decides — derived at read
+  // time, never stored. See service.tax_region on the backend.
+  vendor_gstin?: string | null;
+  tax_region?: string | null;
+  company_gstin?: string | null;
   facility_id?: number | null;
   facility_name?: string | null;
   project_id?: number | null;

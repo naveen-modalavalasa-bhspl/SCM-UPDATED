@@ -1548,6 +1548,9 @@ export interface Dispatch {
   dispatch_date: string;
   warehouse_id: number;
   warehouse_name?: string | null;
+  /** Snapshotted off the warehouse at the moment this consignment was raised
+   *  (SCM_0053) — carried into a transport leg's own from_warehouse_address. */
+  warehouse_address?: string | null;
   to_warehouse_id?: number | null;
   to_warehouse_name?: string | null;
   customer_id?: number | null;

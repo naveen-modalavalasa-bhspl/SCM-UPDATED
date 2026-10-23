@@ -62,6 +62,8 @@ export function TransportDetailPage() {
   const [declineNote, setDeclineNote] = useState("");
   const [downloadingEvidence, setDownloadingEvidence] = useState<number | null>(null);
   const [evidenceDownloadError, setEvidenceDownloadError] = useState<unknown>(null);
+  const [downloadingDocument, setDownloadingDocument] = useState<number | null>(null);
+  const [documentDownloadError, setDocumentDownloadError] = useState<unknown>(null);
 
   // Half of this document is written by somebody who is not in this tab: the provider
   // sends a price, accepts the job or declines it, and the driver's leg is tracked from
@@ -76,6 +78,16 @@ export function TransportDetailPage() {
     queryKey: ["transport", id, "receipt-evidence"],
     queryFn: () => transportApi.receiptEvidence(trId),
     enabled: Boolean(doc?.indent_id && doc?.acknowledged_at),
+  });
+  // The paperwork uploaded when the load went out (DOD, invoice, LR…) — SCM_0073:
+  // the upload step on Dispatch already filed these (DispatchConfirmPage), and the
+  // endpoint to read them back has always existed (`transportApi.documents`), but
+  // nothing on this screen ever called it, so an attached DOD was invisible on the
+  // very record it was filed against.
+  const documents = useQuery({
+    queryKey: ["transport", id, "documents"],
+    queryFn: () => transportApi.documents(trId),
+    enabled: Boolean(doc),
   });
 
   const openDispatch = () => {
@@ -176,6 +188,23 @@ export function TransportDetailPage() {
       setEvidenceDownloadError(downloadError);
     } finally {
       setDownloadingEvidence(null);
+    }
+  };
+  const downloadDocument = async (attachmentId: number, fileName: string) => {
+    setDownloadingDocument(attachmentId);
+    setDocumentDownloadError(null);
+    try {
+      const blob = await transportApi.downloadDocument(trId, attachmentId);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (downloadError) {
+      setDocumentDownloadError(downloadError);
+    } finally {
+      setDownloadingDocument(null);
     }
   };
 
@@ -321,7 +350,8 @@ export function TransportDetailPage() {
       <ErrorBanner error={submit.error ?? approve.error ?? dispatch.error
         ?? share.error
         ?? carrierDeclined.error ?? approveAward.error
-        ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError} />
+        ?? rejectAward.error ?? evidence.error ?? evidenceDownloadError
+        ?? documents.error ?? documentDownloadError} />
 
       {/* A trip is this same shipment with several drops: the route in one line, and
           once the truck leaves, each stop marked delivered from here. */}
@@ -490,6 +520,45 @@ export function TransportDetailPage() {
               {doc.ack_remarks && <p className="mt-0.5 text-xs">{doc.ack_remarks}</p>}
             </div>
           </div>
+        </Card>
+      )}
+
+      {(documents.isLoading || (documents.data ?? []).length > 0) && (
+        <Card className="mb-4 p-4">
+          <div className="mb-3">
+            <h2 className="text-sm font-semibold text-ink">Shipping documents</h2>
+            <p className="mt-0.5 text-xs text-muted">
+              The DOD, invoice or LR uploaded when this load was dispatched.
+            </p>
+          </div>
+          {documents.isLoading ? (
+            <p className="text-xs text-muted">Loading shipping documents…</p>
+          ) : (
+            <ul className="space-y-2">
+              {(documents.data ?? []).map((attachment) => (
+                <li key={attachment.id}
+                  className="flex items-center gap-3 rounded-xl border border-line px-3 py-2">
+                  <FileText className="h-4 w-4 shrink-0 text-brand" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-ink">
+                      {attachment.file_name}
+                    </div>
+                    <div className="text-[11px] text-muted">
+                      {attachment.doc_category ?? "Document"}
+                      {attachment.uploaded_by_name
+                        ? ` · uploaded by ${attachment.uploaded_by_name}` : ""}
+                    </div>
+                  </div>
+                  <Button variant="ghost"
+                    disabled={downloadingDocument === attachment.id}
+                    onClick={() => downloadDocument(attachment.id, attachment.file_name)}>
+                    <Download className="h-4 w-4" />
+                    {downloadingDocument === attachment.id ? "Opening…" : "Open"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
         </Card>
       )}
 

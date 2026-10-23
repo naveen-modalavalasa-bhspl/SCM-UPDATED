@@ -374,6 +374,16 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
       const next = { ...e };
       delete next[k];
       for (const dependent of f.clearOnChange ?? []) delete next[dependent];
+      // SCM_0069: a cross-field `validate` (e.g. "the four shares add up to 100%",
+      // which can only live on one of the four percent fields) was cleared here
+      // unconditionally — typing a NEW value that was STILL wrong made the error
+      // vanish anyway, since nothing re-checked the field just edited against its
+      // own rule. It showed again only on the next full-form validate (Save), which
+      // read as the field "having an issue" with no visible cause while typing.
+      if (f.validate) {
+        const message = f.validate(v, nextValues);
+        if (message) next[k] = message;
+      }
       // A message under another field may have been about this one — the two ends of
       // a validity window judge each other. Re-run the ones still showing and drop
       // whichever this edit has just satisfied, so fixing one end clears both.

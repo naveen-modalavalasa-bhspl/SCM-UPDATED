@@ -454,6 +454,21 @@ PAGES: list[PageDef] = [
     PageDef("rep_returns", "/reports/returns", "Returns Ledger",
             parent="grp_reports", module="reports", icon="rotate-ccw",
             sort_order=79),
+
+    # SCM_0056: one feed for both the bell and this page — `platform.notifications`,
+    # the same `sys_notifications` rows, the same `is_read`. The bell only ever
+    # offered 20 and no way to search or page through the rest; this is that same
+    # inbox in full, not a second, narrower derivation of it (the indent-only
+    # `ind_notifications` page this replaces counted one entity_type family and
+    # silently dropped everything else the bell showed — an allocation, a PO, a
+    # requisition — for anyone who both raises indents and acts on those). Top
+    # level and `always_on` for the same reason Home is: it is the signed-in
+    # person's own inbox, not a module's screen, and needs nothing but a login —
+    # same rule the bell's own endpoint already follows (no `require_permission`
+    # there; `employee_id == caller` is the whole authorisation). sort_order 85
+    # keeps it the last thing before Settings (90), never a module's front door.
+    PageDef("notifications", "/notifications", "Alerts & Notifications",
+            icon="bell", module="notifications", sort_order=85, always_on=True),
 ]
 
 
@@ -591,6 +606,13 @@ RETIRED_PAGES: list[str] = [
     # already reads these tables changes behaviour.
     "admin_rules",
     "admin_policies",
+    # SCM_0056 — the indent-only notifications feed is replaced by the top-level
+    # Alerts & Notifications page (`notifications`), which reads the same
+    # `sys_notifications` rows the bell already does instead of a derived,
+    # entity-type-filtered subset. `always_on` (no permission at all) is a strict
+    # superset of whoever held `page.ind_notifications.view`, so nothing is lost by
+    # retiring rather than inheriting. The old route redirects (App.tsx).
+    "ind_notifications",
 ]
 
 

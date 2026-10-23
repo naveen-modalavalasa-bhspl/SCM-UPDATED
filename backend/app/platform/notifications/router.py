@@ -13,7 +13,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -47,11 +47,17 @@ def _mine(stmt, user):
 
 @router.get("", response_model=Page[NotificationRow])
 async def list_notifications(params: PageParams = Depends(), unread_only: bool = False,
+                             search: str | None = None,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(get_current_user)):
     stmt = _mine(select(Notification), user)
     if unread_only:
         stmt = stmt.where(Notification.is_read.is_(False))
+    term = (search or "").strip()
+    if term:
+        pattern = f"%{term}%"
+        stmt = stmt.where(or_(
+            Notification.title.ilike(pattern), Notification.body.ilike(pattern)))
     return await paginate(db, stmt.order_by(Notification.id.desc()), params)
 
 
