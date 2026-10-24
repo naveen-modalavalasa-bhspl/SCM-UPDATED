@@ -10,6 +10,7 @@ import {
 } from "../api";
 import { alerts } from "@/modules/alerts";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
+import { CombinationTag } from "@/shared/combination";
 
 const fmt = (value: number) =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(value);
@@ -250,6 +251,7 @@ export function AllocationApprovalDetailPage() {
                     <tr key={item.id}>
                       <td className="p-3">
                         <div className="font-medium text-ink">{item.item_name}</div>
+                        <CombinationTag value={item} className="mt-1" />
                         <div className="text-xs text-muted">{item.item_code}</div>
                       </td>
                       <td className="p-3">

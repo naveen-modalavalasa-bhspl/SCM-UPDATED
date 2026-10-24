@@ -126,6 +126,12 @@ export function IndentPrintPage() {
           <div className="mt-0.5 font-mono text-[8.5px] font-normal" style={{ color: "#697187" }}>
             {dash(line.item_code)}
           </div>
+          {(line.brand_name || line.combination_any) && (
+            <div className="mt-0.5 text-[8.5px] font-semibold" style={{ color: "#697187" }}>
+              {line.combination_any ? "Any brand"
+                : [line.brand_name, line.variant_name, line.model_name].filter(Boolean).join(" · ")}
+            </div>
+          )}
         </>,
         dash(displayUom(line.uom_code)),
         <span className="font-semibold" style={{ color: "#141a2a" }}>{qty(line.quantity)}</span>,

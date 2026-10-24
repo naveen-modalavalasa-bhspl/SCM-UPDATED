@@ -24,6 +24,10 @@ import {
   PackQty, greedyWithPart, packable, toPayload, type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
 import { DespatchPacking } from "../components/DespatchPacking";
+import {
+  CombinationPicker, CombinationTag, SUPPLIER_COMBINATIONS, comboFrom, comboPayload, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -42,6 +46,9 @@ type LineDraft = Omit<DespatchLineWrite, "pack_breakdown"> & {
   /** The item's hierarchies and the one the order asked for. */
   pack_options?: PackHierarchy[];
   ordered_hierarchy_id?: number | null;
+  item_id?: number;
+  /** The brand / variant / model sent — the order's, or another (2026-10-23). */
+  combo?: CombinationValue;
 };
 
 /** The order's packing for what is still owed — in the order's own levels where they
@@ -106,6 +113,8 @@ export function SupplierPODetailPage() {
     expected_date: null, remarks: "",
   });
   const [lines, setLines] = useState<LineDraft[]>([]);
+  const comboOptions = useCombinationOptions(lines.map((line) => line.item_id ?? 0),
+                                             SUPPLIER_COMBINATIONS);
   const [editing, setEditing] = useState<DespatchNote | null>(null);
   const [responseNote, setResponseNote] = useState("");
 
@@ -139,6 +148,7 @@ export function SupplierPODetailPage() {
         despatched_qty: line.pending_qty,
         batch_no: "", mfg_date: null, expiry_date: null, remarks: null,
         item_code: line.item_code, item_name: line.item_name,
+        item_id: line.item_id, combo: comboFrom(line),
         uom_code: line.uom_code, pending_qty: line.pending_qty,
         pack_options: packable(line.pack_options),
         ordered_hierarchy_id: line.pack_hierarchy_id ?? null,
@@ -169,6 +179,7 @@ export function SupplierPODetailPage() {
         batch_no: line.batch_no ?? "", mfg_date: line.mfg_date ?? null,
         expiry_date: line.expiry_date ?? null, remarks: line.remarks ?? null,
         item_code: line.item_code, item_name: line.item_name,
+        item_id: line.item_id, combo: comboFrom(line),
         uom_code: line.uom_code,
         // Its own quantity is not spent against its own ceiling on a re-save.
         pending_qty: (source?.pending_qty ?? 0) + num(line.despatched_qty),
@@ -189,8 +200,10 @@ export function SupplierPODetailPage() {
     lines: lines
       .filter((line) => num(line.despatched_qty) > 0)
       .map(({ item_code: _c, item_name: _n, uom_code: _u, pending_qty: _p,
-              pack_options: _o, ordered_hierarchy_id: _h, pack_breakdown, ...rest }) => ({
+              pack_options: _o, ordered_hierarchy_id: _h, pack_breakdown,
+              item_id: _i, combo, ...rest }) => ({
         ...rest,
+        ...comboPayload(combo),
         pack_breakdown: pack_breakdown?.length ? toPayload(pack_breakdown) : null,
       })),
   });
@@ -636,6 +649,7 @@ export function SupplierPODetailPage() {
                 <tr key={line.po_item_id} className={isChanged ? "bg-primary/5" : ""}>
                   <td className="p-3">
                     <strong className="text-ink">{line.item_name ?? "—"}</strong>
+                    <CombinationTag value={line} className="mt-1" />
                     {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
                     {qtyChanged && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">Qty Changed</span>}
                     <p className="font-mono text-xs text-muted">{line.item_code}</p>
@@ -800,6 +814,17 @@ export function SupplierPODetailPage() {
                           <p className="font-mono text-xs text-muted">
                             {line.item_code} · Owed: <span className="font-semibold text-ink">{line.pending_qty} {line.uom_code ?? ""}</span>
                           </p>
+                          {!!comboOptions.data?.[String(line.item_id)]?.length && (
+                            <div className="max-w-xs pt-1">
+                              <CombinationPicker
+                                options={comboOptions.data?.[String(line.item_id)]}
+                                value={line.combo}
+                                ariaLabel={`Brand, variant and model for ${line.item_name ?? "line"}`}
+                                onChange={(combo) => setLines((current) => current.map((l) =>
+                                  l.po_item_id === line.po_item_id ? { ...l, combo } : l))}
+                              />
+                            </div>
+                          )}
 
                           {/* Allocation status */}
                           <div className="flex flex-wrap items-center gap-1.5 pt-0.5">

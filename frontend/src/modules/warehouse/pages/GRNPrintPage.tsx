@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getReceipt, warehouseOptions } from "../api";
 import { fmtDate, fmtDateTime, fmtQty } from "../format";
 import { PrintTemplate, type PrintColumn } from "@/shared/components";
+import { combinationLabel } from "@/shared/combination";
 
 export function GRNPrintPage() {
   const { id } = useParams();
@@ -74,6 +75,9 @@ export function GRNPrintPage() {
     <div key={`name-${line.id}`} className="font-bold text-neutral-900">{line.item_name ?? "—"}</div>,
     <div key={`code-${line.id}`}>
       <div className="font-mono text-[11px] text-neutral-700">{line.item_code ?? "—"}</div>
+      {combinationLabel(line) && (
+        <div className="mt-0.5 text-[11px] text-neutral-600">{combinationLabel(line)}</div>
+      )}
       {line.batch_no && (
         <div className="mt-0.5 text-[11px] text-neutral-500">Batch: {line.batch_no}</div>
       )}

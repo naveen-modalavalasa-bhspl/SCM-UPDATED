@@ -345,11 +345,20 @@ async def shelve(db: AsyncSession, *, item, key: dict, qty, hierarchy_id, entrie
     if ladder.top == 0:
         return None
     qty = _d(qty)
+    # Storage containers mapped for the item (2026-10-23): the shelf is packed in
+    # THOSE, inside the ladder the goods arrived in, whatever the screen sends — one
+    # rule for every storekeeper, so the shelf always matches the master. Changed only
+    # by changing the item's Storage usage.
+    storage = await packs.usage_levels(db, item.id, ladder, "STORAGE")
+    if storage:
+        entries_in, default_entries = None, packing.greedy_in(ladder, qty, storage)
     try:
         if entries_in:
             entries = packing.normalize(ladder, [
                 e.model_dump() if hasattr(e, "model_dump") else dict(e)
                 for e in entries_in], enforce_min=True)
+        elif default_entries and storage:
+            entries = packing.normalize(ladder, default_entries, enforce_min=False)
         elif default_entries:
             try:
                 entries = packing.normalize(ladder, default_entries, enforce_min=True)
@@ -368,6 +377,14 @@ async def shelve(db: AsyncSession, *, item, key: dict, qty, hierarchy_id, entrie
             f"not add up to the {packing.fmt(qty)} {item.uom_code or 'units'} being put "
             "away. Repacking changes how goods are bagged, never how many there are.")
     count = sum(int(_d(e["qty"])) for e in entries if int(e["level"]))
+    # Issued in a container (2026-10-23): every shelved pack is split down to it, and
+    # THOSE packs carry the codes — one per strip. Counted with the shelved ones.
+    issue = await packs.usage_levels(db, item.id, ladder, "ISSUE")
+    issue_level = min((lv for lv in (issue or []) if lv > 0), default=None)
+    if issue_level:
+        count += sum(int(_d(e["qty"])) * int(packing.dec(ladder.at(int(e["level"])).size)
+                                             / ladder.at(issue_level).size)
+                     for e in entries if int(e["level"]) > issue_level)
     if count > MAX_PACKS_PER_REQUEST:
         raise ValidationError(
             f"{item.code}: that is {count:,} separate packs, and one press may make at "
@@ -388,19 +405,151 @@ async def shelve(db: AsyncSession, *, item, key: dict, qty, hierarchy_id, entrie
             made.append(hu)
     await db.flush()
     await _name_packs(db, made, item, warehouse, atom)
+    targets = made
+    if issue_level and any(hu.level > issue_level for hu in made):
+        targets, cut = await split_down(db, made, ladder=ladder, key=key,
+                                        level=issue_level, atom=atom, source=source,
+                                        lot_no=lot_no, user=user)
+        await _name_packs(db, cut, item, warehouse, atom)
 
     # Link the units this putaway placed: the loose ones first (they stay loose), then
-    # pack by pack in id order, each taking exactly what it holds.
+    # pack by pack in id order — the innermost packs when packs were split down to the
+    # issue container — each taking exactly what it holds.
     loose = int(_d(next((e["qty"] for e in entries if int(e["level"]) == 0), 0)))
     units = await _loose_units(db, key, lot_no=lot_no)
     cursor = min(loose, len(units))
-    for hu in made:
+    for hu in targets:
         size = int(held(hu))
         take = units[cursor:cursor + size]
         cursor += len(take)
         if take:
             await _link_units(db, take, hu.id)
     return _named(entries, ladder)
+
+
+async def split_down(db: AsyncSession, packs_in: list, *, ladder: packing.Ladder, key: dict,
+                     level: int, atom: bool, source: tuple, lot_no=None,
+                     user=None) -> tuple[list, list]:
+    """Split each pack down to `level`, nesting the new packs inside it (2026-10-23):
+    a Box of 10 strips gets 10 Strip packs inside it, each its own row and its own
+    code. A part pack splits into whole packs of the level below plus one part pack
+    for the rest. Returns (the innermost packs, every pack made here)."""
+    leaves, made, frontier = [], [], list(packs_in)
+    level = max(int(level or 0), 1)       # loose is not a pack: stop at the smallest
+    while frontier:
+        nxt = []
+        for hu in frontier:
+            if hu.level <= level:
+                leaves.append(hu)
+                continue
+            child = ladder.at(hu.level - 1)
+            content = held(hu)
+            whole = int(content / child.size)
+            rest = content - whole * child.size
+            for _ in range(whole):
+                row = _new_pack(key=key, ladder=ladder, level=hu.level - 1, atom=atom,
+                                source=source, lot_no=lot_no, user=user, parent_id=hu.id)
+                db.add(row)
+                nxt.append(row)
+            if rest > ZERO:
+                row = _new_pack(key=key, ladder=ladder, level=hu.level - 1, atom=atom,
+                                source=source, lot_no=lot_no, user=user, parent_id=hu.id,
+                                content=rest)
+                db.add(row)
+                nxt.append(row)
+        await db.flush()
+        made.extend(nxt)
+        frontier = nxt
+    return leaves, made
+
+
+async def recode_lot(db: AsyncSession, key: dict, *, item, ladder: packing.Ladder,
+                     level: int, reason: str, user=None) -> dict:
+    """Re-cut one lot's packs to a new Issue container (2026-10-23).
+
+    The packs on the shelf at the TOP (not inside another) stay exactly as they are.
+    Everything inside them is closed — its code retired, the reason naming the
+    re-code — and they are split again down to `level` under new codes. Units are
+    re-linked to the new innermost packs. Nothing about the quantity moves.
+    Returns {"retired": n, "made": n}.
+    """
+    now, who = utcnow(), getattr(user, "full_name", None)
+    live = (await db.execute(select(m.HandlingUnit).where(
+        m.HandlingUnit.item_id == key["item_id"],
+        m.HandlingUnit.warehouse_id == key["warehouse_id"],
+        m.HandlingUnit.bin_id == (key["bin_id"] or m.NO_BIN),
+        m.HandlingUnit.batch_id == (key["batch_id"] or m.NO_BATCH),
+        m.HandlingUnit.project_id == (key["project_id"] or 0),
+        m.HandlingUnit.pack_hierarchy_id == ladder.hierarchy_id,
+        m.HandlingUnit.status.in_(LIVE)).with_for_update())).scalars().all()
+    top = [hu for hu in live if not hu.parent_id]
+    inner = [hu for hu in live if hu.parent_id]
+    for hu in inner:
+        _close(hu, HUS.OPENED.value, reason, who, now)
+    await db.flush()
+    warehouse = await db.get(Warehouse, key["warehouse_id"])
+    atom = await codes_per_pack(db, item, warehouse)
+    if level >= 1:
+        leaves, made = await split_down(db, top, ladder=ladder, key=key, level=level,
+                                        atom=atom, source=("RECODE", 0, reason[:40]),
+                                        user=user)
+        await _name_packs(db, made, item, warehouse, atom)
+    else:
+        # Issued loose now: the packs on the shelf stay, nothing is cut inside them.
+        leaves, made = top, []
+    units = list((await db.execute(select(m.SerialNumber.id).where(
+        m.SerialNumber.handling_unit_id.in_([hu.id for hu in live] or [0]),
+        m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+        m.SerialNumber.is_active.is_(True)).order_by(m.SerialNumber.id))).scalars().all())
+    cursor = 0
+    for hu in leaves:
+        take = units[cursor:cursor + int(held(hu))]
+        cursor += len(take)
+        if take:
+            await _link_units(db, take, hu.id)
+    return {"retired": len(inner), "made": len(made)}
+
+
+async def recode_item(db: AsyncSession, item_id: int, user=None) -> dict:
+    """Every lot of an item, re-cut to its NEW Issue container (2026-10-23) — the
+    break (Box -> 10 Strips) or the combine (10 Strips -> 1 Box) when the master's
+    Issue usage changes after the goods were put away.
+
+    A lot whose stock is held by a document (anything reserved on it) is never
+    touched: its packs are what that document named. Counted and reported instead.
+    Quantities never move — only which packs are inside which, and their codes.
+    """
+    item = await db.get(Item, item_id)
+    keys = (await db.execute(
+        select(m.HandlingUnit.warehouse_id, m.HandlingUnit.bin_id, m.HandlingUnit.batch_id,
+               m.HandlingUnit.project_id, m.HandlingUnit.pack_hierarchy_id)
+        .where(m.HandlingUnit.item_id == item_id, m.HandlingUnit.status.in_(LIVE))
+        .distinct())).all()
+    lots = held_lots = retired = made = 0
+    for warehouse_id, bin_id, batch_id, project_id, hierarchy_id in keys:
+        key = {"item_id": item_id, "warehouse_id": warehouse_id, "bin_id": bin_id,
+               "batch_id": batch_id, "project_id": project_id}
+        reserved = await db.scalar(select(func.coalesce(func.sum(Stock.reserved_qty), 0))
+                                   .where(Stock.item_id == item_id,
+                                          Stock.warehouse_id == warehouse_id,
+                                          Stock.bin_id == bin_id, Stock.batch_id == batch_id,
+                                          Stock.project_id == project_id))
+        if _d(reserved) > ZERO:
+            held_lots += 1
+            continue
+        ladder = await packs.ladder(db, item_id, hierarchy_id)
+        issue = await packs.usage_levels(db, item_id, ladder, "ISSUE")
+        level = min((lv for lv in (issue or []) if lv > 0), default=0)
+        out = await recode_lot(db, key, item=item, ladder=ladder, level=level,
+                               reason="Re-coded: the item's Issue container changed",
+                               user=user)
+        lots += 1
+        retired += out["retired"]
+        made += out["made"]
+    return {"lots": lots, "held_lots": held_lots, "retired": retired, "made": made}
+
+
+packs.ON_ISSUE_USAGE_CHANGED.append(recode_item)
 
 
 async def putaway_packing(db: AsyncSession, task) -> dict:
@@ -418,11 +567,16 @@ async def putaway_packing(db: AsyncSession, task) -> dict:
             if packing.base_of(counted) > _d(task.qty) else None
     arriving = counted or _named(packing.greedy(ladder, task.qty), ladder)
     warehouse = await db.get(Warehouse, task.warehouse_id)
+    # The Storage containers, when mapped: the packs putaway WILL make, fixed.
+    storage = await packs.usage_levels(db, task.item_id, ladder, "STORAGE")
+    fixed = _named(packing.greedy_in(ladder, task.qty, storage), ladder) if storage else None
     return {
         "pack_hierarchy_id": ladder.hierarchy_id,
         "pack_hierarchy_name": ladder.hierarchy_name,
         "received_pack_breakdown": arriving,
-        "pack_breakdown": task.pack_breakdown,
+        "pack_breakdown": fixed or task.pack_breakdown,
+        "packing_fixed": bool(fixed),
+        "storage_levels": storage or [],
         "pack_levels": packs.ladder_out(ladder)["levels"],
         "codes_per_pack": await codes_per_pack(db, item, warehouse),
     }
@@ -860,6 +1014,18 @@ async def issue_line_packing(db: AsyncSession, *, item, line_in):
     ladder = await packs.ladder(db, item.id, hierarchy_id)
     if ladder.top == 0:
         return None, None, None
+    # Issue containers mapped for the item (2026-10-23): a pick is stated in them. The
+    # storekeeper may state it otherwise only where the item is STORED in different
+    # containers than it is ISSUED in — that is the only time a pack is opened at the
+    # counter — and only inside this ladder.
+    issue = await packs.usage_levels(db, item.id, ladder, "ISSUE")
+    if issue:
+        storage = await packs.usage_levels(db, item.id, ladder, "STORAGE")
+        if not entries or (storage is not None and sorted(storage) == sorted(issue)):
+            out = _named(packing.greedy_in(ladder, qty, issue), ladder)
+            for e in out:
+                e["hierarchy"] = ladder.hierarchy_name
+            return ladder.hierarchy_id, out, None
     if entries:
         try:
             hid, out = await packs.snapshot(db, item_id=item.id, hierarchy_id=hierarchy_id,

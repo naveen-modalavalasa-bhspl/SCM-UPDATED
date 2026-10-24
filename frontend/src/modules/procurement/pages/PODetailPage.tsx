@@ -23,6 +23,8 @@ import { alerts } from "@/modules/alerts";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { comboFrom, comboPayload } from "@/shared/combination";
+import { CombinationTag } from "@/shared/combination";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value ?? 0);
@@ -93,6 +95,7 @@ export function PODetailPage() {
         original_quantity: String(i.quantity),
         rate: String(i.rate),
         tax_percent: String(i.tax_percent),
+        combo: comboFrom(i),
       })) ?? [],
     );
   };
@@ -109,6 +112,7 @@ export function PODetailPage() {
           quantity: Number(l.quantity),
           rate: Number(l.rate ?? 0),
           tax_percent: Number(l.tax_percent ?? 0),
+          ...comboPayload(l.combo),
         })),
       }),
     onSuccess: (updated) => {
@@ -516,6 +520,7 @@ export function PODetailPage() {
                             {isRateChanged && <span className="rounded bg-cyan-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-cyan-700">Rate Changed</span>}
                           </div>
                           <div className="font-mono text-xs text-muted">{item.item_code ?? `#${item.item_id}`}</div>
+                          <CombinationTag value={item} className="mt-1" />
                           <POLinePacking poId={po.data.id} poStatus={po.data.status}
                                          vendorStatus={po.data.vendor_status} line={item}
                                          showChips={false} />

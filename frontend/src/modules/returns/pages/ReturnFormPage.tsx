@@ -19,6 +19,7 @@ import {
   PHOTO_CATEGORY, type IndentOption, type ReturnIntent, type ReturnKind,
   type ReturnLineWrite, type ReturnWrite, type StagedAttachment,
 } from "../types";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 /**
  * Raise or edit a return.
@@ -245,6 +246,7 @@ export default function ReturnFormPage() {
             item_id: line.item_id,
             quantity: String(line.quantity ?? ""),
             remarks: line.remarks ?? "",
+            ...comboFrom(line),
           }))
         : [{ ...BLANK_LINE }],
     );
@@ -442,6 +444,7 @@ export default function ReturnFormPage() {
       item_id: line.item_id,
       quantity: String(line.quantity),
       remarks: line.remarks?.trim() || null,
+      ...comboPayload(line),
     })),
   });
 

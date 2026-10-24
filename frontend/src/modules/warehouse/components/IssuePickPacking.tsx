@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
 import { Boxes, Layers, Package } from "lucide-react";
 import {
-  PackBreakdownEditor, PackHierarchyPicker, PackQty, baseOf, greedy, num,
-  type PackEntry, type PackHierarchy,
+  PackBreakdownEditor, PackHierarchyPicker, PackQty, baseOf, canRepackAtIssue, greedy,
+  greedyIn, num, usageLevels, type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
+
+/** A quantity in the ladder's Issue containers, else biggest packs (2026-10-23). */
+const issuePacks = (h: PackHierarchy, qty: number): PackEntry[] => {
+  const levels = usageLevels(h, "ISSUE");
+  return levels ? greedyIn(h, qty, levels) : greedy(h, qty);
+};
 import type { IssueItemWrite } from "../types";
 import { ModalCancel, ModalConfirm, PackBalance, PackModal, PackSection } from "./PackModal";
 
@@ -19,12 +25,15 @@ import { ModalCancel, ModalConfirm, PackBalance, PackModal, PackSection } from "
  *
  * Codes belong to units, so there is no coded pack and no break bulk.
  */
-export function IssuePickPacking({ line, hierarchies, locked, uom, onChange }: {
+export function IssuePickPacking({ line, hierarchies, locked, uom, onChange, splitting = false }: {
   line: IssueItemWrite;
   hierarchies: PackHierarchy[];
   locked: boolean;
   uom?: string | null;
   onChange: (patch: Partial<IssueItemWrite>) => void;
+  /** The consignment: packs may always be split into smaller ones of the same
+   *  ladder there, whatever the item's usages (2026-10-23). */
+  splitting?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const hierarchy = hierarchies.find((h) => h.hierarchy_id === line.pack_hierarchy_id)
@@ -41,7 +50,7 @@ export function IssuePickPacking({ line, hierarchies, locked, uom, onChange }: {
       return;
     }
     if (!inStep) {
-      onChange({ pack_hierarchy_id: hierarchy.hierarchy_id, pack_breakdown: greedy(hierarchy, qty) });
+      onChange({ pack_hierarchy_id: hierarchy.hierarchy_id, pack_breakdown: issuePacks(hierarchy, qty) });
     }
   }, [qty, hierarchy?.hierarchy_id, inStep, locked]);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -54,7 +63,7 @@ export function IssuePickPacking({ line, hierarchies, locked, uom, onChange }: {
       {qty > 0 && packs?.length
         ? <PackQty entries={packs} qty={qty} uom={unit} hierarchies={hierarchies} />
         : <span className="text-muted">—</span>}
-      {!locked && qty > 0 && (
+      {!locked && qty > 0 && (splitting || canRepackAtIssue(hierarchy)) && (
         <button type="button" onClick={() => setOpen(true)}
                 className="group inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-brand/25 bg-brand-050/60 px-2.5 py-1 font-semibold text-brand transition-all hover:border-brand hover:bg-brand hover:text-white active:scale-95">
           <Boxes className="h-3.5 w-3.5 transition-transform group-hover:scale-110" aria-hidden />
@@ -63,6 +72,7 @@ export function IssuePickPacking({ line, hierarchies, locked, uom, onChange }: {
       )}
       {open && (
         <ChangePacking hierarchies={hierarchies} hierarchy={hierarchy} packs={packs} qty={qty}
+                       splitting={splitting}
                        unit={unit} itemLabel={line.item_name ?? line.item_code ?? "Item"}
                        batch={line.batch_no} onClose={() => setOpen(false)}
                        onApply={(hid, next) => {
@@ -74,7 +84,9 @@ export function IssuePickPacking({ line, hierarchies, locked, uom, onChange }: {
   );
 }
 
-function ChangePacking({ hierarchies, hierarchy, packs, qty, unit, itemLabel, batch, onClose, onApply }: {
+function ChangePacking({ hierarchies, hierarchy, packs, qty, unit, itemLabel, batch, onClose, onApply,
+                         splitting = false }: {
+  splitting?: boolean;
   hierarchies: PackHierarchy[];
   hierarchy: PackHierarchy;
   packs: PackEntry[] | null;
@@ -86,7 +98,9 @@ function ChangePacking({ hierarchies, hierarchy, packs, qty, unit, itemLabel, ba
   onApply: (hierarchyId: number, packs: PackEntry[]) => void;
 }) {
   const [hid, setHid] = useState(hierarchy.hierarchy_id);
-  const [draft, setDraft] = useState<PackEntry[] | null>(packs ?? greedy(hierarchy, qty));
+  const [draft, setDraft] = useState<PackEntry[] | null>(packs ?? issuePacks(hierarchy, qty));
+  // Issue containers mapped: the ladder is the stock's, and only its levels change.
+  const ladderFixed = !!usageLevels(hierarchy, "ISSUE");
   const current = hierarchies.find((h) => h.hierarchy_id === hid) ?? hierarchy;
   const packed = baseOf(draft);
   return (
@@ -109,20 +123,21 @@ function ChangePacking({ hierarchies, hierarchy, packs, qty, unit, itemLabel, ba
         </>
       }
     >
-      {hierarchies.length > 1 && (
+      {hierarchies.length > 1 && !ladderFixed && (
         <PackSection n={1} title="Hierarchy" icon={<Layers className="h-4 w-4 text-brand" />}>
           <PackHierarchyPicker hierarchies={hierarchies} value={current.hierarchy_id} uom={unit}
                                onChange={(id) => {
                                  const next = hierarchies.find((h) => h.hierarchy_id === id);
                                  if (!next) return;
                                  setHid(id);
-                                 setDraft(greedy(next, qty));
+                                 setDraft(issuePacks(next, qty));
                                }} />
         </PackSection>
       )}
-      <PackSection n={hierarchies.length > 1 ? 2 : 1} title="Packs"
+      <PackSection n={hierarchies.length > 1 && !ladderFixed ? 2 : 1} title="Packs"
                    icon={<Package className="h-4 w-4 text-brand" />}>
-        <PackBreakdownEditor hierarchy={current} value={draft} target={qty} uom={unit}
+        <PackBreakdownEditor usage={splitting ? undefined : "ISSUE"} hierarchy={current}
+                             value={draft} target={qty} uom={unit}
                              onChange={setDraft} />
       </PackSection>
       <PackBalance packed={packed} target={qty} uom={unit} />

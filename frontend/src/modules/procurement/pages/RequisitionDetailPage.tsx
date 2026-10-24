@@ -9,6 +9,7 @@ import { DetailShell, SectionCard, FactGrid, RefChips, RailStat } from "../compo
 import { money } from "./RequisitionListPage";
 import type { ReqItem } from "../types";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * One requisition, and everything that can be done to it.
@@ -88,6 +89,7 @@ export function RequisitionDetailPage() {
         <div className="min-w-0">
           <div className="text-sm font-medium text-ink">{r.item_name ?? `Item ${r.item_id}`}</div>
           <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
+          <CombinationTag value={r} className="mt-1" />
         </div>
       ),
     },
@@ -228,6 +230,7 @@ export function RequisitionDetailPage() {
                       {r.item_name ?? `Item ${r.item_id}`}
                     </div>
                     <div className="font-mono text-[11px] text-muted">{r.item_code ?? "—"}</div>
+                    <CombinationTag value={r} />
                     <div className="text-xs text-body">{r.quantity} {r.uom_code ?? ""}</div>
                   </div>
                 )}

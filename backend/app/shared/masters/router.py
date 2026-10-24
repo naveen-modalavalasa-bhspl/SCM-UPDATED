@@ -14,7 +14,7 @@ from app.platform.hcm.models import HcmDepartment, HcmFacility
 from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
 from app.shared.limits import MAX_BATCH_IDS
-from app.shared.masters import packs
+from app.shared.masters import combinations, packs
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
     MASTERS, UOM_SUGGESTIONS, VendorMappingIn, build_item_code, build_item_prefix,
@@ -276,6 +276,40 @@ async def item_pack_options(item_ids: str = Query(..., max_length=4000),
     options = await packs.pack_options(db, ids)
     return {"items": [{"item_id": item_id, "hierarchies": rows}
                       for item_id, rows in options.items()]}
+
+
+class ContainerUsageRowIn(BaseModel):
+    package_id: int = 0
+    usages: list[str] = Field(default_factory=list, max_length=5)
+
+
+class ContainerUsageIn(BaseModel):
+    rows: list[ContainerUsageRowIn] = Field(default_factory=list, max_length=100)
+
+
+@_packing.get("/api/items/{item_id}/container-usage")
+async def item_container_usage(item_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(get_current_user)):
+    """Masters › Packaging › Container Usage: every container of the item's ladders,
+    with the usages (indent, purchase, storage, issue, consumption) ticked for each."""
+    return await packs.container_usage(db, item_id)
+
+
+@_packing.put("/api/items/{item_id}/container-usage")
+async def save_item_container_usage(
+        item_id: int, body: ContainerUsageIn, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_PACKAGING_MANAGE))):
+    from app.platform.settings.service import write_audit
+    before = await packs.container_usage(db, item_id)
+    out = await packs.save_container_usage(db, item_id, [r.model_dump() for r in body.rows])
+    await write_audit(
+        db, entity="mst_item_container_usage", entity_id=item_id,
+        entity_no=out["item_code"], action=AuditAction.UPDATE, actor=user,
+        before={c["name"]: c["usages"] for c in before["containers"]},
+        after={c["name"]: c["usages"] for c in out["containers"]},
+        summary=f"Container usage of {out['item_code']} updated")
+    await db.commit()
+    return out
 
 
 router.include_router(_packing)
@@ -730,6 +764,54 @@ async def deactivate_brand_item_mapping(
     row.is_active = False
     await db.commit()
     return {"success": True, "id": mapping_id}
+
+
+# Item combinations — item + brand + variant + model (2026-10-23). See
+# masters/combinations.py: derived from the mapped brands, switched on/off per item.
+class _CombinationSwitch(BaseModel):
+    is_active: bool
+
+
+class _ItemBrandsIn(BaseModel):
+    brand_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+@_tracking.get("/api/items/{item_id}/combinations")
+async def item_combinations_route(item_id: int, db: AsyncSession = Depends(get_db),
+                                  user=Depends(get_current_user)):
+    return {"items": await combinations.item_combinations(db, item_id)}
+
+
+@_tracking.put("/api/items/{item_id}/combinations/{combination_id}")
+async def switch_item_combination(
+        item_id: int, combination_id: int, data: _CombinationSwitch,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return await combinations.set_combination_active(
+        db, item_id, combination_id, data.is_active, user)
+
+
+@_tracking.post("/api/items/{item_id}/brands")
+async def map_item_brands_route(
+        item_id: int, data: _ItemBrandsIn, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return {"items": await combinations.map_item_brands(db, item_id, data.brand_ids, user)}
+
+
+@_tracking.delete("/api/items/{item_id}/brands/{brand_id}")
+async def unmap_item_brand_route(
+        item_id: int, brand_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return {"items": await combinations.unmap_item_brand(db, item_id, brand_id)}
+
+
+@_tracking.get("/api/item-combinations")
+async def combination_options_route(
+        item_ids: str = Query(..., max_length=4000), db: AsyncSession = Depends(get_db),
+        user=Depends(get_current_user)):
+    """Each item's combinations that are ON — the full list a document offers."""
+    ids = [int(x) for x in item_ids.split(",") if x.strip().isdigit()][:MAX_BATCH_IDS]
+    return {str(k): v for k, v in (await combinations.combination_options(db, ids)).items()}
 
 
 router.include_router(_tracking)

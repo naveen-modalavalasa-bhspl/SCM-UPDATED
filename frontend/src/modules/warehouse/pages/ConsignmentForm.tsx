@@ -34,6 +34,7 @@ import type {
   IssueDispatchSourceItem,
   IssueItemWrite,
 } from "../types";
+import { CombinationTag } from "@/shared/combination";
 
 const PACKAGE_TYPES = [
   { value: "BOX", label: "Box" },
@@ -1448,6 +1449,7 @@ export default function ConsignmentForm() {
                               <td className="px-3 py-2">
                                 <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                                 <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
+                                <CombinationTag value={line} className="mt-1" />
                               {source && !doc && <QcTag line={line} />}
                               </td>
                               <td className="px-3 py-2"><BatchPlace line={line} /></td>
@@ -1659,6 +1661,7 @@ export default function ConsignmentForm() {
                             <td className="px-3 py-2">
                               <div className="font-mono text-xs font-semibold text-ink">{line.item_code ?? line.item_id}</div>
                               <div className="max-w-[260px] truncate text-xs text-muted">{line.item_name ?? "—"}</div>
+                              <CombinationTag value={line} className="mt-1" />
                               {source && !doc && <QcTag line={line} />}
                             </td>
                             <td className="px-3 py-2"><BatchPlace line={line} /></td>
@@ -1720,7 +1723,7 @@ export default function ConsignmentForm() {
                                 * as the material issue; the quantity never moves. */}
                               {thisQty > 0 && cartonHierarchies(line).length > 0 && (
                                 <div className="mt-1 text-left">
-                                  <IssuePickPacking
+                                  <IssuePickPacking splitting
                                     line={{
                                       item_id: line.item_id, item_code: line.item_code,
                                       item_name: line.item_name, batch_no: line.batch_no,

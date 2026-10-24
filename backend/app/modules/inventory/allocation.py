@@ -24,6 +24,22 @@ from app.shared.models.base import utcnow
 ZERO = Decimal("0")
 
 
+def matches_combination(stock, combination: dict | None) -> bool:
+    """Does a balance row hold the brand / variant / model a line names (2026-10-23)?
+    No combination named — None, or brand 0 — matches every row."""
+    if not combination or not int(combination.get("brand_id") or 0):
+        return True
+    return ((int(stock.brand_id or 0), int(stock.variant_id or 0), int(stock.model_id or 0))
+            == (int(combination.get("brand_id") or 0), int(combination.get("variant_id") or 0),
+                int(combination.get("model_id") or 0)))
+
+
+def _combo_of(stock) -> dict:
+    """The combination columns a reservation copies off its balance row."""
+    return {"brand_id": int(stock.brand_id or 0), "variant_id": int(stock.variant_id or 0),
+            "model_id": int(stock.model_id or 0)}
+
+
 @dataclass(frozen=True)
 class ConsumedStock:
     """The exact stock dimensions released for a physical issue."""
@@ -34,6 +50,11 @@ class ConsumedStock:
     batch_id: int
     project_id: int
     quantity: Decimal
+    # Which brand / variant / model the slice is (2026-10-23), so the posting moves
+    # stock out of that row and no other.
+    brand_id: int = 0
+    variant_id: int = 0
+    model_id: int = 0
 
 
 def _d(value) -> Decimal:
@@ -44,8 +65,12 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
                   ref_no: str | None, user, *, project_id: int = NO_PROJECT,
                   warehouse_types: list[str] | None = None,
                   warehouse_ids: list[int] | None = None,
-                  ref_line_id: int | None = None, item=None) -> tuple[Decimal, Decimal]:
+                  ref_line_id: int | None = None, item=None,
+                  combination: dict | None = None) -> tuple[Decimal, Decimal]:
     """Reserve up to `qty`. Returns (reserved, shortfall).
+
+    `combination` (brand / variant / model) narrows it to that combination's stock;
+    None draws from any.
 
     A partial reservation is a normal outcome, not an error: an indent for 100 when 60
     are on hand should reserve 60 and let the caller raise an MR for the other 40.
@@ -63,7 +88,8 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
         taken = await take_from_holds(
             db, item_id=item_id, project_id=project_id, qty=remaining,
             ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, ref_line_id=ref_line_id,
-            user=user, warehouse_ids=warehouse_ids, warehouse_types=warehouse_types)
+            user=user, warehouse_ids=warehouse_ids, warehouse_types=warehouse_types,
+            combination=combination)
         remaining -= taken
         reserved_total += taken
         if remaining <= ZERO:
@@ -75,6 +101,7 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
     rows = await availability.candidate_stock(db, item_id, project_id,
                                               warehouse_types, strategy,
                                               warehouse_ids=warehouse_ids)
+    rows = [row for row in rows if matches_combination(row, combination)]
 
     for stock in rows:
         if remaining <= ZERO:
@@ -88,6 +115,7 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
         db.add(Reservation(
             stock_id=stock.id, item_id=item_id, warehouse_id=stock.warehouse_id,
             bin_id=stock.bin_id, batch_id=stock.batch_id, project_id=stock.project_id,
+            **_combo_of(stock),
             quantity=take, ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
             ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
             created_by_id=getattr(user, "id", None),
@@ -103,7 +131,7 @@ async def reserve(db: AsyncSession, item_id: int, qty, ref_type: str, ref_id: in
 async def reserve_at(db: AsyncSession, *, item_id: int, qty, warehouse_id: int,
                      bin_id: int | None, batch_id: int | None, ref_type: str,
                      ref_id: int, ref_no: str | None, ref_line_id: int | None,
-                     user) -> Decimal:
+                     user, combination: dict | None = None) -> Decimal:
     """Reserve `qty` at the exact (bin, batch) a document line names. Returns what
     could be reserved; the caller decides whether a shortfall is an error.
 
@@ -123,6 +151,10 @@ async def reserve_at(db: AsyncSession, *, item_id: int, qty, warehouse_id: int,
         stmt = stmt.where(Stock.bin_id == bin_id)
     if batch_id:
         stmt = stmt.where(Stock.batch_id == batch_id)
+    if combination and int(combination.get("brand_id") or 0):
+        stmt = stmt.where(Stock.brand_id == int(combination["brand_id"]),
+                          Stock.variant_id == int(combination.get("variant_id") or 0),
+                          Stock.model_id == int(combination.get("model_id") or 0))
     rows = (await db.execute(stmt.order_by(Stock.id).with_for_update())).scalars().all()
     taken = ZERO
     for stock in sorted(rows, key=lambda row: -(row.available_qty or ZERO)):
@@ -136,6 +168,7 @@ async def reserve_at(db: AsyncSession, *, item_id: int, qty, warehouse_id: int,
         db.add(Reservation(
             stock_id=stock.id, item_id=item_id, warehouse_id=stock.warehouse_id,
             bin_id=stock.bin_id, batch_id=stock.batch_id, project_id=stock.project_id,
+            **_combo_of(stock),
             quantity=part, ref_type=ref_type, ref_id=ref_id, ref_no=ref_no,
             ref_line_id=ref_line_id, status=ReservationStatus.ACTIVE.value,
             created_by_id=getattr(user, "id", None),
@@ -246,7 +279,8 @@ async def take_from_holds(db: AsyncSession, *, item_id: int, project_id: int, qt
                           warehouse_ids: list[int] | None = None,
                           warehouse_types: list[str] | None = None,
                           bin_id: int | None = None,
-                          batch_id: int | None = None) -> Decimal:
+                          batch_id: int | None = None,
+                          combination: dict | None = None) -> Decimal:
     """Draw up to `qty` of a project's held stock for that project's own document.
 
     With a `ref_type` the reservation MOVES from the hold onto the document — neither
@@ -285,6 +319,9 @@ async def take_from_holds(db: AsyncSession, *, item_id: int, project_id: int, qt
         for res in await _active(db, RefType.PROJECT_HOLD.value, ph.id, None):
             if taken >= want or spare <= ZERO:
                 break
+            if combination and not matches_combination(
+                    await db.get(Stock, res.stock_id), combination):
+                continue
             give = min(_d(res.quantity), want - taken, spare)
             spare -= give
             res.status = ReservationStatus.CONSUMED.value
@@ -470,6 +507,7 @@ async def swap_holds(
     warehouse_id: int,
     wanted: dict[tuple[int, int], Decimal],
     pinned: dict[tuple[int, int, int, int], Decimal] | None = None,
+    combination: dict | None = None,
 ) -> Decimal:
     """Let an issue take the batch it picked even when ANOTHER indent's hold sits on it.
 
@@ -487,12 +525,18 @@ async def swap_holds(
 
     Called BEFORE `relocate`, which then covers any remaining gap out of FREE stock.
     Returns the quantity traded. Does not commit.
+
+    `combination` (2026-10-23): only holds of the line's own brand / variant / model
+    trade, on both sides — so neither indent ends up holding a combination it did not
+    have.
     """
     pinned = pinned or {}
     wanted = {_slot(*key): _d(qty) for key, qty in wanted.items() if _d(qty) > ZERO}
     mine: dict[tuple[int, int], list[Reservation]] = {}
     for res in await _active(db, ref_type, ref_id, ref_line_id):
-        if res.item_id == item_id and res.warehouse_id == warehouse_id:
+        if res.item_id == item_id and res.warehouse_id == warehouse_id and (
+                not combination
+                or matches_combination(await db.get(Stock, res.stock_id), combination)):
             mine.setdefault(_slot(res.bin_id, res.batch_id), []).append(res)
     held = {key: sum((_d(r.quantity) for r in rows), ZERO) for key, rows in mine.items()}
     surplus_rows = [r for key, rows in mine.items()
@@ -507,7 +551,8 @@ async def swap_holds(
             continue
         free = sum((_d(row.available_qty) for row in await _stock_at(
             db, item_id=item_id, warehouse_id=warehouse_id,
-            bin_id=key[0], batch_id=key[1])), ZERO)
+            bin_id=key[0], batch_id=key[1])
+            if matches_combination(row, combination)), ZERO)
         need -= free
         if need <= ZERO:
             continue
@@ -520,6 +565,9 @@ async def swap_holds(
                 Reservation.bin_id == key[0], Reservation.batch_id == key[1],
             ).order_by(Reservation.id).with_for_update()
         )).scalars().all())
+        if combination:
+            others = [o for o in others
+                      if matches_combination(await db.get(Stock, o.stock_id), combination)]
         # Per other indent line, what is not pinned by an open issue of theirs.
         free_of_pins: dict[tuple[int, int], Decimal] = {}
         for o in others:
@@ -781,6 +829,7 @@ async def relocate(
     ref_no: str | None = None,
     user=None,
     label: str | None = None,
+    combination: dict | None = None,
 ) -> list[Relocation]:
     """Move an existing hold onto the (bin, batch) a document now names.
 
@@ -811,6 +860,10 @@ async def relocate(
             continue
         if warehouse_id is not None and res.warehouse_id != warehouse_id:
             continue
+        # Only this line's brand / variant / model (2026-10-23).
+        if combination and not matches_combination(
+                await db.get(Stock, res.stock_id), combination):
+            continue
         held.setdefault(_slot(res.bin_id, res.batch_id), []).append(res)
     if not held:
         return []
@@ -837,8 +890,9 @@ async def relocate(
     # there is not moving, so it is not capacity either way.
     room: dict[tuple[int, int], Decimal] = {}
     for key in deficit:
-        rows = await _stock_at(db, item_id=subject, warehouse_id=point,
-                               bin_id=key[0], batch_id=key[1])
+        rows = [row for row in await _stock_at(db, item_id=subject, warehouse_id=point,
+                                               bin_id=key[0], batch_id=key[1])
+                if matches_combination(row, combination)]
         room[key] = sum((row.available_qty or ZERO for row in rows), ZERO)
 
     placeable = sum((min(need, room.get(key, ZERO))
@@ -907,6 +961,8 @@ async def relocate(
                                      bin_id=key[0], batch_id=key[1]):
             if remaining <= ZERO:
                 break
+            if not matches_combination(stock, combination):
+                continue
             take = min(remaining, stock.available_qty or ZERO)
             if take <= ZERO:
                 continue
@@ -915,7 +971,7 @@ async def relocate(
             db.add(Reservation(
                 stock_id=stock.id, item_id=subject, warehouse_id=stock.warehouse_id,
                 bin_id=stock.bin_id, batch_id=stock.batch_id,
-                project_id=stock.project_id, quantity=take,
+                project_id=stock.project_id, quantity=take, **_combo_of(stock),
                 ref_type=ref_type, ref_id=ref_id,
                 ref_no=ref_no or sample.ref_no, ref_line_id=ref_line_id,
                 status=ReservationStatus.ACTIVE.value,
@@ -969,6 +1025,7 @@ async def consume_for_issue(
     warehouse_id: int | None = None,
     bin_id: int | None = None,
     batch_id: int | None = None,
+    combination: dict | None = None,
 ) -> list[ConsumedStock]:
     """Consume an exact quantity and return the balance slices it came from.
 
@@ -1011,6 +1068,10 @@ async def consume_for_issue(
             raise ValidationError(
                 f"Reservation {res.id} points to a stock balance that no longer exists"
             )
+        # The issue line's brand / variant / model (2026-10-23): a hold on another
+        # combination belongs to another line.
+        if not matches_combination(stock, combination):
+            continue
         if (stock.reserved_qty or ZERO) < take:
             raise ValidationError(
                 f"Reservation {res.id} is not backed by enough reserved stock"
@@ -1049,6 +1110,7 @@ async def consume_for_issue(
             batch_id=res.batch_id,
             project_id=res.project_id,
             quantity=take,
+            **_combo_of(stock),
         ))
         if remaining is not None:
             remaining -= take

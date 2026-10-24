@@ -384,10 +384,15 @@ function PackFlags({ lot }: { lot: ProjectLot }) {
 /** Repack, on every lot holding stock (2026-10-11) — stock put away before packing
  *  existed is loose, and this is how it gets packed. Amber when a pack is under its
  *  minimum. An item with no pack levels says where to add them instead of hiding. */
+/** Lots are segregated here, never repacked (2026-10-23): packs change only where
+ *  the master says — putaway shelves in Storage containers, and the issue counter
+ *  opens them when the item is issued in smaller ones. */
+const REPACK_ON_LOTS = false;
+
 function RepackButton({ lot, packable: hasLevels, loading, onRepack }: {
   lot: ProjectLot; packable: boolean; loading: boolean; onRepack: () => void;
 }) {
-  if (num(lot.total_qty) <= 0) return null;
+  if (!REPACK_ON_LOTS || num(lot.total_qty) <= 0) return null;
   const urgent = !!lot.pack_below_min || lot.pack_unreconciled;
   const missing = !loading && !hasLevels;
   return (

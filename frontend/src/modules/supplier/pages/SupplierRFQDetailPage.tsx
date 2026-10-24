@@ -12,12 +12,19 @@ import { supplierApi } from "@/modules/procurement/api";
 import { QuotationChat } from "@/modules/procurement/components/QuotationChat";
 import { QuotePriceTrail } from "@/modules/procurement/components/QuotePriceTrail";
 import type { QuoteChangeRequest, QuoteOtpSent, QuoteSubmit } from "@/modules/procurement/types";
+import {
+  CombinationPicker, SUPPLIER_COMBINATIONS, comboFrom, comboPayload, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 interface QuoteLine {
   rfq_item_id: number;
+  item_id: number;
+  /** The brand / variant / model offered — the buyer's ask, or another (2026-10-23). */
+  combo?: CombinationValue;
   item_name: string;
   item_code: string;
   uom_code: string;
@@ -54,6 +61,8 @@ export function SupplierRFQDetailPage() {
   const rfqId = Number(id);
 
   const [lines, setLines] = useState<QuoteLine[]>([]);
+  const comboOptions = useCombinationOptions(lines.map((line) => line.item_id),
+                                             SUPPLIER_COMBINATIONS);
   const [header, setHeader] = useState({
     vendor_ref_no: "", valid_till: "", expected_delivery_date: "",
     payment_terms: "", freight_amount: "", discount_amount: "", remarks: "",
@@ -97,6 +106,8 @@ export function SupplierRFQDetailPage() {
     });
     setLines(quote.items.map((item) => ({
       rfq_item_id: item.rfq_item_id ?? 0,
+      item_id: Number(item.item_id),
+      combo: comboFrom(item),
       item_name: item.item_name ?? `Item ${item.item_id}`,
       item_code: item.item_code ?? "—",
       uom_code: item.uom_code ?? "",
@@ -182,6 +193,7 @@ export function SupplierRFQDetailPage() {
           discount_percent: Number(line.discount_percent || 0),
           tax_percent: taxRate(line),
           delivery_days: line.delivery_days ? Number(line.delivery_days) : null,
+          ...comboPayload(line.combo),
         })),
       };
       return supplierApi.submitQuotation(rfqId, payload);
@@ -647,6 +659,19 @@ export function SupplierRFQDetailPage() {
                     {line.hsn_code ? ` · HSN ${line.hsn_code}` : ""}
                   </div>
                 </div>
+                {!!comboOptions.data?.[String(line.item_id)]?.length && (
+                  <div className="mb-3 max-w-md">
+                    <Field label="Brand · variant · model">
+                      <CombinationPicker
+                        options={comboOptions.data?.[String(line.item_id)]}
+                        value={line.combo}
+                        locked={!open}
+                        ariaLabel={`Brand, variant and model for ${line.item_name}`}
+                        onChange={(combo) => set(index, { combo })}
+                      />
+                    </Field>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
                   {/* Short is an ordinary answer — say what you can actually supply. More
                     * than was asked for is refused by the server: a quotation answers a

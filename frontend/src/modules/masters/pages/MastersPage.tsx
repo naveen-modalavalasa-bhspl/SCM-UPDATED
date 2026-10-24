@@ -22,12 +22,13 @@ import {
   AttributesTab, CategoryTaggingTab, FeaturesTab, PackagingTab, SpecsTab,
 } from "../tabs/attributeTabs";
 import { BomGroupsTab, BomsTab, ItemGroupsTab } from "../tabs/bomTabs";
+import { ContainerUsageTab, ItemPackagingVariantsTab } from "../tabs/packagingTabs";
 import { ItemEligibilityTab } from "../tabs/eligibilityTabs";
 const TABS = [
   "items", "categories", "general-names", "item-classes", "item-sub-classes",
   "brands", "manufacturers", "dosage-forms", "hsn-codes",
   "brand-item-mapping",
-  "features", "packaging", "item-groups",
+  "features", "packaging", "pack-variants", "container-usage", "item-groups",
   "attributes", "specs", "category-tags",
   "uom", "uom-classes", "conversions", "warehouses",
   "projects", "vendors", "vendor-categories", "vendor-items", "boms", "bom-groups",
@@ -50,7 +51,8 @@ export type MasterGroup = { label: string; tabs: MasterTab[] };
 const GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups", "item-eligibility"] },
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "hsn-codes", "brand-item-mapping"] },
-  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
+  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags"] },
+  { label: "Packaging", tabs: ["packaging", "pack-variants", "container-usage"] },
   { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
   { label: "Vendors", tabs: ["vendors", "vendor-categories", "vendor-items", "payment-terms"] },
   { label: "BOM", tabs: ["boms", "bom-groups"] },
@@ -77,7 +79,8 @@ const GROUPS: MasterGroup[] = [
 export const INVENTORY_MASTER_GROUPS: MasterGroup[] = [
   { label: "Items", tabs: ["items", "categories", "general-names", "item-classes", "item-sub-classes", "item-groups"] },
   { label: "Classification", tabs: ["brands", "manufacturers", "dosage-forms", "brand-item-mapping"] },
-  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags", "packaging"] },
+  { label: "Attributes", tabs: ["attributes", "specs", "features", "category-tags"] },
+  { label: "Packaging", tabs: ["packaging", "pack-variants", "container-usage"] },
   { label: "Units", tabs: ["uom", "uom-classes", "conversions"] },
 ];
 
@@ -110,7 +113,9 @@ const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   brands: "Brands", manufacturers: "Manufacturers",
   "dosage-forms": "Dosage Forms", "hsn-codes": "HSN Codes",
   "brand-item-mapping": "Brand Item Mapping",
-  features: "Features", packaging: "Packages", "item-groups": "Item Groups",
+  features: "Features", packaging: "Container Types",
+  "pack-variants": "Item Packaging Variants", "container-usage": "Container Usage",
+  "item-groups": "Item Groups",
   attributes: "Attributes", specs: "Specifications", "category-tags": "Category Tagging",
   uom: "UOM", "uom-classes": "UOM Types", conversions: "Conversions", warehouses: "Warehouses",
   projects: "Projects", vendors: "Vendors", "vendor-categories": "Vendor Categories", "vendor-items": "Vendor Material Mapping",
@@ -306,6 +311,8 @@ export function MastersShell({
       {tab === "brand-item-mapping" && <BrandItemMappingTab />}
       {tab === "features" && <FeaturesTab />}
       {tab === "packaging" && <PackagingTab />}
+      {tab === "pack-variants" && <ItemPackagingVariantsTab />}
+      {tab === "container-usage" && <ContainerUsageTab />}
       {tab === "item-groups" && <ItemGroupsTab items={itemOpts} />}
       {tab === "attributes" && <AttributesTab uoms={uomOpts} />}
       {tab === "specs" && <SpecsTab uoms={uomOpts} />}

@@ -14,7 +14,7 @@ per module:
                               token — never one from the request.
 """
 from datetime import date
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -804,6 +804,16 @@ async def vendor_me(db: AsyncSession = Depends(get_db),
 async def vendor_item_packing(db: AsyncSession = Depends(get_db),
                               account=Depends(get_current_vendor)):
     return await service.vendor_item_packing(db, account.vendor_id)
+
+
+# The brand / variant / model a quote or despatch line may name (2026-10-23).
+@supplier.get("/items/combinations")
+async def vendor_item_combinations(item_ids: str = Query(..., max_length=4000),
+                                   db: AsyncSession = Depends(get_db),
+                                   account=Depends(get_current_vendor)):
+    return await service.vendor_item_combinations(
+        db, account.vendor_id,
+        [int(x) for x in item_ids.split(",") if x.strip().isdigit()][:500])
 
 
 @supplier.post("/change-password", status_code=204)

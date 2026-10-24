@@ -8,6 +8,7 @@ import { consolidationApi, requisitionApi, rfqApi } from "../api";
 import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker";
 import { OrgFields, type OrgValue } from "../components/OrgFields";
 import { todayIst } from "@/shared/datetime";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 interface MasterVendor {
   id: number;
@@ -132,6 +133,7 @@ export function RFQFormPage() {
       original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
+      combo: comboFrom(item),
     })));
   }, [existing]);
 
@@ -157,6 +159,7 @@ export function RFQFormPage() {
       original_quantity: String(item.quantity),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
+      combo: comboFrom(item),
     })));
   }, [source]);
 
@@ -179,6 +182,7 @@ export function RFQFormPage() {
       original_quantity: String(item.approved_qty),
       uom_code: item.uom_code,
       required_date: item.required_date ?? "",
+      combo: comboFrom(item),
     })));
   }, [sourceConsolidation]);
 
@@ -226,6 +230,7 @@ export function RFQFormPage() {
           quantity: Number(line.quantity),
           uom_code: line.uom_code ?? null,
           required_date: line.required_date || null,
+          ...comboPayload(line.combo),
         })),
       };
       return editing

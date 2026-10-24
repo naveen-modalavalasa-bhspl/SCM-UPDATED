@@ -19,11 +19,30 @@ import {
 } from "../displayFormat";
 import type { IndentCreate, IndentType, IndentUpdate, TemplateLineItem } from "../types";
 import { TONE_AMBER, TONE_MINT, TONE_PINK } from "../buttonTones";
+import {
+  fmtQty, laddersForBrand, levelsFor, packable, usePackOptions, type PackLevel,
+} from "@/shared/packing";
+import {
+  CombinationPicker, combinationKey, pickCombination, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
 interface Line {
   item_id: number | "";
   quantity: number | "";
+  /** Typed in an Indent container (2026-10-23): which level, and how many. The line
+   *  still sends `quantity` in base units — count × the container's size. */
+  packLevel?: number;
+  packCount?: number | "";
   duplicateItemId?: number;
+  /** Which brand / variant / model — or Any (2026-10-23). Unset reads as Any. */
+  combo?: CombinationValue;
+}
+
+/** Item + combination: the same item in two combinations is two lines. */
+function lineKey(line: Line) {
+  const c = line.combo;
+  return `${line.item_id}|${c?.combination_any || !c?.brand_id ? "any" : combinationKey(c)}`;
 }
 
 const PAST_REQUIRED_DATE_ERROR = "Required date cannot be earlier than today";
@@ -70,13 +89,13 @@ function localDateString(date = new Date()) {
 }
 
 function duplicateItemRows(lines: Line[]) {
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   const duplicates = new Map<number, number>();
   lines.forEach((line, index) => {
     if (line.item_id === "") return;
-    const itemId = Number(line.item_id);
-    if (seen.has(itemId)) duplicates.set(index, itemId);
-    seen.add(itemId);
+    const key = lineKey(line);
+    if (seen.has(key)) duplicates.set(index, Number(line.item_id));
+    seen.add(key);
   });
   return duplicates;
 }
@@ -86,7 +105,7 @@ function clearResolvedDuplicateErrors(lines: Line[]) {
     if (
       line.duplicateItemId === undefined
       || lines.some((other, otherIndex) =>
-        otherIndex !== index && other.item_id === line.duplicateItemId)
+        otherIndex !== index && lineKey(other) === lineKey(line))
     ) {
       return line;
     }
@@ -125,6 +144,19 @@ export function IndentFormPage() {
     me?.active_position?.office_id ?? me?.employee.office_id ?? "",
   );
   const [lines, setLines] = useState<Line[]>([{ item_id: "", quantity: "" }]);
+  // Each item's ladders, for the Indent containers (2026-10-23).
+  const packOptions = usePackOptions(lines.map((line) => Number(line.item_id) || 0));
+  /** The line's ladder (its brand's, else the first) and its Indent containers. */
+  const indentContainers = (line: Line) => {
+    if (line.item_id === "") return { ladder: undefined, levels: [] as PackLevel[] };
+    const ladder = laddersForBrand(packable(packOptions.data?.[Number(line.item_id)]),
+                                   line.combo?.brand_id)[0];
+    const levels = ladder && !ladder.unmapped_usages?.includes("INDENT")
+      ? levelsFor(ladder, "INDENT").filter((lv) => lv.level > 0) : [];
+    return { ladder, levels };
+  };
+  // Each item's brand / variant / model combinations that are on (2026-10-23).
+  const comboOptions = useCombinationOptions(lines.map((line) => Number(line.item_id) || 0));
   const [error, setError] = useState<string | null>(null);
   const [bomPickerOpen, setBomPickerOpen] = useState(false);
   const [bomNotice, setBomNotice] = useState<string | null>(null);
@@ -216,6 +248,12 @@ export function IndentFormPage() {
     setLines(draft.items.map((item) => ({
       item_id: item.item_id,
       quantity: Number(item.quantity),
+      combo: {
+        brand_id: item.brand_id || null, variant_id: item.variant_id || null,
+        model_id: item.model_id || null, brand_name: item.brand_name ?? null,
+        variant_name: item.variant_name ?? null, model_name: item.model_name ?? null,
+        combination_any: !!item.combination_any,
+      },
     })));
   }, [canEditLoadedIndent, draft]);
 
@@ -250,7 +288,17 @@ export function IndentFormPage() {
     remarks: remarks || null,
     items: lines
       .filter((l) => l.item_id !== "" && l.quantity !== "" && Number(l.quantity) > 0)
-      .map((l) => ({ item_id: Number(l.item_id), quantity: Number(l.quantity) })),
+      .map((l) => ({
+        item_id: Number(l.item_id), quantity: Number(l.quantity),
+        // Only an item that HAS combinations says which (or Any); one with none sends
+        // the line exactly as before.
+        ...(comboOptions.data?.[String(l.item_id)]?.length ? {
+          brand_id: l.combo?.combination_any ? null : l.combo?.brand_id ?? null,
+          variant_id: l.combo?.combination_any ? null : l.combo?.variant_id ?? null,
+          model_id: l.combo?.combination_any ? null : l.combo?.model_id ?? null,
+          combination_any: !l.combo?.brand_id || !!l.combo?.combination_any,
+        } : {}),
+      })),
   });
 
   const updatePayload = (): IndentUpdate => ({
@@ -275,20 +323,29 @@ export function IndentFormPage() {
     ));
   const setLineItem = (i: number, value: number | "") =>
     setLines((current) => {
-      if (
-        value !== ""
-        && current.some((line, index) => index !== i && line.item_id === value)
-      ) {
+      // The same item may be added again, in another combination (2026-10-23): it
+      // starts on the first one no other line of the item has taken, else on Any.
+      const options = value === "" ? [] : comboOptions.data?.[String(value)] ?? [];
+      // An item with no combinations on another line is the plain duplicate it always was.
+      if (value !== "" && !options.length
+          && current.some((line, index) => index !== i && line.item_id === value)) {
         return current.map((line, index) =>
           index === i ? { ...line, duplicateItemId: value } : line);
       }
+      const taken = new Set(current
+        .filter((line, index) => index !== i && line.item_id === value)
+        .map((line) => lineKey(line)));
+      const free = taken.size
+        ? options.find((o) => !taken.has(`${value}|${combinationKey(o)}`))
+        : undefined;
       const updated: Line[] = current.map((line, index) => {
         if (index !== i) return line;
         const validLine = { ...line };
         delete validLine.duplicateItemId;
         return value === ""
-          ? { ...validLine, item_id: "", quantity: "" }
-          : { ...validLine, item_id: value };
+          ? { ...validLine, item_id: "", quantity: "", combo: undefined }
+          : { ...validLine, item_id: value,
+              combo: free ? pickCombination(free) : pickCombination(null, true) };
       });
       return clearResolvedDuplicateErrors(updated);
     });
@@ -453,12 +510,17 @@ export function IndentFormPage() {
                 const quantityLabel = selectedItem
                   ? `Quantity (${uom})`
                   : "Quantity";
+                // An item already on the indent stays pickable: another line of it is
+                // another brand / variant / model (2026-10-23).
                 const rowItemOptions = itemOptions.map((option) => ({
                   ...option,
                   isDisabled: option.value !== line.item_id
+                    && !comboOptions.data?.[String(option.value)]?.length
                     && lines.some((other, otherIndex) =>
                       otherIndex !== i && other.item_id === option.value),
                 }));
+                const rowCombos = line.item_id === ""
+                  ? undefined : comboOptions.data?.[String(line.item_id)];
                 return (
                   <div key={i}>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px] sm:items-end">
@@ -509,6 +571,58 @@ export function IndentFormPage() {
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
+                    {(() => {
+                      const { ladder, levels } = indentContainers(line);
+                      if (!ladder || !levels.length) return null;
+                      const level = levels.find((lv) => lv.level === line.packLevel) ?? levels[levels.length - 1];
+                      const count = line.packLevel === level.level ? line.packCount ?? "" : "";
+                      return (
+                        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px] sm:items-end">
+                          <Field label="Indent in">
+                            <Select
+                              value={level.level}
+                              ariaLabel={`Indent container for line ${i + 1}`}
+                              options={levels.map((lv) => ({
+                                value: lv.level,
+                                label: `${lv.name} · ${fmtQty(lv.size)} ${uom}`,
+                              }))}
+                              onChange={(v) => setLine(i, { packLevel: Number(v), packCount: "" })}
+                            />
+                          </Field>
+                          <Field label={`No. of ${level.name}`}>
+                            <Input
+                              type="number" min={0} step="1"
+                              aria-label={`Number of ${level.name}`}
+                              className={NO_SPINNER}
+                              value={String(count)}
+                              {...NO_SILENT_STEPPING}
+                              onChange={(e) => {
+                                const n = e.target.value ? Math.max(0, Math.floor(Number(e.target.value))) : "";
+                                setLine(i, { packLevel: level.level, packCount: n,
+                                             quantity: n === "" ? "" : n * level.size });
+                              }}
+                            />
+                          </Field>
+                          <span className="pb-3 text-xs text-muted tabular">
+                            {count !== "" ? `= ${fmtQty(Number(count) * level.size)}` : ""}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                    {!!rowCombos?.length && (
+                      <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px]">
+                        <Field label="Brand · variant · model">
+                          <CombinationPicker
+                            options={rowCombos}
+                            value={line.combo ?? pickCombination(null, true)}
+                            allowAny
+                            invalid={duplicateItemId !== undefined}
+                            ariaLabel={`Brand, variant and model for line ${i + 1}`}
+                            onChange={(combo) => setLine(i, { combo })}
+                          />
+                        </Field>
+                      </div>
+                    )}
                     {duplicateItemId !== undefined && (
                       <div className="mt-1 grid grid-cols-1 gap-3 sm:grid-cols-[1fr_120px_44px]">
                         <span

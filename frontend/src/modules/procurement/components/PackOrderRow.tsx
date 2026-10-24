@@ -2,8 +2,20 @@ import { Package, X } from "lucide-react";
 import { Field, Select } from "@/shared/components";
 import {
   type PackEntry, type PackHierarchy, PackChips, PackHierarchyPicker, fmtQty,
-  greedyWithPart, num,
+  greedyWithPart, levelsFor, num,
 } from "@/shared/packing";
+
+/** The levels a PO may be packed in: the item's Purchase containers (2026-10-23), or
+ *  every pack level when none are mapped. */
+export function purchaseLevels(h: PackHierarchy): number[] {
+  const all = h.levels.filter((lv) => lv.level > 0).map((lv) => lv.level);
+  if (h.unmapped_usages?.includes("PURCHASE")) return all;
+  const mapped = levelsFor(h, "PURCHASE").map((lv) => lv.level).filter((lv) => lv > 0);
+  return mapped.length ? mapped : all;
+}
+
+/** The level a new PO line opens on: the biggest purchase container. */
+const openingLevel = (h: PackHierarchy) => Math.max(...purchaseLevels(h), 0) || h.levels.length - 1;
 
 /** The packing of `qty` base units in level `level` of `h`: whole packs of that level
  *  and the remainder as ONE part pack of it (2026-10-11) — "1,000 NOS in Carton of
@@ -60,7 +72,7 @@ export function PackOrderRow({ hierarchies, hierarchyId, breakdown, quantity, uo
         <span className="text-sm text-muted">Ordered loose, in {uom ?? "units"}.</span>
         {!disabled && hierarchies.map((h) => (
           <button key={h.hierarchy_id} type="button"
-                  onClick={() => choose(h, h.levels.length - 1)}
+                  onClick={() => choose(h, openingLevel(h))}
                   className="min-h-9 rounded-lg border border-line px-2.5 text-xs font-semibold text-brand hover:bg-brand-050">
             Order in {h.name}
           </button>
@@ -89,7 +101,8 @@ export function PackOrderRow({ hierarchies, hierarchyId, breakdown, quantity, uo
                            locked={disabled}
                            onChange={(id) => {
                              const next = hierarchies.find((h) => h.hierarchy_id === id);
-                             if (next) choose(next, Math.min(levelNo, next.levels.length - 1));
+                             if (next) choose(next, purchaseLevels(next).includes(levelNo)
+                               ? levelNo : openingLevel(next));
                            }} />
       <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] sm:items-end">
         <Field label="Pack level">
@@ -97,7 +110,8 @@ export function PackOrderRow({ hierarchies, hierarchyId, breakdown, quantity, uo
             value={level?.level ?? ""}
             isDisabled={disabled}
             ariaLabel="Pack level"
-            options={hierarchy.levels.filter((lv) => lv.level > 0)
+            options={hierarchy.levels
+              .filter((lv) => purchaseLevels(hierarchy).includes(lv.level) || lv.level === levelNo)
               .map((lv) => ({ value: lv.level, label: lv.label }))}
             onChange={(value) => choose(hierarchy, Number(value))}
           />
@@ -110,8 +124,7 @@ export function PackOrderRow({ hierarchies, hierarchyId, breakdown, quantity, uo
                 <PackChips entries={breakdown} uom={uom} showHierarchy={false} showTotal={false} />
               </div>
               <div className="text-xs text-muted tabular">
-                Rounded up to whole {level?.name ?? "pack"} ({fmtQty(size)} {uom ?? "units"} each): {fmtQty(needed)}.
-                The quantity stays {fmtQty(qty)} — packing only says how it is packed.
+                {fmtQty(needed)} × {level?.name ?? "pack"} ({fmtQty(size)} {uom ?? "units"} each)
               </div>
             </>
           ) : (

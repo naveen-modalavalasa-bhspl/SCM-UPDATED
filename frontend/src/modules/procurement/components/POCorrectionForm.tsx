@@ -11,6 +11,7 @@ import { LinePicker, type DraftLine } from "./LinePicker";
 import {
   POHeaderFields, poHeaderFrom, poHeaderPayload, poMissingAddresses, type POHeaderValue,
 } from "./POHeaderFields";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 interface MasterVendor {
   id: number;
@@ -53,6 +54,7 @@ export function POCorrectionForm({ po, onSaved, onCancel, mode = "correction" }:
       quantity: String(i.quantity),
       rate: String(i.rate),
       tax_percent: String(i.tax_percent ?? 0),
+      combo: comboFrom(i),
     })),
   );
 
@@ -101,6 +103,7 @@ export function POCorrectionForm({ po, onSaved, onCancel, mode = "correction" }:
             quantity: Number(line.quantity),
             rate: Number(line.rate || 0),
             tax_percent: Number(line.tax_percent || 0),
+            ...comboPayload(line.combo),
           })),
       }),
     onSuccess: () => {

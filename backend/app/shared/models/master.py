@@ -1,6 +1,6 @@
 """mst_ tables — SCM's own master data. Owned by shared/."""
 from sqlalchemy import (
-    JSON, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
+    JSON, BigInteger, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
     Text, UniqueConstraint, func, select,
 )
 from sqlalchemy.orm import column_property, relationship
@@ -470,6 +470,36 @@ class BrandItemMapping(Base):
     )
 
 
+class ItemCombination(Base):
+    """`mst_item_combinations` — one item as it is actually bought, stocked and
+    issued: item + brand + variant + model (2026-10-23).
+
+    The combinations themselves are DERIVED from the item's mapped brands and each
+    brand's own variants and models (`masters.combinations.sync_item`); this row only
+    records that a combination exists and whether it is switched ON for the item. A
+    level the brand does not have is 0 — "Brand A" with no variants is one
+    combination, (brand, 0, 0). Switching one OFF is refused while stock of it is held.
+    Every transaction line names these three ids, and a different combination is a
+    different row everywhere.
+    """
+    __tablename__ = "mst_item_combinations"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    brand_id = Column(BigInteger, index=True, nullable=False)
+    variant_id = Column(BigInteger, nullable=False, default=0)
+    model_id = Column(BigInteger, nullable=False, default=0)
+    brand_name = Column(String(200), nullable=True)       # snapshot
+    variant_name = Column(String(200), nullable=True)     # snapshot
+    model_name = Column(String(200), nullable=True)       # snapshot
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+    __table_args__ = (
+        UniqueConstraint("item_id", "brand_id", "variant_id", "model_id",
+                         name="uq_item_combination"),
+    )
+
+
 
 class ItemClass(Base):
     """Broad classification, coarser than a category. Replaces the free-text
@@ -567,12 +597,38 @@ class PackHierarchy(Base):
                      nullable=False)
     name = Column(String(100), nullable=False)
     description = Column(String(300), nullable=True)
+    # The brand this ladder packs (2026-10-23): Calpol and Dolo of one item are packed
+    # differently. NULL = "All brands" — every ladder made before brands had ladders.
+    brand_id = Column(BigInteger, index=True, nullable=True)
+    brand_name = Column(String(200), nullable=True)      # snapshot
+    # The default ladder is per item AND brand (NULL counting as one more brand).
     is_default = Column(Boolean, nullable=False, default=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
     __table_args__ = (
         UniqueConstraint("item_id", "name", name="uq_pack_hierarchy_item_name"),
+    )
+
+
+class ItemContainerUsage(Base):
+    """`mst_item_container_usage` — which of an item's container types serve which
+    usage (2026-10-23). Many-to-many: one row per (item, container type, usage).
+
+    `package_id` 0 is the LOOSE base unit (a tablet), which belongs to no container.
+    A container type here applies to it in EVERY ladder of the item that has it; the
+    size is always read off the line's own ladder. An item with no rows for a usage
+    works in base units for it, exactly as before this table existed.
+    """
+    __tablename__ = "mst_item_container_usage"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    package_id = Column(BigInteger, nullable=False, default=0)
+    usage = Column(String(20), nullable=False)
+    created_at = created_at_col()
+    __table_args__ = (
+        UniqueConstraint("item_id", "package_id", "usage", name="uq_item_container_usage"),
     )
 
 

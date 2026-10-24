@@ -30,6 +30,9 @@ export interface PackLevel {
   is_default_putaway_unit?: boolean;
   /** The least one pack of this level may be made with, in base units. */
   min_fill?: number | null;
+  /** The container type (0 = loose base unit) and what it is used for (2026-10-23). */
+  package_id?: number;
+  usages?: ContainerUsage[];
 }
 
 export interface PackHierarchy {
@@ -39,6 +42,38 @@ export interface PackHierarchy {
   /** levels[0] is always LOOSE. */
   levels: PackLevel[];
   is_default?: boolean;
+  /** The brand this ladder packs; null = all brands (2026-10-23). */
+  brand_id?: number | null;
+  brand_name?: string | null;
+  /** Usages with no container mapped for the item — those work in loose units. */
+  unmapped_usages?: ContainerUsage[];
+}
+
+/** What a container of an item is used for (Masters › Packaging › Container Usage). */
+export type ContainerUsage = "INDENT" | "PURCHASE" | "STORAGE" | "ISSUE" | "CONSUMPTION";
+export const USAGES: ContainerUsage[] = ["INDENT", "PURCHASE", "STORAGE", "ISSUE", "CONSUMPTION"];
+export const USAGE_LABEL: Record<ContainerUsage, string> = {
+  INDENT: "Indent", PURCHASE: "Purchase", STORAGE: "Storage", ISSUE: "Issue",
+  CONSUMPTION: "Consumption",
+};
+
+/** The levels of a ladder that serve `usage`. Nothing mapped for it: loose units,
+ *  which is how every item worked before usages existed. */
+export function levelsFor(h: PackHierarchy, usage: ContainerUsage): PackLevel[] {
+  if (h.unmapped_usages?.includes(usage)) return h.levels.filter((lv) => lv.level === 0);
+  return h.levels.filter((lv) => lv.usages?.includes(usage));
+}
+
+/** The biggest level of a ladder serving `usage` — what a screen opens on. */
+export function defaultLevelFor(h: PackHierarchy, usage: ContainerUsage): number {
+  const levels = levelsFor(h, usage);
+  return levels.length ? Math.max(...levels.map((lv) => lv.level)) : 0;
+}
+
+/** Ladders of a brand: its own plus the "all brands" ones. No brand named: all. */
+export function laddersForBrand(list: PackHierarchy[] | undefined,
+                                brandId?: number | null): PackHierarchy[] {
+  return (list ?? []).filter((h) => !brandId || !h.brand_id || h.brand_id === brandId);
 }
 
 /** One level of a breakdown, as stored (snapshotted sizes) or as being edited. */
@@ -262,4 +297,49 @@ export function matchState(entries: PackEntry[] | null | undefined, target?: num
 
 function round3(n: number): number {
   return Math.round(n * 1000) / 1000;
+}
+
+
+/** Biggest packs first using ONLY `levels` — mirror of the server's `greedy_in`. The
+ *  remainder stays loose when loose is one of the levels, else it is one part pack of
+ *  the smallest of them. */
+export function greedyIn(h: PackHierarchy, base: number, levels: number[]): PackEntry[] {
+  const allowed = [...new Set(levels)].filter((lv) => lv >= 0 && lv < h.levels.length)
+    .sort((a, b) => b - a);
+  let remaining = base;
+  const out: PackEntry[] = [];
+  for (const level of allowed) {
+    if (level === 0) continue;
+    const lv = h.levels[level];
+    const whole = Math.floor((remaining + 1e-9) / lv.size);
+    if (whole > 0) {
+      out.push({ item_packaging_id: lv.item_packaging_id, level, name: lv.name,
+                 size: lv.size, qty: whole });
+      remaining = Math.round((remaining - whole * lv.size) * 1000) / 1000;
+    }
+  }
+  if (remaining > 0) {
+    const packs = allowed.filter((lv) => lv > 0);
+    if (allowed.includes(0) || !packs.length) {
+      out.push({ item_packaging_id: null, level: 0, name: h.levels[0].name, size: 1, qty: remaining });
+    } else {
+      out.push(partEntry(h, packs[packs.length - 1], remaining));
+    }
+  }
+  return out;
+}
+
+/** A usage's levels of a ladder, or null when nothing is mapped for it. */
+export function usageLevels(h: PackHierarchy, usage: ContainerUsage): number[] | null {
+  if (h.unmapped_usages?.includes(usage) || !h.levels.some((lv) => lv.usages)) return null;
+  return levelsFor(h, usage).map((lv) => lv.level);
+}
+
+/** May a pick be re-packed at the issue counter? Only where the item is STORED in
+ *  other containers than it is ISSUED in (2026-10-23); nothing mapped: as before. */
+export function canRepackAtIssue(h: PackHierarchy): boolean {
+  const issue = usageLevels(h, "ISSUE");
+  if (!issue) return true;
+  const storage = usageLevels(h, "STORAGE");
+  return !storage || storage.slice().sort().join() !== issue.slice().sort().join();
 }

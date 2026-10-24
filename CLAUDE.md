@@ -668,6 +668,39 @@ beside it.
 Scenario tests: `shared/tests/test_packing.py` (pure), `warehouse/tests/
 test_packing_shelf.py` and `procurement/tests/test_po_packing.py` (DB).
 
+### Packaging by usage (2026-10-23)
+
+Masters › Packaging has three sub-tabs: **Container Types** (`mst_packaging`),
+**Item Packaging Variants** (ladders per item AND brand — `mst_pack_hierarchies.brand_id`,
+NULL = "All brands"; the default ladder is per item + brand; moved off the item form)
+and **Container Usage** (`mst_item_container_usage`, many-to-many: one row per item,
+container type, usage — INDENT, PURCHASE, STORAGE, ISSUE, CONSUMPTION; package 0 =
+loose). `packs.pack_options` decorates every ladder with its brand and every level with
+its usages, so screens filter by usage from one read (`levelsFor`, `usage` prop on
+`PackBreakdownEditor`). **A usage with nothing mapped behaves exactly as before** —
+that is what keeps unconfigured items working; `scripts.setup_container_usage` seeds
+only Storage (from the default putaway rung) and single-brand ladder brands.
+
+Where packing may change, and where not:
+- PO / supplier quote / despatch note: any PURCHASE container of any ladder of the
+  item (`procurement.packing.assert_purchase_packs`, default `purchase_breakdown`).
+- Putaway: FIXED to the STORAGE containers of the received ladder (`shelve` ignores
+  the client's packs when Storage is mapped; `putaway_packing.packing_fixed`).
+- Issue: stated in ISSUE containers; a different packing only when Storage ≠ Issue,
+  inside the same ladder (`issue_line_packing`, `canRepackAtIssue`).
+- Outward QC: read-only. Consignment: splits within one ladder (`splitting`).
+  Stock Segregation › Lots: Repack hidden (`REPACK_ON_LOTS`).
+
+**Codes follow the ISSUE container**, replacing "codes belong to the base unit" for
+items issued in a container: `shelve` splits each storage pack down to the issue
+level (`split_down`) and those packs carry the codes; `_place_unit_codes` mints no
+per-unit code for such an item (`packs.issues_in_containers`), so its lots hold no
+unit rows and the per-lot serial rule issues them by quantity. Changing an item's
+Issue container fires `packs.ON_ISSUE_USAGE_CHANGED` → `recode_item`: every lot NOT
+held by a document has its inner packs closed (codes retired, reason recorded) and
+re-split at the new level; held lots are counted and left alone. Items issued loose
+keep one code per base unit, exactly as before.
+
 ### Part packs: the size is a ceiling, not a rule (2026-10-11)
 
 A level's size is the STANDARD — the most one pack holds. A carton of 600 may really
@@ -1480,10 +1513,27 @@ built against a different backend contract and is to be rewritten (see
 - Item codes are `L1L2L3-GEN-0001`. The serial is a locked `MAX+1` per
   category+general prefix, assigned once at create and **never** regenerated on an edit — stock,
   ledger rows and documents point at the code the item was created with. Brand and
-  manufacturer are validated on the item but are not part of the code: one general
-  name sold by several brands is one item row per brand sharing the prefix and
-  differing only in the serial. Rows created before the change keep their longer
-  `L1L2L3-GEN-BRAND-MFR-0001` shape, which is never rewritten.
+  manufacturer are validated on the item but are not part of the code. Rows created
+  before the change keep their longer `L1L2L3-GEN-BRAND-MFR-0001` shape, which is
+  never rewritten.
+- **One item row per code; brands are combinations of it (2026-10-23).** Creating an
+  item whose general name already has a code adds the brand to THAT item
+  (`crud.UseExistingRow`, answered with `merged_into_existing`) instead of a second
+  row with the same code. Rows created the old way (one row per brand, same code) are
+  merged by `scripts.consolidate_item_brands` (preview by default, `--apply` to save;
+  run after `alembic upgrade head` + bootstrap, with a backup): the oldest active row
+  survives, every sibling's lines/ledger/reservations/units move to it tagged with the
+  sibling's brand (a sibling with no brand stays untagged), stock landing on one lot
+  is summed, a clashing serial gets a suffix (`SN123-BETA` / `SN123-2`), and each code
+  is saved ONLY if its stock, ledger, units, reservations and document row counts are
+  identical before and after — otherwise that code is rolled back and reported. It
+  also maps every item's old `brand_id` and tags the untagged stock of an item with
+  exactly one brand. Until it runs, the mapping screen and the Brands tab already read
+  every row of a code as one item.
+- **Serials are demanded per LOT** (`warehouse.service._lot_has_units`): a lot with no
+  recorded unit — stock from a sibling that was never tracked — is issued, moved and
+  QC'd by quantity even when the item master says tracked. Bounded EXISTS, never a
+  COUNT over `whs_serial_numbers`.
 - Tax lives on `mst_hsn_codes` and is read at PO/GRN time, never copied onto an item.
   `mst_items.purchase_price` survives as the stock-valuation cost fallback, fed by
   GRN and hidden from the item form.

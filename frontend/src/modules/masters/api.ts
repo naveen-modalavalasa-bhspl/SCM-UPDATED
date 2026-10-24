@@ -1,3 +1,5 @@
+import type { ContainerUsage } from "@/shared/packing";
+import type { ContainerUsageView } from "./types";
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
 import type {
@@ -13,7 +15,7 @@ import type {
   MasterWarehouse, Project, RefRow, UomClass, UomSuggestion,
   MasterBrandManufacturer, MasterGeneralName, MasterItemSubClass, MasterUomClass, NamedMaster,
   MasterBrandModel, MasterBrandVariant,
-  MasterBrandItemMapping, BrandItemMappingSources,
+  MasterBrandItemMapping, BrandItemMappingSources, MasterItemCombination,
 } from "./types";
 
 type ListParams = {
@@ -249,6 +251,28 @@ export const mastersApi = {
       created: number; updated: number; suppliers: number; items: number;
     }>("/api/vendor-items/mapping", body).then((r) => r.data),
   },
+  /** Item + brand + variant + model (2026-10-23). Derived from the mapped brands;
+   *  switched on/off per item (off only while none of it is in stock). */
+  itemCombinations: {
+    list: (itemId: number) =>
+      api.get<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/combinations`)
+        .then((r) => r.data.items),
+    switch: (itemId: number, id: number, isActive: boolean) =>
+      api.put<MasterItemCombination>(`/api/items/${itemId}/combinations/${id}`,
+                                     { is_active: isActive }).then((r) => r.data),
+    mapBrands: (itemId: number, brandIds: number[]) =>
+      api.post<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/brands`,
+                                                   { brand_ids: brandIds })
+        .then((r) => r.data.items),
+    unmapBrand: (itemId: number, brandId: number) =>
+      api.delete<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/brands/${brandId}`)
+        .then((r) => r.data.items),
+    /** Each item's combinations that are ON — what a document offers. */
+    options: (itemIds: number[]) =>
+      api.get<Record<string, MasterItemCombination[]>>("/api/item-combinations",
+                                                       { params: { item_ids: itemIds.join(",") } })
+        .then((r) => r.data),
+  },
   brandItemMapping: {
     /** All brands, categories and items needed to drive the mapping panel. */
     sources: () => api.get<BrandItemMappingSources>("/api/brand-item-mapping/sources")
@@ -346,6 +370,15 @@ export const mastersApi = {
   },
   /** The named families an item is packed in — "Strip of 10", "Strip of 15". */
   packHierarchies: crud<MasterPackHierarchy>("/api/pack-hierarchies"),
+  /** Which containers of an item serve indent, purchase, storage, issue and
+   *  consumption (2026-10-23). */
+  containerUsage: {
+    get: (itemId: number) =>
+      api.get<ContainerUsageView>(`/api/items/${itemId}/container-usage`).then((r) => r.data),
+    save: (itemId: number, rows: { package_id: number; usages: ContainerUsage[] }[]) =>
+      api.put<ContainerUsageView>(`/api/items/${itemId}/container-usage`, { rows })
+        .then((r) => r.data),
+  },
 
   departments: () => all<RefRow>("/api/departments"),
   ownershipDepartments: () => all<RefRow>("/api/departments/ownership-options"),

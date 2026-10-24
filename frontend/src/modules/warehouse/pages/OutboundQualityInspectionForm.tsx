@@ -24,6 +24,7 @@ import type {
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_REJECT } from "@/shared/components/tones";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * Inspect a receipt line by line.
@@ -467,6 +468,7 @@ export default function OutboundQualityInspectionForm({
               {saved?.item_name ?? l.item_name ?? "—"}
               {l.batch_no ? ` · batch ${l.batch_no}` : ""}
             </div>
+            <CombinationTag value={saved ?? l} className="mt-1" />
             {(() => {
               const packs = saved?.pack_breakdown ?? packsOf(l.issue_item_id, num(l.inspected_qty));
               return packs?.length ? (

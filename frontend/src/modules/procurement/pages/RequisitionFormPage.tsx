@@ -8,6 +8,7 @@ import { blankLine, LinePicker, type DraftLine } from "../components/LinePicker"
 import { OrgFields, type OrgValue } from "../components/OrgFields";
 import type { ReqCreate } from "../types";
 import { todayIst } from "@/shared/datetime";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 const PRIORITIES = [
   { value: "NORMAL", label: "Normal" },
@@ -65,6 +66,7 @@ export function RequisitionFormPage() {
       // value — but it is no longer typed here. An editor that re-sends the line has
       // to carry it forward or every edit would zero it.
       rate: String(item.estimated_rate ?? 0),
+      combo: comboFrom(item),
     })));
   }, [existing]);
 
@@ -102,6 +104,7 @@ export function RequisitionFormPage() {
         estimated_rate: Number(line.rate || 0),
         // Left null: the header date applies to every line (service fills it in).
         required_date: null,
+        ...comboPayload(line.combo),
       })),
     });
   };

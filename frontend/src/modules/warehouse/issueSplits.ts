@@ -39,7 +39,19 @@ import type { IssueItemWrite, IssueStockSource, TrackingType } from "./types";
  *  the thing being fulfilled — and otherwise the item, because two hand-added lines
  *  of one item on one issue ARE two picks of the same thing. */
 export const groupKeyOf = (line: IssueItemWrite): string =>
-  line.indent_item_id ? `indent:${line.indent_item_id}` : `item:${line.item_id}`;
+  (line.indent_item_id ? `indent:${line.indent_item_id}` : `item:${line.item_id}`)
+  + `|${comboKeyOf(line)}`;
+
+/** A line's brand / variant / model as a key, "" where it names none (2026-10-23).
+ *  Two combinations of one item are two asks, drawn from two different shelves. */
+export const comboKeyOf = (row: { brand_id?: number | null; variant_id?: number | null;
+                                  model_id?: number | null }): string =>
+  row.brand_id ? `${row.brand_id}|${row.variant_id || 0}|${row.model_id || 0}` : "";
+
+/** An item's sources narrowed to one combination; "" keeps every row. */
+export const sourcesFor = (sourcesByItem: Record<number, IssueStockSource[]>,
+                           itemId: number, combo: string): IssueStockSource[] =>
+  (sourcesByItem[itemId] ?? []).filter((row) => !combo || comboKeyOf(row) === combo);
 
 /** The "no bin" / "no batch" sentinel the warehouse writes is 0, not a real id. */
 const src = (value: number | null | undefined): number | null => (value ? value : null);
@@ -106,6 +118,8 @@ export interface IssueSplit {
 export interface IssueGroup {
   key: string;
   itemId: number;
+  /** The group's brand / variant / model key — "" for none. */
+  combo: string;
   itemCode?: string | null;
   itemName?: string | null;
   trackingType: TrackingType;
@@ -196,6 +210,7 @@ export function groupIssueLines(
       group = {
         key,
         itemId: line.item_id,
+        combo: comboKeyOf(line),
         itemCode: line.item_code,
         itemName: line.item_name,
         trackingType: trackingOf(line),
@@ -220,7 +235,7 @@ export function groupIssueLines(
       byKey.set(key, group);
       groups.push(group);
     }
-    const sources = sourcesByItem[line.item_id] ?? [];
+    const sources = sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line));
     const match = sources.find(
       (row) => sourceKey(row.batch_id, row.bin_id) === sourceKey(line.batch_id, line.bin_id),
     );
@@ -273,7 +288,7 @@ export function groupIssueLines(
     if (group.direct) group.requested = group.issued;
     group.remaining = Math.max(round(group.requested - group.issued), 0);
     const today = new Date().toISOString().slice(0, 10);
-    const all = (sourcesByItem[group.itemId] ?? []).filter(
+    const all = sourcesFor(sourcesByItem, group.itemId, group.combo).filter(
       (row) => !(row.expiry_date && row.expiry_date < today)
     );
     // `item_total_qty` is the same number on every row of the item, so the first row

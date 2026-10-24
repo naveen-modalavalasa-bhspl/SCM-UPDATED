@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import String, case, cast, func, select, or_, and_, text, true
+from sqlalchemy import String, bindparam, case, cast, func, select, or_, and_, text, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -45,6 +45,7 @@ from app.shared.models.warehouse import Warehouse, WarehouseLocation
 from app.shared.numbering import next_number
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
+from app.shared.masters import combinations
 
 
 logger = logging.getLogger(__name__)
@@ -296,8 +297,13 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                      bin_id: int = NO_BIN, batch_id: int = NO_BATCH,
                      project_id: int = NO_PROJECT, rate=None,
                      serial_numbers: list[str] | None = None,
-                     pack_text: str | None = None) -> Stock:
+                     pack_text: str | None = None,
+                     brand_id: int = 0, variant_id: int = 0,
+                     model_id: int = 0) -> Stock:
     """The ONLY function that changes stock. Always writes a stk_ledger row.
+
+    `brand_id` / `variant_id` / `model_id` name the item's COMBINATION (2026-10-23)
+    and are part of the stock row's key, like the batch: 0 is "none named".
 
     Either warehouse_id or facility_id must be given; a facility resolves to its
     default warehouse, so callers that only know a facility keep working.
@@ -327,6 +333,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
 
     bin_id, batch_id, project_id = bin_id or NO_BIN, batch_id or NO_BATCH, \
         project_id or NO_PROJECT
+    brand_id, variant_id, model_id = int(brand_id or 0), int(variant_id or 0), int(model_id or 0)
     batch_no, expiry_date = await _batch_snapshot(db, batch_id)
 
     # stk_balance.item_id is a hard FK to mst_items. Inserting a row for an item that
@@ -365,7 +372,10 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                             Stock.warehouse_id == warehouse_id,
                             Stock.bin_id == bin_id,
                             Stock.batch_id == batch_id,
-                            Stock.project_id == project_id)
+                            Stock.project_id == project_id,
+                            Stock.brand_id == brand_id,
+                            Stock.variant_id == variant_id,
+                            Stock.model_id == model_id)
         .with_for_update()
     )).scalar_one_or_none()
 
@@ -379,6 +389,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                       bin_id=bin_id, bin_code=bin_code,
                       batch_id=batch_id, batch_no=batch_no,
                       expiry_date=expiry_date, project_id=project_id,
+                      brand_id=brand_id, variant_id=variant_id, model_id=model_id,
                       available_qty=Decimal("0"), total_qty=Decimal("0"))
         try:
             # Nested so a lost race rolls back only this INSERT. Two putaways into the
@@ -396,7 +407,10 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
                                     Stock.warehouse_id == warehouse_id,
                                     Stock.bin_id == bin_id,
                                     Stock.batch_id == batch_id,
-                                    Stock.project_id == project_id)
+                                    Stock.project_id == project_id,
+                                    Stock.brand_id == brand_id,
+                                    Stock.variant_id == variant_id,
+                                    Stock.model_id == model_id)
                 .with_for_update()
             )).scalar_one_or_none()
             if stock is None:
@@ -464,6 +478,7 @@ async def move_stock(db: AsyncSession, item_id: int, qty, direction: str,
         # warehouse module stamped on it later, and that is still the right name.
         bin_id=bin_id, bin_code=bin_code or stock.bin_code,
         batch_id=batch_id, batch_no=batch_no, project_id=project_id,
+        brand_id=brand_id, variant_id=variant_id, model_id=model_id,
         direction=direction, quantity=qty, balance_after=new_balance,
         rate=posted_rate,
         value=(qty * posted_rate).quantize(Decimal("0.01")),
@@ -534,8 +549,16 @@ async def move_stock_out(
     batch_id: int | None = None,
     serial_numbers: list[str] | None = None,
     pack_text: str | None = None,
-) -> None:
+    brand_id: int | None = None,
+    variant_id: int | None = None,
+    model_id: int | None = None,
+) -> list[dict]:
     """Issue stock across matching balance rows using move_stock() for every slice.
+
+    The combination (2026-10-23) narrows like the batch: None draws from any, a
+    number from that combination only. Returns the slices drawn — bin, batch,
+    project, brand / variant / model, quantity and the units — so a caller moving the
+    goods somewhere else can put each slice down as exactly what it was.
 
     A document that does not specify a bin means "pick from available stock", not
     "bulk bin 0". This matters after put-away, when valid stock no longer sits in the
@@ -559,6 +582,10 @@ async def move_stock_out(
         stmt = stmt.where(Stock.bin_id == (bin_id or NO_BIN))
     if batch_id is not None:
         stmt = stmt.where(Stock.batch_id == (batch_id or NO_BATCH))
+    if brand_id is not None:
+        stmt = stmt.where(Stock.brand_id == int(brand_id or 0),
+                          Stock.variant_id == int(variant_id or 0),
+                          Stock.model_id == int(model_id or 0))
     rows = list((await db.execute(
         stmt.order_by(
             Stock.expiry_date.is_(None),
@@ -576,10 +603,17 @@ async def move_stock_out(
 
     remaining = wanted
     pool = list(serial_numbers) if serial_numbers is not None else None
+    slices: list[dict] = []
     for row in rows:
         if remaining <= 0:
             break
         take = min(remaining, row.available_qty or Decimal("0"))
+        units = take_units(pool, take)
+        slices.append({"bin_id": row.bin_id, "batch_id": row.batch_id,
+                       "project_id": row.project_id, "brand_id": row.brand_id or 0,
+                       "variant_id": row.variant_id or 0, "model_id": row.model_id or 0,
+                       "qty": take, "serial_numbers": units,
+                       "rate": row.valuation_rate})
         await move_stock(
             db,
             item_id=item_id,
@@ -593,10 +627,27 @@ async def move_stock_out(
             bin_id=row.bin_id,
             batch_id=row.batch_id,
             project_id=row.project_id,
-            serial_numbers=take_units(pool, take),
+            serial_numbers=units,
             pack_text=pack_text,
+            brand_id=row.brand_id, variant_id=row.variant_id, model_id=row.model_id,
         )
         remaining -= take
+    return slices
+
+
+def slice_combination(slice_: dict) -> dict:
+    """A drawn slice's brand / variant / model, as `move_stock` takes it."""
+    return {"brand_id": slice_["brand_id"], "variant_id": slice_["variant_id"],
+            "model_id": slice_["model_id"]}
+
+
+def single_combination(slices: list[dict]) -> dict | None:
+    """The one combination a draw came out of, or None when it was mixed / none."""
+    combos = {(s["brand_id"], s["variant_id"], s["model_id"]) for s in slices}
+    if len(combos) != 1:
+        return None
+    b, v, m = combos.pop()
+    return {"brand_id": b, "variant_id": v, "model_id": m} if b else None
 
 
 async def rehome_balance(db: AsyncSession, stock: Stock, *, to_bin_id: int,
@@ -633,7 +684,9 @@ async def rehome_balance(db: AsyncSession, stock: Stock, *, to_bin_id: int,
     rate = _d(stock.valuation_rate) if _d(stock.valuation_rate) > 0 else None
     common = dict(ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, user=user,
                   warehouse_id=stock.warehouse_id, batch_id=stock.batch_id,
-                  project_id=stock.project_id, serial_numbers=serial_numbers)
+                  project_id=stock.project_id, serial_numbers=serial_numbers,
+                  brand_id=stock.brand_id or 0, variant_id=stock.variant_id or 0,
+                  model_id=stock.model_id or 0)
     # IN before OUT: the warehouse's total never dips by the quantity in between, so
     # the move cannot set off a "below minimum" alert for stock that never left.
     landed = await move_stock(db, item_id=stock.item_id, qty=qty,
@@ -662,15 +715,17 @@ async def transfer_stock(db: AsyncSession, item_id: int, qty, user,
             or await db.get(Warehouse, to_warehouse_id) is None:
         raise NotFoundError("Transfer warehouse not found")
 
-    # OUT first: if the source is short, it raises before anything is credited.
-    await move_stock(db, item_id=item_id, qty=qty,
-                     direction=StockDirection.OUT.value, ref_type=RefType.TRANSFER.value,
-                     ref_id=to_warehouse_id, ref_no=ref_no, user=user,
-                     warehouse_id=from_warehouse_id, project_id=from_project_id)
-    await move_stock(db, item_id=item_id, qty=qty,
-                     direction=StockDirection.IN.value, ref_type=RefType.TRANSFER.value,
-                     ref_id=from_warehouse_id, ref_no=ref_no, user=user,
-                     warehouse_id=to_warehouse_id, project_id=to_project_id)
+    # OUT first: if the source is short, it raises before anything is credited. Each
+    # slice lands under the brand / variant / model it left as (2026-10-23).
+    for slice_ in await move_stock_out(
+            db, item_id=item_id, qty=qty, ref_type=RefType.TRANSFER.value,
+            ref_id=to_warehouse_id, ref_no=ref_no, user=user,
+            warehouse_id=from_warehouse_id, project_id=from_project_id):
+        await move_stock(db, item_id=item_id, qty=slice_["qty"],
+                         direction=StockDirection.IN.value, ref_type=RefType.TRANSFER.value,
+                         ref_id=from_warehouse_id, ref_no=ref_no, user=user,
+                         warehouse_id=to_warehouse_id, project_id=to_project_id,
+                         **slice_combination(slice_))
 
 
 #: What the stock grid is being asked to show. Not a document status — a view mode —
@@ -884,7 +939,13 @@ async def list_stock(db: AsyncSession, params: PageParams, item_id: int | None =
         held = await _indent_held_by_stock(db, [row.id for row in page["items"]])
         for row in page["items"]:
             setattr(row, "indent_held_qty", float(held.get(row.id, 0)))
+        await fill_combination_names(db, page["items"])
     return page
+
+
+async def fill_combination_names(db: AsyncSession, rows) -> None:
+    """Name each row's brand / variant / model (2026-10-23)."""
+    await combinations.fill_names(db, rows)
 
 
 async def list_stock_grouped(db: AsyncSession, params: PageParams,
@@ -1653,6 +1714,18 @@ async def create_mr_from_shortfall(db: AsyncSession, indent_id: int | None,
     return await _raise_mr(db, indent_id, indent_no, shortfalls, user, ctx)
 
 
+async def _indent_line_combinations(db: AsyncSession, ids: list) -> dict[int, dict]:
+    """`{indent_item_id: combination columns}` off `ind_indent_items`."""
+    ids = [int(i) for i in ids if i]
+    if not ids:
+        return {}
+    rows = (await db.execute(text(
+        "SELECT id, brand_id, variant_id, model_id, brand_name, variant_name, model_name, "
+        "combination_any FROM ind_indent_items WHERE id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})).mappings().all()
+    return {r["id"]: combinations.carry(dict(r)) for r in rows}
+
+
 async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | None,
                     lines: list[dict], user, ctx: dict) -> MaterialRequest:
     """Write one material request and put it into approval.
@@ -1683,13 +1756,20 @@ async def _raise_mr(db: AsyncSession, indent_id: int | None, indent_no: str | No
     db.add(mr)
     await db.flush()
 
+    # Each line buys the combination its indent line asked for (2026-10-23). Read off
+    # the indent line by raw SQL — inventory may not import indents (rule 5).
+    asked = await _indent_line_combinations(
+        db, [line.get("indent_item_id") for line in lines if line.get("indent_item_id")])
     for line_no, line in enumerate(lines, start=1):
+        combo = (combinations.carry(line) if line.get("brand_id") or line.get("combination_any")
+                 else asked.get(line.get("indent_item_id"), {}))
         db.add(MaterialRequestItem(
             mr_id=mr.id, line_no=line_no, item_id=line["item_id"],
             item_code=line.get("item_code"), item_name=line.get("item_name"),
             uom_code=line.get("uom_code"), quantity=_d(line["quantity"]),
             project_id=line.get("project_id") or NO_PROJECT,
             indent_item_id=line.get("indent_item_id"),
+            **combo,
         ))
 
     # Straight into approval: nobody types an auto-raised MR, so leaving it in DRAFT
@@ -2378,6 +2458,8 @@ async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) 
             await move_stock_out(
                 db, item_id=adj_item.item_id, qty=adj_item.quantity,
                 bin_id=adj_item.bin_id or None, batch_id=adj_item.batch_id or None,
+                brand_id=adj_item.brand_id or None, variant_id=adj_item.variant_id,
+                model_id=adj_item.model_id,
                 **common,
             )
             await hooks.fire_adjustment_out(db, adjustment, adj_item, user)
@@ -2386,7 +2468,9 @@ async def _post_adjustment_lines(db: AsyncSession, adjustment, adj_items, user) 
                 db, item_id=adj_item.item_id, qty=adj_item.quantity,
                 direction=StockDirection.IN.value,
                 bin_id=adj_item.bin_id, batch_id=adj_item.batch_id,
-                rate=adj_item.unit_cost, **common,
+                rate=adj_item.unit_cost,
+                brand_id=adj_item.brand_id or 0, variant_id=adj_item.variant_id or 0,
+                model_id=adj_item.model_id or 0, **common,
             )
 
 
@@ -3553,6 +3637,10 @@ async def create_sto(db: AsyncSession, data, user) -> StockTransferOrder:
             uom_code=item.uom_code if item else None,
             requested_qty=_d(item_data.requested_qty),
             remarks=item_data.remarks,
+            # The brand / variant / model to transfer, when one is picked (2026-10-23).
+            **(await combinations.resolve(db, item_data.item_id, item_data,
+                                          label=item.code if item else "")
+               if item_data.brand_id else dict(combinations.NONE)),
         ))
 
     await db.flush()
@@ -3826,11 +3914,18 @@ async def dispatch_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrde
 
     for sto_item in sto.items:
         sto_item.dispatched_qty = sto_item.requested_qty
-        await move_stock_out(
+        drawn = await move_stock_out(
             db, item_id=sto_item.item_id, qty=sto_item.dispatched_qty,
             ref_type=RefType.STO.value, ref_id=sto.id, ref_no=sto.sto_no, user=user,
             warehouse_id=sto.from_warehouse_id, project_id=sto.from_project_id,
+            brand_id=sto_item.brand_id or None, variant_id=sto_item.variant_id,
+            model_id=sto_item.model_id,
         )
+        # Named nothing but drew one brand / variant / model: say so on the line, so
+        # the receiving end lands what was actually sent (2026-10-23).
+        if not sto_item.brand_id and (one := single_combination(drawn)):
+            for key, value in one.items():
+                setattr(sto_item, key, value)
 
     sto.status = STOStatus.DISPATCHED.value
     sto.dispatched_at = utcnow()
@@ -3855,6 +3950,8 @@ async def receive_sto(db: AsyncSession, sto_id: int, user) -> StockTransferOrder
             db, item_id=sto_item.item_id, qty=qty, direction=StockDirection.IN.value,
             ref_type=RefType.STO.value, ref_id=sto.id, ref_no=sto.sto_no, user=user,
             warehouse_id=sto.to_warehouse_id, project_id=sto.to_project_id,
+            brand_id=sto_item.brand_id or 0, variant_id=sto_item.variant_id or 0,
+            model_id=sto_item.model_id or 0,
         )
 
     sto.status = STOStatus.RECEIVED.value
@@ -3981,11 +4078,16 @@ async def post_cycle_count(db: AsyncSession, cc_id: int, user) -> CycleCount:
         direction = StockDirection.IN.value if variance > 0 else StockDirection.OUT.value
         qty = abs(variance)
 
-        await move_stock(
-            db, item_id=item.item_id, qty=qty, direction=direction,
-            ref_type=RefType.CYCLE_COUNT.value, ref_id=cc.id, ref_no=cc.count_no, user=user,
-            warehouse_id=cc.warehouse_id, bin_id=item.bin_id, batch_id=item.batch_id,
-        )
+        common = dict(ref_type=RefType.CYCLE_COUNT.value, ref_id=cc.id,
+                      ref_no=cc.count_no, user=user, warehouse_id=cc.warehouse_id)
+        if direction == StockDirection.OUT.value:
+            # Off whatever brand / variant / model stands at the spot (2026-10-23):
+            # a count says how many are missing, not which brand.
+            await move_stock_out(db, item_id=item.item_id, qty=qty, bin_id=item.bin_id,
+                                 batch_id=item.batch_id, **common)
+        else:
+            await move_stock(db, item_id=item.item_id, qty=qty, direction=direction,
+                             bin_id=item.bin_id, batch_id=item.batch_id, **common)
 
     cc.status = CycleCountStatus.COMPLETED.value
     cc.posted_by_name = getattr(user, "full_name", None)

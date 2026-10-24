@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getDispatch, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
 import { PrintTemplate, type PrintColumn } from "@/shared/components";
+import { combinationLabel } from "@/shared/combination";
 
 export function DispatchPrintPage() {
   const { id } = useParams();
@@ -62,6 +63,9 @@ export function DispatchPrintPage() {
           <div>
             <span className="font-semibold text-neutral-800">{item.item_name}</span>
             <div className="font-mono text-[10px] text-neutral-500">{item.item_code}</div>
+            {combinationLabel(item) && (
+              <div className="text-[10px] text-neutral-600">{combinationLabel(item)}</div>
+            )}
             {item.serial_numbers && item.serial_numbers.length > 0 && (
               <div className="mt-0.5 text-[9px] text-neutral-400 break-all">
                 S/N: {item.serial_numbers.join(", ")}

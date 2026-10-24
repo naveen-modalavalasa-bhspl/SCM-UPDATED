@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { CombinationTag } from "@/shared/combination";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -417,6 +418,9 @@ export function IndentDetailPage() {
                     <TableCell>
                       <div className="font-medium text-body">{it.item_name}</div>
                       <div className="mono text-xs text-muted">{it.item_code}</div>
+                      {it.combination_any
+                        ? <div className="mt-1 text-[11px] font-semibold text-muted">Any brand</div>
+                        : <CombinationTag value={it} className="mt-1" />}
                     </TableCell>
                     <TableCell className="text-right tabular font-semibold">{it.quantity}</TableCell>
                     <TableCell className="text-right text-muted">{displayUom(it.uom_code) || "—"}</TableCell>

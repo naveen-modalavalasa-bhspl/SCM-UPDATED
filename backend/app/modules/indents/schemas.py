@@ -10,6 +10,7 @@ from app.shared.time import iso as ist_iso, not_in_past, to_ist, today
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_DOCUMENT_LINES,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
 _AGE_FROZEN = {IndentStatus.CLOSED.value, IndentStatus.REJECTED.value}
@@ -20,7 +21,9 @@ def _utc_iso(value: datetime | None) -> str | None:
     return ist_iso(value)
 
 
-class IndentItemIn(BaseModel):
+class IndentItemIn(CombinationIn):
+    """A line: the item, and which brand / variant / model of it — or "Any"
+    (2026-10-23). The same item in two combinations is two lines."""
     item_id: int
     quantity: float = Field(gt=0)
     remarks: str | None = None
@@ -73,7 +76,7 @@ class CorrectionOwnerOut(BaseModel):
     position_id: int | None = None
 
 
-class IndentItemOut(BaseModel):
+class IndentItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     item_id: int
@@ -304,7 +307,7 @@ class AcknowledgementPackageQuantityRow(BaseModel):
     pack_text: str | None = None
 
 
-class AcknowledgementLineRow(BaseModel):
+class AcknowledgementLineRow(CombinationOut):
     """One indent line on the "what is owed to me" screen."""
     indent_item_id: int
     item_code: str | None = None

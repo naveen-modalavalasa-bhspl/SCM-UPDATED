@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import {
-  PackBreakdownEditor, PackChips, PackQty, baseOf, greedy, heldOf, isPartial, num as packNum,
+  PackBreakdownEditor, PackChips, PackQty, baseOf, greedy, greedyIn, heldOf, isPartial, num as packNum,
   shrinkWithin, toPayload,
   type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, ScanLine, Tags } from "lucide-react";
+import { ArrowLeft, ScanLine } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
@@ -18,6 +18,7 @@ import { CapacityMeter, fmtCount, volume, weight } from "../components/CapacityM
 import { fmtDate, fmtDateTime, fmtQty, humanise, normaliseStatus } from "../format";
 import { alerts } from "@/modules/alerts";
 import { usePointLabel } from "../usePointLabel";
+import { CombinationTag } from "@/shared/combination";
 
 const parseCodes = (arr: any): string[] | null => {
   if (!arr) return null;
@@ -123,7 +124,9 @@ export default function PutawayForm() {
   // A part putaway re-reads what arrived inside the smaller quantity.
   const changeQty = (next: number) => {
     setQty(next);
-    if (hierarchy && task?.received_pack_breakdown?.length) {
+    if (hierarchy && task?.packing_fixed && task.storage_levels?.length) {
+      setShelfPacks(greedyIn(hierarchy, next, task.storage_levels));
+    } else if (hierarchy && task?.received_pack_breakdown?.length) {
       setShelfPacks(shrinkWithin(task.received_pack_breakdown, next));
     } else if (hierarchy) {
       setShelfPacks(greedy(hierarchy, next));
@@ -246,6 +249,7 @@ export default function PutawayForm() {
         <MetaRow label="From GRN" value={<span className="font-mono">{task.grn_no ?? "—"}</span>} />
         <MetaRow label="Warehouse" value={task.warehouse_name} />
         <MetaRow label="Item" value={`${task.item_code ?? ""} ${task.item_name ?? ""}`.trim() || "—"} />
+        {!!task.brand_id && <MetaRow label="Brand · variant · model" value={<CombinationTag value={task} />} />}
         <MetaRow label="Batch" value={task.batch_no} />
         <MetaRow label={task.is_asset ? "Warranty" : "Expiry"} value={fmtDate(task.expiry_date)} />
         <MetaRow label="Quantity" value={<span className="tabular">{fmtQty(task.qty)} {task.uom_code ?? ""}</span>} />
@@ -368,8 +372,13 @@ export default function PutawayForm() {
             <div className="mt-4 space-y-2 rounded-xl border border-line p-3">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <span className="text-sm font-semibold text-ink">
-                  How it goes on the shelf
+                  Shelf packing
                   <span className="ml-2 text-xs font-normal text-muted">{hierarchy.name}</span>
+                  {task.packing_fixed && (
+                    <span className="ml-2 rounded-full bg-brand-050 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-600">
+                      Storage containers
+                    </span>
+                  )}
                 </span>
                 {task.received_pack_breakdown?.length ? (
                   <span className="inline-flex flex-wrap items-center gap-1 text-xs text-muted">
@@ -382,15 +391,8 @@ export default function PutawayForm() {
                 * refused (2026-10-11). A short carton that arrived can be shelved as
                 * smaller packs, or left loose. */}
               <PackBreakdownEditor hierarchy={hierarchy} value={shelfPacks} target={qty}
-                                   uom={task.uom_code} onChange={setShelfPacks} enforceMin />
-              {task.codes_per_pack && (
-                <p className="flex items-start gap-1.5 rounded-lg bg-info-bg px-3 py-2 text-xs text-info">
-                  <Tags className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
-                  Each pack gets its own code here. Codes cannot be split, so the smallest
-                  pack you shelve is the smallest this stock can later be repacked into —
-                  bigger packs can always be made from it.
-                </p>
-              )}
+                                   uom={task.uom_code} onChange={setShelfPacks} enforceMin
+                                   readOnly={!!task.packing_fixed} allowAutoFill={!task.packing_fixed} />
             </div>
           )}
 

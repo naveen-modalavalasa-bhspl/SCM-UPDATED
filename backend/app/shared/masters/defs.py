@@ -23,7 +23,7 @@ from app.shared.enums import (
     AttributeDataType, CategoryTagType, UomClass,
     WarehouseType, PAYMENT_MILESTONE_META, MAX_PAYMENT_INSTALMENTS, PaymentSplitMode,
 )
-from app.shared.masters.crud import Lookup, MasterDef
+from app.shared.masters.crud import Lookup, MasterDef, UseExistingRow
 from app.platform.rbac.models import Role
 from app.shared.models.master import (
     ItemEligibility,
@@ -213,11 +213,23 @@ async def prepare_items(db: AsyncSession, rows: list[Item]) -> None:
         .group_by(Attachment.entity_id))).all()) if ids else {}
     for row in rows:
         row._photo_id = latest.get(row.id)
+    # A code still held by more than one active row (2026-10-23) — created before an
+    # item became one row per code, and not yet merged by
+    # `scripts.consolidate_item_brands`. Said on the row so nobody mistakes the two
+    # for two different items.
+    codes = {row.code for row in rows if row.code}
+    shared = dict((await db.execute(
+        select(Item.code, func.count(Item.id))
+        .where(Item.code.in_(codes), Item.is_active.is_(True))
+        .group_by(Item.code).having(func.count(Item.id) > 1))).all()) if codes else {}
+    for row in rows:
+        row._rows_with_code = shared.get(row.code, 1)
 
 
 def item_out(i: Item) -> dict:
     return {"id": i.id, "code": i.code, "serial_no": i.serial_no, "name": i.name,
             "photo_id": getattr(i, "_photo_id", None),
+            "rows_with_code": getattr(i, "_rows_with_code", 1),
             "short_name": i.short_name,
             "uom_id": i.uom_id, "uom_code": i.uom_code, "category_id": i.category_id,
             "category_name": i.category_name, "item_type": i.item_type,
@@ -345,31 +357,33 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         await next_item_serial(db, prefix)            # takes the series lock first
         sibling = await sibling_item(db, prefix, category.id, general.id)
         if sibling is not None:
-            # The same code + the same brand + the same manufacturer is the same
-            # item. NULL-safe on both sides: an item with no brand clashes only
-            # with another unbranded item of that code, never with a branded
-            # variant sharing the code (brand variants intentionally share one).
-            clash_stmt = select(Item.id).where(Item.code == sibling.code)
+            # ONE row per item code (2026-10-23). Another brand of an item that
+            # already exists is a brand of that item, not a second item: the brand is
+            # mapped onto the item that holds the code and the create answers with it.
+            # Rows created before this share a code until
+            # `scripts.consolidate_item_brands` merges them.
+            from app.shared.masters import combinations
+            holder = await db.scalar(
+                select(Item).where(Item.code == sibling.code, Item.is_active.is_(True))
+                .order_by(Item.id).limit(1)) or sibling
             if brand is not None:
-                clash_stmt = clash_stmt.where(Item.brand_id == brand.id)
-            else:
-                clash_stmt = clash_stmt.where(Item.brand_id.is_(None))
-            if manufacturer is not None:
-                clash_stmt = clash_stmt.where(
-                    Item.manufacturer_id == manufacturer.id)
-            else:
-                clash_stmt = clash_stmt.where(Item.manufacturer_id.is_(None))
-            if await db.scalar(clash_stmt) is not None:
-                if brand is not None and manufacturer is not None:
-                    who = f" by {brand.name} / {manufacturer.name}"
-                elif brand is not None:
-                    who = f" by {brand.name}"
-                else:
-                    who = ""
+                mapped = {row.brand_id for row in await combinations.sync_item(db, holder.id)}
+                if brand.id not in mapped:
+                    db.add(BrandItemMapping(
+                        item_id=holder.id, item_code=holder.code, item_name=holder.name,
+                        brand_id=brand.id, brand_code=brand.code, brand_name=brand.name,
+                        is_active=True))
+                    await db.flush()
+                    await combinations.sync_item(db, holder.id)
+                    raise UseExistingRow(
+                        holder, f"“{general.name}” already exists as {holder.code}. "
+                                f"{brand.name} has been added to it as a brand.")
                 raise ValidationError(
-                    f"“{general.name}”{who} already "
-                    f"exists as {sibling.code}. Edit that item instead.")
-            item.serial_no, item.code = sibling.serial_no, sibling.code
+                    f"“{general.name}” by {brand.name} already exists as "
+                    f"{holder.code}. Edit that item instead.")
+            raise ValidationError(
+                f"“{general.name}” already exists as {holder.code}. Edit that item "
+                "instead, or add the brand on its Brands tab.")
         else:
             item.serial_no = await next_item_serial(db, prefix)
             item.code = build_item_code(category.path, item.serial_no)
@@ -1523,13 +1537,33 @@ async def brand_item_mapping_sources(db: AsyncSession) -> dict:
     """
     cats = (await db.execute(select(ItemCategory).where(
         ItemCategory.is_active.is_(True)).order_by(ItemCategory.path))).scalars().all()
-    items = (await db.execute(select(Item).where(
-        Item.is_active.is_(True)).order_by(Item.code))).scalars().all()
+    every = (await db.execute(select(Item).where(
+        Item.is_active.is_(True)).order_by(Item.code, Item.id))).scalars().all()
     brands = (await db.execute(select(Brand).where(
         Brand.is_active.is_(True)).order_by(Brand.name))).scalars().all()
-    pairs = (await db.execute(
-        select(BrandItemMapping.brand_id, BrandItemMapping.item_id).where(
-            BrandItemMapping.is_active.is_(True)))).all()
+    # ONE entry per item code (2026-10-23). Rows that still share a code (created
+    # before an item became one row per code) are shown as the oldest of them, with
+    # every row's brands — mapped, or the older single `brand_id` on the row — so the
+    # screen reads the way the data will once `scripts.consolidate_item_brands` runs.
+    holder: dict[str, Item] = {}
+    alias: dict[int, int] = {}
+    for row in every:
+        alias[row.id] = holder.setdefault(row.code, row).id
+    items = list(holder.values())
+    seen: set[tuple[int, int]] = set()
+    pairs = []
+    for brand_id, item_id in (await db.execute(
+            select(BrandItemMapping.brand_id, BrandItemMapping.item_id).where(
+                BrandItemMapping.is_active.is_(True)))).all():
+        key = (brand_id, alias.get(item_id, item_id))
+        if key not in seen:
+            seen.add(key)
+            pairs.append(key)
+    for row in every:
+        key = (row.brand_id, alias[row.id])
+        if row.brand_id and key not in seen:
+            seen.add(key)
+            pairs.append(key)
     # Per-brand manufacturer names off the eagerly-loaded Brand.manufacturers
     # relationship (selectin, so no lazy load on this async session).
     return {
@@ -2190,6 +2224,8 @@ class PackHierarchyIn(BaseModel):
     """A named family of packs: "Strip of 10", "Strip of 15". Its levels are the
     `item-packaging` rows that name it."""
     item_id: int
+    #: The brand this ladder packs (2026-10-23); None = "All brands".
+    brand_id: int | None = None
     name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=300)
     is_default: bool = False
@@ -2207,6 +2243,7 @@ class PackHierarchyIn(BaseModel):
 
 def pack_hierarchy_out(h: PackHierarchy) -> dict:
     return {"id": h.id, "item_id": h.item_id, "name": h.name,
+            "brand_id": h.brand_id, "brand_name": h.brand_name,
             "description": h.description, "is_default": bool(h.is_default),
             "is_active": h.is_active}
 
@@ -2227,19 +2264,40 @@ async def apply_pack_hierarchy(db: AsyncSession, row: PackHierarchy,
         raise ValidationError(
             f'{item.name} already has a pack hierarchy called "{data.name}". Each '
             'hierarchy needs its own name, e.g. "Strip of 10" and "Strip of 15".')
+    # The brand is one the item carries (2026-10-23) — a ladder for a brand the item
+    # is never bought in would only ever be offered on lines that cannot use it.
+    brand_name = None
+    if data.brand_id:
+        from app.shared.masters import combinations
+        offered = {c.brand_id: c.brand_name
+                   for c in await combinations.sync_item(db, data.item_id)}
+        if data.brand_id not in offered:
+            raise ValidationError(
+                f"Brand: that brand is not mapped to {item.name}. Map it on the item's "
+                "Brands tab first, or pick one of its brands.")
+        brand_name = offered[data.brand_id]
+    if row.id and (row.brand_id or None) != (data.brand_id or None):
+        packed = await _live_handling_units(db, hierarchy_id=row.id)
+        if packed:
+            raise ValidationError(
+                f"{packed} pack(s) on the shelf are packed as \"{row.name}\" — its brand "
+                "cannot change while they are there.")
+    same_brand = (PackHierarchy.brand_id == data.brand_id if data.brand_id
+                  else PackHierarchy.brand_id.is_(None))
     others = await db.scalar(select(func.count()).select_from(PackHierarchy).where(
-        PackHierarchy.item_id == data.item_id,
+        PackHierarchy.item_id == data.item_id, same_brand,
         PackHierarchy.is_active.is_(True),
         PackHierarchy.id != (row.id or 0)))
     for key, value in data.model_dump().items():
         setattr(row, key, value)
-    # The first hierarchy of an item is its default — there is nothing else to offer.
+    row.brand_name = brand_name
+    # The first ladder of an item's brand is that brand's default.
     if not others and row.is_active:
         row.is_default = True
     if row.is_default:
         await db.execute(
             update(PackHierarchy)
-            .where(PackHierarchy.item_id == data.item_id,
+            .where(PackHierarchy.item_id == data.item_id, same_brand,
                    PackHierarchy.id != (row.id or 0))
             .values(is_default=False))
 

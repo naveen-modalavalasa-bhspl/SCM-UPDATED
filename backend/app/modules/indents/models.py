@@ -24,6 +24,7 @@ from app.shared.enums import IndentItemStatus
 from app.shared.models.base import (
     BigIntPortable, created_at_col, pk, soft_fk, updated_at_col,
 )
+from app.shared.models.combination import CombinationMixin
 
 
 class Consolidation(Base):
@@ -168,7 +169,7 @@ Index("ix_ind_bom", Indent.bom_id)
 Index("ix_ind_region_status", Indent.region_id, Indent.status)
 
 
-class IndentItem(Base):
+class IndentItem(CombinationMixin, Base):
     __tablename__ = "ind_indent_items"
     id = pk()
     indent_id = Column(ForeignKey("ind_indents.id", ondelete="CASCADE"), index=True, nullable=False)

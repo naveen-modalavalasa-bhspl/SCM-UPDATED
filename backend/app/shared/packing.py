@@ -321,6 +321,34 @@ def counts(entries) -> dict[int, Decimal]:
     return out
 
 
+def greedy_in(ladder: Ladder, base_qty, levels) -> list[dict]:
+    """Biggest packs first, using ONLY `levels` (2026-10-23) — what one usage of the
+    item (storage, issue…) packs in. 2,740 TAB over {Box, Carton} -> 2 Carton + 7 Box,
+    and the 40 left over as one part Box ("1 Box (40 of 100)") unless loose (level 0)
+    is one of the levels, when they stay loose.
+    """
+    allowed = sorted({int(lv) for lv in levels if 0 <= int(lv) <= ladder.top}, reverse=True)
+    remaining = dec(base_qty)
+    if remaining < ZERO:
+        raise PackError("A quantity cannot be negative.")
+    out: list[dict] = []
+    for level in allowed:
+        if level == 0:
+            continue
+        row = ladder.at(level)
+        whole = (remaining / row.size).to_integral_value(rounding="ROUND_FLOOR")
+        if whole > ZERO:
+            out.append(entry(row, whole))
+            remaining -= whole * row.size
+    if remaining > ZERO:
+        smallest = [lv for lv in allowed if lv > 0]
+        if 0 in allowed or not smallest:
+            out.append(entry(ladder.at(0), remaining))
+        else:
+            out.append(entry(ladder.at(smallest[-1]), 1, fill=remaining))
+    return out
+
+
 def greedy(ladder: Ladder, base_qty, *, max_level: int | None = None,
            min_level: int = 0) -> list[dict]:
     """Biggest packs first: 2,740 TAB -> 2 Carton + 2 Box + 14 Strip (+ 0 loose).

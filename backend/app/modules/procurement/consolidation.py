@@ -40,6 +40,7 @@ from app.shared.enums import (
 )
 from app.shared.models.base import utcnow
 from app.shared.numbering import next_number
+from app.shared.masters import combinations
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +289,11 @@ async def _aggregate(db: AsyncSession, requisitions: list[Requisition]) -> list[
 
     merged: OrderedDict[tuple, dict] = OrderedDict()
     for line in lines:
-        key = (line.item_id, (line.uom_code or "").upper())
+        # Merged per item AND combination (2026-10-23): two brands of one item are two
+        # rows on the sheet, bought separately.
+        combo = combinations.carry(line)
+        key = (line.item_id, (line.uom_code or "").upper(), combo["brand_id"],
+               combo["variant_id"], combo["model_id"])
         bucket = merged.get(key)
         if bucket is None:
             bucket = merged[key] = {
@@ -296,6 +301,7 @@ async def _aggregate(db: AsyncSession, requisitions: list[Requisition]) -> list[
                 "item_name": line.item_name, "uom_code": line.uom_code,
                 "quantity": ZERO, "estimated_amount": ZERO,
                 "required_date": line.required_date, "sources": [],
+                **combo,
             }
         bucket["quantity"] += _d(line.quantity)
         bucket["estimated_amount"] += _d(line.estimated_amount)
@@ -318,6 +324,7 @@ def _apply_aggregate(doc: PurchaseConsolidation, rows: list[dict]) -> None:
         amount = row["estimated_amount"]
         doc.items.append(PurchaseConsolidationItem(
             line_no=index,
+            **combinations.carry(row),
             item_id=row["item_id"], item_code=row["item_code"],
             item_name=row["item_name"], uom_code=row["uom_code"],
             quantity=quantity,

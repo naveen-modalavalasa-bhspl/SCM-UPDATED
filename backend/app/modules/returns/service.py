@@ -108,6 +108,7 @@ from .enums import (
     ReturnIntent, ReturnKind, ReturnLeg, ReturnReason, ReturnStatus, TrailDocType,
     VehicleArrangement,
 )
+from app.shared.masters import combinations
 
 # The four standard ways a load travels, taken straight off logistics' own enum rather
 # than listed again here (2026-09-08). They ARE the four methods the returns flow reuses —
@@ -902,7 +903,11 @@ async def my_stock(db: AsyncSession, params: PageParams, user, *,
         "warehouse_name": row.warehouse_name,
         "expiry_date": row.expiry_date.isoformat() if row.expiry_date else None,
         "batch_no": row.batch_no,
+        # Which brand / variant / model the raiser holds (2026-10-23).
+        "brand_id": int(row.brand_id or 0), "variant_id": int(row.variant_id or 0),
+        "model_id": int(row.model_id or 0),
     } for row in page["items"]]
+    await combinations.fill_names(db, page["items"])
     return page
 
 
@@ -1834,6 +1839,9 @@ async def _apply_lines(db: AsyncSession, doc: StockTransferOrder, lines,
             uom_code=item.uom_code,
             requested_qty=_d(line.quantity),
             remarks=(line.remarks or None),
+            # What is going back: the brand / variant / model held (2026-10-23).
+            **(await combinations.resolve(db, item.id, line, label=item.code)
+               if getattr(line, "brand_id", None) else dict(combinations.NONE)),
         ))
 
 
@@ -1986,6 +1994,9 @@ async def submit_return(db: AsyncSession, return_id: int, user) -> dict:
             project_id=doc.from_project_id or NO_PROJECT,
             warehouse_ids=[doc.from_warehouse_id],
             ref_line_id=line.id,
+            # The line's brand / variant / model when it names one (2026-10-23).
+            combination=({"brand_id": line.brand_id, "variant_id": line.variant_id or 0,
+                          "model_id": line.model_id or 0} if line.brand_id else None),
         )
         if shortfall > ZERO:
             # Everything reserved so far in this call goes back before the error
@@ -2709,6 +2720,7 @@ async def _carry_out(db: AsyncSession, doc: StockTransferOrder, user) -> None:
                     warehouse_id=doc.from_warehouse_id,
                     bin_id=slice_.bin_id, batch_id=slice_.batch_id,
                     project_id=slice_.project_id, serial_numbers=units,
+                    brand_id=slice_.brand_id, variant_id=slice_.variant_id, model_id=slice_.model_id,
                 )
                 if movement is Movement.TRANSFER:
                     landed = await _land_return_units(db, doc, line.item_id,
@@ -2720,6 +2732,8 @@ async def _carry_out(db: AsyncSession, doc: StockTransferOrder, user) -> None:
                         bin_id=NO_BIN, batch_id=slice_.batch_id,
                         project_id=doc.to_project_id or slice_.project_id,
                         serial_numbers=landed,
+                        # Lands as the brand / variant / model it left as.
+                        brand_id=slice_.brand_id, variant_id=slice_.variant_id, model_id=slice_.model_id,
                     )
                 moved += slice_.quantity
             line.dispatched_qty = moved
@@ -3037,6 +3051,7 @@ async def _dispatch_stock(db: AsyncSession, doc: StockTransferOrder, user) -> No
                 warehouse_id=doc.from_warehouse_id,
                 bin_id=slice_.bin_id, batch_id=slice_.batch_id,
                 project_id=slice_.project_id, serial_numbers=units,
+                brand_id=slice_.brand_id, variant_id=slice_.variant_id, model_id=slice_.model_id,
             )
             moved += slice_.quantity
         line.dispatched_qty = moved
@@ -3116,6 +3131,9 @@ async def _land_stock(db: AsyncSession, doc: StockTransferOrder, user, *,
             bin_id=NO_BIN, batch_id=row.batch_id or NO_BATCH,
             project_id=doc.to_project_id or row.project_id or NO_PROJECT,
             serial_numbers=units,
+            # The ledger row that left says which brand / variant / model it was.
+            brand_id=row.brand_id or 0, variant_id=row.variant_id or 0,
+            model_id=row.model_id or 0,
         )
         landed_by_item[row.item_id] = landed_by_item.get(row.item_id, ZERO) + quantity
 

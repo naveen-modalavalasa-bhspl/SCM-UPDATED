@@ -142,7 +142,7 @@ export function DespatchPacking({
             });
           }}
         />
-        <PackBreakdownEditor
+        <PackBreakdownEditor usage="PURCHASE"
           hierarchy={currentHierarchy}
           value={breakdown}
           uom={uom}
@@ -321,7 +321,7 @@ export function DespatchPacking({
                 <p className="text-xs text-muted">
                   Specify counts of full outer containers, boxes, or loose pieces to meet the required batch total.
                 </p>
-                <PackBreakdownEditor
+                <PackBreakdownEditor usage="PURCHASE"
                   hierarchy={activeDraftHierarchy}
                   value={draftPacks}
                   uom={uom}

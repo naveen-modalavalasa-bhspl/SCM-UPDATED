@@ -15,9 +15,11 @@ import {
   sourceKey, trimUnits,
 } from "../issueSplits";
 import type { BatchChoice, IssueGroup, IssueSplit } from "../issueSplits";
+import { sourcesFor } from "../issueSplits";
 import type {
   IssueItemWrite, IssueStockSource, TrackingType, TrackingTypeMeta, UnitSupply,
 } from "../types";
+import { CombinationPicker, CombinationTag, inStockOptions, type CombinationValue } from "@/shared/combination";
 
 /**
  * The Lines grid of a material issue: **one row per item, however many batches and
@@ -187,6 +189,17 @@ export function IssueSplitEditor({
     if (picked && onSourcePicked) onSourcePicked(index, line);
   };
 
+  /** A direct issue picks which brand / variant / model it gives, off what the point
+   *  holds (2026-10-23). The picks then stand on another shelf, so their batch,
+   *  location and codes are cleared to be picked again. */
+  const setCombination = (group: IssueGroup, combo: CombinationValue) => {
+    const at = new Set(group.splits.map((s) => s.index));
+    onChange(lines.map((line, i) => (at.has(i) ? {
+      ...line, ...combo, batch_id: null, batch_no: null, bin_id: null, bin_code: null,
+      serial_numbers: null,
+    } : line)));
+  };
+
   /**
    * Take a pick off an item, and give what it was requesting back to the item.
    *
@@ -321,7 +334,9 @@ export function IssueSplitEditor({
           key={group.key}
           group={group}
           lines={lines}
-          sources={sourcesByItem[group.itemId] ?? []}
+          sources={sourcesFor(sourcesByItem, group.itemId, group.combo)}
+          allSources={sourcesByItem[group.itemId] ?? []}
+          onSetCombination={(combo) => setCombination(group, combo)}
           binManaged={binManaged}
           warehouseId={warehouseId}
           indentId={indentId}
@@ -343,7 +358,7 @@ export function IssueSplitEditor({
           renderItemPicker={renderItemPicker}
           renderRate={renderRate}
           packOptions={packable(packOptionsByItem?.[group.itemId])}
-          hasSources={(sourcesByItem[group.itemId] ?? []).length > 0}
+          hasSources={sourcesFor(sourcesByItem, group.itemId, group.combo).length > 0}
         />
       ))}
 
@@ -396,13 +411,23 @@ interface ItemProps {
   renderRate?: (split: IssueSplit) => React.ReactNode;
   packOptions: PackHierarchy[];
   hasSources: boolean;
+  /** Every source of the item, whatever its combination — the in-stock dropdown. */
+  allSources: IssueStockSource[];
+  onSetCombination: (combo: CombinationValue) => void;
 }
 
 function ItemRow(props: ItemProps) {
   const {
     group, sources, locked, unitMeta, sourcesReady, onAddPick, onRestore, onSetAsk,
-    onRemoveGroup, renderItemPicker, hasSources,
+    onRemoveGroup, renderItemPicker, hasSources, allSources, onSetCombination,
   } = props;
+  // The brand / variant / model: an indent's is carried and fixed (it is what was
+  // reserved); a direct issue picks one off what this point holds.
+  const firstLine = group.splits[0]?.line;
+  const comboChoices = group.direct && group.itemId
+    ? inStockOptions(group.itemId,
+                     allSources.map((row) => ({ ...row, qty: num(row.drawable_qty) })))
+    : [];
 
   // The shelf has answered and it holds none of this item — at this point, in any
   // batch, in any bay. Said once, in a sentence, instead of leaving the batch picker
@@ -484,6 +509,18 @@ function ItemRow(props: ItemProps) {
               <div className="mt-0.5 break-words text-xs leading-5 text-muted">
                 {group.itemName ?? "—"}
               </div>
+              {comboChoices.length > 0 && !locked ? (
+                <div className="mt-2">
+                  <CombinationPicker
+                    options={comboChoices}
+                    value={firstLine}
+                    ariaLabel={`Brand, variant and model for ${group.itemCode ?? "this item"}`}
+                    onChange={onSetCombination}
+                  />
+                </div>
+              ) : (
+                <CombinationTag value={firstLine} className="mt-1.5" />
+              )}
             </>
           ) : (
             <div className="max-w-md">{renderItemPicker(group.splits[0])}</div>

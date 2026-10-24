@@ -90,6 +90,9 @@ from app.shared.enums import (
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
+from app.shared.models.combination import COMBINATION_COLUMNS
+from app.shared.masters import combinations
+from app.modules.inventory.allocations import combo_dict, combo_key
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
 from app.shared import packing as shared_packing
@@ -1660,8 +1663,11 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         # ladders. The hierarchy read here is the one packing settled above — for a
         # despatch-note line that is the note's, never the client's.
         # Mirrored by `lineProblems` on the form, which says it before the press.
+        combo = await _receipt_line_combination(
+            db, item, line, line_packing[index - 1]["despatch_note_item_id"])
         batch_key = ((line.batch_no or "").strip().lower(),
-                     line_packing[index - 1].get("pack_hierarchy_id") or 0)
+                     line_packing[index - 1].get("pack_hierarchy_id") or 0,
+                     combo["brand_id"], combo["variant_id"], combo["model_id"])
         claimed = seen_batch_by_item.setdefault(item.id, {})
         if batch_key in claimed:
             where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
@@ -1822,6 +1828,7 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             declared_pack_breakdown=line_packing[index - 1]["declared_pack_breakdown"],
             pack_breakdown=line_packing[index - 1]["pack_breakdown"],
             despatch_note_item_id=line_packing[index - 1]["despatch_note_item_id"],
+            **combo,
         )
         row = _take_existing(line, item.id)
         if row is None:
@@ -1839,6 +1846,29 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
             receipt.items.remove(row)
     await db.flush()
     _receipt_totals(receipt)
+
+
+async def _receipt_line_combination(db: AsyncSession, item, line,
+                                    despatch_note_item_id) -> dict:
+    """Which brand / variant / model a receipt line books in (2026-10-23).
+
+    Off a despatch-note line: that line's — what the supplier said they sent — and
+    never the client's. Off a PO line: the order's. A line added by hand: the
+    storekeeper's pick, checked against the item's ON combinations. Else none.
+    """
+    if despatch_note_item_id:
+        from app.modules.procurement.models import DespatchNoteItem
+        source = await db.get(DespatchNoteItem, despatch_note_item_id)
+        if source is not None:
+            return combinations.carry(source)
+    if getattr(line, "po_item_id", None):
+        from app.modules.procurement.models import POItem
+        source = await db.get(POItem, line.po_item_id)
+        if source is not None:
+            return combinations.carry(source)
+    if getattr(line, "brand_id", None):
+        return await combinations.resolve(db, item.id, line, label=item.code)
+    return dict(combinations.NONE)
 
 
 def _receipt_types_for(receipt_type: str) -> tuple[str, ...]:
@@ -2033,7 +2063,7 @@ def _guard_leaves_the_company(dispatch_type, to_wh, issue=None) -> None:
         )
 
 
-def _dispatch_lots(lines, qty_field: str) -> list[tuple[int, int | None, Decimal]]:
+def _dispatch_lots(lines, qty_field: str) -> list[tuple]:
     """A consignment's lines, rolled up into one entry per lot it moves.
 
     NEW 2026-08-22, and the fix for a ledger nobody could read. `out_dispatch_items`
@@ -2054,14 +2084,18 @@ def _dispatch_lots(lines, qty_field: str) -> list[tuple[int, int | None, Decimal
     Shared by both legs — `credit_arrival` (delivered_qty) and `_apply_gate_out`
     (quantity) — so the inward and the outward can never drift apart again.
     """
-    lots: dict[tuple[int, int | None], Decimal] = {}
+    # And per brand / variant / model (2026-10-23): (item, batch, combination, qty).
+    lots: dict[tuple, Decimal] = {}
     for line in lines:
         qty = _d(getattr(line, qty_field, None))
         if qty <= ZERO:
             continue
-        key = (line.item_id, line.batch_id)
+        key = (line.item_id, line.batch_id,
+               _combo3(getattr(line, "brand_id", 0), getattr(line, "variant_id", 0),
+                       getattr(line, "model_id", 0)))
         lots[key] = lots.get(key, ZERO) + qty
-    return [(item_id, batch_id, qty) for (item_id, batch_id), qty in lots.items()]
+    return [(item_id, batch_id, combo, qty)
+            for (item_id, batch_id, combo), qty in lots.items()]
 
 
 async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
@@ -2109,10 +2143,11 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
         return
 
     # What previous runs of this credit already put on the shelf, per lot.
-    credited: dict[tuple[int, int], Decimal] = {}
-    for item_id, batch_id, qty in (await db.execute(
+    credited: dict[tuple, Decimal] = {}
+    for item_id, batch_id, c_brand, c_variant, c_model, qty in (await db.execute(
         select(StockMovement.item_id,
                func.coalesce(StockMovement.batch_id, m.NO_BATCH),
+               StockMovement.brand_id, StockMovement.variant_id, StockMovement.model_id,
                func.sum(StockMovement.quantity))
         .where(
             StockMovement.ref_type == InventoryRefType.DISPATCH.value,
@@ -2120,9 +2155,10 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
             StockMovement.direction == StockDirection.IN.value,
         )
         .group_by(StockMovement.item_id,
-                  func.coalesce(StockMovement.batch_id, m.NO_BATCH))
+                  func.coalesce(StockMovement.batch_id, m.NO_BATCH),
+                  StockMovement.brand_id, StockMovement.variant_id, StockMovement.model_id)
     )).all():
-        credited[(item_id, batch_id)] = _d(qty)
+        credited[(item_id, batch_id, _combo3(c_brand, c_variant, c_model))] = _d(qty)
 
     # Which documents the units in this consignment are travelling under. Both, and
     # in this order: the goods were claimed against the issue when one was posted, and
@@ -2142,13 +2178,13 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
     # separate quantity-1 ledger row for every unit that arrived.
     remaining_cap = ({k: _d(v) for k, v in cap_by_item.items()}
                      if cap_by_item is not None else None)
-    for item_id, batch_id, delivered in _dispatch_lots(dispatch.items, "delivered_qty"):
+    for item_id, batch_id, combo, delivered in _dispatch_lots(dispatch.items, "delivered_qty"):
         allowed = _d(delivered)
         if remaining_cap is not None:
             # Confirmed-so-far ceiling, spent greedily across the lots of an item.
             allowed = max(ZERO, min(allowed, remaining_cap.get(item_id, ZERO)))
             remaining_cap[item_id] = _d(remaining_cap.get(item_id, ZERO)) - allowed
-        lot_key = (item_id, batch_id or m.NO_BATCH)
+        lot_key = (item_id, batch_id or m.NO_BATCH, combo)
         delta = (allowed - credited.get(lot_key, ZERO)).quantize(Decimal("0.001"))
         if delta <= ZERO:
             continue
@@ -2174,6 +2210,8 @@ async def credit_arrival(db: AsyncSession, dispatch: m.Dispatch, user, *,
             bin_id=m.NO_BIN, batch_id=batch_id or m.NO_BATCH,
             project_id=dispatch.project_id or 0,
             serial_numbers=units or None,
+            # The destination holds what was sent: the same brand / variant / model.
+            brand_id=combo[0], variant_id=combo[1], model_id=combo[2],
         )
 
 
@@ -3581,6 +3619,8 @@ async def _prepare_receipt_line(
         # What the goods cost, carried onto the balance they become. The GRN has
         # captured this rate all along; it just never reached stk_balance.
         rate=line.rate,
+        # Under its brand / variant / model (2026-10-23).
+        brand_id=line.brand_id, variant_id=line.variant_id, model_id=line.model_id,
         # What THIS receipt brought in — never the lot as it stands afterwards. Empty
         # stays None so a leg that genuinely named no units keeps the old fallback.
         serial_numbers=_ledger_units(moved_units),
@@ -3637,6 +3677,7 @@ async def _build_putaway_task(db: AsyncSession, receipt: m.Receipt, line: m.Rece
         qty=_d(line.accepted_qty),
         # The receipt's hierarchy, fixed for the life of the stock (2026-10-08).
         pack_hierarchy_id=line.pack_hierarchy_id,
+        **combinations.carry(line),
         # No suggestion, and therefore not system-directed: the storekeeper decides
         # where this goes, at any rung of the tree. See the note where `_suggest_bin`
         # stood.
@@ -3821,6 +3862,8 @@ def _despatch_prefill_line(line, *, ordered: dict, rates: dict,
         rate=rates.get(key),
         batch_no=line.batch_no, mfg_date=line.mfg_date,
         expiry_date=line.expiry_date,
+        # The brand / variant / model the supplier sent, locked (2026-10-23).
+        **combinations.carry(line),
         **((tracking or {}).get(line.item_id) or {}),
         # How the supplier packed it, declared and fixed; and the count to start from.
         **wh_packing.despatch_prefill_packing(line, sent),
@@ -3977,7 +4020,8 @@ async def po_lines(db: AsyncSession, po_id: int,
     items = (await db.execute(
         select(POItem.id, POItem.item_id, POItem.item_code, POItem.item_name,
                POItem.uom_code, POItem.quantity, POItem.rate, POItem.indent_item_id,
-               POItem.pack_hierarchy_id)
+               POItem.pack_hierarchy_id,
+               *[getattr(POItem, c) for c in COMBINATION_COLUMNS])
         .where(POItem.po_id == po_id).order_by(POItem.id))).all()
     ladders = await pack_ladders_for(db, {line.item_id for line in items})
     received = await po_received_by_line(db, po_id, exclude_receipt_id=receipt_id)
@@ -4012,6 +4056,8 @@ async def po_lines(db: AsyncSession, po_id: int,
             "received_qty": already,
             "pending_qty": pending,
             "rate": line.rate,
+            # The brand / variant / model the order bought, locked (2026-10-23).
+            **combinations.carry(line),
             **(tracking.get(line.item_id) or {}),
             # What is still owed, in whole packs of the order's hierarchy — the
             # count a receipt with no despatch note starts from.
@@ -4085,6 +4131,7 @@ async def _raise_inspection_for(
             receipt_item_id=line.id, item_id=line.item_id,
             item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
             batch_no=line.batch_no,
+            **combinations.carry(line),
             inspected_qty=_d(line.received_qty), accepted_qty=_d(line.received_qty),
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
             serial_numbers=list(line.serial_numbers) if line.serial_numbers else None,
@@ -4280,6 +4327,8 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers=serials or None,
             imei_numbers=imeis or None,
+            **(combinations.carry(await db.get(m.ReceiptItem, line.receipt_item_id))
+               if line.receipt_item_id else dict(combinations.NONE)),
         ))
     _inspection_totals(inspection)
 
@@ -4581,6 +4630,8 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask,
         "item_id": task.item_id,
         "item_code": item.code if item else None,
         "item_name": item.name if item else None,
+        # Which brand / variant / model is being shelved (2026-10-23).
+        **combinations.carry(task),
         "uom_id": task.uom_id, "uom_code": item.uom_code if item else None,
         "batch_id": task.batch_id, "batch_no": batch.batch_no if batch else None,
         "expiry_date": (
@@ -5153,6 +5204,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
                              user=user, warehouse_id=task.warehouse_id,
                              bin_id=target.id, batch_id=task.batch_id or m.NO_BATCH,
                              project_id=project_id,
+                             brand_id=task.brand_id, variant_id=task.variant_id, model_id=task.model_id,
                              # Putaway moves the same goods into their bin, so it
                              # carries the same cost the batch was received at.
                              rate=batch.rate if batch else None,
@@ -5224,6 +5276,7 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
             package_id=task.package_id,
             package_name=task.package_name,
             pack_hierarchy_id=task.pack_hierarchy_id,
+            **combinations.carry(task),
             handling_units=capacity.space_for(
                 capacity.choose_pack(
                     (await capacity.pack_ladders(db, [task.item_id]))
@@ -5500,6 +5553,11 @@ async def _place_unit_codes(
     item = await db.get(Item, item_id)
     if item is None or bool(getattr(item, "is_serial_tracked", False)):
         return []
+    # Issued in a container (2026-10-23): the codes are the containers' — one per
+    # strip, made by `wh_packing.shelve` — never one per tablet.
+    from app.shared.masters import packs as master_packs
+    if await master_packs.issues_in_containers(db, item_id):
+        return []
     # Grams and litres have no unit to name. Guarded here as well as at the caller so
     # the putaway route cannot mint 30 rows for 30 grams of cotton either.
     if not await _is_countable(db, item):
@@ -5755,6 +5813,10 @@ async def _movement_units(
                 f"{label} is not tracked by serial, IMEI or unit code in the item "
                 "master, so a movement of it names no units")
         return [], []
+    # A lot with no recorded units moves by quantity (2026-10-23).
+    if not names and not await _lot_has_units(db, item_id=item.id, warehouse_id=warehouse_id,
+                                              batch_id=batch_id, bin_id=bin_id):
+        return [], []
 
     qty = _d(quantity)
     if qty != qty.to_integral_value():
@@ -5909,7 +5971,10 @@ async def create_stock_movement(
 
     item = await _item_snapshot(db, data.item_id)
     batch_id = data.batch_id or m.NO_BATCH
-    stock = (await db.execute(
+    # One brand / variant / model when the move names one (2026-10-23).
+    combination = ({"brand_id": data.brand_id, "variant_id": data.variant_id or 0,
+                    "model_id": data.model_id or 0} if data.brand_id else None)
+    stock = _summed(row for row in (await db.execute(
         select(Stock).where(
             Stock.warehouse_id == wh.id,
             Stock.bin_id == source.id,
@@ -5917,7 +5982,7 @@ async def create_stock_movement(
             Stock.batch_id == batch_id,
             Stock.project_id == 0,
         ).with_for_update()
-    )).scalar_one_or_none()
+    )).scalars().all() if stock_allocation.matches_combination(row, combination))
     if stock is None or _d(stock.available_qty) < _d(data.quantity):
         available = _d(stock.available_qty) if stock else ZERO
         raise ValidationError(
@@ -5930,36 +5995,12 @@ async def create_stock_movement(
         quantity=data.quantity)
 
     movement_no = await next_number(db, WarehouseDocType.STOCK_MOVEMENT.value)
-    await move_stock(
-        db,
-        item_id=item.id,
-        qty=data.quantity,
-        direction=StockDirection.OUT.value,
-        ref_type=InventoryRefType.STOCK_MOVEMENT.value,
-        ref_id=0,
-        ref_no=movement_no,
-        user=user,
-        warehouse_id=wh.id,
-        bin_id=source.id,
-        batch_id=batch_id,
-        project_id=0,
-        serial_numbers=serial_numbers,
-    )
-    await move_stock(
-        db,
-        item_id=item.id,
-        qty=data.quantity,
-        direction=StockDirection.IN.value,
-        ref_type=InventoryRefType.STOCK_MOVEMENT.value,
-        ref_id=0,
-        ref_no=movement_no,
-        user=user,
-        warehouse_id=wh.id,
-        bin_id=destination.id,
-        batch_id=batch_id,
-        project_id=0,
-        serial_numbers=serial_numbers,
-    )
+    await _move_between_bins(
+        db, item_id=item.id, qty=data.quantity, warehouse_id=wh.id,
+        from_bin_id=source.id, to_bin_id=destination.id, batch_id=batch_id,
+        project_id=0, ref_type=InventoryRefType.STOCK_MOVEMENT.value, ref_id=0,
+        ref_no=movement_no, user=user, serial_numbers=serial_numbers,
+        combination=combination)
     # One statement for the units this movement carries, whatever its size.
     await _set_unit_fields(db, [row.id for row in serial_rows],
                            bin_id=destination.id,
@@ -6278,7 +6319,7 @@ class MovementOrderStatus(str, Enum):
 
 async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
                               batch_id, quantity, serial_rows, serial_numbers, order_no, user,
-                              project_id: int = 0) -> None:
+                              project_id: int = 0, combination: dict | None = None) -> None:
     """Move ONE line out of its source bin and into its destination bin.
 
     The physical half of a movement, in one place for the final completion action.
@@ -6287,15 +6328,12 @@ async def _move_movement_line(db: AsyncSession, wh, item, source, destination,
     and each call writes its own `stk_ledger` row, which is what makes a movement
     traceable afterwards.
     """
-    for direction, bin_row in ((StockDirection.OUT.value, source),
-                               (StockDirection.IN.value, destination)):
-        await move_stock(
-            db, item_id=item.id, qty=quantity, direction=direction,
-            ref_type=InventoryRefType.STOCK_MOVEMENT.value,
-            ref_id=0, ref_no=order_no, user=user,
-            warehouse_id=wh.id, bin_id=bin_row.id, batch_id=batch_id,
-            project_id=project_id, serial_numbers=serial_numbers,
-        )
+    await _move_between_bins(
+        db, item_id=item.id, qty=quantity, warehouse_id=wh.id,
+        from_bin_id=source.id, to_bin_id=destination.id, batch_id=batch_id,
+        project_id=project_id, ref_type=InventoryRefType.STOCK_MOVEMENT.value, ref_id=0,
+        ref_no=order_no, user=user, serial_numbers=serial_numbers,
+        combination=combination)
     # One statement for the units this order carries, whatever its size.
     await _set_unit_fields(db, [row.id for row in serial_rows],
                            bin_id=destination.id,
@@ -6335,13 +6373,13 @@ async def _validate_movement_order(db: AsyncSession, order) -> None:
         await _get(db, Bin, line.destination_bin_id, "Destination bin")
         batch_id = line.batch_id or m.NO_BATCH
         releasing = _is_release_line(line, hold)
-        stock = (await db.execute(
+        stock = _summed(row for row in (await db.execute(
             select(Stock).where(
                 Stock.warehouse_id == wh.id, Stock.bin_id == source.id,
                 Stock.item_id == item.id, Stock.batch_id == batch_id,
                 Stock.project_id == (hold_stock.project_id if releasing else 0),
             ).with_for_update()
-        )).scalar_one_or_none()
+        )).scalars().all() if stock_allocation.matches_combination(row, combo_dict(line)))
         available = _d(stock.available_qty) if stock else ZERO
         if releasing:
             available += _d(hold.release_qty)
@@ -6458,13 +6496,13 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
             and (line.source_bin_id or 0) == (hold_stock.bin_id or 0) \
             and (line.batch_id or 0) == (hold_stock.batch_id or 0)
         line_project = hold_stock.project_id if releasing else 0
-        stock = (await db.execute(
+        stock = _summed(row for row in (await db.execute(
             select(Stock).where(
                 Stock.warehouse_id == wh.id, Stock.bin_id == source.id,
                 Stock.item_id == item.id, Stock.batch_id == batch_id,
                 Stock.project_id == line_project,
             ).with_for_update()
-        )).scalar_one_or_none()
+        )).scalars().all() if stock_allocation.matches_combination(row, combo_dict(line)))
         available = _d(stock.available_qty) if stock else ZERO
         if available < _d(line.requested_qty):
             raise ValidationError(
@@ -6482,7 +6520,7 @@ async def _perform_movement_order(db: AsyncSession, order, user) -> None:
         await _move_movement_line(
             db, wh, item, source, destination, batch_id,
             line.requested_qty, serial_rows, serial_numbers, order.sto_no, user,
-            project_id=line_project)
+            project_id=line_project, combination=combo_dict(line))
 
     order.status = MovementOrderStatus.COMPLETED.value
 
@@ -6626,7 +6664,7 @@ async def create_stock_movement_order(
 
         item = await _item_snapshot(db, line.item_id)
         batch_id = line.batch_id or m.NO_BATCH
-        stock = (await db.execute(
+        stock = _summed(row for row in (await db.execute(
             select(Stock).where(
                 Stock.warehouse_id == wh.id,
                 Stock.bin_id == source.id,
@@ -6634,7 +6672,7 @@ async def create_stock_movement_order(
                 Stock.batch_id == batch_id,
                 Stock.project_id == 0,
             ).with_for_update()
-        )).scalar_one_or_none()
+        )).scalars().all() if stock_allocation.matches_combination(row, combo_dict(line)))
         if stock is None or _d(stock.available_qty) < _d(line.quantity):
             available = _d(stock.available_qty) if stock else ZERO
             raise ValidationError(
@@ -6652,6 +6690,9 @@ async def create_stock_movement_order(
             "item_code": item.code,
             "item_name": item.name,
             "uom_code": item.uom_code,
+            # The brand / variant / model this line moves, when it names one.
+            "combination": (await combinations.resolve(db, item.id, line, label=item.code)
+                            if line.brand_id else dict(combinations.NONE)),
             "batch_id": line.batch_id or None,
             "source_bin_id": source.id,
             "source_bin_code": source.code,
@@ -6678,6 +6719,7 @@ async def create_stock_movement_order(
             destination_bin_id=row["destination_bin_id"],
             batch_id=row["batch_id"],
             serial_numbers=row["serial_numbers"] or None,
+            **row.get("combination", combinations.NONE),
         ) for row in moved],
     )
     db.add(order)
@@ -7655,14 +7697,16 @@ async def _record_sto_for_str_issue(db: AsyncSession, issue: m.MaterialIssue,
     )
     # One order line per ITEM: the issue splits an item over the batches and bays it
     # was reserved from, which is the storekeeper's detail, not the order's.
-    by_item: dict[int, StockTransferOrderItem] = {}
+    # Per brand / variant / model too (2026-10-23).
+    by_item: dict[tuple, StockTransferOrderItem] = {}
     for line in issue.items:
-        row = by_item.get(line.item_id)
+        key = (line.item_id, combo_key(line))
+        row = by_item.get(key)
         if row is None:
-            by_item[line.item_id] = StockTransferOrderItem(
+            by_item[key] = StockTransferOrderItem(
                 item_id=line.item_id, item_code=line.item_code,
                 item_name=line.item_name, uom_code=line.uom_code,
-                requested_qty=_d(line.requested_qty))
+                requested_qty=_d(line.requested_qty), **combinations.carry(line))
         else:
             row.requested_qty = _d(row.requested_qty) + _d(line.requested_qty)
     order.items = list(by_item.values())
@@ -7695,7 +7739,10 @@ async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
         project_id=project_id,
         department_id=getattr(raiser, "department_id", None),
         remarks=f"STO {sto.sto_no} to {sto.to_warehouse_name}",
-        items=[s.IssueItemWrite(item_id=line.item_id, requested_qty=_d(line.requested_qty))
+        items=[s.IssueItemWrite(item_id=line.item_id, requested_qty=_d(line.requested_qty),
+                                brand_id=line.brand_id or None,
+                                variant_id=line.variant_id or None,
+                                model_id=line.model_id or None)
                for line in sto.items],
     )
     issue = await _build_issue(db, data, user, for_sto=True)
@@ -8869,6 +8916,11 @@ async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> 
         item = await _item_snapshot(db, line.item_id)
         if not await _unit_codes_required(db, item, config=code_config):
             continue
+        # A lot with no recorded units is issued by quantity (2026-10-23).
+        if not await _lot_has_units(db, item_id=line.item_id,
+                                    warehouse_id=issue.warehouse_id,
+                                    batch_id=line.batch_id, bin_id=line.bin_id):
+            continue
         # `_issue_unit_supply` already counts the units this line is holding — they
         # are `available` rows stamped with its own marker — so adding the captured
         # set on top would count the storekeeper's own picks twice.
@@ -8954,7 +9006,11 @@ async def _decorate_issue_serials(
         setattr(line, "is_serial_tracked", serial_by_item.get(line.item_id, False))
         setattr(line, "is_imei_tracked", imei_tracked_by_item.get(line.item_id, False))
         setattr(line, "unit_mode", mode)
-        has_units = line.item_id in coded_items
+        has_units = line.item_id in coded_items and (
+            not (line.batch_id or line.bin_id)
+            or await _lot_has_units(db, item_id=line.item_id,
+                                    warehouse_id=issue.warehouse_id,
+                                    batch_id=line.batch_id, bin_id=line.bin_id))
         setattr(line, "has_units", has_units)
         # What the badge on the screen says. Read per line, because `has_units` is —
         # see `_tracking_type`.
@@ -9091,6 +9147,8 @@ async def issue_stock_sources(
             m.Batch.batch_no,
             m.Batch.expiry_date,
             m.Batch.mfg_date,
+            # Which brand / variant / model the row is (2026-10-23).
+            Stock.brand_id, Stock.variant_id, Stock.model_id,
         )
         .select_from(Stock)
         .outerjoin(Bin, Bin.id == Stock.bin_id)
@@ -9111,7 +9169,8 @@ async def issue_stock_sources(
                ))
         .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id,
                   Bin.code, Bin.name, m.Batch.batch_no,
-                  m.Batch.expiry_date, m.Batch.mfg_date)
+                  m.Batch.expiry_date, m.Batch.mfg_date,
+                  Stock.brand_id, Stock.variant_id, Stock.model_id)
         .order_by(m.Batch.expiry_date.is_(None), m.Batch.expiry_date,
                   Stock.batch_id, Bin.code)
     )
@@ -9134,24 +9193,30 @@ async def issue_stock_sources(
 
     # Other indents' quantity holds per (item, bin, batch), less what their open
     # issues have pinned — tradeable on save (`allocation.swap_holds`).
-    tradeable: dict[tuple[int, int, int], Decimal] = {}
+    tradeable: dict[tuple, Decimal] = {}
     if indent_id:
-        for t_item, t_bin, t_batch, t_qty in (await db.execute(
+        for t_item, t_bin, t_batch, t_brand, t_variant, t_model, t_qty in (await db.execute(
             select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                   Stock.brand_id, Stock.variant_id, Stock.model_id,
                    func.sum(Reservation.quantity))
+            .join(Stock, Stock.id == Reservation.stock_id)
             .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
                    Reservation.status == ReservationStatus.ACTIVE.value,
                    Reservation.warehouse_id == warehouse_id,
                    Reservation.item_id.in_(ids),
                    Reservation.ref_id != indent_id)
-            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id)
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                      Stock.brand_id, Stock.variant_id, Stock.model_id)
         )).all():
-            tradeable[(int(t_item), int(t_bin or 0), int(t_batch or 0))] = _d(t_qty)
+            tradeable[(int(t_item), int(t_bin or 0), int(t_batch or 0),
+                       *_combo3(t_brand, t_variant, t_model))] = _d(t_qty)
         _pins, pinned_slots = await _open_issue_pins(
             db, warehouse_id, set(ids), exclude_issue_id=issue_id)
-        for slot, pinned in pinned_slots.items():
-            if slot in tradeable:
-                tradeable[slot] = max(ZERO, tradeable[slot] - pinned)
+        for pin_slot, pinned in pinned_slots.items():
+            for slot in [key for key in tradeable if key[:3] == pin_slot]:
+                used = min(tradeable[slot], pinned)
+                tradeable[slot] -= used
+                pinned -= used
 
     # What the warehouse holds for these items ALTOGETHER — every batch, every
     # location, and deliberately NOT filtered by `_stock_offerable`. A screen shows
@@ -9217,9 +9282,10 @@ async def issue_stock_sources(
     out = []
     for (item_id, bin_id, batch_id, available_qty, reserved_qty, total_qty,
          own_qty, hold_qty_row, bin_code, bin_name, batch_no, expiry_date,
-         mfg_date) in rows:
+         mfg_date, c_brand, c_variant, c_model) in rows:
+        combo = _combo3(c_brand, c_variant, c_model)
         own_reserved = _d(own_qty)
-        other_indents = tradeable.get((item_id, bin_id or 0, batch_id or 0), ZERO)
+        other_indents = tradeable.get((item_id, bin_id or 0, batch_id or 0, *combo), ZERO)
         issue_hold = _d(hold_qty_row)
         drawable = _d(available_qty) + own_reserved + other_indents + issue_hold
         if drawable <= ZERO:
@@ -9253,7 +9319,9 @@ async def issue_stock_sources(
             "item_available_qty": by_item.get(item_id, (ZERO, ZERO))[1],
             "codes_required": bool(codes_required.get(item_id)),
             "has_unit_codes": (item_id, bin_id or 0, batch_id or 0) in coded_slots,
+            "brand_id": combo[0], "variant_id": combo[1], "model_id": combo[2],
         })
+    await combinations.fill_names(db, out)
     return out
 
 
@@ -9287,9 +9355,11 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
         return []
 
     line_indents = await _line_indent_ids(db, issue)
-    # {(indent, indent line, item): {(bin, batch): quantity}}
-    wanted: dict[tuple[int, int, int], dict[tuple[int, int], Decimal]] = defaultdict(dict)
-    labels: dict[tuple[int, int, int], str] = {}
+    # {(indent, indent line, item, combination): {(bin, batch): quantity}} — per
+    # brand / variant / model too (2026-10-23): an Alpha line and a Beta line of one
+    # indent line hold different stock and move separately.
+    wanted: dict[tuple, dict[tuple[int, int], Decimal]] = defaultdict(dict)
+    labels: dict[tuple, str] = {}
     for line in issue.items:
         if not line.indent_item_id:
             continue
@@ -9299,13 +9369,15 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
         qty = _d(line.issued_qty)
         if qty <= ZERO:
             continue
-        key = (indent_id, line.indent_item_id, line.item_id)
+        key = (indent_id, line.indent_item_id, line.item_id, combo_key(line))
         slot = (int(line.bin_id or 0), int(line.batch_id or 0))
         wanted[key][slot] = wanted[key].get(slot, ZERO) + qty
         labels[key] = line.item_code or line.item_name or f"item {line.item_id}"
 
     moved: list[dict] = []
-    for (indent_id, indent_item_id, item_id), slots in wanted.items():
+    for (indent_id, indent_item_id, item_id, combo), slots in wanted.items():
+        combination = (None if combo is None else
+                       {"brand_id": combo[0], "variant_id": combo[1], "model_id": combo[2]})
         # A document that names no location and no batch is not saying where the goods
         # are — it is saying nothing. Two shapes arrive like that and neither is a
         # correction to follow: a point that stocks in bulk (`bin_id` 0 on every line
@@ -9346,7 +9418,8 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
         await stock_allocation.swap_holds(
             db, InventoryRefType.RESERVATION.value, indent_id,
             ref_line_id=indent_item_id, item_id=item_id,
-            warehouse_id=issue.warehouse_id, wanted=slots, pinned=pins)
+            warehouse_id=issue.warehouse_id, wanted=slots, pinned=pins,
+            combination=combination)
         for move in await stock_allocation.relocate(
             db,
             InventoryRefType.RESERVATION.value,
@@ -9357,7 +9430,8 @@ async def _realign_issue_reservations(db: AsyncSession, issue: m.MaterialIssue,
             warehouse_id=issue.warehouse_id,
             ref_no=issue.issue_no,
             user=user,
-            label=labels[(indent_id, indent_item_id, item_id)],
+            label=labels[(indent_id, indent_item_id, item_id, combo)],
+            combination=combination,
         ):
             moved.append({
                 "item_id": move.item_id,
@@ -9427,14 +9501,16 @@ async def _hold_direct_issue_stock(db: AsyncSession, issue: m.MaterialIssue, use
                 ref_type=InventoryRefType.ISSUE_HOLD.value, ref_id=issue.id,
                 ref_no=issue.issue_no, ref_line_id=line.id, user=user,
                 warehouse_ids=[issue.warehouse_id],
-                bin_id=line.bin_id or None, batch_id=line.batch_id or None)
+                bin_id=line.bin_id or None, batch_id=line.batch_id or None,
+                combination=combo_dict(line))
         if got < want:
             got += await stock_allocation.reserve_at(
                 db, item_id=line.item_id, qty=want - got,
                 warehouse_id=issue.warehouse_id,
                 bin_id=line.bin_id or None, batch_id=line.batch_id or None,
                 ref_type=InventoryRefType.ISSUE_HOLD.value, ref_id=issue.id,
-                ref_no=issue.issue_no, ref_line_id=line.id, user=user)
+                ref_no=issue.issue_no, ref_line_id=line.id, user=user,
+                combination=combo_dict(line))
         if got < want:
             where = " / ".join(filter(None, (line.batch_no, line.bin_code))) or "this point"
             short.append(f"{line.item_code or line.item_id}: {want} wanted at {where}, "
@@ -9739,6 +9815,53 @@ async def _assert_sources_picked(db: AsyncSession, issue: m.MaterialIssue) -> No
             + "; ".join(missing[:5]) + (f" and {len(missing) - 5} more" if len(missing) > 5 else ""))
 
 
+def _summed(rows):
+    """Every balance row at one spot, read as one — available added up.
+
+    A spot (location, item, batch, project) holds one row PER brand / variant / model
+    since 2026-10-23, so reading it with `scalar_one_or_none` fails the moment a
+    second brand lands there. None where nothing stands there at all."""
+    rows = list(rows)
+    if not rows:
+        return None
+    return SimpleNamespace(available_qty=sum((_d(r.available_qty) for r in rows), ZERO))
+
+
+async def _move_between_bins(db: AsyncSession, *, item_id: int, qty, warehouse_id: int,
+                             from_bin_id: int, to_bin_id: int, batch_id: int,
+                             project_id: int, ref_type: str, ref_id: int, ref_no: str,
+                             user, serial_numbers=None,
+                             combination: dict | None = None) -> None:
+    """Move stock from one location to another — out, then in AS WHAT CAME OUT.
+
+    Each slice keeps its brand / variant / model (2026-10-23): moving five Alpha
+    monitors to another bay lands five Alpha monitors there, never five of none."""
+    for slice_ in await move_stock_out(
+            db, item_id=item_id, qty=qty, ref_type=ref_type, ref_id=ref_id,
+            ref_no=ref_no, user=user, warehouse_id=warehouse_id, bin_id=from_bin_id,
+            batch_id=batch_id, project_id=project_id, serial_numbers=serial_numbers,
+            **(combination or {})):
+        await move_stock(
+            db, item_id=item_id, qty=slice_["qty"], direction=StockDirection.IN.value,
+            ref_type=ref_type, ref_id=ref_id, ref_no=ref_no, user=user,
+            warehouse_id=warehouse_id, bin_id=to_bin_id, batch_id=slice_["batch_id"],
+            project_id=project_id, serial_numbers=slice_["serial_numbers"],
+            brand_id=slice_["brand_id"], variant_id=slice_["variant_id"],
+            model_id=slice_["model_id"])
+
+
+def _combo3(brand, variant, model) -> tuple[int, int, int]:
+    """A balance row's brand / variant / model as a key part (2026-10-23)."""
+    return (int(brand or 0), int(variant or 0), int(model or 0))
+
+
+def line_combo_label(line) -> str:
+    """"Alpha · 24-inch · M1" for a line naming a combination, for messages."""
+    get = (line.get if isinstance(line, dict) else (lambda k, d=None: getattr(line, k, d)))
+    return " · ".join(part for part in (get("brand_name"), get("variant_name"),
+                                        get("model_name")) if part) or "that brand"
+
+
 async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                                 lines: list[s.IssueItemWrite]) -> None:
     """Is every pick on this document one the shelf can actually serve?
@@ -9784,9 +9907,11 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # document — the alternative is a query per line. Expired stock is not on it: it is
     # never to be issued, so it can neither satisfy a pick nor be drawn by one.
     today = ist_today()
-    on_hand: dict[tuple[int, int, int], Decimal] = {}
-    for item_id, bin_id, batch_id, available in (await db.execute(
-        select(Stock.item_id, Stock.bin_id, Stock.batch_id,
+    # Keyed (item, location, batch, brand, variant, model) since 2026-10-23: a line
+    # naming a brand / variant / model draws that combination and no other.
+    on_hand: dict[tuple, Decimal] = {}
+    for item_id, bin_id, batch_id, c_brand, c_variant, c_model, available in (await db.execute(
+        select(Stock.item_id, Stock.bin_id, Stock.batch_id, Stock.brand_id, Stock.variant_id, Stock.model_id,
                func.sum(Stock.available_qty))
         .outerjoin(m.Batch, m.Batch.id == Stock.batch_id)
         .where(Stock.warehouse_id == issue.warehouse_id, Stock.item_id.in_(item_ids),
@@ -9794,37 +9919,41 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                    func.coalesce(m.Batch.expiry_date, Stock.expiry_date).is_(None),
                    func.coalesce(m.Batch.expiry_date, Stock.expiry_date) >= today,
                ))
-        .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id)
+        .group_by(Stock.item_id, Stock.bin_id, Stock.batch_id, Stock.brand_id, Stock.variant_id, Stock.model_id)
     )).all():
-        on_hand[(int(item_id), int(bin_id or 0), int(batch_id or 0))] = _d(available)
+        on_hand[(int(item_id), int(bin_id or 0), int(batch_id or 0),
+                 *_combo3(c_brand, c_variant, c_model))] = _d(available)
 
     # What this document's own indent lines are already holding, and where. That hold
     # is stock this issue may draw on — an approved allocation reserves exactly what it
     # is about to issue, so counting only what is free would refuse every correct
     # indent-linked document.
-    own: dict[tuple[int, int, int], Decimal] = {}
+    own: dict[tuple, Decimal] = {}
     allocated_batches: dict[tuple[int, int], set[int]] = {}
     pairs = {(line_indents[int(line.indent_item_id)], int(line.indent_item_id))
              for line in outward
              if line.indent_item_id and int(line.indent_item_id) in line_indents}
     if pairs:
-        for item_id, bin_id, batch_id, ref_id, ref_line_id, qty in (await db.execute(
+        for (item_id, bin_id, batch_id, ref_id, ref_line_id, c_brand, c_variant, c_model,
+             qty) in (await db.execute(
             select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
-                   Reservation.ref_id, Reservation.ref_line_id,
+                   Reservation.ref_id, Reservation.ref_line_id, Stock.brand_id, Stock.variant_id, Stock.model_id,
                    func.sum(Reservation.quantity))
+            .join(Stock, Stock.id == Reservation.stock_id)
             .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
                    Reservation.status == ReservationStatus.ACTIVE.value,
                    Reservation.warehouse_id == issue.warehouse_id,
                    Reservation.ref_id.in_({pair[0] for pair in pairs}),
                    Reservation.ref_line_id.in_({pair[1] for pair in pairs}))
             .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
-                      Reservation.ref_id, Reservation.ref_line_id)
+                      Reservation.ref_id, Reservation.ref_line_id, Stock.brand_id, Stock.variant_id, Stock.model_id)
         )).all():
             # The two `IN`s above are a cross product; only the pairs the document
             # actually carries count.
             if (int(ref_id), int(ref_line_id or 0)) not in pairs:
                 continue
-            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0),
+                    *_combo3(c_brand, c_variant, c_model))
             own[slot] = own.get(slot, ZERO) + _d(qty)
             if batch_id:
                 allocated_batches.setdefault(
@@ -9834,53 +9963,65 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # it is saved (`_hold_direct_issue_stock`), and an edit to the same picks must not
     # be refused for want of the stock it is already holding.
     if issue.id:
-        for item_id, bin_id, batch_id, qty in (await db.execute(
+        for item_id, bin_id, batch_id, c_brand, c_variant, c_model, qty in (await db.execute(
             select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
-                   func.sum(Reservation.quantity))
+                   Stock.brand_id, Stock.variant_id, Stock.model_id, func.sum(Reservation.quantity))
+            .join(Stock, Stock.id == Reservation.stock_id)
             .where(Reservation.ref_type == InventoryRefType.ISSUE_HOLD.value,
                    Reservation.ref_id == issue.id,
                    Reservation.status == ReservationStatus.ACTIVE.value)
-            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id)
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                      Stock.brand_id, Stock.variant_id, Stock.model_id)
         )).all():
-            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0),
+                    *_combo3(c_brand, c_variant, c_model))
             own[slot] = own.get(slot, ZERO) + _d(qty)
 
     # Lots held for this document's project are its own too (stk_project_holds).
     if issue.project_id:
-        for item_id, bin_id, batch_id, qty in (await db.execute(
+        for item_id, bin_id, batch_id, c_brand, c_variant, c_model, qty in (await db.execute(
             select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
-                   func.sum(Reservation.quantity))
+                   Stock.brand_id, Stock.variant_id, Stock.model_id, func.sum(Reservation.quantity))
+            .join(Stock, Stock.id == Reservation.stock_id)
             .where(_own_hold_clause(None, issue.project_id),
                    Reservation.status == ReservationStatus.ACTIVE.value,
                    Reservation.warehouse_id == issue.warehouse_id,
                    Reservation.item_id.in_(item_ids))
-            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id)
+            .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
+                      Stock.brand_id, Stock.variant_id, Stock.model_id)
         )).all():
-            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+            slot = (int(item_id), int(bin_id or 0), int(batch_id or 0),
+                    *_combo3(c_brand, c_variant, c_model))
             own[slot] = own.get(slot, ZERO) + _d(qty)
 
     # Other indents' quantity holds here, less what their open issues have pinned.
-    others: dict[tuple[int, int, int], Decimal] = {}
+    others: dict[tuple, Decimal] = {}
     _pins, pinned_slots = await _open_issue_pins(
         db, issue.warehouse_id, item_ids, exclude_issue_id=getattr(issue, "id", None))
     own_pairs = pairs or set()
-    for item_id, bin_id, batch_id, ref_id, ref_line_id, qty in (await db.execute(
+    for (item_id, bin_id, batch_id, ref_id, ref_line_id, c_brand, c_variant, c_model,
+         qty) in (await db.execute(
         select(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
-               Reservation.ref_id, Reservation.ref_line_id, func.sum(Reservation.quantity))
+               Reservation.ref_id, Reservation.ref_line_id, Stock.brand_id, Stock.variant_id, Stock.model_id,
+               func.sum(Reservation.quantity))
+        .join(Stock, Stock.id == Reservation.stock_id)
         .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
                Reservation.status == ReservationStatus.ACTIVE.value,
                Reservation.warehouse_id == issue.warehouse_id,
                Reservation.item_id.in_(item_ids))
         .group_by(Reservation.item_id, Reservation.bin_id, Reservation.batch_id,
-                  Reservation.ref_id, Reservation.ref_line_id)
+                  Reservation.ref_id, Reservation.ref_line_id, Stock.brand_id, Stock.variant_id, Stock.model_id)
     )).all():
         if (int(ref_id), int(ref_line_id or 0)) in own_pairs:
             continue
-        slot = (int(item_id), int(bin_id or 0), int(batch_id or 0))
+        slot = (int(item_id), int(bin_id or 0), int(batch_id or 0),
+                *_combo3(c_brand, c_variant, c_model))
         others[slot] = others.get(slot, ZERO) + _d(qty)
-    for slot, pinned in pinned_slots.items():
-        if slot in others:
-            others[slot] = max(ZERO, others[slot] - pinned)
+    for pin_slot, pinned in pinned_slots.items():
+        for slot in [key for key in others if key[:3] == pin_slot]:
+            used = min(others[slot], pinned)
+            others[slot] -= used
+            pinned -= used
 
     # The FEFO plan per item: every batch this document could draw from, grouped into
     # TIERS of the same expiry date (FEFO cannot tell same-day batches apart), earliest
@@ -9888,24 +10029,34 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # line may also draw on other indents' floating holds (`others`); a manual line
     # only on free stock and its project's own lots.
     indent_items = {int(line.item_id) for line in outward if line.indent_item_id}
-    drawable_by_batch: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    # Per brand / variant / model too (2026-10-23): FEFO is asked within the
+    # combination a line names — an older batch of ANOTHER brand is not one this line
+    # could have taken first.
+    drawable_by_batch: dict[tuple, Decimal] = defaultdict(Decimal)
     for source, indent_only in ((on_hand, False), (own, False), (others, True)):
-        for (s_item, _s_bin, s_batch), qty in source.items():
+        for (s_item, _s_bin, s_batch, *s_combo), qty in source.items():
             if s_batch and (not indent_only or s_item in indent_items):
-                drawable_by_batch[(s_item, s_batch)] += qty
-    fefo_ids = {b for (_i, b), q in drawable_by_batch.items() if q > ZERO}
+                drawable_by_batch[(s_item, tuple(s_combo), s_batch)] += qty
+    fefo_ids = {b for (_i, _c, b), q in drawable_by_batch.items() if q > ZERO}
     fefo_rows = {row.id: row for row in (await db.execute(
         select(m.Batch).where(m.Batch.id.in_(fefo_ids))
     )).scalars().all()} if fefo_ids else {}
     today = ist_today()
-    tiers_of: dict[int, dict[object, list[tuple[int, Decimal]]]] = defaultdict(dict)
-    for (s_item, s_batch), qty in drawable_by_batch.items():
-        row = fefo_rows.get(s_batch)
-        if qty <= ZERO or row is None:
-            continue
-        if row.expiry_date is not None and row.expiry_date < today:
-            continue
-        tiers_of[s_item].setdefault(row.expiry_date, []).append((s_batch, qty))
+
+    def tiers_for(item: int, combo) -> dict[object, list[tuple[int, Decimal]]]:
+        per_batch: dict[int, Decimal] = defaultdict(Decimal)
+        for (s_item, s_combo, s_batch), qty in drawable_by_batch.items():
+            if s_item == item and (combo is None or s_combo == combo):
+                per_batch[s_batch] += qty
+        tiers: dict[object, list[tuple[int, Decimal]]] = {}
+        for s_batch, qty in per_batch.items():
+            row = fefo_rows.get(s_batch)
+            if qty <= ZERO or row is None:
+                continue
+            if row.expiry_date is not None and row.expiry_date < today:
+                continue
+            tiers.setdefault(row.expiry_date, []).append((s_batch, qty))
+        return tiers
 
     # Every batch either named or allocated, read once: expiry is the whole of the
     # FEFO question.
@@ -9922,10 +10073,11 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
         row = batches.get(batch_id)
         return row.batch_no if row is not None and row.batch_no else f"batch {batch_id}"
 
-    taken: dict[tuple[int, int, int], Decimal] = {}
+    taken: dict[tuple, Decimal] = {}
     for index, line in enumerate(outward, start=1):
         item_id = int(line.item_id)
         bin_id, batch_id = _line_slot(line)
+        combo = combo_key(line)
         label = line.item_code or f"item {item_id}"
 
         # Reject an expired batch right away
@@ -9937,7 +10089,7 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
                     f"and cannot be issued.")
 
         # --- and the stock itself ------------------------------------------------
-        slot = (item_id, bin_id, batch_id)
+        slot = (item_id, bin_id, batch_id, combo)
         want = taken.get(slot, ZERO) + _line_issued(line)
         # A line naming no location (a point that stocks in bulk) or no batch is asking
         # about everything under that heading, exactly as `_issue_unit_supply` and
@@ -9946,7 +10098,8 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             return sum((qty for key, qty in source.items()
                         if key[0] == item_id
                         and (not bin_id or key[1] == bin_id)
-                        and (not batch_id or key[2] == batch_id)), ZERO)
+                        and (not batch_id or key[2] == batch_id)
+                        and (combo is None or tuple(key[3:]) == combo)), ZERO)
 
         mine = under(own)
         # Another indent's quantity hold on this row is drawable too: holds float
@@ -9961,6 +10114,8 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             if bin_id:
                 where.append(await _bin_code(db, bin_id) or f"location {bin_id}")
             place = " in ".join(where) if where else "this warehouse"
+            if combo is not None:
+                place = f"{line_combo_label(line)} in {place}"
             raise ValidationError(
                 f"Line {index}: {label} takes {want} from {place}, which can give "
                 f"{drawable}."
@@ -9974,14 +10129,14 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
     # earlier batch used up before a later one is touched (2026-10-12). Damaged or
     # unusable stock is the stock audit's business, never the issue's — so there is
     # no "later batch with a reason". Same-day batches form one tier and may be mixed.
-    by_item_batch: dict[int, dict[int, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
-    for (t_item, _t_bin, t_batch), qty in taken.items():
+    by_item_batch: dict[tuple, dict[int, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+    for (t_item, _t_bin, t_batch, t_combo), qty in taken.items():
         if t_batch:
-            by_item_batch[t_item][t_batch] += qty
-    for t_item, takes in by_item_batch.items():
+            by_item_batch[(t_item, t_combo)][t_batch] += qty
+    for (t_item, t_combo), takes in by_item_batch.items():
         label = next((line.item_code for line in outward
                       if int(line.item_id) == t_item and line.item_code), f"item {t_item}")
-        tiers = sorted(tiers_of.get(t_item, {}).items(),
+        tiers = sorted(tiers_for(t_item, t_combo).items(),
                        key=lambda kv: (kv[0] is None, kv[0] or date.max))
         known = {b for _e, members in tiers for b, _q in members}
         stray = [b for b in takes if b not in known]
@@ -10012,10 +10167,43 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             remaining -= tier_take
 
 
+async def _issue_line_combinations(db: AsyncSession,
+                                   lines: list[s.IssueItemWrite]) -> list[dict]:
+    """Which brand / variant / model each issue line takes (2026-10-23).
+
+    A line serving an indent line that named one takes exactly that — the
+    storekeeper cannot change it. Otherwise (an indent line that said Any, or a
+    direct issue) the storekeeper's pick off the shelf, checked against the item's
+    ON combinations; with none picked the line names none and draws any.
+    The pick is written back onto the line, so every check after this reads it.
+    """
+    from app.modules.indents.models import IndentItem
+    ids = {int(line.indent_item_id) for line in lines if line.indent_item_id}
+    asked = {row.id: row for row in (await db.execute(
+        select(IndentItem).where(IndentItem.id.in_(ids)))).scalars().all()} if ids else {}
+    out = []
+    for index, line in enumerate(lines, start=1):
+        source = asked.get(int(line.indent_item_id or 0))
+        if source is not None and source.brand_id:
+            combo = combinations.carry(source)
+        elif getattr(line, "brand_id", None):
+            combo = await combinations.resolve(
+                db, line.item_id, line, label=f"Line {index}")
+        else:
+            combo = {**combinations.NONE,
+                     "combination_any": bool(source is not None and source.combination_any)}
+        for key in ("brand_id", "variant_id", "model_id", "brand_name", "variant_name",
+                    "model_name"):
+            setattr(line, key, combo[key])
+        out.append(combo)
+    return out
+
+
 async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
                              lines: list[s.IssueItemWrite]) -> None:
     issue.items.clear()
     await db.flush()
+    line_combos = await _issue_line_combinations(db, lines)
 
     # Every location named on the document, checked once for the whole document.
     #
@@ -10120,6 +10308,7 @@ async def _apply_issue_lines(db: AsyncSession, issue: m.MaterialIssue,
             pack_hierarchy_id=line_packs[index - 1][0],
             pack_breakdown=line_packs[index - 1][1],
             break_bulk=bool(getattr(line, "break_bulk", False)),
+            **line_combos[index - 1],
         ))
     _issue_totals(issue)
     # Flushed so every line has an id before `_reserve_issue_serials` stamps units
@@ -12303,11 +12492,17 @@ async def set_issue_serials(db: AsyncSession, issue_id: int,
     return await get_issue(db, issue.id)
 
 
+def _row_combo(row) -> dict:
+    """A balance row's combination, in the shape `move_stock_out` takes."""
+    return {"brand_id": int(row.brand_id or 0), "variant_id": int(row.variant_id or 0),
+            "model_id": int(row.model_id or 0)}
+
+
 async def _issue_slices(
     db: AsyncSession, issue: m.MaterialIssue, line: m.MaterialIssueLine, qty,
-) -> list[tuple[int, int, int, object]]:
+) -> list[tuple]:
     """Where an unreserved issue line's goods actually are:
-    (bin, batch, project, quantity).
+    (bin, batch, project, quantity, brand / variant / model).
 
     All three dimensions come off the balance row, not off the document. `stk_balance`
     is keyed on (item, warehouse, bin, batch, project) and `move_stock_out` filters on
@@ -12333,7 +12528,8 @@ async def _issue_slices(
     """
     from app.modules.inventory.models import Stock
 
-    fallback = [(line.bin_id, line.batch_id, issue.project_id or 0, qty)]
+    wanted = combo_dict(line)
+    fallback = [(line.bin_id, line.batch_id, issue.project_id or 0, qty, wanted)]
     rows = (await db.execute(
         select(Stock)
         .where(Stock.warehouse_id == issue.warehouse_id,
@@ -12341,6 +12537,9 @@ async def _issue_slices(
                Stock.available_qty > 0)
         .order_by(Stock.expiry_date.is_(None), Stock.expiry_date, Stock.id)
     )).scalars().all()
+    # Only the brand / variant / model the line names (2026-10-23); a line naming
+    # none may take any.
+    rows = [row for row in rows if stock_allocation.matches_combination(row, wanted)]
     if not rows:
         return fallback
 
@@ -12359,19 +12558,20 @@ async def _issue_slices(
         for row in named:
             take = min(remaining, _d(row.available_qty))
             if take > ZERO:
-                slices.append((row.bin_id, row.batch_id, row.project_id, take))
+                slices.append((row.bin_id, row.batch_id, row.project_id, take,
+                               _row_combo(row)))
                 remaining -= take
             if remaining <= ZERO:
                 break
         return slices
 
-    slices: list[tuple[int, int, int, object]] = []
+    slices: list[tuple] = []
     remaining = qty
     for row in rows:
         take = min(remaining, _d(row.available_qty))
         if take <= ZERO:
             continue
-        slices.append((row.bin_id, row.batch_id, row.project_id, take))
+        slices.append((row.bin_id, row.batch_id, row.project_id, take, _row_combo(row)))
         remaining -= take
         if remaining <= ZERO:
             break
@@ -12449,6 +12649,7 @@ async def _raise_outbound_inspection_for(
             issue_item_id=line.id, item_id=line.item_id,
             item_code=line.item_code, item_name=line.item_name, uom_code=line.uom_code,
             batch_no=line.batch_no,
+            **combinations.carry(line),
             inspected_qty=_d(line.issued_qty), accepted_qty=_d(line.issued_qty),
             rejected_qty=ZERO, result=InspectionResult.PENDING.value,
             serial_numbers=line_serials if line_serials else None,
@@ -12551,7 +12752,10 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                 "item is issued in whole units")
             continue
         captured = len(getattr(line, "serial_numbers", None) or [])
-        if captured != int(qty):
+        if captured != int(qty) and (captured or await _lot_has_units(
+                db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
+                batch_id=line.batch_id, bin_id=line.bin_id)):
+            # A lot with no recorded units is issued by quantity (2026-10-23).
             incomplete.append(
                 f"{item.code}: {captured} of {int(qty)} serial numbers captured")
     if incomplete:
@@ -12660,6 +12864,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     warehouse_id=issue.warehouse_id,
                     bin_id=line.bin_id or None,
                     batch_id=line.batch_id or None,
+                    combination=combo_dict(line),
                 ) if from_hold > ZERO else []
                 taken = sum((row.quantity for row in slices), ZERO)
                 if taken < from_hold:
@@ -12671,6 +12876,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                         ref_line_id=line.indent_item_id,
                         item_id=line.item_id,
                         warehouse_id=issue.warehouse_id,
+                        combination=combo_dict(line),
                     )
                 for stock in slices:
                     await move_stock(
@@ -12681,6 +12887,8 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                         warehouse_id=stock.warehouse_id,
                         bin_id=stock.bin_id, batch_id=stock.batch_id,
                         project_id=stock.project_id,
+                        brand_id=stock.brand_id, variant_id=stock.variant_id,
+                        model_id=stock.model_id,
                         serial_numbers=take_units(units, stock.quantity),
                         pack_text=_ledger_packs(line, stock.quantity),
                     )
@@ -12698,7 +12906,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
             held_slices = await stock_allocation.consume_for_issue(
                 db, InventoryRefType.ISSUE_HOLD.value, issue.id, quantity=qty,
                 ref_line_id=line.id, item_id=line.item_id,
-                warehouse_id=issue.warehouse_id)
+                warehouse_id=issue.warehouse_id, combination=combo_dict(line))
             for stock in held_slices:
                 await move_stock(
                     db, item_id=line.item_id, qty=stock.quantity,
@@ -12706,6 +12914,8 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     ref_id=issue.id, ref_no=issue.issue_no, user=user,
                     warehouse_id=stock.warehouse_id, bin_id=stock.bin_id,
                     batch_id=stock.batch_id, project_id=stock.project_id,
+                    brand_id=stock.brand_id, variant_id=stock.variant_id,
+                    model_id=stock.model_id,
                     serial_numbers=take_units(units, stock.quantity),
                     pack_text=_ledger_packs(line, stock.quantity),
                 )
@@ -12721,7 +12931,8 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                 ref_type=None, ref_id=None, ref_no=None, ref_line_id=None, user=user,
                 warehouse_ids=[issue.warehouse_id],
                 bin_id=line.bin_id if line.bin_id else None,
-                batch_id=line.batch_id if line.batch_id else None)
+                batch_id=line.batch_id if line.batch_id else None,
+                combination=combo_dict(line))
         if outward:
             # Where this line's goods actually sit, not where the line says they do.
             # A forwarded consignment has no reservation at THIS point (the hold was
@@ -12730,7 +12941,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
             # `stk_balance` is keyed on (item, warehouse, bin, batch, project), so a
             # line still carrying batch 0 looked up a row that does not exist and the
             # issue failed for "no stock" while the goods sat one key away.
-            for source_bin, source_batch, source_project, slice_qty in (
+            for source_bin, source_batch, source_project, slice_qty, source_combo in (
                     await _issue_slices(db, issue, line, qty)):
                 await move_stock_out(
                     db, item_id=line.item_id, qty=slice_qty,
@@ -12739,6 +12950,7 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                     warehouse_id=issue.warehouse_id,
                     bin_id=source_bin, batch_id=source_batch,
                     project_id=source_project,
+                    **(source_combo or {}),
                     serial_numbers=take_units(units, slice_qty),
                     pack_text=_ledger_packs(line, slice_qty),
                 )
@@ -12750,6 +12962,8 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                 user=user, warehouse_id=issue.warehouse_id,
                 bin_id=line.bin_id or m.NO_BIN, batch_id=line.batch_id or m.NO_BATCH,
                 project_id=issue.project_id or 0,
+                brand_id=line.brand_id or 0, variant_id=line.variant_id or 0,
+                model_id=line.model_id or 0,
             )
 
     await _mark_serials(db, issue, outward)
@@ -13136,6 +13350,41 @@ async def _adopt_legacy_issue_reservations(
     await db.flush()
 
 
+async def _lot_has_units(db: AsyncSession, *, item_id: int, warehouse_id: int | None,
+                         batch_id: int | None = None, bin_id: int | None = None) -> bool:
+    """Does this lot hold any recorded unit — a serial, IMEI or code — at all?
+
+    Since the same-code consolidation (2026-10-23) one item can hold stock that was
+    serial-tracked (one brand's) beside stock that never had a number recorded (a
+    sibling that was not tracked). Demanding a number per unit from a lot that holds
+    none asks for something that does not exist, so the rule applies per LOT: a lot
+    with no recorded units is issued and moved by quantity. A bounded EXISTS, never a
+    COUNT over the unit table. 0/None on batch or bin means "any".
+    """
+    probe = select(literal(1)).select_from(m.SerialNumber).where(
+        m.SerialNumber.item_id == item_id,
+        m.SerialNumber.is_active == 1,
+        m.SerialNumber.status == SerialStatus.AVAILABLE.value)
+    if warehouse_id:
+        probe = probe.where(m.SerialNumber.warehouse_id == warehouse_id)
+    if batch_id:
+        probe = probe.where(m.SerialNumber.batch_id == batch_id)
+    else:
+        # Batch 0 is "any batch" on a document, but where unbatched stock really stands
+        # at this point it is a lot of its own — the untracked sibling's — and only
+        # ITS units count. Without unbatched stock, any batch's units do.
+        from app.modules.inventory.models import Stock
+        unbatched = await db.scalar(select(literal(1)).select_from(Stock).where(
+            Stock.item_id == item_id, Stock.warehouse_id == warehouse_id,
+            Stock.batch_id == 0, Stock.total_qty > 0).limit(1)) if warehouse_id else None
+        if unbatched:
+            probe = probe.where(or_(m.SerialNumber.batch_id.is_(None),
+                                    m.SerialNumber.batch_id == 0))
+    if bin_id:
+        probe = probe.where(m.SerialNumber.bin_id == bin_id)
+    return bool(await db.scalar(probe.limit(1)))
+
+
 async def _unit_codes_required(db: AsyncSession, item, *, config: dict | None = None) -> bool:
     """Must an issue of this item name one identifier per unit before it may post?
 
@@ -13201,7 +13450,12 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
         )).scalars().all()
         # Every kind of identifier the master declares, not just the serial. The noun
         # follows the kind, so an asset line is not told it is missing "serials".
-        if await _unit_codes_required(db, item, config=code_config)                 and len(rows) != wanted:
+        if (await _unit_codes_required(db, item, config=code_config)
+                and len(rows) != wanted
+                # A lot with no recorded units is issued by quantity (2026-10-23).
+                and (rows or await _lot_has_units(
+                    db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
+                    batch_id=line.batch_id, bin_id=line.bin_id))):
             noun = _UNIT_NOUN[_unit_mode(item)]
             raise ValidationError(
                 f"{line.item_code or line.item_id}: {wanted} {noun} are required, "
@@ -14011,6 +14265,7 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
             "indent_item_id": line.id,
             "item_code": line.item_code, "item_name": line.item_name,
             "uom_code": line.uom_code,
+            **combinations.carry(line),
             "approved_quantity": float(sent),
             "issued_quantity": float(sent),
             # Handed over at the counter or on a consignment — either way it has left.
@@ -14603,6 +14858,8 @@ async def _apply_consignment_packages(
                         issue_no=source_issue.issue_no,
                         issue_item_id=issue_line.id if issue_line else None,
                         bin_code=issue_line.bin_code if issue_line else None,
+                        **(combinations.carry(issue_line) if issue_line
+                           else dict(combinations.NONE)),
                         mr_id=source_mr_id,
                         mr_no=source_mr_no,
                         indent_id=item_data.indent_id or source_issue.indent_id,
@@ -14635,6 +14892,8 @@ async def _apply_consignment_packages(
                     issue_no=source_issue.issue_no,
                     issue_item_id=issue_line.id if issue_line else None,
                     bin_code=issue_line.bin_code if issue_line else None,
+                    **(combinations.carry(issue_line) if issue_line
+                       else dict(combinations.NONE)),
                     mr_id=source_mr_id,
                     mr_no=source_mr_no,
                     indent_id=item_data.indent_id or source_issue.indent_id,
@@ -15745,7 +16004,7 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
         # the per-unit lines wrote a quantity-1 OUT row for every unit that left the
         # gate, which is the same defect the arrival credit had, on the other side of
         # the journey. FIXED 2026-08-22.
-        for item_id, batch_id, qty in _dispatch_lots(dispatch.items, "quantity"):
+        for item_id, batch_id, combo, qty in _dispatch_lots(dispatch.items, "quantity"):
             # No issue behind this consignment, so the units are claimed against the
             # consignment itself. Without this a directly-gated dispatch left its
             # units on the source shelf, free to be picked again tomorrow.
@@ -15762,6 +16021,7 @@ async def _apply_gate_out(db: AsyncSession, dispatch: m.Dispatch,
                 batch_id=batch_id,
                 project_id=dispatch.project_id or 0,
                 serial_numbers=units or None,
+                brand_id=combo[0] or None, variant_id=combo[1], model_id=combo[2],
             )
 
     # The dispatch's own number off the DISPATCH series, never the consignment's with
@@ -16199,6 +16459,9 @@ async def _apply_return_lines(db: AsyncSession, doc: m.PurchaseReturn,
             batch_id=line.batch_id, batch_no=batch.batch_no if batch else None,
             quantity=qty, rate=rate or None, amount=(qty * rate) if rate else None,
             reason=line.reason,
+            # The brand / variant / model the receipt line booked in (2026-10-23).
+            **(combinations.carry(await db.get(m.ReceiptItem, line.grn_item_id))
+               if line.grn_item_id else dict(combinations.NONE)),
         ))
     _return_totals(doc)
 
@@ -16801,6 +17064,8 @@ async def complete_return(db: AsyncSession, return_id: int, credit_note_no: str 
             ref_no=doc.return_no, user=user,
             warehouse_id=doc.warehouse_id,
             batch_id=line.batch_id,
+            brand_id=line.brand_id or None, variant_id=line.variant_id,
+            model_id=line.model_id,
         )
 
     doc.credit_note_no = credit_note_no or doc.credit_note_no
@@ -20796,6 +21061,7 @@ async def purchase_return_source_detail(db: AsyncSession, *,
             batch = await db.get(m.Batch, line.batch_id) if getattr(line, 'batch_id', None) else None
             unit_price = _d(line.rate) or None
             item_details.append(s.ItemDetailOut(
+                **combinations.carry(line),
                 item_id=line.item_id,
                 item_code=line.item_code or (item.code if item else None),
                 item_name=line.item_name or (item.name if item else None),
@@ -20875,6 +21141,7 @@ async def purchase_return_source_detail(db: AsyncSession, *,
             returnable = max(original - previously, ZERO)
             unit_price = _d(line.rate) or None
             item_details.append(s.ItemDetailOut(
+                **combinations.carry(line),
                 item_id=line.item_id,
                 item_code=line.item_code or (item.code if item else None),
                 item_name=line.item_name or (item.name if item else None),
@@ -20944,6 +21211,7 @@ async def purchase_return_source_detail(db: AsyncSession, *,
             previously = ZERO
             returnable = max(original - previously, ZERO)
             item_details.append(s.ItemDetailOut(
+                **combinations.carry(line),
                 item_id=getattr(line, 'item_id', 0),
                 item_code=getattr(line, 'item_code', None) or (item.code if item else None),
                 item_name=getattr(line, 'item_name', None) or (item.name if item else None),
@@ -21383,6 +21651,7 @@ async def _build_return_consignment(db: AsyncSession, doc: m.PurchaseReturn, use
             rate=_d(line.rate) if line.rate else None,
             amount=_d(line.amount) if line.amount else None,
             remarks=line.reason,
+            **combinations.carry(line),
         ))
     await db.flush()
 
@@ -23520,6 +23789,8 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 "item_code": item.item_code,
                 "item_name": item.item_name,
                 "uom_code": item.uom_code,
+                # What the indent asked for — a brand / variant / model, or Any.
+                **combinations.carry(item),
                 "approved_quantity": float(approved),
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
@@ -24961,7 +25232,9 @@ def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
             line.batch_id and line.batch_id != m.NO_BATCH
         ) else serial_batch.get(line.serial_no or "")
         batch = batches.get(batch_id) if batch_id else None
-        key = (line.item_id, batch_id or 0, line.batch_no or "", line.indent_id or 0)
+        key = (line.item_id, batch_id or 0, line.batch_no or "", line.indent_id or 0,
+               _combo3(getattr(line, "brand_id", 0), getattr(line, "variant_id", 0),
+                       getattr(line, "model_id", 0)))
         existing = grouped.get(key)
         if existing is not None:
             for field in ("ordered_qty", "received_qty", "accepted_qty"):
@@ -24978,6 +25251,8 @@ def _group_dispatch_lines(lines, serial_batch: dict[str, int], batches: dict,
             continue
         row = {
             "item_id": line.item_id,
+            # What was sent: the same brand / variant / model lands here (2026-10-23).
+            **combinations.carry(line),
             # The snapshot the consignment carries. Without these the inward form had
             # an item id and nothing to show for it, so every line rendered as the
             # placeholder "PO line" with no code, name or unit.
@@ -25078,6 +25353,7 @@ async def indent_issue_source(
     indent = await _get(db, Indent, indent_id, "Indent")
     requested_by_id = getattr(indent, "requested_by_id", None)
     requested_by = await db.get(HcmEmployee, requested_by_id) if requested_by_id else None
+    from app.modules.inventory.models import Stock
     rows = (await db.execute(
         select(
             Reservation.ref_line_id,
@@ -25086,7 +25362,11 @@ async def indent_issue_source(
             Reservation.batch_id,
             Reservation.project_id,
             func.sum(Reservation.quantity),
+            # Which brand / variant / model is held (2026-10-23) — off the stock row
+            # the hold sits on, so a hold made before the column existed reads too.
+            Stock.brand_id, Stock.variant_id, Stock.model_id,
         )
+        .join(Stock, Stock.id == Reservation.stock_id)
         .where(
             Reservation.ref_type == InventoryRefType.RESERVATION.value,
             Reservation.ref_id == indent_id,
@@ -25099,6 +25379,7 @@ async def indent_issue_source(
             Reservation.bin_id,
             Reservation.batch_id,
             Reservation.project_id,
+            Stock.brand_id, Stock.variant_id, Stock.model_id,
         )
         .order_by(Reservation.ref_line_id, Reservation.item_id)
     )).all()
@@ -25211,11 +25492,13 @@ async def indent_issue_source(
             db, requested_by.office_id if requested_by else None),
         # One line per indent line, QUANTITY only (2026-10-12): the hold is a quantity
         # that floats between batches, and the storekeeper picks the batch — offered
-        # earliest-expiry first — and the location on the issue itself.
-        "items": [
+        # earliest-expiry first — and the location on the issue itself. Per brand /
+        # variant / model held (2026-10-23): 5 Alpha and 3 Beta are two lines.
+        "items": await _named_combinations(db, [
             {
                 "indent_item_id": line_id,
                 "item_id": item_id,
+                "brand_id": combo[0], "variant_id": combo[1], "model_id": combo[2],
                 "item_code": item_by_id[item_id].code if item_id in item_by_id else None,
                 "item_name": item_by_id[item_id].name if item_id in item_by_id else None,
                 "is_serial_tracked": (
@@ -25227,16 +25510,23 @@ async def indent_issue_source(
                 "requested_qty": qty,
                 "issued_qty": qty,
             }
-            for (line_id, item_id), qty in _sum_by_line(rows).items()
-        ],
+            for (line_id, item_id, combo), qty in _sum_by_line(rows).items()
+        ]),
     }
 
 
-def _sum_by_line(rows) -> dict[tuple[int, int], Decimal]:
-    """Reservation rows (line, item, bin, batch, project, qty) summed per indent line."""
-    out: dict[tuple[int, int], Decimal] = {}
+async def _named_combinations(db: AsyncSession, rows: list[dict]) -> list[dict]:
+    await combinations.fill_names(db, rows)
+    return rows
+
+
+def _sum_by_line(rows) -> dict[tuple, Decimal]:
+    """Reservation rows (line, item, bin, batch, project, qty, b, v, m) summed per
+    indent line and brand / variant / model."""
+    out: dict[tuple, Decimal] = {}
     for row in rows:
-        key = (row.ref_line_id, row.item_id)
+        key = (row.ref_line_id, row.item_id,
+               _combo3(row.brand_id, row.variant_id, row.model_id))
         out[key] = out.get(key, ZERO) + _d(row[5])
     return out
 
@@ -25791,6 +26081,8 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "item_id": line.item_id,
                 "item_code": line.item_code,
                 "item_name": line.item_name,
+                # The issue line's brand / variant / model, carried to the cartons.
+                **combinations.carry(line),
                 "uom_code": line.uom_code,
                 "batch_id": line.batch_id,
                 "batch_no": line.batch_no,
@@ -27052,7 +27344,10 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 raise ValidationError(
                     f"{label}: choose exactly {int(accepted)} accepted units "
                     f"({len(serials)} selected)")
-        elif item.is_serial_tracked and len(serials) != int(accepted):
+        elif (item.is_serial_tracked and not line.issue_item_id
+              and len(serials) != int(accepted)):
+            # A line whose issue sent no units came off a lot with none recorded
+            # (2026-10-23): it is inspected by quantity.
             raise ValidationError(
                 f"{label}: choose exactly {int(accepted)} accepted serial numbers")
 
@@ -27064,6 +27359,8 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
 
         inspection.items.append(m.OutboundInspectionItem(
             issue_item_id=line.issue_item_id,
+            **(combinations.carry(await db.get(m.MaterialIssueLine, line.issue_item_id))
+               if line.issue_item_id else dict(combinations.NONE)),
             item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code, batch_no=line.batch_no,
             inspected_qty=inspected, accepted_qty=accepted, rejected_qty=rejected,

@@ -24,6 +24,7 @@ from app.shared.limits import (  # request-size guards, see the module
     MAX_BATCH_IDS, MAX_DOCUMENT_LINES, MAX_SERIALS_PER_LINE,
     assert_serial_budget,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 ORM = ConfigDict(from_attributes=True)
 
@@ -666,7 +667,7 @@ class StorageTypeWrite(BaseModel):
 # Inward
 # ---------------------------------------------------------------------------
 
-class ReceiptItemWrite(BaseModel):
+class ReceiptItemWrite(CombinationIn):
     """`accepted_qty` is what you are keeping; rejected and short are derived from
     it by the service, so they are not accepted here."""
     id: int | None = None
@@ -760,7 +761,7 @@ class ReceiptWrite(BaseModel):
         return self
 
 
-class ReceiptItemRead(_Read):
+class ReceiptItemRead(CombinationOut, _Read):
     id: int
     receipt_id: int
     line_no: int
@@ -919,7 +920,7 @@ class ReceiptRouting(BaseModel):
     direct_lines: list[ReceiptRouteLine] = Field(default_factory=list)
 
 
-class PoLineOption(BaseModel):
+class PoLineOption(CombinationOut):
     """An open PO line, so the GRN form fills itself from the order."""
     po_item_id: int
     indent_id: int | None = None
@@ -1098,7 +1099,7 @@ class InspectionWrite(BaseModel):
         return self
 
 
-class InspectionItemRead(_Read):
+class InspectionItemRead(CombinationOut, _Read):
     id: int
     inspection_id: int
     receipt_item_id: int | None = None
@@ -1167,7 +1168,7 @@ class OutboundInspectionWrite(BaseModel):
     items: Annotated[list[OutboundInspectionItemWrite], DocumentLines] = []
 
 
-class OutboundInspectionItemRead(_Read):
+class OutboundInspectionItemRead(CombinationOut, _Read):
     id: int
     inspection_id: int
     issue_item_id: int | None = None
@@ -1228,7 +1229,7 @@ class OutboundInspectionDetail(OutboundInspectionRead):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayRead(_Read):
+class PutawayRead(CombinationOut, _Read):
     """The task plus the labels the queue screen shows. The `*_name` fields are
     filled by the service from the masters, because `whs_warehouse_items` carries
     only ids — it is a work queue, not a document."""
@@ -1454,7 +1455,7 @@ class PutawayConfirm(BaseModel):
     pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
-class StockMovementWrite(BaseModel):
+class StockMovementWrite(CombinationIn):
     movement_type: str = Field(default="BIN_TO_BIN", max_length=30)
     warehouse_id: int
     source_bin_id: int
@@ -1510,7 +1511,7 @@ class StockAvailabilityRead(BaseModel):
     batch_no: str | None = None
 
 
-class StockMovementOrderItemWrite(BaseModel):
+class StockMovementOrderItemWrite(CombinationIn):
     item_id: int
     source_bin_id: int
     destination_bin_id: int
@@ -1669,7 +1670,7 @@ class PickingDetail(PickingRead):
 # Issues
 # ---------------------------------------------------------------------------
 
-class IssueItemWrite(BaseModel):
+class IssueItemWrite(CombinationIn):
     id: int | None = None
     indent_item_id: int | None = None
     item_id: int
@@ -1730,7 +1731,7 @@ class IssueWrite(BaseModel):
         return self
 
 
-class IssueItemRead(_Read):
+class IssueItemRead(CombinationOut, _Read):
     id: int
     issue_id: int
     line_no: int
@@ -1867,7 +1868,7 @@ class IssueStockSourceFetchIn(BaseModel):
     issue_id: int | None = None
 
 
-class IssueStockSource(_Read):
+class IssueStockSource(CombinationOut, _Read):
     """One (batch, bin) an issue line can draw from, with what it holds.
 
     The unit of the split: a quantity larger than any single source is spread over
@@ -2029,7 +2030,7 @@ IssueDetail.model_rebuild()
 # Dispatch
 # ---------------------------------------------------------------------------
 
-class DispatchItemWrite(BaseModel):
+class DispatchItemWrite(CombinationIn):
     id: int | None = None
     package_id: int | None = None
     issue_id: int | None = None
@@ -2185,7 +2186,7 @@ class AcknowledgeWrite(BaseModel):
     lines: Annotated[list[AcknowledgeLine], DocumentLines] = []
 
 
-class DispatchItemRead(_Read):
+class DispatchItemRead(CombinationOut, _Read):
     id: int
     dispatch_id: int
     line_no: int
@@ -2468,7 +2469,7 @@ class ReturnWrite(BaseModel):
     vendor_gstin: str | None = Field(default=None, max_length=20)
 
 
-class ReturnItemRead(_Read):
+class ReturnItemRead(CombinationOut, _Read):
     id: int
     return_id: int
     line_no: int
@@ -2860,7 +2861,7 @@ class VendorDetailOut(BaseModel):
     gstin: str | None = None
 
 
-class ItemDetailOut(BaseModel):
+class ItemDetailOut(CombinationOut):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
@@ -4309,7 +4310,7 @@ class IssueBatchIn(BaseModel):
     issue_ids: Annotated[list[int], BatchIds]
 
 
-class DespatchPrefillLine(BaseModel):
+class DespatchPrefillLine(CombinationOut):
     """One line of what the vendor says they sent, ready to become a receipt line."""
     po_item_id: int | None = None
     item_id: int

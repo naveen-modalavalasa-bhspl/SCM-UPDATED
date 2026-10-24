@@ -26,6 +26,9 @@ import { alerts } from "@/modules/alerts";
 import { useAuth } from "@/shared/auth/AuthContext";
 import type { ItemOption, Receipt, ReceiptItemWrite, ReceiptWrite } from "../types";
 import { useMyPoint, usePointLabel } from "../usePointLabel";
+import {
+  CombinationPicker, CombinationTag, comboFrom, pickCombination, useCombinationOptions,
+} from "@/shared/combination";
 
 /**
  * One form for both a gate entry and a GRN — they are one `inb_receipts` row at two
@@ -231,6 +234,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         po_item_id: l.po_item_id,
         indent_id: l.indent_id,
         item_id: l.item_id,
+        ...comboFrom(l),
         item_code: l.item_code,
         item_name: l.item_name,
         uom_code: l.uom_code,
@@ -294,6 +298,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         po_item_id: line.po_item_id,
         indent_id: line.indent_id ?? undefined,
         item_id: line.item_id,
+        ...comboFrom(line),
         item_code: line.item_code,
         item_name: line.item_name,
         uom_code: line.uom_code,
@@ -418,6 +423,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           ...emptyLine(),
           po_item_id: line.po_item_id ?? undefined,
           item_id: line.item_id,
+          ...comboFrom(line),
           item_code: line.item_code,
           item_name: line.item_name,
           uom_code: line.uom_code,
@@ -490,6 +496,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           po_item_id: line.po_item_id,
           indent_id: line.indent_id,
           item_id: line.item_id,
+          ...comboFrom(line),
           item_code: line.item_code,
           item_name: line.item_name,
           uom_code: line.uom_code,
@@ -614,6 +621,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     packable(packOptions.data?.[line.item_id])
       .find((h) => h.hierarchy_id === line.pack_hierarchy_id)?.name
     ?? hierarchyOf(line.declared_pack_breakdown ?? line.pack_breakdown) ?? null;
+
+  // The ON brand / variant / model combinations of every item on the receipt.
+
+  const comboOptions = useCombinationOptions(form.items.map((line) => line.item_id || 0));
 
   const patchLine = (index: number, patch: Partial<ReceiptItemWrite>) =>
     setForm((f) => {
@@ -1087,6 +1098,7 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                 {name ?? (fromConsignment ? "Consignment line" : "PO line")}
               </div>
               <div className="truncate font-mono text-[11px] text-muted">{code ?? "—"}</div>
+              <CombinationTag value={saved ?? l} className="mt-1" />
               {lineNote(i)}
             </div>
           );
@@ -1112,6 +1124,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               const item = option as ItemOption | undefined;
               patchLine(i, {
                 item_id: v === "" ? 0 : v,
+                ...pickCombination(null),
+                combination_any: false,
                 item_code: item?.code ?? null,
                 item_name: item?.name ?? null,
                 uom_code: item?.uom_code ?? null,
@@ -1124,6 +1138,16 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             }}
             placeholder="Pick an item"
           />
+          {!!l.item_id && !!comboOptions.data?.[String(l.item_id)]?.length && (
+            <div className="mt-2">
+              <CombinationPicker
+                options={comboOptions.data?.[String(l.item_id)]}
+                value={comboFrom(l)}
+                ariaLabel={`Brand, variant and model for line ${i + 1}`}
+                onChange={(combo) => patchLine(i, combo)}
+              />
+            </div>
+          )}
           {lineNote(i)}
           </>
         );

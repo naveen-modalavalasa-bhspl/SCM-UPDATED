@@ -45,6 +45,7 @@ from app.modules.warehouse.enums import (
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 # Re-exported so the rest of the module has one import site for its tables.
 from app.shared.models.warehouse import Bin, Warehouse  # noqa: F401
+from app.shared.models.combination import CombinationMixin
 
 # 0 rather than NULL: these columns are NOT NULL in the schema and "no bin" /
 # "no batch" is expressed as 0, matching how inventory's stk_balance already works.
@@ -171,7 +172,7 @@ class Receipt(Base):
 Index("ix_inb_receipts_status_wh", Receipt.status, Receipt.warehouse_id)
 
 
-class ReceiptItem(Base):
+class ReceiptItem(CombinationMixin, Base):
     """`inb_receipt_items`. `rejected_qty` and `short_qty` are derived on write —
     the service computes them, so the three quantities cannot disagree."""
     __tablename__ = "inb_receipt_items"
@@ -264,7 +265,7 @@ class Inspection(Base):
     )
 
 
-class InspectionItem(Base):
+class InspectionItem(CombinationMixin, Base):
     """`inb_inspection_items`. `parameters` holds what was measured — a failure with
     no reading behind it is not something a vendor can be held to."""
     __tablename__ = "inb_inspection_items"
@@ -299,7 +300,7 @@ class InspectionItem(Base):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayTask(Base):
+class PutawayTask(CombinationMixin, Base):
     """`whs_warehouse_items`. One task per received line, because putting away is
     done a pallet at a time and a task covering eight lines cannot be half done.
 
@@ -399,7 +400,7 @@ class Picking(Base):
     )
 
 
-class PickingItem(Base):
+class PickingItem(CombinationMixin, Base):
     """`out_picking_items`."""
     __tablename__ = "out_picking_items"
 
@@ -509,7 +510,7 @@ class MaterialIssue(Base):
 Index("ix_out_issues_status_dir", MaterialIssue.status, MaterialIssue.direction)
 
 
-class MaterialIssueLine(Base):
+class MaterialIssueLine(CombinationMixin, Base):
     """`out_issue_items`. `requested_qty` and `issued_qty` are both kept: a short
     issue has to stay visible as a short issue."""
     __tablename__ = "out_issue_items"
@@ -676,7 +677,7 @@ class DispatchSource(Base):
     dispatch = relationship("Dispatch", back_populates="sources")
 
 
-class DispatchItem(Base):
+class DispatchItem(CombinationMixin, Base):
     """`out_dispatch_items`. `package_id` records which carton a line went into —
     the thing an "it arrived short" call needs."""
     __tablename__ = "out_dispatch_items"
@@ -1104,7 +1105,7 @@ class PurchaseReturn(Base):
     )
 
 
-class PurchaseReturnItem(Base):
+class PurchaseReturnItem(CombinationMixin, Base):
     """`pro_return_items`."""
     __tablename__ = "pro_return_items"
 
@@ -1384,7 +1385,7 @@ class OutboundInspection(Base):
     )
 
 
-class OutboundInspectionItem(Base):
+class OutboundInspectionItem(CombinationMixin, Base):
     """`whs_inspection_items`. The specific items and quantities inspected for outbound QC."""
     __tablename__ = "whs_inspection_items"
 

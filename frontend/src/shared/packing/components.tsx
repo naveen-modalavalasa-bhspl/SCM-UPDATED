@@ -6,7 +6,7 @@ import { Modal, ModalContent, ModalHeader, ModalBody, ModalFooter } from "@herou
 import {
   type PackEntry, type PackHierarchy, LOOSE, baseOf, describe, entriesFrom, fmtQty,
   fullCountsOf, greedy, greedyWithPart, heldOf, hierarchyOf, isPartial, matchState, num,
-  packWarnings, partEntry,
+  packWarnings, partEntry, USAGE_LABEL, levelsFor, type ContainerUsage,
 } from "./packing";
 import { usePackOptions } from "./api";
 
@@ -109,6 +109,11 @@ export function HierarchyLadder({ hierarchy, uom, entries, current = false }: {
     <div className="space-y-1.5">
       <div className="flex flex-wrap items-center gap-1.5 text-sm font-semibold text-ink">
         <Layers size={14} className="text-brand" aria-hidden /> {hierarchy.name}
+        {hierarchy.brand_name && (
+          <span className="rounded-full bg-content2 px-1.5 text-[10px] font-semibold text-ink-700">
+            {hierarchy.brand_name}
+          </span>
+        )}
         {current && (
           <span className="rounded-full bg-brand-050 px-1.5 text-[10px] font-semibold uppercase tracking-wide text-brand-600">
             This line
@@ -139,6 +144,15 @@ export function HierarchyLadder({ hierarchy, uom, entries, current = false }: {
                   <span className="ml-1.5 text-muted">· min {fmtQty(lv.min_fill)}</span>
                 )}
               </span>
+              {!!lv.usages?.length && (
+                <span className="flex w-full flex-wrap gap-1">
+                  {lv.usages.map((u) => (
+                    <span key={u} className="rounded-full bg-brand-050 px-1.5 py-px text-[10px] font-semibold text-brand-600">
+                      {USAGE_LABEL[u]}
+                    </span>
+                  ))}
+                </span>
+              )}
             </li>
           );
         })}
@@ -520,6 +534,9 @@ interface EditorProps {
   /** Refuse a part pack under its level's minimum here (where packs are MADE). The
    *  server refuses it too; this only says so before the press. */
   enforceMin?: boolean;
+  /** Offer only the containers of this usage (2026-10-23) — Masters › Packaging ›
+   *  Container Usage. Nothing mapped for it: every level, as before. */
+  usage?: ContainerUsage;
 }
 
 /** How many of each level — one tile per level for FULL packs, biggest first, and
@@ -527,14 +544,19 @@ interface EditorProps {
 export function PackBreakdownEditor({
   hierarchy, value, onChange, target, limits, minLevel = 0, minLevelReason,
   allowLoose = true, readOnly = false, uom, allowAutoFill = true, onlyLevels,
-  allowPartial = true, enforceMin = false,
+  allowPartial = true, enforceMin = false, usage,
 }: EditorProps) {
   const counts = useMemo(() => fullCountsOf(value), [value]);
   const parts = useMemo(() => (value ?? []).filter(isPartial), [value]);
   const unit = uom ?? hierarchy.base_uom ?? "units";
+  const usageLevels = usage && !hierarchy.unmapped_usages?.includes(usage)
+    ? levelsFor(hierarchy, usage).map((lv) => lv.level) : undefined;
   const levels = [...hierarchy.levels]
     .filter((lv) => (lv.level > 0 || allowLoose)
-      && (!onlyLevels || onlyLevels.includes(lv.level)))
+      && (!onlyLevels || onlyLevels.includes(lv.level))
+      && (!usageLevels || usageLevels.includes(lv.level)
+          // a level already on the line stays visible, so a saved pick never vanishes
+          || num(counts[lv.level]) > 0))
     .sort((a, b) => b.level - a.level);
   const packLevels = levels.filter((lv) => lv.level > 0 && lv.level >= minLevel);
   const total = baseOf(value);

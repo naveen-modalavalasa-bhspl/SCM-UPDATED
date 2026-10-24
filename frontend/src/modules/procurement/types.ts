@@ -1,5 +1,6 @@
+import type { CombinationValue } from "@/shared/combination";
 import type { PackEntry, PackEntryIn, PackHierarchy } from "@/shared/packing";
-export interface POItem {
+export interface POItem extends CombinationValue {
   id: number;
   item_id: number;
   /** An indent stands behind the line: its quantity is the indent's. */
@@ -246,7 +247,7 @@ export interface POCopyTemplate extends POHeader {
   vendor_id?: number | null;
   vendor_name?: string | null;
   expected_date?: string | null;
-  lines: {
+  lines: ({
     item_id: number;
     item_code?: string | null;
     item_name?: string | null;
@@ -254,7 +255,7 @@ export interface POCopyTemplate extends POHeader {
     quantity: number;
     rate: number;
     tax_percent: number;
-  }[];
+  } & CombinationValue)[];
   warnings: string[];
 }
 
@@ -266,7 +267,7 @@ export interface POFromQuotation extends POHeader {
 
 /* ------------------------------------------------------------------ Requisition */
 
-export interface ReqItem {
+export interface ReqItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -309,7 +310,7 @@ export interface ReqListRow {
 //  Consolidated buying sheet
 // --------------------------------------------------------------------------- //
 
-export interface ConsolidationItem {
+export interface ConsolidationItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -466,7 +467,7 @@ export interface ReqCreate {
 
 /* -------------------------------------------------------------------------- RFQ */
 
-export interface RFQItem {
+export interface RFQItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -629,7 +630,7 @@ export interface RFQInvite {
 
 /* -------------------------------------------------------------------- Quotation */
 
-export interface QuoteItem {
+export interface QuoteItem extends CombinationValue {
   id: number;
   line_no: number;
   rfq_item_id?: number | null;
@@ -914,7 +915,7 @@ export interface VendorProfile {
 
 /** One line the vendor says is on the vehicle. Keyed to the ORDER line, never to a
  *  free item choice — a despatch note answers a purchase order. */
-export interface DespatchItem {
+export interface DespatchItem extends CombinationValue {
   id: number;
   line_no: number;
   po_item_id?: number | null;
@@ -989,7 +990,7 @@ export interface DespatchNoteWrite {
 
 /** A PO line as the vendor sees it. `pending_qty` is what is still owed, so a second
  *  delivery opens with the remainder rather than the whole order. */
-export interface VendorPOLine {
+export interface VendorPOLine extends CombinationValue {
   po_item_id: number;
   item_id: number;
   item_code?: string | null;

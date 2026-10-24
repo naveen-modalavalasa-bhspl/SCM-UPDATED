@@ -13,9 +13,23 @@ import { alerts } from "@/modules/alerts";
 import type { AllocationDecision, AllocationProposalLine } from "../types";
 import { TONE_SUBMIT } from "@/shared/components/tones";
 import { TONE_MINT } from "@/shared/components/tones";
+import {
+  CombinationPicker, CombinationTag, combinationKey, inStockOptions, type CombinationValue,
+} from "@/shared/combination";
 
-/** One "give this much, out of this warehouse" row. A line can carry several. */
-type Split = { qty: string; wh: string };
+/** One "give this much, out of this warehouse" row. A line can carry several. An Any
+ *  line also says which brand / variant / model the row gives (2026-10-23). */
+type Split = { qty: string; wh: string; combo?: CombinationValue };
+
+/** A line whose indent named its combination: the points' figures are already that
+ *  combination's, and nothing is picked here. */
+const named = (line: AllocationProposalLine) => !!line.brand_id;
+
+/** What a point holds of each combination, as picker options with quantities. */
+const combosAt = (line: AllocationProposalLine, wh: string) => named(line) ? [] : inStockOptions(
+  line.item_id,
+  (line.warehouses.find((w) => String(w.warehouse_id) === wh)?.combinations ?? [])
+    .map((c) => ({ ...c, qty: c.available_qty })));
 
 /**
  * Where a person decides how much stock an indent actually gets.
@@ -60,11 +74,11 @@ export function AllocationPage() {
       const best = [...line.warehouses]
         .filter((w) => !isChainPoint(w) && w.available_qty > 0)
         .sort((a, b) => b.available_qty - a.available_qty)[0];
-      const suggested = Math.min(line.requested_qty, best?.available_qty ?? 0);
-      seed[line.indent_item_id] = [{
-        qty: String(suggested),
-        wh: best ? String(best.warehouse_id) : "",
-      }];
+      const wh = best ? String(best.warehouse_id) : "";
+      const top = combosAt(line, wh)[0];
+      const suggested = Math.min(line.requested_qty,
+                                 top ? top.stock_qty ?? 0 : best?.available_qty ?? 0);
+      seed[line.indent_item_id] = [{ qty: String(suggested), wh, combo: top }];
     }
     setDecisions(seed);
   }, [data]);
@@ -75,8 +89,15 @@ export function AllocationPage() {
 
   /** Free stock at one warehouse for one line. No warehouse picked means nothing
    *  can be taken, so any quantity against it is over. */
-  const shelfAt = (line: AllocationProposalLine, warehouseId: string) =>
-    line.warehouses.find((w) => String(w.warehouse_id) === warehouseId)?.available_qty ?? 0;
+  const shelfAt = (line: AllocationProposalLine, warehouseId: string,
+                   combo?: CombinationValue) => {
+    const point = line.warehouses.find((w) => String(w.warehouse_id) === warehouseId);
+    if (combo?.brand_id) {
+      return combosAt(line, warehouseId)
+        .find((o) => combinationKey(o) === combinationKey(combo))?.stock_qty ?? 0;
+    }
+    return point?.available_qty ?? 0;
+  };
 
   /**
    * The most this split may hold: what is left of the request, and never more than
@@ -90,7 +111,8 @@ export function AllocationPage() {
   const ceilingFor = (line: AllocationProposalLine, splits: Split[], index: number) => {
     const others = splits.reduce(
       (sum, sp, i) => (i === index ? sum : sum + Number(sp.qty || 0)), 0);
-    return Math.max(0, Math.min(line.requested_qty - others, shelfAt(line, splits[index]?.wh ?? "")));
+    return Math.max(0, Math.min(line.requested_qty - others,
+                                shelfAt(line, splits[index]?.wh ?? "", splits[index]?.combo)));
   };
 
   const clampQty = (line: AllocationProposalLine, splits: Split[], index: number, raw: string) => {
@@ -115,15 +137,26 @@ export function AllocationPage() {
    * from that list — it can never add a point the caller was not offered.
    */
   const pointsFor = (line: AllocationProposalLine, splits: Split[], index: number) => {
-    const taken = new Set(
-      splits.filter((_, i) => i !== index).map((s) => s.wh).filter(Boolean));
-    return line.warehouses.filter((w) => !taken.has(String(w.warehouse_id)));
+    const others = splits.filter((s, i) => i !== index && s.wh);
+    return line.warehouses.filter((w) => {
+      const wh = String(w.warehouse_id);
+      const combos = combosAt(line, wh);
+      if (!combos.length) return !others.some((s) => s.wh === wh);
+      const used = new Set(others.filter((s) => s.wh === wh && s.combo?.brand_id)
+        .map((s) => combinationKey(s.combo)));
+      return combos.some((o) => !used.has(combinationKey(o)));
+    });
   };
+
+  /** Every (point, combination) a line could still be served from — what "Take some
+   *  from another warehouse" may add a row for. */
+  const sourcesOf = (line: AllocationProposalLine) => line.warehouses.reduce(
+    (sum, w) => sum + Math.max(1, combosAt(line, String(w.warehouse_id)).length), 0);
 
   /** Anything still promising stock that is not there. The backend refuses these, so
    *  the submit button has no business being live while one is on screen. */
   const overSplits = (data?.lines ?? []).filter((line: AllocationProposalLine) =>
-    splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh)));
+    splitsOf(line.indent_item_id).some((s) => Number(s.qty || 0) > shelfAt(line, s.wh, s.combo)));
 
   // Raising is per LINE, so one line's request cannot fail the whole screen and the
   // mutation carries the line it was fired for.
@@ -168,6 +201,11 @@ export function AllocationPage() {
           requested_qty: i === 0 ? line.requested_qty : 0,
           quantity: Number(s.qty || 0),
           warehouse_id: s.wh ? Number(s.wh) : null,
+          // An Any line's pick settles it; a named line's is the server's to state.
+          ...(!named(line) && s.combo?.brand_id ? {
+            brand_id: s.combo.brand_id, variant_id: s.combo.variant_id ?? null,
+            model_id: s.combo.model_id ?? null,
+          } : {}),
         })),
       );
       return createAllocation(id, payload, remarks || undefined);
@@ -257,7 +295,7 @@ export function AllocationPage() {
           // stock the branch already had.
           const unavailable = Math.max(0, short - Math.max(0, line.available_total - giving));
           const withheld = short - unavailable;
-          const overWarehouse = splits.some((s) => Number(s.qty || 0) > shelfAt(line, s.wh));
+          const overWarehouse = splits.some((s) => Number(s.qty || 0) > shelfAt(line, s.wh, s.combo));
 
           return (
             <Card key={line.indent_item_id} className="p-4">
@@ -268,6 +306,7 @@ export function AllocationPage() {
                 <div>
                   <span className="mono text-xs text-muted">{line.item_code}</span>
                   <h3 className="font-semibold text-ink">{line.item_name}</h3>
+                  <CombinationTag value={line} className="mt-1" />
                 </div>
                 <div className="text-sm text-muted">
                   {/* Not "asked": the backend already subtracts what an approved or
@@ -310,7 +349,9 @@ export function AllocationPage() {
                       {/* Both controls sit in a <Field> so their labels share a
                           baseline — Select's own label floats inside the box and
                           would sit a row below the Input's. */}
-                      <div className="grid flex-1 items-start gap-x-4 gap-y-3 sm:grid-cols-2">
+                      <div className={`grid flex-1 items-start gap-x-4 gap-y-3 ${
+                        line.warehouses.some((w) => combosAt(line, String(w.warehouse_id)).length)
+                          ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
                         <Field label={i === 0 ? "From warehouse" : ""}>
                           <Select
                             ariaLabel="From warehouse"
@@ -320,9 +361,11 @@ export function AllocationPage() {
                             // holding 8 cannot leave 50 sitting in the box.
                             onChange={(v) => {
                               const next = [...splits];
-                              next[i] = { ...next[i], wh: v };
+                              // A new point starts on the combination it holds most of.
+                              const combo = combosAt(line, v)[0];
+                              next[i] = { ...next[i], wh: v, combo };
                               set(line.indent_item_id, i,
-                                  { wh: v, qty: clampQty(line, next, i, next[i].qty) });
+                                  { wh: v, combo, qty: clampQty(line, next, i, next[i].qty) });
                             }}
                             placeholder="— none —"
                             // Warehouses first, then the distribution points, each
@@ -334,6 +377,22 @@ export function AllocationPage() {
                             }))}
                           />
                         </Field>
+                        {line.warehouses.some((w) => combosAt(line, String(w.warehouse_id)).length) && (
+                          <Field label={i === 0 ? "Brand · variant · model" : ""}>
+                            <CombinationPicker
+                              options={combosAt(line, s.wh)}
+                              value={s.combo}
+                              uom={line.uom_code}
+                              ariaLabel="Brand, variant and model"
+                              onChange={(combo) => {
+                                const next = [...splits];
+                                next[i] = { ...next[i], combo };
+                                set(line.indent_item_id, i,
+                                    { combo, qty: clampQty(line, next, i, next[i].qty) });
+                              }}
+                            />
+                          </Field>
+                        )}
                         <Field label={i === 0 ? `Give (${line.uom_code ?? ""})` : ""}>
                           <Input
                             type="number"
@@ -360,7 +419,7 @@ export function AllocationPage() {
                       the row it would add could only ever be blank. */}
                   <Button
                     variant="subtle"
-                    disabled={splits.filter((s) => s.wh).length >= line.warehouses.length}
+                    disabled={splits.filter((s) => s.wh).length >= sourcesOf(line)}
                     onClick={() => addSplit(line.indent_item_id)}
                   >
                     <Plus size={14} /> Take some from another warehouse

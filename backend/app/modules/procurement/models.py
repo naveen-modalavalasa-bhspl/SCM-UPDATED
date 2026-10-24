@@ -23,6 +23,7 @@ from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
 from app.shared.enums import DespatchNoteStatus, PackChangeStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
+from app.shared.models.combination import CombinationMixin
 
 
 class PurchaseOrder(Base):
@@ -169,7 +170,7 @@ class PORevision(Base):
 Index("ix_pro_po_date", PurchaseOrder.po_date.desc())
 
 
-class POItem(Base):
+class POItem(CombinationMixin, Base):
     __tablename__ = "pro_po_items"
     id = pk()
     po_id = Column(ForeignKey("pro_purchase_orders.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -262,7 +263,7 @@ class Requisition(Base):
 Index("ix_pro_req_status_created", Requisition.status, Requisition.created_at.desc())
 
 
-class RequisitionItem(Base):
+class RequisitionItem(CombinationMixin, Base):
     __tablename__ = "pro_requisition_items"
     id = pk()
     requisition_id = Column(ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
@@ -394,7 +395,7 @@ class RFQ(Base):
                            cascade="all, delete-orphan", lazy="selectin")
 
 
-class RFQItem(Base):
+class RFQItem(CombinationMixin, Base):
     __tablename__ = "pro_rfq_items"
     id = pk()
     rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
@@ -585,7 +586,7 @@ Index("ix_pro_quotation_comments_q_created", QuotationComment.quotation_id,
       QuotationComment.created_at)
 
 
-class QuotationItem(Base):
+class QuotationItem(CombinationMixin, Base):
     __tablename__ = "pro_quotation_items"
     id = pk()
     quotation_id = Column(ForeignKey("pro_quotations.id", ondelete="CASCADE"),
@@ -667,7 +668,7 @@ class DespatchNote(Base):
 Index("ix_pro_dn_po_status", DespatchNote.po_id, DespatchNote.status)
 
 
-class DespatchNoteItem(Base):
+class DespatchNoteItem(CombinationMixin, Base):
     """`pro_despatch_note_items`. Batch, manufacture and expiry per line.
 
     These three are the reason this document earns its place. They cannot be derived
@@ -834,7 +835,7 @@ Index("ix_pro_cons_status_created", PurchaseConsolidation.status,
       PurchaseConsolidation.created_at.desc())
 
 
-class PurchaseConsolidationItem(Base):
+class PurchaseConsolidationItem(CombinationMixin, Base):
     """`pro_consolidation_items` — one line per ITEM, whatever it was asked on."""
     __tablename__ = "pro_consolidation_items"
     id = pk()

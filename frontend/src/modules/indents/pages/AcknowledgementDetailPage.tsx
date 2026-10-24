@@ -26,6 +26,7 @@ import {
   BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, dayStamp, lineStage, neededBy, onOrder, qty,
   receivable, shortDate,
 } from "../components/acknowledgementParts";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * One indent's delivery, walked the way the delivery itself happens.
@@ -2197,6 +2198,7 @@ function PackageLineRow({
                 {line.item_name ?? line.item_code}
               </div>
               <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+              <CombinationTag value={line} className="mt-1" />
               {/* The packs this package holds of it, as the packer left them — codes
                   stay per unit (2026-10-22). Older consignments fall back to the
                   line's packs cut to this package's quantity. */}
@@ -2818,6 +2820,7 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
           {line.item_name ?? line.item_code}
         </div>
         <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+        <CombinationTag value={line} className="mt-1" />
         {packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0)) && (
           <PackQty entries={packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0))}
                    qty={line.dispatched_quantity} uom={line.uom_code} className="mt-1.5" />

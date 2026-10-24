@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Modal, ModalBody, ModalContent, ModalFooter, ModalHeader, Switch,
@@ -6,15 +7,16 @@ import {
 import { Image as ImageIcon, Plus, Search } from "lucide-react";
 
 import {
-  Button, Can, Field, Input, ResponsiveList, Select, type Column,
+  Button, Can, Field, Input, ResponsiveList, Select, useToast, type Column,
 } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { ladderCaption, usePackOptions } from "@/shared/packing";
 import { mastersApi } from "../api";
 import { BulkBar } from "./BulkBar";
+import { ItemBrandsPanel } from "./ItemBrandsPanel";
 import { MASTER_PAGE_SIZE } from "./MasterCrud";
 import type {
-  MasterBrand, MasterBrandItemMapping, MasterBrandManufacturer, MasterCategoryTag,
+  MasterBrand, MasterBrandManufacturer, MasterCategoryTag,
   MasterGeneralName, MasterItem, MasterItemComponent,
   MasterItemPackaging, MasterPackaging, MasterPackHierarchy, NamedMaster, PackagingBreakdown, UomClass,
 } from "../types";
@@ -264,6 +266,7 @@ export function missingRequiredTags(
 }
 
 export function ItemMasterTab() {
+  const toast = useToast();
   const { can } = useAuth();
   const canManage = can("master.item.manage");
   const qc = useQueryClient();
@@ -278,6 +281,8 @@ export function ItemMasterTab() {
   const [uomClass, setUomClass] = useState<UomClass | "">("");
   const [hsnCode, setHsnCode] = useState("");
   const [draftComponents, setDraftComponents] = useState<DraftComponent[]>([]);
+  // A new item's brands, chosen before its first save and mapped right after it.
+  const [draftBrands, setDraftBrands] = useState<number[]>([]);
   // Answers to whatever the category asks for, keyed by tag code. Saved into
   // mst_item_specs.specifications once the item itself exists.
   const [tagValues, setTagValues] = useState<Record<string, string>>({});
@@ -434,11 +439,27 @@ export function ItemMasterTab() {
       const saved = editing
         ? await mastersApi.items.update(editing.id, itemPayload)
         : await mastersApi.items.create(itemPayload);
+      // Another brand of an item already in the master (2026-10-23): the server added
+      // the brand to that item instead of creating a second row with the same code.
+      // Only the brands picked here go onto it — its own specs and components stay
+      // exactly as they are.
+      if (saved.merged_into_existing) {
+        if (draftBrands.length) {
+          await mastersApi.itemCombinations.mapBrands(saved.id, draftBrands);
+          setDraftBrands([]);
+        }
+        toast.success(saved.message ?? `Added to ${saved.code}`);
+        return saved;
+      }
       let addedComponents = 0;
       try {
         // Saving even an empty object is intentional: changing category or
         // deselecting every feature must clear values that no longer apply.
         await mastersApi.itemSpecs.save(saved.id, { specifications: tagValues });
+        if (!editing && draftBrands.length) {
+          await mastersApi.itemCombinations.mapBrands(saved.id, draftBrands);
+          setDraftBrands([]);
+        }
         if (form.has_components && draftComponents.length) {
           const existing = await mastersApi.itemComponents.list({
             item_id: saved.id, size: 200, include_inactive: true,
@@ -481,6 +502,7 @@ export function ItemMasterTab() {
   const openNew = () => {
     setForm(empty); setEditing(null); setTab("Basic"); setLevel1(""); setLevel2("");
     setUomClass(""); setHsnCode(""); setTagValues({}); setDraftComponents([]);
+    setDraftBrands([]);
     setError(null);
   };
   const openEdit = (row: MasterItem) => {
@@ -545,9 +567,12 @@ export function ItemMasterTab() {
     { key: "code", header: "Item Code", render: (row) => (
       <span>
         <span className="mono font-semibold">{row.representative.code}</span>
-        {row.variants.length > 1 && (
-          <span className="ml-2 rounded-full bg-content2 px-2 py-0.5 text-xs text-muted">
-            {row.variants.length} variants
+        {Math.max(row.variants.length, row.representative.rows_with_code ?? 1) > 1 && (
+          // Rows created before an item became one row per code (2026-10-23), still
+          // waiting for the consolidation script to merge them.
+          <span className="ml-2 rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning"
+                title="Created as separate rows before brands moved onto one item. The consolidation script merges them.">
+            {Math.max(row.variants.length, row.representative.rows_with_code ?? 1)} rows · to merge
           </span>
         )}
       </span>
@@ -684,9 +709,9 @@ export function ItemMasterTab() {
                 onChange={(e) => set("description", e.target.value)} /></Field></div>
             </div>}
 
-            {tab === "Brands" && (!editing
-              ? <Empty>Save the item first — brands are mapped to it afterwards.</Empty>
-              : <ItemBrands itemId={editing.id} />)}
+            {tab === "Brands" && (
+              <ItemBrandsPanel itemId={editing?.id} draft={draftBrands} onDraft={setDraftBrands} />
+            )}
 
             {tab === "Kit Components" && (
               !form.has_components
@@ -776,9 +801,23 @@ export function ItemMasterTab() {
 
             {tab === "Packaging" && (
               !editing
-                ? <Empty>Save the item first — the packing ladder is built against it.</Empty>
-                : <ItemPackHierarchies itemId={editing.id}
-                    itemName={editing.name} baseUom={editing.uom_code} />
+                ? <Empty>Save the item first — its packing is built against it.</Empty>
+                : (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-content2/40 p-4">
+                    <div>
+                      <div className="text-sm font-semibold text-ink">Packing</div>
+                      <div className="text-xs text-muted">Masters › Packaging</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Link to={`/masters?tab=pack-variants&item=${editing.id}`}>
+                        <Button variant="soft">Item Packaging Variants</Button>
+                      </Link>
+                      <Link to={`/masters?tab=container-usage&item=${editing.id}`}>
+                        <Button variant="ghost">Container Usage</Button>
+                      </Link>
+                    </div>
+                  </div>
+                )
             )}
 
             {tab === "Photos" && (editing
@@ -823,36 +862,6 @@ function Empty({ children }: { children: React.ReactNode }) {
 /** The brands mapped to one item, read-only. Mapping itself happens on
  *  Masters › Classification › Brand Item Mapping — this tab only shows what
  *  that screen recorded, with each brand's manufacturers beside it. */
-function ItemBrands({ itemId }: { itemId: number }) {
-  const mapped = useQuery({
-    queryKey: ["masters", "brand-item-mapping", "for-item", itemId],
-    queryFn: () => mastersApi.brandItemMapping.listForItem(itemId),
-  });
-  if (mapped.isLoading) return <Empty>Loading mapped brands…</Empty>;
-  if (mapped.error) return <Empty>Brands could not be loaded.</Empty>;
-  const rows: MasterBrandItemMapping[] = mapped.data ?? [];
-  if (rows.length === 0) {
-    return <Empty>No brands mapped yet — map them on Masters › Classification › Brand Item Mapping.</Empty>;
-  }
-  return (
-    <ul className="grid gap-3 md:grid-cols-2">
-      {rows.map((row) => (
-        <li key={row.id} className="rounded-xl border border-line p-4">
-          <div className="text-sm font-semibold">
-            {row.brand_code ? <span className="mono mr-2">{row.brand_code}</span> : null}
-            {row.brand_name ?? "—"}
-          </div>
-          <div className="mt-1 text-xs text-muted">
-            {(row.manufacturer_names ?? []).length > 0
-              ? `Manufacturers: ${(row.manufacturer_names ?? []).join(", ")}`
-              : "No manufacturers linked"}
-          </div>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 /** Renders whatever the category asked for. A LIST attribute becomes a dropdown of
  *  its own options; a spec shows the unit it is measured in. */
 export function TagFields({ tags, values, onChange }: {
@@ -1175,18 +1184,30 @@ export function localPackagingBreakdown(
  *  levels. A container type is used at most once per hierarchy; across hierarchies it
  *  is fine (both families go into a Box). The default hierarchy is the one a new PO
  *  offers first. */
-export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
+/** A new ladder's name starts with the brand's first word (2026-10-23): "Calpol – ". */
+export const brandPrefix = (brandName?: string | null) => {
+  const first = (brandName ?? "").trim().split(/\s+/)[0];
+  return first ? `${first} – ` : "";
+};
+
+export function ItemPackHierarchies({ itemId, itemName, baseUom, brandId, brandName }: {
   itemId: number; itemName: string; baseUom?: string | null;
+  /** The brand whose ladders these are (2026-10-23). null = "All brands";
+   *  undefined = every ladder of the item, whatever its brand. */
+  brandId?: number | null; brandName?: string | null;
 }) {
   const qc = useQueryClient();
   const [selected, setSelected] = useState<number | null>(null);
-  const [newName, setNewName] = useState("");
+  const [newName, setNewName] = useState(brandPrefix(brandName));
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => { setNewName(brandPrefix(brandName)); setSelected(null); }, [brandId, brandName]);
   const hierarchies = useQuery({
     queryKey: ["masters", "pack-hierarchies", itemId],
     queryFn: () => mastersApi.packHierarchies
       .list({ item_id: itemId, size: 50 })
       .then((r) => r.items.filter((h) => h.is_active)),
+    select: (rows) => brandId === undefined ? rows
+      : rows.filter((h) => (h.brand_id ?? null) === (brandId ?? null)),
   });
   const ladders = usePackOptions([itemId]);
   const list = hierarchies.data ?? [];
@@ -1209,15 +1230,18 @@ export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
   const create = useMutation({
     mutationFn: () => mastersApi.packHierarchies.create({
       item_id: itemId, name: newName.trim(), is_active: true,
+      brand_id: brandId ?? null,
       is_default: list.length === 0,
     }),
-    onSuccess: (row) => { setNewName(""); setError(null); setSelected(row.id); refresh(); },
+    onSuccess: (row) => {
+      setNewName(brandPrefix(brandName)); setError(null); setSelected(row.id); refresh();
+    },
     onError: (reason: Error) => setError(reason.message),
   });
   const makeDefault = useMutation({
     mutationFn: (row: MasterPackHierarchy) => mastersApi.packHierarchies.update(row.id, {
       item_id: row.item_id, name: row.name, description: row.description ?? null,
-      is_default: true, is_active: true,
+      brand_id: row.brand_id ?? null, is_default: true, is_active: true,
     }),
     onSuccess: () => { setError(null); refresh(); },
     onError: (reason: Error) => setError(reason.message),
@@ -1236,12 +1260,7 @@ export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
     <div className="space-y-4">
       {error && <div className="rounded-lg bg-bad-bg p-3 text-sm text-bad">{error}</div>}
       <div className="rounded-xl border border-line bg-content2/40 p-3">
-        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-          <span className="text-sm font-semibold text-ink">Pack hierarchies</span>
-          <span className="text-xs text-muted">
-            One item can be packed several ways at once — each way is a hierarchy.
-          </span>
-        </div>
+        <div className="mb-2 text-sm font-semibold text-ink">Pack hierarchies</div>
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
           <Field label="Pack hierarchy">
             <Select
@@ -1261,10 +1280,14 @@ export function ItemPackHierarchies({ itemId, itemName, baseUom }: {
               <input value={newName} onChange={(e) => setNewName(e.target.value)}
                      placeholder='New, e.g. "Strip of 15"' aria-label="New pack hierarchy name"
                      maxLength={100}
-                     onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) create.mutate(); }}
-                     className="h-9 w-44 bg-transparent text-sm outline-none" />
+                     onKeyDown={(e) => {
+                       if (e.key === "Enter" && newName.trim() !== brandPrefix(brandName).trim()
+                           && newName.trim()) create.mutate();
+                     }}
+                     className="h-9 w-52 bg-transparent text-sm outline-none" />
               <Button variant="soft" onClick={() => create.mutate()}
-                      disabled={!newName.trim() || create.isPending}>
+                      disabled={!newName.trim() || newName.trim() === brandPrefix(brandName).trim()
+                                || create.isPending}>
                 <Plus size={14} /> Add
               </Button>
             </div>

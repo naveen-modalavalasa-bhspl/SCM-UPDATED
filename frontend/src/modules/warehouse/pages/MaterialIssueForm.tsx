@@ -44,6 +44,7 @@ import type {
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { comboKeyOf, sourcesFor } from "../issueSplits";
 
 /**
  * Raise, approve and post a material issue.
@@ -137,7 +138,7 @@ function BreakdownGroup({
           ) : (
             (() => {
               const split = picks[0];
-              const source = (sourcesByItem[group.itemId] ?? []).find(
+              const source = sourcesFor(sourcesByItem, group.itemId, group.combo).find(
                 (row) => sourceKey(row.batch_id, row.bin_id)
                   === sourceKey(split.line.batch_id, split.line.bin_id),
               );
@@ -184,7 +185,7 @@ function BreakdownGroup({
         const binCode = location
           ? location.location_code
           : savedLine(split.index)?.bin_code ?? `Bin ${split.line.bin_id}`;
-        const source = (sourcesByItem[group.itemId] ?? []).find(
+        const source = sourcesFor(sourcesByItem, group.itemId, group.combo).find(
           (row) => sourceKey(row.batch_id, row.bin_id)
             === sourceKey(split.line.batch_id, split.line.bin_id),
         );
@@ -648,7 +649,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     if (serialLine === null || !activeSerialLine) return undefined;
     const group = groups.find((g) => g.splits.some((s) => s.index === serialLine));
     const split = group?.splits.find((s) => s.index === serialLine);
-    const source = (sourcesByItem[activeSerialLine.item_id] ?? []).find(
+    const source = sourcesFor(sourcesByItem, activeSerialLine.item_id, comboKeyOf(activeSerialLine)).find(
       (row) => sourceKey(row.batch_id, row.bin_id)
         === sourceKey(activeSerialLine.batch_id, activeSerialLine.bin_id),
     );
@@ -1193,7 +1194,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     ? form.items
         .map((line, index) => ({ line, index }))
         .filter(({ line }) => line.item_id && !line.bin_id)
-        .filter(({ line }) => (sourcesByItem[line.item_id] ?? []).some(
+        .filter(({ line }) => sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line)).some(
           (row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"),
         ))
     : [];
@@ -1214,7 +1215,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const pointStaleAt = (index: number) => {
     const line = form.items[index];
     if (!line?.item_id) return false;
-    const rows = sourcesByItem[line.item_id] ?? [];
+    const rows = sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line));
     const target = rows.find((row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"));
     if (!target || line.bin_id) return false;
     patchLine(index, { bin_id: target.bin_id ?? null, bin_code: target.bin_code ?? null });

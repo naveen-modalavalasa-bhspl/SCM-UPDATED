@@ -1,3 +1,4 @@
+import type { CombinationValue } from "@/shared/combination";
 /**
  * Warehouse module types.
  *
@@ -655,7 +656,7 @@ export interface ReceiptRouting {
 }
 
 /** `inb_receipt_items`. */
-export interface ReceiptItem {
+export interface ReceiptItem extends CombinationValue {
   id: number;
   receipt_id: number;
   line_no: number;
@@ -700,7 +701,7 @@ export interface ReceiptItem {
   pack_text?: string | null;
 }
 
-export interface ReceiptItemWrite {
+export interface ReceiptItemWrite extends CombinationValue {
   id?: number;
   po_item_id?: number | null;
   indent_id?: number | null;
@@ -802,7 +803,7 @@ export interface InspectionParameter {
 }
 
 /** `inb_inspection_items`. */
-export interface InspectionItem {
+export interface InspectionItem extends CombinationValue {
   id: number;
   inspection_id: number;
   receipt_item_id?: number | null;
@@ -823,7 +824,7 @@ export interface InspectionItem {
   imei_numbers?: string[] | null;
 }
 
-export interface InspectionItemWrite {
+export interface InspectionItemWrite extends CombinationValue {
   id?: number;
   receipt_item_id?: number | null;
   item_id: number;
@@ -878,7 +879,7 @@ export interface OutboundInspection {
   approved_at?: string | null;
 }
 
-export interface OutboundInspectionItem {
+export interface OutboundInspectionItem extends CombinationValue {
   /** The packs this quantity travels in, read off the issue line (2026-10-22). */
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;
@@ -901,7 +902,7 @@ export interface OutboundInspectionItem {
   serial_numbers?: string[] | null;
 }
 
-export interface OutboundInspectionItemWrite {
+export interface OutboundInspectionItemWrite extends CombinationValue {
   id?: number;
   issue_item_id?: number | null;
   item_id: number;
@@ -929,13 +930,17 @@ export interface OutboundInspectionWrite {
 }
 
 /** `whs_warehouse_items` — one putaway task per received line. */
-export interface Putaway {
+export interface Putaway extends CombinationValue {
   id: number;
   putaway_no: string;
   /** Packing (2026-10-08) — served on the single task only. */
   pack_hierarchy_id?: number | null;
   pack_hierarchy_name?: string | null;
   received_pack_breakdown?: PackEntry[] | null;
+  /** Storage containers are mapped for the item (2026-10-23): putaway shelves in
+   *  them, inside the received ladder, and the screen cannot change it. */
+  packing_fixed?: boolean;
+  storage_levels?: number[];
   received_pack_text?: string | null;
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;
@@ -1263,7 +1268,7 @@ export interface ApprovalEvent {
 }
 
 /** `out_issue_items`. */
-export interface IssueItem {
+export interface IssueItem extends CombinationValue {
   id: number;
   issue_id: number;
   line_no: number;
@@ -1332,7 +1337,7 @@ export interface TrackingTypeMeta {
 
 /** One (batch, bin) an issue line can draw from, and what it holds. The unit of a
  *  split: a quantity larger than any single source becomes several of these. */
-export interface IssueStockSource {
+export interface IssueStockSource extends CombinationValue {
   item_id: number;
   bin_id?: number | null;
   bin_code?: string | null;
@@ -1420,7 +1425,7 @@ export interface SerialScopeCounts {
 
 export type CodeScopeLevel = "exact" | "batch" | "point";
 
-export interface IssueItemWrite {
+export interface IssueItemWrite extends CombinationValue {
   id?: number;
   indent_item_id?: number | null;
   item_id: number;
@@ -1632,7 +1637,7 @@ export interface DispatchLinePacks {
 }
 
 /** `out_dispatch_items`. */
-export interface DispatchItem {
+export interface DispatchItem extends CombinationValue {
   id: number;
   dispatch_id: number;
   line_no: number;
@@ -1708,7 +1713,7 @@ export interface DispatchEvent {
   recorded_by_name?: string | null;
 }
 
-export interface DispatchItemWrite {
+export interface DispatchItemWrite extends CombinationValue {
   id?: number;
   package_id?: number | null;
   issue_id?: number | null;
@@ -2314,7 +2319,7 @@ export interface PurchaseReturnDossier {
 }
 
 /** `pro_return_items`. */
-export interface PurchaseReturnItem {
+export interface PurchaseReturnItem extends CombinationValue {
   id: number;
   return_id: number;
   line_no: number;
@@ -2431,7 +2436,7 @@ export interface VendorDetail {
   gstin?: string | null;
 }
 
-export interface ItemDetail {
+export interface ItemDetail extends CombinationValue {
   item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -2843,7 +2848,7 @@ export interface ItemOption extends Option {
 
 /** An open PO line the GRN screen pulls in when a PO is chosen. */
 /** One line of what the vendor says they sent, ready to become a receipt line. */
-export interface DespatchPrefillLine {
+export interface DespatchPrefillLine extends CombinationValue {
   po_item_id?: number | null;
   item_id: number;
   item_code?: string | null;
@@ -2891,7 +2896,7 @@ export interface DespatchPrefill {
   lines: DespatchPrefillLine[];
 }
 
-export interface PoLineOption {
+export interface PoLineOption extends CombinationValue {
   po_item_id: number;
   item_id: number;
   item_code?: string | null;

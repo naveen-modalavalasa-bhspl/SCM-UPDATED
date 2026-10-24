@@ -74,6 +74,7 @@ from app.shared.models.base import utcnow
 from app.shared.time import today as ist_today
 from app.shared.models.master import HsnCode, Item, Project, Vendor, VendorItem
 from app.shared.numbering import next_number
+from app.shared.masters import combinations
 
 
 def _d(value) -> Decimal:
@@ -468,6 +469,7 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
             item_code=item.code, item_name=item.name, uom_code=item.uom_code,
             quantity=_d(line.quantity), rate=_d(line.rate),
             tax_percent=_d(line.tax_percent), amount=amount,
+            **await _po_line_combination(db, item, line, line.indent_item_id),
         )
         db.add(po_line)
         await po_packing.stamp_line(db, po_line, hierarchy_id=line.pack_hierarchy_id,
@@ -575,6 +577,7 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
             po_id=po.id, item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code, quantity=_d(line.quantity), rate=_d(line.rate),
             tax_percent=_d(line.tax_percent), amount=amount,
+            **await _po_line_combination(db, item, line, None),
         )
         db.add(po_line)
         await po_packing.stamp_line(db, po_line, hierarchy_id=line.pack_hierarchy_id,
@@ -653,6 +656,7 @@ async def copy_po_template(db: AsyncSession, po_id: int, user) -> dict:
             "quantity": float(line.quantity), "rate": float(line.rate),
             "tax_percent": float(item.tax_percent if item.tax_percent is not None
                                  else line.tax_percent),
+            **combinations.carry(line),
         })
     if dropped:
         warnings.append("Left out because the item is no longer active: "
@@ -910,6 +914,7 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             # What the vendor promised on this line, kept with the line rather than
             # summarised into the header date above.
             delivery_days=line.delivery_days,
+            **combinations.carry(line),
         ))
 
     # The offer's own document-level money, carried across so the order comes to the
@@ -1515,12 +1520,16 @@ async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
             existing.rate = _d(incoming.rate)
             existing.tax_percent = _d(incoming.tax_percent)
             existing.amount = amount
+            for key, value in (await _po_line_combination(
+                    db, item, incoming, existing.indent_item_id, keep=existing)).items():
+                setattr(existing, key, value)
         else:
             db.add(POItem(
                 po_id=po.id, item_id=item.id, item_code=item.code,
                 item_name=item.name, uom_code=item.uom_code,
                 quantity=_d(incoming.quantity), rate=_d(incoming.rate),
                 tax_percent=_d(incoming.tax_percent), amount=amount,
+                **await _po_line_combination(db, item, incoming, None),
             ))
     for line in list(po.items):
         if line.id not in kept:
@@ -1664,6 +1673,26 @@ async def _vendor_has_dispatched(db: AsyncSession, po_id: int) -> str | None:
     )).scalar_one_or_none()
 
 
+async def _po_line_combination(db: AsyncSession, item, line, indent_item_id,
+                               *, keep=None) -> dict:
+    """Which brand / variant / model a PO line buys (2026-10-23).
+
+    The buyer's pick, checked against the item's ON combinations — a buyer may change
+    what the indent asked for (an alternative brand). Nothing picked: the line it was
+    already (an edit), else the indent line's own, else none. An indent that said
+    "Any" leaves the PO line without one until the buyer picks.
+    """
+    if getattr(line, "brand_id", None):
+        return await combinations.resolve(db, item.id, line, label=item.code)
+    if keep is not None:
+        return combinations.carry(keep)
+    if indent_item_id:
+        source = await db.get(IndentItem, indent_item_id)
+        if source is not None and source.brand_id:
+            return combinations.carry(source)
+    return dict(combinations.NONE)
+
+
 def _po_snapshot(po: PurchaseOrder) -> dict:
     """The whole order as it stands, header and lines, ready to be filed away.
 
@@ -1695,6 +1724,7 @@ def _po_snapshot(po: PurchaseOrder) -> dict:
             "received_quantity": float(line.received_quantity or 0),
             "pack_hierarchy_id": line.pack_hierarchy_id,
             "pack_breakdown": line.pack_breakdown,
+            **combinations.carry(line),
         } for line in po.items],
     }
 
@@ -1824,6 +1854,9 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
                 existing.rate = _d(incoming.rate)
                 existing.tax_percent = _d(incoming.tax_percent)
                 existing.amount = amount
+                for key, value in (await _po_line_combination(
+                        db, item, incoming, existing.indent_item_id, keep=existing)).items():
+                    setattr(existing, key, value)
                 await po_packing.stamp_line(
                     db, existing, hierarchy_id=incoming.pack_hierarchy_id,
                     entries=incoming.pack_breakdown)
@@ -1833,6 +1866,7 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
                     item_name=item.name, uom_code=item.uom_code,
                     quantity=_d(incoming.quantity), rate=_d(incoming.rate),
                     tax_percent=_d(incoming.tax_percent), amount=amount,
+                    **await _po_line_combination(db, item, incoming, None),
                 )
                 db.add(po_line)
                 await po_packing.stamp_line(
@@ -2947,12 +2981,16 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
         item = await _item_snapshot(db, line.item_id)
         if item is None:
             raise ValidationError(f"Item {line.item_id} does not exist")
-        if line.item_id in seen_items:
+        combo = await _po_line_combination(
+            db, item, line, getattr(line, "indent_item_id", None))
+        key = (line.item_id, combo["brand_id"], combo["variant_id"], combo["model_id"])
+        if key in seen_items:
             raise ValidationError(
                 f"Item '{item.name or item.code}' is already added. "
-                "An item cannot be added more than once in the same requisition."
+                "An item cannot be added more than once in the same requisition "
+                "in the same brand / variant / model."
             )
-        seen_items.add(line.item_id)
+        seen_items.add(key)
         rate = _d(line.estimated_rate) or fallback.get(line.item_id, Decimal(0))
         amount = _d(line.quantity) * rate
         total += amount
@@ -2965,6 +3003,7 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
             quantity=_d(line.quantity), estimated_rate=rate,
             estimated_amount=amount,
             required_date=line.required_date or default_date,
+            **combo,
         ))
     req.total_items = len(lines)
     req.estimated_value = total
@@ -3365,6 +3404,8 @@ async def _write_rfq_lines(db: AsyncSession, rfq: RFQ, lines) -> None:
             description=line.description,
             uom_code=line.uom_code or getattr(item, "uom_code", None),
             quantity=_d(line.quantity), required_date=line.required_date,
+            **await _po_line_combination(
+                db, item, line, getattr(line, "indent_item_id", None)),
         ))
     rfq.total_items = len(lines)
 
@@ -4105,6 +4146,7 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
                 item_code=line.item_code, item_name=line.item_name,
                 description=line.description, uom_code=line.uom_code,
                 quantity=_d(item_quantities[str(line.item_id)]),
+                **combinations.carry(line),
             ))
 
 
@@ -5462,6 +5504,33 @@ async def vendor_profile(db: AsyncSession, vendor_id: int) -> Vendor:
     return vendor
 
 
+async def vendor_item_combinations(db: AsyncSession, vendor_id: int,
+                                   item_ids: list[int]) -> dict:
+    """The ON brand / variant / model combinations of items THIS vendor deals in
+    (2026-10-23) — what the portal's quote and despatch-note lines may switch to.
+
+    Only items the vendor is mapped to, has been asked to quote, or has been ordered;
+    any other id in the request is dropped, so the portal never lists another
+    supplier's catalogue.
+    """
+    if not item_ids:
+        return {}
+    wanted = set(item_ids)
+    allowed = set((await db.execute(
+        select(VendorItem.item_id).where(VendorItem.vendor_id == vendor_id,
+                                         VendorItem.item_id.in_(wanted)))).scalars())
+    allowed |= set((await db.execute(
+        select(POItem.item_id).join(PurchaseOrder, PurchaseOrder.id == POItem.po_id)
+        .where(PurchaseOrder.vendor_id == vendor_id, POItem.item_id.in_(wanted))
+    )).scalars())
+    allowed |= set((await db.execute(
+        select(RFQItem.item_id).join(RFQVendor, RFQVendor.rfq_id == RFQItem.rfq_id)
+        .where(RFQVendor.vendor_id == vendor_id, RFQItem.item_id.in_(wanted))
+    )).scalars())
+    rows = await combinations.combination_options(db, sorted(allowed))
+    return {str(k): v for k, v in rows.items()}
+
+
 async def vendor_item_packing(db: AsyncSession, vendor_id: int) -> dict:
     """The pack hierarchies of the items mapped to THIS vendor, every level with its
     size and minimum fill (2026-10-11) — what the portal's Packing tab shows, so a
@@ -5636,6 +5705,7 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
                 uom_code=line.uom_code,
                 quantity=qty,
                 requested_quantity=qty,
+                **combinations.carry(line),
                 rate=0,
                 discount_percent=0,
                 tax_percent=line.tax_percent or 0,
@@ -5775,6 +5845,12 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         # is a fact about the two GSTINs and never rewrites the number.
         line.tax_percent = _d(gst)
         line.delivery_days = incoming.delivery_days
+        # The supplier may offer another brand / variant / model of the item
+        # (2026-10-23) — checked against the item's ON combinations.
+        if getattr(incoming, "brand_id", None):
+            for key, value in (await combinations.resolve(
+                    db, line.item_id, incoming, label=label)).items():
+                setattr(line, key, value)
 
     quote.vendor_ref_no = data.vendor_ref_no
     quote.valid_till = data.valid_till
@@ -6039,6 +6115,7 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
                 received_quantity=_d(row.get("received_quantity", 0)),
                 pack_hierarchy_id=row.get("pack_hierarchy_id"),
                 pack_breakdown=row.get("pack_breakdown"),
+                **combinations.carry(row),
             ))
     await db.flush()
     await po_packing.sync_po_packing(db, po.id)
@@ -6212,6 +6289,7 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
             pack_hierarchy_id=line.pack_hierarchy_id,
             pack_breakdown=line.pack_breakdown,
             pack_options=options.get(line.item_id, []),
+            **combinations.carry(line),
         )
         for line in po.items
     ]
@@ -6380,6 +6458,12 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             despatched_qty=_d(line.despatched_qty),
             batch_no=line.batch_no, mfg_date=line.mfg_date,
             expiry_date=line.expiry_date, remarks=line.remarks,
+            # What was ordered, unless the supplier says they are sending another
+            # brand / variant / model of the item (2026-10-23) — checked against the
+            # item's ON combinations; the receipt then books what actually came.
+            **(await combinations.resolve(db, po_line.item_id, line,
+                                          label=po_line.item_code or "A line")
+               if getattr(line, "brand_id", None) else combinations.carry(po_line)),
         )
         # How it is packed; a hierarchy other than the order's goes to the buyer.
         await po_packing.stamp_despatch_line(

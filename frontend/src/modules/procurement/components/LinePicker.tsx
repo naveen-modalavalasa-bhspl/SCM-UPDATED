@@ -10,6 +10,10 @@ import { todayIst } from "@/shared/datetime";
 import { ChevronRight } from "lucide-react";
 import { packable, usePackOptions, type PackEntry } from "@/shared/packing";
 import { PackOrderRow, levelOf, packFor } from "./PackOrderRow";
+import {
+  CombinationPicker, combinationKey, pickCombination, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
 /** One editable line. `rate` is optional — an RFQ asks for a price rather than
  *  stating one, so the same editor serves both with the column switched off. */
@@ -31,7 +35,13 @@ export interface DraftLine {
   /** How the line is to be packed (2026-10-08) — PO lines only. */
   pack_hierarchy_id?: number | null;
   pack_breakdown?: PackEntry[] | null;
+  /** Which brand / variant / model the line buys (2026-10-23). */
+  combo?: CombinationValue;
 }
+
+/** Item + combination: the same item in two combinations is two lines. */
+const lineKey = (line: DraftLine) =>
+  `${line.item_id}|${line.combo?.brand_id ? combinationKey(line.combo) : ""}`;
 
 export const blankLine = (): DraftLine => ({ item_id: "", quantity: "" });
 
@@ -116,9 +126,16 @@ export function LinePicker({
    *  at half opacity and routes the press to `onDisabledSelect`, so the same toast
    *  still explains WHY; it is now the second line of defence rather than the first.
    *  The line's own item stays selectable — that is the value it is showing. */
+  const comboOptions = useCombinationOptions(lines.map((line) => Number(line.item_id) || 0));
+  const combosOf = (itemId: number | "") =>
+    itemId === "" ? [] : comboOptions.data?.[String(itemId)] ?? [];
+
   const optionsFor = (line: DraftLine) => {
+    // An item with brand / variant / model combinations stays pickable: another line
+    // of it is another combination (2026-10-23).
     const takenElsewhere = new Set(
-      lines.filter((other) => other !== line && other.item_id !== "")
+      lines.filter((other) => other !== line && other.item_id !== ""
+                              && !combosOf(other.item_id).length)
         .map((other) => other.item_id),
     );
     const withSeed =
@@ -175,12 +192,20 @@ export function LinePicker({
                 onChange={(value) => {
                   // Kept as the backstop: the greying is computed from `lines`, and a
                   // duplicate could still arrive from a prefill or a stale render.
-                  if (lines.some((l, i) => i !== index && l.item_id === value)) {
+                  const combos = combosOf(value);
+                  const taken = new Set(lines.filter((l, i) => i !== index && l.item_id === value)
+                    .map(lineKey));
+                  if (taken.size && !combos.length) {
                     toast.error("This item is already in the list. Change its quantity instead of adding it again.");
                     return;
                   }
+                  // A second line of the item starts on a combination not yet taken.
+                  const free = taken.size
+                    ? combos.find((o) => !taken.has(`${value}|${combinationKey(o)}`))
+                    : undefined;
                   const chosen = items.find((item) => item.id === value);
                   set(index, {
+                    combo: free ? pickCombination(free) : undefined,
                     item_id: value,
                     uom_code: chosen?.uom_code ?? null,
                     item_code: chosen?.code ?? null,
@@ -270,6 +295,22 @@ export function LinePicker({
             </button>
           </div>
           
+          {combosOf(line.item_id).length > 0 && (
+            <div className="sm:col-span-6">
+              <Field label="Brand · variant · model">
+                <CombinationPicker
+                  options={combosOf(line.item_id)}
+                  value={line.combo}
+                  locked={disabled}
+                  invalid={lines.some((other) => other !== line && other.item_id === line.item_id
+                                                 && lineKey(other) === lineKey(line))}
+                  ariaLabel={`Brand, variant and model for line ${index + 1}`}
+                  onChange={(combo) => set(index, { combo })}
+                />
+              </Field>
+            </div>
+          )}
+
           {showPacking && line.item_id !== ""
             && packable(packOptions.data?.[Number(line.item_id)]).length > 0 && (
             <div className="sm:col-span-12">

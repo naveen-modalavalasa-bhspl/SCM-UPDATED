@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { PackQty, usePackSummary } from "@/shared/packing";
+import { CombinationTag } from "@/shared/combination";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Chip } from "@heroui/react";
@@ -443,6 +444,7 @@ export function StockBalanceView() {
             <div className="font-mono text-[11px] text-muted">
               {r.item_code}{r.category_name ? ` · ${r.category_name}` : ""}
             </div>
+            <CombinationTag value={r} className="mt-1" />
           </div>
         </div>
       ),

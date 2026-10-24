@@ -188,7 +188,7 @@ export function POLinePacking({ poId, poStatus, vendorStatus, line, showChips = 
                 <p className="text-xs text-muted">
                   Specify counts of full outer containers, boxes, or loose pieces to meet the required line total.
                 </p>
-                <PackBreakdownEditor
+                <PackBreakdownEditor usage="PURCHASE"
                   hierarchy={hierarchy}
                   value={packs}
                   uom={line.uom_code}

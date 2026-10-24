@@ -9,6 +9,7 @@ import { ApprovalTrail } from "../components/ApprovalTrail";
 import { DetailShell, SectionCard, RailStat } from "../components/DetailKit";
 import { money } from "./RequisitionListPage";
 import { TONE_APPROVE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { CombinationTag } from "@/shared/combination";
 
 const EDITABLE = ["DRAFT"];
 
@@ -176,6 +177,7 @@ export function PurchaseConsolidationDetailPage() {
                       <td className="px-3 py-3">
                         <div className="font-medium text-ink">{line.item_name ?? "—"}</div>
                         <div className="font-mono text-[11px] text-muted">{line.item_code}</div>
+                        <CombinationTag value={line} className="mt-1" />
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-right text-body">
                         {Number(line.quantity)} {line.uom_code}

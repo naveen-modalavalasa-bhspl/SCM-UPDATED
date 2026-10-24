@@ -1,5 +1,10 @@
 export interface MasterItem {
   id: number;
+  /** Active rows holding this code; above 1 until the consolidation script runs. */
+  rows_with_code?: number;
+  /** Set on a create answered with an existing item (another brand of it). */
+  merged_into_existing?: boolean;
+  message?: string;
   /** The latest photo, for the list's thumbnail. Null when there is none. */
   photo_id?: number | null;
   /** L1L2L3-GEN-0001. Assigned once at create, never regenerated. */
@@ -374,6 +379,9 @@ export interface MasterPackaging {
 export interface MasterPackHierarchy {
   id: number;
   item_id: number;
+  /** The brand this ladder packs; null = all brands (2026-10-23). */
+  brand_id?: number | null;
+  brand_name?: string | null;
   name: string;
   description?: string | null;
   /** The one a new document offers first. At most one per item. */
@@ -636,4 +644,46 @@ export interface ItemEligibilityScopes {
   roles: { id: number; name: string; code?: string; holders?: number;
            project_id?: number | null; project_name?: string | null }[];
   regions: { id: number; name: string }[];
+}
+
+/** One item as bought, stocked and issued: item + brand + variant + model
+ *  (2026-10-23). A level the brand does not have is null. */
+export interface MasterItemCombination {
+  id: number;
+  item_id: number;
+  brand_id: number;
+  brand_name?: string | null;
+  variant_id?: number | null;
+  variant_name?: string | null;
+  model_id?: number | null;
+  model_name?: string | null;
+  /** "Brand · Variant · Model", only the parts that exist. */
+  label: string;
+  is_active: boolean;
+  /** On hand across every point. */
+  stock_qty: number;
+}
+
+
+/** Masters › Packaging › Container Usage (2026-10-23). */
+export interface ContainerUsageRow {
+  /** 0 = the loose base unit. */
+  package_id: number;
+  code?: string | null;
+  name: string;
+  is_loose: boolean;
+  used_in: { hierarchy_id: number | null; hierarchy: string; brand_name?: string | null;
+             level: number; size: number }[];
+  usages: import("@/shared/packing").ContainerUsage[];
+}
+
+export interface ContainerUsageView {
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  base_uom?: string | null;
+  containers: ContainerUsageRow[];
+  unmapped: import("@/shared/packing").ContainerUsage[];
+  /** Set when a save changed the Issue container: what was re-coded on the shelf. */
+  recoded?: { lots: number; held_lots: number; retired: number; made: number };
 }

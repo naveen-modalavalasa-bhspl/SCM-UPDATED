@@ -4,6 +4,7 @@ import { PrintPanel, PrintTemplate, SectionTitle, type PrintColumn } from "@/sha
 import { poApi } from "../api";
 import { fmtDate } from "@/shared/datetime";
 import { formatPONo } from "@/shared/format";
+import { combinationLabel } from "@/shared/combination";
 
 const money = (value: number | null | undefined) =>
   new Intl.NumberFormat("en-IN", {
@@ -110,6 +111,9 @@ export function POPrintPage() {
           <div className="mt-0.5 font-mono text-[8.5px]" style={{ color: "#697187" }}>
             {line.item_code ?? `#${line.item_id}`}
           </div>
+          {combinationLabel(line) && (
+            <div className="mt-0.5 text-[8.5px]" style={{ color: "#3d4559" }}>{combinationLabel(line)}</div>
+          )}
         </>,
         <>{line.quantity} <span style={{ color: "#697187" }}>{line.uom_code ?? ""}</span></>,
         money(line.rate),

@@ -42,6 +42,35 @@ def _entries(raw) -> list[dict] | None:
     return [e.model_dump() if hasattr(e, "model_dump") else dict(e) for e in raw]
 
 
+async def assert_purchase_packs(db: AsyncSession, *, item_id: int, hierarchy_id,
+                                entries: list[dict] | None, label: str = "") -> None:
+    """Purchase containers mapped for the item (2026-10-23): a PO or despatch line is
+    packed in THOSE — from any of the item's ladders, but never in a container the
+    item is not bought in ("Bag of 7"). Nothing mapped: anything the ladder has."""
+    if not entries:
+        return
+    ladder = await packs.ladder(db, item_id, hierarchy_id)
+    allowed = await packs.usage_levels(db, item_id, ladder, "PURCHASE")
+    if allowed is None:
+        return
+    used = {int(e.get("level") or 0) for e in entries if packing.dec(e.get("qty") or 0) > 0}
+    stray = sorted(used - set(allowed))
+    if stray:
+        names = ", ".join(ladder.at(lv).name for lv in sorted(allowed)) or "none"
+        raise ValidationError(
+            f"{label or 'This line'}: {ladder.hierarchy_name} is bought in {names} only — "
+            f"{', '.join(ladder.at(lv).name for lv in stray)} is not a purchase container "
+            "of this item.")
+
+
+async def purchase_breakdown(db: AsyncSession, ladder, item_id: int, qty) -> list[dict]:
+    """A quantity said in the item's Purchase containers, or biggest packs when none
+    are mapped."""
+    allowed = await packs.usage_levels(db, item_id, ladder, "PURCHASE")
+    return (packing.greedy_in(ladder, qty, allowed) if allowed
+            else packing.greedy(ladder, qty))
+
+
 async def stamp_line(db: AsyncSession, row, *, hierarchy_id, entries) -> None:
     """Freeze what a client said about one line's packing onto it.
 
@@ -53,6 +82,8 @@ async def stamp_line(db: AsyncSession, row, *, hierarchy_id, entries) -> None:
     entries = _entries(entries)
     if not entries and not hierarchy_id:
         return
+    await assert_purchase_packs(db, item_id=row.item_id, hierarchy_id=hierarchy_id,
+                                entries=entries, label=getattr(row, "item_code", "") or "")
     # The order says how packs are to be MADE, so a part pack under its level's
     # minimum is refused here (2026-10-11).
     hid, out = await packs.snapshot(db, item_id=row.item_id, hierarchy_id=hierarchy_id,
@@ -93,7 +124,7 @@ async def sync_po_packing(db: AsyncSession, po_id: int) -> None:
         if not ladders or ladders[0].top == 0:
             continue
         ladder = ladders[0]
-        out = packing.greedy(ladder, row.quantity)
+        out = await purchase_breakdown(db, ladder, row.item_id, row.quantity)
         for e in out:
             e["hierarchy"] = ladder.hierarchy_name
         row.pack_hierarchy_id, row.pack_breakdown = ladder.hierarchy_id, out
@@ -129,6 +160,8 @@ async def stamp_despatch_line(db: AsyncSession, row: DespatchNoteItem, po_line: 
     entries = _entries(entries)
     ordered_hid = po_line.pack_hierarchy_id
     chosen = hierarchy_id or ordered_hid
+    await assert_purchase_packs(db, item_id=row.item_id, hierarchy_id=chosen,
+                                entries=entries, label=po_line.item_code or "")
     if entries:
         hid, out = await packs.snapshot(db, item_id=row.item_id, hierarchy_id=chosen,
                                         entries=entries)
@@ -318,6 +351,8 @@ async def repack_po_line(db: AsyncSession, po: PurchaseOrder, line: POItem, *,
     entries = _entries(entries)
     if not entries:
         raise ValidationError("Say how the line is packed — at least one pack or loose quantity.")
+    await assert_purchase_packs(db, item_id=line.item_id, hierarchy_id=hierarchy_id,
+                                entries=entries, label=line.item_code or "")
     hid, out = await packs.snapshot(db, item_id=line.item_id, hierarchy_id=hierarchy_id,
                                     entries=entries, enforce_min=True)
     new_qty = packing.base_of(out)

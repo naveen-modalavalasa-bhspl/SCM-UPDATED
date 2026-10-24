@@ -1,3 +1,4 @@
+import type { CombinationValue } from "@/shared/combination";
 /** Returns — types mirror the backend schemas field for field. Backend names win. */
 
 export interface Page<T> {
@@ -44,7 +45,7 @@ export type Disposition =
   | "CONTROLLED_DISPOSAL"
   | "REJECT_UNECONOMIC";
 
-export interface ReturnLine {
+export interface ReturnLine extends CombinationValue {
   id: number;
   item_id: number;
   item_code: string | null;
@@ -530,7 +531,7 @@ export interface ReturnJourney {
 }
 
 /** One returnable row: an item the signed-in raiser is actually holding. */
-export interface MyStockRow {
+export interface MyStockRow extends CombinationValue {
   item_id: number;
   item_code: string | null;
   item_name: string | null;
@@ -593,7 +594,7 @@ export interface ReceivingConfig {
   warnings: string[];
 }
 
-export interface ReturnLineWrite {
+export interface ReturnLineWrite extends CombinationValue {
   item_id: number;
   quantity: string;
   remarks?: string | null;

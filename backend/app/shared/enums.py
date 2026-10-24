@@ -886,6 +886,23 @@ class ItemScope(str, Enum):
     REGION = "REGION"
 
 
+class ContainerUsage(str, Enum):
+    """What a container type of an item is USED for (2026-10-23) — many-to-many: one
+    container may serve several usages and one usage several containers.
+
+    INDENT: what a requester asks in. PURCHASE: what is bought and despatched in.
+    STORAGE: what putaway shelves in. ISSUE: what leaves the counter in — and the
+    container asset / consumable codes are minted per. CONSUMPTION: what the site
+    reports using in. Quantities stay in base units everywhere; this only says which
+    containers each screen offers and defaults to.
+    """
+    INDENT = "INDENT"
+    PURCHASE = "PURCHASE"
+    STORAGE = "STORAGE"
+    ISSUE = "ISSUE"
+    CONSUMPTION = "CONSUMPTION"
+
+
 class PackChangeStatus(str, Enum):
     """A supplier's change of PACK HIERARCHY on a despatch note line (2026-10-08).
 

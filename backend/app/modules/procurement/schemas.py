@@ -8,9 +8,10 @@ from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
-class POLineIn(BaseModel):
+class POLineIn(CombinationIn):
     item_id: int
     indent_item_id: int | None = None
     quantity: float = Field(gt=0)
@@ -75,7 +76,7 @@ class POHeaderUpdate(POHeaderIn):
     expected_date: date | None = None
 
 
-class POAmendLineIn(BaseModel):
+class POAmendLineIn(CombinationIn):
     """One line of an amended order.
 
     `id` is the EXISTING line being changed. Omit it and the line is new; leave an
@@ -232,7 +233,7 @@ class ApprovalTrailOut(BaseModel):
     history: list[ApprovalEventRow] = []
 
 
-class POItemOut(BaseModel):
+class POItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     item_id: int
@@ -405,7 +406,7 @@ class POListRow(BaseModel):
     created_at: datetime
 
 
-class POCopyLineOut(BaseModel):
+class POCopyLineOut(CombinationOut):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
@@ -437,7 +438,7 @@ class POCopyOut(POHeaderIn):
 #  Requisition
 # --------------------------------------------------------------------------- #
 
-class ReqLineIn(BaseModel):
+class ReqLineIn(CombinationIn):
     item_id: int
     quantity: float = Field(gt=0)
     uom_code: str | None = None
@@ -491,7 +492,7 @@ class MRCandidateRow(BaseModel):
     created_at: datetime
 
 
-class ReqItemOut(BaseModel):
+class ReqItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -564,7 +565,7 @@ class ReqOut(ReqListRow):
 #  RFQ
 # --------------------------------------------------------------------------- #
 
-class RFQLineIn(BaseModel):
+class RFQLineIn(CombinationIn):
     item_id: int
     quantity: float = Field(gt=0)
     uom_code: str | None = None
@@ -635,7 +636,7 @@ class RFQUpdate(BaseModel):
     lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
 
 
-class RFQItemOut(BaseModel):
+class RFQItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -788,7 +789,7 @@ class ConsolidationLinesIn(BaseModel):
     lines: list[ConsolidationLineEdit] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
-class ConsolidationItemOut(BaseModel):
+class ConsolidationItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -874,7 +875,7 @@ class VendorInviteOut(BaseModel):
 #  Quotation
 # --------------------------------------------------------------------------- #
 
-class QuoteLineIn(BaseModel):
+class QuoteLineIn(CombinationIn):
     rfq_item_id: int
     # What the vendor can actually supply. Optional: say nothing and the quantity asked
     # for stands. It may never be MORE than was asked — a quotation is an answer to a
@@ -916,7 +917,7 @@ class QuoteSubmit(BaseModel):
     lines: list[QuoteLineIn] = Field(min_length=1)
 
 
-class QuoteItemOut(BaseModel):
+class QuoteItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -1154,7 +1155,7 @@ class VendorAccountIn(BaseModel):
 #  Despatch note — the vendor's statement of what they sent
 # --------------------------------------------------------------------------- #
 
-class DespatchLineIn(BaseModel):
+class DespatchLineIn(CombinationIn):
     """One line the vendor says is on the vehicle.
 
     `po_item_id` rather than a free item choice: a despatch note answers an order, and
@@ -1191,7 +1192,7 @@ class DespatchNoteIn(BaseModel):
     lines: list[DespatchLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
-class DespatchItemOut(BaseModel):
+class DespatchItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -1251,7 +1252,7 @@ class DespatchNoteOut(BaseModel):
     items: list[DespatchItemOut] = []
 
 
-class VendorPOLineOut(BaseModel):
+class VendorPOLineOut(CombinationOut):
     """A PO line as the VENDOR sees it. `pending_qty` is what is still owed, so a
     second delivery opens with the remainder rather than the whole order."""
     model_config = ConfigDict(from_attributes=True)

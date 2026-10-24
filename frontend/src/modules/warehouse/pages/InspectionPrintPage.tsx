@@ -4,6 +4,7 @@ import { getInspection, getOutboundInspection, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
 import type { Inspection, OutboundInspection } from "../types";
 import { PrintTemplate, type PrintColumn } from "@/shared/components";
+import { combinationLabel } from "@/shared/combination";
 
 export function InspectionPrintPage() {
   const { id } = useParams();
@@ -66,6 +67,9 @@ export function InspectionPrintPage() {
     <div key={`name-${line.id}`} className="font-bold text-neutral-900">{line.item_name ?? "—"}</div>,
     <div key={`code-${line.id}`}>
       <div className="font-mono text-[11px] text-neutral-700">{line.item_code ?? "—"}</div>
+      {combinationLabel(line) && (
+        <div className="mt-0.5 text-[11px] text-neutral-600">{combinationLabel(line)}</div>
+      )}
       {line.batch_no && (
         <div className="mt-0.5 text-[11px] text-neutral-500">Batch: {line.batch_no}</div>
       )}
