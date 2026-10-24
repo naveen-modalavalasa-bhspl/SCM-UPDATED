@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CombinationTag } from "@/shared/combination";
 import { Check, ShieldAlert, ShoppingCart } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -288,6 +289,7 @@ export function MaterialRequestDetailPage() {
       render: (r) => (
         <div>
           <div>{r.item_name ?? "—"}</div>
+          <CombinationTag value={r} className="mt-1" />
           <MRClaimsPanel mrId={mrId} itemId={r.item_id} uom={r.uom_code} />
         </div>
       ),
@@ -415,6 +417,7 @@ export function MaterialRequestDetailPage() {
               <div className="min-w-[14rem] flex-1">
                 <span className="mono text-xs text-muted">{row.item_code}</span>
                 <p className="font-semibold text-ink">{row.item_name ?? "—"}</p>
+                <CombinationTag value={row} className="mt-1" />
                 <MRClaimsPanel mrId={mrId} itemId={row.item_id} uom={row.uom_code} />
               </div>
               <div>
@@ -439,6 +442,7 @@ export function MaterialRequestDetailPage() {
             <div className="space-y-1">
               <span className="mono text-xs text-muted">{r.item_code}</span>
               <p className="font-semibold text-ink">{r.item_name}</p>
+              <CombinationTag value={r} />
               <p className="tabular text-sm text-muted">
                 {r.quantity} {r.uom_code ?? ""}
               </p>

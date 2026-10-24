@@ -3,18 +3,25 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.shared.packing import PACK_ENTRIES, PackEntryIn, describe as describe_packs
 from app.shared.time import not_in_past
 from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
-class POLineIn(BaseModel):
+class POLineIn(CombinationIn):
     item_id: int
     indent_item_id: int | None = None
     quantity: float = Field(gt=0)
     rate: float = Field(ge=0)
     tax_percent: float = Field(ge=0, default=0)
+    # How the quantity is packed (2026-10-08): one of the item's pack hierarchies and
+    # a breakdown in it. Optional; the server checks it adds up to `quantity`, and
+    # describes a line that names none in the item's default hierarchy.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class POHeaderIn(BaseModel):
@@ -69,7 +76,7 @@ class POHeaderUpdate(POHeaderIn):
     expected_date: date | None = None
 
 
-class POAmendLineIn(BaseModel):
+class POAmendLineIn(CombinationIn):
     """One line of an amended order.
 
     `id` is the EXISTING line being changed. Omit it and the line is new; leave an
@@ -81,6 +88,11 @@ class POAmendLineIn(BaseModel):
     quantity: float = Field(gt=0)
     rate: float = Field(ge=0)
     tax_percent: float = Field(ge=0, default=0)
+    # How the quantity is packed (2026-10-08): one of the item's pack hierarchies and
+    # a breakdown in it. Optional; the server checks it adds up to `quantity`, and
+    # describes a line that names none in the item's default hierarchy.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class POAmendIn(POHeaderIn):
@@ -221,10 +233,12 @@ class ApprovalTrailOut(BaseModel):
     history: list[ApprovalEventRow] = []
 
 
-class POItemOut(BaseModel):
+class POItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     item_id: int
+    # Set when an indent stands behind the line — its quantity is then the indent's.
+    indent_item_id: int | None = None
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
@@ -245,6 +259,21 @@ class POItemOut(BaseModel):
     cgst_amount: float = 0
     sgst_amount: float = 0
     igst_amount: float = 0
+    # Packing, served with its sentence so no screen composes it (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_hierarchy_name: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.pack_breakdown and not self.pack_hierarchy_name:
+            self.pack_hierarchy_name = next(
+                (e.get("hierarchy") for e in self.pack_breakdown if e.get("hierarchy")),
+                None)
+        return self
 
 
 class PODocumentOut(BaseModel):
@@ -377,7 +406,7 @@ class POListRow(BaseModel):
     created_at: datetime
 
 
-class POCopyLineOut(BaseModel):
+class POCopyLineOut(CombinationOut):
     item_id: int
     item_code: str | None = None
     item_name: str | None = None
@@ -409,7 +438,7 @@ class POCopyOut(POHeaderIn):
 #  Requisition
 # --------------------------------------------------------------------------- #
 
-class ReqLineIn(BaseModel):
+class ReqLineIn(CombinationIn):
     item_id: int
     quantity: float = Field(gt=0)
     uom_code: str | None = None
@@ -463,7 +492,7 @@ class MRCandidateRow(BaseModel):
     created_at: datetime
 
 
-class ReqItemOut(BaseModel):
+class ReqItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -536,7 +565,7 @@ class ReqOut(ReqListRow):
 #  RFQ
 # --------------------------------------------------------------------------- #
 
-class RFQLineIn(BaseModel):
+class RFQLineIn(CombinationIn):
     item_id: int
     quantity: float = Field(gt=0)
     uom_code: str | None = None
@@ -607,7 +636,7 @@ class RFQUpdate(BaseModel):
     lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
 
 
-class RFQItemOut(BaseModel):
+class RFQItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -760,7 +789,7 @@ class ConsolidationLinesIn(BaseModel):
     lines: list[ConsolidationLineEdit] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
-class ConsolidationItemOut(BaseModel):
+class ConsolidationItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -846,7 +875,7 @@ class VendorInviteOut(BaseModel):
 #  Quotation
 # --------------------------------------------------------------------------- #
 
-class QuoteLineIn(BaseModel):
+class QuoteLineIn(CombinationIn):
     rfq_item_id: int
     # What the vendor can actually supply. Optional: say nothing and the quantity asked
     # for stands. It may never be MORE than was asked — a quotation is an answer to a
@@ -888,7 +917,7 @@ class QuoteSubmit(BaseModel):
     lines: list[QuoteLineIn] = Field(min_length=1)
 
 
-class QuoteItemOut(BaseModel):
+class QuoteItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -1126,7 +1155,7 @@ class VendorAccountIn(BaseModel):
 #  Despatch note — the vendor's statement of what they sent
 # --------------------------------------------------------------------------- #
 
-class DespatchLineIn(BaseModel):
+class DespatchLineIn(CombinationIn):
     """One line the vendor says is on the vehicle.
 
     `po_item_id` rather than a free item choice: a despatch note answers an order, and
@@ -1139,6 +1168,12 @@ class DespatchLineIn(BaseModel):
     mfg_date: date | None = None
     expiry_date: date | None = None
     remarks: str | None = None
+    # How it is packed. A breakdown REPLACES `despatched_qty` with its own total —
+    # the vendor states packs, the server counts units. A hierarchy other than the
+    # order's is allowed, goes to the buyer, and must carry `pack_change_reason`.
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+    pack_change_reason: str | None = Field(default=None, max_length=500)
 
 
 class DespatchNoteIn(BaseModel):
@@ -1157,7 +1192,7 @@ class DespatchNoteIn(BaseModel):
     lines: list[DespatchLineIn] = Field(min_length=1, max_length=MAX_DOCUMENT_LINES)
 
 
-class DespatchItemOut(BaseModel):
+class DespatchItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -1171,6 +1206,26 @@ class DespatchItemOut(BaseModel):
     mfg_date: date | None = None
     expiry_date: date | None = None
     remarks: str | None = None
+    # Packing, served with its sentence so no screen composes it (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_hierarchy_name: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.pack_breakdown and not self.pack_hierarchy_name:
+            self.pack_hierarchy_name = next(
+                (e.get("hierarchy") for e in self.pack_breakdown if e.get("hierarchy")),
+                None)
+        return self
+    pack_change_status: str | None = None
+    ordered_pack_hierarchy_name: str | None = None
+    pack_change_reason: str | None = None
+    pack_change_note: str | None = None
+    pack_change_by_name: str | None = None
 
 
 class DespatchNoteOut(BaseModel):
@@ -1197,7 +1252,7 @@ class DespatchNoteOut(BaseModel):
     items: list[DespatchItemOut] = []
 
 
-class VendorPOLineOut(BaseModel):
+class VendorPOLineOut(CombinationOut):
     """A PO line as the VENDOR sees it. `pending_qty` is what is still owed, so a
     second delivery opens with the remainder rather than the whole order."""
     model_config = ConfigDict(from_attributes=True)
@@ -1211,6 +1266,25 @@ class VendorPOLineOut(BaseModel):
     pending_qty: float
     rate: float | None = None
     amount: float | None = None
+    # Packing, served with its sentence so no screen composes it (2026-10-08).
+    pack_hierarchy_id: int | None = None
+    pack_breakdown: list[dict] | None = None
+    pack_text: str | None = None
+    pack_hierarchy_name: str | None = None
+
+    @model_validator(mode="after")
+    def _describe_packing(self):
+        if self.pack_breakdown and not self.pack_text:
+            self.pack_text = describe_packs(self.pack_breakdown, self.uom_code)
+        if self.pack_breakdown and not self.pack_hierarchy_name:
+            self.pack_hierarchy_name = next(
+                (e.get("hierarchy") for e in self.pack_breakdown if e.get("hierarchy")),
+                None)
+        return self
+    # The item's pack hierarchies, so the portal can offer the order's packing first
+    # and the others behind a "different packing" switch. Served here because the
+    # vendor's token cannot read the employee-side masters.
+    pack_options: list[dict] = []
 
 
 class VendorPOOut(BaseModel):
@@ -1482,3 +1556,16 @@ class SupplierOut(BaseModel):
     must_change_password: bool | None = None
     last_login_at: datetime | None = None
     quotable: bool
+
+
+class PackChangeDecisionIn(BaseModel):
+    """The buyer's answer to a supplier's change of packing. A decline must say why;
+    the supplier reads it."""
+    note: str | None = Field(default=None, max_length=500)
+
+
+class POLinePackingIn(BaseModel):
+    """How one PO line is to be packed. The packs must add up to the line's ordered
+    quantity, which a re-pack never changes — see `procurement/packing.repack_po_line`."""
+    pack_hierarchy_id: int
+    pack_breakdown: Annotated[list[PackEntryIn], Field(min_length=1, max_length=12)]

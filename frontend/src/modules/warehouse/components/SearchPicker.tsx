@@ -43,6 +43,7 @@ export function SearchPicker<T>({
   disabled = false,
   filterNote,
   required = false,
+  error,
 }: {
   label: string;
   hint?: ReactNode;
@@ -58,6 +59,8 @@ export function SearchPicker<T>({
   /** Said at the top of the open list when a filter narrows it, with a way out. */
   filterNote?: ReactNode;
   required?: boolean;
+  /** Said under the field, in red, in place of the hint — a required one left empty. */
+  error?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
@@ -180,7 +183,8 @@ export function SearchPicker<T>({
           aria-expanded={open}
           aria-controls={listId}
           className={`flex min-h-11 w-full items-center gap-2 rounded-md border bg-content1 px-3 py-1.5 text-left transition
-            ${open ? "border-brand ring-2 ring-brand/15" : "border-line hover:border-ink/30"}
+            ${open ? "border-brand ring-2 ring-brand/15"
+              : error ? "border-bad ring-1 ring-bad/20" : "border-line hover:border-ink/30"}
             ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
         >
           {value ? (
@@ -301,7 +305,9 @@ export function SearchPicker<T>({
           document.body,
         )}
       </div>
-      {hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
+      {error
+        ? <span className="mt-1 block text-xs font-medium text-bad" role="alert">{error}</span>
+        : hint && <span className="mt-1 block text-xs text-muted">{hint}</span>}
     </div>
   );
 }

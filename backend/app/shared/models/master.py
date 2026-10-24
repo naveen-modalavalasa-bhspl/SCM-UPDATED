@@ -1,6 +1,6 @@
 """mst_ tables — SCM's own master data. Owned by shared/."""
 from sqlalchemy import (
-    JSON, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
+    JSON, BigInteger, Boolean, Column, Date, ForeignKey, Index, Integer, Numeric, String,
     Text, UniqueConstraint, func, select,
 )
 from sqlalchemy.orm import column_property, relationship
@@ -50,13 +50,29 @@ class PaymentTerm(Base):
     advance_days = Column(Integer, nullable=False, default=0)
     delivery_pct = Column(Numeric(5, 2), nullable=False, default=0)
     delivery_days = Column(Integer, nullable=False, default=0)
-    # "30,60,90": the delivery share paid in equal instalments, each that many days
-    # after delivery. Blank = one payment at `delivery_days`.
-    delivery_schedule = Column(String(60), nullable=True)
     installation_pct = Column(Numeric(5, 2), nullable=False, default=0)
     installation_days = Column(Integer, nullable=False, default=0)
     warranty_pct = Column(Numeric(5, 2), nullable=False, default=0)
     warranty_days = Column(Integer, nullable=False, default=0)
+    # How each stage's share is paid (PaymentSplitMode): ONE payment at `<stage>_days`,
+    # or N instalments. `<stage>_instalment_days` is "30,60,90,120" -- one day count
+    # per instalment, after that stage's trigger. `<stage>_instalment_pcts` is
+    # "30,40,10,20" -- each instalment's percent OF THE STAGE, CUSTOM only (EQUAL
+    # divides the stage evenly). Plain text, not JSON: this master lists ordered by
+    # name, and a JSON column makes that sort fail (CLAUDE.md, MySQL 1038), and a
+    # comma list is what an import sheet can carry in one cell (2026-10-06).
+    advance_split = Column(String(10), nullable=False, default="ONE")
+    advance_instalment_days = Column(String(120), nullable=True)
+    advance_instalment_pcts = Column(String(120), nullable=True)
+    delivery_split = Column(String(10), nullable=False, default="ONE")
+    delivery_instalment_days = Column(String(120), nullable=True)
+    delivery_instalment_pcts = Column(String(120), nullable=True)
+    installation_split = Column(String(10), nullable=False, default="ONE")
+    installation_instalment_days = Column(String(120), nullable=True)
+    installation_instalment_pcts = Column(String(120), nullable=True)
+    warranty_split = Column(String(10), nullable=False, default="ONE")
+    warranty_instalment_days = Column(String(120), nullable=True)
+    warranty_instalment_pcts = Column(String(120), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = created_at_col()
     updated_at = updated_at_col()
@@ -392,6 +408,44 @@ class BrandManufacturer(Base):
     )
 
 
+class BrandVariant(Base):
+    """`mst_brand_variants` — a line within a brand (Accu-Chek → Active, Instant).
+    Code and name are unique within the brand, not globally: two brands may each
+    have a "PRO". Brand name/code are snapshots, like every child master here."""
+    __tablename__ = "mst_brand_variants"
+    id = pk()
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(50), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    code = Column(String(20), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("brand_id", "code", name="uq_brand_variant_code"),
+    )
+
+
+class BrandModel(Base):
+    """`mst_brand_models` — a model within a brand's variant (Brand → Variant →
+    Model). Unique by code and by name within its variant."""
+    __tablename__ = "mst_brand_models"
+    id = pk()
+    brand_id = Column(ForeignKey("mst_brands.id"), index=True, nullable=False)
+    brand_code = Column(String(50), nullable=True)
+    brand_name = Column(String(200), nullable=True)
+    variant_id = Column(ForeignKey("mst_brand_variants.id"), index=True, nullable=False)
+    variant_code = Column(String(20), nullable=True)
+    variant_name = Column(String(200), nullable=True)
+    code = Column(String(20), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(String(300), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
+    __table_args__ = (
+        UniqueConstraint("variant_id", "code", name="uq_brand_model_code"),
+    )
+
+
 class BrandItemMapping(Base):
     """Which brands are mapped to which items.
 
@@ -413,6 +467,36 @@ class BrandItemMapping(Base):
     created_at = created_at_col()
     __table_args__ = (
         UniqueConstraint("item_id", "brand_id", name="uq_brand_item_mapping"),
+    )
+
+
+class ItemCombination(Base):
+    """`mst_item_combinations` — one item as it is actually bought, stocked and
+    issued: item + brand + variant + model (2026-10-23).
+
+    The combinations themselves are DERIVED from the item's mapped brands and each
+    brand's own variants and models (`masters.combinations.sync_item`); this row only
+    records that a combination exists and whether it is switched ON for the item. A
+    level the brand does not have is 0 — "Brand A" with no variants is one
+    combination, (brand, 0, 0). Switching one OFF is refused while stock of it is held.
+    Every transaction line names these three ids, and a different combination is a
+    different row everywhere.
+    """
+    __tablename__ = "mst_item_combinations"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    brand_id = Column(BigInteger, index=True, nullable=False)
+    variant_id = Column(BigInteger, nullable=False, default=0)
+    model_id = Column(BigInteger, nullable=False, default=0)
+    brand_name = Column(String(200), nullable=True)       # snapshot
+    variant_name = Column(String(200), nullable=True)     # snapshot
+    model_name = Column(String(200), nullable=True)       # snapshot
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+    __table_args__ = (
+        UniqueConstraint("item_id", "brand_id", "variant_id", "model_id",
+                         name="uq_item_combination"),
     )
 
 
@@ -493,6 +577,61 @@ class Packaging(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class PackHierarchy(Base):
+    """`mst_pack_hierarchies` — one named FAMILY of packs for an item (2026-10-08).
+
+    A tablet can be bought in strips of 10 and in strips of 15 at the same time; each
+    is its own ladder (strip -> box -> carton) and a pack never moves between them —
+    a tablet cannot leave a 10-strip for a 15-strip without a factory. So every rung
+    of `mst_item_packaging` belongs to exactly one hierarchy, and every document line
+    that says how goods are packed names one hierarchy and levels inside it.
+
+    The name is what a person reads on a PO, a despatch note and a shelf label
+    ("Strip of 10"), so it is unique per item. `is_default` is the one a new document
+    offers first — at most one per item, enforced in `apply_pack_hierarchy` for the
+    reason `apply_vendor_item` gives about its preferred vendor.
+    """
+    __tablename__ = "mst_pack_hierarchies"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    name = Column(String(100), nullable=False)
+    description = Column(String(300), nullable=True)
+    # The brand this ladder packs (2026-10-23): Calpol and Dolo of one item are packed
+    # differently. NULL = "All brands" — every ladder made before brands had ladders.
+    brand_id = Column(BigInteger, index=True, nullable=True)
+    brand_name = Column(String(200), nullable=True)      # snapshot
+    # The default ladder is per item AND brand (NULL counting as one more brand).
+    is_default = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+    __table_args__ = (
+        UniqueConstraint("item_id", "name", name="uq_pack_hierarchy_item_name"),
+    )
+
+
+class ItemContainerUsage(Base):
+    """`mst_item_container_usage` — which of an item's container types serve which
+    usage (2026-10-23). Many-to-many: one row per (item, container type, usage).
+
+    `package_id` 0 is the LOOSE base unit (a tablet), which belongs to no container.
+    A container type here applies to it in EVERY ladder of the item that has it; the
+    size is always read off the line's own ladder. An item with no rows for a usage
+    works in base units for it, exactly as before this table existed.
+    """
+    __tablename__ = "mst_item_container_usage"
+    id = pk()
+    item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
+                     nullable=False)
+    package_id = Column(BigInteger, nullable=False, default=0)
+    usage = Column(String(20), nullable=False)
+    created_at = created_at_col()
+    __table_args__ = (
+        UniqueConstraint("item_id", "package_id", "usage", name="uq_item_container_usage"),
+    )
+
+
 class ItemPackaging(Base):
     """One rung of an item's packing ladder — a PACKAGING UNIT in the WMS sense.
 
@@ -520,6 +659,12 @@ class ItemPackaging(Base):
     id = pk()
     item_id = Column(ForeignKey("mst_items.id", ondelete="CASCADE"), index=True,
                      nullable=False)
+    # Which family this rung belongs to. Levels count from 1 WITHIN a hierarchy, and a
+    # container type appears at most once in one (a strip cannot hold a strip) — both
+    # enforced in `apply_item_packaging`. NULL only on a database the 2026-10-08
+    # migration has not reached; it backfills every rung into a "Standard" hierarchy.
+    hierarchy_id = Column(ForeignKey("mst_pack_hierarchies.id", ondelete="CASCADE"),
+                          index=True, nullable=True)
     level = Column(Integer, nullable=False, default=1)
     package_id = Column(ForeignKey("mst_packaging.id"), index=True, nullable=False)
     package_name = Column(String(200), nullable=True)     # snapshot
@@ -533,10 +678,15 @@ class ItemPackaging(Base):
     gross_weight_kg = Column(Numeric(12, 3), nullable=True)
     max_stack_tiers = Column(Integer, nullable=True)
     is_default_putaway_unit = Column(Boolean, nullable=False, default=False)
+    # The least one pack of this level may be MADE with, in the item's own unit
+    # (2026-10-11). The level's size is the most a pack holds — a carton of 600 may
+    # really hold 500 — and this is the floor under it. NULL: no floor. A pack that
+    # FALLS below it (stock issued out of it) is allowed and flagged for a repack.
+    min_fill_qty = Column(Numeric(16, 3), nullable=True)
 
     is_active = Column(Boolean, nullable=False, default=True)
     __table_args__ = (
-        UniqueConstraint("item_id", "level", name="uq_item_packaging_level"),
+        UniqueConstraint("hierarchy_id", "level", name="uq_item_packaging_hierarchy_level"),
     )
 
 

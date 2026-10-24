@@ -26,6 +26,7 @@ from app.shared.enums import DocType
 from app.modules.warehouse.enums import (
     BatchStatus,
     DispatchSourceType,
+    HandlingUnitStatus,
     DispatchStatus,
     InspectionResult,
     InspectionStatus,
@@ -44,6 +45,7 @@ from app.modules.warehouse.enums import (
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
 # Re-exported so the rest of the module has one import site for its tables.
 from app.shared.models.warehouse import Bin, Warehouse  # noqa: F401
+from app.shared.models.combination import CombinationMixin
 
 # 0 rather than NULL: these columns are NOT NULL in the schema and "no bin" /
 # "no batch" is expressed as 0, matching how inventory's stk_balance already works.
@@ -170,7 +172,7 @@ class Receipt(Base):
 Index("ix_inb_receipts_status_wh", Receipt.status, Receipt.warehouse_id)
 
 
-class ReceiptItem(Base):
+class ReceiptItem(CombinationMixin, Base):
     """`inb_receipt_items`. `rejected_qty` and `short_qty` are derived on write —
     the service computes them, so the three quantities cannot disagree."""
     __tablename__ = "inb_receipt_items"
@@ -211,6 +213,16 @@ class ReceiptItem(Base):
     # Same shape as serial_numbers above: an IMEI names the same physical unit a
     # serial does, so one storage idea rather than two.
     imei_numbers = Column(JSON, nullable=True)
+
+    # Packing (2026-10-08). `declared_pack_breakdown` is what the supplier's despatch
+    # note said — copied once, never edited by the gate. `pack_breakdown` is what was
+    # COUNTED: the same levels, each at most what was declared, and `received_qty` is
+    # its total. A receipt with no despatch note behind it declares nothing and the
+    # storekeeper states the packing directly.
+    pack_hierarchy_id = Column(BigInteger, index=True, nullable=True)
+    declared_pack_breakdown = Column(JSON, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
+    despatch_note_item_id = Column(BigInteger, nullable=True)
 
     receipt = relationship("Receipt", back_populates="items")
 
@@ -253,7 +265,7 @@ class Inspection(Base):
     )
 
 
-class InspectionItem(Base):
+class InspectionItem(CombinationMixin, Base):
     """`inb_inspection_items`. `parameters` holds what was measured — a failure with
     no reading behind it is not something a vendor can be held to."""
     __tablename__ = "inb_inspection_items"
@@ -288,7 +300,7 @@ class InspectionItem(Base):
 # Putaway
 # ---------------------------------------------------------------------------
 
-class PutawayTask(Base):
+class PutawayTask(CombinationMixin, Base):
     """`whs_warehouse_items`. One task per received line, because putting away is
     done a pallet at a time and a task covering eight lines cannot be half done.
 
@@ -317,6 +329,12 @@ class PutawayTask(Base):
     # ceil(qty / units per pack) — whole packs, because half a case still occupies a
     # case's footprint. Stamped at confirm from the rung above.
     handling_units = Column(Numeric(15, 3), nullable=True)
+    # The pack hierarchy is the GRN line's and never changes here; the BREAKDOWN may
+    # (2026-10-08) — the putaway desk opens a carton into its boxes, or shelves loose
+    # strips as boxes. Same base total, always. Confirming it creates one
+    # `whs_handling_units` row per physical pack.
+    pack_hierarchy_id = Column(BigInteger, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
 
     suggested_bin_id = Column(BigInteger, nullable=True)
     actual_bin_id = Column(BigInteger, nullable=True)
@@ -382,7 +400,7 @@ class Picking(Base):
     )
 
 
-class PickingItem(Base):
+class PickingItem(CombinationMixin, Base):
     """`out_picking_items`."""
     __tablename__ = "out_picking_items"
 
@@ -492,7 +510,7 @@ class MaterialIssue(Base):
 Index("ix_out_issues_status_dir", MaterialIssue.status, MaterialIssue.direction)
 
 
-class MaterialIssueLine(Base):
+class MaterialIssueLine(CombinationMixin, Base):
     """`out_issue_items`. `requested_qty` and `issued_qty` are both kept: a short
     issue has to stay visible as a short issue."""
     __tablename__ = "out_issue_items"
@@ -521,6 +539,14 @@ class MaterialIssueLine(Base):
     rate = Column(RATE, nullable=True)
     amount = Column(MONEY, nullable=True)
     remarks = Column(String(500), nullable=True)
+
+    # The packs this line issues in (2026-10-08): "2 Box + 5 Strip". `issued_qty`
+    # is its base total. `break_bulk` says the storekeeper is opening a coded pack to
+    # give out part of it — refused without `issue.break_bulk`, and recorded so the
+    # retired code has a reason next to it.
+    pack_hierarchy_id = Column(BigInteger, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
+    break_bulk = Column(Boolean, nullable=False, default=False)
 
     issue = relationship("MaterialIssue", back_populates="items")
 
@@ -651,7 +677,7 @@ class DispatchSource(Base):
     dispatch = relationship("Dispatch", back_populates="sources")
 
 
-class DispatchItem(Base):
+class DispatchItem(CombinationMixin, Base):
     """`out_dispatch_items`. `package_id` records which carton a line went into —
     the thing an "it arrived short" call needs."""
     __tablename__ = "out_dispatch_items"
@@ -720,6 +746,11 @@ class DispatchPackage(Base):
     status = Column(String(30), nullable=False, default=PackageStatus.PACKED.value)
     packed_by_name = Column(String(200), nullable=True)
     packed_at = Column(DateTime, nullable=True)
+    # Per issue line packed into this carton: the hierarchy and the packs it holds of
+    # it — [{issue_item_id, item_id, batch_id, quantity, pack_hierarchy_id,
+    # pack_breakdown, pack_text}] (2026-10-22). Shown at acknowledgement, shelved at
+    # the destination. NULL: nothing in it is packed.
+    item_packs = Column(JSON, nullable=True)
 
     dispatch = relationship("Dispatch", back_populates="packages")
 
@@ -1074,7 +1105,7 @@ class PurchaseReturn(Base):
     )
 
 
-class PurchaseReturnItem(Base):
+class PurchaseReturnItem(CombinationMixin, Base):
     """`pro_return_items`."""
     __tablename__ = "pro_return_items"
 
@@ -1182,6 +1213,9 @@ class SerialNumber(Base):
     consumable_code = Column(String(100), nullable=True)
     # The lot the unit was put away under; same value as the putaway task's.
     lot_no = Column(String(120), index=True, nullable=True)
+    # The innermost PACK this unit sits in (2026-10-08) — a strip, or the box it was
+    # shelved in. NULL = loose. Scanning a pack's code selects every unit under it.
+    handling_unit_id = Column(BigInteger, index=True, nullable=True)
     status = Column(String(20), nullable=False, default=SerialStatus.AVAILABLE.value)
     remarks = Column(String(500), nullable=True)
     is_active = Column(Boolean, nullable=False, default=True)
@@ -1198,6 +1232,75 @@ class SerialNumber(Base):
         Index("ix_whs_serial_stock_lookup",
               "item_id", "warehouse_id", "status", "is_active", "batch_id", "bin_id"),
         Index("ix_whs_serial_point_item", "item_id", "warehouse_id", "is_active"),
+    )
+
+
+class HandlingUnit(Base):
+    """`whs_handling_units` — ONE physical pack on the shelf (2026-10-08).
+
+    A box, a carton, a strip: whatever the pack hierarchy calls a level. Stock is
+    still counted in `stk_balance` in base units (rule 7); this is the layer that says
+    how those units are BAGGED, so a screen can show "2 Carton + 3 Box + 4 Strip"
+    instead of "2,740".
+
+    The invariant: the live packs at one stock key (item, warehouse, location, batch,
+    project) hold at most `stk_balance.total_qty`; whatever they do not hold is LOOSE,
+    and loose is never stored — it is read as the difference.
+
+    Packs nest: `parent_id` is the pack this one sits inside (status INSIDE). Only the
+    outermost pack is SEALED. `pack_size` is snapshotted, so a pack keeps meaning what
+    it meant when it was made even if the master is edited. `content_qty` is what is
+    actually inside when that is less — a PART pack — and an issue that takes some of
+    a pack shrinks it in place rather than breaking it up.
+
+    `is_atom` marks a pack whose CODE was minted at its own level — at putaway, or by a
+    break bulk. It may be wrapped into bigger packs (they get codes of their own and
+    the atom keeps its code inside them) but never opened by a repack: a code names
+    everything inside it, and a code cannot be split. Only a break bulk at the issue
+    desk, under `issue.break_bulk`, opens one — the code retires and what is left gets
+    new codes.
+    """
+    __tablename__ = "whs_handling_units"
+
+    id = pk()
+    hu_code = Column(String(120), unique=True, nullable=False)
+    # ASSET / CONSUMABLE when the code is the item's own asset or consumable code;
+    # PACK for a plain handling-unit label on an item that is not code-tracked.
+    code_kind = Column(String(20), nullable=False, default="PACK")
+    item_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    bin_id = Column(BigInteger, nullable=False, default=NO_BIN)
+    batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
+    project_id = Column(BigInteger, nullable=False, default=0)
+    pack_hierarchy_id = Column(BigInteger, index=True, nullable=False)
+    item_packaging_id = Column(BigInteger, index=True, nullable=True)
+    level = Column(Integer, nullable=False)
+    pack_name = Column(String(200), nullable=True)
+    pack_size = Column(QTY, nullable=False)
+    # What is REALLY inside, in base units, when it is less than `pack_size`
+    # (2026-10-11): a carton of 600 holding 500, or one that had 100 issued out of it.
+    # NULL: full. `pack_size` stays the standard the pack was made to; read the
+    # contents through `warehouse.packing.held`, never `pack_size` alone.
+    content_qty = Column(QTY, nullable=True)
+    parent_id = Column(BigInteger, index=True, nullable=True)
+    is_atom = Column(Boolean, nullable=False, default=False)
+    status = Column(String(20), nullable=False, default=HandlingUnitStatus.SEALED.value)
+    lot_no = Column(String(120), nullable=True)
+    # Where it came from: PUTAWAY, RECEIPT (a bulk site), REPACK, BREAK_BULK.
+    source_type = Column(String(30), nullable=True)
+    source_id = Column(BigInteger, nullable=True)
+    source_no = Column(String(60), nullable=True)
+    # Why and when it stopped being a pack, for OPENED / CONSUMED.
+    closed_reason = Column(String(300), nullable=True)
+    closed_by_name = Column(String(200), nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+    created_by_id = soft_fk()
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    __table_args__ = (
+        Index("ix_whs_hu_stock_key", "item_id", "warehouse_id", "bin_id", "batch_id",
+              "status"),
     )
 
 
@@ -1282,7 +1385,7 @@ class OutboundInspection(Base):
     )
 
 
-class OutboundInspectionItem(Base):
+class OutboundInspectionItem(CombinationMixin, Base):
     """`whs_inspection_items`. The specific items and quantities inspected for outbound QC."""
     __tablename__ = "whs_inspection_items"
 

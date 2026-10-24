@@ -25,6 +25,7 @@ import { ReturnStepper } from "../components/ReturnStepper";
 import { PHASE, money, roleOnly } from "../constants";
 import { originOf } from "../origin";
 import type { ReturnLine } from "../types";
+import { CombinationTag } from "@/shared/combination";
 
 const qty = (value: string | number) => Number(value ?? 0).toLocaleString();
 
@@ -168,6 +169,7 @@ export default function ReturnDetailPage() {
         <div className="min-w-0">
           <div className="font-medium text-ink">{row.item_name ?? "—"}</div>
           <div className="mono text-xs text-muted">{row.item_code ?? ""}</div>
+          <CombinationTag value={row} className="mt-1" />
         </div>
       ),
     },
@@ -620,6 +622,7 @@ export default function ReturnDetailPage() {
                 <div className="p-4">
                   <div className="font-medium text-ink">{row.item_name ?? "—"}</div>
                   <div className="mono text-xs text-muted">{row.item_code ?? ""}</div>
+                  <CombinationTag value={row} className="mt-1" />
                   <div className="tabular mt-1 text-sm font-semibold text-body">
                     {qty(row.quantity)} {row.uom_code ?? ""}
                   </div>

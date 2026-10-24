@@ -1,4 +1,7 @@
 import { useMemo, useState } from "react";
+import { AlertTriangle, Boxes } from "lucide-react";
+import { PackChips, packable, usePackOptions } from "@/shared/packing";
+import { RepackDialog } from "./RepackDialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
 import {
@@ -63,6 +66,7 @@ export function ProjectLotsTab() {
   const [page, setPage] = useState(1);
   const [reserving, setReserving] = useState<ProjectLot | null>(null);
   const [releasing, setReleasing] = useState<{ hold: ProjectHold; lend: boolean } | null>(null);
+  const [repacking, setRepacking] = useState<number | null>(null);
 
   const lots = useQuery({
     queryKey: ["project-lots", search, warehouseId, lotFilter, page],
@@ -80,6 +84,8 @@ export function ProjectLotsTab() {
     }),
     enabled: view === "holds",
   });
+  const packOptions = usePackOptions((lots.data?.items ?? []).map((r) => r.item_id),
+                                     view === "lots");
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["project-lots"] });
     qc.invalidateQueries({ queryKey: ["project-holds"] });
@@ -93,22 +99,23 @@ export function ProjectLotsTab() {
     {
       key: "item", header: "Item",
       render: (r) => (
-        <div>
+        <div className="max-w-[14rem] whitespace-normal [overflow-wrap:anywhere]">
           <div className="font-medium text-ink">{lotLabel(r)}</div>
           <div className="text-xs text-muted">{r.warehouse_name}</div>
         </div>
       ),
     },
     {
-      key: "path", header: "Location path",
-      render: (r) => <span className="font-mono text-xs text-body">{r.location_path ?? "—"}</span>,
-    },
-    {
       key: "lot", header: "Batch · location",
       render: (r) => (
-        <div>
+        <div className="max-w-[13rem] whitespace-normal [overflow-wrap:anywhere]">
           <div className="text-sm">{where(r)}</div>
           {r.expiry_date && <div className="text-xs text-muted">Expiry {fmtDate(r.expiry_date)}</div>}
+          {/* The full path, folded in here (2026-10-12): as a column of its own it pushed
+            * Packing and Repack off the screen on a 1440-wide display. */}
+          {r.location_path && (
+            <div className="mt-0.5 font-mono text-[11px] text-muted">{r.location_path}</div>
+          )}
         </div>
       ),
     },
@@ -126,6 +133,18 @@ export function ProjectLotsTab() {
       ),
     },
     {
+      // How the quantity is bagged (2026-10-08), read off the packs on the shelf. A
+      // part pack reads "1 Carton (350/500)"; one under its level's minimum is amber
+      // and stays flagged until somebody repacks it (2026-10-11).
+      key: "packing", header: "Packing",
+      render: (r) => r.packs?.length ? (
+        <div className="space-y-0.5">
+          <PackChips entries={r.packs} uom={r.uom_code} showHierarchy={false} />
+          <PackFlags lot={r} />
+        </div>
+      ) : <span className="text-sm text-muted">Loose</span>,
+    },
+    {
       key: "held", header: "Held for",
       render: (r) => r.holds.length ? (
         <div className="flex flex-wrap gap-1">
@@ -141,6 +160,10 @@ export function ProjectLotsTab() {
       key: "act", header: "",
       render: (r) => (
         <div className="flex justify-end gap-2">
+          <Can do="stock.repack">
+            <RepackButton lot={r} packable={packable(packOptions.data?.[r.item_id]).length > 0}
+                          loading={packOptions.isLoading} onRepack={() => setRepacking(r.stock_id)} />
+          </Can>
           <Can do="stock.project_hold.manage">
             <Button className={TONE_BLUE} disabled={num(r.available_qty) <= 0}
                     title={num(r.available_qty) <= 0 ? "Nothing free on this lot to hold" : undefined}
@@ -268,12 +291,20 @@ export function ProjectLotsTab() {
                 <div className="text-xs text-muted">{r.warehouse_name} · {where(r)}</div>
                 {r.location_path && <div className="font-mono text-xs text-body">{r.location_path}</div>}
                 <div className="text-sm">{fmtQty(r.total_qty)} on hand · {fmtQty(r.available_qty)} free</div>
+                {!!r.packs?.length && <PackChips entries={r.packs} uom={r.uom_code} showHierarchy={false} />}
+                <PackFlags lot={r} />
                 {r.holds.map((h) => (
                   <div key={h.id} className="text-xs text-secondary">Held for {h.project_name}: {fmtQty(h.quantity)}</div>
                 ))}
-                {can("stock.project_hold.manage") && num(r.available_qty) > 0 && (
-                  <Button className={TONE_BLUE} onClick={() => setReserving(r)}>Reserve</Button>
-                )}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {can("stock.repack") && (
+                    <RepackButton lot={r} packable={packable(packOptions.data?.[r.item_id]).length > 0}
+                                  loading={packOptions.isLoading} onRepack={() => setRepacking(r.stock_id)} />
+                  )}
+                  {can("stock.project_hold.manage") && num(r.available_qty) > 0 && (
+                    <Button className={TONE_BLUE} onClick={() => setReserving(r)}>Reserve</Button>
+                  )}
+                </div>
               </div>
             )}
           />
@@ -313,6 +344,10 @@ export function ProjectLotsTab() {
         )}
       </div>
 
+      {repacking != null && (
+        <RepackDialog stockId={repacking} onClose={() => setRepacking(null)}
+                      onDone={() => { setRepacking(null); refresh(); }} />
+      )}
       {reserving && (
         <ReserveDialog lot={reserving} onClose={() => setReserving(null)} onDone={() => { setReserving(null); refresh(); }} />
       )}
@@ -328,11 +363,54 @@ export function ProjectLotsTab() {
   );
 }
 
+/** What a lot's packs need saying about: packs under their minimum, and packs that
+ *  claim more than the balance. Both are fixed by a repack. */
+function PackFlags({ lot }: { lot: ProjectLot }) {
+  return (
+    <>
+      {!!lot.pack_below_min && (
+        <div className="flex items-center gap-1 text-[11px] font-medium text-warn">
+          <AlertTriangle className="h-3 w-3" aria-hidden />
+          {lot.pack_below_min} pack{lot.pack_below_min === 1 ? "" : "s"} below minimum — repack
+        </div>
+      )}
+      {lot.pack_unreconciled && (
+        <div className="text-[11px] text-warn">Packs exceed the balance — repack to tidy</div>
+      )}
+    </>
+  );
+}
+
+/** Repack, on every lot holding stock (2026-10-11) — stock put away before packing
+ *  existed is loose, and this is how it gets packed. Amber when a pack is under its
+ *  minimum. An item with no pack levels says where to add them instead of hiding. */
+/** Lots are segregated here, never repacked (2026-10-23): packs change only where
+ *  the master says — putaway shelves in Storage containers, and the issue counter
+ *  opens them when the item is issued in smaller ones. */
+const REPACK_ON_LOTS = false;
+
+function RepackButton({ lot, packable: hasLevels, loading, onRepack }: {
+  lot: ProjectLot; packable: boolean; loading: boolean; onRepack: () => void;
+}) {
+  if (!REPACK_ON_LOTS || num(lot.total_qty) <= 0) return null;
+  const urgent = !!lot.pack_below_min || lot.pack_unreconciled;
+  const missing = !loading && !hasLevels;
+  return (
+    <Button variant="subtle" onClick={onRepack} disabled={missing}
+            className={urgent ? "!bg-warn-bg !text-warn" : undefined}
+            title={missing ? "This item has no pack levels — add them on the item master's Packaging tab first."
+              : urgent ? "A pack here is under its minimum or out of step with the balance." : undefined}>
+      {urgent ? <AlertTriangle className="h-4 w-4" /> : <Boxes className="h-4 w-4" />} Repack
+    </Button>
+  );
+}
+
 /** A row's lot numbers: the first in full, the rest on hover. */
 function LotNos({ lots }: { lots: string[] }) {
   if (!lots.length) return <span className="text-sm text-muted">—</span>;
   return (
-    <div className="font-mono text-xs text-ink" title={lots.join(", ")}>
+    <div className="max-w-[11rem] whitespace-normal font-mono text-xs text-ink [overflow-wrap:anywhere]"
+         title={lots.join(", ")}>
       {lots[0]}
       {lots.length > 1 && <span className="ml-1 text-muted">+{lots.length - 1} more</span>}
     </div>

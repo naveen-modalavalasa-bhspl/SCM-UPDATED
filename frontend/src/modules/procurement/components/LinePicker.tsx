@@ -8,6 +8,12 @@ import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import { api } from "@/shared/api/client";
 import { todayIst } from "@/shared/datetime";
 import { ChevronRight } from "lucide-react";
+import { packable, usePackOptions, type PackEntry } from "@/shared/packing";
+import { PackOrderRow, levelOf, packFor } from "./PackOrderRow";
+import {
+  CombinationPicker, combinationKey, pickCombination, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
 /** One editable line. `rate` is optional — an RFQ asks for a price rather than
  *  stating one, so the same editor serves both with the column switched off. */
@@ -26,7 +32,16 @@ export interface DraftLine {
   tax_percent?: string;
   required_date?: string;
   description?: string;
+  /** How the line is to be packed (2026-10-08) — PO lines only. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  /** Which brand / variant / model the line buys (2026-10-23). */
+  combo?: CombinationValue;
 }
+
+/** Item + combination: the same item in two combinations is two lines. */
+const lineKey = (line: DraftLine) =>
+  `${line.item_id}|${line.combo?.brand_id ? combinationKey(line.combo) : ""}`;
 
 export const blankLine = (): DraftLine => ({ item_id: "", quantity: "" });
 
@@ -53,6 +68,7 @@ export function LinePicker({
   capQuantityAtOriginal = true,
   hideAddLine = false,
   vendorsByItem,
+  showPacking = false,
 }: {
   lines: DraftLine[];
   onChange: (lines: DraftLine[]) => void;
@@ -75,6 +91,9 @@ export function LinePicker({
   /** Amendments may revise existing quantities but cannot introduce new items. */
   hideAddLine?: boolean;
   vendorsByItem?: Record<number, { name: string; code?: string | null }[]>;
+  /** Ask how each line is to be packed: hierarchy, level and how many. The quantity
+   *  is then set by the packs. Only the purchase order asks this. */
+  showPacking?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const toast = useToast();
@@ -107,9 +126,16 @@ export function LinePicker({
    *  at half opacity and routes the press to `onDisabledSelect`, so the same toast
    *  still explains WHY; it is now the second line of defence rather than the first.
    *  The line's own item stays selectable — that is the value it is showing. */
+  const comboOptions = useCombinationOptions(lines.map((line) => Number(line.item_id) || 0));
+  const combosOf = (itemId: number | "") =>
+    itemId === "" ? [] : comboOptions.data?.[String(itemId)] ?? [];
+
   const optionsFor = (line: DraftLine) => {
+    // An item with brand / variant / model combinations stays pickable: another line
+    // of it is another combination (2026-10-23).
     const takenElsewhere = new Set(
-      lines.filter((other) => other !== line && other.item_id !== "")
+      lines.filter((other) => other !== line && other.item_id !== ""
+                              && !combosOf(other.item_id).length)
         .map((other) => other.item_id),
     );
     const withSeed =
@@ -122,8 +148,25 @@ export function LinePicker({
       takenElsewhere.has(option.value) ? { ...option, isDisabled: true } : option);
   };
 
+  const packOptions = usePackOptions(
+    lines.map((line) => Number(line.item_id)).filter(Boolean), showPacking);
+
   const set = (index: number, patch: Partial<DraftLine>) =>
     onChange(lines.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+
+  /** A new quantity on a packed line re-describes it in the same hierarchy and level
+   *  (2026-10-11): the quantity is the person's, the packs only say how it travels. */
+  const setQuantity = (index: number, quantity: string) => {
+    const line = lines[index];
+    const h = packable(packOptions.data?.[Number(line.item_id)])
+      .find((row) => row.hierarchy_id === line.pack_hierarchy_id);
+    if (!showPacking || !h) {
+      set(index, { quantity });
+      return;
+    }
+    set(index, { quantity,
+                 pack_breakdown: packFor(h, levelOf(h, line.pack_breakdown), Number(quantity) || 0) });
+  };
 
   const remove = (index: number) =>
     onChange(lines.length === 1 ? [blankLine()] : lines.filter((_, i) => i !== index));
@@ -149,12 +192,20 @@ export function LinePicker({
                 onChange={(value) => {
                   // Kept as the backstop: the greying is computed from `lines`, and a
                   // duplicate could still arrive from a prefill or a stale render.
-                  if (lines.some((l, i) => i !== index && l.item_id === value)) {
+                  const combos = combosOf(value);
+                  const taken = new Set(lines.filter((l, i) => i !== index && l.item_id === value)
+                    .map(lineKey));
+                  if (taken.size && !combos.length) {
                     toast.error("This item is already in the list. Change its quantity instead of adding it again.");
                     return;
                   }
+                  // A second line of the item starts on a combination not yet taken.
+                  const free = taken.size
+                    ? combos.find((o) => !taken.has(`${value}|${combinationKey(o)}`))
+                    : undefined;
                   const chosen = items.find((item) => item.id === value);
                   set(index, {
+                    combo: free ? pickCombination(free) : undefined,
                     item_id: value,
                     uom_code: chosen?.uom_code ?? null,
                     item_code: chosen?.code ?? null,
@@ -178,8 +229,10 @@ export function LinePicker({
                 max={capQuantityAtOriginal ? line.original_quantity : undefined}
                 step="0.001"
                 value={line.quantity}
+                // The quantity is always the person's; on a packed line the packs
+                // below follow it (2026-10-11).
                 disabled={disabled}
-                onChange={(e) => set(index, { quantity: e.target.value })}
+                onChange={(e) => setQuantity(index, e.target.value)}
               />
             </Field>
           </div>
@@ -242,6 +295,37 @@ export function LinePicker({
             </button>
           </div>
           
+          {combosOf(line.item_id).length > 0 && (
+            <div className="sm:col-span-6">
+              <Field label="Brand · variant · model">
+                <CombinationPicker
+                  options={combosOf(line.item_id)}
+                  value={line.combo}
+                  locked={disabled}
+                  invalid={lines.some((other) => other !== line && other.item_id === line.item_id
+                                                 && lineKey(other) === lineKey(line))}
+                  ariaLabel={`Brand, variant and model for line ${index + 1}`}
+                  onChange={(combo) => set(index, { combo })}
+                />
+              </Field>
+            </div>
+          )}
+
+          {showPacking && line.item_id !== ""
+            && packable(packOptions.data?.[Number(line.item_id)]).length > 0 && (
+            <div className="sm:col-span-12">
+              <PackOrderRow
+                hierarchies={packable(packOptions.data?.[Number(line.item_id)])}
+                hierarchyId={line.pack_hierarchy_id}
+                breakdown={line.pack_breakdown}
+                quantity={line.quantity}
+                uom={line.uom_code}
+                disabled={disabled}
+                onChange={(patch) => set(index, patch)}
+              />
+            </div>
+          )}
+
           {vendorsByItem && line.item_id !== "" && (
             <div className="sm:col-span-12">
               <details className="group">

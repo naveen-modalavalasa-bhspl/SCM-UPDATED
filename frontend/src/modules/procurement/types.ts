@@ -1,6 +1,10 @@
-export interface POItem {
+import type { CombinationValue } from "@/shared/combination";
+import type { PackEntry, PackEntryIn, PackHierarchy } from "@/shared/packing";
+export interface POItem extends CombinationValue {
   id: number;
   item_id: number;
+  /** An indent stands behind the line: its quantity is the indent's. */
+  indent_item_id?: number | null;
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
@@ -21,6 +25,34 @@ export interface POItem {
   cgst_amount?: number;
   sgst_amount?: number;
   igst_amount?: number;
+  /** How the line is to be packed (2026-10-08), with its sentence served. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+}
+
+/** A supplier's change of pack hierarchy on a despatch note, and the buyer's answer. */
+export interface POPackChange {
+  id: number;
+  despatch_note_id: number;
+  dn_no: string;
+  dn_status: string;
+  po_item_id?: number | null;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  despatched_qty: number;
+  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  ordered_hierarchy_name?: string | null;
+  sent_hierarchy_name?: string | null;
+  sent_pack_text?: string | null;
+  pack_breakdown?: PackEntry[] | null;
+  reason?: string | null;
+  decision_note?: string | null;
+  decided_by_name?: string | null;
+  decided_at?: string | null;
 }
 
 /** One frozen stage of a PO's payment terms (advance, against delivery, ...). */
@@ -132,6 +164,8 @@ export interface POAmend extends POHeader {
     quantity: number;
     rate: number;
     tax_percent?: number;
+    pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntryIn[] | null;
   }[] | null;
 }
 
@@ -197,6 +231,8 @@ export interface POCreate extends POHeader {
     quantity: number;
     rate: number;
     tax_percent?: number;
+    pack_hierarchy_id?: number | null;
+    pack_breakdown?: PackEntryIn[] | null;
   }[];
   copied_from_po_id?: number | null;
 }
@@ -211,7 +247,7 @@ export interface POCopyTemplate extends POHeader {
   vendor_id?: number | null;
   vendor_name?: string | null;
   expected_date?: string | null;
-  lines: {
+  lines: ({
     item_id: number;
     item_code?: string | null;
     item_name?: string | null;
@@ -219,7 +255,7 @@ export interface POCopyTemplate extends POHeader {
     quantity: number;
     rate: number;
     tax_percent: number;
-  }[];
+  } & CombinationValue)[];
   warnings: string[];
 }
 
@@ -231,7 +267,7 @@ export interface POFromQuotation extends POHeader {
 
 /* ------------------------------------------------------------------ Requisition */
 
-export interface ReqItem {
+export interface ReqItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -274,7 +310,7 @@ export interface ReqListRow {
 //  Consolidated buying sheet
 // --------------------------------------------------------------------------- //
 
-export interface ConsolidationItem {
+export interface ConsolidationItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -431,7 +467,7 @@ export interface ReqCreate {
 
 /* -------------------------------------------------------------------------- RFQ */
 
-export interface RFQItem {
+export interface RFQItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -594,7 +630,7 @@ export interface RFQInvite {
 
 /* -------------------------------------------------------------------- Quotation */
 
-export interface QuoteItem {
+export interface QuoteItem extends CombinationValue {
   id: number;
   line_no: number;
   rfq_item_id?: number | null;
@@ -879,7 +915,7 @@ export interface VendorProfile {
 
 /** One line the vendor says is on the vehicle. Keyed to the ORDER line, never to a
  *  free item choice — a despatch note answers a purchase order. */
-export interface DespatchItem {
+export interface DespatchItem extends CombinationValue {
   id: number;
   line_no: number;
   po_item_id?: number | null;
@@ -892,6 +928,15 @@ export interface DespatchItem {
   mfg_date?: string | null;
   expiry_date?: string | null;
   remarks?: string | null;
+  /** How the supplier packed it (2026-10-08), and the buyer's answer to a change. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+  pack_change_status?: "NONE" | "PENDING" | "ACCEPTED" | "DECLINED" | null;
+  ordered_pack_hierarchy_name?: string | null;
+  pack_change_reason?: string | null;
+  pack_change_note?: string | null;
 }
 
 export interface DespatchNote {
@@ -924,6 +969,9 @@ export interface DespatchLineWrite {
   mfg_date?: string | null;
   expiry_date?: string | null;
   remarks?: string | null;
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntryIn[] | null;
+  pack_change_reason?: string | null;
 }
 
 export interface DespatchNoteWrite {
@@ -942,7 +990,7 @@ export interface DespatchNoteWrite {
 
 /** A PO line as the vendor sees it. `pending_qty` is what is still owed, so a second
  *  delivery opens with the remainder rather than the whole order. */
-export interface VendorPOLine {
+export interface VendorPOLine extends CombinationValue {
   po_item_id: number;
   item_id: number;
   item_code?: string | null;
@@ -953,6 +1001,12 @@ export interface VendorPOLine {
   pending_qty: number;
   rate?: number | null;
   amount?: number | null;
+  /** How the order asks for it to be packed, and every hierarchy the item has. */
+  pack_hierarchy_id?: number | null;
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
+  pack_hierarchy_name?: string | null;
+  pack_options?: PackHierarchy[];
 }
 
 export interface VendorPO {
@@ -1701,4 +1755,16 @@ export interface DemandPoolResponse {
   page: number;
   size: number;
   total: number;
+}
+
+
+/** One item mapped to the signed-in vendor, and every way it may be packed
+ *  (`GET /api/supplier/items/packing`, 2026-10-11). */
+export interface VendorItemPacking {
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  vendor_item_code?: string | null;
+  hierarchies: PackHierarchy[];
 }

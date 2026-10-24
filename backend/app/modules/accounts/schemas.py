@@ -66,6 +66,7 @@ class MilestoneOut(BaseModel):
     id: int
     seq: int
     stage: str
+    code: str = ""          # ADV 1/1, DLV 2/4: the stage's short code, nth of its count
     label: str
     trigger: str
     percent: float

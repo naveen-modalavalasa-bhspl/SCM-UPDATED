@@ -1,9 +1,12 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import { usePackOptions } from "@/shared/packing";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
-import { ArrowLeft, Info, MapPin, FileText, ChevronRight, ChevronDown } from "lucide-react";
+import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown } from "lucide-react";
+import { LiveStockPanel } from "../components/LiveStockPanel";
+import { SplitFamilyCard } from "../components/SplitFamilyCard";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { Lookup } from "../components/Lookup";
 import { ItemPicker } from "../components/ItemPicker";
@@ -41,6 +44,7 @@ import type {
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
+import { comboKeyOf, sourcesFor } from "../issueSplits";
 
 /**
  * Raise, approve and post a material issue.
@@ -134,7 +138,7 @@ function BreakdownGroup({
           ) : (
             (() => {
               const split = picks[0];
-              const source = (sourcesByItem[group.itemId] ?? []).find(
+              const source = sourcesFor(sourcesByItem, group.itemId, group.combo).find(
                 (row) => sourceKey(row.batch_id, row.bin_id)
                   === sourceKey(split.line.batch_id, split.line.bin_id),
               );
@@ -181,7 +185,7 @@ function BreakdownGroup({
         const binCode = location
           ? location.location_code
           : savedLine(split.index)?.bin_code ?? `Bin ${split.line.bin_id}`;
-        const source = (sourcesByItem[group.itemId] ?? []).find(
+        const source = sourcesFor(sourcesByItem, group.itemId, group.combo).find(
           (row) => sourceKey(row.batch_id, row.bin_id)
             === sourceKey(split.line.batch_id, split.line.bin_id),
         );
@@ -379,6 +383,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         issued_qty: num(l.issued_qty),
         rate: l.rate,
         remarks: l.remarks,
+        pack_hierarchy_id: l.pack_hierarchy_id ?? null,
+        pack_breakdown: l.pack_breakdown ?? null,
+        break_bulk: !!l.break_bulk,
         // Stated in the currency the item is validated on — the serial for a
         // serialized item, the IMEI for a handset, the asset/consumable code
         // otherwise. The backend resolves any of the three back to the same unit.
@@ -497,14 +504,25 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     () => Array.from(new Set(form.items.map((l) => l.item_id).filter(Boolean))),
     [form.items],
   );
-  const { data: sources = [], isSuccess: sourcesReady } = useQuery({
-    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0, form.project_id ?? 0, itemIds, doc?.id ?? 0],
-    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id, form.project_id, doc?.id),
+  const {
+    data: sources = [], isSuccess: sourcesReady, dataUpdatedAt: sourcesAt,
+    isFetching: sourcesFetching, refetch: refetchSources,
+  } = useQuery({
+    queryKey: ["wh-issue-sources", form.warehouse_id, form.indent_id ?? 0,
+      form.project_id ?? 0, (editing ? Number(id) : (doc?.id ?? 0)), itemIds],
+    queryFn: () => issueStockSources(form.warehouse_id, itemIds, form.indent_id,
+      form.project_id, editing ? Number(id) : (doc?.id ?? null)),
     // Only while the picks are still open. Once the stock is posted the balances
     // have already moved, and drawing "available" against a document that has gone
     // out would report every split as over-issued.
     enabled: !!form.warehouse_id && itemIds.length > 0 && !doc?.is_stock_posted,
-    staleTime: 30_000,
+    // LIVE: other storekeepers are drawing on the same shelf. Re-read every 15 s and
+    // whenever the window comes back into focus, keeping the last answer on screen
+    // while the next one loads so nothing flickers.
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    staleTime: 5_000,
+    placeholderData: (previous) => previous,
   });
   const sourcesByItem = useMemo(() => {
     const map: Record<number, IssueStockSource[]> = {};
@@ -632,7 +650,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     if (serialLine === null || !activeSerialLine) return undefined;
     const group = groups.find((g) => g.splits.some((s) => s.index === serialLine));
     const split = group?.splits.find((s) => s.index === serialLine);
-    const source = (sourcesByItem[activeSerialLine.item_id] ?? []).find(
+    const source = sourcesFor(sourcesByItem, activeSerialLine.item_id, comboKeyOf(activeSerialLine)).find(
       (row) => sourceKey(row.batch_id, row.bin_id)
         === sourceKey(activeSerialLine.batch_id, activeSerialLine.bin_id),
     );
@@ -755,6 +773,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // Asset/consumable codes are auto-assigned and swappable: on a draft, and once
   // approved by the issuer OR anyone who approved it (`can_swap_codes`).
   const codesLocked = locked && (unitsHidden || !(awaitingIssue && doc?.can_swap_codes));
+  // Pack hierarchies of every item on the issue, in one call (2026-10-08).
+  const packOptions = usePackOptions(form.items.map((line) => line.item_id));
   const payload = (): IssueWrite => ({
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
@@ -783,15 +803,18 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       bin: l.bin_code,
       need: Math.trunc(num(l.issued_qty)),
       have: l.units_available ?? null,
-      serial: !!l.is_serial_tracked,
+      strict: !!l.has_units,
     }))
-    .filter((r) => r.serial && r.need > 0 && r.have !== null && r.have < r.need);
+    .filter((r) => r.strict && r.need > 0 && r.have !== null && r.have < r.need);
 
   const save = useMutation({
     mutationFn: () => (editing ? updateIssue(Number(id), payload()) : createIssue(payload())),
     onSuccess: (saved: Issue) => {
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       qc.invalidateQueries({ queryKey: ["wh-issue", String(saved.id)] });
+      // Saving moves holds (a direct issue's own, a relocated allocation's), so the
+      // shelf this screen is showing has just changed.
+      qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
       if (!editing) nav(`${listPath}/${saved.id}`, { replace: true });
     },
   });
@@ -915,6 +938,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   // A point with no service area code (an MDP, a main warehouse) says "None" there.
   const pointHasNoSac = !!destPoint && !destPoint.sac;
   const direct = !form.indent_id && direction === "OUT";
+  // A direct issue must say where the goods go and who takes them (2026-10-21): with
+  // no indent behind it, these two are the only record of it. The server refuses the
+  // same (`_build_issue`); this says it on the field before the press.
+  const missingDestination = direct && !form.destination_warehouse_id;
+  const missingIssuedTo = direct && !form.issued_to_id;
 
   const pullEmployee = useMutation({
     mutationFn: (employeeId: number) => getEmployeeDestination(employeeId),
@@ -1000,7 +1028,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // at all, or a status-guard error on a second press that had nothing to do
         // with what was actually wrong. Saving here first means submit always acts
         // on what the user is looking at.
-        await save.mutateAsync();
+        if (editing) await save.mutateAsync();
         return submitIssue(numId);
       }
       if (what === "approve") return approveIssue(numId, reason);
@@ -1016,6 +1044,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       if (what === "post") void alerts.success("issue.posted", { number });
       else if (what === "ack") void alerts.success("issue.acknowledged", { number });
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
+      qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
       qc.invalidateQueries({ queryKey: ["wh-issue-approvals", id] });
       qc.invalidateQueries({ queryKey: [`wh-issues-${direction}`] });
       // A posted issue is exactly what the consignment screen offers as its source,
@@ -1167,7 +1196,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     ? form.items
         .map((line, index) => ({ line, index }))
         .filter(({ line }) => line.item_id && !line.bin_id)
-        .filter(({ line }) => (sourcesByItem[line.item_id] ?? []).some(
+        .filter(({ line }) => sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line)).some(
           (row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"),
         ))
     : [];
@@ -1188,7 +1217,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const pointStaleAt = (index: number) => {
     const line = form.items[index];
     if (!line?.item_id) return false;
-    const rows = sourcesByItem[line.item_id] ?? [];
+    const rows = sourcesFor(sourcesByItem, line.item_id, comboKeyOf(line));
     const target = rows.find((row) => (row.bin_code || "").toUpperCase().includes("UNLOCATED"));
     if (!target || line.bin_id) return false;
     patchLine(index, { bin_id: target.bin_id ?? null, bin_code: target.bin_code ?? null });
@@ -1230,7 +1259,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                   variant="subtle"
                   onClick={() => {
                     setTouched(true);
-                    if (form.warehouse_id && form.items.length && blocking.length === 0) {
+                    if (form.warehouse_id && form.items.length && blocking.length === 0
+                        && !missingDestination && !missingIssuedTo) {
                       save.mutate();
                     }
                   }}
@@ -1319,71 +1349,29 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           still waiting on, since its own status is rolled up from theirs. Hidden while
           the just-split result is up — that card already lists the same children. */}
       {!splitResult && doc && (doc.child_issues?.length ?? 0) > 0 && (
-        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
-          <div className="font-semibold">
-            {doc.status === "SPLIT"
-              ? "Split across floors — closes when every floor issue below is posted"
-              : doc.status === "CLOSED"
-                ? "Split across floors — every floor issue has been posted"
-                : "Split across floors — every floor issue was cancelled, so this one is back in your hands"}
-          </div>
-          <ul className="mt-2 space-y-1">
-            {doc.child_issues!.map((child) => (
-              <li key={child.id} className="flex flex-wrap items-center gap-2">
-                <button type="button" className="font-mono underline"
-                        onClick={() => nav(`${listPath}/${child.id}`)}>
-                  {child.issue_no}
-                </button>
-                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
-                <span>· {fmtQty(Number(child.total_qty))}</span>
-                <StatusPill status={child.status} />
-              </li>
-            ))}
-          </ul>
-        </div>
+        <SplitFamilyCard
+          parentNo={doc.parent_issue_no ?? doc.issue_no}
+          parentStatus={doc.parent_issue_id ? null : doc.status}
+          members={doc.child_issues!}
+          currentId={doc.id}
+          onOpen={(childId) => nav(`${listPath}/${childId}`)}
+        />
       )}
 
       {splitResult && (
-        <div className="mb-4 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
-          <div className="flex items-center justify-between gap-3">
-            <span className="font-semibold">
-              {splitResult.parent_issue_no} split into {splitResult.children.length}{" "}
-              issue{splitResult.children.length === 1 ? "" : "s"}
-            </span>
-            <Button variant="ghost" onClick={() => setSplitResult(null)}>Dismiss</Button>
-          </div>
-          <ul className="mt-2 space-y-1">
-            {splitResult.children.map((child) => (
-              <li key={child.id} className="flex flex-wrap items-baseline gap-2">
-                <button type="button" className="font-mono underline"
-                        onClick={() => nav(`${listPath}/${child.id}`)}>
-                  {child.issue_no}
-                </button>
-                <span className="text-muted">{child.floor_location_name ?? "—"}</span>
-                <span>
-                  → {child.in_charge_names.length
-                    ? <span className="font-medium">{child.in_charge_names.join(", ")}</span>
-                    : <span className="text-warn">no floor in-charge assigned</span>}
-                </span>
-                <span>· {child.total_items} line{child.total_items === 1 ? "" : "s"}</span>
-                <span>· {fmtQty(Number(child.total_qty))}</span>
-              </li>
-            ))}
-          </ul>
-          {splitResult.unfulfilled.length > 0 && (
-            <div className="mt-3 rounded-lg bg-bad-bg px-3 py-2 text-bad">
-              <div className="font-semibold">No floor is holding these — still outstanding</div>
-              <ul className="mt-1 space-y-0.5">
-                {splitResult.unfulfilled.map((row) => (
-                  <li key={row.item_id}>
-                    {row.item_name ?? row.item_code ?? `#${row.item_id}`} ·{" "}
-                    {fmtQty(Number(row.qty))}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
+        <SplitFamilyCard
+          parentNo={splitResult.parent_issue_no}
+          parentStatus="SPLIT"
+          members={splitResult.children.map((child) => ({
+            id: child.id, issue_no: child.issue_no, status: "DRAFT" as const,
+            floor_location_name: child.floor_location_name, is_stock_posted: false,
+            total_qty: Number(child.total_qty), total_items: child.total_items,
+            in_charge_names: child.in_charge_names,
+          }))}
+          unfulfilled={splitResult.unfulfilled}
+          onOpen={(childId) => nav(`${listPath}/${childId}`)}
+          onDismiss={() => setSplitResult(null)}
+        />
       )}
       {mixedProjects && (
         <div className="mb-4 flex items-start gap-2 rounded-xl border border-info/30 bg-info-bg px-4 py-3 text-sm text-info">
@@ -1396,6 +1384,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       )}
       {touched && !form.warehouse_id && <ErrorBanner error="Pick the issuing warehouse." />}
       {touched && form.items.length === 0 && <ErrorBanner error="Add at least one line." />}
+      {touched && (missingDestination || missingIssuedTo) && (
+        <ErrorBanner error={`A direct issue needs ${[
+          missingDestination && "a destination", missingIssuedTo && "the person it is issued to",
+        ].filter(Boolean).join(" and ")} — pick ${missingDestination && missingIssuedTo ? "them" : "it"} under Issue details.`} />
+      )}
 
       {doc && (
         <MetaCard title="Document">
@@ -1525,6 +1518,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               <div className="sm:col-span-2">
                 <SearchPicker<IssueDestinationOption>
                   label="Destination"
+                  required
+                  error={touched && missingDestination
+                    ? "Pick where the goods are going — a direct issue needs a destination." : null}
                   hint="Any warehouse, MDP or LIP but your own. Search a name, a SAC or a vehicle number."
                   placeholder={destination || "Search warehouse, MDP or LIP"}
                   value={destPoint ? pointRow(destPoint) : null}
@@ -1570,6 +1566,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
               <div className="sm:col-span-2">
                 <SearchPicker<IssueEmployeeOption>
                   label="Issued to"
+                  required
+                  error={touched && missingIssuedTo
+                    ? "Pick who is taking the goods — a direct issue needs a person." : null}
                   hint={destPoint?.office_id && !everyone
                     ? "People at the destination. Choosing one fills Department and Project."
                     : "Search every employee by name, code, office or department."}
@@ -1649,7 +1648,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         {unitShort.length > 0 && (
           <div className="mb-3 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-sm text-ink">
             <b>These picks cannot be posted as they stand.</b> Approval freezes the
-            batch, and issuing from stock needs one serial per unit — change the batch,
+            batch, and issuing from stock needs one identified unit per issued unit — change the batch,
             split the quantity onto another location, or reduce it now.
             <ul className="mt-1 list-disc pl-5">
               {unitShort.map((row) => (
@@ -1665,6 +1664,37 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           </div>
         )}
 
+
+        {direction === "OUT" && !doc?.is_stock_posted && !!form.warehouse_id && (
+          <LiveStockPanel lines={form.items} sources={sources} updatedAt={sourcesAt}
+                          fetching={sourcesFetching} onRefresh={() => void refetchSources()} />
+        )}
+
+        {/* A direct issue has no allocation behind it, so it holds its own stock. */}
+        {direction === "OUT" && !form.indent_id && !doc?.is_stock_posted
+          && form.items.length > 0 && (
+          <div className="mb-3 flex items-start gap-2.5 rounded-xl border border-ok/30 bg-ok-bg px-3 py-2.5 text-sm text-ink">
+            <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ok" />
+            <div className="min-w-0 flex-1">
+              {editing && sources.some((row) => num(row.issue_hold_qty ?? 0) > 0) ? (
+                <>
+                  <b>
+                    {fmtQty(sources.reduce((sum, row) => sum + num(row.issue_hold_qty ?? 0), 0))}{" "}
+                    reserved for this issue.
+                  </b>{" "}
+                  Nobody else can take it until this issue is issued from stock or
+                  cancelled — cancelling gives it straight back to the shelf.
+                </>
+              ) : (
+                <>
+                  <b>Saving reserves these quantities for this issue.</b> A direct issue has
+                  no allocation behind it, so it holds its own stock from the moment it is
+                  saved until it is issued or cancelled.
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Stated, never acted on. Which bay the goods actually come out of is the
           * storekeeper's decision, and "Add batch / storage location" on the item is
@@ -1780,6 +1810,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           renderItemPicker={renderItemPicker}
           onAddItem={locked ? undefined : addItem}
           onRemoveGroup={locked ? undefined : removeGroup}
+          packOptionsByItem={packOptions.data}
         />
 
         <div className="mt-3 flex flex-wrap justify-end gap-x-6 gap-y-1 rounded-2xl border border-line/70 bg-content2/50 px-3 py-2 text-sm">
@@ -1787,14 +1818,15 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {groups.length} item{groups.length === 1 ? "" : "s"}
             {totals.lines > groups.length && ` · ${totals.lines} picks`}
           </span>
-          {/* SCM_0077: "Requested" implies a request behind the line, which a direct
-              issue (no indent) has none of — the per-line label was fixed under
-              SCM_0068 but the totals bar still said it. Same wording as the line. */}
-          <span className="text-ink">
-            {direct ? "Quantity to issue" : "Requested"} <b className="tabular">{fmtQty(totals.requested)}</b>
-          </span>
+          {/* A direct issue asks for nothing, so it has no "requested" and nothing
+            * to be short of (2026-10-21). */}
+          {form.indent_id && (
+            <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+          )}
           <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
-          {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
+          {form.indent_id && short > 0 && (
+            <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>
+          )}
           {/* What leaving the shelves gives back. Only shown once it is knowable —
             * a zero here would claim the issue frees nothing, when the truth is
             * usually that the items have not been measured. */}
@@ -1997,7 +2029,8 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         isOpen={confirming === "split"}
         title="Split this issue across the floors?"
         message={"One issue is created per floor that is holding stock for these items, "
-          + "each for the quantity that floor actually has. The floor in-charges see "
+          + "each for the quantity that floor actually has, numbered off this one — "
+          + `${doc?.issue_no ?? "this issue"}-001, -002 and so on. The floor in-charges see `
           + "their own and nobody else's. Anything no floor is holding stays unfulfilled "
           + "and is listed for you. Nothing leaves the warehouse yet."}
         confirmLabel="Split across floors"

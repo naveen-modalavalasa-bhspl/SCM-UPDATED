@@ -34,6 +34,7 @@ from app.modules.warehouse.models import (
 )
 from app.platform.rbac import permissions as perms
 from app.platform.workflow.models import Action, Instance, Pending
+from app.shared.models.master import Brand, BrandModel, BrandVariant
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,22 @@ class Filt:
     @property
     def col(self) -> str:
         return self.column or self.key
+
+
+def _with_combination(stmt: Select, entity) -> Select:
+    """Add the row's brand / variant / model as one column — "Alpha · 24-inch · M1",
+    NULL where it names none (2026-10-23). Off the masters by id, so a renamed brand
+    reads by its current name."""
+    brand, variant, model = aliased(Brand), aliased(BrandVariant), aliased(BrandModel)
+    label = func.nullif(func.concat_ws(" · ", brand.name, variant.name, model.name), "")
+    return (stmt.add_columns(label.label("combination"))
+            .outerjoin(brand, brand.id == entity.brand_id)
+            .outerjoin(variant, variant.id == entity.variant_id)
+            .outerjoin(model, model.id == entity.model_id))
+
+
+COMBINATION_COL = Col("combination", "Brand · variant · model")
+COMBINATION_FILTER = Filt("combination", "Brand · variant · model")
 
 
 @dataclass(frozen=True)
@@ -252,7 +269,7 @@ APPROVALS = LedgerSpec(
 # --------------------------------------------------------------------------- #
 
 def _inventory_source() -> Select:
-    return select(
+    return _with_combination(select(
         StockMovement.id.label("id"),
         StockMovement.txn_date.label("txn_date"),
         StockMovement.item_code.label("item_code"),
@@ -269,7 +286,7 @@ def _inventory_source() -> Select:
         StockMovement.created_by_name.label("done_by"),
         StockMovement.remarks.label("remarks"),
         StockMovement.created_at.label("created_at"),
-    )
+    ), StockMovement)
 
 
 INVENTORY = LedgerSpec(
@@ -282,6 +299,7 @@ INVENTORY = LedgerSpec(
         Col("txn_date", "Txn date", "datetime"),
         Col("item_code", "Item code"),
         Col("item_name", "Item"),
+        COMBINATION_COL,
         Col("warehouse", "Warehouse"),
         Col("bin_code", "Bin", narrow=True),
         Col("batch_no", "Batch", narrow=True),
@@ -296,6 +314,7 @@ INVENTORY = LedgerSpec(
     ],
     filters=[
         Filt("direction", "In / Out"),
+        COMBINATION_FILTER,
         Filt("ref_type", "Reference type"),
         Filt("warehouse", "Warehouse"),
         Filt("done_by", "Done by"),
@@ -303,7 +322,7 @@ INVENTORY = LedgerSpec(
         Filt("batch_no", "Batch", kind="text"),
     ],
     search=["item_code", "item_name", "ref_no", "done_by", "batch_no", "bin_code",
-            "remarks"],
+            "remarks", "combination"],
     date_col="txn_date",
     order_col="txn_date",
     key_cols=["id"],
@@ -452,7 +471,7 @@ def _stock_source() -> Select:
     days_in_stock = func.datediff(
         func.now(), func.coalesce(Stock.last_movement_at, func.now()))
     days_to_expiry = func.datediff(Stock.expiry_date, func.curdate())
-    return select(
+    return _with_combination(select(
         Stock.id.label("id"),
         Stock.item_code.label("item_code"),
         Stock.item_name.label("item_name"),
@@ -489,19 +508,20 @@ def _stock_source() -> Select:
         ).label("expiry_bucket"),
         Stock.last_movement_at.label("last_movement_at"),
         Stock.updated_at.label("updated_at"),
-    )
+    ), Stock)
 
 
 STOCK = LedgerSpec(
     key=LedgerKey.STOCK.value,
     label="Stock",
     subtitle="Balance on hand with ageing and valuation — one row per item, "
-             "warehouse, bin and batch",
+             "brand / variant / model, warehouse, bin and batch",
     permission=perms.STOCK_VIEW,
     source=_stock_source,
     columns=[
         Col("item_code", "Item code"),
         Col("item_name", "Item"),
+        COMBINATION_COL,
         Col("warehouse", "Warehouse"),
         Col("bin_code", "Bin", narrow=True),
         Col("batch_no", "Batch", narrow=True),
@@ -522,13 +542,15 @@ STOCK = LedgerSpec(
     ],
     filters=[
         Filt("warehouse", "Warehouse"),
+        COMBINATION_FILTER,
         Filt("age_bucket", "Age band"),
         Filt("expiry_bucket", "Expiry band"),
         Filt("project", "Project"),
         Filt("item_code", "Item code", kind="text"),
         Filt("batch_no", "Batch", kind="text"),
     ],
-    search=["item_code", "item_name", "warehouse", "bin_code", "batch_no", "project"],
+    search=["item_code", "item_name", "warehouse", "bin_code", "batch_no", "project",
+            "combination"],
     date_col="updated_at",
     order_col="updated_at",
     key_cols=["id"],
@@ -546,7 +568,7 @@ STOCK = LedgerSpec(
 # --------------------------------------------------------------------------- #
 
 def _assets_source() -> Select:
-    return select(
+    return _with_combination(select(
         Stock.id.label("id"),
         Stock.asset_code.label("asset_code"),
         Stock.item_code.label("item_code"),
@@ -563,7 +585,7 @@ def _assets_source() -> Select:
         Stock.stock_value.label("stock_value"),
         Stock.last_movement_at.label("last_movement_at"),
         Stock.updated_at.label("updated_at"),
-    ).where(Stock.asset_code.isnot(None))
+    ).where(Stock.asset_code.isnot(None)), Stock)
 
 
 ASSETS = LedgerSpec(
@@ -577,6 +599,7 @@ ASSETS = LedgerSpec(
         Col("asset_code", "Asset code"),
         Col("item_code", "Item code"),
         Col("item_name", "Item"),
+        COMBINATION_COL,
         Col("warehouse", "Warehouse"),
         Col("bin_code", "Bin", narrow=True),
         Col("batch_no", "Batch", narrow=True),
@@ -865,6 +888,9 @@ APPROVAL_SLA = LedgerSpec(
 # purpose.
 # --------------------------------------------------------------------------- #
 
+_CB, _CV, _CM = aliased(Brand), aliased(BrandVariant), aliased(BrandModel)
+
+
 def _consumption_source() -> Select:
     net_qty = MaterialIssueLine.issued_qty - func.coalesce(
         MaterialIssueLine.returned_qty, 0)
@@ -874,6 +900,8 @@ def _consumption_source() -> Select:
             func.date_format(MaterialIssue.issue_date, "%Y-%m").label("month"),
             MaterialIssueLine.item_code.label("item_code"),
             MaterialIssueLine.item_name.label("item_name"),
+            func.nullif(func.concat_ws(" · ", _CB.name, _CV.name, _CM.name), ""
+                        ).label("combination"),
             MaterialIssueLine.uom_code.label("uom"),
             MaterialIssueLine.issued_qty.label("issued_qty"),
             MaterialIssueLine.returned_qty.label("returned_qty"),
@@ -894,6 +922,9 @@ def _consumption_source() -> Select:
             MaterialIssue.status.label("status"),
         )
         .join(MaterialIssue, MaterialIssue.id == MaterialIssueLine.issue_id)
+        .outerjoin(_CB, _CB.id == MaterialIssueLine.brand_id)
+        .outerjoin(_CV, _CV.id == MaterialIssueLine.variant_id)
+        .outerjoin(_CM, _CM.id == MaterialIssueLine.model_id)
         .where(
             MaterialIssue.direction == IssueDirection.OUT.value,
             # The flag the issue itself sets when stock actually moved. Filtering on
@@ -914,6 +945,7 @@ CONSUMPTION = LedgerSpec(
         Col("month", "Month", "status", narrow=True),
         Col("item_code", "Item code"),
         Col("item_name", "Item"),
+        COMBINATION_COL,
         Col("net_qty", "Net qty", "qty"),
         Col("uom", "UoM", narrow=True),
         Col("issued_qty", "Issued", "qty", narrow=True),
@@ -934,6 +966,7 @@ CONSUMPTION = LedgerSpec(
     ],
     filters=[
         Filt("month", "Month"),
+        COMBINATION_FILTER,
         Filt("issue_type", "Type"),
         Filt("department", "Department"),
         Filt("project", "Project"),
@@ -941,7 +974,7 @@ CONSUMPTION = LedgerSpec(
         Filt("item_code", "Item code", kind="text"),
     ],
     search=["item_code", "item_name", "doc_no", "indent_no", "department", "project",
-            "issued_to", "vehicle"],
+            "issued_to", "vehicle", "combination"],
     date_col="doc_date",
     order_col="doc_date",
     key_cols=["id"],

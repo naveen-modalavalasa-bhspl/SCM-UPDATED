@@ -11,6 +11,7 @@ import { LinePicker, type DraftLine } from "./LinePicker";
 import {
   POHeaderFields, poHeaderFrom, poHeaderPayload, poMissingAddresses, type POHeaderValue,
 } from "./POHeaderFields";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 interface MasterVendor {
   id: number;
@@ -32,8 +33,10 @@ const money = (value: number) =>
  * `mode="draft"` is the same edit on a DRAFT order (2026-10-19) — same fields, same
  * rules, saved through `PUT /api/pos/{id}/draft` instead of the correction route.
  */
-export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
+export function POCorrectionForm({ po, onSaved, onCancel, mode = "correction" }: {
   po: PurchaseOrder; onSaved: () => void; mode?: "correction" | "draft";
+  /** Leaves the form without saving — the order's own cards come back in its place. */
+  onCancel?: () => void;
 }) {
   const toast = useToast();
   const vendorLocked = Boolean(po.quotation_no);
@@ -51,6 +54,7 @@ export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
       quantity: String(i.quantity),
       rate: String(i.rate),
       tax_percent: String(i.tax_percent ?? 0),
+      combo: comboFrom(i),
     })),
   );
 
@@ -99,6 +103,7 @@ export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
             quantity: Number(line.quantity),
             rate: Number(line.rate || 0),
             tax_percent: Number(line.tax_percent || 0),
+            ...comboPayload(line.combo),
           })),
       }),
     onSuccess: () => {
@@ -157,7 +162,7 @@ export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
         </div>
 
         <div className="rounded-xl bg-white p-3 ring-1 ring-indigo-100">
-          <POHeaderFields value={header} onChange={(patch) => setHeader({ ...header, ...patch })} />
+          <POHeaderFields value={header} orderTotal={totals.grand} onChange={(patch) => setHeader({ ...header, ...patch })} />
         </div>
 
         <dl className="grid grid-cols-2 gap-3 rounded-xl bg-white p-3 text-sm ring-1 ring-indigo-100 sm:grid-cols-5">
@@ -172,7 +177,10 @@ export function POCorrectionForm({ po, onSaved, mode = "correction" }: {
           ))}
         </dl>
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {onCancel && (
+            <Button variant="ghost" disabled={save.isPending} onClick={onCancel}>Cancel</Button>
+          )}
           <Button disabled={save.isPending} onClick={submit}>
             <Save className="h-4 w-4" /> {save.isPending ? "Saving…" : "Save changes"}
           </Button>

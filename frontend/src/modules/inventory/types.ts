@@ -1,3 +1,4 @@
+import type { CombinationValue } from "@/shared/combination";
 export interface InventoryOverview {
   module: string;
   status: string;
@@ -78,6 +79,13 @@ export interface VendorOption {
 }
 
 export interface StockBalanceItem {
+  /** The combination (2026-10-23); absent / 0 when none was named. */
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
   id: number;
   /** Part of reserved_qty that is an indent's QUANTITY hold — not tied to this lot. */
   indent_held_qty?: number;
@@ -280,6 +288,8 @@ export interface StockLedgerItem {
   in_qty: number;
   out_qty: number;
   balance_qty: number;
+  /** How the movement was packed (2026-10-08), as written at the time. */
+  pack_text?: string | null;
   /** Null, not 0, when the movement was never costed — "not costed" is not "free". */
   unit_rate: number | null;
   total_value: number | null;
@@ -400,6 +410,13 @@ export interface Page<T> {
 
 /** Exactly what GET /api/stock returns -- the live stk_balance columns. */
 export interface StockRow {
+  /** The combination (2026-10-23); absent / 0 when none was named. */
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
   id: number;
   warehouse_id: number;
   warehouse_name?: string | null;
@@ -472,6 +489,8 @@ export interface MovementRow {
   direction: "IN" | "OUT";
   quantity: number;
   balance_after: number;
+  /** How the movement was packed, snapshotted on the row (2026-10-08). */
+  pack_text?: string | null;
   /** stk_ledger.rate / .value — null on rows written before they were mapped. */
   rate?: number | null;
   value?: number | null;
@@ -501,7 +520,7 @@ export interface UnitCodeRow {
   status: string | null;
 }
 
-export interface MaterialRequestItem {
+export interface MaterialRequestItem extends CombinationValue {
   id: number;
   line_no: number;
   item_id: number;
@@ -595,10 +614,13 @@ export interface AllocationWarehouseOption {
    *  chain, everything else is the warehouse itself. */
   warehouse_type: string | null;
   available_qty: number;
+  /** Free stock here per brand / variant / model — the in-stock dropdown. */
+  combinations?: (CombinationValue & { available_qty: number })[];
 }
 
-/** A line on the allocation screen: what was asked for, what is actually there. */
-export interface AllocationProposalLine {
+/** A line on the allocation screen: what was asked for, what is actually there.
+ *  Its combination is the indent's — named, or Any. */
+export interface AllocationProposalLine extends CombinationValue {
   on_order_qty?: number;
   indent_item_id: number;
   item_id: number;
@@ -677,6 +699,9 @@ export interface AllocationDecision {
   quantity: number;
   warehouse_id: number | null;
   project_id?: number;
+  brand_id?: number | null;
+  variant_id?: number | null;
+  model_id?: number | null;
 }
 
 /** Outcome of allocating a whole cycle at once. `failed` names the indents that moved
@@ -762,7 +787,7 @@ export interface AllocationListRow {
 
 /** What one allocation line could actually be given right now: the shelf at its point,
  *  less what other un-approved allocations have already promised out of it. */
-export interface AllocationLineAvailability {
+export interface AllocationLineAvailability extends CombinationValue {
   id: number;
   item_id: number;
   item_code: string | null;
@@ -779,7 +804,7 @@ export interface AllocationLineAvailability {
   max_allowed: number;
 }
 
-export interface AllocationItem {
+export interface AllocationItem extends CombinationValue {
   id: number;
   indent_item_id: number;
   item_id: number;

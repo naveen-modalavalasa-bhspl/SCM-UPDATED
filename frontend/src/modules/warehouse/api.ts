@@ -1,9 +1,12 @@
 import { api } from "@/shared/api/client";
+import type { PackEntryIn } from "@/shared/packing";
 import type {
   UnlocatedStockStatus,
   IssueDestinationOption,
   IssueEmployeeOption,
   AcknowledgeWrite,
+  LotPacks,
+  PackSummaryRow,
   ApprovalEvent,
   Attachment,
   Batch,
@@ -447,7 +450,8 @@ export const issueStockSources = (
   indent_id?: number | null,
   // Lots held for this project (Stock Segregation > Project Lots) are offered too.
   project_id?: number | null,
-  // The issue being edited: its own picks are not "pinned by another issue".
+  // The issue being edited: a direct issue reserves its own picks, and that hold is
+  // stock it may still draw; its own picks are not "pinned by another issue".
   issue_id?: number | null,
 ) =>
   post<IssueStockSource[]>(`${BASE}/issues/stock-sources/fetch`, {
@@ -1242,3 +1246,29 @@ export const releaseProjectHold = (id: number, body: import("./types").ProjectHo
 /** Another project's urgent need — the lot is released TO it, with a reason. */
 export const lendProjectHold = (id: number, body: import("./types").ProjectHoldRelease) =>
   post<import("./types").ProjectHoldReleaseResult>(`${BASE}/project-holds/${id}/lend`, body);
+
+
+// --- Packs on the shelf (2026-10-08) ------------------------------------------------
+
+/** How each of these stock rows is packed: "2 Carton + 3 Box + 14 loose TAB". */
+export const packSummary = (stockIds: number[]) =>
+  api.post<{ items: PackSummaryRow[] }>("/api/warehouse/packs/summary",
+    { stock_ids: stockIds }).then((r) => r.data.items);
+
+/** One stock row pack by pack, with each hierarchy's levels and coded floor. */
+export const lotPacks = (stockId: number) =>
+  api.get<LotPacks>(`/api/warehouse/packs/lots/${stockId}`).then((r) => r.data);
+
+/** Change the pack levels of stock on the shelf — never the quantity. */
+export const repackLot = (stockId: number, body: {
+  pack_hierarchy_id: number; target: PackEntryIn[]; reason?: string | null;
+}) => api.post<LotPacks>(`/api/warehouse/packs/lots/${stockId}/repack`, body)
+  .then((r) => r.data);
+
+/** A scanned pack code and every unit inside it, at any depth. */
+export const packByCode = (code: string) =>
+  api.get<{ id: number; hu_code: string; level: number; pack_name?: string | null;
+            pack_size: number; is_atom: boolean; item_id: number; bin_id: number;
+            batch_id: number; units: { serial_number: string; imei?: string | null;
+                                       code: string }[] }>(
+    `/api/warehouse/packs/code/${encodeURIComponent(code)}`).then((r) => r.data);

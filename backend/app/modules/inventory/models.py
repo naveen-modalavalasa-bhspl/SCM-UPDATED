@@ -19,6 +19,7 @@ from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
 from app.shared.enums import Priority, ProjectHoldStatus, ReservationStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col, utcnow
+from app.shared.models.combination import CombinationMixin
 
 """0 rather than NULL means "not set" for bin, batch and project.
 
@@ -52,6 +53,13 @@ class Stock(Base):
     expiry_date = Column(Date, nullable=True)
     project_id = Column(BigInteger, index=True, nullable=False, default=NO_PROJECT)
     project_name = Column(String(200), nullable=True)     # snapshot
+    # The item's COMBINATION — brand, variant, model (mst_item_combinations,
+    # 2026-10-23). Part of the key: 100 of Brand A and 50 of Brand B are two rows, and
+    # nothing issues one for the other. 0 = no combination named (stock booked before
+    # this, or an item with no brands).
+    brand_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    variant_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    model_id = Column(BigInteger, nullable=False, default=0, server_default="0")
     # JSON, not a string: the live column is `json` and a lot holds many units, so it
     # is a LIST of serials / IMEIs. It was mapped as String(50) here, which is why
     # nothing ever managed to write one — MySQL rejects a bare string into a json
@@ -74,7 +82,8 @@ class Stock(Base):
     updated_at = updated_at_col()
     __table_args__ = (
         UniqueConstraint("item_id", "warehouse_id", "bin_id", "batch_id", "project_id",
-                         name="uq_stk_balance_item_wh_bin_batch_proj"),
+                         "brand_id", "variant_id", "model_id",
+                         name="uq_stk_balance_item_wh_bin_batch_proj_combo"),
     )
 
 
@@ -94,6 +103,10 @@ class StockMovement(Base):
     batch_id = Column(BigInteger, nullable=False, default=NO_BATCH)
     batch_no = Column(String(50), nullable=True)
     project_id = Column(BigInteger, index=True, nullable=False, default=NO_PROJECT)
+    # Which combination moved (2026-10-23) — see stk_balance.brand_id.
+    brand_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    variant_id = Column(BigInteger, nullable=False, default=0, server_default="0")
+    model_id = Column(BigInteger, nullable=False, default=0, server_default="0")
     direction = Column(String(3), nullable=False)   # StockDirection: IN | OUT
     quantity = Column(Numeric(16, 3), nullable=False)
     balance_after = Column(Numeric(16, 3), nullable=False)
@@ -112,6 +125,10 @@ class StockMovement(Base):
     ref_id = Column(BigInteger, nullable=True)
     ref_no = Column(String(50), nullable=True)
     remarks = Column(String(500), nullable=True)
+    # How this movement was PACKED, as the sentence the document said at the time
+    # ("2 Box + 5 Strip = 25 TAB", 2026-10-08). A snapshot like every other name on the
+    # row: the ledger is append-only and must read the same after any repack.
+    pack_text = Column(String(300), nullable=True)
     created_by_id = soft_fk()
     created_by_name = Column(String(200), nullable=True)
     created_at = created_at_col()
@@ -137,7 +154,7 @@ Index("ix_stk_ledger_ref", StockMovement.ref_type, StockMovement.ref_id)
 Index("ix_stk_ledger_created", StockMovement.created_at.desc())
 
 
-class Reservation(Base):
+class Reservation(CombinationMixin, Base):
     """One row per promised quantity — stock spoken for but not yet issued.
 
     Exists so stk_balance.reserved_qty is explainable: a reserved quantity with no
@@ -274,7 +291,7 @@ Index("ix_inv_allocations_status_created", Allocation.status,
       Allocation.created_at.desc())
 
 
-class AllocationItem(Base):
+class AllocationItem(CombinationMixin, Base):
     """One decision: this indent line gets this much, out of this warehouse.
 
     A line can appear more than once when the allocator splits it across warehouses.
@@ -340,7 +357,7 @@ Index("ix_inv_material_requests_status_created", MaterialRequest.status,
       MaterialRequest.created_at.desc())
 
 
-class MaterialRequestItem(Base):
+class MaterialRequestItem(CombinationMixin, Base):
     __tablename__ = "inv_material_request_items"
     id = pk()
     mr_id = Column(ForeignKey("inv_material_requests.id", ondelete="CASCADE"),
@@ -395,7 +412,7 @@ class StockAdjustment(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-class StockAdjustmentItem(Base):
+class StockAdjustmentItem(CombinationMixin, Base):
     __tablename__ = "inv_adjustment_items"
     id = pk()
     adjustment_id = Column(ForeignKey("inv_adjustments.id", ondelete="CASCADE"),
@@ -496,7 +513,7 @@ class StockTransferOrder(Base):
                          cascade="all, delete-orphan", lazy="selectin")
 
 
-class StockTransferOrderItem(Base):
+class StockTransferOrderItem(CombinationMixin, Base):
     __tablename__ = "inv_sto_items"
     id = pk()
     sto_id = Column(ForeignKey("inv_sto.id", ondelete="CASCADE"),

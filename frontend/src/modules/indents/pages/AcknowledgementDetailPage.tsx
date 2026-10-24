@@ -12,6 +12,7 @@ import {
   Button, Card, EmptyState, ErrorBanner, Input, PageHeader, SharedAttachmentViewer,
 } from "@/shared/components";
 import { alerts } from "@/modules/alerts";
+import { PackQty, baseOf, shrinkWithin, type PackEntry } from "@/shared/packing";
 import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
 import { TrackingBadge, useTrackingMeta } from "@/modules/warehouse/components/TrackingBadge";
 import type { TrackingType } from "@/modules/warehouse/types";
@@ -25,6 +26,7 @@ import {
   BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, dayStamp, lineStage, neededBy, onOrder, qty,
   receivable, shortDate,
 } from "../components/acknowledgementParts";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * One indent's delivery, walked the way the delivery itself happens.
@@ -683,6 +685,8 @@ type ReceiptPackageLine = AcknowledgementLine & {
   package_id?: number | null;
   package_no?: string | null;
   package_quantity?: number | null;
+  /** What the packer put in this package of the line (2026-10-22). */
+  package_pack_breakdown?: PackEntry[] | null;
 };
 
 interface ReceiptPackage {
@@ -866,6 +870,7 @@ function receiptPackageLine(
     package_id: part.package_id,
     package_no: part.package_no,
     package_quantity: packageQuantity,
+    package_pack_breakdown: part.pack_breakdown ?? null,
     serial_numbers: packageSerials.length > 0 ? packageSerials : line.serial_numbers,
   };
 }
@@ -2193,6 +2198,14 @@ function PackageLineRow({
                 {line.item_name ?? line.item_code}
               </div>
               <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+              <CombinationTag value={line} className="mt-1" />
+              {/* The packs this package holds of it, as the packer left them — codes
+                  stay per unit (2026-10-22). Older consignments fall back to the
+                  line's packs cut to this package's quantity. */}
+              {packsFor(line.package_pack_breakdown ?? line.pack_breakdown, max) && (
+                <PackQty entries={packsFor(line.package_pack_breakdown ?? line.pack_breakdown, max)}
+                         qty={max} uom={line.uom_code} className="mt-1.5" />
+              )}
             </div>
           </div>
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
@@ -2789,6 +2802,13 @@ function InProcessPanel({ lines }: { lines: AcknowledgementLine[] }) {
   );
 }
 
+/** A line's packs cut to the quantity being shown — the line was sent as one set of
+ *  packs and may arrive split over several cartons (2026-10-22). */
+function packsFor(packs: PackEntry[] | null | undefined, qty: number): PackEntry[] | null {
+  if (!packs?.length || qty <= 0) return null;
+  return Math.abs(baseOf(packs) - qty) < 1e-6 ? packs : shrinkWithin(packs, qty);
+}
+
 function InProcessLine({ line }: { line: AcknowledgementLine }) {
   const stage = lineStage(line);
   const { label, tone, icon: StageIcon, caption } = STAGE[stage];
@@ -2800,6 +2820,11 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
           {line.item_name ?? line.item_code}
         </div>
         <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
+        <CombinationTag value={line} className="mt-1" />
+        {packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0)) && (
+          <PackQty entries={packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0))}
+                   qty={line.dispatched_quantity} uom={line.uom_code} className="mt-1.5" />
+        )}
         <div className="mt-1.5 text-xs text-muted">
           {qty(line.approved_quantity)} approved
           {/* Only where there is one: a zero on every other row is noise, and on the

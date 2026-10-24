@@ -23,6 +23,7 @@ import type {
   Inspection, InspectionItemWrite, InspectionParameter, InspectionWrite, Receipt,
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { CombinationTag, comboFrom } from "@/shared/combination";
 
 /**
  * Inspect a receipt line by line.
@@ -132,6 +133,7 @@ export default function QualityInspectionForm({
       items: (doc.items ?? []).map((l) => ({
         id: l.id,
         receipt_item_id: l.receipt_item_id,
+        ...comboFrom(l),
         item_id: l.item_id,
         batch_no: l.batch_no,
         inspected_qty: num(l.inspected_qty),
@@ -255,6 +257,7 @@ export default function QualityInspectionForm({
         items: (receipt.items ?? []).filter((l) => l.requires_qi).map((l) => ({
           receipt_item_id: l.id,
           item_id: l.item_id,
+          ...comboFrom(l),
           item_code: l.item_code,
           item_name: l.item_name,
           batch_no: l.batch_no,
@@ -456,6 +459,7 @@ export default function QualityInspectionForm({
               {saved?.item_name ?? l.item_name ?? "—"}
               {l.batch_no ? ` · batch ${l.batch_no}` : ""}
             </div>
+            <CombinationTag value={saved ?? l} className="mt-1" />
           </div>
         );
       },

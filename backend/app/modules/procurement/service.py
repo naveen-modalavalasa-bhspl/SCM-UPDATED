@@ -47,6 +47,10 @@ from app.platform.mail import service as mail_service
 from app.platform.mail import template as mail_template
 from app.platform.mail.schemas import MailSendIn
 from app.platform.notifications import service as notifications
+from app.modules.procurement import packing as po_packing
+from app.shared.masters import packs
+from app.shared.masters.packs import pack_options
+from app.shared.packing import base_of as base_of_packs
 from app.platform.rbac import permissions as perms
 from app.platform.rbac.service import get_user_permissions
 from app.platform.settings.service import (
@@ -70,6 +74,7 @@ from app.shared.models.base import utcnow
 from app.shared.time import today as ist_today
 from app.shared.models.master import HsnCode, Item, Project, Vendor, VendorItem
 from app.shared.numbering import next_number
+from app.shared.masters import combinations
 
 
 def _d(value) -> Decimal:
@@ -187,33 +192,19 @@ async def _apply_payment_term(db: AsyncSession, po: PurchaseOrder, term_id: int)
     if term is None or not term.is_active:
         raise ValidationError("Payment terms: pick an active payment term from the list.")
     po.payment_term_id = term.id
-    from app.shared.masters.defs import parse_schedule
+    from app.shared.masters.defs import term_instalments, term_wording
 
-    parts, rows = [], []
+    # One milestone per instalment: a stage paid in four parts is four rows accounts
+    # pays against, each on its own day. `term_instalments` is the same arithmetic the
+    # master form previews, so the order holds exactly what the term promised.
+    rows = []
     for stage in PAYMENT_MILESTONE_META:
-        pct = _d(getattr(term, f"{stage['field']}_pct") or 0)
-        if pct <= 0:
-            continue
-        days = getattr(term, f"{stage['field']}_days") or 0
-        schedule = parse_schedule(term.delivery_schedule) \
-            if stage["field"] == "delivery" else []
-        if len(schedule) > 1:
-            # Equal instalments; the last takes the rounding so they add up to `pct`.
-            share = (pct / len(schedule)).quantize(Decimal("0.01"))
-            shares = [share] * (len(schedule) - 1) + [pct - share * (len(schedule) - 1)]
-            parts.append(f"{float(pct):g}% {stage['label'].lower()} in {len(schedule)} "
-                         f"instalments ({'/'.join(map(str, schedule))} days)")
-            for when, piece in zip(schedule, shares):
-                rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
-                                               percent=piece, due_days=when))
-            continue
-        days = schedule[0] if schedule else days
-        parts.append(f"{float(pct):g}% {stage['label'].lower()}"
-                     + (f" ({days} days)" if days else ""))
-        rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
-                                       percent=pct, due_days=days))
+        for part in term_instalments(term, stage["field"]):
+            rows.append(POPaymentMilestone(seq=len(rows) + 1, stage=stage["value"],
+                                           percent=part["order_pct"],
+                                           due_days=part["days"]))
     po.payment_milestones = rows
-    po.payment_terms = f"{term.name}: {', '.join(parts)}"
+    po.payment_terms = term_wording(term)
 
 
 def _apply_po_totals(po: PurchaseOrder, sub_total: Decimal, tax_total: Decimal) -> None:
@@ -473,12 +464,16 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
         tax = amount * _d(line.tax_percent) / _d(100)
         sub_total += amount
         tax_total += tax
-        db.add(POItem(
+        po_line = POItem(
             po_id=po.id, indent_item_id=line.indent_item_id, item_id=item.id,
             item_code=item.code, item_name=item.name, uom_code=item.uom_code,
             quantity=_d(line.quantity), rate=_d(line.rate),
             tax_percent=_d(line.tax_percent), amount=amount,
-        ))
+            **await _po_line_combination(db, item, line, line.indent_item_id),
+        )
+        db.add(po_line)
+        await po_packing.stamp_line(db, po_line, hierarchy_id=line.pack_hierarchy_id,
+                                    entries=line.pack_breakdown)
         # roll the ordered quantity up onto the indent line
         if line.indent_item_id:
             ind_item = await db.get(IndentItem, line.indent_item_id)
@@ -494,6 +489,8 @@ async def create_po_from_indent(db: AsyncSession, indent_id: int, data: POCreate
             to_apply -= applied
 
     _apply_po_totals(po, sub_total, tax_total)
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
 
     indent.status = IndentStatus.ORDERED.value
     await indent_service.notify_indent_followers(db, indent, indent.status)
@@ -576,13 +573,19 @@ async def create_po(db: AsyncSession, data: POCreate, user) -> PurchaseOrder:
         tax = amount * _d(line.tax_percent) / _d(100)
         sub_total += amount
         tax_total += tax
-        db.add(POItem(
+        po_line = POItem(
             po_id=po.id, item_id=item.id, item_code=item.code, item_name=item.name,
             uom_code=item.uom_code, quantity=_d(line.quantity), rate=_d(line.rate),
             tax_percent=_d(line.tax_percent), amount=amount,
-        ))
+            **await _po_line_combination(db, item, line, None),
+        )
+        db.add(po_line)
+        await po_packing.stamp_line(db, po_line, hierarchy_id=line.pack_hierarchy_id,
+                                    entries=line.pack_breakdown)
 
     _apply_po_totals(po, sub_total, tax_total)
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     await db.commit()
     logger.info("purchase order %s raised directly by %s (%d line(s))",
                 po.po_no, user.full_name, len(data.lines))
@@ -653,6 +656,7 @@ async def copy_po_template(db: AsyncSession, po_id: int, user) -> dict:
             "quantity": float(line.quantity), "rate": float(line.rate),
             "tax_percent": float(item.tax_percent if item.tax_percent is not None
                                  else line.tax_percent),
+            **combinations.carry(line),
         })
     if dropped:
         warnings.append("Left out because the item is no longer active: "
@@ -910,6 +914,7 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             # What the vendor promised on this line, kept with the line rather than
             # summarised into the header date above.
             delivery_days=line.delivery_days,
+            **combinations.carry(line),
         ))
 
     # The offer's own document-level money, carried across so the order comes to the
@@ -958,6 +963,10 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
     if rfq.consolidation_id:
         await _close_sheet_if_ordered(db, rfq.consolidation_id)
 
+    # A quotation says nothing about packing; describe each line in the item's
+    # default hierarchy so the supplier is told how to pack it (2026-10-08).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     await db.commit()
     logger.info("purchase order %s raised from %s (%s, %d line(s))",
                 po.po_no, quote.quotation_no, rfq.rfq_no, len(lines))
@@ -1511,12 +1520,16 @@ async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
             existing.rate = _d(incoming.rate)
             existing.tax_percent = _d(incoming.tax_percent)
             existing.amount = amount
+            for key, value in (await _po_line_combination(
+                    db, item, incoming, existing.indent_item_id, keep=existing)).items():
+                setattr(existing, key, value)
         else:
             db.add(POItem(
                 po_id=po.id, item_id=item.id, item_code=item.code,
                 item_name=item.name, uom_code=item.uom_code,
                 quantity=_d(incoming.quantity), rate=_d(incoming.rate),
                 tax_percent=_d(incoming.tax_percent), amount=amount,
+                **await _po_line_combination(db, item, incoming, None),
             ))
     for line in list(po.items):
         if line.id not in kept:
@@ -1529,6 +1542,9 @@ async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
         po.remarks = data.remarks
     await _apply_po_header(db, po, data)
 
+    # Lines were added and quantities moved: their packing must follow (2026-10-08).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     lines = list((await db.execute(
         select(POItem).where(POItem.po_id == po.id))).scalars().all())
     sub_total = tax_total = Decimal("0")
@@ -1545,9 +1561,13 @@ async def _rewrite_po(db: AsyncSession, po: PurchaseOrder, data, user,
                "total_amount": float(po.total_amount or 0)},
         summary=summary,
     )
+    # Expire only the order, so its lines are re-read. `expire_all` also expired the
+    # signed-in employee, and the scope check then read `user.id` synchronously —
+    # which an async session refuses (MissingGreenlet).
+    po_id = po.id
     await db.commit()
-    db.expire_all()
-    return await get_po_detail(db, po.id, user)
+    db.expire(po)
+    return await get_po_detail(db, po_id, user)
 
 
 async def pass_po_correction_down(db: AsyncSession, po_id: int, comments: str,
@@ -1659,6 +1679,26 @@ async def _vendor_has_dispatched(db: AsyncSession, po_id: int) -> str | None:
     )).scalar_one_or_none()
 
 
+async def _po_line_combination(db: AsyncSession, item, line, indent_item_id,
+                               *, keep=None) -> dict:
+    """Which brand / variant / model a PO line buys (2026-10-23).
+
+    The buyer's pick, checked against the item's ON combinations — a buyer may change
+    what the indent asked for (an alternative brand). Nothing picked: the line it was
+    already (an edit), else the indent line's own, else none. An indent that said
+    "Any" leaves the PO line without one until the buyer picks.
+    """
+    if getattr(line, "brand_id", None):
+        return await combinations.resolve(db, item.id, line, label=item.code)
+    if keep is not None:
+        return combinations.carry(keep)
+    if indent_item_id:
+        source = await db.get(IndentItem, indent_item_id)
+        if source is not None and source.brand_id:
+            return combinations.carry(source)
+    return dict(combinations.NONE)
+
+
 def _po_snapshot(po: PurchaseOrder) -> dict:
     """The whole order as it stands, header and lines, ready to be filed away.
 
@@ -1688,6 +1728,9 @@ def _po_snapshot(po: PurchaseOrder) -> dict:
             "tax_percent": float(line.tax_percent or 0),
             "amount": float(line.amount or 0),
             "received_quantity": float(line.received_quantity or 0),
+            "pack_hierarchy_id": line.pack_hierarchy_id,
+            "pack_breakdown": line.pack_breakdown,
+            **combinations.carry(line),
         } for line in po.items],
     }
 
@@ -1817,13 +1860,24 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
                 existing.rate = _d(incoming.rate)
                 existing.tax_percent = _d(incoming.tax_percent)
                 existing.amount = amount
+                for key, value in (await _po_line_combination(
+                        db, item, incoming, existing.indent_item_id, keep=existing)).items():
+                    setattr(existing, key, value)
+                await po_packing.stamp_line(
+                    db, existing, hierarchy_id=incoming.pack_hierarchy_id,
+                    entries=incoming.pack_breakdown)
             else:
-                db.add(POItem(
+                po_line = POItem(
                     po_id=po.id, item_id=item.id, item_code=item.code,
                     item_name=item.name, uom_code=item.uom_code,
                     quantity=_d(incoming.quantity), rate=_d(incoming.rate),
                     tax_percent=_d(incoming.tax_percent), amount=amount,
-                ))
+                    **await _po_line_combination(db, item, incoming, None),
+                )
+                db.add(po_line)
+                await po_packing.stamp_line(
+                    db, po_line, hierarchy_id=incoming.pack_hierarchy_id,
+                    entries=incoming.pack_breakdown)
         for line in list(po.items):
             if line.id is not None and line.id not in kept:
                 await db.delete(line)
@@ -1835,6 +1889,8 @@ async def amend_po(db: AsyncSession, po_id: int, data, user) -> PurchaseOrder:
         po.remarks = data.remarks
     await _apply_po_header(db, po, data)
 
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     lines = list((await db.execute(
         select(POItem).where(POItem.po_id == po.id)
     )).scalars().all())
@@ -2293,6 +2349,9 @@ async def update_po_approval_quantities(
         tax_total += amount * _d(line.tax_percent or 0) / _d(100)
     _apply_po_totals(po, sub_total, tax_total)
 
+    # A trimmed quantity is rescaled in the same hierarchy (2 Carton -> 18 Box).
+    await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
     await db.commit()
     logger.info("PO %s quantities trimmed during approval by %s: %s",
                 po.po_no, getattr(user, "full_name", user), trimmed)
@@ -2961,12 +3020,16 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
         item = await _item_snapshot(db, line.item_id)
         if item is None:
             raise ValidationError(f"Item {line.item_id} does not exist")
-        if line.item_id in seen_items:
+        combo = await _po_line_combination(
+            db, item, line, getattr(line, "indent_item_id", None))
+        key = (line.item_id, combo["brand_id"], combo["variant_id"], combo["model_id"])
+        if key in seen_items:
             raise ValidationError(
                 f"Item '{item.name or item.code}' is already added. "
-                "An item cannot be added more than once in the same requisition."
+                "An item cannot be added more than once in the same requisition "
+                "in the same brand / variant / model."
             )
-        seen_items.add(line.item_id)
+        seen_items.add(key)
         rate = _d(line.estimated_rate) or fallback.get(line.item_id, Decimal(0))
         amount = _d(line.quantity) * rate
         total += amount
@@ -2979,6 +3042,7 @@ async def _write_requisition_lines(db: AsyncSession, req: Requisition, lines,
             quantity=_d(line.quantity), estimated_rate=rate,
             estimated_amount=amount,
             required_date=line.required_date or default_date,
+            **combo,
         ))
     req.total_items = len(lines)
     req.estimated_value = total
@@ -3379,6 +3443,8 @@ async def _write_rfq_lines(db: AsyncSession, rfq: RFQ, lines) -> None:
             description=line.description,
             uom_code=line.uom_code or getattr(item, "uom_code", None),
             quantity=_d(line.quantity), required_date=line.required_date,
+            **await _po_line_combination(
+                db, item, line, getattr(line, "indent_item_id", None)),
         ))
     rfq.total_items = len(lines)
 
@@ -4119,6 +4185,7 @@ async def _publish_rfq(db: AsyncSession, rfq: RFQ) -> None:
                 item_code=line.item_code, item_name=line.item_name,
                 description=line.description, uom_code=line.uom_code,
                 quantity=_d(item_quantities[str(line.item_id)]),
+                **combinations.carry(line),
             ))
 
 
@@ -5491,6 +5558,62 @@ async def vendor_profile(db: AsyncSession, vendor_id: int) -> Vendor:
     return vendor
 
 
+async def vendor_item_combinations(db: AsyncSession, vendor_id: int,
+                                   item_ids: list[int]) -> dict:
+    """The ON brand / variant / model combinations of items THIS vendor deals in
+    (2026-10-23) — what the portal's quote and despatch-note lines may switch to.
+
+    Only items the vendor is mapped to, has been asked to quote, or has been ordered;
+    any other id in the request is dropped, so the portal never lists another
+    supplier's catalogue.
+    """
+    if not item_ids:
+        return {}
+    wanted = set(item_ids)
+    allowed = set((await db.execute(
+        select(VendorItem.item_id).where(VendorItem.vendor_id == vendor_id,
+                                         VendorItem.item_id.in_(wanted)))).scalars())
+    allowed |= set((await db.execute(
+        select(POItem.item_id).join(PurchaseOrder, PurchaseOrder.id == POItem.po_id)
+        .where(PurchaseOrder.vendor_id == vendor_id, POItem.item_id.in_(wanted))
+    )).scalars())
+    allowed |= set((await db.execute(
+        select(RFQItem.item_id).join(RFQVendor, RFQVendor.rfq_id == RFQItem.rfq_id)
+        .where(RFQVendor.vendor_id == vendor_id, RFQItem.item_id.in_(wanted))
+    )).scalars())
+    rows = await combinations.combination_options(db, sorted(allowed))
+    return {str(k): v for k, v in rows.items()}
+
+
+async def vendor_item_packing(db: AsyncSession, vendor_id: int) -> dict:
+    """The pack hierarchies of the items mapped to THIS vendor, every level with its
+    size and minimum fill (2026-10-11) — what the portal's Packing tab shows, so a
+    supplier knows how each item is to be packed before an order arrives.
+
+    Scoped by the vendor id from the token: only rows of `mst_vendor_items` naming
+    this vendor are read, so no supplier ever sees another's items.
+    """
+    rows = (await db.execute(
+        select(VendorItem.item_id, VendorItem.vendor_item_code, Item.code, Item.name,
+               Item.uom_code)
+        .join(Item, Item.id == VendorItem.item_id)
+        .where(VendorItem.vendor_id == vendor_id, Item.is_active.is_(True))
+        .order_by(Item.name)
+    )).all()
+    options = await pack_options(db, {r[0] for r in rows})
+    seen: set[int] = set()
+    items = []
+    for item_id, vendor_code, code, name, uom in rows:
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        hierarchies = [h for h in options.get(item_id, []) if len(h["levels"]) > 1]
+        items.append({"item_id": item_id, "item_code": code, "item_name": name,
+                      "uom_code": uom, "vendor_item_code": vendor_code,
+                      "hierarchies": hierarchies})
+    return {"items": items}
+
+
 def _vendor_visible():
     """The statuses a vendor may see. A DRAFT or PENDING_APPROVAL RFQ is internal —
     the company has not decided to ask them yet."""
@@ -5636,6 +5759,7 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
                 uom_code=line.uom_code,
                 quantity=qty,
                 requested_quantity=qty,
+                **combinations.carry(line),
                 rate=0,
                 discount_percent=0,
                 tax_percent=line.tax_percent or 0,
@@ -5775,6 +5899,12 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
         # is a fact about the two GSTINs and never rewrites the number.
         line.tax_percent = _d(gst)
         line.delivery_days = incoming.delivery_days
+        # The supplier may offer another brand / variant / model of the item
+        # (2026-10-23) — checked against the item's ON combinations.
+        if getattr(incoming, "brand_id", None):
+            for key, value in (await combinations.resolve(
+                    db, line.item_id, incoming, label=label)).items():
+                setattr(line, key, value)
 
     quote.vendor_ref_no = data.vendor_ref_no
     quote.valid_till = data.valid_till
@@ -6020,6 +6150,9 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
             line.rate = _d(row.get("rate", 0))
             line.tax_percent = _d(row.get("tax_percent", 0))
             line.amount = _d(row.get("amount", 0))
+            if "pack_breakdown" in row:
+                line.pack_hierarchy_id = row.get("pack_hierarchy_id")
+                line.pack_breakdown = row.get("pack_breakdown")
         else:
             # Added by the amendment the supplier has just refused. It can only be a
             # line nothing has been received against: amendment is closed once the
@@ -6034,8 +6167,12 @@ async def _revert_rejected_amendment(db: AsyncSession, po: PurchaseOrder,
                 tax_percent=_d(row.get("tax_percent", 0)),
                 amount=_d(row.get("amount", 0)),
                 received_quantity=_d(row.get("received_quantity", 0)),
+                pack_hierarchy_id=row.get("pack_hierarchy_id"),
+                pack_breakdown=row.get("pack_breakdown"),
+                **combinations.carry(row),
             ))
     await db.flush()
+    await po_packing.sync_po_packing(db, po.id)
 
     # Standing where it stood, including the supplier's own yes - which the amendment
     # cleared and which this puts back. No workflow is started: the agreement being
@@ -6191,6 +6328,7 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
     po = await _vendor_po_visible(db, vendor_id, po_id)
     po.under_revision = po.status not in _VENDOR_READABLE
     already = await _despatched_by_po_item(db, po.id)
+    options = await pack_options(db, {line.item_id for line in po.items})
 
     po.lines = [
         SimpleNamespace(
@@ -6202,6 +6340,10 @@ async def vendor_get_po(db: AsyncSession, vendor_id: int, po_id: int) -> Purchas
                             Decimal(0)),
             rate=float(line.rate),
             amount=float(line.amount),
+            pack_hierarchy_id=line.pack_hierarchy_id,
+            pack_breakdown=line.pack_breakdown,
+            pack_options=options.get(line.item_id, []),
+            **combinations.carry(line),
         )
         for line in po.items
     ]
@@ -6270,6 +6412,16 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             if line.po_item_id in already:
                 already[line.po_item_id] -= _d(line.despatched_qty)
 
+    # A line stated in packs carries its own total; work it out before the ceiling
+    # check below, so "1 Carton" is capped exactly as "1,200 TAB" would be.
+    for line in data.lines:
+        po_line = po_items.get(line.po_item_id)
+        if line.pack_breakdown and po_line is not None:
+            _hid, packed = await packs.snapshot(
+                db, item_id=po_line.item_id,
+                hierarchy_id=line.pack_hierarchy_id or po_line.pack_hierarchy_id,
+                entries=[e.model_dump() for e in line.pack_breakdown])
+            line.despatched_qty = float(base_of_packs(packed))
     lines = [line for line in data.lines if _d(line.despatched_qty) > 0]
     if not lines:
         raise ValidationError("A despatch note needs at least one quantity")
@@ -6352,7 +6504,7 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
 
     for index, line in enumerate(lines, start=1):
         po_line = po_items[line.po_item_id]
-        db.add(DespatchNoteItem(
+        note_line = DespatchNoteItem(
             despatch_note_id=note.id, line_no=index,
             po_item_id=line.po_item_id, item_id=po_line.item_id,
             item_code=po_line.item_code, item_name=po_line.item_name,
@@ -6360,7 +6512,18 @@ async def vendor_save_despatch_note(db: AsyncSession, vendor_id: int, po_id: int
             despatched_qty=_d(line.despatched_qty),
             batch_no=line.batch_no, mfg_date=line.mfg_date,
             expiry_date=line.expiry_date, remarks=line.remarks,
-        ))
+            # What was ordered, unless the supplier says they are sending another
+            # brand / variant / model of the item (2026-10-23) — checked against the
+            # item's ON combinations; the receipt then books what actually came.
+            **(await combinations.resolve(db, po_line.item_id, line,
+                                          label=po_line.item_code or "A line")
+               if getattr(line, "brand_id", None) else combinations.carry(po_line)),
+        )
+        # How it is packed; a hierarchy other than the order's goes to the buyer.
+        await po_packing.stamp_despatch_line(
+            db, note_line, po_line, hierarchy_id=line.pack_hierarchy_id,
+            entries=line.pack_breakdown, reason=line.pack_change_reason)
+        db.add(note_line)
 
     await db.commit()
     return await vendor_get_despatch_note(db, vendor_id, note.id)
@@ -6439,6 +6602,11 @@ async def vendor_submit_despatch_note(db: AsyncSession, vendor_id: int,
 
     note.status = DespatchNoteStatus.SUBMITTED.value
     note.submitted_at = utcnow()
+    # A changed packing is never silent: the buyer is told the moment the note is
+    # filed, which is when the goods are actually on their way.
+    po = await db.get(PurchaseOrder, note.po_id)
+    if po is not None:
+        await po_packing.notify_buyer_of_changes(db, note, po)
     await db.commit()
     logger.info("despatch note %s submitted against %s", note.dn_no, note.po_no)
     return await vendor_get_despatch_note(db, vendor_id, note.id)
@@ -6584,3 +6752,39 @@ async def _draft_requisition_on_mr_approval(db: AsyncSession, mr, user) -> None:
 # Guarded so a module reload cannot register the same hook twice and raise two drafts.
 if _draft_requisition_on_mr_approval not in inventory_hooks.ON_MR_APPROVED:
     inventory_hooks.ON_MR_APPROVED.append(_draft_requisition_on_mr_approval)
+
+
+# =========================================================================== #
+#  Supplier changes of packing — see `procurement/packing.py`
+# =========================================================================== #
+
+async def list_po_pack_changes(db: AsyncSession, po_id: int, user) -> list[dict]:
+    await get_po(db, po_id, user, include_approver=True)   # the scope check
+    return await po_packing.list_pack_changes(db, po_id)
+
+
+async def decide_po_pack_change(db: AsyncSession, po_id: int, line_id: int,
+                                accept: bool, data, user) -> dict:
+    await get_po(db, po_id, user)                          # the raiser's scope
+    return await po_packing.decide_pack_change(db, po_id, line_id, accept=accept,
+                                               note=data.note, user=user)
+
+
+async def repack_po_line(db: AsyncSession, po_id: int, line_id: int, data, user):
+    """See `procurement/packing.repack_po_line`. Scoped like every PO edit."""
+    po = await get_po(db, po_id, user)
+    line = next((row for row in po.items if row.id == line_id), None)
+    if line is None:
+        raise NotFoundError("That line is not on this order.")
+    await po_packing.repack_po_line(
+        db, po, line, hierarchy_id=data.pack_hierarchy_id, entries=data.pack_breakdown,
+        user=user, closed_statuses=_UNAMENDABLE,
+        despatched_no=await _vendor_has_dispatched(db, po.id))
+    sub_total = tax_total = Decimal("0")
+    for row in po.items:
+        amount = _d(row.amount)
+        sub_total += amount
+        tax_total += amount * _d(row.tax_percent or 0) / _d(100)
+    _apply_po_totals(po, sub_total, tax_total)
+    await db.commit()
+    return await get_po_detail(db, po.id, user)

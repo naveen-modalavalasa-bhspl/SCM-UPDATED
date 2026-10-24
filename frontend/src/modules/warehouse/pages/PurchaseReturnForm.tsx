@@ -39,6 +39,7 @@ import type {
   PurchaseReturnSourceDetail,
   PurchaseReturnWrite,
 } from "../types";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * Warehouse → Vendor Purchase Return — the Storekeeper's single screen.
@@ -1113,6 +1114,7 @@ export default function PurchaseReturnForm() {
                   <tr key={l.key} className="border-b border-line/60 last:border-0">
                     <td className="py-2 pr-3">
                       <div className="font-medium text-ink">{l.it.item_name ?? l.it.item_code}</div>
+                      <CombinationTag value={l.it} className="mt-1" />
                       <div className="text-xs text-muted">
                         {[l.it.item_code, l.it.uom_code, l.it.batch_no ? `Batch ${l.it.batch_no}` : null].filter(Boolean).join(" · ")}
                       </div>

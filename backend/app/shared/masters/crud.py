@@ -24,6 +24,18 @@ from app.shared.enums import AuditAction
 from app.shared.masters.bulk import register_bulk_routes
 
 
+class UseExistingRow(Exception):
+    """Raised by a master's `apply` when the "new" row is really an existing one —
+    an item whose code already exists gets the new brand added to it rather than a
+    second row (2026-10-23). The create route answers with that row and a message,
+    and writes nothing else."""
+
+    def __init__(self, row, message: str):
+        super().__init__(message)
+        self.row = row
+        self.message = message
+
+
 # A usage declaration names a table and a column. Nothing from a request is ever
 # interpolated into SQL, but the check keeps that true if defs.py is edited carelessly.
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -324,7 +336,14 @@ def _register(router: APIRouter, defn: MasterDef) -> None:
         user=Depends(require_permission(defn.manage_perm)),
     ):
         row = defn.model()
-        await _apply_fields(db, defn, row, data, user)
+        try:
+            await _apply_fields(db, defn, row, data, user)
+        except UseExistingRow as existing:
+            await _write(db, defn, commit=True)
+            await db.refresh(existing.row)
+            await _prepare_rows(db, defn, [existing.row])
+            return {**defn.serialize(existing.row), "merged_into_existing": True,
+                    "message": existing.message}
         db.add(row)
         await _write(db, defn)
         # A new row has only ever been written, never read, so anything the ORM does

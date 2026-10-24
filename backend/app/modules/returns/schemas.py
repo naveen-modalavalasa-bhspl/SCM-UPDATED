@@ -13,9 +13,10 @@ from .enums import Disposition, ReturnIntent, ReturnKind, ReturnReason
 from app.shared.limits import (  # request-size guards, see the module
     MAX_DOCUMENT_LINES,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
-class ReturnLineIn(BaseModel):
+class ReturnLineIn(CombinationIn):
     item_id: int
     quantity: Decimal = Field(gt=0)
     remarks: str | None = None
@@ -168,7 +169,7 @@ class SentBackOut(BaseModel):
     from_stage: str | None = None
 
 
-class ReturnLineOut(BaseModel):
+class ReturnLineOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
 
     id: int

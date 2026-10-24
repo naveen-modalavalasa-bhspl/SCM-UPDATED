@@ -13,6 +13,8 @@ import {
 } from "../components/POHeaderFields";
 import type { POCopyTemplate } from "../types";
 import { money } from "./RequisitionListPage";
+import { toPayload } from "@/shared/packing";
+import { comboFrom, comboPayload } from "@/shared/combination";
 
 /** A copy template in the shape this form edits. */
 function headerFromCopy(t: POCopyTemplate): POHeaderValue {
@@ -36,6 +38,7 @@ const linesFromCopy = (t: POCopyTemplate): DraftLine[] => t.lines.length
     item_id: line.item_id, item_code: line.item_code, item_name: line.item_name,
     uom_code: line.uom_code, quantity: String(line.quantity), rate: String(line.rate),
     tax_percent: String(line.tax_percent),
+    combo: comboFrom(line),
   }))
   : [blankLine()];
 
@@ -156,6 +159,9 @@ export function POFormPage() {
             quantity: Number(line.quantity),
             rate: Number(line.rate || 0),
             tax_percent: Number(line.tax_percent || 0),
+            pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+            pack_breakdown: line.pack_breakdown?.length ? toPayload(line.pack_breakdown) : null,
+            ...comboPayload(line.combo),
           })),
         copied_from_po_id: copied?.source_po_id ?? null,
       }),
@@ -261,7 +267,8 @@ export function POFormPage() {
 
         <div>
           <h2 className="mb-3 text-sm font-semibold text-ink">What is being ordered</h2>
-          <LinePicker lines={lines} onChange={setLines} showRate showTax showDate={false} />
+          <LinePicker lines={lines} onChange={setLines} showRate showTax showDate={false}
+                      showPacking />
         </div>
 
         {/* Project, remarks, addresses, terms and the document money — the same block
@@ -270,6 +277,7 @@ export function POFormPage() {
         <div className="border-t border-line pt-4">
           <POHeaderFields
             value={header}
+            orderTotal={totals.grand}
             onChange={(patch) => setHeader({ ...header, ...patch })}
           />
         </div>

@@ -10,7 +10,7 @@ import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
-from sqlalchemy import false, func, or_, select, update
+from sqlalchemy import false, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -21,17 +21,17 @@ from app.shared.enums import (
     ItemScope,
     AuditAction, CARRIER_VENDOR_TYPES, SHIPMENT_ADDRESS_WAREHOUSE_TYPES,
     AttributeDataType, CategoryTagType, UomClass,
-    WarehouseType, PAYMENT_MILESTONE_META,
+    WarehouseType, PAYMENT_MILESTONE_META, MAX_PAYMENT_INSTALMENTS, PaymentSplitMode,
 )
-from app.shared.masters.crud import Lookup, MasterDef
+from app.shared.masters.crud import Lookup, MasterDef, UseExistingRow
 from app.platform.rbac.models import Role
 from app.shared.models.master import (
     ItemEligibility,
     Attribute, Bom, BomGroup, BomItem, Brand, BrandGeneralName, BrandManufacturer,
-    BrandItemMapping,
+    BrandItemMapping, BrandModel, BrandVariant,
     CategoryTag, DosageForm, Feature, GeneralName, HsnCode, Item, ItemCategory,
     ItemClass, ItemComponent, ItemGroup, ItemPackaging, ItemSubClass, Manufacturer,
-    Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
+    PackHierarchy, Packaging, PaymentTerm, Project, Spec, Uom, UomConversion, Vendor, VendorItem,
     UomClassRow, VendorCategory, VendorCategoryMember,
 )
 from app.shared.models.warehouse import Bin, StorageType, Warehouse
@@ -213,11 +213,23 @@ async def prepare_items(db: AsyncSession, rows: list[Item]) -> None:
         .group_by(Attachment.entity_id))).all()) if ids else {}
     for row in rows:
         row._photo_id = latest.get(row.id)
+    # A code still held by more than one active row (2026-10-23) — created before an
+    # item became one row per code, and not yet merged by
+    # `scripts.consolidate_item_brands`. Said on the row so nobody mistakes the two
+    # for two different items.
+    codes = {row.code for row in rows if row.code}
+    shared = dict((await db.execute(
+        select(Item.code, func.count(Item.id))
+        .where(Item.code.in_(codes), Item.is_active.is_(True))
+        .group_by(Item.code).having(func.count(Item.id) > 1))).all()) if codes else {}
+    for row in rows:
+        row._rows_with_code = shared.get(row.code, 1)
 
 
 def item_out(i: Item) -> dict:
     return {"id": i.id, "code": i.code, "serial_no": i.serial_no, "name": i.name,
             "photo_id": getattr(i, "_photo_id", None),
+            "rows_with_code": getattr(i, "_rows_with_code", 1),
             "short_name": i.short_name,
             "uom_id": i.uom_id, "uom_code": i.uom_code, "category_id": i.category_id,
             "category_name": i.category_name, "item_type": i.item_type,
@@ -345,31 +357,33 @@ async def apply_item(db: AsyncSession, item: Item, data: ItemIn) -> None:
         await next_item_serial(db, prefix)            # takes the series lock first
         sibling = await sibling_item(db, prefix, category.id, general.id)
         if sibling is not None:
-            # The same code + the same brand + the same manufacturer is the same
-            # item. NULL-safe on both sides: an item with no brand clashes only
-            # with another unbranded item of that code, never with a branded
-            # variant sharing the code (brand variants intentionally share one).
-            clash_stmt = select(Item.id).where(Item.code == sibling.code)
+            # ONE row per item code (2026-10-23). Another brand of an item that
+            # already exists is a brand of that item, not a second item: the brand is
+            # mapped onto the item that holds the code and the create answers with it.
+            # Rows created before this share a code until
+            # `scripts.consolidate_item_brands` merges them.
+            from app.shared.masters import combinations
+            holder = await db.scalar(
+                select(Item).where(Item.code == sibling.code, Item.is_active.is_(True))
+                .order_by(Item.id).limit(1)) or sibling
             if brand is not None:
-                clash_stmt = clash_stmt.where(Item.brand_id == brand.id)
-            else:
-                clash_stmt = clash_stmt.where(Item.brand_id.is_(None))
-            if manufacturer is not None:
-                clash_stmt = clash_stmt.where(
-                    Item.manufacturer_id == manufacturer.id)
-            else:
-                clash_stmt = clash_stmt.where(Item.manufacturer_id.is_(None))
-            if await db.scalar(clash_stmt) is not None:
-                if brand is not None and manufacturer is not None:
-                    who = f" by {brand.name} / {manufacturer.name}"
-                elif brand is not None:
-                    who = f" by {brand.name}"
-                else:
-                    who = ""
+                mapped = {row.brand_id for row in await combinations.sync_item(db, holder.id)}
+                if brand.id not in mapped:
+                    db.add(BrandItemMapping(
+                        item_id=holder.id, item_code=holder.code, item_name=holder.name,
+                        brand_id=brand.id, brand_code=brand.code, brand_name=brand.name,
+                        is_active=True))
+                    await db.flush()
+                    await combinations.sync_item(db, holder.id)
+                    raise UseExistingRow(
+                        holder, f"“{general.name}” already exists as {holder.code}. "
+                                f"{brand.name} has been added to it as a brand.")
                 raise ValidationError(
-                    f"“{general.name}”{who} already "
-                    f"exists as {sibling.code}. Edit that item instead.")
-            item.serial_no, item.code = sibling.serial_no, sibling.code
+                    f"“{general.name}” by {brand.name} already exists as "
+                    f"{holder.code}. Edit that item instead.")
+            raise ValidationError(
+                f"“{general.name}” already exists as {holder.code}. Edit that item "
+                "instead, or add the brand on its Brands tab.")
         else:
             item.serial_no = await next_item_serial(db, prefix)
             item.code = build_item_code(category.path, item.serial_no)
@@ -615,7 +629,7 @@ class WarehouseIn(BaseModel):
     warehouse_type: str = "MAIN"
     address: str | None = None
     incharge_id: int | None = None
-    is_bin_managed: bool = False
+    is_bin_managed: bool = True
     # Blank = follow the company default (warehouse.requires_inward_default). True
     # means arrivals here go through Material Inward -> GRN -> QC before they count.
     requires_inward: bool | None = None
@@ -663,6 +677,8 @@ async def apply_warehouse(db: AsyncSession, w: Warehouse, data: WarehouseIn) -> 
         raise ValidationError(
             f"Warehouse type: “{data.warehouse_type}” is not one of the choices. "
             f"Pick one of: {', '.join(t.value for t in WarehouseType)}.")
+    if data.warehouse_type == "MAIN":
+        data.is_bin_managed = True
     facility = await db.get(HcmFacility, data.facility_id) if data.facility_id else None
     if data.facility_id is not None and facility is None:
         raise ValidationError("Facility: that facility does not exist. Pick one from the list.")
@@ -1079,63 +1095,251 @@ def vendor_category_out(row) -> dict:
             "vendor_ids": getattr(row, "_vendor_ids", [])}
 
 
-def parse_schedule(value: str | None) -> list[int]:
-    """"30, 60/90" -> [30, 60, 90]: the days after delivery each instalment is due."""
-    parts = [p for p in re.split(r"[\s,/;]+", (value or "").strip()) if p]
-    if not parts:
+# --------------------------------------------------------------------------- #
+#  Payment terms: stages and their instalments (2026-10-06)
+# --------------------------------------------------------------------------- #
+_TWO_PLACES = Decimal("0.01")
+
+
+def _number_list(value) -> list[str]:
+    """"30, 60/90" or [30, 60, 90] -> ["30", "60", "90"]. Blank -> []."""
+    if value is None:
         return []
-    if len(parts) > 12 or not all(p.isdigit() and int(p) <= 3650 for p in parts):
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [p for p in re.split(r"[\s,/;]+", str(value).strip()) if p]
+
+
+def parse_schedule(value, *, stage: str = "Instalment") -> list[int]:
+    """The day counts of a stage's instalments, in the order they fall due.
+
+    Strictly increasing: two instalments on the same day are one payment, and a list
+    typed out of order is far more often a slip than a plan."""
+    parts = _number_list(value)
+    if len(parts) > MAX_PAYMENT_INSTALMENTS or not all(
+            p.isdigit() and int(p) <= 3650 for p in parts):
         raise PydanticCustomError(
             "payment_schedule",
-            "Delivery instalments: list the days after delivery, e.g. 30,60,90 "
-            "(at most 12, each 0–3650).")
-    return sorted(int(p) for p in parts)
+            "{stage}: each instalment needs a whole number of days between 0 and 3650 "
+            "(at most {max} instalments).",
+            {"stage": stage, "max": MAX_PAYMENT_INSTALMENTS})
+    days = [int(p) for p in parts]
+    for i in range(1, len(days)):
+        if days[i] <= days[i - 1]:
+            raise PydanticCustomError(
+                "payment_schedule",
+                "{stage}: instalment {n} ({later} days) must fall after instalment "
+                "{prev} ({earlier} days).",
+                {"stage": stage, "n": i + 1, "later": days[i], "prev": i,
+                 "earlier": days[i - 1]})
+    return days
+
+
+def parse_shares(value, *, stage: str = "Instalment") -> list[Decimal]:
+    """Each custom instalment's percent of its stage, e.g. "30,40,10,20"."""
+    out = []
+    for p in _number_list(value):
+        try:
+            share = Decimal(p)
+        except Exception:
+            share = Decimal(-1)
+        if not share.is_finite() or share <= 0 or share > 100:
+            raise PydanticCustomError(
+                "payment_shares",
+                "{stage}: every instalment needs a share above 0% and up to 100% "
+                "(got \"{value}\").", {"stage": stage, "value": p})
+        out.append(share.quantize(_TWO_PLACES))
+    return out
+
+
+def fmt_pct(value) -> str:
+    """33.30 -> "33.3", 25.00 -> "25"."""
+    text = format(Decimal(str(value)).quantize(_TWO_PLACES), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def term_instalments(term, field: str) -> list[dict]:
+    """One stage of a payment term as the payments it becomes, in order.
+
+    Each entry: `stage_pct` (its share of the STAGE), `order_pct` (its share of the
+    ORDER, two places) and `days` after the stage's trigger. The last instalment takes
+    the rounding, so the order shares add up to the stage's exactly -- a 50% stage in
+    three equal parts is 16.67 + 16.67 + 16.66, never 50.01. Reads attribute names
+    only, so it serves the ORM row and the incoming schema alike. A stage at 0% is no
+    payment at all."""
+    pct = Decimal(str(getattr(term, f"{field}_pct") or 0))
+    if pct <= 0:
+        return []
+    mode = getattr(term, f"{field}_split", None) or PaymentSplitMode.ONE.value
+    mode = getattr(mode, "value", mode)
+    days = parse_schedule(getattr(term, f"{field}_instalment_days", None))
+    if mode == PaymentSplitMode.ONE.value or len(days) < 2:
+        return [{"stage_pct": Decimal(100), "order_pct": pct.quantize(_TWO_PLACES),
+                 "days": int(getattr(term, f"{field}_days") or 0)}]
+    if mode == PaymentSplitMode.CUSTOM.value:
+        shares = parse_shares(getattr(term, f"{field}_instalment_pcts", None))
+        order = [(pct * s / 100).quantize(_TWO_PLACES) for s in shares]
+    else:
+        # Divide the ORDER share, not the stage: 50% in three is 16.67/16.67/16.66,
+        # where a third of the stage each (33.33%) rounds to 16.66/16.66/16.68.
+        even = (pct / len(days)).quantize(_TWO_PLACES)
+        order = [even] * len(days)
+        shares = [(even * 100 / pct).quantize(_TWO_PLACES)] * len(days)
+        shares[-1] = Decimal(100) - sum(shares[:-1])
+    order[-1] = pct - sum(order[:-1])
+    return [{"stage_pct": s, "order_pct": o, "days": d}
+            for s, o, d in zip(shares, order, days)]
+
+
+def _stage_sentence(meta: dict, term) -> str | None:
+    parts = term_instalments(term, meta["field"])
+    if not parts:
+        return None
+    pct = fmt_pct(getattr(term, f"{meta['field']}_pct"))
+    if len(parts) == 1:
+        days = parts[0]["days"]
+        trigger = meta["trigger"][:1].lower() + meta["trigger"][1:]
+        when = f"within {days} days {meta['after']}" if days else trigger
+        return f"{pct}% {meta['label'].lower()}, {when}"
+    mode = getattr(term, f"{meta['field']}_split")
+    mode = getattr(mode, "value", mode)
+    kind = "equal" if mode == PaymentSplitMode.EQUAL.value else "custom"
+    each = ", ".join(f"{fmt_pct(p['order_pct'])}% at {p['days']}d" for p in parts)
+    return (f"{pct}% {meta['label'].lower()} in {len(parts)} {kind} instalments "
+            f"({each} {meta['after']})")
+
+
+def term_summary(term) -> str:
+    """One line, for a dropdown or a list."""
+    return " · ".join(filter(None, (_stage_sentence(m, term)
+                                    for m in PAYMENT_MILESTONE_META))) or "—"
+
+
+def term_wording(term) -> str:
+    """What a purchase order prints for a term: the term's CODE first, so anybody
+    holding the paper can find the master it came from, then one line per stage,
+    each led by the milestone code accounts pays against (ADV, DLV, INS, WAR)."""
+    lines = [f"[{term.code}] {term.name}"]
+    for meta in PAYMENT_MILESTONE_META:
+        sentence = _stage_sentence(meta, term)
+        if sentence:
+            lines.append(f"• {meta['short']}: {sentence}")
+    return "\n".join(lines)
 
 
 class PaymentTermIn(BaseModel):
-    """A payment term: the four milestones' share of the order value, and how many days
-    after its trigger each one is payable. The shares must add up to 100."""
+    """A payment term: the four milestones' share of the order value, and when each is
+    payable -- in one payment, or split into instalments. The shares add up to 100."""
     code: str = Field(min_length=1, max_length=20)
     name: str = Field(min_length=1, max_length=150)
     description: str | None = Field(None, max_length=300)
     advance_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     advance_days: int = Field(default=0, ge=0, le=3650)
+    advance_split: PaymentSplitMode = PaymentSplitMode.ONE
+    advance_instalment_days: str | None = Field(None, max_length=120)
+    advance_instalment_pcts: str | None = Field(None, max_length=120)
     delivery_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     delivery_days: int = Field(default=0, ge=0, le=3650)
-    # Equal instalments of the delivery share, e.g. "30,60,90" days after delivery.
-    delivery_schedule: str | None = Field(None, max_length=60)
+    delivery_split: PaymentSplitMode = PaymentSplitMode.ONE
+    delivery_instalment_days: str | None = Field(None, max_length=120)
+    delivery_instalment_pcts: str | None = Field(None, max_length=120)
     installation_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     installation_days: int = Field(default=0, ge=0, le=3650)
+    installation_split: PaymentSplitMode = PaymentSplitMode.ONE
+    installation_instalment_days: str | None = Field(None, max_length=120)
+    installation_instalment_pcts: str | None = Field(None, max_length=120)
     warranty_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     warranty_days: int = Field(default=0, ge=0, le=3650)
+    warranty_split: PaymentSplitMode = PaymentSplitMode.ONE
+    warranty_instalment_days: str | None = Field(None, max_length=120)
+    warranty_instalment_pcts: str | None = Field(None, max_length=120)
     is_active: bool = True
 
-    @field_validator("delivery_schedule")
+    @field_validator("advance_split", "delivery_split", "installation_split",
+                     "warranty_split", mode="before")
     @classmethod
-    def _schedule(cls, value: str | None) -> str | None:
-        days = parse_schedule(value)
-        return ",".join(str(d) for d in days) or None
+    def _split(cls, value):
+        # An import sheet cell left blank, or typed in lower case.
+        text = str(value).strip().upper() if value is not None else ""
+        return text or PaymentSplitMode.ONE.value
+
+    @field_validator("advance_instalment_days", "advance_instalment_pcts",
+                     "delivery_instalment_days", "delivery_instalment_pcts",
+                     "installation_instalment_days", "installation_instalment_pcts",
+                     "warranty_instalment_days", "warranty_instalment_pcts",
+                     mode="before")
+    @classmethod
+    def _list(cls, value):
+        # A JSON client may send a real list; store the same comma text either way.
+        return ",".join(_number_list(value)) or None
 
     @model_validator(mode="after")
-    def _adds_to_hundred(self):
+    def _plan(self):
         total = (self.advance_pct + self.delivery_pct + self.installation_pct
                  + self.warranty_pct)
         if total != 100:
             raise PydanticCustomError(
                 "payment_split",
                 "Advance + delivery + installation + warranty must add up to 100% "
-                "(they add up to {total}%).", {"total": f"{total:g}"})
+                "(they add up to {total}%).", {"total": fmt_pct(total)})
+        for meta in PAYMENT_MILESTONE_META:
+            self._check_stage(meta)
         return self
+
+    def _check_stage(self, meta: dict) -> None:
+        f, label = meta["field"], meta["label"]
+        mode = getattr(self, f"{f}_split")
+        if getattr(self, f"{f}_pct") <= 0 or mode == PaymentSplitMode.ONE:
+            # Nothing to split: a stage at 0% pays nothing, and ONE ignores the lists.
+            setattr(self, f"{f}_split", PaymentSplitMode.ONE)
+            setattr(self, f"{f}_instalment_days", None)
+            setattr(self, f"{f}_instalment_pcts", None)
+            return
+        days = parse_schedule(getattr(self, f"{f}_instalment_days"), stage=label)
+        if len(days) < 2:
+            raise PydanticCustomError(
+                "payment_instalments",
+                "{stage}: instalments need at least 2 payments, each with its days. "
+                "For a single payment, untick the instalment box.", {"stage": label})
+        if mode == PaymentSplitMode.CUSTOM:
+            shares = parse_shares(getattr(self, f"{f}_instalment_pcts"), stage=label)
+            if len(shares) != len(days):
+                raise PydanticCustomError(
+                    "payment_instalments",
+                    "{stage}: every instalment needs both a share and a day count "
+                    "(got {s} shares and {d} day counts).",
+                    {"stage": label, "s": len(shares), "d": len(days)})
+            if sum(shares) != 100:
+                raise PydanticCustomError(
+                    "payment_instalments",
+                    "{stage}: the instalment shares must add up to 100% of the stage "
+                    "(they add up to {total}%).",
+                    {"stage": label, "total": fmt_pct(sum(shares))})
+        else:
+            setattr(self, f"{f}_instalment_pcts", None)
+        if any(p["order_pct"] <= 0 for p in term_instalments(self, f)):
+            raise PydanticCustomError(
+                "payment_instalments",
+                "{stage}: {pct}% is too small to split into {n} payments -- each "
+                "would round to 0% of the order.",
+                {"stage": label, "pct": fmt_pct(getattr(self, f"{f}_pct")),
+                 "n": len(days)})
+        # The single-payment day count mirrors the first instalment, so anything that
+        # still reads `<stage>_days` alone reads when the stage STARTS paying.
+        setattr(self, f"{f}_days", days[0])
 
 
 def payment_term_out(row) -> dict:
     out = {"id": row.id, "code": row.code, "name": row.name,
-           "description": row.description, "is_active": row.is_active}
+           "description": row.description, "is_active": row.is_active,
+           "summary": term_summary(row), "wording": term_wording(row)}
     for stage in PAYMENT_MILESTONE_META:
         f = stage["field"]
         out[f"{f}_pct"] = float(getattr(row, f"{f}_pct") or 0)
         out[f"{f}_days"] = getattr(row, f"{f}_days") or 0
-    out["delivery_schedule"] = row.delivery_schedule
+        out[f"{f}_split"] = getattr(row, f"{f}_split") or PaymentSplitMode.ONE.value
+        out[f"{f}_instalment_days"] = getattr(row, f"{f}_instalment_days")
+        out[f"{f}_instalment_pcts"] = getattr(row, f"{f}_instalment_pcts")
     return out
 
 
@@ -1143,7 +1347,7 @@ async def apply_payment_term(db: AsyncSession, row, data: PaymentTermIn) -> None
     await require_unique(db, PaymentTerm, "name", data.name, row, "A payment term named")
     await require_unique(db, PaymentTerm, "code", data.code, row, "Payment term code")
     for key, value in data.model_dump().items():
-        setattr(row, key, value)
+        setattr(row, key, value.value if isinstance(value, PaymentSplitMode) else value)
 
 
 async def prepare_vendor_categories(db: AsyncSession, rows: list) -> None:
@@ -1333,13 +1537,33 @@ async def brand_item_mapping_sources(db: AsyncSession) -> dict:
     """
     cats = (await db.execute(select(ItemCategory).where(
         ItemCategory.is_active.is_(True)).order_by(ItemCategory.path))).scalars().all()
-    items = (await db.execute(select(Item).where(
-        Item.is_active.is_(True)).order_by(Item.code))).scalars().all()
+    every = (await db.execute(select(Item).where(
+        Item.is_active.is_(True)).order_by(Item.code, Item.id))).scalars().all()
     brands = (await db.execute(select(Brand).where(
         Brand.is_active.is_(True)).order_by(Brand.name))).scalars().all()
-    pairs = (await db.execute(
-        select(BrandItemMapping.brand_id, BrandItemMapping.item_id).where(
-            BrandItemMapping.is_active.is_(True)))).all()
+    # ONE entry per item code (2026-10-23). Rows that still share a code (created
+    # before an item became one row per code) are shown as the oldest of them, with
+    # every row's brands — mapped, or the older single `brand_id` on the row — so the
+    # screen reads the way the data will once `scripts.consolidate_item_brands` runs.
+    holder: dict[str, Item] = {}
+    alias: dict[int, int] = {}
+    for row in every:
+        alias[row.id] = holder.setdefault(row.code, row).id
+    items = list(holder.values())
+    seen: set[tuple[int, int]] = set()
+    pairs = []
+    for brand_id, item_id in (await db.execute(
+            select(BrandItemMapping.brand_id, BrandItemMapping.item_id).where(
+                BrandItemMapping.is_active.is_(True)))).all():
+        key = (brand_id, alias.get(item_id, item_id))
+        if key not in seen:
+            seen.add(key)
+            pairs.append(key)
+    for row in every:
+        key = (row.brand_id, alias[row.id])
+        if row.brand_id and key not in seen:
+            seen.add(key)
+            pairs.append(key)
     # Per-brand manufacturer names off the eagerly-loaded Brand.manufacturers
     # relationship (selectin, so no lazy load on this async session).
     return {
@@ -1594,6 +1818,97 @@ async def apply_brand_manufacturer(
     row.manufacturer_id = manufacturer.id
     row.manufacturer_code, row.manufacturer_name = manufacturer.code, manufacturer.name
     row.is_active = data.is_active
+
+
+# --------------------------------------------------------------------------- #
+#  Brand variants and models (Brand → Variant → Model)
+# --------------------------------------------------------------------------- #
+_CHILD_CODE = r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$"
+
+
+class _BrandChildIn(BaseModel):
+    code: str = Field(min_length=1, max_length=20, pattern=_CHILD_CODE)
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(None, max_length=300)
+    is_active: bool = True
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def _upper(cls, value):
+        return str(value).strip().upper() if value is not None else value
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _trim(cls, value):
+        return str(value).strip() if value is not None else value
+
+
+class BrandVariantIn(_BrandChildIn):
+    brand_id: int
+
+
+class BrandModelIn(_BrandChildIn):
+    brand_id: int
+    variant_id: int
+
+
+def brand_variant_out(row) -> dict:
+    return {"id": row.id, "brand_id": row.brand_id, "brand_code": row.brand_code,
+            "brand_name": row.brand_name, "code": row.code, "name": row.name,
+            "description": row.description, "is_active": row.is_active}
+
+
+def brand_model_out(row: BrandModel) -> dict:
+    return {**brand_variant_out(row), "variant_id": row.variant_id,
+            "variant_code": row.variant_code, "variant_name": row.variant_name}
+
+
+async def _active_brand(db: AsyncSession, brand_id: int) -> Brand:
+    brand = await db.get(Brand, brand_id)
+    if not brand:
+        raise ValidationError("Brand: pick one from the list.")
+    if not brand.is_active:
+        raise ValidationError(f"Brand “{brand.name}” is inactive. Reactivate it first.")
+    return brand
+
+
+async def apply_brand_variant(db: AsyncSession, row: BrandVariant,
+                              data: BrandVariantIn) -> None:
+    brand = await _active_brand(db, data.brand_id)
+    # Its models snapshot the brand, so a variant with models cannot change brand.
+    if row.id is not None and row.brand_id != brand.id and await db.scalar(
+            select(BrandModel.id).where(BrandModel.variant_id == row.id).limit(1)):
+        raise ValidationError(
+            "This variant already has models, so it cannot move to another brand. "
+            "Create a new variant under that brand instead.")
+    scope = BrandVariant.brand_id == brand.id
+    await require_unique(db, BrandVariant, "code", data.code, row,
+                         f"Variant code in {brand.name}", scope=scope)
+    await require_unique(db, BrandVariant, "name", data.name, row,
+                         f"A variant of {brand.name} named", scope=scope)
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.brand_code, row.brand_name = brand.code, brand.name
+
+
+async def apply_brand_model(db: AsyncSession, row: BrandModel,
+                            data: BrandModelIn) -> None:
+    brand = await _active_brand(db, data.brand_id)
+    variant = await db.get(BrandVariant, data.variant_id)
+    if not variant or variant.brand_id != brand.id:
+        raise ValidationError(f"Variant: pick one of the variants of {brand.name}.")
+    if not variant.is_active:
+        raise ValidationError(f"Variant “{variant.name}” is inactive. Reactivate it first.")
+    scope = BrandModel.variant_id == variant.id
+    label = f"{brand.name} {variant.name}"
+    await require_unique(db, BrandModel, "code", data.code, row,
+                         f"Model code in {label}", scope=scope)
+    await require_unique(db, BrandModel, "name", data.name, row,
+                         f"A model of {label} named", scope=scope)
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.brand_code, row.brand_name = brand.code, brand.name
+    row.variant_code, row.variant_name = variant.code, variant.name
 
 
 class ItemClassIn(BaseModel):
@@ -1903,18 +2218,171 @@ async def apply_item_group(db: AsyncSession, row: ItemGroup,
 
 
 # --------------------------------------------------------------------------- #
-#  Item packaging — the tray -> box -> container ladder
+#  Pack hierarchies — named families of packs for one item (2026-10-08)
+# --------------------------------------------------------------------------- #
+class PackHierarchyIn(BaseModel):
+    """A named family of packs: "Strip of 10", "Strip of 15". Its levels are the
+    `item-packaging` rows that name it."""
+    item_id: int
+    #: The brand this ladder packs (2026-10-23); None = "All brands".
+    brand_id: int | None = None
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=300)
+    is_default: bool = False
+    is_active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _tidy(cls, value: str) -> str:
+        cleaned = " ".join((value or "").split())
+        if not cleaned:
+            raise ValueError('Give the hierarchy a name people will recognise, '
+                             'e.g. "Strip of 10".')
+        return cleaned
+
+
+def pack_hierarchy_out(h: PackHierarchy) -> dict:
+    return {"id": h.id, "item_id": h.item_id, "name": h.name,
+            "brand_id": h.brand_id, "brand_name": h.brand_name,
+            "description": h.description, "is_default": bool(h.is_default),
+            "is_active": h.is_active}
+
+
+async def apply_pack_hierarchy(db: AsyncSession, row: PackHierarchy,
+                               data: PackHierarchyIn) -> None:
+    item = await db.get(Item, data.item_id)
+    if item is None:
+        raise ValidationError("Item: that item does not exist. Pick one from the list.")
+    if row.id and row.item_id and row.item_id != data.item_id:
+        raise ValidationError("A pack hierarchy cannot move to another item.")
+    # Unique per item, ignoring case — checked here so the message names the clash.
+    clash = await db.scalar(select(PackHierarchy.id).where(
+        PackHierarchy.item_id == data.item_id,
+        func.lower(PackHierarchy.name) == data.name.lower(),
+        PackHierarchy.id != (row.id or 0)))
+    if clash is not None:
+        raise ValidationError(
+            f'{item.name} already has a pack hierarchy called "{data.name}". Each '
+            'hierarchy needs its own name, e.g. "Strip of 10" and "Strip of 15".')
+    # The brand is one the item carries (2026-10-23) — a ladder for a brand the item
+    # is never bought in would only ever be offered on lines that cannot use it.
+    brand_name = None
+    if data.brand_id:
+        from app.shared.masters import combinations
+        offered = {c.brand_id: c.brand_name
+                   for c in await combinations.sync_item(db, data.item_id)}
+        if data.brand_id not in offered:
+            raise ValidationError(
+                f"Brand: that brand is not mapped to {item.name}. Map it on the item's "
+                "Brands tab first, or pick one of its brands.")
+        brand_name = offered[data.brand_id]
+    if row.id and (row.brand_id or None) != (data.brand_id or None):
+        packed = await _live_handling_units(db, hierarchy_id=row.id)
+        if packed:
+            raise ValidationError(
+                f"{packed} pack(s) on the shelf are packed as \"{row.name}\" — its brand "
+                "cannot change while they are there.")
+    same_brand = (PackHierarchy.brand_id == data.brand_id if data.brand_id
+                  else PackHierarchy.brand_id.is_(None))
+    others = await db.scalar(select(func.count()).select_from(PackHierarchy).where(
+        PackHierarchy.item_id == data.item_id, same_brand,
+        PackHierarchy.is_active.is_(True),
+        PackHierarchy.id != (row.id or 0)))
+    for key, value in data.model_dump().items():
+        setattr(row, key, value)
+    row.brand_name = brand_name
+    # The first ladder of an item's brand is that brand's default.
+    if not others and row.is_active:
+        row.is_default = True
+    if row.is_default:
+        await db.execute(
+            update(PackHierarchy)
+            .where(PackHierarchy.item_id == data.item_id, same_brand,
+                   PackHierarchy.id != (row.id or 0))
+            .values(is_default=False))
+
+
+async def validate_pack_hierarchy_deactivate(db: AsyncSession, row: PackHierarchy) -> None:
+    """A hierarchy that stock on the shelf is packed in cannot go: those packs would
+    be left describing themselves in a family that no longer exists."""
+    live = await _live_handling_units(db, hierarchy_id=row.id)
+    if live:
+        raise ValidationError(
+            f'{live} pack(s) on the shelf are packed as "{row.name}". Issue or repack '
+            'them before retiring this hierarchy.')
+    if row.is_default:
+        # Hand the default on rather than leaving the item with none.
+        successor = await db.scalar(select(PackHierarchy.id).where(
+            PackHierarchy.item_id == row.item_id, PackHierarchy.is_active.is_(True),
+            PackHierarchy.id != row.id).order_by(PackHierarchy.name).limit(1))
+        if successor is not None:
+            await db.execute(update(PackHierarchy).where(PackHierarchy.id == successor)
+                             .values(is_default=True))
+        row.is_default = False
+
+
+#: A pack still on the shelf: standing on its own, or inside a bigger one.
+LIVE_PACK_STATUSES = ("SEALED", "INSIDE")
+
+
+async def _live_handling_units(db: AsyncSession, *, hierarchy_id: int | None = None,
+                               item_packaging_id: int | None = None) -> int:
+    """How many packs on the shelf use this hierarchy / rung. Raw SQL: the table is
+    the warehouse module's and shared may not import a module (rule 5)."""
+    column, value = (("pack_hierarchy_id", hierarchy_id) if hierarchy_id
+                     else ("item_packaging_id", item_packaging_id))
+    if not value:
+        return 0
+    exists = await db.scalar(text(
+        "SELECT COUNT(*) FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name = 'whs_handling_units'"))
+    if not exists:
+        return 0
+    return int(await db.scalar(text(
+        f"SELECT COUNT(*) FROM whs_handling_units WHERE {column} = :v "
+        "AND status IN ('SEALED', 'INSIDE')"), {"v": value}) or 0)
+
+
+async def _hierarchy_for_rung(db: AsyncSession, item_id: int,
+                              hierarchy_id: int | None) -> PackHierarchy:
+    """The hierarchy a rung belongs to. None means the item's default, and an item
+    with no hierarchy at all gets a "Standard" one — so a client that never heard of
+    hierarchies still builds a ladder exactly as it did before."""
+    if hierarchy_id:
+        found = await db.get(PackHierarchy, hierarchy_id)
+        if found is None or found.item_id != item_id:
+            raise ValidationError(
+                "Pack hierarchy: that hierarchy is not one of this item's. Pick one "
+                "from the item's own list.")
+        if not found.is_active:
+            raise ValidationError(f'The "{found.name}" hierarchy has been retired.')
+        return found
+    found = await db.scalar(select(PackHierarchy).where(
+        PackHierarchy.item_id == item_id, PackHierarchy.is_active.is_(True))
+        .order_by(PackHierarchy.is_default.desc(), PackHierarchy.id).limit(1))
+    if found is None:
+        found = PackHierarchy(item_id=item_id, name="Standard", is_default=True,
+                              is_active=True)
+        db.add(found)
+        await db.flush()
+    return found
+
+
+# --------------------------------------------------------------------------- #
+#  Item packaging — the levels of one hierarchy: strip -> box -> carton
 # --------------------------------------------------------------------------- #
 class ItemPackagingIn(BaseModel):
-    """One rung of an item's ladder — a PACKAGING UNIT, in the WMS sense.
+    """One rung of a hierarchy — a PACKAGING UNIT, in the WMS sense.
 
-    `quantity` is the conversion factor (1 BOX = 50 EACH). The dimensions are an
-    OVERRIDE of the container type's own box and are blank in the ordinary case, so a
-    ladder stays cheap to configure and only genuine exceptions are typed.
-    `gross_weight_kg` is what ONE of these weighs full — item-specific by definition,
-    which is exactly why it cannot live on the container type.
+    `quantity` is the conversion factor to the level below (1 BOX = 10 STRIP; level 1
+    counts the item's own unit). The dimensions are an OVERRIDE of the container
+    type's own box and are blank in the ordinary case. `gross_weight_kg` is what ONE
+    of these weighs full — item-specific by definition, which is exactly why it
+    cannot live on the container type.
     """
     item_id: int
+    # None = the item's default hierarchy (created as "Standard" if it has none).
+    hierarchy_id: int | None = None
     level: int
     package_id: int
     quantity: float
@@ -1924,6 +2392,9 @@ class ItemPackagingIn(BaseModel):
     gross_weight_kg: float | None = Field(default=None, ge=0, le=1000000)
     max_stack_tiers: int | None = Field(default=None, ge=1, le=999)
     is_default_putaway_unit: bool = False
+    # The least one pack of this level may be made with, in the item's own unit.
+    # Blank: no floor. Never more than what one pack of the level holds.
+    min_fill_qty: float | None = Field(default=None, gt=0, le=1e12)
     is_active: bool = True
 
     @model_validator(mode="after")
@@ -1937,7 +2408,8 @@ class ItemPackagingIn(BaseModel):
 
 
 def item_packaging_out(p: ItemPackaging) -> dict:
-    return {"id": p.id, "item_id": p.item_id, "level": p.level,
+    return {"id": p.id, "item_id": p.item_id, "hierarchy_id": p.hierarchy_id,
+            "level": p.level,
             "package_id": p.package_id, "package_name": p.package_name,
             "quantity": _num(p.quantity), "uom_id": p.uom_id,
             "uom_code": p.uom_code,
@@ -1946,14 +2418,22 @@ def item_packaging_out(p: ItemPackaging) -> dict:
             "gross_weight_kg": _num(p.gross_weight_kg),
             "max_stack_tiers": p.max_stack_tiers,
             "is_default_putaway_unit": bool(p.is_default_putaway_unit),
+            "min_fill_qty": _num(p.min_fill_qty),
             "is_active": p.is_active}
 
 
 async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
                                data: ItemPackagingIn) -> None:
     """Level 1 is measured in the item's own unit; every level above counts the level
-    below it. The rungs are stored, never the running totals — a stored total is one
-    edit away from disagreeing with its own parts."""
+    below it, WITHIN ONE HIERARCHY. The rungs are stored, never the running totals — a
+    stored total is one edit away from disagreeing with its own parts.
+
+    Three rules, all per hierarchy:
+      * levels are contiguous — a missing rung cannot be multiplied up;
+      * a container type appears at most once — a strip cannot hold a strip, and the
+        same box twice would make "1 Box" mean two different quantities;
+      * one default putaway unit.
+    """
     if data.level < 1:
         raise ValidationError(f"Pack level must be 1 or more. You typed {data.level}.")
     if data.quantity <= 0:
@@ -1968,34 +2448,76 @@ async def apply_item_packaging(db: AsyncSession, row: ItemPackaging,
         raise ValidationError(
             f"Quantity: level {data.level} must hold a whole number of the pack below "
             f"it, e.g. 12 — not {data.quantity}.")
+    hierarchy = await _hierarchy_for_rung(db, data.item_id, data.hierarchy_id)
 
     # A ladder with a missing rung cannot be multiplied up, so a level may only be
-    # added directly on top of one that already exists.
+    # added directly on top of one that already exists in the same hierarchy.
     if data.level > 1:
         below = await db.scalar(select(ItemPackaging.id).where(
-            ItemPackaging.item_id == data.item_id,
+            ItemPackaging.hierarchy_id == hierarchy.id,
             ItemPackaging.level == data.level - 1,
             ItemPackaging.is_active.is_(True)))
         if below is None:
             raise ValidationError(
-                f"Pack level {data.level - 1} does not exist yet. Add level "
+                f'"{hierarchy.name}" has no level {data.level - 1} yet. Add level '
                 f"{data.level - 1} before level {data.level}.")
+
+    # A container type at most once per hierarchy. Across hierarchies it is fine —
+    # strips of 10 and strips of 15 both go into a Box.
+    if data.is_active:
+        twin = await db.scalar(select(ItemPackaging.level).where(
+            ItemPackaging.hierarchy_id == hierarchy.id,
+            ItemPackaging.package_id == data.package_id,
+            ItemPackaging.is_active.is_(True),
+            ItemPackaging.id != (row.id or 0)))
+        if twin is not None:
+            raise ValidationError(
+                f'{package.name} is already level {twin} of "{hierarchy.name}". A '
+                "container type can be used once per hierarchy — pick a different "
+                "container for this level.")
+
+    # Changing what a level HOLDS while stock is packed in it would silently change
+    # how much is on the shelf. The packs keep their own snapshot, but the next person
+    # to read "3 Box" would read a different number of tablets.
+    if row.id and _num(row.quantity) != _num(data.quantity):
+        live = await _live_handling_units(db, item_packaging_id=row.id)
+        if live:
+            raise ValidationError(
+                f"{live} {row.package_name or 'pack'}(s) on the shelf hold "
+                f"{_num(row.quantity)} each. Changing it to {data.quantity} would "
+                "change how much stock they are counted as. Create a new hierarchy "
+                "for the new pack size instead.")
+
+    # The floor sits UNDER the level's size: a carton of 600 cannot have to hold 700.
+    if data.min_fill_qty is not None:
+        from app.shared import packing as shared_packing
+        from app.shared.masters import packs as shared_packs
+        below_size = 1.0
+        if data.level > 1:
+            ladder = await shared_packs.ladder(db, data.item_id, hierarchy.id)
+            if data.level - 1 <= ladder.top:
+                below_size = float(ladder.at(data.level - 1).size)
+        size = below_size * float(data.quantity)
+        if data.min_fill_qty > size:
+            raise ValidationError(
+                f"Minimum fill: one {package.name} holds {shared_packing.fmt(size)} "
+                f"{item.uom_code or 'units'}, so it cannot have to hold at least "
+                f"{shared_packing.fmt(data.min_fill_qty)}. Leave it blank for no minimum.")
 
     for key, value in data.model_dump().items():
         setattr(row, key, value)
+    row.hierarchy_id = hierarchy.id
     row.package_name = package.name
     # Every result is ultimately expressed in the item's own stocking UOM.
     row.uom_id, row.uom_code = item.uom_id, item.uom_code
 
-    # At most one default putaway unit per item. Enforced here rather than by an index
-    # for the reason `apply_vendor_item` gives about its preferred vendor: "at most one
-    # TRUE per item" is not something a unique index can express. Turning one rung on
-    # turns the others off, because the alternative is a form that refuses to save and
-    # sends the storekeeper away to find the old default first.
+    # At most one default putaway unit per hierarchy. Turning one rung on turns the
+    # others off, because the alternative is a form that refuses to save and sends the
+    # storekeeper away to find the old default first.
     if data.is_default_putaway_unit:
         await db.execute(
             update(ItemPackaging)
-            .where(ItemPackaging.item_id == data.item_id,
+            .where(ItemPackaging.hierarchy_id == hierarchy.id,
                    ItemPackaging.id != (row.id or 0))
             .values(is_default_putaway_unit=False)
         )
@@ -2005,6 +2527,7 @@ async def validate_item_packaging_deactivate(
     db: AsyncSession, row: ItemPackaging,
 ) -> None:
     higher = await db.scalar(select(ItemPackaging.id).where(
+        ItemPackaging.hierarchy_id == row.hierarchy_id,
         ItemPackaging.item_id == row.item_id,
         ItemPackaging.level > row.level,
         ItemPackaging.is_active.is_(True),
@@ -2013,20 +2536,32 @@ async def validate_item_packaging_deactivate(
         raise ValidationError(
             "There is a bigger pack level above this one. Remove the highest level "
             "first, then this one.")
+    live = await _live_handling_units(db, item_packaging_id=row.id)
+    if live:
+        raise ValidationError(
+            f"{live} {row.package_name or 'pack'}(s) are on the shelf at this level. "
+            "Repack or issue them before removing it.")
 
 
-async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
+async def packaging_breakdown(db: AsyncSession, item_id: int,
+                              hierarchy_id: int | None = None) -> list[dict]:
     """The ladder with its running totals: 1 tray = 10 L, 1 box = 10 trays = 100 L.
 
-    Multiplied up on read rather than stored, so the totals cannot drift from the
-    rungs they come from.
+    One hierarchy at a time (the default when none is named). Multiplied up on read
+    rather than stored, so the totals cannot drift from the rungs they come from.
     """
     item = await db.get(Item, item_id)
     if item is None:
         raise NotFoundError("Item not found")
+    if hierarchy_id is None:
+        hierarchy_id = await db.scalar(select(PackHierarchy.id).where(
+            PackHierarchy.item_id == item_id, PackHierarchy.is_active.is_(True))
+            .order_by(PackHierarchy.is_default.desc(), PackHierarchy.id).limit(1))
     rows = (await db.execute(
         select(ItemPackaging)
-        .where(ItemPackaging.item_id == item_id, ItemPackaging.is_active.is_(True))
+        .where(ItemPackaging.item_id == item_id, ItemPackaging.is_active.is_(True),
+               (ItemPackaging.hierarchy_id == hierarchy_id) if hierarchy_id
+               else ItemPackaging.hierarchy_id.is_(None))
         .order_by(ItemPackaging.level)
     )).scalars().all()
 
@@ -2080,6 +2615,7 @@ async def packaging_breakdown(db: AsyncSession, item_id: int) -> list[dict]:
             "max_stack_tiers": (row.max_stack_tiers
                                 or (container.max_stack_tiers if container else None)),
             "is_default_putaway_unit": bool(row.is_default_putaway_unit),
+            "min_fill_qty": _num(row.min_fill_qty),
         })
     return out
 
@@ -2761,7 +3297,22 @@ MASTERS: list[MasterDef] = [
     MasterDef(path="brands", name="Brand", model=Brand, schema=BrandIn,
               manage_perm=perms.MASTER_BRAND_MANAGE, serialize=brand_out,
               search_cols=("name", "code"), apply=apply_brand,
-              usage=((*USED_BY_ITEMS, "brand_id"), ("Manufacturer mappings", "mst_brand_manufacturers", "brand_id"), ("General name mappings", "mst_brand_general_names", "brand_id"),)),
+              usage=((*USED_BY_ITEMS, "brand_id"), ("Manufacturer mappings", "mst_brand_manufacturers", "brand_id"), ("General name mappings", "mst_brand_general_names", "brand_id"), ("Variants", "mst_brand_variants", "brand_id"),)),
+
+    # Brand → Variant → Model, each scoped to its parent (Masters › Brands sub-tabs).
+    MasterDef(path="brand-variants", name="Brand variant", model=BrandVariant,
+              schema=BrandVariantIn, manage_perm=perms.MASTER_BRAND_MANAGE,
+              serialize=brand_variant_out, search_cols=("name", "code", "brand_name"),
+              order_col="brand_name", apply=apply_brand_variant,
+              filters=("brand_id",),
+              usage=(("Models", "mst_brand_models", "variant_id"),)),
+
+    MasterDef(path="brand-models", name="Brand model", model=BrandModel,
+              schema=BrandModelIn, manage_perm=perms.MASTER_BRAND_MANAGE,
+              serialize=brand_model_out,
+              search_cols=("name", "code", "brand_name", "variant_name"),
+              order_col="brand_name", apply=apply_brand_model,
+              filters=("brand_id", "variant_id")),
 
     MasterDef(path="brand-manufacturers", name="Brand manufacturer",
               model=BrandManufacturer, schema=BrandManufacturerIn,
@@ -2819,10 +3370,20 @@ MASTERS: list[MasterDef] = [
               filters=("item_id", "group_id")),
 
     # ---- an item's packing ladder and, for a kit, its contents ----
+    # Pack hierarchies (2026-10-08): the named families an item is packed in. The
+    # levels of each are the item-packaging rows that name it.
+    MasterDef(path="pack-hierarchies", name="Pack hierarchy", model=PackHierarchy,
+              schema=PackHierarchyIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
+              serialize=pack_hierarchy_out, search_cols=("name",), order_col="name",
+              apply=apply_pack_hierarchy, filters=("item_id",),
+              before_deactivate=validate_pack_hierarchy_deactivate,
+              usage=(("Packs on the shelf", "whs_handling_units", "pack_hierarchy_id"),
+                     ("Purchase order lines", "pro_po_items", "pack_hierarchy_id"),
+                     ("Goods receipt lines", "inb_receipt_items", "pack_hierarchy_id"))),
     MasterDef(path="item-packaging", name="Item packaging", model=ItemPackaging,
               schema=ItemPackagingIn, manage_perm=perms.MASTER_PACKAGING_MANAGE,
               serialize=item_packaging_out, order_col="level",
-              apply=apply_item_packaging, filters=("item_id",),
+              apply=apply_item_packaging, filters=("item_id", "hierarchy_id"),
               default_active_only=True,
               before_deactivate=validate_item_packaging_deactivate),
 

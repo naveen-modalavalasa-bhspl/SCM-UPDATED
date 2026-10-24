@@ -1,7 +1,7 @@
 """Master-data endpoints. CRUD comes from the MasterDef registry; the only things
 written by hand here are the two HCM mirrors (read-only, rule 10) and item specs,
 whose primary key is item_id rather than a surrogate id."""
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
@@ -13,6 +13,8 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.platform.hcm.models import HcmDepartment, HcmFacility
 from app.platform.rbac import permissions as perms
 from app.shared.enums import AuditAction, UomClass
+from app.shared.limits import MAX_BATCH_IDS
+from app.shared.masters import combinations, packs
 from app.shared.masters.crud import build_router
 from app.shared.masters.defs import (
     MASTERS, UOM_SUGGESTIONS, VendorMappingIn, build_item_code, build_item_prefix,
@@ -242,14 +244,72 @@ _packing = APIRouter(tags=["masters"])
 
 
 @_packing.get("/api/items/{item_id}/packaging-breakdown")
-async def item_packaging_breakdown(item_id: int, db: AsyncSession = Depends(get_db),
+async def item_packaging_breakdown(item_id: int, hierarchy_id: int | None = None,
+                                   db: AsyncSession = Depends(get_db),
                                    user=Depends(get_current_user)):
     """1 tray = 10 L, 1 box = 10 trays = 100 L, 1 container = 10 boxes = 1000 L.
 
-    Computed from the stored rungs on every read rather than kept as a column, so
-    the totals can never drift from the quantities they come from.
+    One hierarchy at a time — the item's default when none is named. Computed from
+    the stored rungs on every read rather than kept as a column, so the totals can
+    never drift from the quantities they come from.
     """
-    return {"items": await packaging_breakdown(db, item_id)}
+    return {"items": await packaging_breakdown(db, item_id, hierarchy_id)}
+
+
+@_packing.get("/api/pack-options")
+async def item_pack_options(item_ids: str = Query(..., max_length=4000),
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(get_current_user)):
+    """Every pack hierarchy of these items, each level with its size in base units and
+    its sentence ("Box · 10 Strip (100 TAB)"). One call for a whole document: the pack
+    pickers on a PO, a despatch note, a GRN and an issue all read it.
+
+    `item_ids` is a comma-separated list, capped like every other id selection.
+    """
+    ids = []
+    for part in item_ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    if len(ids) > MAX_BATCH_IDS:
+        raise ValidationError(f"Ask for at most {MAX_BATCH_IDS} items at once.")
+    options = await packs.pack_options(db, ids)
+    return {"items": [{"item_id": item_id, "hierarchies": rows}
+                      for item_id, rows in options.items()]}
+
+
+class ContainerUsageRowIn(BaseModel):
+    package_id: int = 0
+    usages: list[str] = Field(default_factory=list, max_length=5)
+
+
+class ContainerUsageIn(BaseModel):
+    rows: list[ContainerUsageRowIn] = Field(default_factory=list, max_length=100)
+
+
+@_packing.get("/api/items/{item_id}/container-usage")
+async def item_container_usage(item_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(get_current_user)):
+    """Masters › Packaging › Container Usage: every container of the item's ladders,
+    with the usages (indent, purchase, storage, issue, consumption) ticked for each."""
+    return await packs.container_usage(db, item_id)
+
+
+@_packing.put("/api/items/{item_id}/container-usage")
+async def save_item_container_usage(
+        item_id: int, body: ContainerUsageIn, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_PACKAGING_MANAGE))):
+    from app.platform.settings.service import write_audit
+    before = await packs.container_usage(db, item_id)
+    out = await packs.save_container_usage(db, item_id, [r.model_dump() for r in body.rows])
+    await write_audit(
+        db, entity="mst_item_container_usage", entity_id=item_id,
+        entity_no=out["item_code"], action=AuditAction.UPDATE, actor=user,
+        before={c["name"]: c["usages"] for c in before["containers"]},
+        after={c["name"]: c["usages"] for c in out["containers"]},
+        summary=f"Container usage of {out['item_code']} updated")
+    await db.commit()
+    return out
 
 
 router.include_router(_packing)
@@ -704,6 +764,54 @@ async def deactivate_brand_item_mapping(
     row.is_active = False
     await db.commit()
     return {"success": True, "id": mapping_id}
+
+
+# Item combinations — item + brand + variant + model (2026-10-23). See
+# masters/combinations.py: derived from the mapped brands, switched on/off per item.
+class _CombinationSwitch(BaseModel):
+    is_active: bool
+
+
+class _ItemBrandsIn(BaseModel):
+    brand_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+@_tracking.get("/api/items/{item_id}/combinations")
+async def item_combinations_route(item_id: int, db: AsyncSession = Depends(get_db),
+                                  user=Depends(get_current_user)):
+    return {"items": await combinations.item_combinations(db, item_id)}
+
+
+@_tracking.put("/api/items/{item_id}/combinations/{combination_id}")
+async def switch_item_combination(
+        item_id: int, combination_id: int, data: _CombinationSwitch,
+        db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return await combinations.set_combination_active(
+        db, item_id, combination_id, data.is_active, user)
+
+
+@_tracking.post("/api/items/{item_id}/brands")
+async def map_item_brands_route(
+        item_id: int, data: _ItemBrandsIn, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return {"items": await combinations.map_item_brands(db, item_id, data.brand_ids, user)}
+
+
+@_tracking.delete("/api/items/{item_id}/brands/{brand_id}")
+async def unmap_item_brand_route(
+        item_id: int, brand_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return {"items": await combinations.unmap_item_brand(db, item_id, brand_id)}
+
+
+@_tracking.get("/api/item-combinations")
+async def combination_options_route(
+        item_ids: str = Query(..., max_length=4000), db: AsyncSession = Depends(get_db),
+        user=Depends(get_current_user)):
+    """Each item's combinations that are ON — the full list a document offers."""
+    ids = [int(x) for x in item_ids.split(",") if x.strip().isdigit()][:MAX_BATCH_IDS]
+    return {str(k): v for k, v in (await combinations.combination_options(db, ids)).items()}
 
 
 router.include_router(_tracking)

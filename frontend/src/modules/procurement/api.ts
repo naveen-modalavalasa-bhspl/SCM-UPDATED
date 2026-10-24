@@ -1,11 +1,12 @@
 import { api } from "@/shared/api/client";
 import type { Paginated } from "@/shared/types";
+import type { PackEntryIn } from "@/shared/packing";
 import type {
   ApprovalTrail,
   Comparison, Consolidation, ConsolidationCreate, ConsolidationListRow,
   ConsolidationSource, DespatchNote, DespatchNoteWrite, EvaluationMethodOption,
-  MRCandidate, POAmend, POCopyTemplate, POCreate, POFromQuotation, POHeader, POListRow, PORevision,
-  PurchaseOrder, VendorPO,
+  MRCandidate, POAmend, POCopyTemplate, POCreate, POPackChange, POFromQuotation, POHeader, POListRow, PORevision,
+  PurchaseOrder, VendorItemPacking, VendorPO,
   VendorPOListRow, VendorReturnDetail, VendorReturnListRow,
   VendorReturnReceiptInput,
   VendorReturnDecisionInput, VendorReturnSettlementInput,
@@ -95,6 +96,18 @@ export const poApi = {
   /** The full edit of a DRAFT order — same body as `correct`. */
   editDraft: (id: number, data: POEditBody) =>
     api.put<PurchaseOrder>(`/api/pos/${id}/draft`, data).then((r) => r.data),
+  /** Change how a line is packed: hierarchy, levels, count (2026-10-08). */
+  repackLine: (id: number, lineId: number, body: {
+    pack_hierarchy_id: number; pack_breakdown: PackEntryIn[];
+  }) => api.put<PurchaseOrder>(`/api/pos/${id}/lines/${lineId}/packing`, body)
+    .then((r) => r.data),
+  /** Supplier changes of packing on this order's despatch notes. */
+  packChanges: (id: number) =>
+    api.get<{ items: POPackChange[] }>(`/api/pos/${id}/pack-changes`).then((r) => r.data.items),
+  decidePackChange: (id: number, lineId: number, accept: boolean, note?: string) =>
+    api.post<POPackChange>(
+      `/api/pos/${id}/pack-changes/${lineId}/${accept ? "accept" : "decline"}`,
+      { note: note || null }).then((r) => r.data),
   amend: (id: number, data: POAmend) =>
     api.post<PurchaseOrder>(`/api/pos/${id}/amend`, data).then((r) => r.data),
   revisions: (id: number) =>
@@ -331,6 +344,10 @@ export const supplierApi = {
   login: (username: string, password: string) =>
     api.post<VendorToken>("/api/supplier/login", { username, password }).then((r) => r.data),
   me: () => api.get<VendorProfile>("/api/supplier/me").then((r) => r.data),
+  /** The packing of the items mapped to this vendor (Profile > Packing, 2026-10-11).
+   *  Scoped server-side on the vendor id in the token. */
+  itemPacking: () =>
+    api.get<{ items: VendorItemPacking[] }>("/api/supplier/items/packing").then((r) => r.data.items),
   /* --- the vendor's own bell (2026-08-21) --- */
   /** Scoped server-side on the vendor id in the token; there is no id to pass. */
   notifications: (params: { unread_only?: boolean; page?: number; size?: number } = {}) =>

@@ -59,6 +59,7 @@ from app.modules.indents.schemas import IndentCreate, IndentItemIn, IndentUpdate
 from app.shared.time import now as ist_now, today as ist_today
 from app.shared.time import to_ist
 from app.shared import uom
+from app.shared.masters import combinations
 
 
 logger = logging.getLogger(__name__)
@@ -123,8 +124,13 @@ def _validate_priority(priority: str | None) -> str | None:
 
 
 def _validate_unique_item_ids(items) -> None:
-    item_ids = [line.item_id for line in items]
-    if len(item_ids) != len(set(item_ids)):
+    """One line per item PER COMBINATION (2026-10-23): the same item in two brands is
+    two lines; twice in the same one is the duplicate this refuses."""
+    keys = [(line.item_id, int(getattr(line, "brand_id", 0) or 0),
+             int(getattr(line, "variant_id", 0) or 0), int(getattr(line, "model_id", 0) or 0),
+             bool(getattr(line, "combination_any", False)))
+            for line in items]
+    if len(keys) != len(set(keys)):
         raise ValidationError(DUPLICATE_ITEM_ERROR)
 
 
@@ -432,6 +438,8 @@ async def create_indent(db: AsyncSession, data: IndentCreate, user) -> Indent:
             indent_id=indent.id, line_no=line_no, item_id=item.id, item_code=item.code,
             item_name=item.name, uom_code=item.uom_code,
             quantity=line.quantity, remarks=line.remarks,
+            **await combinations.resolve(db, item.id, line, allow_any=True, default_any=True,
+                                         label=f"Line {line_no} ({item.name})"),
         ))
     await write_audit(
         db, entity="ind_indents", entity_id=indent.id, entity_no=indent.indent_no,
@@ -1481,6 +1489,9 @@ async def update_indent(db: AsyncSession, indent_id: int, data: IndentUpdate, us
             indent.items.append(IndentItem(
                 line_no=line_no, item_id=item.id, item_code=item.code, item_name=item.name,
                 uom_code=item.uom_code, quantity=line.quantity, remarks=line.remarks,
+                **await combinations.resolve(db, item.id, line, allow_any=True,
+                                             default_any=True,
+                                             label=f"Line {line_no} ({item.name})"),
             ))
         indent.total_items = len(data.items)
         indent.total_qty = sum(line.quantity for line in data.items)
@@ -5922,6 +5933,8 @@ async def allocation_proposal(db: AsyncSession, indent_id: int, user=None) -> di
         ),
         "on_order_qty": float(on_order.get(line.id, Decimal("0"))),
         "project_id": indent.project_id,
+        # What the indent asked for — a brand / variant / model, or Any (2026-10-23).
+        **combinations.carry(line),
     } for line in indent.items]
 
     # Points this person may DRAW FROM: the stocking points they hold or that report
@@ -6124,6 +6137,28 @@ def _reject_over_allocation(indent: Indent, decisions: list[dict],
             )
 
 
+async def _decide_combinations(db: AsyncSession, indent: Indent,
+                               decisions: list[dict]) -> None:
+    """Which brand / variant / model each decision gives (2026-10-23).
+
+    An indent line that named one gives exactly that — the client cannot change it.
+    A line that said Any is settled HERE, by the storekeeper's pick off the shelf,
+    checked against the item's ON combinations; with no pick it stays Any and the
+    reservation draws from whichever combination the point holds.
+    """
+    lines = {line.id: line for line in indent.items}
+    for d in decisions:
+        line = lines.get(d.get("indent_item_id"))
+        if line is not None and line.brand_id:
+            d.update(combinations.carry(line))
+        elif d.get("brand_id"):
+            d.update(await combinations.resolve(
+                db, d["item_id"], d, label=d.get("item_name") or ""))
+        else:
+            d.update({**combinations.NONE,
+                      "combination_any": bool(line is not None and line.combination_any)})
+
+
 async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
                                        decisions: list[dict], user,
                                        remarks: str | None = None):
@@ -6193,6 +6228,7 @@ async def create_allocation_for_indent(db: AsyncSession, indent: Indent,
     # only to its own project's decisions — so trusting the client hid every hold.
     for d in decisions:
         d["project_id"] = indent.project_id or 0
+    await _decide_combinations(db, indent, decisions)
 
     alloc = await allocations.create(
         db, indent.id, indent.indent_no, decisions, user,

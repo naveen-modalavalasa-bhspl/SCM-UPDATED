@@ -1,5 +1,10 @@
 export interface MasterItem {
   id: number;
+  /** Active rows holding this code; above 1 until the consolidation script runs. */
+  rows_with_code?: number;
+  /** Set on a create answered with an existing item (another brand of it). */
+  merged_into_existing?: boolean;
+  message?: string;
   /** The latest photo, for the list's thumbnail. Null when there is none. */
   photo_id?: number | null;
   /** L1L2L3-GEN-0001. Assigned once at create, never regenerated. */
@@ -123,14 +128,24 @@ export interface MasterItemSubClass extends NamedMaster {
   item_class_name?: string | null;
 }
 
-export interface MasterPaymentTerm {
+/** How one stage of a payment term is paid: in one go, or in N instalments. */
+export type PaymentSplit = "ONE" | "EQUAL" | "CUSTOM";
+export type PaymentStageKey = "advance" | "delivery" | "installation" | "warranty";
+
+export type MasterPaymentTerm = {
   id: number; code: string; name: string; description: string | null; is_active: boolean;
-  advance_pct: number; advance_days: number; delivery_pct: number; delivery_days: number;
-  installation_pct: number; installation_days: number;
-  warranty_pct: number; warranty_days: number;
-  /** "30,60,90": the delivery share in equal instalments. */
-  delivery_schedule: string | null;
-}
+  /** One line for a dropdown or a list, written by the server. */
+  summary: string;
+  /** What a PO prints: "[CODE] Name" then one line per stage. */
+  wording: string;
+} & {
+  [K in PaymentStageKey as `${K}_pct`]: number } & {
+  [K in PaymentStageKey as `${K}_days`]: number } & {
+  [K in PaymentStageKey as `${K}_split`]: PaymentSplit } & {
+  /** "30,60,90,120": days after the stage's trigger, one per instalment. */
+  [K in PaymentStageKey as `${K}_instalment_days`]: string | null } & {
+  /** "30,40,10,20": each instalment's % of the stage. CUSTOM only. */
+  [K in PaymentStageKey as `${K}_instalment_pcts`]: string | null };
 
 export interface MasterVendorCategory {
   id: number; code: string; name: string; description: string | null;
@@ -280,6 +295,25 @@ export interface MasterBrand {
   is_active: boolean;
 }
 
+/** Brand → Variant: a line within a brand. Code is unique within the brand. */
+export interface MasterBrandVariant {
+  id: number;
+  brand_id: number;
+  brand_code: string | null;
+  brand_name: string | null;
+  code: string;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
+}
+
+/** Brand → Variant → Model. Code is unique within the variant. */
+export interface MasterBrandModel extends MasterBrandVariant {
+  variant_id: number;
+  variant_code: string | null;
+  variant_name: string | null;
+}
+
 export interface MasterGeneralName {
   id: number;
   code: string;
@@ -340,9 +374,26 @@ export interface MasterPackaging {
  * box and are blank in the ordinary case; `gross_weight_kg` is what one of these weighs
  * full, which is item-specific and so cannot live on the container type.
  */
+/** One named family of packs for an item (2026-10-08). Its levels are the
+ *  `MasterItemPackaging` rows that name it. */
+export interface MasterPackHierarchy {
+  id: number;
+  item_id: number;
+  /** The brand this ladder packs; null = all brands (2026-10-23). */
+  brand_id?: number | null;
+  brand_name?: string | null;
+  name: string;
+  description?: string | null;
+  /** The one a new document offers first. At most one per item. */
+  is_default: boolean;
+  is_active: boolean;
+}
+
 export interface MasterItemPackaging {
   id: number;
   item_id: number;
+  /** The pack hierarchy this level belongs to. Levels count from 1 within it. */
+  hierarchy_id?: number | null;
   level: number;
   package_id: number;
   package_name?: string | null;
@@ -357,6 +408,9 @@ export interface MasterItemPackaging {
   /** The rung putaway and bin occupancy work in unless a document says otherwise.
    *  At most one per item — setting one clears the others. */
   is_default_putaway_unit?: boolean;
+  /** The least one pack of this level may be MADE with, in the item's own unit
+   *  (2026-10-11). Blank: no minimum. Never more than one pack holds. */
+  min_fill_qty?: number | null;
   is_active: boolean;
 }
 
@@ -387,6 +441,7 @@ export interface PackagingBreakdown {
   tare_weight_kg?: number | null;
   max_stack_tiers?: number | null;
   is_default_putaway_unit?: boolean;
+  min_fill_qty?: number | null;
 }
 
 /** One component of a kit. A real item, so the contents can be issued. */
@@ -589,4 +644,46 @@ export interface ItemEligibilityScopes {
   roles: { id: number; name: string; code?: string; holders?: number;
            project_id?: number | null; project_name?: string | null }[];
   regions: { id: number; name: string }[];
+}
+
+/** One item as bought, stocked and issued: item + brand + variant + model
+ *  (2026-10-23). A level the brand does not have is null. */
+export interface MasterItemCombination {
+  id: number;
+  item_id: number;
+  brand_id: number;
+  brand_name?: string | null;
+  variant_id?: number | null;
+  variant_name?: string | null;
+  model_id?: number | null;
+  model_name?: string | null;
+  /** "Brand · Variant · Model", only the parts that exist. */
+  label: string;
+  is_active: boolean;
+  /** On hand across every point. */
+  stock_qty: number;
+}
+
+
+/** Masters › Packaging › Container Usage (2026-10-23). */
+export interface ContainerUsageRow {
+  /** 0 = the loose base unit. */
+  package_id: number;
+  code?: string | null;
+  name: string;
+  is_loose: boolean;
+  used_in: { hierarchy_id: number | null; hierarchy: string; brand_name?: string | null;
+             level: number; size: number }[];
+  usages: import("@/shared/packing").ContainerUsage[];
+}
+
+export interface ContainerUsageView {
+  item_id: number;
+  item_code: string;
+  item_name: string;
+  base_uom?: string | null;
+  containers: ContainerUsageRow[];
+  unmapped: import("@/shared/packing").ContainerUsage[];
+  /** Set when a save changed the Issue container: what was re-coded on the shelf. */
+  recoded?: { lots: number; held_lots: number; retired: number; made: number };
 }

@@ -67,6 +67,7 @@ from app.platform.settings.service import write_audit
 from app.platform.hcm import service as hcm_service
 from app.platform.workflow import engine
 from app.platform.workflow.models import Instance
+from app.shared.masters import combinations
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, AuditAction, DocType, IndentStatus,
     InstanceStatus, RefType, ReservationStatus, WarehouseType,
@@ -119,6 +120,65 @@ UNAPPROVED_ALLOCATION_STATUSES = (
     AllocationStatus.DRAFT.value,
     AllocationStatus.PENDING_APPROVAL.value,
 )
+
+
+def combo_key(line) -> tuple[int, int, int] | None:
+    """A line's brand / variant / model, or None where it names none (2026-10-23)."""
+    get = (line.get if isinstance(line, dict) else (lambda k, d=None: getattr(line, k, d)))
+    brand = int(get("brand_id") or 0)
+    if not brand:
+        return None
+    return (brand, int(get("variant_id") or 0), int(get("model_id") or 0))
+
+
+def combo_dict(line) -> dict | None:
+    """The same, in the shape `allocation.reserve` takes."""
+    key = combo_key(line)
+    return (None if key is None
+            else {"brand_id": key[0], "variant_id": key[1], "model_id": key[2]})
+
+
+def free_for(on_shelf: dict, pledged: dict, item_id: int, warehouse_id: int,
+             combo: tuple | None) -> Decimal:
+    """Free at a point, out of shelf and pledges keyed (item, point, b, v, m).
+
+    A line naming no combination may take any of the item. A line naming one is
+    capped twice: by that combination's own free stock, and by the item's free stock
+    there — another allocation's line may name no combination and draw from any, so
+    the combination's own figure alone could promise units the point does not have.
+    """
+    def total(source):
+        return sum((qty for (i, w, *_), qty in source.items()
+                    if i == item_id and w == warehouse_id), ZERO)
+    whole = total(on_shelf) - total(pledged)
+    if combo is None:
+        return max(whole, ZERO)
+    key = (item_id, warehouse_id, *combo)
+    own = on_shelf.get(key, ZERO) - pledged.get(key, ZERO)
+    return max(min(own, whole), ZERO)
+
+
+async def shelf_by_combination(db: AsyncSession, item_ids: set[int],
+                               warehouse_ids: set[int], *,
+                               lock: bool = False) -> dict[tuple, Decimal]:
+    """Available, unexpired stock per (item, point, brand, variant, model)."""
+    if not item_ids or not warehouse_ids:
+        return {}
+    today = ist_today()
+    where = (Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids),
+             or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
+    if lock:
+        # Lock the balance rows themselves, not the aggregate: MySQL cannot lock a
+        # GROUP BY result, so take the rows first and then add them up.
+        await db.execute(select(Stock.id).where(*where).with_for_update())
+    rows = (await db.execute(
+        select(Stock.item_id, Stock.warehouse_id, Stock.brand_id, Stock.variant_id,
+               Stock.model_id, func.coalesce(func.sum(Stock.available_qty), 0))
+        .where(*where)
+        .group_by(Stock.item_id, Stock.warehouse_id, Stock.brand_id, Stock.variant_id,
+                  Stock.model_id))).all()
+    return {(i, w, int(b or 0), int(v or 0), int(m or 0)): _d(q)
+            for i, w, b, v, m, q in rows}
 
 
 def _d(value) -> Decimal:
@@ -192,6 +252,9 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
             warehouse_ids=warehouse_ids)
 
         by_warehouse: dict[int, dict] = {}
+        # The same shelf per brand / variant / model (2026-10-23) — what the desk's
+        # in-stock dropdown offers, and what a line naming one may draw.
+        shelf: dict[tuple, Decimal] = {}
         for stock in rows:
             entry = by_warehouse.setdefault(stock.warehouse_id, {
                 "warehouse_id": stock.warehouse_id,
@@ -200,6 +263,9 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
                 "available_qty": ZERO,
             })
             entry["available_qty"] += stock.available_qty or ZERO
+            key = (line["item_id"], stock.warehouse_id, int(stock.brand_id or 0),
+                   int(stock.variant_id or 0), int(stock.model_id or 0))
+            shelf[key] = shelf.get(key, ZERO) + (stock.available_qty or ZERO)
 
         # The type of each point, so the screen can tell warehouse stock from stock
         # sitting out on the distribution chain. `candidate_stock` filters on this
@@ -217,11 +283,21 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
         # This indent's own pledges stay in: the screen shows them separately as
         # already-allocated and would double-count them here.
         pledged = await pledged_by_point(
-            db, {line["item_id"]}, set(by_warehouse), exclude_indent_id=indent_id)
-        for (_item, warehouse_id), qty in pledged.items():
-            entry = by_warehouse.get(warehouse_id)
-            if entry is not None:
-                entry["available_qty"] = max(entry["available_qty"] - qty, ZERO)
+            db, {line["item_id"]}, set(by_warehouse), exclude_indent_id=indent_id,
+            by_combination=True)
+        wanted = combo_key(line)
+        for warehouse_id, entry in by_warehouse.items():
+            entry["available_qty"] = free_for(
+                shelf, pledged, line["item_id"], warehouse_id, wanted)
+            entry["combinations"] = [
+                {"brand_id": b, "variant_id": v, "model_id": m,
+                 "available_qty": float(free_for(shelf, pledged, line["item_id"],
+                                                 warehouse_id, (b, v, m)))}
+                for (_i, w, b, v, m) in sorted(shelf)
+                if w == warehouse_id and b
+                and free_for(shelf, pledged, line["item_id"], warehouse_id, (b, v, m)) > 0
+            ]
+            await combinations.fill_names(db, entry["combinations"])
 
         # Lots set aside for THIS line's project are free to it, and to nobody else.
         # Added after the netting: a pledge is against the shared pool, never a hold.
@@ -272,7 +348,8 @@ async def pledged_by_point(
     db: AsyncSession, item_ids: set[int], warehouse_ids: set[int],
     exclude_indent_id: int | None = None,
     exclude_allocation_id: int | None = None,
-) -> dict[tuple[int, int], Decimal]:
+    by_combination: bool = False,
+) -> dict[tuple, Decimal]:
     """Per (item, point), how much an un-approved allocation has already promised.
 
     Nothing is reserved until an allocation is APPROVED, so between the decision and
@@ -298,6 +375,17 @@ async def pledged_by_point(
         # For a caller asking "what would be free if this allocation were not here" —
         # the approval screen, quoting the room its own line has to grow into.
         conditions.append(Allocation.id != exclude_allocation_id)
+    if by_combination:
+        # Keyed (item, point, brand, variant, model) — what `free_for` reads.
+        keys = (AllocationItem.item_id, AllocationItem.warehouse_id,
+                AllocationItem.brand_id, AllocationItem.variant_id,
+                AllocationItem.model_id)
+        rows = (await db.execute(
+            select(*keys, func.coalesce(func.sum(AllocationItem.quantity), 0))
+            .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+            .where(*conditions).group_by(*keys))).all()
+        return {(i, w, int(b or 0), int(v or 0), int(m or 0)): _d(q)
+                for i, w, b, v, m, q in rows}
     rows = (await db.execute(
         select(AllocationItem.item_id, AllocationItem.warehouse_id,
                func.coalesce(func.sum(AllocationItem.quantity), 0))
@@ -408,45 +496,32 @@ async def competing_claims(
 
 # ---------------- what an approver may still give ----------------
 
+def free_key(line) -> tuple:
+    """How `_free_by_point` keys a line: (item, point, combination or None)."""
+    return (line.item_id, line.warehouse_id, combo_key(line))
+
+
 async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
-                         lock: bool = False) -> dict[tuple[int, int], Decimal]:
-    """Free quantity per (item, point) for a set of allocation lines, in two queries.
+                         lock: bool = False) -> dict[tuple, Decimal]:
+    """Free quantity per line key — (item, point, combination) — in two queries.
 
     One grouped read of the shelf and one of the outstanding pledges — not a query per
     line, because a monthly cycle carries thousands of them. `lock` takes the balance
     rows FOR UPDATE so an approval that is about to reserve cannot be overtaken between
     the check and the reservation.
     """
-    pairs = {(line.item_id, line.warehouse_id) for line in lines
-             if line.warehouse_id and _d(line.quantity) >= ZERO}
-    if not pairs:
+    keys = {free_key(line) for line in lines
+            if line.warehouse_id and _d(line.quantity) >= ZERO}
+    if not keys:
         return {}
-    item_ids = {item_id for item_id, _ in pairs}
-    warehouse_ids = {warehouse_id for _, warehouse_id in pairs}
+    item_ids = {item_id for item_id, _, _ in keys}
+    warehouse_ids = {warehouse_id for _, warehouse_id, _ in keys}
 
-    today = ist_today()
-    stmt = (
-        select(Stock.item_id, Stock.warehouse_id,
-               func.coalesce(func.sum(Stock.available_qty), 0))
-        .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids),
-               or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
-        .group_by(Stock.item_id, Stock.warehouse_id)
-    )
-    if lock:
-        # Lock the balance rows themselves, not the aggregate: MySQL cannot lock a
-        # GROUP BY result, so take the rows first and then add them up.
-        await db.execute(
-            select(Stock.id)
-            .where(Stock.item_id.in_(item_ids), Stock.warehouse_id.in_(warehouse_ids),
-                   or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today))
-            .with_for_update()
-        )
-    on_shelf = {(item_id, warehouse_id): _d(qty)
-                for item_id, warehouse_id, qty in (await db.execute(stmt)).all()}
+    on_shelf = await shelf_by_combination(db, item_ids, warehouse_ids, lock=lock)
     pledged = await pledged_by_point(
-        db, item_ids, warehouse_ids, exclude_allocation_id=exclude_allocation_id)
-    free = {pair: max(on_shelf.get(pair, ZERO) - pledged.get(pair, ZERO), ZERO)
-            for pair in pairs}
+        db, item_ids, warehouse_ids, exclude_allocation_id=exclude_allocation_id,
+        by_combination=True)
+    free = {key: free_for(on_shelf, pledged, key[0], key[1], key[2]) for key in keys}
     # Each line's own project's held lots. One allocation serves one indent, so its
     # lines share a project; grouped anyway rather than assumed.
     by_project: dict[int, set[int]] = {}
@@ -454,10 +529,11 @@ async def _free_by_point(db: AsyncSession, lines, exclude_allocation_id: int,
         if line.warehouse_id and getattr(line, "project_id", None):
             by_project.setdefault(int(line.project_id), set()).add(int(line.item_id))
     for project_id, project_items in by_project.items():
-        for pair, qty in (await allocation.held_for(
+        for (item_id, warehouse_id), qty in (await allocation.held_for(
                 db, project_id, project_items, warehouse_ids)).items():
-            if pair in free:
-                free[pair] += qty
+            for key in keys:
+                if key[0] == item_id and key[1] == warehouse_id:
+                    free[key] += qty
     return free
 
 
@@ -519,17 +595,19 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
 
     out = []
     for line in lines:
-        pair = (line.item_id, line.warehouse_id)
         if line.warehouse_id:
-            free = free_map.get(pair, ZERO)
+            free = free_map.get(free_key(line), ZERO)
             today = ist_today()
-            on_shelf = _d(await db.scalar(
-                select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
-                    Stock.item_id == line.item_id,
-                    Stock.warehouse_id == line.warehouse_id,
-                    or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today),
-                )
-            ))
+            shelf = select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
+                Stock.item_id == line.item_id,
+                Stock.warehouse_id == line.warehouse_id,
+                or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today),
+            )
+            if combo_key(line) is not None:
+                shelf = shelf.where(Stock.brand_id == line.brand_id,
+                                    Stock.variant_id == (line.variant_id or 0),
+                                    Stock.model_id == (line.model_id or 0))
+            on_shelf = _d(await db.scalar(shelf))
         else:
             # No point chosen yet: answer for the tier, not for NULL.
             free = tier_free.get(line.item_id, ZERO)
@@ -544,6 +622,7 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
             "item_code": line.item_code,
             "item_name": line.item_name,
             "uom_code": line.uom_code,
+            **combinations.carry(line),
             "warehouse_id": line.warehouse_id,
             "warehouse_name": line.warehouse_name,
             "requested_qty": float(_d(line.requested_qty)),
@@ -621,7 +700,7 @@ async def revise(db: AsyncSession, alloc: Allocation,
         wanted, before = by_id[line.id], _d(line.quantity)
         if wanted == before:
             continue
-        free = free_map.get((line.item_id, line.warehouse_id), ZERO)
+        free = free_map.get(free_key(line), ZERO)
         if wanted > free:
             raise ValidationError(
                 f"{line.item_name or line.item_id}: only {free} is free at "
@@ -647,9 +726,9 @@ async def _assert_still_available(db: AsyncSession, alloc: Allocation) -> None:
         return
     free_map = await _free_by_point(db, lines, exclude_allocation_id=alloc.id, lock=True)
     short = [
-        (line, free_map.get((line.item_id, line.warehouse_id), ZERO))
+        (line, free_map.get(free_key(line), ZERO))
         for line in lines
-        if _d(line.quantity) > free_map.get((line.item_id, line.warehouse_id), ZERO)
+        if _d(line.quantity) > free_map.get(free_key(line), ZERO)
     ]
     if short:
         line, free = short[0]
@@ -727,21 +806,19 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         # never ordered. Check against available stock at the chosen point — reserved
         # quantity belongs to somebody else's indent and is not ours to promise.
         if quantity > ZERO:
-            today = ist_today()
-            on_shelf = _d(await db.scalar(
-                select(func.coalesce(func.sum(Stock.available_qty), 0)).where(
-                    Stock.item_id == d["item_id"],
-                    Stock.warehouse_id == d["warehouse_id"],
-                    or_(Stock.expiry_date.is_(None), Stock.expiry_date >= today),
-                )
-            ))
+            # Per brand / variant / model (2026-10-23): a decision naming one is
+            # checked against that combination's own shelf as well as the item's.
+            shelf = await shelf_by_combination(db, {d["item_id"]}, {d["warehouse_id"]})
+            combo = combo_key(d)
+            on_shelf = (sum(shelf.values(), ZERO) if combo is None
+                        else shelf.get((d["item_id"], d["warehouse_id"], *combo), ZERO))
             # Less whatever an un-approved allocation has already promised out of this
             # point. Reservation only happens at approval, so without this the shelf
             # reads full to every approver until the first signature lands, and the
             # same 100 units get committed to three indents.
             pledged = await pledged_by_point(
-                db, {d["item_id"]}, {d["warehouse_id"]})
-            free = on_shelf - pledged.get((d["item_id"], d["warehouse_id"]), ZERO)
+                db, {d["item_id"]}, {d["warehouse_id"]}, by_combination=True)
+            free = free_for(shelf, pledged, d["item_id"], d["warehouse_id"], combo)
             free += (await allocation.held_for(
                 db, d.get("project_id"), {d["item_id"]}, {d["warehouse_id"]}
             )).get((d["item_id"], d["warehouse_id"]), ZERO)
@@ -764,6 +841,7 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
             warehouse_name=warehouse.name if warehouse else None,
             project_id=d.get("project_id") or NO_PROJECT,
             remarks=d.get("remarks"),
+            **combinations.carry(d),
         ))
     await db.flush()
 
@@ -1083,6 +1161,11 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
     from app.modules.inventory import service
 
     shortfalls, requested_total, given_total = [], ZERO, ZERO
+    # What each indent line had ALREADY put aside, read ONCE before this allocation
+    # reserves anything (2026-10-23). Read per row inside the loop, the second row of
+    # one indent line — another point, or another brand / variant / model — counted
+    # the first row's fresh reservation as "already held" and reserved that much less.
+    prior: dict[int, Decimal] = {}
 
     for line in alloc.items:
         requested_total += _d(line.requested_qty)
@@ -1103,13 +1186,16 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
         #
         # RELEASED stays out: that stock went back on the shelf and is genuinely
         # reservable again.
-        held = await allocation.reserved_quantity(
-            db, RefType.RESERVATION.value, alloc.indent_id,
-            ref_line_id=line.indent_item_id, item_id=line.item_id,
-            statuses=(ReservationStatus.ACTIVE.value,
-                      ReservationStatus.CONSUMED.value),
-        )
-        to_reserve = _d(line.quantity) - _d(held)
+        if line.indent_item_id not in prior:
+            prior[line.indent_item_id] = _d(await allocation.reserved_quantity(
+                db, RefType.RESERVATION.value, alloc.indent_id,
+                ref_line_id=line.indent_item_id, item_id=line.item_id,
+                statuses=(ReservationStatus.ACTIVE.value,
+                          ReservationStatus.CONSUMED.value),
+            ))
+        held = min(prior[line.indent_item_id], _d(line.quantity))
+        prior[line.indent_item_id] -= held
+        to_reserve = _d(line.quantity) - held
         # FIXED 2026-08-21 — `reserve` is deliberately partial-tolerant (an indent for
         # 100 against 60 on hand reserves 60 and returns the rest as a shortfall) and
         # this threw its answer away. A line promising more than its own point actually
@@ -1131,6 +1217,7 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                 warehouse_ids=[line.warehouse_id] if line.warehouse_id else None,
                 ref_line_id=line.indent_item_id,
                 item=await db.get(Item, line.item_id),
+                combination=combo_dict(line),
             )
             if unreserved > ZERO:
                 # The decision has to tell the truth about what it actually holds, or

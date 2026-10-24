@@ -21,8 +21,9 @@ from sqlalchemy.orm import relationship
 from app.core.database import Base
 from app.platform.workflow import doc_registry
 from app.shared.enums import DocType
-from app.shared.enums import DespatchNoteStatus
+from app.shared.enums import DespatchNoteStatus, PackChangeStatus
 from app.shared.models.base import created_at_col, pk, soft_fk, updated_at_col
+from app.shared.models.combination import CombinationMixin
 
 
 class PurchaseOrder(Base):
@@ -169,7 +170,7 @@ class PORevision(Base):
 Index("ix_pro_po_date", PurchaseOrder.po_date.desc())
 
 
-class POItem(Base):
+class POItem(CombinationMixin, Base):
     __tablename__ = "pro_po_items"
     id = pk()
     po_id = Column(ForeignKey("pro_purchase_orders.id", ondelete="CASCADE"), index=True, nullable=False)
@@ -189,6 +190,12 @@ class POItem(Base):
     # behind it and nobody promised anything.
     delivery_days = Column(Integer, nullable=True)
     received_quantity = Column(Numeric(14, 3), nullable=False, default=0)
+    # HOW the quantity is to be packed (2026-10-08): one of the item's pack
+    # hierarchies, and a breakdown inside it ("2 Carton"). `quantity` stays the truth,
+    # in the item's base unit; the breakdown always adds up to it — see
+    # `app/shared/packing.py`. NULL on lines written before packing existed.
+    pack_hierarchy_id = Column(BigInteger, index=True, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
 
     po = relationship("PurchaseOrder", back_populates="items")
 
@@ -256,7 +263,7 @@ class Requisition(Base):
 Index("ix_pro_req_status_created", Requisition.status, Requisition.created_at.desc())
 
 
-class RequisitionItem(Base):
+class RequisitionItem(CombinationMixin, Base):
     __tablename__ = "pro_requisition_items"
     id = pk()
     requisition_id = Column(ForeignKey("pro_requisitions.id", ondelete="CASCADE"),
@@ -388,7 +395,7 @@ class RFQ(Base):
                            cascade="all, delete-orphan", lazy="selectin")
 
 
-class RFQItem(Base):
+class RFQItem(CombinationMixin, Base):
     __tablename__ = "pro_rfq_items"
     id = pk()
     rfq_id = Column(ForeignKey("pro_rfqs.id", ondelete="CASCADE"),
@@ -579,7 +586,7 @@ Index("ix_pro_quotation_comments_q_created", QuotationComment.quotation_id,
       QuotationComment.created_at)
 
 
-class QuotationItem(Base):
+class QuotationItem(CombinationMixin, Base):
     __tablename__ = "pro_quotation_items"
     id = pk()
     quotation_id = Column(ForeignKey("pro_quotations.id", ondelete="CASCADE"),
@@ -661,7 +668,7 @@ class DespatchNote(Base):
 Index("ix_pro_dn_po_status", DespatchNote.po_id, DespatchNote.status)
 
 
-class DespatchNoteItem(Base):
+class DespatchNoteItem(CombinationMixin, Base):
     """`pro_despatch_note_items`. Batch, manufacture and expiry per line.
 
     These three are the reason this document earns its place. They cannot be derived
@@ -686,6 +693,23 @@ class DespatchNoteItem(Base):
     mfg_date = Column(Date, nullable=True)
     expiry_date = Column(Date, nullable=True)
     remarks = Column(String(500), nullable=True)
+
+    # How the supplier PACKED what they sent (2026-10-08) — "1 Carton + 10 Box +
+    # 20 Strip". `despatched_qty` is that breakdown's total in base units. The gate
+    # receives against exactly this, read-only.
+    pack_hierarchy_id = Column(BigInteger, index=True, nullable=True)
+    pack_breakdown = Column(JSON, nullable=True)
+    # A different hierarchy from the order's is allowed but goes to the buyer
+    # (PackChangeStatus). The order's hierarchy at the time is snapshotted so the
+    # buyer reads "you ordered X, they sent Y" even after accepting it.
+    pack_change_status = Column(String(20), nullable=False,
+                                default=PackChangeStatus.NONE.value)
+    ordered_pack_hierarchy_id = Column(BigInteger, nullable=True)
+    ordered_pack_hierarchy_name = Column(String(100), nullable=True)
+    pack_change_reason = Column(String(500), nullable=True)
+    pack_change_note = Column(String(500), nullable=True)
+    pack_change_by_name = Column(String(200), nullable=True)
+    pack_change_at = Column(DateTime, nullable=True)
 
     note = relationship("DespatchNote", back_populates="items")
 
@@ -811,7 +835,7 @@ Index("ix_pro_cons_status_created", PurchaseConsolidation.status,
       PurchaseConsolidation.created_at.desc())
 
 
-class PurchaseConsolidationItem(Base):
+class PurchaseConsolidationItem(CombinationMixin, Base):
     """`pro_consolidation_items` — one line per ITEM, whatever it was asked on."""
     __tablename__ = "pro_consolidation_items"
     id = pk()

@@ -1,4 +1,14 @@
+import type { CombinationValue } from "@/shared/combination";
+import type { PackEntry } from "@/shared/packing";
 export interface IndentItem {
+  /** Brand / variant / model, or Any (2026-10-23). 0 / absent when none. */
+  brand_id?: number;
+  variant_id?: number;
+  model_id?: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  combination_any?: boolean;
   id: number;
   item_id: number;
   item_code?: string | null;
@@ -188,7 +198,10 @@ export interface FulfilmentStep {
 }
 
 /** One line of an indent on the "what am I still owed" screen. */
-export interface AcknowledgementLine {
+export interface AcknowledgementLine extends CombinationValue {
+  /** The packs it was sent in, merged over its issue lines (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   indent_item_id: number;
   item_code?: string | null;
   item_name?: string | null;
@@ -229,6 +242,9 @@ export interface AcknowledgementLine {
  * package weighing zero.
  */
 export interface AcknowledgementPackageQuantity {
+  /** The packs THIS package holds of the line, as packed (2026-10-22). */
+  pack_breakdown?: PackEntry[] | null;
+  pack_text?: string | null;
   dispatch_id?: number | null;
   dispatch_no?: string | null;
   package_id?: number | null;
@@ -387,7 +403,11 @@ export interface IndentCreate {
   indent_type?: IndentType;
   vehicle_id?: number | null;
   remarks?: string | null;
-  items: { item_id: number; quantity: number; remarks?: string }[];
+  items: {
+    item_id: number; quantity: number; remarks?: string;
+    brand_id?: number | null; variant_id?: number | null; model_id?: number | null;
+    combination_any?: boolean;
+  }[];
 }
 
 export interface IndentUpdate extends IndentCreate {

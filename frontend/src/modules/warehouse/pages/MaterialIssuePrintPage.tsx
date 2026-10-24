@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { PrintTemplate } from "@/shared/components";
 import { getIssue, warehouseOptions } from "../api";
 import { fmtDate, fmtQty } from "../format";
+import { combinationLabel } from "@/shared/combination";
 
 /**
  * The material issue note — the paper that leaves the store with the goods.
@@ -69,6 +70,7 @@ export function MaterialIssuePrintPage() {
         <span className="font-semibold" style={{ color: "#141a2a" }}>{line.item_name ?? "—"}</span>,
         <>
           <div className="font-mono text-[9px]">{line.item_code ?? "—"}</div>
+          {combinationLabel(line) && <div className="text-[9px]">{combinationLabel(line)}</div>}
           {line.batch_no && (
             <div className="mt-0.5 text-[9px]" style={{ color: "#697187" }}>Batch: {line.batch_no}</div>
           )}

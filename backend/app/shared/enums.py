@@ -247,19 +247,42 @@ class PaymentMilestoneStage(str, Enum):
     POST_WARRANTY = "POST_WARRANTY"
 
 
+class PaymentSplitMode(str, Enum):
+    """How one stage's share of a payment term is paid (2026-10-06).
+
+    ONE    -- a single payment, `<stage>_days` after the stage's trigger.
+    EQUAL  -- N equal instalments, each on its own day after the trigger.
+    CUSTOM -- N instalments, each its own percent OF THE STAGE (they add up to 100)
+              on its own day after the trigger.
+    """
+    ONE = "ONE"
+    EQUAL = "EQUAL"
+    CUSTOM = "CUSTOM"
+
+
+# The most instalments one stage may be split into. A request limit as much as a
+# business one: each instalment is a milestone row accounts pays against.
+MAX_PAYMENT_INSTALMENTS = 12
+
 # Served to every screen (the master form, the PO, the accounts desk), so a stage reads
-# the same everywhere. `field` is the column prefix on mst_payment_terms.
+# the same everywhere. `field` is the column prefix on mst_payment_terms; `short` is
+# the milestone code printed beside each instalment (ADV 1/1, DLV 2/4); `after` is how
+# a day count on that stage is read ("30 days after delivery").
 PAYMENT_MILESTONE_META = [
     {"value": PaymentMilestoneStage.ADVANCE.value, "field": "advance",
-     "label": "Advance", "trigger": "On PO approval"},
+     "label": "Advance", "trigger": "On PO approval", "short": "ADV",
+     "after": "after PO approval"},
     {"value": PaymentMilestoneStage.AGAINST_DELIVERY.value, "field": "delivery",
-     "label": "Against delivery", "trigger": "On receipt of goods"},
+     "label": "Against delivery", "trigger": "On receipt of goods", "short": "DLV",
+     "after": "after delivery"},
     {"value": PaymentMilestoneStage.POST_INSTALLATION.value, "field": "installation",
      "label": "Post commissioning / installation",
-     "trigger": "After commissioning or installation"},
+     "trigger": "After commissioning or installation", "short": "INS",
+     "after": "after installation"},
     {"value": PaymentMilestoneStage.POST_WARRANTY.value, "field": "warranty",
      "label": "Post support / warranty period",
-     "trigger": "After the support or warranty period"},
+     "trigger": "After the support or warranty period", "short": "WAR",
+     "after": "after the warranty ends"},
 ]
 
 
@@ -376,6 +399,11 @@ class RefType(str, Enum):
     RESERVATION = "RESERVATION"
     # Not a movement: a lot set aside for one project (stk_project_holds).
     PROJECT_HOLD = "PROJECT_HOLD"
+    # Not a movement: stock a DIRECT material issue (no indent, so no allocation
+    # behind it) has claimed from the moment it was saved, so two drafts cannot both
+    # promise the same shelf. ref_id = out_issues.id, ref_line_id = out_issue_items.id.
+    # Released on cancel/reject, consumed when the issue posts (2026-10-06).
+    ISSUE_HOLD = "ISSUE_HOLD"
 
 
 class Priority(str, Enum):
@@ -856,3 +884,35 @@ class ItemScope(str, Enum):
     """
     ROLE = "ROLE"
     REGION = "REGION"
+
+
+class ContainerUsage(str, Enum):
+    """What a container type of an item is USED for (2026-10-23) — many-to-many: one
+    container may serve several usages and one usage several containers.
+
+    INDENT: what a requester asks in. PURCHASE: what is bought and despatched in.
+    STORAGE: what putaway shelves in. ISSUE: what leaves the counter in — and the
+    container asset / consumable codes are minted per. CONSUMPTION: what the site
+    reports using in. Quantities stay in base units everywhere; this only says which
+    containers each screen offers and defaults to.
+    """
+    INDENT = "INDENT"
+    PURCHASE = "PURCHASE"
+    STORAGE = "STORAGE"
+    ISSUE = "ISSUE"
+    CONSUMPTION = "CONSUMPTION"
+
+
+class PackChangeStatus(str, Enum):
+    """A supplier's change of PACK HIERARCHY on a despatch note line (2026-10-08).
+
+    The order said "strips of 10"; the supplier is sending strips of 15. Allowed —
+    the quantity in tablets is what was bought — but the buyer is told, and decides.
+    NONE: the line is packed in the order's own hierarchy. PENDING: waiting on the
+    buyer. ACCEPTED: the order now says the new hierarchy. DECLINED: the buyer refused
+    it; the gate sees that on the receipt before it books the goods in.
+    """
+    NONE = "NONE"
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    DECLINED = "DECLINED"

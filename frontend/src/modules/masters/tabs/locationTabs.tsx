@@ -39,10 +39,25 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
           pattern: /^[A-Za-z0-9-]+$/,
           patternMessage: "Use letters, numbers or a hyphen" },
         { key: "name", label: "Name", required: true, maxLength: 200 },
-        { key: "warehouse_type", label: "Type", type: "select", options: WAREHOUSE_TYPES },
+        {
+          key: "warehouse_type",
+          label: "Type",
+          type: "select",
+          options: WAREHOUSE_TYPES,
+          onChange: (v) => {
+            if (v === "MAIN") {
+              return { is_bin_managed: true };
+            }
+          },
+        },
         { key: "facility_id", label: "Facility", type: "select", options: facilities },
         { key: "address", label: "Address" },
-        { key: "is_bin_managed", label: "Bin managed", type: "switch" },
+        {
+          key: "is_bin_managed",
+          label: "Bin managed",
+          type: "switch",
+          hint: "Main store warehouses are automatically bin managed.",
+        },
         { key: "is_active", label: "Active", type: "switch" },
       ]}
       // A new warehouse starts as MAIN, and a main store keeps storage locations by
@@ -51,10 +66,17 @@ export function WarehousesTab({ facilities }: { facilities: Option[] }) {
                    address: "", is_bin_managed: true, is_active: true }}
       toForm={(r) => ({ code: r.code, name: r.name, warehouse_type: r.warehouse_type,
         facility_id: r.facility_id ?? null, address: r.address ?? "",
-        is_bin_managed: r.is_bin_managed, is_active: r.is_active })}
+        is_bin_managed: r.warehouse_type === "MAIN" ? true : r.is_bin_managed,
+        is_active: r.is_active })}
       bulk={mastersApi.warehouses} usage={mastersApi.warehouses.usage}
-      onCreate={(v) => mastersApi.warehouses.create(v as Partial<MasterWarehouse>)}
-      onUpdate={(id, v) => mastersApi.warehouses.update(id, v as Partial<MasterWarehouse>)}
+      onCreate={(v) => mastersApi.warehouses.create({
+        ...v,
+        is_bin_managed: v.warehouse_type === "MAIN" ? true : Boolean(v.is_bin_managed),
+      } as Partial<MasterWarehouse>)}
+      onUpdate={(id, v) => mastersApi.warehouses.update(id, {
+        ...v,
+        is_bin_managed: v.warehouse_type === "MAIN" ? true : Boolean(v.is_bin_managed),
+      } as Partial<MasterWarehouse>)}
       onDeactivate={mastersApi.warehouses.deactivate}
     />
   );

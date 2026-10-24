@@ -1,3 +1,4 @@
+import { PackQty } from "@/shared/packing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -1881,6 +1882,23 @@ export function DispatchConfirmPage() {
                     value={load(subject.packages, subject.weight_kg)} />
                   <Fact icon={<CalendarDays className="h-4 w-4" />}
                     label={subject.dateLabel} value={fmtDate(subject.date)} />
+                  {/* The packs on the vehicle, per item (2026-10-22). */}
+                  {!!doc?.line_packs?.length && (
+                    <div className="space-y-2 border-t border-line/70 pt-3.5">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+                        Packs
+                      </span>
+                      {doc.line_packs.map((row) => (
+                        <div key={row.issue_item_id} className="rounded-xl border border-line/70 bg-content2/30 px-3 py-2">
+                          <div className="truncate text-xs font-semibold text-ink">
+                            {row.item_name ?? row.item_code}
+                          </div>
+                          <PackQty entries={row.pack_breakdown} qty={row.quantity}
+                                   uom={row.uom_code} itemId={row.item_id} className="mt-1" />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               ) : (
                 <p className="text-sm text-muted">

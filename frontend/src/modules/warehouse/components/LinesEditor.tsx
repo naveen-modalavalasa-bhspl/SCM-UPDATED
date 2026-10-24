@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { Fragment, useState, useEffect, type ReactNode } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/shared/components";
 
@@ -43,6 +43,9 @@ interface Props<T> {
   rowTone?: (row: T, index: number) => string | undefined;
   /** Minimum table width for dense documents whose cells need room to breathe. */
   minTableWidth?: string;
+  /** A full-width panel under a line — its packing, say. `null` for none. Drawn as
+   *  a second table row on desktop and at the foot of the card on a phone. */
+  renderDetail?: (row: T, index: number) => ReactNode | null;
 }
 
 export function LinesEditor<T>({
@@ -56,6 +59,7 @@ export function LinesEditor<T>({
   empty = "No lines yet.",
   rowTone,
   minTableWidth = "min-w-[720px]",
+  renderDetail,
 }: Props<T>) {
   const head = (
     <>
@@ -93,8 +97,11 @@ export function LinesEditor<T>({
                 </td>
               </tr>
             ) : (
-              rows.map((row, i) => (
-                <tr key={keyOf(row, i)} className={`border-t border-line/70 transition-colors ${rowTone?.(row, i) ?? ""}`}>
+              rows.map((row, i) => {
+                const detail = renderDetail?.(row, i) ?? null;
+                return (
+                <Fragment key={keyOf(row, i)}>
+                <tr className={`border-t border-line/70 transition-colors ${rowTone?.(row, i) ?? ""}`}>
                   {columns.map((c) => (
                     <td
                       key={c.key}
@@ -118,7 +125,16 @@ export function LinesEditor<T>({
                     </td>
                   )}
                 </tr>
-              ))
+                {detail && (
+                  <tr className={rowTone?.(row, i) ?? ""}>
+                    <td colSpan={columns.length + (onRemove ? 1 : 0)} className="px-3 pb-3 pt-0">
+                      {detail}
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -161,6 +177,7 @@ export function LinesEditor<T>({
                     <div className="text-sm">{c.render(row, i)}</div>
                   </div>
                 ))}
+                {renderDetail?.(row, i)}
               </div>
             </div>
           ))

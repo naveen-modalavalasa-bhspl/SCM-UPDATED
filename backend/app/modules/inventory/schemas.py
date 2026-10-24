@@ -13,6 +13,7 @@ from app.shared.limits import (  # request-size guards, see the module
     Annotated, BatchDocuments, BatchIds, DocumentLines, MAX_BATCH_IDS, MAX_DOCUMENT_LINES,
     SerialList,
 )
+from app.shared.masters.combinations import CombinationIn, CombinationOut
 
 
 class StockRow(BaseModel):
@@ -31,6 +32,14 @@ class StockRow(BaseModel):
     expiry_date: date | None = None
     project_id: int
     project_name: str | None = None
+    # The combination (2026-10-23): one row per brand / variant / model. 0 and no
+    # name when none was named — the screen shows nothing then.
+    brand_id: int = 0
+    variant_id: int = 0
+    model_id: int = 0
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
     # A JSON list on the table — a lot holds many units. Sent as a list so the screen
     # can say "…and 84 more" instead of pretending a lot has one identity.
     serial_number: list[str] | None = None
@@ -99,6 +108,8 @@ class MovementRow(BaseModel):
     serial_numbers: list[str] | None = None
     asset_code: str | None = None
     consumable_code: str | None = None
+    # How the movement was packed, snapshotted when it was written (2026-10-08).
+    pack_text: str | None = None
     # Every unit code this movement carried, for an item that is not serial-tracked —
     # where the code IS the unit's identity. A list, because the screen's code column
     # lists and copies them one per line; `asset_code` / `consumable_code` above stay
@@ -191,7 +202,7 @@ class TransferIn(BaseModel):
     remarks: str | None = None
 
 
-class MRItemOut(BaseModel):
+class MRItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     line_no: int
@@ -354,7 +365,7 @@ class AllocationLineOut(BaseModel):
     status: str
 
 
-class AllocationDecisionIn(BaseModel):
+class AllocationDecisionIn(CombinationIn):
     """One decision: this indent line gets this much, out of this warehouse.
     quantity may be 0 -- "give nothing now" is a decision, not a missing value."""
     indent_item_id: int
@@ -399,7 +410,7 @@ class AllocApproveIn(BaseModel):
     revisions: list[AllocationRevisionIn] = Field(default_factory=list, max_length=MAX_DOCUMENT_LINES)
 
 
-class AllocationLineAvailability(BaseModel):
+class AllocationLineAvailability(CombinationOut):
     """What one allocation line could actually be given, read right now.
 
     `free` is the shelf at the chosen point less what other un-approved allocations
@@ -449,7 +460,7 @@ class AllocationBatchOut(BaseModel):
     failed: list[AllocationBatchFailureOut] = Field(default_factory=list)
 
 
-class AllocationItemOut(BaseModel):
+class AllocationItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     indent_item_id: int
@@ -786,7 +797,7 @@ class NearExpiryAlertRow(BaseModel):
 
 # ---------------- STO (Stock Transfer Order) Schemas ----------------
 
-class STOItemIn(BaseModel):
+class STOItemIn(CombinationIn):
     item_id: int
     requested_qty: float = Field(gt=0)
     remarks: str | None = None
@@ -801,7 +812,7 @@ class STOIn(BaseModel):
     items: Annotated[list[STOItemIn], DocumentLines]
 
 
-class STOItemOut(BaseModel):
+class STOItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
     id: int
     item_id: int

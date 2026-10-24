@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Check, Send, Truck, X, CreditCard, Package, Route, Building, MapPin } from "lucide-react";
+import {
+  AlertCircle, ArrowLeft, Check, CheckCircle2, Copy, CreditCard, Layers, MapPin,
+  Package, Plus, Route, Send, Trash2, Truck, X, Building,
+} from "lucide-react";
 import { Accordion, AccordionItem } from "@heroui/react";
 import {
   Button, Card, ErrorBanner, Field, Input, PageHeader, StatusPill, useToast,
@@ -17,6 +20,14 @@ import { formatPONo } from "@/shared/format";
 import { vendorPoLabel } from "../status";
 import { supplierPoDocs } from "@/modules/accounts/api";
 import { DocumentFiles } from "@/modules/accounts/components/DocumentFiles";
+import {
+  PackQty, greedyWithPart, packable, toPayload, type PackEntry, type PackHierarchy,
+} from "@/shared/packing";
+import { DespatchPacking } from "../components/DespatchPacking";
+import {
+  CombinationPicker, CombinationTag, SUPPLIER_COMBINATIONS, comboFrom, comboPayload, useCombinationOptions,
+  type CombinationValue,
+} from "@/shared/combination";
 
 const money = (value: number | null | undefined) => new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -25,12 +36,34 @@ const money = (value: number | null | undefined) => new Intl.NumberFormat(undefi
 const today = () => new Date().toISOString().slice(0, 10);
 const num = (value: unknown) => (Number.isFinite(Number(value)) ? Number(value) : 0);
 
-type LineDraft = DespatchLineWrite & {
+type LineDraft = Omit<DespatchLineWrite, "pack_breakdown"> & {
   item_code?: string | null;
   item_name?: string | null;
   uom_code?: string | null;
   pending_qty: number;
+  /** Packing being edited (full entries; reduced to the request shape on save). */
+  pack_breakdown?: PackEntry[] | null;
+  /** The item's hierarchies and the one the order asked for. */
+  pack_options?: PackHierarchy[];
+  ordered_hierarchy_id?: number | null;
+  item_id?: number;
+  /** The brand / variant / model sent — the order's, or another (2026-10-23). */
+  combo?: CombinationValue;
 };
+
+/** The order's packing for what is still owed — in the order's own levels where they
+ *  still fit, else whole packs of its hierarchy. */
+function startingPacks(line: VendorPOLine): Pick<LineDraft, "pack_hierarchy_id" | "pack_breakdown"> {
+  const options = packable(line.pack_options);
+  const hierarchy = options.find((h) => h.hierarchy_id === line.pack_hierarchy_id) ?? options[0];
+  if (!hierarchy) return { pack_hierarchy_id: null, pack_breakdown: null };
+  const ordered = line.pack_breakdown ?? [];
+  const top = Math.max(0, ...ordered.map((e) => e.level));
+  // Whole packs of the order's biggest level, and what is left as one part pack of
+  // it (2026-10-11) — the same way the order itself describes a remainder.
+  return { pack_hierarchy_id: hierarchy.hierarchy_id,
+           pack_breakdown: greedyWithPart(hierarchy, line.pending_qty, top || undefined) };
+}
 
 /**
  * One order, and the despatch note the vendor files against it.
@@ -80,6 +113,8 @@ export function SupplierPODetailPage() {
     expected_date: null, remarks: "",
   });
   const [lines, setLines] = useState<LineDraft[]>([]);
+  const comboOptions = useCombinationOptions(lines.map((line) => line.item_id ?? 0),
+                                             SUPPLIER_COMBINATIONS);
   const [editing, setEditing] = useState<DespatchNote | null>(null);
   const [responseNote, setResponseNote] = useState("");
 
@@ -113,7 +148,12 @@ export function SupplierPODetailPage() {
         despatched_qty: line.pending_qty,
         batch_no: "", mfg_date: null, expiry_date: null, remarks: null,
         item_code: line.item_code, item_name: line.item_name,
+        item_id: line.item_id, combo: comboFrom(line),
         uom_code: line.uom_code, pending_qty: line.pending_qty,
+        pack_options: packable(line.pack_options),
+        ordered_hierarchy_id: line.pack_hierarchy_id ?? null,
+        pack_change_reason: null,
+        ...startingPacks(line),
       })));
     setComposing(true);
   };
@@ -139,9 +179,15 @@ export function SupplierPODetailPage() {
         batch_no: line.batch_no ?? "", mfg_date: line.mfg_date ?? null,
         expiry_date: line.expiry_date ?? null, remarks: line.remarks ?? null,
         item_code: line.item_code, item_name: line.item_name,
+        item_id: line.item_id, combo: comboFrom(line),
         uom_code: line.uom_code,
         // Its own quantity is not spent against its own ceiling on a re-save.
         pending_qty: (source?.pending_qty ?? 0) + num(line.despatched_qty),
+        pack_options: packable(source?.pack_options),
+        ordered_hierarchy_id: source?.pack_hierarchy_id ?? null,
+        pack_hierarchy_id: line.pack_hierarchy_id ?? null,
+        pack_breakdown: line.pack_breakdown ?? null,
+        pack_change_reason: line.pack_change_reason ?? null,
       };
     }));
     setComposing(true);
@@ -153,8 +199,13 @@ export function SupplierPODetailPage() {
     ...header,
     lines: lines
       .filter((line) => num(line.despatched_qty) > 0)
-      .map(({ item_code: _c, item_name: _n, uom_code: _u, pending_qty: _p, ...rest }) =>
-        rest),
+      .map(({ item_code: _c, item_name: _n, uom_code: _u, pending_qty: _p,
+              pack_options: _o, ordered_hierarchy_id: _h, pack_breakdown,
+              item_id: _i, combo, ...rest }) => ({
+        ...rest,
+        ...comboPayload(combo),
+        pack_breakdown: pack_breakdown?.length ? toPayload(pack_breakdown) : null,
+      })),
   });
 
   const refresh = () => {
@@ -190,17 +241,87 @@ export function SupplierPODetailPage() {
   const setLine = (index: number, patch: Partial<LineDraft>) =>
     setLines((current) => current.map((line, i) => (i === index ? { ...line, ...patch } : line)));
 
-  // REQ_111 — one item sent in several batches is one note line per batch. A new batch
-  // row lands after the item's last row, empty, so the vendor splits the quantity.
-  const addBatch = (index: number) =>
+  /** When the user types or edits the sending quantity directly, auto-pack into the
+   *  currently selected hierarchy so the packaging breakdown stays live in sync. */
+  const handleSendingQtyChange = (index: number, rawVal: string) => {
+    const newQty = rawVal === "" ? 0 : Math.max(0, num(rawVal));
+    const line = lines[index];
+    if (line.pack_options?.length) {
+      const hierarchy = line.pack_options.find((h) => h.hierarchy_id === line.pack_hierarchy_id)
+        ?? line.pack_options.find((h) => h.hierarchy_id === line.ordered_hierarchy_id)
+        ?? line.pack_options[0];
+      if (hierarchy) {
+        const packs = newQty > 0 ? greedyWithPart(hierarchy, newQty) : [];
+        setLine(index, {
+          despatched_qty: newQty,
+          pack_hierarchy_id: hierarchy.hierarchy_id,
+          pack_breakdown: packs,
+        });
+        return;
+      }
+    }
+    setLine(index, { despatched_qty: newQty });
+  };
+
+  /** Add a split line for an item.
+   *  - If `sameBatch` is true: copies batch_no, mfg_date, expiry_date from the source line.
+   *    If another packaging hierarchy is available, pre-selects it so managing multiple
+   *    hierarchies for the same batch is instant!
+   *  - If `sameBatch` is false: creates a new batch split with blank batch fields.
+   *  - Prefills remaining owed quantity and auto-packs it.
+   */
+  const addSplitLine = (sourceIndex: number, sameBatch = false) => {
     setLines((current) => {
-      const id = current[index].po_item_id;
-      let last = index;
+      const source = current[sourceIndex];
+      const id = source.po_item_id;
+
+      let last = sourceIndex;
       while (last + 1 < current.length && current[last + 1].po_item_id === id) last += 1;
-      const row = { ...current[index], despatched_qty: 0, batch_no: "",
-                    mfg_date: null, expiry_date: null, remarks: null };
+
+      const itemLines = current.filter((l) => l.po_item_id === id);
+      const allocated = itemLines.reduce((sum, l) => sum + num(l.despatched_qty), 0);
+      const remaining = Math.max(0, source.pending_qty - allocated);
+
+      const options = source.pack_options ?? [];
+      const currentHid = source.pack_hierarchy_id;
+      const otherHierarchy = options.find((h) => h.hierarchy_id !== currentHid);
+      // New batch defaults strictly to buyer-requested packaging hierarchy; split-packaging tries alternate hierarchy
+      const nextHierarchy = (sameBatch && otherHierarchy)
+        ? otherHierarchy
+        : (options.find((h) => h.hierarchy_id === source.ordered_hierarchy_id)
+           ?? options.find((h) => h.hierarchy_id === currentHid)
+           ?? options[0]);
+
+      const packBreakdown = nextHierarchy && remaining > 0 ? greedyWithPart(nextHierarchy, remaining) : null;
+
+      const row: LineDraft = {
+        ...source,
+        despatched_qty: remaining,
+        batch_no: sameBatch ? (source.batch_no ?? "") : "",
+        mfg_date: sameBatch ? (source.mfg_date ?? null) : null,
+        expiry_date: sameBatch ? (source.expiry_date ?? null) : null,
+        remarks: null,
+        pack_hierarchy_id: nextHierarchy?.hierarchy_id ?? null,
+        pack_breakdown: packBreakdown,
+        pack_change_reason: (nextHierarchy && nextHierarchy.hierarchy_id !== source.ordered_hierarchy_id)
+          ? (source.pack_change_reason ?? "")
+          : null,
+      };
+
       return [...current.slice(0, last + 1), row, ...current.slice(last + 1)];
     });
+  };
+
+  const copyBatchFromSplit = (targetIndex: number, sourceIndex: number) => {
+    const src = lines[sourceIndex];
+    setLine(targetIndex, {
+      batch_no: src.batch_no ?? "",
+      mfg_date: src.mfg_date ?? null,
+      expiry_date: src.expiry_date ?? null,
+    });
+    toast.success("Batch details copied");
+  };
+
   const removeLine = (index: number) =>
     setLines((current) => current.filter((_, i) => i !== index));
 
@@ -209,6 +330,12 @@ export function SupplierPODetailPage() {
   const sentByItem = new Map<number, number>();
   lines.forEach((l) => sentByItem.set(l.po_item_id,
     (sentByItem.get(l.po_item_id) ?? 0) + num(l.despatched_qty)));
+  // A changed hierarchy must say why — the server refuses the save without it.
+  const missingReasons = lines
+    .filter((l) => l.ordered_hierarchy_id != null && l.pack_hierarchy_id != null
+      && l.pack_hierarchy_id !== l.ordered_hierarchy_id && num(l.despatched_qty) > 0
+      && !(l.pack_change_reason ?? "").trim())
+    .map((l) => l.item_code ?? l.item_name ?? "a line");
   const overSent = lines.filter((l, i) =>
     lines.findIndex((x) => x.po_item_id === l.po_item_id) === i
     && (sentByItem.get(l.po_item_id) ?? 0) > l.pending_qty);
@@ -522,15 +649,23 @@ export function SupplierPODetailPage() {
                 <tr key={line.po_item_id} className={isChanged ? "bg-primary/5" : ""}>
                   <td className="p-3">
                     <strong className="text-ink">{line.item_name ?? "—"}</strong>
+                    <CombinationTag value={line} className="mt-1" />
                     {isNew && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">New Item</span>}
                     {qtyChanged && <span className="ml-2 text-[10px] font-bold uppercase text-primary bg-primary/10 px-1.5 py-0.5 rounded">Qty Changed</span>}
                     <p className="font-mono text-xs text-muted">{line.item_code}</p>
+                    {!!line.pack_breakdown?.length && (
+                      <p className="mt-1 text-xs font-semibold text-ink-700">Pack as shown under Ordered.</p>
+                    )}
                   </td>
                   <td className="tabular p-3 text-right">
                     {qtyChanged && (
                       <span className="line-through text-muted mr-1 text-xs">{prev.quantity}</span>
                     )}
-                    {line.ordered_qty} {line.uom_code ?? ""}
+                    {/* The packs, the ordered quantity in the item's own unit under them,
+                      * and the whole hierarchy one press away (2026-10-11). Read off the
+                      * line's own options — the portal never calls the staff API. */}
+                    <PackQty entries={line.pack_breakdown} qty={line.ordered_qty} uom={line.uom_code}
+                             hierarchies={packable(line.pack_options)} align="right" />
                   </td>
                   <td className="tabular p-2 text-right">
                     {/* The rate is READ, on every rung. What changed on an
@@ -649,45 +784,171 @@ export function SupplierPODetailPage() {
               </thead>
               <tbody className="divide-y divide-line">
                 {lines.map((line, index) => {
-                  const extraBatch = index > 0 && lines[index - 1].po_item_id === line.po_item_id;
+                  const itemLines = lines.filter((l) => l.po_item_id === line.po_item_id);
+                  const splitIndex = itemLines.indexOf(line);
+                  const splitNo = splitIndex + 1;
+                  const totalSplits = itemLines.length;
+                  const isFirst = splitIndex === 0;
+                  const totalSentForItem = sentByItem.get(line.po_item_id) ?? 0;
+                  const pending = line.pending_qty;
+                  const isMatched = totalSentForItem === pending;
+                  const isOver = totalSentForItem > pending;
+                  const isUnder = totalSentForItem < pending;
+                  const primaryLineIndex = lines.findIndex((l) => l.po_item_id === line.po_item_id);
+                  const primaryLine = lines[primaryLineIndex];
+                  const hasSameBatch = !isFirst && !!line.batch_no && !!primaryLine?.batch_no && line.batch_no === primaryLine.batch_no;
+
                   return (
-                  <tr key={index} className={extraBatch ? "border-t-0" : ""}>
-                    <td className="p-3">
-                      {extraBatch ? (
-                        <div className="flex items-center gap-2 pl-3 text-xs text-muted">
-                          ↳ another batch
-                          <Button variant="ghost" onClick={() => removeLine(index)}>
-                            <X className="h-3.5 w-3.5" /> Remove
-                          </Button>
+                  <Fragment key={index}>
+                  <tr className={!isFirst ? "border-t border-line/40 bg-surface-2/20" : ""}>
+                    <td className="p-3 align-top">
+                      {isFirst ? (
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <strong className="text-sm font-bold text-ink">{line.item_name ?? "—"}</strong>
+                            {totalSplits > 1 && (
+                              <span className="rounded-full bg-brand-050 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-brand">
+                                Split 1 of {totalSplits}
+                              </span>
+                            )}
+                          </div>
+                          <p className="font-mono text-xs text-muted">
+                            {line.item_code} · Owed: <span className="font-semibold text-ink">{line.pending_qty} {line.uom_code ?? ""}</span>
+                          </p>
+                          {!!comboOptions.data?.[String(line.item_id)]?.length && (
+                            <div className="max-w-xs pt-1">
+                              <CombinationPicker
+                                options={comboOptions.data?.[String(line.item_id)]}
+                                value={line.combo}
+                                ariaLabel={`Brand, variant and model for ${line.item_name ?? "line"}`}
+                                onChange={(combo) => setLines((current) => current.map((l) =>
+                                  l.po_item_id === line.po_item_id ? { ...l, combo } : l))}
+                              />
+                            </div>
+                          )}
+
+                          {/* Allocation status */}
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            {isMatched && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-ok-bg px-2 py-0.5 text-[11px] font-semibold text-ok">
+                                <CheckCircle2 size={12} /> Total {totalSentForItem} / {pending} {line.uom_code ?? ""} matched
+                              </span>
+                            )}
+                            {isUnder && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-800 border border-amber-200">
+                                <AlertCircle size={12} /> Sending {totalSentForItem} / {pending} ({pending - totalSentForItem} left)
+                              </span>
+                            )}
+                            {isOver && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-bad-bg px-2 py-0.5 text-[11px] font-semibold text-bad border border-bad/30">
+                                <AlertCircle size={12} /> Over by {totalSentForItem - pending} {line.uom_code ?? ""}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       ) : (
-                        <>
-                          <strong className="text-ink">{line.item_name ?? "—"}</strong>
-                          <p className="font-mono text-xs text-muted">
-                            {line.item_code} · up to {line.pending_qty} {line.uom_code ?? ""}
-                          </p>
-                          <Button variant="ghost" onClick={() => addBatch(index)}>
-                            + Add batch
-                          </Button>
-                        </>
+                        <div className="space-y-1.5 pl-3 border-l-2 border-brand/40">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="rounded-md bg-brand-050 px-2 py-0.5 text-xs font-bold text-brand">
+                                ↳ Split #{splitNo}
+                              </span>
+                              {hasSameBatch ? (
+                                <span className="rounded-full bg-ok-bg px-2 py-0.5 text-[10px] font-semibold text-ok border border-ok/20">
+                                  Same batch ({line.batch_no})
+                                </span>
+                              ) : (
+                                !!primaryLine?.batch_no && (
+                                  <button
+                                    type="button"
+                                    onClick={() => copyBatchFromSplit(index, primaryLineIndex)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-line bg-content1 px-1.5 py-0.5 text-[10px] font-semibold text-muted hover:text-brand hover:border-brand/40 transition-colors cursor-pointer"
+                                    title="Copy batch & dates from Split #1"
+                                  >
+                                    <Copy size={10} /> Use Split #1 batch
+                                  </button>
+                                )
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => removeLine(index)}
+                              className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold text-muted hover:text-bad hover:bg-bad-bg/40 transition-colors cursor-pointer"
+                              title="Remove this split"
+                            >
+                              <Trash2 size={12} /> Remove Split
+                            </button>
+                          </div>
+                        </div>
                       )}
+
+                      {/* Packaging Section (displays in buyer-requested packages with modal popup, as in PO page) */}
+                      {!!line.pack_options?.length && (
+                        <div className="mt-2.5 pt-2 border-t border-line/40">
+                          <DespatchPacking
+                            hierarchies={line.pack_options}
+                            orderedId={line.ordered_hierarchy_id}
+                            hierarchyId={line.pack_hierarchy_id}
+                            breakdown={line.pack_breakdown}
+                            reason={line.pack_change_reason}
+                            uom={line.uom_code}
+                            owed={line.pending_qty}
+                            targetQty={line.despatched_qty}
+                            itemName={line.item_name}
+                            itemCode={line.item_code}
+                            batchNo={line.batch_no}
+                            splitNo={splitNo}
+                            totalSplits={totalSplits}
+                            onChange={(patch) => setLine(index, patch)}
+                          />
+                        </div>
+                      )}
+
+                      {/* Batch Actions: rendered down after EVERY batch addition row */}
+                      <div className="flex flex-wrap items-center gap-1.5 pt-2.5 border-t border-line/30">
+                        <button
+                          type="button"
+                          onClick={() => addSplitLine(index, false)}
+                          className="group inline-flex min-h-7 items-center gap-1.5 rounded-lg border border-brand/30 bg-brand-050/70 px-2.5 py-1 text-xs font-semibold text-brand hover:border-brand hover:bg-brand hover:text-white transition-all shadow-2xs hover:shadow-xs active:scale-95 cursor-pointer"
+                          title="Add another batch/lot for this item"
+                        >
+                          <Plus size={13} className="transition-transform group-hover:rotate-90" />
+                          <span>+ Add New Batch</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addSplitLine(index, true)}
+                          className="inline-flex min-h-7 items-center gap-1.5 rounded-lg border border-line bg-content1 px-2.5 py-1 text-xs font-semibold text-ink-700 hover:border-brand/40 hover:bg-brand-050/30 transition-all shadow-2xs hover:shadow-xs active:scale-95 cursor-pointer"
+                          title="Add another packaging hierarchy row for the same batch"
+                        >
+                          <Layers size={13} className="text-brand" />
+                          <span>+ Split Packaging (Same Batch)</span>
+                        </button>
+                      </div>
                     </td>
-                    <td className="p-2 text-right">
+                    <td className="p-2 text-right align-top w-36">
                       <Input
                         type="number"
-                        className="text-right"
-                        value={line.despatched_qty}
-                        onChange={(e) => setLine(index, { despatched_qty: num(e.target.value) })}
+                        min={0}
+                        className="text-right font-semibold"
+                        value={line.despatched_qty === 0 ? "" : String(line.despatched_qty)}
+                        placeholder="0"
+                        onChange={(e) => handleSendingQtyChange(index, e.target.value)}
                       />
+                      {!!line.pack_options?.length && (
+                        <span className="mt-1 block text-[11px] font-medium text-brand">
+                          {line.despatched_qty > 0 ? "⚡ Auto-packs in ladder" : "Type qty to auto-pack"}
+                        </span>
+                      )}
                     </td>
-                    <td className="p-2">
+                    <td className="p-2 align-top">
                       <Input
                         value={line.batch_no ?? ""}
                         placeholder="Batch / lot"
                         onChange={(e) => setLine(index, { batch_no: e.target.value })}
                       />
                     </td>
-                    <td className="p-2">
+                    <td className="p-2 align-top">
                       <Input
                         type="date"
                         // Nothing is manufactured tomorrow.
@@ -696,7 +957,7 @@ export function SupplierPODetailPage() {
                         onChange={(e) => setLine(index, { mfg_date: e.target.value || null })}
                       />
                     </td>
-                    <td className="p-2">
+                    <td className="p-2 align-top">
                       <Input
                         type="date"
                         // Already-expired stock must not be dispatched at all, so the
@@ -707,11 +968,19 @@ export function SupplierPODetailPage() {
                       />
                     </td>
                   </tr>
+                  </Fragment>
                   );
                 })}
               </tbody>
             </table>
           </div>
+
+          {missingReasons.length > 0 && (
+            <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Say why the packing changed for {missingReasons.join(", ")} — the buyer reads
+              it before accepting.
+            </p>
+          )}
 
           {overSent.length > 0 && (
             <p className="rounded-lg bg-danger/10 px-3 py-2 text-xs text-danger">
@@ -736,7 +1005,8 @@ export function SupplierPODetailPage() {
               {save.isPending ? "Saving…" : "Save draft"}
             </Button>
             <Button
-              disabled={busy || missingPapers.length > 0 || overSent.length > 0}
+              disabled={busy || missingPapers.length > 0 || overSent.length > 0
+                        || missingReasons.length > 0}
               onClick={() => submit.mutate()}
             >
               <Send className="h-4 w-4" /> {submit.isPending ? "Submitting…" : "Submit dispatch"}
@@ -767,6 +1037,18 @@ export function SupplierPODetailPage() {
                       `${note.items.length} line(s)`]
                       .filter(Boolean).join(" · ")}
                   </p>
+                  {note.items.filter((item) => item.pack_change_status
+                    && item.pack_change_status !== "NONE").map((item) => (
+                    <p key={item.id} className={`mt-1 inline-flex flex-wrap items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${
+                      item.pack_change_status === "PENDING" ? "bg-warn-bg text-warn"
+                        : item.pack_change_status === "ACCEPTED" ? "bg-ok-bg text-ok"
+                          : "bg-bad-bg text-bad"}`}>
+                      {item.item_code}: {item.ordered_pack_hierarchy_name} → {item.pack_hierarchy_name} —{" "}
+                      {item.pack_change_status === "PENDING" ? "waiting for the buyer"
+                        : item.pack_change_status === "ACCEPTED" ? "accepted by the buyer"
+                          : `declined${item.pack_change_note ? `: ${item.pack_change_note}` : ""}`}
+                    </p>
+                  ))}
                 </div>
                 {note.status === "DRAFT" && (
                   <>

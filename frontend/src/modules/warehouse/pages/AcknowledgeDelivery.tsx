@@ -13,6 +13,7 @@ import { fmtDate, fmtQty, num } from "../format";
 import { alerts } from "@/modules/alerts";
 import type { DispatchItem } from "../types";
 import { usePointLabel } from "../usePointLabel";
+import { CombinationTag } from "@/shared/combination";
 
 /**
  * The receiving end: confirm what actually turned up.
@@ -187,6 +188,7 @@ export default function AcknowledgeDelivery() {
               {first.batch_no ? ` · ${first.batch_no}` : ""}
               {g.lines.length > 1 ? ` · ${g.lines.length} serials` : ""}
             </div>
+            <CombinationTag value={first} className="mt-1" />
           </div>
         );
       },
@@ -252,6 +254,7 @@ export default function AcknowledgeDelivery() {
             {l.item_name ?? "—"}
             {l.batch_no ? ` · ${l.batch_no}` : ""}
           </div>
+          <CombinationTag value={l} className="mt-1" />
         </div>
       ),
     },
