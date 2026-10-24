@@ -189,6 +189,22 @@ _ISSUE_PHRASES: dict[str, str] = {
     "json_invalid": "could not be read — the request body is not valid JSON",
 }
 
+#: A bound error names a side ("ge"/"gt"/"le"/"lt") and a limit in pydantic's own
+#: `ctx` — SCM_0084/SCM_0070: "must not be smaller than the minimum allowed" says
+#: there IS a rule without saying what it is, which for a day count a person is
+#: about to type is worse than useless. Read with the type, below, so the sentence
+#: says the actual number: "cannot be less than 0."
+_BOUND_CTX_KEY: dict[str, str] = {
+    "greater_than": "gt", "greater_than_equal": "ge",
+    "less_than": "lt", "less_than_equal": "le",
+}
+_BOUND_PHRASE: dict[str, str] = {
+    "greater_than": "must be more than {0}",
+    "greater_than_equal": "cannot be less than {0}",
+    "less_than": "must be less than {0}",
+    "less_than_equal": "cannot be more than {0}",
+}
+
 
 def _field_path(loc) -> str:
     """`("body", "items", 0, "qty")` -> `items.0.qty`. The wrapper names go."""
@@ -216,7 +232,13 @@ def _field_label(path: str) -> str:
 def _issue_sentence(issue: dict) -> str:
     path = _field_path(issue.get("loc", ()))
     label = _field_label(path)
-    phrase = _ISSUE_PHRASES.get(issue.get("type", ""))
+    issue_type = issue.get("type", "")
+    ctx_key = _BOUND_CTX_KEY.get(issue_type)
+    if ctx_key:
+        limit = (issue.get("ctx") or {}).get(ctx_key)
+        if limit is not None:
+            return f"{label} {_BOUND_PHRASE[issue_type].format(limit)}."
+    phrase = _ISSUE_PHRASES.get(issue_type)
     if phrase:
         return f"{label} {phrase}."
     message = str(issue.get("msg", "is not valid")).strip()

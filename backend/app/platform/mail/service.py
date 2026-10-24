@@ -128,7 +128,16 @@ async def _log_and_send(db: AsyncSession, *, to_addrs: list[str],
     except Exception as exc:  # noqa: BLE001 - recorded, then re-raised unchanged
         row.status = MailStatus.FAILED.value
         row.error = str(exc)[:2000]
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:  # noqa: BLE001 - the FAILED row is a nice-to-have
+            # If writing the FAILED row itself fails (e.g. the original error
+            # already poisoned this transaction), roll back rather than leaving
+            # the session stuck "pending rollback" — every later statement on it
+            # would raise PendingRollbackError, turning a logged mail failure
+            # into a 500 on whatever the caller does next.
+            await db.rollback()
+            log.warning("could not record the failed send for %r: %s", subject, exc)
         raise
 
     row.status = MailStatus.SENT.value

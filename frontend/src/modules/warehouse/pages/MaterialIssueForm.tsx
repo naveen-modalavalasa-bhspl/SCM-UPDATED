@@ -361,6 +361,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         item_id: l.item_id,
         item_code: l.item_code,
         item_name: l.item_name,
+        qty_decimals: l.qty_decimals,
         is_serial_tracked: l.is_serial_tracked,
         is_imei_tracked: l.is_imei_tracked,
         unit_mode: l.unit_mode,
@@ -781,7 +782,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     // than it asked for. Done once here rather than on every keystroke, so the number
     // in the Issue qty box stays the storekeeper's until he saves. See issueSplits.ts.
     items: normalizeSplits(form.items).map(
-      ({ item_code, item_name, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
+      ({ item_code, item_name, qty_decimals, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
          tracking_type, has_units, units_available, bin_code, bin_path, batch_no,
          ...line }) => line,
     ),
@@ -1127,6 +1128,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           item_id: v === "" ? 0 : v,
           item_code: item?.code ?? null,
           item_name: item?.name ?? null,
+          qty_decimals: item?.qty_decimals ?? null,
           is_serial_tracked: !!item?.is_serial_tracked,
           is_imei_tracked: !!item?.is_imei_tracked,
           is_batch_tracked: !!item?.is_batch_tracked,

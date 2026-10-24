@@ -1740,6 +1740,10 @@ class IssueItemRead(CombinationOut, _Read):
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
+    # How many decimal places this line's unit allows — 0 for a whole-unit UOM.
+    # Set by `get_issue`, never a column; an ORM row read with no decoration
+    # (a listing, say) keeps the safe `None` default rather than a wrong 0.
+    qty_decimals: int | None = None
     is_serial_tracked: bool = False
     bin_id: int | None = None
     bin_code: str | None = None
@@ -4030,6 +4034,9 @@ class LocationOption(Option):
 
 class ItemOption(Option):
     uom_code: str | None = None
+    # How many decimal places this item's unit allows — 0 for a whole-unit UOM.
+    # Lets the issue form refuse a typed fraction before save (SCM_0080).
+    qty_decimals: int | None = None
     is_batch_tracked: bool = False
     is_serial_tracked: bool = False
     is_imei_tracked: bool = False

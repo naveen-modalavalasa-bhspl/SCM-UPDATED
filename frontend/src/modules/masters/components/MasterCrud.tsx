@@ -363,7 +363,7 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     const nextValues = { ...values, [k]: v };
     for (const dependent of f.clearOnChange ?? []) nextValues[dependent] = null;
     const patch = (updates: Partial<Values>) => {
-      setValues((curr) => ({ ...curr, ...updates }));
+      setValues((curr) => ({ ...curr, ...updates } as Values));
     };
     const updates = f.onChange?.(v, nextValues, patch);
     if (updates && typeof updates === "object") {
@@ -477,7 +477,14 @@ export function MasterCrud<T extends { id: number }>(p: Props<T>) {
     }
     // A date's own bounds come from the rest of the form, so the picker greys out
     // the days the pair forbids instead of letting one be chosen and then refused.
-    const bounds = f.type === "date" ? f.range?.(values) ?? {} : {};
+    // A number field's bounds are its own `min`/`max` — SCM_0084/SCM_0070: these
+    // were declared on the field (Payment Terms' day counts, 0–3650) but never
+    // reached the actual input, which carried no bound at all. `validateForm`
+    // still caught it on Save, but a storekeeper is better stopped at the spinner
+    // than sent to a red error after typing -65.
+    const bounds: { min?: string | number; max?: string | number } =
+      f.type === "date" ? f.range?.(values) ?? {}
+        : f.type === "number" ? { min: f.min, max: f.max } : {};
     return (
       // The hint steps aside for an error: two lines of small grey and
       // red text under one field is where the message gets missed.

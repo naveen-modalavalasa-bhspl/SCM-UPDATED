@@ -540,6 +540,7 @@ function ItemRow(props: ItemProps) {
                     <QtyInput
                       ariaLabel={`Quantity to issue for ${group.itemCode ?? "this item"}`}
                       value={group.requested}
+                      decimals={group.qtyDecimals}
                       onChange={(value) => onSetAsk(num(value))}
                     />
                   </span>
@@ -1116,6 +1117,7 @@ function PickRow(props: PickProps) {
             max={split.drawable ?? undefined}
             disabled={locked}
             invalid={overDrawn}
+            decimals={group.qtyDecimals}
             onChange={(value) => onPatch(split.index, {
               issued_qty: value,
               serial_numbers: trimUnits(line, num(value)),

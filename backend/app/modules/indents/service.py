@@ -1013,6 +1013,18 @@ async def _pending_indent_return_instance(
 async def _active_position_matches_return_task(
     db: AsyncSession, instance: Instance, user,
 ) -> bool:
+    # No ladder on this instance at all (`resolved_chain` is only ever frozen by a
+    # ladder-routed submit — engine.py) means a classic, stage-based workflow, where
+    # a rung is not a rank one person can hold through several positions. The caller
+    # (`_pending_indent_return_instance`) already proved this user is the pending
+    # approver at the CURRENT stage, which is the whole question on that workflow —
+    # there is no second position of theirs to disambiguate. Without this, every
+    # classic-workflow indent answered `_current_workflow_link` with None and Correction
+    # never offered itself to anyone (SCM_0078), because the ladder-only check below
+    # ran on indents that were never on a ladder.
+    if not instance.resolved_chain:
+        return True
+
     active_position_id = getattr(user, "active_position_id", None)
     if active_position_id is None:
         return False
@@ -7090,6 +7102,14 @@ async def fulfilment_batches(db: AsyncSession, user,
                 [(line.uom_code, owed_quantity(line)) for line in owed_lines],
                 uom_decimals),
             "oldest_raised_at": min(
+                (ind.created_at for ind in group if ind.created_at), default=None,
+            ),
+            # SCM_0082: the queue showed only the oldest date in the cycle and
+            # called it "raised" with nothing saying it was a range — a cycle
+            # spanning 21-22 Oct read as "raised 21 Oct", a day earlier than half
+            # the indents in it. Served so the screen can say "raised 21-22 Oct"
+            # instead of composing a range from a single timestamp.
+            "newest_raised_at": max(
                 (ind.created_at for ind in group if ind.created_at), default=None,
             ),
         })

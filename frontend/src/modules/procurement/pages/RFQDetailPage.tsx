@@ -143,6 +143,15 @@ export function RFQDetailPage() {
       return rfqApi.approve(rfqId);
     },
     onSuccess: () => { setQtyEdits({}); refresh("Approved — vendors can now see the approved quantities")(); },
+    // The approval/publish itself can have already gone through even though this
+    // request came back as an error (e.g. a courtesy vendor email failed after
+    // the decision was committed) — refetch so a second press isn't needed and
+    // the screen shows the real status instead of a stale one next to a toast.
+    onError: (e: any) => {
+      toast.error(e?.message ?? "Could not approve the RFQ. Checking the latest status…");
+      queryClient.invalidateQueries({ queryKey: ["rfq", id] });
+      queryClient.invalidateQueries({ queryKey: ["rfqs"] });
+    },
   });
   // Reject and Send back both ask for a reason in a dialog; the server refuses either
   // without one. `reasonFor` says which of the two the open dialog is for.

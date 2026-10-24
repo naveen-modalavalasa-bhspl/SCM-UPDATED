@@ -122,6 +122,9 @@ export interface IssueGroup {
   combo: string;
   itemCode?: string | null;
   itemName?: string | null;
+  /** How many decimal places this item's unit allows — 0 for a whole-unit UOM
+   *  (Nos, Box…). `null` until a line has carried one back from the server. */
+  qtyDecimals: number | null;
   trackingType: TrackingType;
   /** Whether this item's units can be named at all at this point. */
   pickable: boolean;
@@ -213,6 +216,7 @@ export function groupIssueLines(
         combo: comboKeyOf(line),
         itemCode: line.item_code,
         itemName: line.item_name,
+        qtyDecimals: line.qty_decimals ?? null,
         trackingType: trackingOf(line),
         pickable: isPickable(line),
         isBatchTracked: !!line.is_batch_tracked,
@@ -281,6 +285,7 @@ export function groupIssueLines(
     if (line.item_code) group.itemCode = line.item_code;
     if (line.item_name) group.itemName = line.item_name;
     if (line.is_batch_tracked) group.isBatchTracked = true;
+    if (line.qty_decimals != null) group.qtyDecimals = line.qty_decimals;
   });
 
   for (const group of groups) {
