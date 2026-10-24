@@ -1076,7 +1076,9 @@ async def _out(db: AsyncSession, doc: StockTransferOrder, user=None,
     # no ladder configured, so it falls back to the reporting line and leaves the
     # chain null by design — every approver came back unable to act on a document the
     # same engine was naming them the current approver of.
-    can_act = user is not None and getattr(user, "id", None) in approver_ids
+    from app.platform.workflow.engine import is_workflow_admin
+    is_admin = await is_workflow_admin(db, user) if user is not None else False
+    can_act = (user is not None and getattr(user, "id", None) in approver_ids) or is_admin
 
     decision = _decision_of(doc)
     value = await _value_of(db, doc)

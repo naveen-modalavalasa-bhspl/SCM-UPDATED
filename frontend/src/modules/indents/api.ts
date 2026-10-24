@@ -211,8 +211,10 @@ export const indentApi = {
    * update, because the request body carries whatever item id the caller sent.
    */
   eligibleItems: (search?: string) =>
-    api.get<{ id: number; code: string; name: string; uom_code?: string | null;
-              category_name?: string | null }[]>(
+    api.get<{
+      id: number; code: string; name: string; uom_code?: string | null;
+      category_name?: string | null
+    }[]>(
       "/api/indents/eligible-items", { params: { search: search || undefined } },
     ).then((r) => r.data),
   offices: () => api.get<{ items: Option[] }>("/api/indents/options/offices").then((r) => r.data.items),
@@ -267,12 +269,14 @@ export const indentApi = {
    * Served by the warehouse module because the issue and dispatch evidence lives
    * there; the screen is an indents screen all the same.
    */
-  myAcknowledgements: (params: { search?: string; status?: string;
-                                 only_actionable?: boolean; indent_type?: string[] } = {}) =>
+  myAcknowledgements: (params: {
+    search?: string; status?: string;
+    only_actionable?: boolean; indent_type?: string[]
+  } = {}) =>
     // URLSearchParams so `indent_type` repeats (`?indent_type=A&indent_type=B`) the
     // way FastAPI reads a list, not axios's `indent_type[]=`.
     api.get<Acknowledgement[]>("/api/warehouse/acknowledgements/mine",
-                               { params: toSearchParams(params) })
+      { params: toSearchParams(params) })
       .then((r) => r.data),
 
   /** Direct (no-indent) material issues handed to me, to confirm I got them. */
@@ -298,7 +302,7 @@ export const indentApi = {
    * the backend opens the claim from them.
    */
   acknowledge: (id: number, lines: AcknowledgeLine[],
-                receipt: { condition?: string; remarks?: string } = {}) =>
+    receipt: { condition?: string; remarks?: string } = {}) =>
     api.post<Indent>(`/api/indents/${id}/acknowledge`, { lines, ...receipt })
       .then((r) => r.data),
 

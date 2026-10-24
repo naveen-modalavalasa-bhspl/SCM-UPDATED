@@ -11,11 +11,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
-from sqlalchemy.exc import DataError, IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 
 from app.core.exceptions import (
     AppException, app_exception_handler, data_error_handler, http_exception_handler,
-    integrity_error_handler, request_validation_exception_handler,
+    integrity_error_handler, operational_error_handler, request_validation_exception_handler,
     unhandled_exception_handler,
 )
 from app.platform.admin.app_logs import capture_backend_error, safe_request_id
@@ -179,6 +179,8 @@ app.add_exception_handler(DataError, data_error_handler)
 # else still points at is the caller's to fix, and answering 500 said nothing about
 # which. The constraint name never leaves the log — see integrity_error_handler.
 app.add_exception_handler(IntegrityError, integrity_error_handler)
+# Database connection drops, lock timeouts, or server gone away
+app.add_exception_handler(OperationalError, operational_error_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 
 

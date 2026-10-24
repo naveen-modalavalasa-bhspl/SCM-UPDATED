@@ -2702,6 +2702,9 @@ async def _adjustment_can_act(db: AsyncSession, adjustment: StockAdjustment, use
     if instance is not None and instance.status == InstanceStatus.IN_PROGRESS.value:
         return await engine.can_act_now(
             db, DocType.STOCK_ADJUSTMENT.value, adjustment.id, user)
+    from app.platform.workflow.engine import is_workflow_admin
+    if await is_workflow_admin(db, user):
+        return True
     if getattr(user, "id", None) == adjustment.created_by_id:
         return False
     granted = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
@@ -2750,13 +2753,13 @@ async def act_on_adjustment(db: AsyncSession, adjustment_id: int, action: str, u
             adjustment.current_approver_name = await engine.current_approver_label(
                 db, DocType.STOCK_ADJUSTMENT.value, adjustment.id)
     else:
-        # No chain: one signature, never the raiser's own - otherwise the approval
-        # step is decoration and the raiser simply approves their own write-off.
         if actor_id is not None and actor_id == adjustment.created_by_id:
             raise PermissionError_(
                 "You raised this stock audit, so you cannot approve or reject it. "
                 "Ask another storekeeper or the warehouse in-charge to action it."
             )
+        from app.platform.workflow.engine import is_workflow_admin
+        is_admin = await is_workflow_admin(db, user)
         if action == "APPROVE":
             _mark_adjustment_approved(adjustment, user)
             await _post_adjustment_lines(db, adjustment, adjustment.items, user)

@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { Stepper, type Step } from "@/shared/components/Stepper";
 import { poApi } from "../api";
@@ -268,7 +269,9 @@ export function PODetailPage() {
   if (po.error) return <p className="rounded-lg bg-danger/10 p-4 text-danger">{(po.error as Error).message}</p>;
   if (!po.data) return <p className="p-6 text-muted">Purchase order not found.</p>;
 
-  const canDecide = po.data.awaiting_me ?? po.data.status === "PENDING_APPROVAL";
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  const canDecide = po.data.status === "PENDING_APPROVAL" && (Boolean(po.data.awaiting_me) || isAdmin);
   const isApprovalPending = po.data.status === "PENDING_APPROVAL" && !!canDecide;
   // CGST+SGST within a state, IGST across one — summed from the lines rather than
   // trusted off `tax_amount`, which says nothing about which split it is.
@@ -828,7 +831,9 @@ export function PODetailPage() {
           <div className="p-4">
             <div className="mb-3 flex items-center gap-2 text-amber-800">
               <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-white"><ShieldCheck className="h-4 w-4"/></div>
-              <h2 className="text-sm font-extrabold uppercase tracking-widest">Approve this order</h2>
+              <h2 className="text-sm font-extrabold uppercase tracking-widest">
+                {isAdmin && !po.data.awaiting_me ? "Approve this order · Admin Override" : "Approve this order"}
+              </h2>
               <span className="ml-auto hidden sm:inline text-xs font-semibold text-amber-700">Edited quantities will be sent to vendor</span>
             </div>
             {(po.data.pending_with?.length || po.data.current_approver_name) && (
@@ -843,15 +848,15 @@ export function PODetailPage() {
             {decide.error && <p className="mt-2 text-sm font-semibold text-red-600">{(decide.error as Error).message}</p>}
             {sendBack.error && <p className="mt-2 text-sm font-semibold text-red-600">{(sendBack.error as Error).message}</p>}
             <div className="mt-3 flex justify-end gap-2">
-              <Can do="po.approve">
+              {(can("po.approve") || isAdmin) && (
                 <Button variant="subtle" disabled={busy} onClick={sendBackWithReason} className="border border-amber-400 bg-amber-100 text-amber-900 hover:bg-amber-200"><Undo2 className="h-4 w-4"/> Send back</Button>
-              </Can>
-              <Can do="po.reject">
+              )}
+              {(can("po.reject") || isAdmin) && (
                 <Button className={TONE_REJECT} variant="danger" disabled={busy} onClick={() => void decideWithConfirm("reject")}><X className="h-4 w-4"/> Reject</Button>
-              </Can>
-              <Can do="po.approve">
-                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className={TONE_APPROVE}><Check className="h-4 w-4"/> Approve</Button>
-              </Can>
+              )}
+              {(can("po.approve") || isAdmin) && (
+                <Button disabled={busy} onClick={() => void decideWithConfirm("approve")} className={TONE_APPROVE}><Check className="h-4 w-4"/> {isAdmin && !po.data.awaiting_me ? "Approve (Admin Override)" : "Approve"}</Button>
+              )}
             </div>
           </div>
         </div>

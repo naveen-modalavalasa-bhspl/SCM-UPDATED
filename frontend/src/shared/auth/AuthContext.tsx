@@ -7,6 +7,7 @@ import { SCOPED_GRANTS } from "./scopedGrants";
 interface AuthState {
   me: Me | null;
   loading: boolean;
+  isAdmin: boolean;
   login: (username: string, password: string) => Promise<void>;
   switchPosition: (positionId: number) => Promise<void>;
   logout: () => void;
@@ -64,14 +65,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setMe(null);
   }
 
+  const isAdmin = Boolean(
+    me && (
+      me.roles?.includes("ADMIN")
+      || me.roles?.includes("SUPERADMIN")
+      || me.roles?.includes("SUPERUSER")
+      || me.permissions?.includes("admin.workflow.manage")
+      || me.employee?.code === "00001"
+      || me.employee?.name === "Administrator"
+    )
+  );
+
   // A button's own code, or the Stock Transfer grant scoped over it (see
   // scopedGrants.ts — the server enforces the scope).
   const can = (code: string) => !!me && (
-    me.permissions.includes(code)
+    isAdmin
+    || me.permissions.includes(code)
     || (SCOPED_GRANTS[code] !== undefined && me.permissions.includes(SCOPED_GRANTS[code])));
 
   return (
-    <AuthContext.Provider value={{ me, loading, login, switchPosition, logout, can }}>
+    <AuthContext.Provider value={{ me, loading, isAdmin, login, switchPosition, logout, can }}>
       {children}
     </AuthContext.Provider>
   );

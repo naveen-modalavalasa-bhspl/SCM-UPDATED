@@ -33,6 +33,7 @@ import {
   ScrollBox, selectOnFocus, useToast,
 } from "@/shared/components";
 import { useDebouncedValue } from "@/shared/hooks/useDebouncedValue";
+import { TONE_APPROVE } from "@/shared/components/tones";
 import { rbacApi } from "../api";
 import type { JobProfileMatrix, ScopeRung } from "../types";
 
@@ -837,68 +838,68 @@ function Tick({
   onChange: () => void; label: ReactNode; hint?: string; shot?: string;
 }) {
   return (
-    <Tooltip
-      content={
-        <div className="max-w-md whitespace-normal p-1 text-sm">
-          {hint}
-          {/* Lazy, and it fails quietly: a missing file leaves the words, which are
-              the answer. An <img> that 404s must never blank the help around it. */}
-          {shot && (
-            <img
-              src={shot}
-              alt=""
-              loading="lazy"
-              onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-              className="mt-2 max-h-40 w-auto max-w-full rounded-lg border border-default bg-white object-contain p-1"
-            />
-          )}
-        </div>
-      }
-      isDisabled={!hint}
-    >
     <label
       title={hint}
-      className={`flex min-h-9 items-start gap-2.5 rounded-lg px-2 py-1.5 text-sm
-        ${disabled ? "cursor-default" : "cursor-pointer hover:bg-brand-050/70"}`}
+      className={`group flex min-h-10 items-start gap-3 rounded-xl px-2.5 py-2 text-sm transition-all
+        ${disabled ? "cursor-default opacity-50" : "cursor-pointer hover:bg-slate-100/80 dark:hover:bg-white/5"}
+        ${checked ? "bg-brand/[0.04] dark:bg-brand/[0.08]" : ""}`}
     >
       <input
         type="checkbox"
-        className="mt-0.5 h-4 w-4 shrink-0 accent-brand"
+        className="mt-0.5 h-4.5 w-4.5 shrink-0 rounded border-line text-brand accent-brand transition focus:ring-2 focus:ring-brand/20"
         disabled={disabled}
         checked={checked}
         ref={(el) => { if (el) el.indeterminate = !!indeterminate && !checked; }}
         onChange={onChange}
         aria-description={hint}
       />
-      <span className={disabled ? "text-muted" : "text-body"}>{label}</span>
+      <span className={`min-w-0 flex-1 leading-5 ${disabled ? "text-muted" : "text-ink"}`}>{label}</span>
+      {shot && (
+        <Tooltip
+          content={
+            <div className="max-w-md p-1">
+              <img
+                src={shot}
+                alt=""
+                loading="lazy"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                className="max-h-40 w-auto max-w-full rounded-lg border border-default bg-white object-contain p-1"
+              />
+            </div>
+          }
+        >
+          <span className="shrink-0 text-xs text-muted hover:text-brand cursor-pointer p-0.5" title="Preview screenshot">
+            📷
+          </span>
+        </Tooltip>
+      )}
     </label>
-    </Tooltip>
   );
 }
 
 function Badge({ tone, children }: { tone: "ok" | "brand" | "warn" | "muted";
                                      children: ReactNode }) {
   const TONE = {
-    ok: "bg-ok-bg text-ok",
-    brand: "bg-brand-050 text-brand",
-    warn: "bg-warn-bg text-warn",
-    muted: "bg-neutral-bg text-neutral",
+    ok: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20",
+    brand: "bg-brand/10 text-brand border border-brand/20",
+    warn: "bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20",
+    muted: "bg-slate-500/10 text-slate-600 dark:text-slate-400 border border-slate-500/20",
   }[tone];
   return (
-    <span className={`shrink-0 whitespace-nowrap rounded-full px-2 py-0.5 text-[10px]
-                      font-bold uppercase tracking-wide ${TONE}`}>
+    <span className={`inline-flex items-center shrink-0 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[10px]
+                      font-bold uppercase tracking-wider ${TONE}`}>
       {children}
     </span>
   );
 }
 
-/** Plain-text button for the small "all / none" links inside a card. */
+/** Modern pill button for the small "all / none" links inside a card. */
 function MiniButton({ onClick, children }: { onClick: () => void;
                                              children: ReactNode }) {
   return (
     <button type="button" onClick={onClick}
-            className="rounded-md px-1.5 py-0.5 text-xs font-semibold text-brand
-                       hover:bg-brand-050">
+            className="rounded-md px-2 py-0.5 text-xs font-semibold text-brand
+                       bg-brand/5 hover:bg-brand/15 border border-brand/15 transition-colors">
       {children}
     </button>
   );
@@ -1226,7 +1227,7 @@ export function JobProfilesPage() {
 
       <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
         {/* ------------------------------ profiles ------------------------------ */}
-        <Card className="overflow-hidden p-0">
+        <Card className="overflow-hidden p-0 lg:sticky lg:top-4 lg:self-start">
           <div className="space-y-2.5 border-b border-line bg-content1 p-3">
             <Input
               aria-label="Search job profiles"
@@ -1326,7 +1327,7 @@ export function JobProfilesPage() {
               old HCM role still decides.
             </p>
           </div>
-          <ScrollBox className="max-h-[68vh] overflow-y-auto">
+          <ScrollBox className="max-h-[calc(100vh-14rem)] overflow-y-auto">
             {isLoading && <div className="p-4 text-sm text-muted">Loading…</div>}
             {!isLoading && !filtered.length && (
               <EmptyState title="No job profile matches that" />
@@ -1338,13 +1339,13 @@ export function JobProfilesPage() {
                     type="button"
                     onClick={() => setSelectedKey(profile.key)}
                     aria-current={profile.key === selectedKey}
-                    className={`min-h-11 w-full border-l-[3px] px-3.5 py-2.5 text-left
-                      transition ${profile.key === selectedKey
-                        ? "border-brand bg-brand-050"
-                        : "border-transparent hover:bg-surface"}`}
+                    className={`min-h-12 w-full border-l-[3px] px-3.5 py-3 text-left transition-all
+                      ${profile.key === selectedKey
+                        ? "border-brand bg-brand/10 shadow-sm"
+                        : "border-transparent hover:bg-slate-50 dark:hover:bg-white/5"}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-semibold text-ink">
+                      <span className={`truncate text-sm ${profile.key === selectedKey ? "font-bold text-brand" : "font-semibold text-ink"}`}>
                         {profile.name}
                       </span>
                       {profile.is_approval_post
@@ -1355,26 +1356,15 @@ export function JobProfilesPage() {
                           ? <Badge tone="ok">Set up</Badge>
                           : <Badge tone="muted">HCM role</Badge>}
                     </div>
-                    {/* The project is half the profile's identity, not a detail:
-                     *  "4:DEO" and "6:DEO" are two grant units, and the name alone
-                     *  cannot tell them apart. Always shown, never truncated away. */}
-                    <div className="truncate text-[11px] font-medium text-brand">
-                      {profile.project_name}
+                    <div className="mt-1 flex items-center gap-1.5 text-[11px]">
+                      <span className="font-semibold text-brand truncate max-w-[150px]">
+                        {profile.project_name}
+                      </span>
+                      <span className="text-muted">·</span>
+                      <span className="text-muted truncate">
+                        {profile.holder_count} {profile.holder_count === 1 ? "person" : "people"}
+                      </span>
                     </div>
-                    {profile.is_approval_post ? (
-                      <div className="mt-0.5 truncate text-xs text-muted">
-                        {profile.holder_count} seated · created here, not from HCM
-                      </div>
-                    ) : (
-                      <>
-                        <div className="mt-0.5 truncate text-xs text-muted">
-                          {profile.holder_count} people · {profile.position_count} positions
-                        </div>
-                        <div className="truncate text-[11px] text-muted/80">
-                          was: {profile.hcm_roles.join(", ") || "—"}
-                        </div>
-                      </>
-                    )}
                   </button>
                 </li>
               ))}
@@ -1383,7 +1373,7 @@ export function JobProfilesPage() {
         </Card>
 
         {/* ------------------------------- matrix ------------------------------- */}
-        <div className="space-y-4">
+        <div className={`space-y-4 ${dirty ? "pb-28" : ""}`}>
           {!selected && <Card className="p-6"><EmptyState title="Pick a job profile" /></Card>}
 
           {selected && (
@@ -1571,18 +1561,17 @@ export function JobProfilesPage() {
                     return (
                       <div
                         key={section.name}
-                        className={`overflow-hidden rounded-xl border transition
-                          ${state.on ? "border-brand/40 bg-brand-050/30" : "border-line"}`}
+                        className={`overflow-hidden rounded-2xl border transition-all duration-200 shadow-sm
+                          ${state.on ? "border-brand/30 bg-content1 ring-1 ring-brand/10" : "border-line bg-content1/70 hover:border-line"}`}
                       >
-                        {/* Header: the module tick and the summary, both readable
-                         *  without opening the card. */}
-                        <div className="flex items-center gap-2 px-2 py-2 sm:px-3">
+                        {/* Header: the module tick and the summary, both readable without opening the card */}
+                        <div className={`flex items-center gap-3 px-3 py-2.5 sm:px-4 transition-colors
+                          ${state.on ? "bg-brand/[0.03]" : "hover:bg-content2/30"}`}>
                           <input
                             type="checkbox"
                             aria-label={`Give this job the whole ${section.name} module`}
-                            title={`Turn the whole ${section.name} module on or off — `
-                              + "every screen under it and every action in it."}
-                            className="h-4.5 w-4.5 shrink-0 accent-brand"
+                            title={`Turn the whole ${section.name} module on or off`}
+                            className="h-4.5 w-4.5 shrink-0 rounded accent-brand transition"
                             checked={state.all}
                             ref={(el) => {
                               if (el) el.indeterminate = state.some;
@@ -1593,11 +1582,12 @@ export function JobProfilesPage() {
                             type="button"
                             onClick={() => toggleOpen(section.name)}
                             aria-expanded={isOpen(section.name)}
-                            className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5
-                                       rounded-lg px-1 text-left"
+                            className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-lg text-left"
                           >
-                            <Icon className={`h-4.5 w-4.5 shrink-0
-                              ${state.on ? "text-brand" : "text-muted"}`} />
+                            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-colors
+                              ${state.on ? "bg-brand/10 text-brand" : "bg-slate-100 text-slate-500 dark:bg-white/5"}`}>
+                              <Icon className="h-5 w-5" />
+                            </div>
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-sm font-bold text-ink">
                                 {section.name}
@@ -1610,27 +1600,27 @@ export function JobProfilesPage() {
                                 )}
                               </span>
                             </span>
-                            <span className="shrink-0 tabular text-xs font-semibold text-muted">
+                            <span className={`shrink-0 tabular px-2.5 py-0.5 rounded-full text-xs font-bold border transition
+                              ${state.on 
+                                ? "bg-brand/10 text-brand border-brand/20" 
+                                : "bg-slate-100 text-slate-500 border-slate-200 dark:bg-white/5 dark:border-white/10"}`}>
                               {state.on}/{state.total}
                             </span>
                             <ChevronRight
-                              className={`h-4 w-4 shrink-0 text-muted transition-transform
-                                ${isOpen(section.name) ? "rotate-90" : ""}`}
+                              className={`h-4 w-4 shrink-0 text-muted transition-transform duration-200
+                                ${isOpen(section.name) ? "rotate-90 text-brand" : ""}`}
                             />
                           </button>
                         </div>
 
                         {isOpen(section.name) && (
-                          <div className="grid gap-4 border-t border-line bg-content1 px-2
-                                          py-3 sm:px-3 md:grid-cols-2">
+                          <div className="grid gap-6 border-t border-line/70 bg-content1/50 px-3 py-4 sm:px-4 md:grid-cols-2">
                             <div>
-                              <div className="mb-1 flex items-center justify-between gap-2
-                                              px-2">
-                                <span className="text-[11px] font-bold uppercase
-                                                 tracking-wider text-muted">
+                              <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-muted">
                                   Screens they can open
                                 </span>
-                                <span className="flex gap-1">
+                                <span className="flex gap-1.5">
                                   <MiniButton onClick={() => setPageCodes(apply(
                                     pageCodes, selectablePages(section), true))}>
                                     All
@@ -1811,19 +1801,27 @@ export function JobProfilesPage() {
               {/* The list above runs long, so Save follows you down it. Cleared of the
                *  phone's bottom module bar. */}
               {dirty && (
-                <div className="sticky bottom-19 z-10 md:bottom-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3
-                                  rounded-xl border border-brand/40 bg-content1/95 px-3
-                                  py-2.5 shadow-lg backdrop-blur">
-                    <span className="text-sm font-semibold text-ink">
-                      Unsaved changes to {selected.name}
-                    </span>
-                    <div className="flex gap-2">
-                      <Button variant="ghost" onClick={loadDraft}>
+                <div className="sticky bottom-19 z-20 md:bottom-5">
+                  <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-brand/40 bg-content1/90 px-4 py-3 shadow-2xl backdrop-blur-md ring-1 ring-black/5 dark:ring-white/10 transition-all">
+                    <div className="flex items-center gap-3">
+                      <span className="relative flex h-3 w-3">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                        <span className="relative inline-flex h-3 w-3 rounded-full bg-amber-500" />
+                      </span>
+                      <span className="text-sm font-bold text-ink">
+                        Unsaved modifications to <span className="text-brand font-black">{selected.name}</span>
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button variant="ghost" onClick={loadDraft} className="rounded-xl">
                         <Undo2 className="h-4 w-4" /> Discard
                       </Button>
-                      <Button disabled={save.isPending} onClick={() => save.mutate()}>
-                        <Check className="h-4 w-4" /> Save changes
+                      <Button
+                        className={`${TONE_APPROVE} rounded-xl shadow-md`}
+                        disabled={save.isPending}
+                        onClick={() => save.mutate()}
+                      >
+                        <Check className="h-4 w-4" /> {save.isPending ? "Saving..." : "Save changes"}
                       </Button>
                     </div>
                   </div>

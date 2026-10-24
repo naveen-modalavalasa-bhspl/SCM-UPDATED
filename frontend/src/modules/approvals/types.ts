@@ -11,6 +11,7 @@ export interface PendingApproval {
   due_at?: string | null;
   current_stage_name?: string | null;
   approver_name?: string | null;
+  is_overridden?: boolean;
   /** The indent's own type (STR, MONTHLY…) when doc_type is INDENT. */
   indent_type?: string | null;
   /** What the row is shown as: STOCK_TRANSFER_REQUEST for an STR, else doc_type. */

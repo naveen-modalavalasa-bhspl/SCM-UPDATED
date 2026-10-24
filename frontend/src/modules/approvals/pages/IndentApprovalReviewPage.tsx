@@ -3,11 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   AlertCircle, ArrowLeft, Building2, CalendarDays, Check, CheckCircle2, ClipboardCheck,
-  Flag, History, Info, MessageSquare, PackageCheck, RotateCcw, TriangleAlert, User, X,
+  Flag, History, Info, MessageSquare, PackageCheck, RotateCcw, ShieldAlert, TriangleAlert, User, X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button, Card, ConfirmModal, PageHeader, StatusPill } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { fmtDate } from "@/shared/datetime";
 import { approvalsApi } from "../api";
 import { IssueFromStockPanel } from "../components/IssueFromStockPanel";
@@ -235,6 +236,8 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
   const indentId = suppliedIndentId ?? Number(id);
   const nav = useNavigate();
   const qc = useQueryClient();
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
   const [quantities, setQuantities] = useState<Record<number, string>>({});
   const [comments, setComments] = useState("");
   const [reason, setReason] = useState("");
@@ -428,12 +431,16 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
 
   const historyRows = history.data ?? [];
 
+  const isOverride = Boolean(
+    isAdmin && indent.data?.current_approver_name && indent.data?.current_approver_name !== me?.employee?.name
+  );
+
   return <>
     <Button variant="ghost" onClick={() => nav("/approvals")}>
       <ArrowLeft className="h-4 w-4" /> Back to approvals
     </Button>
     <PageHeader
-      eyebrow="Approval review"
+      eyebrow={isOverride ? "Approval review · Admin Override" : "Approval review"}
       title={indent.data.indent_no}
       actions={<>
         <StatusPill status={indent.data.current_stage_name ?? indent.data.status} />
@@ -447,6 +454,20 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     />
 
     <div className="space-y-4 pb-4">
+      {isOverride && (
+        <div className="flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-amber-900 dark:text-amber-200">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-500/20 text-amber-700 dark:text-amber-300">
+            <ShieldAlert className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 text-xs leading-relaxed">
+            <strong className="block text-sm font-semibold">Admin Workflow Override Mode</strong>
+            <span>
+              This indent is currently pending with <strong>{indent.data.current_approver_name}</strong>. As an administrator, your decision will advance the workflow and be officially recorded as an Admin Override in the audit log.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Who is asking, and for what — the context the numbers below are judged
           against, on one strip instead of a paragraph of definition lists. */}
       <Card className="p-4 sm:p-5">

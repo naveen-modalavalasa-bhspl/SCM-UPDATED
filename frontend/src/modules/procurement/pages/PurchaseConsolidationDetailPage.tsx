@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill, useAction } from "@/shared/components";
+import { useAuth } from "@/shared/auth/AuthContext";
 import { Button } from "../components/ActionButton";
 import { fmtDate } from "@/shared/datetime";
 import { consolidationApi } from "../api";
@@ -83,6 +84,10 @@ export function PurchaseConsolidationDetailPage() {
     (line) => Number(line.approved_qty) > Number(line.quantity),
   );
 
+  const { can, me } = useAuth();
+  const isAdmin = can("admin.workflow.manage") || Boolean(me?.roles.includes("ADMIN")) || Boolean(me?.roles.includes("SUPERUSER"));
+  const canDecide = doc.status === "PENDING_APPROVAL" && (Boolean(doc.awaiting_me) || isAdmin);
+
   return (
     <div>
       <PageHeader
@@ -105,14 +110,13 @@ export function PurchaseConsolidationDetailPage() {
                 </Button>
               </Can>
             )}
-            {/* FIXED 2026-08-20 — awaiting_me, not the status: PENDING_APPROVAL says the document is with SOMEBODY, not with you. */}
-            {(doc.awaiting_me ?? doc.status === "PENDING_APPROVAL") && (
-              <Can do="consolidation.approve">
+            {canDecide && (can("consolidation.approve") || isAdmin) && (
+              <>
                 <Button className={TONE_REJECT} variant="ghost" onClick={() => setReject(true)}>Reject</Button>
                 <Button className={TONE_APPROVE} onClick={() => approve.mutate()} disabled={approve.isPending}>
-                  Approve
+                  {isAdmin && !doc.awaiting_me ? "Approve (Admin Override)" : "Approve"}
                 </Button>
-              </Can>
+              </>
             )}
             {["DRAFT", "PENDING_APPROVAL", "APPROVED"].includes(doc.status) && (
               <Can do="consolidation.create">
