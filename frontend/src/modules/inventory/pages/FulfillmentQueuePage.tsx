@@ -34,6 +34,12 @@ interface QueueRow {
   status: string;
   total_items: number;
   created_at: string;
+  /** The newest indent's created_at in this row's cycle. Undefined on a single
+   *  indent, where `created_at` already names it exactly — set only on a cycle
+   *  row, where `created_at` is the OLDEST of several and reading it alone as
+   *  "raised" understated every later indent folded into the same row
+   *  (SCM_0082: a cycle spanning 21-22 Oct read as "raised 21 Oct"). */
+  raised_until?: string | null;
   /** Set on the one row that stands for a whole monthly cycle. A cycle of 900 indents
    *  is one decision, so it is one row here; clicking it opens the item-first split
    *  rather than 900 separate allocation screens. */
@@ -73,6 +79,14 @@ const hashCycle = (cycle: string) =>
 
 const ageInDays = (s?: string | null) =>
   s ? Math.floor((Date.now() - new Date(s).getTime()) / 86_400_000) : 0;
+
+/** "raised 21 Oct" for one date, "raised 21-22 Oct" for a cycle spanning several —
+ *  never the oldest date alone with nothing saying it is one of several (SCM_0082). */
+const raisedLabel = (row: QueueRow): string => {
+  const from = fmtDate(row.created_at);
+  const to = row.raised_until ? fmtDate(row.raised_until) : from;
+  return from === to ? `raised ${from}` : `raised ${from} – ${to}`;
+};
 
 /** `embedded` drops this page's own header and intro, because the Fulfilment Desk
  *  wraps it as a tab and a screen must not print two headings. Everything else — the
@@ -171,6 +185,7 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
       status: "AWAITING_ALLOCATION",
       total_items: b.item_count,
       created_at: b.oldest_raised_at ?? new Date().toISOString(),
+      raised_until: b.newest_raised_at ?? null,
     }));
     return [...cycleRows, ...singles];
   }, [queue.data, batches.data]);
@@ -439,7 +454,7 @@ export function FulfillmentQueuePage({ embedded = false, indentType }: {
                   {!indentType && r.indent_type && (
                     <>{INDENT_TYPE_OPTIONS.find((o) => o.value === r.indent_type)?.label ?? r.indent_type} · </>
                   )}
-                  {r.total_items} lines · raised {fmtDate(r.created_at)} · waiting {ageInDays(r.created_at)}d
+                  {r.total_items} lines · {raisedLabel(r)} · waiting {ageInDays(r.created_at)}d
                 </p>
               </div>
             )}

@@ -357,6 +357,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         item_id: l.item_id,
         item_code: l.item_code,
         item_name: l.item_name,
+        qty_decimals: l.qty_decimals,
         is_serial_tracked: l.is_serial_tracked,
         is_imei_tracked: l.is_imei_tracked,
         unit_mode: l.unit_mode,
@@ -761,7 +762,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     // than it asked for. Done once here rather than on every keystroke, so the number
     // in the Issue qty box stays the storekeeper's until he saves. See issueSplits.ts.
     items: normalizeSplits(form.items).map(
-      ({ item_code, item_name, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
+      ({ item_code, item_name, qty_decimals, is_serial_tracked, is_imei_tracked, unit_mode, unit_keys,
          tracking_type, has_units, units_available, bin_code, bin_path, batch_no,
          ...line }) => line,
     ),
@@ -1098,6 +1099,7 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
           item_id: v === "" ? 0 : v,
           item_code: item?.code ?? null,
           item_name: item?.name ?? null,
+          qty_decimals: item?.qty_decimals ?? null,
           is_serial_tracked: !!item?.is_serial_tracked,
           is_imei_tracked: !!item?.is_imei_tracked,
           is_batch_tracked: !!item?.is_batch_tracked,
@@ -1785,7 +1787,12 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
             {groups.length} item{groups.length === 1 ? "" : "s"}
             {totals.lines > groups.length && ` · ${totals.lines} picks`}
           </span>
-          <span className="text-ink">Requested <b className="tabular">{fmtQty(totals.requested)}</b></span>
+          {/* SCM_0077: "Requested" implies a request behind the line, which a direct
+              issue (no indent) has none of — the per-line label was fixed under
+              SCM_0068 but the totals bar still said it. Same wording as the line. */}
+          <span className="text-ink">
+            {direct ? "Quantity to issue" : "Requested"} <b className="tabular">{fmtQty(totals.requested)}</b>
+          </span>
           <span className="text-ink">Issued <b className="tabular">{fmtQty(totals.issued)}</b></span>
           {short > 0 && <span className="text-warn">Short <b className="tabular">{fmtQty(short)}</b></span>}
           {/* What leaving the shelves gives back. Only shown once it is knowable —

@@ -583,6 +583,7 @@ export function SupplierPODetailPage() {
             <Field label="Invoice amount">
               <Input
                 type="number"
+                min={0}
                 value={header.invoice_amount ?? ""}
                 onChange={(e) => setHeader((h) => ({
                   ...h, invoice_amount: e.target.value === "" ? null : Number(e.target.value),
