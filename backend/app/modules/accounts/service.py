@@ -557,12 +557,12 @@ async def act_on_payment(db: AsyncSession, payment_id: int, action: str, user,
             payment.current_approver_name = await engine.current_approver_label(
                 db, DOC, payment.id)
     else:
-        if getattr(user, "id", None) == payment.created_by_id:
+        from app.platform.workflow.engine import is_workflow_admin
+        is_admin = await is_workflow_admin(db, user)
+        if not is_admin and getattr(user, "id", None) == payment.created_by_id:
             raise PermissionError_(
                 "You recorded this payment, so you cannot approve or reject it. "
                 "Ask another holder of payment approval to action it.")
-        from app.platform.workflow.engine import is_workflow_admin
-        is_admin = await is_workflow_admin(db, user)
         granted = await get_user_permissions(db, user, getattr(user, "active_position_id", None))
         if not is_admin and perms.ACCOUNTS_APPROVE not in granted:
             raise PermissionError_("You cannot approve vendor payments.")

@@ -357,7 +357,12 @@ function fallbackStageMessage(journey: IndentJourney, steps: SummaryStep[], stat
     const detail = approvalDetail(journey);
     return detail ? `Waiting for ${detail}` : "Request submitted — waiting for approval";
   }
-  if (currentIndex === 3) return PROCUREMENT_MESSAGES[status] ?? "Waiting for allocation";
+  if (currentIndex === 3) {
+    if (status === "PARTIALLY_FULFILLED") {
+      return "Partially fulfilled — remaining items awaiting allocation";
+    }
+    return PROCUREMENT_MESSAGES[status] ?? "Waiting for allocation";
+  }
   if (currentIndex === 4) return "Waiting for warehouse issue";
   if (currentIndex === 5) return "Waiting for dispatch";
   if (currentIndex === 6) return "Waiting for acknowledgement";
@@ -477,9 +482,11 @@ export function FlowStepper({
   const effectiveStatus = String(status || journey?.status || "").trim().toUpperCase();
   const currentIndex = steps.findIndex((step) => step.state === "current");
   const haltedIndex = steps.findIndex((step) => isHalted(step.state));
-  const currentStageMessage = shipmentStageMessage(shipments)
+  const isDeliveryOrLater = currentIndex >= 5 || steps.every((step) => step.state === "completed" || step.state === "skipped");
+  const currentStageMessage = (isDeliveryOrLater ? shipmentStageMessage(shipments) : undefined)
     || journey?.current_stage_message?.trim()
-    || (journey ? fallbackStageMessage(journey, steps, effectiveStatus) : undefined);
+    || (journey ? fallbackStageMessage(journey, steps, effectiveStatus) : undefined)
+    || shipmentStageMessage(shipments);
   const settled = steps.every((step) => step.state === "completed" || step.state === "skipped");
   const summaryIndex = currentIndex >= 0
     ? currentIndex

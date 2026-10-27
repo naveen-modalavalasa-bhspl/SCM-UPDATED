@@ -69,7 +69,7 @@ from app.platform.workflow import engine
 from app.platform.workflow.models import Instance
 from app.shared.enums import (
     AllocationStatus, ApprovalAction, AuditAction, DocType, IndentStatus,
-    InstanceStatus, RefType, ReservationStatus, WarehouseType,
+    InstanceStatus, MRStatus, RefType, ReservationStatus, WarehouseType,
 )
 from app.shared.models.base import utcnow
 from app.shared.models.master import Item
@@ -1138,6 +1138,31 @@ async def apply_to_stock(db: AsyncSession, alloc: Allocation, user,
                 # draft, the remainder — inherits the lie.
                 line.quantity = _d(line.quantity) - unreserved
                 given_total -= unreserved
+
+        # If stock was allocated for this line, credit any previous shortfall MR
+        if _d(line.quantity) > ZERO and line.indent_item_id:
+            from app.modules.inventory.models import MaterialRequestItem, MaterialRequest
+            open_mr_items = (await db.execute(
+                select(MaterialRequestItem)
+                .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+                .where(
+                    MaterialRequest.indent_id == alloc.indent_id,
+                    MaterialRequestItem.indent_item_id == line.indent_item_id,
+                    MaterialRequest.status.notin_((
+                        MRStatus.REJECTED.value, MRStatus.CANCELLED.value, MRStatus.RECEIVED.value,
+                    )),
+                )
+            )).scalars().all()
+            for mr_it in open_mr_items:
+                mr_it.received_quantity = min(
+                    _d(mr_it.quantity),
+                    _d(mr_it.received_quantity or 0) + _d(line.quantity),
+                )
+                parent_mr = await db.get(MaterialRequest, mr_it.mr_id)
+                if parent_mr:
+                    await db.refresh(parent_mr, ["items"])
+                    if all(_d(mi.received_quantity or 0) >= _d(mi.quantity) for mi in parent_mr.items):
+                        parent_mr.status = MRStatus.RECEIVED.value
 
         short = _d(line.requested_qty) - _d(line.quantity)
         if short > ZERO:

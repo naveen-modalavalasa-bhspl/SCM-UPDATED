@@ -921,8 +921,11 @@ async def _indent_visibility(db: AsyncSession, user):
     for the same reason `scope_condition` always OR-s in `mine`: narrow the rung and
     you narrow whose work you see, never whether you can do your own.
     """
-    return or_(
-        await indent_participant_condition(db, user),
+    scm_statuses = await _scm_stage_statuses(db, user)
+    branches = [await indent_participant_condition(db, user)]
+    if scm_statuses:
+        branches.append(Indent.status.in_(scm_statuses))
+    branches.append(
         and_(
             await indent_access_condition(db, user),
             await scope_condition(
@@ -932,8 +935,9 @@ async def _indent_visibility(db: AsyncSession, user):
                 office_col=Indent.office_id,
                 project_col=Indent.project_id,
             ),
-        ),
+        )
     )
+    return or_(*branches)
 
 
 async def _assert_can_view_indent(db: AsyncSession, indent_id: int, user) -> Indent:
@@ -1325,6 +1329,18 @@ async def list_indents(
             .correlate(IndentItem)
             .scalar_subquery()
         )
+        # If warehouse stock has arrived for this item, on_order stops hiding the
+        # indent: the goods are on the shelf and ready to be allocated.
+        free_stock = (
+            select(func.coalesce(func.sum(Stock.available_qty), 0))
+            .where(
+                Stock.item_id == IndentItem.item_id,
+                or_(Stock.expiry_date.is_(None), Stock.expiry_date >= ist_today()),
+            )
+            .correlate(IndentItem)
+            .scalar_subquery()
+        )
+        effective_on_order = func.greatest(on_order - free_stock, 0)
         # The SQL twin of `owed_quantity`: what the approver granted, falling back to
         # what was asked for. Reading `approved_quantity` raw hid every line that
         # predates the approval flow and carries 0 there — 69 of the live ones — so the
@@ -1337,7 +1353,7 @@ async def list_indents(
         stmt = stmt.where(exists(
             select(IndentItem.id).where(
                 IndentItem.indent_id == Indent.id,
-                owed_qty > IndentItem.allocated_quantity + committed + on_order,
+                owed_qty > IndentItem.allocated_quantity + committed + effective_on_order,
             ).correlate(Indent)
         ))
         # An allocation still awaiting approval takes the indent out of the queue
@@ -5651,6 +5667,8 @@ async def list_notifications(
 # The queue and the allocation guards both subtract what is "on order", and both must
 # read the same list — a delivered request counted as outstanding is stock nobody can
 # allocate, a rejected one counted as outstanding is a line nobody can serve.
+ZERO = Decimal("0")
+
 #: What of an MR line is still being bought: asked for, less what has already reached
 #: stock. A request delivered in parts stays OPEN, so the status filter alone kept the
 #: lines that had arrived counting as on order and the desk offered 0 of them.
@@ -6032,6 +6050,75 @@ async def decide_allocations_batch(db: AsyncSession, body, user) -> dict:
             "sealed_consolidations": sealed, "failed": failed}
 
 
+async def _reconcile_indent_mr_receipts(db: AsyncSession, indent_id: int) -> None:
+    """If POs or receipts exist for this indent, ensure the shortfall MRs reflect the received goods."""
+    try:
+        from app.modules.procurement.models import PurchaseOrder, POItem, Requisition
+        from app.modules.warehouse import models as whs_models
+        from app.modules.warehouse.enums import ReceiptStatus
+
+        mrs = list((await db.execute(
+            select(MaterialRequest)
+            .options(selectinload(MaterialRequest.items))
+            .where(
+                MaterialRequest.indent_id == indent_id,
+                MaterialRequest.status.notin_(_SETTLED_MR_STATUSES),
+            )
+        )).scalars().unique().all())
+        if not mrs:
+            return
+
+        mr_ids = [mr.id for mr in mrs]
+        po_ids = list((await db.execute(
+            select(PurchaseOrder.id).where(PurchaseOrder.indent_id == indent_id)
+        )).scalars().all())
+
+        req_po_ids = list((await db.execute(
+            select(PurchaseOrder.id)
+            .join(Requisition, Requisition.id == PurchaseOrder.requisition_id)
+            .where(Requisition.source_mr_id.in_(mr_ids))
+        )).scalars().all())
+
+        all_po_ids = list(set(po_ids) | set(req_po_ids))
+        if not all_po_ids:
+            return
+
+        receipt_rows = (await db.execute(
+            select(
+                POItem.item_id,
+                POItem.indent_item_id,
+                func.coalesce(func.sum(whs_models.ReceiptItem.received_qty), 0),
+            )
+            .join(whs_models.Receipt, whs_models.Receipt.id == whs_models.ReceiptItem.receipt_id)
+            .join(POItem, POItem.id == whs_models.ReceiptItem.po_item_id)
+            .where(
+                whs_models.Receipt.po_id.in_(all_po_ids),
+                whs_models.Receipt.status.in_([
+                    ReceiptStatus.RECEIVED.value, ReceiptStatus.INSPECTED.value,
+                    ReceiptStatus.CLOSED.value,
+                ]),
+            )
+            .group_by(POItem.item_id, POItem.indent_item_id)
+        )).all()
+
+        for item_id, indent_line_id, qty in receipt_rows:
+            q = _d(qty)
+            if q <= ZERO:
+                continue
+            for mr in mrs:
+                for mr_item in mr.items:
+                    if (indent_line_id and mr_item.indent_item_id == indent_line_id) or (mr_item.item_id == item_id):
+                        mr_item.received_quantity = max(
+                            _d(mr_item.received_quantity or 0),
+                            min(_d(mr_item.quantity), q),
+                        )
+                if all(_d(mi.received_quantity or 0) >= _d(mi.quantity) for mi in mr.items):
+                    mr.status = MRStatus.RECEIVED.value
+        await db.commit()
+    except Exception:
+        pass
+
+
 async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decimal]:
     """Quantity per indent line already handed to procurement as a material request.
 
@@ -6044,9 +6131,11 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
 
     Same status filter as the queue: a rejected or cancelled request is not on order.
     """
+    await _reconcile_indent_mr_receipts(db, indent_id)
     rows = (await db.execute(
         select(
             MaterialRequestItem.indent_item_id,
+            MaterialRequestItem.item_id,
             func.coalesce(func.sum(_MR_STILL_COMING), 0),
         )
         .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
@@ -6055,9 +6144,22 @@ async def _on_order_by_line(db: AsyncSession, indent_id: int) -> dict[int, Decim
             IndentItem.indent_id == indent_id,
             MaterialRequest.status.notin_(_SETTLED_MR_STATUSES),
         )
-        .group_by(MaterialRequestItem.indent_item_id)
+        .group_by(MaterialRequestItem.indent_item_id, MaterialRequestItem.item_id)
     )).all()
-    return {int(line_id): _d(quantity) for line_id, quantity in rows if line_id}
+    result: dict[int, Decimal] = {}
+    for line_id, item_id, quantity in rows:
+        if not line_id:
+            continue
+        q = _d(quantity)
+        stock_qty = (await db.scalar(
+            select(func.coalesce(func.sum(Stock.available_qty), 0))
+            .where(
+                Stock.item_id == item_id,
+                or_(Stock.expiry_date.is_(None), Stock.expiry_date >= ist_today()),
+            )
+        )) or ZERO
+        result[int(line_id)] = max(ZERO, q - _d(stock_qty))
+    return result
 
 
 def _reject_over_allocation(indent: Indent, decisions: list[dict],
@@ -7095,6 +7197,11 @@ async def _on_order_by_lines(db: AsyncSession,
     """
     if not line_ids:
         return {}
+    indent_ids = (await db.execute(
+        select(IndentItem.indent_id).where(IndentItem.id.in_(line_ids)).distinct()
+    )).scalars().all()
+    for i_id in indent_ids:
+        await _reconcile_indent_mr_receipts(db, i_id)
     return {int(row[0]): _d(row[1]) for row in (await db.execute(
         select(MaterialRequestItem.indent_item_id,
                func.coalesce(func.sum(_MR_STILL_COMING), 0))

@@ -837,11 +837,11 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
             Pending.stage_sequence == instance.current_sequence,
         )
     )).scalars().all()
-    if instance.started_by_id and instance.started_by_id == user.id:
+    is_admin = await is_workflow_admin(db, user)
+    if not is_admin and instance.started_by_id and instance.started_by_id == user.id:
         raise PermissionError_("Requester cannot approve their own document")
 
     pending_approver_ids = {row.approver_id for row in pending}
-    is_admin = await is_workflow_admin(db, user)
     is_admin_override = False
     if user.id not in pending_approver_ids:
         if is_admin:
@@ -1338,10 +1338,10 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         ] if employee is not None
     ]
     approver_ids = {a.id for a in approvers}
-    if instance.started_by_id and instance.started_by_id == user.id:
+    is_admin = await is_workflow_admin(db, user)
+    if not is_admin and instance.started_by_id and instance.started_by_id == user.id:
         raise PermissionError_("Requester cannot approve their own document")
 
-    is_admin = await is_workflow_admin(db, user)
     is_admin_override = False
     if user.id not in pending_ids:
         if is_admin:
