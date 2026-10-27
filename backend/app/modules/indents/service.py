@@ -6742,7 +6742,17 @@ async def _recalculate_indent_allocation_state(db: AsyncSession, indent: Indent)
         total_allocated += allocated
 
     was = indent.status
-    if total_requested <= 0:
+    has_received = any(_d(item_line.received_quantity) > 0 for item_line in indent.items)
+    all_received = (
+        total_requested > 0
+        and all(_d(item_line.received_quantity) >= _owed_quantity(item_line, recorded) for item_line in indent.items)
+    )
+
+    if all_received:
+        indent.status = IndentStatus.CLOSED.value
+    elif has_received:
+        indent.status = IndentStatus.PARTIALLY_FULFILLED.value
+    elif total_requested <= 0:
         # Every line approved at zero: there is nothing to allocate and nothing to
         # buy. Falling through to PENDING_PROCUREMENT would ask procurement to source
         # nothing. Rejecting it is the approver's call, not this function's.

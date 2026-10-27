@@ -22811,6 +22811,7 @@ def _shipment_row(leg) -> dict:
     """One transport leg as the requester's delivery screen shows it."""
     return {
         "dispatch_id": leg.dispatch_id,
+        "consignment_no": getattr(leg, "consignment_no", None),
         "tr_id": leg.id,
         "tr_no": leg.tr_no,
         "mode": leg.mode,

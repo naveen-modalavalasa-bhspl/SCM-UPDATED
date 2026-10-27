@@ -135,10 +135,17 @@ export const STAGE_HINT: Partial<Record<LineStage, string>> = {
  * has not been fulfilled.
  */
 export function displayStatus(row: Acknowledgement) {
+  const hasReceived = row.lines.some((line) => Number(line.received_quantity ?? 0) > 0);
+  const hasOutstanding = row.lines.some((line) => outstanding(line) > 0);
+
+  if (hasReceived && hasOutstanding) {
+    return INDENT_STATUS.PARTIALLY_FULFILLED;
+  }
+  if (!hasOutstanding && hasReceived) {
+    return INDENT_STATUS.CLOSED;
+  }
   if (row.status !== INDENT_STATUS.CLOSED) return row.status;
-  return row.lines.some((line) => outstanding(line) > 0)
-    ? INDENT_STATUS.PARTIALLY_FULFILLED
-    : INDENT_STATUS.CLOSED;
+  return hasOutstanding ? INDENT_STATUS.PARTIALLY_FULFILLED : INDENT_STATUS.CLOSED;
 }
 
 /** One line of summary for a whole indent, so the row says something without opening. */

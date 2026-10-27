@@ -234,8 +234,8 @@ export function AllocationPage() {
               {data.allocations.map((allocation) => (
                 <Button
                   key={allocation.id}
-                  size="sm"
                   variant="subtle"
+                  className="h-8 text-xs px-2.5"
                   onClick={() => nav(`/inventory/allocation-approvals/${allocation.id}`)}
                 >
                   {allocation.allocation_no} · {allocation.status.replace(/_/g, " ").toLowerCase()}

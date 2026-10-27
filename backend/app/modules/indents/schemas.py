@@ -344,6 +344,7 @@ class ShipmentTrackRow(BaseModel):
     today". Read-only — the leg itself belongs to Logistics.
     """
     dispatch_id: int | None = None
+    consignment_no: str | None = None
     tr_id: int
     tr_no: str
     mode: str

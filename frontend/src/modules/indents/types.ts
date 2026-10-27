@@ -256,6 +256,7 @@ export interface AcknowledgementPackageQuantity {
  */
 export interface ShipmentTrack {
   dispatch_id?: number | null;
+  consignment_no?: string | null;
   tr_id: number;
   tr_no: string;
   mode: string;
