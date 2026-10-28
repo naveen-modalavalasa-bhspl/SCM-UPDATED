@@ -746,6 +746,38 @@ For a unit-tracked item (serial, IMEI, or asset / consumable code):
 Existing box-only stock is NOT converted (decided 2026-10-27); lots coded the old way
 keep issuing by box with no unit rows.
 
+### The package picker answers in a sentence; labels print per DOCUMENT (2026-10-28)
+
+**Picker** (`PackagePickerModal`, rules in `warehouse/packPick.ts`, pure and tested):
+it opens on a SUGGESTED pick (`suggestPick`: carton by carton, opened cartons first,
+whole packs while they fit, the remainder out of ONE box — its strips when the item
+has a second Issue level, part-opened boxes first) and states it in one sentence
+(`pickSentence`, "Take 4 boxes + 5 strips from carton …0572"). Each carton is a grid
+of box tiles, each tile a bar of its strips. What fails silently if undone: **`rollUp`
+turns every strip of a box back into the box** — without it a carton read "0" while
+its boxes had been emptied strip by strip. Serial / IMEI lines are two steps
+(packages, then numbers) and the numbers are still NEVER auto-selected. The issue
+line cell says the held mix in pack names (`heldMix`), and its packages count is
+only editable as packages while every held pack is the same one — a mix of boxes and
+strips is edited in base units (counting 45 strips as "45 boxes" and multiplying an
+edit by the box size was the defect).
+
+**Labels for a document** (`warehouse/issue_labels.py`, `DocLabelsDialog`):
+`GET /issues/{id}/labels` — refused until `is_stock_posted` (part packs get codes AT
+posting) — serves every pack the line issued (`line_boxes` plus consignment
+`box_code`s, since landing clears the issue stamp), parent first with everything
+inside each, the part pack cut at posting flagged `new_here`, and every asset /
+consumable code. **Never a serial or an IMEI** (decided 2026-10-28: the maker's label
+is on the goods). `GET /dispatches/{id}/received-labels` serves only rows with
+`delivered_qty > 0` — what the site acknowledged, at what arrived. `…/printed` writes
+an audit row and ticks any queued Box label it covered. Doors: the issue page (header
+button + a banner right after posting), Labels & Printing › Issue labels, and the
+acknowledgement page per consignment. The dialog picks whole document or chosen
+items, package levels, codes, Barcode/QR/both, Code128/39, thermal-roll and A4
+presets or a custom size, fields, text size and copies; settings and named presets
+are per USER in the browser (`docLabels.ts`) — no table, by decision. `LabelSticker`
+is the one sticker drawing, used by Box labels too.
+
 ### An item issued in a container is issued by the BOX (2026-10-26)
 
 `warehouse/box_codes.py`. When Container Usage maps an ISSUE container, the issue line

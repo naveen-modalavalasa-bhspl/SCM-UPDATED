@@ -37,6 +37,7 @@ from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
 from app.modules.warehouse import box_codes
+from app.modules.warehouse import issue_labels as doc_labels
 from app.modules.warehouse import packing as wh_packing
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
@@ -740,6 +741,42 @@ async def get_issue(issue_id: int, db: AsyncSession = Depends(get_db),
                     user=Depends(require_permission_or(
         ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
     return await service.get_issue(db, issue_id, user)
+
+
+@router.get("/issues/{issue_id}/labels", response_model=s.DocLabels)
+async def issue_labels(issue_id: int, db: AsyncSession = Depends(get_db),
+                       user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+    """Every label a POSTED issue's goods carry, item by item (2026-10-28)."""
+    return await doc_labels.issue_labels(db, issue_id)
+
+
+@router.post("/issues/{issue_id}/labels/printed")
+async def issue_labels_printed(issue_id: int, body: s.DocLabelsPrintedIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(require_permission_or(
+        ISSUE_VIEW, STOCK_TRANSFER_ISSUE, service.transfer_issue_in_reach))):
+    return await doc_labels.record_printed(
+        db, document_type="ISSUE", document_id=issue_id, label_ids=body.label_ids,
+        printed=body.printed, reprint=body.reprint, user=user)
+
+
+@router.get("/dispatches/{dispatch_id}/received-labels", response_model=s.DocLabels)
+async def received_labels(dispatch_id: int, db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, (DISPATCH_VIEW, STOCK_TRANSFER_RECEIVE), service.anywhere_in_reach))):
+    """Labels for what a site ACKNOWLEDGED on one consignment — never what was sent."""
+    return await doc_labels.received_labels(db, dispatch_id)
+
+
+@router.post("/dispatches/{dispatch_id}/received-labels/printed")
+async def received_labels_printed(dispatch_id: int, body: s.DocLabelsPrintedIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission_or(
+        INDENT_ACKNOWLEDGE, (DISPATCH_VIEW, STOCK_TRANSFER_RECEIVE), service.anywhere_in_reach))):
+    return await doc_labels.record_printed(
+        db, document_type="RECEIPT", document_id=dispatch_id, label_ids=body.label_ids,
+        printed=body.printed, reprint=body.reprint, user=user)
 
 
 @router.post("/issues", response_model=s.IssueDetail, status_code=201)

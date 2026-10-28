@@ -5,7 +5,7 @@ import {
   AlertTriangle, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
   Camera, Check, CheckCircle2, ChevronDown, Circle, ExternalLink, Eye, FileText, Hash,
   Lock, MapPin, Package, Phone, Plus, Receipt, RectangleHorizontal, Ruler, ScanBarcode,
-  PackageCheck as PackageCheckIcon, Send, Signature, Snowflake, Trash2, Truck, UserRound, Weight,
+  PackageCheck as PackageCheckIcon, Send, Signature, Snowflake, Tag, Trash2, Truck, UserRound, Weight,
 } from "lucide-react";
 import { tripProgressText, tripStopLabel } from "../components/tripLeg";
 import {
@@ -16,6 +16,7 @@ import {
   PackChips, PackQty, baseOf, packsIn, shrinkWithin, usePackOptions, type PackEntry,
 } from "@/shared/packing";
 import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
+import { DocLabelsDialog } from "@/modules/warehouse/components/DocLabelsDialog";
 import { TrackingBadge, useTrackingMeta } from "@/modules/warehouse/components/TrackingBadge";
 import type { TrackingType } from "@/modules/warehouse/types";
 import { indentApi, indentKeys, receiptApi, useIndentAccountScope, type ReceiptKind } from "../api";
@@ -245,6 +246,8 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
   const [pickedSerials, setPickedSerials] = useState<Record<string, string[]>>({});
   // Packages checked carton by carton, for lines issued in packages (2026-10-26).
   const [packChecks, setPackChecks] = useState<Record<string, PackageCheck>>({});
+  // Labels for what was RECEIVED on one consignment (2026-10-28) — never what was sent.
+  const [labelDispatch, setLabelDispatch] = useState<number | null>(null);
   const [viewing, setViewing] = useState<
     { files: ReceiptAttachment[]; index: number } | null>(null);
 
@@ -517,6 +520,23 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
       />
 
       <ErrorBanner error={confirm.error ?? upload.error ?? remove.error} />
+
+      {/* Once something has been acknowledged, its labels can be printed here — only
+          what arrived, each package at what arrived in it (`received_labels`). */}
+      {row.lines.some((line) => line.received_quantity > 0) && packedDispatches(row.lines).size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-content1 px-4 py-3">
+          <span className="mr-1 flex items-center gap-2 text-sm text-ink">
+            <Tag className="h-4 w-4 text-brand" aria-hidden /> Labels for what you received
+          </span>
+          {[...packedDispatches(row.lines).entries()].map(([dispatchId, dispatchNo]) => (
+            <Button key={dispatchId} variant="subtle" onClick={() => setLabelDispatch(dispatchId)}>
+              {dispatchNo || `Consignment ${dispatchId}`}
+            </Button>
+          ))}
+        </div>
+      )}
+      {labelDispatch !== null && <DocLabelsDialog open={labelDispatch !== null} onClose={() => setLabelDispatch(null)}
+                       doc={labelDispatch !== null ? { type: "RECEIPT", id: labelDispatch } : null} />}
 
       <ReceiptHeader
         row={row}

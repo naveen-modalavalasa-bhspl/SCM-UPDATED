@@ -1958,6 +1958,71 @@ class BoxLabelPrintedIn(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
 
 
+class DocLabelRow(BaseModel):
+    """One sticker for a posted issue or an acknowledged receipt (2026-10-28):
+    a PACK (carton, box, strip — parent first, `depth` under it) or a UNIT (an asset /
+    consumable code). Never a serial or an IMEI: the maker's label is on the goods."""
+    key: str
+    kind: str
+    code: str
+    line_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    pack_name: str | None = None
+    qty: float
+    pack_size: float
+    part: bool = False
+    batch_no: str | None = None
+    expiry_date: date | None = None
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
+    depth: int = 0
+    parent_code: str | None = None
+    packs_inside: str | None = None
+    qr_token: str | None = None
+    # The Box-label queue row still waiting for this pack, ticked off when printed here.
+    label_id: int | None = None
+    # A part pack cut by this issue at posting.
+    new_here: bool = False
+
+
+class DocLabelLine(BaseModel):
+    line_id: int
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    uom_code: str | None = None
+    qty: float
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
+    batch_no: str | None = None
+    packs: int = 0
+    inner_packs: int = 0
+    units: int = 0
+
+
+class DocLabels(BaseModel):
+    document_type: str
+    document_id: int
+    document_no: str
+    document_date: date | None = None
+    from_name: str | None = None
+    to_name: str | None = None
+    lines: list[DocLabelLine]
+    labels: list[DocLabelRow]
+
+
+class DocLabelsPrintedIn(BaseModel):
+    """What was printed: the queued Box labels it covers, and how many stickers."""
+    label_ids: list[int] = Field(default_factory=list, max_length=MAX_BATCH_IDS)
+    printed: int = Field(ge=0, le=100_000)
+    reprint: bool = False
+
+
 class IssueStockSource(CombinationOut, _Read):
     """One (batch, bin) an issue line can draw from, with what it holds.
 

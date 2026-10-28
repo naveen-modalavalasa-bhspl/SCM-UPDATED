@@ -16,6 +16,7 @@ import {
 } from "../issueSplits";
 import type { BatchChoice, IssueGroup, IssueSplit } from "../issueSplits";
 import { sourcesFor } from "../issueSplits";
+import { heldMix } from "../packPick";
 import type {
   IssueItemWrite, IssueStockSource, TrackingType, TrackingTypeMeta, UnitSupply,
 } from "../types";
@@ -896,7 +897,14 @@ function PickRow(props: PickProps) {
   // A pick issued in PACKAGES (2026-10-26): the package size off the boxes it holds,
   // and how many it holds — or, before a save, how many the quantity comes to.
   const boxes = line.issue_in_boxes ? line.box_codes ?? [] : [];
-  const packSize = boxes.length ? Math.max(...boxes.map((b) => num(b.size))) : 0;
+  // Counted in packages only while every package is the same one. Boxes AND the strips
+  // out of a box (two Issue levels) are not one unit: counting 45 strips as "45 boxes"
+  // and multiplying an edit by the box size is how the count went wrong, so a mixed
+  // pick is edited in base units and its mix is said under it.
+  const uniformPacks = boxes.length > 0 && boxes.every((b) =>
+    num(b.size) === num(boxes[0].size) && (b.pack_name ?? "") === (boxes[0].pack_name ?? ""));
+  const packSize = uniformPacks ? Math.max(...boxes.map((b) => num(b.size))) : 0;
+  const boxesMix = boxes.length ? heldMix(boxes) : "";
   const packsHeld = boxes.length && Math.abs(boxes.reduce((s, b) => s + num(b.take), 0)
     - num(line.issued_qty)) < 1e-6
     ? boxes.length : packSize ? Math.ceil(num(line.issued_qty) / packSize) : 0;
@@ -1178,7 +1186,7 @@ function PickRow(props: PickProps) {
           * storekeeper has actually named. A quantity is not an identity — stock put
           * away before the item was coded has the first and not the second. */}
         <div className="min-w-0">
-          <CellLabel>{line.issue_in_boxes ? "Box codes" : unitMeta?.label ?? "Identifiers"}</CellLabel>
+          <CellLabel>{line.issue_in_boxes ? "Package codes" : unitMeta?.label ?? "Identifiers"}</CellLabel>
           {!tracked ? (
             <span className="inline-block text-[11px] text-muted lg:pt-2.5">Not tracked</span>
           ) : hidden ? (
@@ -1235,7 +1243,8 @@ function PickRow(props: PickProps) {
               )}
               <div className="mt-0.5 text-[10px] leading-tight text-muted">
                 {line.issue_in_boxes && !needsSource ? (
-                  need > 0 ? `${need} ${need === 1 ? "box" : "boxes"} for this pick` : null
+                  boxesMix ? `${boxesMix} for this pick`
+                    : need > 0 ? `${need} ${need === 1 ? "package" : "packages"} for this pick` : null
                 ) : needsSource ? (
                   "Name the source first"
                 ) : unitsHere === null || unitsHere === undefined ? (

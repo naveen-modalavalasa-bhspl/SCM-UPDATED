@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Accordion, AccordionItem } from "@heroui/react";
-import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown } from "lucide-react";
+import { ArrowLeft, Info, Lock, MapPin, FileText, ChevronRight, ChevronDown, Tag } from "lucide-react";
 import { LiveStockPanel } from "../components/LiveStockPanel";
 import { SplitFamilyCard } from "../components/SplitFamilyCard";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
@@ -46,6 +46,7 @@ import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
 import { codesNeeded, comboKeyOf, sourcesFor } from "../issueSplits";
 import { PackagePickerModal } from "../components/PackagePickerModal";
+import { DocLabelsDialog } from "../components/DocLabelsDialog";
 
 /**
  * Raise, approve and post a material issue.
@@ -273,6 +274,9 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
     "submit" | "approve" | "reject" | "post" | "split" | "ack" | "cancel" | null
   >(null);
   const [reason, setReason] = useState("");
+  // Labels print once the stock is posted (2026-10-28): the whole issue or chosen items.
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const [justPosted, setJustPosted] = useState(false);
   const [serialLine, setSerialLine] = useState<number | null>(null);
   const [destination, setDestination] = useState("");
   // The destination office's service area code. Held beside the destination name and
@@ -1057,7 +1061,10 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       const number = doc?.issue_no ?? "The issue";
       // Only the outcomes that change what the storekeeper does next are announced;
       // submit and approve are already obvious from the status pill moving.
-      if (what === "post") void alerts.success("issue.posted", { number });
+      if (what === "post") {
+        void alerts.success("issue.posted", { number });
+        setJustPosted(true);
+      }
       else if (what === "ack") void alerts.success("issue.acknowledged", { number });
       qc.invalidateQueries({ queryKey: ["wh-issue", id] });
       qc.invalidateQueries({ queryKey: ["wh-issue-sources"] });
@@ -1342,9 +1349,14 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
                 <Button variant="danger" onClick={() => setConfirming("cancel")}>Cancel</Button>
               </Can>
             )}
+            {editing && doc?.is_stock_posted && direction === "OUT" && (
+              <Button variant="subtle" onClick={() => setLabelsOpen(true)}>
+                <Tag className="h-4 w-4" /> Print labels
+              </Button>
+            )}
             {editing && doc && (
-              <Button 
-                variant="subtle" 
+              <Button
+                variant="subtle"
                 onClick={() => window.open(`/warehouse/material-issues/${doc.id}/print`, "_blank")}
               >
                 <FileText className="mr-2 h-4 w-4" />
@@ -1356,6 +1368,23 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       />
 
       <ErrorBanner error={save.error ?? saveSerials.error ?? pullIndent.error ?? pullEmployee.error ?? pickingSource.error} />
+
+      {/* The moment the goods leave is the moment their labels are wanted — part packs
+          cut at posting have only just got their codes. */}
+      {justPosted && doc?.is_stock_posted && direction === "OUT" && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ok/30 bg-ok-bg px-4 py-3">
+          <span className="flex items-center gap-2 text-sm text-ink">
+            <Tag className="h-4 w-4 text-ok" aria-hidden />
+            {doc.issue_no} is issued. Its labels are ready — every package that left, and any part packs cut just now.
+          </span>
+          <span className="flex gap-2">
+            <Button variant="ghost" onClick={() => setJustPosted(false)}>Later</Button>
+            <Button onClick={() => { setJustPosted(false); setLabelsOpen(true); }}>Print now</Button>
+          </span>
+        </div>
+      )}
+      {labelsOpen && <DocLabelsDialog open={labelsOpen} onClose={() => setLabelsOpen(false)}
+                       doc={doc ? { type: "ISSUE", id: doc.id } : null} />}
 
       {/* What the split actually handed out. Shown here rather than as a toast: the
           shortfall is the half that matters and it must not scroll away — a quantity

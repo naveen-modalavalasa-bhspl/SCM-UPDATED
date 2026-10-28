@@ -3324,6 +3324,62 @@ export interface BoxSource {
   units?: string[] | null;
 }
 
+/** One sticker for a posted issue or an acknowledged receipt (2026-10-28). */
+export interface DocLabelRow {
+  key: string;
+  kind: "PACK" | "UNIT";
+  code: string;
+  line_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  pack_name?: string | null;
+  qty: number;
+  pack_size: number;
+  part: boolean;
+  batch_no?: string | null;
+  expiry_date?: string | null;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  depth: number;
+  parent_code?: string | null;
+  packs_inside?: string | null;
+  qr_token?: string | null;
+  /** The Box-label queue row still waiting for this pack. */
+  label_id?: number | null;
+  /** A part pack cut by this issue at posting. */
+  new_here: boolean;
+}
+
+export interface DocLabelLine {
+  line_id: number;
+  item_id: number;
+  item_code?: string | null;
+  item_name?: string | null;
+  uom_code?: string | null;
+  qty: number;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  batch_no?: string | null;
+  packs: number;
+  inner_packs: number;
+  units: number;
+}
+
+export interface DocLabels {
+  document_type: "ISSUE" | "RECEIPT";
+  document_id: number;
+  document_no: string;
+  document_date?: string | null;
+  from_name?: string | null;
+  to_name?: string | null;
+  lines: DocLabelLine[];
+  labels: DocLabelRow[];
+}
+
 export type BoxLabelReason = "PUTAWAY" | "CONVERTED" | "RECODED" | "PART_BOX";
 
 /** A queued (or printed) label for one box code (2026-10-26). */
