@@ -775,7 +775,7 @@ function receiptConsignments(
       || `Consignment ${index + 1}`,
     leg,
     isConsignment: true,
-    packages: receiptPackages(row.lines, leg.dispatch_id ?? null),
+    packages: receiptPackages(row.lines, leg.dispatch_id ?? null, true),
   }));
 }
 
@@ -787,8 +787,20 @@ function receiptPackages(
    *  one belongs to another and must not be listed twice. */
   strict = false,
 ): ReceiptPackage[] {
-  const arrived = lines.filter((line) => receivable(line) > 0);
-  const visible = arrived.length > 0 ? arrived : lines;
+  // If scoped to a specific dispatch, only inspect lines that belong to that dispatch:
+  const scopedLines = dispatchId
+    ? lines.filter((line) =>
+        (line.package_quantities ?? []).some((part) => part.dispatch_id === dispatchId)
+      )
+    : lines;
+
+  // Filter out lines that were never dispatched at all (e.g. unfulfilled shortfall lines)
+  const dispatchedLines = scopedLines.filter(
+    (line) =>
+      (line.package_quantities && line.package_quantities.length > 0) ||
+      Number(line.dispatched_quantity ?? 0) > 0
+  );
+  const visible = dispatchedLines.length > 0 ? dispatchedLines : scopedLines;
   const byPackage = new Map<string, ReceiptPackage>();
 
   visible.forEach((line) => {
@@ -847,9 +859,10 @@ function packagePartsForLine(
   const parts = scoped.length > 0 || strict ? scoped : all;
   if (parts.length === 0) return [];
 
+  const partsSent = parts.reduce((sum, p) => sum + Number(p.quantity ?? 0), 0);
   const target = receivable(line) > 0
-    ? receivable(line)
-    : Number(line.dispatched_quantity ?? 0);
+    ? Math.min(receivable(line), partsSent)
+    : partsSent;
   let remaining = Math.max(target, 0);
   return parts
     .map((part) => {

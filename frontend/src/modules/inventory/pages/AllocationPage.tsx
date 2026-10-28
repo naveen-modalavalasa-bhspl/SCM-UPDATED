@@ -296,6 +296,28 @@ export function AllocationPage() {
       {/* Every fulfilment-queue row opens this screen, including the ones with no
           decision left in them. Saying so here — with a link to whatever is already
           promising the goods — beats four different destinations and a red error. */}
+      {data.allocatable && data.allocations.length > 0 && (
+        <Card className="mb-4 p-3 bg-content2/40 border-line/70">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-muted">
+              Previous allocation rounds for this indent:
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {data.allocations.map((allocation) => (
+                <Button
+                  key={allocation.id}
+                  variant="subtle"
+                  className="h-8 text-xs px-2.5"
+                  onClick={() => nav(`/inventory/allocation-approvals/${allocation.id}`)}
+                >
+                  {allocation.allocation_no} · {allocation.status.replace(/_/g, " ").toLowerCase()}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </Card>
+      )}
+
       {!data.allocatable && (
         <Card className="mb-4 p-4">
           <p className="text-sm font-semibold text-ink">{data.blocked_reason}</p>

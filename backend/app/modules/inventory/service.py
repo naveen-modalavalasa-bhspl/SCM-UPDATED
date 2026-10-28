@@ -1615,6 +1615,7 @@ async def mark_mrs_received(db: AsyncSession,
             MaterialRequest.id.in_(mr_ids),
             MaterialRequest.status.in_([
                 MRStatus.APPROVED.value, MRStatus.ORDERED.value,
+                MRStatus.PENDING_APPROVAL.value, MRStatus.DRAFT.value,
             ]),
         )
     )).scalars().unique().all():

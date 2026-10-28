@@ -3282,8 +3282,30 @@ async def _receipts_by_indent_line(db: AsyncSession, po, lines,
         elif quantity > ZERO:
             unlinked[int(line.item_id)] = unlinked.get(int(line.item_id), ZERO) + quantity
 
+    if not unlinked:
+        return by_indent_line
+
+    # First fallback: PO raised for an indent directly (po.indent_id)
+    if getattr(po, "indent_id", None):
+        from app.modules.inventory.models import MaterialRequest
+        mr_lines = (await db.execute(
+            select(MaterialRequestItem.item_id, MaterialRequestItem.indent_item_id)
+            .join(MaterialRequest, MaterialRequest.id == MaterialRequestItem.mr_id)
+            .where(
+                MaterialRequest.indent_id == po.indent_id,
+                MaterialRequestItem.indent_item_id.isnot(None),
+                MaterialRequestItem.item_id.in_(list(unlinked.keys())),
+            )
+        )).all()
+        for item_id, indent_line_id in mr_lines:
+            quantity = unlinked.get(int(item_id), ZERO)
+            if quantity > ZERO:
+                by_indent_line[int(indent_line_id)] = (
+                    by_indent_line.get(int(indent_line_id), ZERO) + quantity
+                )
+
     requisition_id = getattr(po, "requisition_id", None)
-    if not unlinked or not requisition_id:
+    if not requisition_id:
         return by_indent_line
 
     source_mr_id = await db.scalar(
@@ -24387,6 +24409,7 @@ def _shipment_row(leg) -> dict:
     """One transport leg as the requester's delivery screen shows it."""
     return {
         "dispatch_id": leg.dispatch_id,
+        "consignment_no": getattr(leg, "consignment_no", None),
         "tr_id": leg.id,
         "tr_no": leg.tr_no,
         "mode": leg.mode,

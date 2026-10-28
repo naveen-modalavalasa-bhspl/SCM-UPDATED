@@ -4015,7 +4015,10 @@ async def submit_rfq(db: AsyncSession, rfq_id: int, user) -> RFQ:
         rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
     if rfq.status == RFQStatus.PUBLISHED.value:
-        await email_rfq_copies(db, rfq, user)
+        try:
+            await email_rfq_copies(db, rfq, user)
+        except Exception as exc:
+            logger.warning("could not email RFQ copies for %s: %s", rfq.id, exc)
     return await get_rfq(db, rfq_id)
 
 
@@ -4038,7 +4041,10 @@ async def act_on_rfq(db: AsyncSession, rfq_id: int, action: str, comments: str,
         rfq.current_approver_name = await _approver_names(db, DocType.RFQ.value, rfq.id)
     await db.commit()
     if rfq.status == RFQStatus.PUBLISHED.value:
-        await email_rfq_copies(db, rfq, user)
+        try:
+            await email_rfq_copies(db, rfq, user)
+        except Exception as exc:
+            logger.warning("could not email RFQ copies for %s: %s", rfq.id, exc)
     return await get_rfq(db, rfq_id)
 
 

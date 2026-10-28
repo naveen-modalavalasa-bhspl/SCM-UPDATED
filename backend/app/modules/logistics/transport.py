@@ -291,7 +291,8 @@ async def _tr_scope(db: AsyncSession, user):
 
 
 async def _tr_readable(db: AsyncSession, user):
-    """What this login may READ on the register — the row scope, plus every INBOUND leg.
+    """What this login may READ on the register — the row scope, plus every INBOUND leg,
+    plus any shipment awaiting this user's approval in the workflow, plus workflow admins.
 
     ONE definition, because the three reads that used to carve the return out on their
     own had drifted into three different answers. `get_tr` exempted it, `_summary_scope`
@@ -307,8 +308,27 @@ async def _tr_readable(db: AsyncSession, user):
     inbound leg from a field warehouse is every logistics viewer's business. The scope
     still applies in full to outward legs.
     """
-    return or_(await _tr_scope(db, user),
-               TransportRequest.source_type.in_(INBOUND_SOURCES))
+    from app.platform.workflow.engine import is_workflow_admin
+    if await is_workflow_admin(db, user):
+        return literal(True)
+
+    conditions = [
+        await _tr_scope(db, user),
+        TransportRequest.source_type.in_(INBOUND_SOURCES),
+    ]
+
+    if user and getattr(user, "id", None):
+        from app.platform.workflow.models import Pending
+        conditions.append(
+            TransportRequest.id.in_(
+                select(Pending.doc_id).where(
+                    Pending.doc_type == "TRANSPORT_REQUEST",
+                    Pending.approver_id == user.id,
+                )
+            )
+        )
+
+    return or_(*conditions)
 
 
 # The paperwork that travels WITH the load, as opposed to the receipt evidence above,
