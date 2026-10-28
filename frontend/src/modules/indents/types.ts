@@ -1,6 +1,9 @@
 import type { CombinationValue } from "@/shared/combination";
 import type { PackEntry } from "@/shared/packing";
 export interface IndentItem {
+  /** Allocations that gave another brand than this line asked for (2026-10-24). */
+  brand_changes?: { asked_for?: string | null; given?: string | null; quantity: number;
+                    reason?: string | null; allocation_no?: string | null }[];
   /** Brand / variant / model, or Any (2026-10-23). 0 / absent when none. */
   brand_id?: number;
   variant_id?: number;
@@ -199,6 +202,13 @@ export interface FulfilmentStep {
 
 /** One line of an indent on the "what am I still owed" screen. */
 export interface AcknowledgementLine extends CombinationValue {
+  item_id?: number | null;
+  /** What was actually ISSUED, per brand / variant / model (2026-10-26) — a
+   *  substituted brand, or stock with no brand recorded. */
+  issued_combinations?: (CombinationValue & { no_brand?: boolean; quantity: number })[];
+  /** Issued in BOXES (2026-10-26): the boxes the line went out in. Counted by
+   *  quantity; no code per piece is asked for. */
+  box_codes?: { code: string; pack_name?: string | null; quantity: number }[];
   /** The packs it was sent in, merged over its issue lines (2026-10-22). */
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;
@@ -242,6 +252,8 @@ export interface AcknowledgementLine extends CombinationValue {
  * package weighing zero.
  */
 export interface AcknowledgementPackageQuantity {
+  /** The PACKAGES this carton holds of a line issued in packages (2026-10-26). */
+  box_codes?: { code: string; quantity: number; received?: number | null }[];
   /** The packs THIS package holds of the line, as packed (2026-10-22). */
   pack_breakdown?: PackEntry[] | null;
   pack_text?: string | null;

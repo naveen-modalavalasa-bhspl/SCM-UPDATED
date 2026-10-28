@@ -42,7 +42,8 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.modules.inventory.models import Stock
 from app.modules.warehouse import models as m
 from app.modules.warehouse.enums import (
-    LIVE_HANDLING_UNIT_STATUSES as LIVE, HandlingUnitStatus as HUS, SerialStatus,
+    LIVE_HANDLING_UNIT_STATUSES as LIVE, HandlingUnitStatus as HUS, InspectionStatus,
+    SerialStatus,
 )
 from app.platform.rbac import permissions as perms
 from app.platform.settings import codeformat
@@ -206,6 +207,73 @@ async def receipt_line_packing(db: AsyncSession, *, item, line_in, received) -> 
         raise _fail(item, exc) from exc
     return {**base, "pack_hierarchy_id": ladder.hierarchy_id,
             "pack_breakdown": _named(counted, ladder) or None, "received": received}
+
+
+async def inspection_line_packs(db: AsyncSession, *, item, receipt_line, inspected,
+                                accepted_in, rejected_in) -> tuple[list | None, list | None]:
+    """Inward QC decided by the PACK (2026-10-27): which of the GRN's counted packs were
+    kept and which rejected. Returns the two snapshotted breakdowns, or (None, None)
+    when the line was decided by quantity alone.
+
+    A kept pack with units taken out of it is a PART pack on the accepted side and
+    those units are LOOSE on the rejected side, so per level the two together may
+    never hold more packs than the GRN counted — QC judges the packs that arrived, it
+    cannot invent one. And the two must add up to exactly what was inspected: every
+    unit inspected is either kept or rejected, and is in a pack the inspector named.
+    """
+    if not accepted_in and not rejected_in:
+        return None, None
+    counted = getattr(receipt_line, "pack_breakdown", None)
+    if not counted:
+        raise ValidationError(
+            f"{item.code}: the GRN did not count this line in packs, so QC decides it "
+            "by quantity. Enter the accepted quantity instead.")
+    ladder = await packs.ladder(db, item.id, receipt_line.pack_hierarchy_id)
+    dump = lambda rows: [e.model_dump() if hasattr(e, "model_dump") else dict(e)  # noqa: E731
+                         for e in rows or []]
+    try:
+        accepted = packing.normalize(ladder, dump(accepted_in)) if accepted_in else []
+        rejected = packing.normalize(ladder, dump(rejected_in)) if rejected_in else []
+    except packing.PackError as exc:
+        raise _fail(item, exc) from exc
+    limit = packing.counts(counted)
+    decided: dict[int, Decimal] = {}
+    for rows in (accepted, rejected):
+        for level, qty in packing.counts(rows).items():
+            decided[level] = decided.get(level, ZERO) + qty
+    for level, qty in decided.items():
+        if level and qty > limit.get(level, ZERO):
+            raise ValidationError(
+                f"{item.code}: {packing.fmt(qty)} {ladder.at(level).name} decided at QC, "
+                f"but the GRN counted {packing.fmt(limit.get(level, ZERO))} "
+                f"({packing.describe(counted, item.uom_code)}).")
+    total = packing.base_of(accepted) + packing.base_of(rejected)
+    if total != _d(inspected):
+        raise ValidationError(
+            f"{item.code}: the packs kept and rejected come to {packing.fmt(total)} "
+            f"{item.uom_code or 'units'}, but {packing.fmt(inspected)} was inspected. "
+            "Every inspected unit is either kept or rejected — open Packages and check "
+            "each one.")
+    return _named(accepted, ladder) or None, _named(rejected, ladder) or None
+
+
+async def accepted_packs(db: AsyncSession, receipt_line) -> list | None:
+    """The packs of a receipt line that go on the shelf: the ones its completed QC
+    KEPT when QC decided by the pack (2026-10-27), else the GRN's count. A rejected
+    carton must never be shelved as though it had passed, which is what reading the
+    GRN count cut down to the accepted quantity did."""
+    if receipt_line is None:
+        return None
+    kept = await db.scalar(
+        select(m.InspectionItem.accepted_pack_breakdown)
+        .join(m.Inspection, m.Inspection.id == m.InspectionItem.inspection_id)
+        .where(m.InspectionItem.receipt_item_id == receipt_line.id,
+               m.Inspection.status == InspectionStatus.COMPLETED.value,
+               m.InspectionItem.accepted_pack_breakdown.isnot(None))
+        .order_by(m.InspectionItem.id.desc()).limit(1))
+    if kept and packing.base_of(kept) == _d(receipt_line.accepted_qty):
+        return kept
+    return receipt_line.pack_breakdown
 
 
 def despatch_prefill_packing(dn_line, sent) -> dict:
@@ -377,18 +445,28 @@ async def shelve(db: AsyncSession, *, item, key: dict, qty, hierarchy_id, entrie
             f"not add up to the {packing.fmt(qty)} {item.uom_code or 'units'} being put "
             "away. Repacking changes how goods are bagged, never how many there are.")
     count = sum(int(_d(e["qty"])) for e in entries if int(e["level"]))
-    # Issued in a container (2026-10-23): every shelved pack is split down to it, and
-    # THOSE packs carry the codes — one per strip. Counted with the shelved ones.
     issue = await packs.usage_levels(db, item.id, ladder, "ISSUE")
     issue_level = min((lv for lv in (issue or []) if lv > 0), default=None)
-    if issue_level:
-        count += sum(int(_d(e["qty"])) * int(packing.dec(ladder.at(int(e["level"])).size)
-                                             / ladder.at(issue_level).size)
-                     for e in entries if int(e["level"]) > issue_level)
+    # THE CODE TREE (2026-10-27). An item whose units are tracked — a serial, an IMEI,
+    # or an asset / consumable code — is split all the way down: every carton, every
+    # box inside it and every unit inside that has its own code, so a scan of any
+    # label answers what it is and what is in it. Other items are split only down to
+    # their Issue container, as before. Every pack made is counted against the cap.
+    tracked = await _units_tracked(db, item)
+    split_to = 1 if tracked else issue_level
+    if split_to:
+        for e in entries:
+            level = int(e["level"])
+            per = int(_d(e["qty"]))
+            for lv in range(level - 1, split_to - 1, -1):
+                count += per * int(packing.dec(ladder.at(level).size) / ladder.at(lv).size)
     if count > MAX_PACKS_PER_REQUEST:
         raise ValidationError(
             f"{item.code}: that is {count:,} separate packs, and one press may make at "
-            f"most {MAX_PACKS_PER_REQUEST:,}. Put it away in a bigger pack level.")
+            f"most {MAX_PACKS_PER_REQUEST:,}. "
+            + ("Every carton, box and strip of this item gets its own code, so put the "
+               "quantity away in two or more smaller putaways."
+               if tracked else "Put it away in a bigger pack level."))
 
     warehouse = await db.get(Warehouse, key["warehouse_id"])
     atom = await codes_per_pack(db, item, warehouse)
@@ -405,12 +483,13 @@ async def shelve(db: AsyncSession, *, item, key: dict, qty, hierarchy_id, entrie
             made.append(hu)
     await db.flush()
     await _name_packs(db, made, item, warehouse, atom)
-    targets = made
-    if issue_level and any(hu.level > issue_level for hu in made):
+    targets, every = made, list(made)
+    if split_to and any(hu.level > split_to for hu in made):
         targets, cut = await split_down(db, made, ladder=ladder, key=key,
-                                        level=issue_level, atom=atom, source=source,
+                                        level=split_to, atom=atom, source=source,
                                         lot_no=lot_no, user=user)
         await _name_packs(db, cut, item, warehouse, atom)
+        every += cut
 
     # Link the units this putaway placed: the loose ones first (they stay loose), then
     # pack by pack in id order — the innermost packs when packs were split down to the
@@ -424,7 +503,42 @@ async def shelve(db: AsyncSession, *, item, key: dict, qty, hierarchy_id, entrie
         cursor += len(take)
         if take:
             await _link_units(db, take, hu.id)
+    if issue_level:
+        # Issued in a container (2026-10-26): every box carries the item's own code
+        # format, what is left over loose becomes boxes too — the last one a PART box —
+        # and every new box code is queued for a label.
+        from app.modules.warehouse import box_codes
+        boxes = [hu for hu in every if hu.level == issue_level]
+        if loose:
+            extra = await box_codes._make_boxes(
+                db, key=key, ladder=ladder, level=issue_level, qty=_d(loose),
+                source=source, lot_no=lot_no, user=user)
+            spare, cursor = units[:min(loose, len(units))], 0
+            for hu in extra:
+                take = spare[cursor:cursor + int(held(hu))]
+                cursor += len(take)
+                if take:
+                    await _link_units(db, take, hu.id)
+            boxes += extra
+        await _name_packs(db, boxes, item, warehouse, True)
+        every += [hu for hu in boxes if hu not in every]
+    if tracked or issue_level:
+        # A label for EVERY pack made (2026-10-27) — the carton and each box inside it
+        # — printed in parent → child order from Labels & Printing.
+        from app.modules.warehouse import box_codes
+        await box_codes.queue_labels(db, every, item=item,
+                                     reason=box_codes.BoxLabelReason.PUTAWAY,
+                                     source_no=source[2])
     return _named(entries, ladder)
+
+
+async def _units_tracked(db: AsyncSession, item) -> bool:
+    """Does every unit of this item carry its own identity — a serial, an IMEI, or an
+    asset / consumable code? Those items get the full code tree at putaway."""
+    if getattr(item, "is_serial_tracked", False) or getattr(item, "is_imei_tracked", False):
+        return True
+    config = await codeformat.code_settings(db)
+    return bool(codeformat.is_code_tracked(item, config))
 
 
 async def split_down(db: AsyncSession, packs_in: list, *, ladder: packing.Ladder, key: dict,
@@ -525,21 +639,31 @@ async def recode_item(db: AsyncSession, item_id: int, user=None) -> dict:
                m.HandlingUnit.project_id, m.HandlingUnit.pack_hierarchy_id)
         .where(m.HandlingUnit.item_id == item_id, m.HandlingUnit.status.in_(LIVE))
         .distinct())).all()
+    from app.modules.warehouse import box_codes
     lots = held_lots = retired = made = 0
     for warehouse_id, bin_id, batch_id, project_id, hierarchy_id in keys:
         key = {"item_id": item_id, "warehouse_id": warehouse_id, "bin_id": bin_id,
                "batch_id": batch_id, "project_id": project_id}
-        reserved = await db.scalar(select(func.coalesce(func.sum(Stock.reserved_qty), 0))
-                                   .where(Stock.item_id == item_id,
-                                          Stock.warehouse_id == warehouse_id,
-                                          Stock.bin_id == bin_id, Stock.batch_id == batch_id,
-                                          Stock.project_id == project_id))
-        if _d(reserved) > ZERO:
+        # Held by an open ISSUE (2026-10-26) — its boxes are what that issue named, so
+        # the lot is re-cut when that issue is next saved (`ensure_issue_level`). A
+        # quantity reserved by an allocation is no reason to wait: re-boxing never
+        # moves a quantity.
+        if await box_codes.held_lot(db, key):
             held_lots += 1
             continue
         ladder = await packs.ladder(db, item_id, hierarchy_id)
         issue = await packs.usage_levels(db, item_id, ladder, "ISSUE")
         level = min((lv for lv in (issue or []) if lv > 0), default=0)
+        if level:
+            out = await box_codes.rebox_lot(
+                db, key, item=item, ladder=ladder, level=level,
+                reason="Re-coded: the item's Issue container changed",
+                label_reason=box_codes.BoxLabelReason.RECODED,
+                source=("RECODE", 0, "Issue container changed"), user=user)
+            lots += 1
+            retired += out["retired"]
+            made += out["made"]
+            continue
         out = await recode_lot(db, key, item=item, ladder=ladder, level=level,
                                reason="Re-coded: the item's Issue container changed",
                                user=user)
@@ -561,7 +685,7 @@ async def putaway_packing(db: AsyncSession, task) -> dict:
     ladder = await packs.ladder(db, task.item_id, hid)
     if ladder.top == 0:
         return {"pack_levels": [], "pack_breakdown": task.pack_breakdown}
-    counted = receipt_line.pack_breakdown if receipt_line is not None else None
+    counted = await accepted_packs(db, receipt_line)
     if counted and packing.base_of(counted) != _d(task.qty):
         counted = packing.shrink_snapshot(counted, task.qty) \
             if packing.base_of(counted) > _d(task.qty) else None
@@ -1039,6 +1163,42 @@ async def issue_line_packing(db: AsyncSession, *, item, line_in):
     return hid, out, None
 
 
+def _shrink_fill(entries: list[dict], qty) -> list[dict]:
+    """The same packs holding less (2026-10-26): what is short comes out of the last
+    packs, each staying the pack it was as a part pack ("1 Box (45 of 100)"); a pack
+    emptied by it is dropped. Loose units go first."""
+    short = packing.base_of(entries) - _d(qty)
+    out: list[dict] = []
+    for e in sorted(entries, key=lambda x: int(x["level"])):
+        e = dict(e)
+        if short > ZERO and int(e["level"]) == 0:
+            take = min(short, _d(e["qty"]))
+            short -= take
+            e["qty"] = str(_d(e["qty"]) - take)
+            if _d(e["qty"]) > ZERO:
+                out.append(e)
+            continue
+        out.append(e)
+    for i in range(len(out) - 1, -1, -1):
+        if short <= ZERO:
+            break
+        e = out[i]
+        if int(e["level"]) == 0:
+            continue
+        each, count = packing.held(e), int(_d(e["qty"]))
+        while short > ZERO and count > 0:
+            left = each - min(short, each)
+            short -= each - left
+            count -= 1
+            if left > ZERO:
+                out.insert(i + 1, {**e, "qty": "1", "fill": str(left)})
+        if count:
+            e["qty"] = str(count)
+        else:
+            out.pop(i)
+    return out
+
+
 async def issue_line_packs(db: AsyncSession, wanted: dict) -> dict[int, dict]:
     """How a quantity of each issue line is packed, read back off the issue line
     (2026-10-22): `{issue_item_id: {pack_breakdown, pack_text}}`.
@@ -1065,8 +1225,15 @@ async def issue_line_packs(db: AsyncSession, wanted: dict) -> dict[int, dict]:
         qty = _d(wanted.get(line_id))
         if qty <= ZERO:
             continue
+        from app.modules.warehouse import box_codes
         if packing.base_of(breakdown) == qty:
             entries = breakdown
+        elif (packing.base_of(breakdown) > qty
+              and await box_codes.issue_packages(db, item_id)):
+            # Issued in BOXES (2026-10-26): what travels is the boxes that left, a
+            # few units short — "1 Box (45 of 100)" — never the quantity re-cut into
+            # strips the issue desk never handled.
+            entries = _shrink_fill(breakdown, qty)
         else:
             try:
                 _hid, entries = await packs.snapshot(db, item_id=item_id,
@@ -1141,6 +1308,9 @@ async def assert_issue_packs(db: AsyncSession, issue, units_by_line: dict, user)
         return
     atoms = (await db.execute(select(m.HandlingUnit).where(
         m.HandlingUnit.id.in_(taking), m.HandlingUnit.is_atom.is_(True),
+        # A box an issue line holds is settled by `box_codes` (2026-10-26): part of
+        # it leaves as a new part box, never a refused break bulk.
+        m.HandlingUnit.held_by.is_(None),
         m.HandlingUnit.status.in_(LIVE)))).scalars().all()
     if not atoms:
         return
@@ -1507,9 +1677,16 @@ async def reserve_named_packs(db: AsyncSession, *, warehouse_id: int, line, mark
         # A part pack named on the line ("1 Carton (350 of 500)") is THAT carton:
         # the packs holding what the entry says come first, then part packs, so a
         # short carton is the one picked before a full one is broken into.
+        #
+        # Then the smallest pack that still COVERS it (2026-10-24), so "1 Box (50)"
+        # is one box and one code — taking a box of 40 first sent the rest of the
+        # line looking for units in a second box. Short packs only after those.
+        fill = packing.held(e)
         candidates = sorted(
             (hu for hu in standing if hu.level == int(e["level"]) and hu.id not in chosen),
-            key=lambda hu: (held(hu) != packing.held(e), not is_part(hu), hu.id))
+            key=lambda hu: ((0, 0, hu.id) if held(hu) == fill
+                            else (1, held(hu), hu.id) if held(hu) > fill
+                            else (2, -held(hu), hu.id)))
         chosen += [hu.id for hu in candidates][:want]
     if not chosen:
         return 0
@@ -1523,6 +1700,9 @@ async def reserve_named_packs(db: AsyncSession, *, warehouse_id: int, line, mark
     rows = (await db.execute(
         select(m.SerialNumber.id, m.SerialNumber.remarks).where(
             m.SerialNumber.handling_unit_id.in_(ids),
+            # A unit linked to the pack but standing at ANOTHER point (moved on
+            # without leaving its pack row) is not in this box (2026-10-24).
+            m.SerialNumber.warehouse_id == warehouse_id,
             m.SerialNumber.status == SerialStatus.AVAILABLE.value,
             m.SerialNumber.is_active.is_(True))
         .order_by(m.SerialNumber.id).with_for_update())).all()

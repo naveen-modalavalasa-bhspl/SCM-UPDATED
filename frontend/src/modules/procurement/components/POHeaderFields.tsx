@@ -1,3 +1,4 @@
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Field, Input, Select } from "@/shared/components";
 import { api } from "@/shared/api/client";
@@ -5,7 +6,7 @@ import type { POHeader, PurchaseOrder } from "../types";
 import type { MasterPaymentTerm } from "@/modules/masters/types";
 import { PaymentPlanPreview } from "@/modules/masters/components/PaymentPlanEditor";
 import { planInstalments } from "@/modules/masters/paymentPlan";
-import { CalendarClock } from "lucide-react";
+import { CalendarClock, Check, Copy, FileText, MapPin, Pencil } from "lucide-react";
 
 /**
  * Everything a purchase order says beyond its lines: what it is booked against, what
@@ -121,6 +122,254 @@ export function LongText({
   );
 }
 
+const rupeesText = (n: number) =>
+  `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+/** Copies a field's text — an address is usually wanted somewhere else verbatim. */
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      title={`Copy ${label.toLowerCase()}`}
+      aria-label={`Copy ${label.toLowerCase()}`}
+      onClick={() => {
+        navigator.clipboard?.writeText(text).then(() => {
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        }).catch(() => undefined);
+      }}
+      className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-[10px] font-semibold normal-case tracking-normal text-muted transition-colors hover:bg-content2 hover:text-ink"
+    >
+      {done ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+      {done ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+/**
+ * A saved address or term, read. Every character is shown — long unbroken text wraps
+ * anywhere rather than running out of its card — and the server's term wording
+ * ("[CODE] Name", then "• ADV: …" per stage) is drawn as a heading and a list with the
+ * milestone code as a chip, instead of one dense paragraph.
+ */
+function ReadText({ text }: { text: string }) {
+  if (!text.trim()) return <div className="text-sm italic text-muted">Not stated</div>;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const blocks: ReactNode[] = [];
+  let bullets: ReactNode[] = [];
+  const flush = () => {
+    if (!bullets.length) return;
+    blocks.push(<ul key={`ul-${blocks.length}`} className="space-y-1.5">{bullets}</ul>);
+    bullets = [];
+  };
+  lines.forEach((line, i) => {
+    const bullet = line.match(/^[•\-*·]\s*(.*)$/);
+    if (bullet) {
+      const coded = bullet[1].match(/^([A-Z]{2,6}):\s*(.*)$/);
+      bullets.push(
+        <li key={i} className="flex min-w-0 items-start gap-2">
+          {coded ? (
+            <span className="mt-0.5 shrink-0 rounded bg-violet-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-violet-700 dark:bg-violet-500/20 dark:text-violet-200">{coded[1]}</span>
+          ) : (
+            <span className="mt-2.5 h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-40" />
+          )}
+          <span className="min-w-0 flex-1">{coded ? coded[2] : bullet[1]}</span>
+        </li>,
+      );
+      return;
+    }
+    flush();
+    const head = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+    blocks.push(head ? (
+      <div key={i} className="flex min-w-0 flex-wrap items-start gap-2 font-semibold">
+        <span className="shrink-0 rounded-md bg-content2 px-1.5 py-0.5 font-mono text-[11px] font-bold">{head[1]}</span>
+        <span className="min-w-0 flex-1">{head[2]}</span>
+      </div>
+    ) : <p key={i}>{line}</p>);
+  });
+  flush();
+  return (
+    <div className="space-y-2 text-sm font-medium leading-6 text-ink [overflow-wrap:anywhere]">{blocks}</div>
+  );
+}
+
+export type AddressTermKey = "billing_address" | "shipping_address" | "payment_terms"
+  | "delivery_terms" | "material_terms" | "logistics_terms";
+const ADDRESS_FIELDS = [
+  { key: "billing_address", label: "Billing address", placeholder: "Company name, street, city, state, PIN, GSTIN" },
+  { key: "shipping_address", label: "Shipping address", placeholder: "Where the goods are to be delivered" },
+] as const;
+const TERM_FIELDS = [
+  { key: "payment_terms", label: "Payment terms", placeholder: "e.g. 30 days from receipt of invoice" },
+  { key: "delivery_terms", label: "Delivery terms", placeholder: "e.g. Door delivery within 10 days of PO" },
+  { key: "material_terms", label: "Material terms", placeholder: "e.g. Minimum 80% shelf life on receipt" },
+  { key: "logistics_terms", label: "Logistics terms", placeholder: "e.g. Freight and unloading by the supplier" },
+] as const;
+
+/**
+ * Addresses and Terms & conditions as the PO page draws them (2026-10-26): a rose
+ * card and a violet card, the payment-term master picker with the plan it makes, and
+ * every field a box while it may be edited. One component for the draft page's inline
+ * edit, Edit draft, a correction and a new order — so they all read alike.
+ */
+export function AddressesTermsCards({
+  value, onChange, editable, orderTotal, changed = [], editableNote,
+}: {
+  value: Pick<POHeaderValue, AddressTermKey | "paymentTermId">;
+  onChange: (patch: Partial<POHeaderValue>) => void;
+  editable: boolean;
+  orderTotal?: number;
+  /** Fields that differ from what is saved, tagged "edited". */
+  changed?: string[];
+  /** The note beside each card's title while editable. */
+  editableNote?: string;
+}) {
+  const { data: terms = [] } = useQuery({
+    queryKey: ["po-payment-terms"],
+    queryFn: () =>
+      api.get<{ items: PaymentTermRow[] }>("/api/payment-terms", { params: { size: 300 } })
+        .then((r) => r.data.items.filter((t) => t.is_active)),
+  });
+  const pickedTerm = terms.find((t) => String(t.id) === String(value.paymentTermId));
+
+  const box = (key: AddressTermKey, label: string, placeholder: string,
+               ring: string, tone: string, rows: number, wide = false) => {
+    const edited = changed.includes(key);
+    const text = value[key] ?? "";
+    return (
+      <div key={key}
+           className={`flex min-w-0 flex-col rounded-xl bg-white p-3.5 ring-1 dark:bg-content1 ${edited ? "ring-brand/50" : ring} ${wide ? "sm:col-span-2" : ""}`}>
+        <div className={`flex min-h-6 items-center justify-between gap-2 text-[11px] font-bold uppercase tracking-widest ${tone}`}>
+          <span>{label}</span>
+          <span className="flex items-center gap-1.5">
+            {edited && <span className="rounded-full bg-brand/10 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-brand">edited</span>}
+            {!editable && text.trim() && <CopyButton text={text} label={label} />}
+          </span>
+        </div>
+        {editable ? (
+          <textarea
+            value={text}
+            rows={rows}
+            placeholder={placeholder}
+            aria-label={label}
+            onChange={(e) => onChange({ [key]: e.target.value })}
+            className="mt-1.5 w-full resize-y rounded-lg border border-line/70 bg-content1 px-3 py-2 text-sm leading-6 text-ink outline-none transition-colors [field-sizing:content] [overflow-wrap:anywhere] placeholder:text-muted/70 focus:border-brand focus:ring-2 focus:ring-brand/15"
+            style={{ minHeight: `${rows * 1.5 + 1}rem` }}
+          />
+        ) : (
+          <div className="mt-1.5"><ReadText text={text} /></div>
+        )}
+      </div>
+    );
+  };
+  /** A term long enough to be cramped in half the card takes the whole row. */
+  const isLong = (key: AddressTermKey) => {
+    const t = value[key] ?? "";
+    return t.length > 220 || t.split("\n").length > 4;
+  };
+  const note = editable && editableNote ? (
+    <span className="inline-flex items-center gap-1 text-[11px] font-semibold opacity-80">
+      <Pencil className="h-3 w-3" /> {editableNote}
+    </span>
+  ) : null;
+
+  return (
+    <div className="space-y-4">
+      {/* ── Addresses — rose block ── */}
+      <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-pink-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-rose-400 via-pink-400 to-rose-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-rose-700">
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-500 text-white"><MapPin className="h-4 w-4" /></div>
+              <h2 className="text-sm font-extrabold uppercase tracking-widest">Addresses</h2>
+            </div>
+            {note}
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {ADDRESS_FIELDS.map((f) => box(f.key, f.label, f.placeholder, "ring-rose-100", "text-rose-700/80", 4))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Terms — violet block ── */}
+      <div className="overflow-hidden rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-purple-50 to-white shadow-sm">
+        <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-purple-500 to-fuchsia-500" />
+        <div className="p-4 sm:p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-violet-700">
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-600 text-white"><FileText className="h-4 w-4" /></div>
+              <h2 className="text-sm font-extrabold uppercase tracking-widest">Terms & conditions</h2>
+            </div>
+            {note}
+          </div>
+
+          {/* The payment-term master: picking one fills the wording below and puts its
+              milestones on the order when it is saved. */}
+          {(editable || pickedTerm) && (
+            <div className={`mb-4 rounded-xl bg-white p-3.5 ring-1 dark:bg-content1 ${changed.includes("payment_term_id") ? "ring-brand/50" : "ring-violet-100"}`}>
+              <div className="min-w-0 space-y-2">
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between text-[11px] font-bold uppercase tracking-widest text-violet-700/80">
+                    Payment term
+                    {changed.includes("payment_term_id") && <span className="rounded-full bg-brand/10 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-brand">edited</span>}
+                  </div>
+                  {editable ? (
+                    <Select
+                      value={value.paymentTermId === "" ? "" : String(value.paymentTermId)}
+                      placeholder="Pick a payment term"
+                      ariaLabel="Payment term"
+                      options={terms.map((t) => ({ value: String(t.id), label: `${t.code} — ${t.name}` }))}
+                      onChange={(v) => {
+                        const term = terms.find((t) => String(t.id) === String(v));
+                        onChange(term
+                          ? { paymentTermId: term.id, payment_terms: term.wording ?? value.payment_terms }
+                          : { paymentTermId: "" });
+                      }}
+                    />
+                  ) : pickedTerm ? (
+                    <div className="flex min-w-0 flex-wrap items-start gap-2">
+                      <span className="shrink-0 rounded-md bg-violet-600 px-2 py-0.5 font-mono text-xs font-bold text-white">{pickedTerm.code}</span>
+                      <span className="min-w-0 flex-1 text-[15px] font-semibold leading-6 text-ink [overflow-wrap:anywhere]">{pickedTerm.name}</span>
+                    </div>
+                  ) : (
+                    <div className="text-sm italic text-muted">Not stated</div>
+                  )}
+                </div>
+                {/* What the term does, in a full-width sentence — it was a tiny grey
+                    column beside the name, and the part people actually needed to read. */}
+                <p className="rounded-lg bg-violet-50/70 px-3 py-2 text-sm leading-6 text-ink/80 [overflow-wrap:anywhere] dark:bg-violet-500/10">
+                  {pickedTerm?.summary ?? "Splits the order value into advance / delivery / installation / warranty — accounts pays against it."}
+                </p>
+              </div>
+              {pickedTerm && (
+                <div className="mt-3 rounded-xl border border-line bg-content1 p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <CalendarClock className="h-4 w-4 text-brand" />
+                    <h3 className="text-sm font-semibold text-ink">How this order will be paid</h3>
+                    <span className="rounded-md bg-content2 px-2 py-0.5 font-mono text-xs font-bold text-ink">{pickedTerm.code}</span>
+                    {orderTotal && orderTotal > 0 ? (
+                      <span className="ml-auto text-xs text-muted">on an order of <b className="tabular-nums text-ink">{rupeesText(orderTotal)}</b></span>
+                    ) : null}
+                  </div>
+                  <PaymentPlanPreview instalments={planInstalments(pickedTerm)}
+                                      amount={orderTotal && orderTotal > 0 ? orderTotal : 0} />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {TERM_FIELDS.map((f) => box(f.key, f.label, f.placeholder, "ring-violet-100", "text-violet-700/80", 3,
+                                        !editable && isLong(f.key)))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function POHeaderFields({
   value, onChange, disabled = false, showProject = true, orderTotal,
 }: {
@@ -139,15 +388,7 @@ export function POHeaderFields({
       }).then((r) => r.data.items),
   });
 
-  const { data: terms = [] } = useQuery({
-    queryKey: ["po-payment-terms"],
-    queryFn: () =>
-      api.get<{ items: PaymentTermRow[] }>("/api/payment-terms", { params: { size: 300 } })
-        .then((r) => r.data.items.filter((t) => t.is_active)),
-  });
-
   const set = (key: keyof POHeaderValue) => (v: string) => onChange({ [key]: v });
-  const pickedTerm = terms.find((t) => String(t.id) === String(value.paymentTermId));
 
   return (
     <div className="space-y-5">
@@ -173,67 +414,9 @@ export function POHeaderFields({
         value={value.remarks} onChange={set("remarks")}
       />
 
-      {/* Where the goods are invoiced and where they land. Two different places more
-        * often than not, which is why they are two fields and not one. */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <LongText label="Billing address" disabled={disabled} required
-          value={value.billing_address} onChange={set("billing_address")} />
-        <LongText label="Shipping address" disabled={disabled} required
-          value={value.shipping_address} onChange={set("shipping_address")} />
-      </div>
-
-      <div>
-        <h2 className="mb-3 text-sm font-semibold text-ink">Terms and conditions</h2>
-        <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label="Payment term"
-            hint="Splits the order value into advance / delivery / installation / warranty, each paid at once or in instalments. Accounts pays against it.">
-            <Select
-              value={value.paymentTermId === "" ? "" : String(value.paymentTermId)}
-              placeholder="Pick a payment term"
-              isDisabled={disabled}
-              options={terms.map((t) => ({ value: String(t.id), label: `${t.code} — ${t.name}` }))}
-              onChange={(v) => {
-                const term = terms.find((t) => String(t.id) === v);
-                onChange(term
-                  ? { paymentTermId: term.id, payment_terms: term.wording }
-                  : { paymentTermId: "" });
-              }}
-            />
-          </Field>
-          {pickedTerm && (
-            <p className="self-end pb-1 text-xs leading-relaxed text-muted">{pickedTerm.summary}</p>
-          )}
-        </div>
-        {pickedTerm && (
-          <div className="mb-4 rounded-2xl border border-line bg-content1 p-4">
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <CalendarClock className="h-4 w-4 text-brand" />
-              <h3 className="text-sm font-semibold text-ink">How this order will be paid</h3>
-              <span className="rounded-md bg-content2 px-2 py-0.5 font-mono text-xs font-bold text-ink">
-                {pickedTerm.code}
-              </span>
-            </div>
-            <PaymentPlanPreview instalments={planInstalments(pickedTerm)}
-                                amount={orderTotal && orderTotal > 0 ? orderTotal : 0} />
-            <p className="mt-3 text-xs leading-relaxed text-muted">
-              Each payment carries its code on the PO and on the accounts desk
-              (<b>ADV</b> advance, <b>DLV</b> delivery, <b>INS</b> installation, <b>WAR</b> warranty;
-              DLV 2/4 = 2nd of 4 delivery payments). Days count from that stage's event. The plan is
-              copied onto the order when it is saved and is fixed once the PO is approved.
-            </p>
-          </div>
-        )}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <LongText label="Payment terms" disabled={disabled}
-            value={value.payment_terms} onChange={set("payment_terms")} />
-          <LongText label="Delivery terms" disabled={disabled}
-            value={value.delivery_terms} onChange={set("delivery_terms")} />
-          <LongText label="Material terms" disabled={disabled}
-            value={value.material_terms} onChange={set("material_terms")} />
-          <LongText label="Logistics terms" disabled={disabled}
-            value={value.logistics_terms} onChange={set("logistics_terms")} />
-        </div>
-      </div>
+      {/* Addresses and terms — the same cards the PO page shows (2026-10-26). */}
+      <AddressesTermsCards value={value} onChange={onChange} editable={!disabled}
+                           orderTotal={orderTotal} />
 
       {/* Document money. The sub-total and the tax are the sum of the lines and are
         * never typed; these two are applied to the order as a whole. */}

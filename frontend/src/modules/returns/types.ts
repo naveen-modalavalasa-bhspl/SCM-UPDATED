@@ -595,6 +595,9 @@ export interface ReceivingConfig {
 }
 
 export interface ReturnLineWrite extends CombinationValue {
+  /** Typed in an Issue container (screen only): which level, how many. */
+  packLevel?: number;
+  packCount?: number | "";
   item_id: number;
   quantity: string;
   remarks?: string | null;

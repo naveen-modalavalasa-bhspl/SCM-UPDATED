@@ -21,7 +21,7 @@ import { vendorPoLabel } from "../status";
 import { supplierPoDocs } from "@/modules/accounts/api";
 import { DocumentFiles } from "@/modules/accounts/components/DocumentFiles";
 import {
-  PackQty, greedyWithPart, packable, toPayload, type PackEntry, type PackHierarchy,
+  PackQty, greedyWithPartFor, laddersForUsage, packable, toPayload, type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
 import { DespatchPacking } from "../components/DespatchPacking";
 import {
@@ -54,7 +54,7 @@ type LineDraft = Omit<DespatchLineWrite, "pack_breakdown"> & {
 /** The order's packing for what is still owed — in the order's own levels where they
  *  still fit, else whole packs of its hierarchy. */
 function startingPacks(line: VendorPOLine): Pick<LineDraft, "pack_hierarchy_id" | "pack_breakdown"> {
-  const options = packable(line.pack_options);
+  const options = laddersForUsage(packable(line.pack_options), "PURCHASE", line.pack_hierarchy_id);
   const hierarchy = options.find((h) => h.hierarchy_id === line.pack_hierarchy_id) ?? options[0];
   if (!hierarchy) return { pack_hierarchy_id: null, pack_breakdown: null };
   const ordered = line.pack_breakdown ?? [];
@@ -62,7 +62,7 @@ function startingPacks(line: VendorPOLine): Pick<LineDraft, "pack_hierarchy_id" 
   // Whole packs of the order's biggest level, and what is left as one part pack of
   // it (2026-10-11) — the same way the order itself describes a remainder.
   return { pack_hierarchy_id: hierarchy.hierarchy_id,
-           pack_breakdown: greedyWithPart(hierarchy, line.pending_qty, top || undefined) };
+           pack_breakdown: greedyWithPartFor(hierarchy, line.pending_qty, "PURCHASE", top || undefined) };
 }
 
 /**
@@ -251,7 +251,7 @@ export function SupplierPODetailPage() {
         ?? line.pack_options.find((h) => h.hierarchy_id === line.ordered_hierarchy_id)
         ?? line.pack_options[0];
       if (hierarchy) {
-        const packs = newQty > 0 ? greedyWithPart(hierarchy, newQty) : [];
+        const packs = newQty > 0 ? greedyWithPartFor(hierarchy, newQty, "PURCHASE") : [];
         setLine(index, {
           despatched_qty: newQty,
           pack_hierarchy_id: hierarchy.hierarchy_id,
@@ -292,7 +292,7 @@ export function SupplierPODetailPage() {
            ?? options.find((h) => h.hierarchy_id === currentHid)
            ?? options[0]);
 
-      const packBreakdown = nextHierarchy && remaining > 0 ? greedyWithPart(nextHierarchy, remaining) : null;
+      const packBreakdown = nextHierarchy && remaining > 0 ? greedyWithPartFor(nextHierarchy, remaining, "PURCHASE") : null;
 
       const row: LineDraft = {
         ...source,

@@ -92,6 +92,8 @@ from app.shared.models.base import utcnow
 from app.shared.models.master import Item, Uom, Vendor
 from app.shared.models.combination import COMBINATION_COLUMNS
 from app.shared.masters import combinations
+from app.shared.masters import packs as master_packs
+from app.modules.warehouse import box_codes
 from app.modules.inventory.allocations import combo_dict, combo_key
 from app.shared.models.warehouse import Bin, Warehouse
 from app.shared.numbering import next_number
@@ -1671,19 +1673,24 @@ async def _apply_receipt_lines(db: AsyncSession, receipt: m.Receipt,
         claimed = seen_batch_by_item.setdefault(item.id, {})
         if batch_key in claimed:
             where = (f"batch {line.batch_no}" if line.batch_no else "no batch")
+            named = " / ".join(filter(None, (combo["brand_name"], combo["variant_name"],
+                                             combo["model_name"])))
+            if named:
+                where = f"{where}, {named}"
             if at_gate or receipt.receipt_type == "GATE_ENTRY" or not line.batch_no:
                 raise ValidationError(
-                    f"Line {index} is a duplicate: {item.code} in the same batch and "
+                    f"Line {index} is a duplicate: {item.code} ({where}) in the same "
                     f"packing is already on line {claimed[batch_key]} of this Material "
-                    f"Inward — combine the quantity onto line {claimed[batch_key]}, or "
-                    f"remove line {index}."
+                    f"Inward — combine the quantity onto line {claimed[batch_key]}, "
+                    f"remove line {index}, or name the brand / variant / model that "
+                    f"actually arrived."
                 )
             raise ValidationError(
                 f"Line {index} is a duplicate: {item.code} with {where}, in the same "
                 f"packing, is already on line {claimed[batch_key]} of this Material "
                 f"Inward. Remove line "
                 f"{index} and add its quantity to line {claimed[batch_key]}, or enter "
-                f"a different batch number on it."
+                f"a different batch number or brand / variant / model on it."
             )
         claimed[batch_key] = index
 
@@ -1860,21 +1867,27 @@ async def _receipt_line_combination(db: AsyncSession, item, line,
     """Which brand / variant / model a receipt line books in (2026-10-23).
 
     Off a despatch-note line: that line's — what the supplier said they sent — and
-    never the client's. Off a PO line: the order's. A line added by hand: the
-    storekeeper's pick, checked against the item's ON combinations. Else none.
+    never the client's. Otherwise the storekeeper's pick, checked against the item's
+    ON combinations, and only failing that the order's.
+
+    The pick wins over the PO line (2026-10-27): the gate records what is standing in
+    front of it, and one order line for "HP LaserJet Toner" can arrive as an LG
+    carton and an HP carton. Taking the order's combination for both made them the
+    same goods, so the second line was refused as a duplicate of the first and the
+    receipt could not say what actually came.
     """
     if despatch_note_item_id:
         from app.modules.procurement.models import DespatchNoteItem
         source = await db.get(DespatchNoteItem, despatch_note_item_id)
         if source is not None:
             return combinations.carry(source)
+    if getattr(line, "brand_id", None):
+        return await combinations.resolve(db, item.id, line, label=item.code)
     if getattr(line, "po_item_id", None):
         from app.modules.procurement.models import POItem
         source = await db.get(POItem, line.po_item_id)
         if source is not None:
             return combinations.carry(source)
-    if getattr(line, "brand_id", None):
-        return await combinations.resolve(db, item.id, line, label=item.code)
     return dict(combinations.NONE)
 
 
@@ -2232,6 +2245,14 @@ async def _shelve_arrival_packs(db: AsyncSession, dispatch: m.Dispatch, *, item_
     them, so a delivery confirmed 6 now and 4 next week shelves each carton's packs
     once. What no carton describes stays loose.
     """
+    # A line that travelled as PACKAGES lands as those packages, same codes, each
+    # holding what arrived in it (2026-10-26) — never re-packed into new ones.
+    package_rows = [row for row in dispatch.items
+                    if row.box_code and row.item_id == item_id
+                    and (row.batch_id or m.NO_BATCH) == batch_id]
+    if package_rows:
+        await box_codes.land_packages(db, dispatch, package_rows, batch_id=batch_id, user=user)
+        return
     rows = (await db.execute(
         select(m.DispatchPackage.item_packs)
         .where(m.DispatchPackage.dispatch_id == dispatch.id)
@@ -4266,6 +4287,16 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
                     f"{item.code}: {inspected} inspected but only {received} was "
                     f"received. QC cannot pass more than arrived."
                 )
+        # Decided by the PACK (2026-10-27): the kept packs ARE the accepted quantity,
+        # whatever number came with them — the server never lets the two disagree.
+        receipt_line = (await db.get(m.ReceiptItem, line.receipt_item_id)
+                        if line.receipt_item_id else None)
+        accepted_packs, rejected_packs = await wh_packing.inspection_line_packs(
+            db, item=item, receipt_line=receipt_line, inspected=inspected,
+            accepted_in=line.accepted_pack_breakdown,
+            rejected_in=line.rejected_pack_breakdown)
+        if accepted_packs is not None or rejected_packs is not None:
+            line.accepted_qty = shared_packing.base_of(accepted_packs or [])
         if _d(line.accepted_qty) > inspected:
             raise ValidationError(
                 f"{item.code}: {line.accepted_qty} accepted out of {inspected} "
@@ -4334,8 +4365,10 @@ async def _apply_inspection_lines(db: AsyncSession, inspection: m.Inspection,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers=serials or None,
             imei_numbers=imeis or None,
-            **(combinations.carry(await db.get(m.ReceiptItem, line.receipt_item_id))
-               if line.receipt_item_id else dict(combinations.NONE)),
+            accepted_pack_breakdown=accepted_packs,
+            rejected_pack_breakdown=rejected_packs,
+            **(combinations.carry(receipt_line)
+               if receipt_line is not None else dict(combinations.NONE)),
         ))
     _inspection_totals(inspection)
 
@@ -4627,10 +4660,25 @@ async def _decorate_putaway(db: AsyncSession, task: m.PutawayTask,
     if ladders is None:
         ladders = await capacity.pack_ladders(db, [task.item_id])
     packs = ladders.get(task.item_id, [])
-    pack = capacity.choose_pack(packs, task.item_packaging_id)
+    # Measured in the STORAGE container when the item has one (2026-10-27): that is
+    # what will stand on the shelf, so "Stored as" and "Space needed" read the same
+    # pack. Failing that, the old rule (the default putaway rung, else the smallest).
+    storage_rung = None
+    storage_defined = False
+    try:
+        ladder = await master_packs.ladder(db, task.item_id, task.pack_hierarchy_id)
+        storage = await master_packs.usage_levels(db, task.item_id, ladder, "STORAGE")
+        storage_defined = storage is not None
+        if storage and max(storage) > 0:
+            storage_rung = ladder.at(max(storage)).item_packaging_id
+    except ValidationError:
+        pass
+    pack = capacity.choose_pack(packs, task.item_packaging_id or storage_rung)
     space = capacity.space_for(pack, task.qty)
     return {
         "id": task.id, "putaway_no": task.putaway_no,
+        # Is a Storage container mapped for the item? The screen warns when not.
+        "storage_defined": storage_defined,
         "grn_id": task.grn_id, "grn_no": receipt.grn_no if receipt else None,
         "grn_item_id": task.grn_item_id,
         "warehouse_id": task.warehouse_id, "warehouse_name": wh.name if wh else None,
@@ -5196,7 +5244,8 @@ async def confirm_putaway(db: AsyncSession, task_id: int, data: s.PutawayConfirm
         hierarchy_id=task.pack_hierarchy_id or (
             receipt_item.pack_hierarchy_id if receipt_item else None),
         entries_in=data.pack_breakdown,
-        default_entries=(receipt_item.pack_breakdown if receipt_item else None),
+        # The packs QC kept, when it decided by the pack — never a rejected carton.
+        default_entries=await wh_packing.accepted_packs(db, receipt_item),
         lot_no=task.lot_no,
         source=("PUTAWAY", task.id, task.putaway_no), user=user)
     if shelved:
@@ -5560,11 +5609,11 @@ async def _place_unit_codes(
     item = await db.get(Item, item_id)
     if item is None or bool(getattr(item, "is_serial_tracked", False)):
         return []
-    # Issued in a container (2026-10-23): the codes are the containers' — one per
-    # strip, made by `wh_packing.shelve` — never one per tablet.
-    from app.shared.masters import packs as master_packs
-    if await master_packs.issues_in_containers(db, item_id):
-        return []
+    # Issued in a container or not, every unit carries its own code (2026-10-27): the
+    # box codes `wh_packing.shelve` makes sit ABOVE the unit codes, never instead of
+    # them. The unit codes travel inside the boxes, unseen, and are read again at the
+    # destination's stock balance. This reverses the 2026-10-23 "the codes are the
+    # containers'" rule, which left a box with no record of what was in it.
     # Grams and litres have no unit to name. Guarded here as well as at the caller so
     # the putaway route cannot mint 30 rows for 30 grams of cotton either.
     if not await _is_countable(db, item):
@@ -8197,6 +8246,8 @@ async def _clear_issue_serial_reservations(
         stmt = stmt.where(m.SerialNumber.remarks.in_(
             [_issue_line_serial_marker(issue_id, line_id) for line_id in line_ids]
         ))
+    # The boxes it holds go back on the shelf with them (2026-10-26).
+    await box_codes.release_issue(db, issue_id, line_ids)
     await db.execute(stmt)
 
 
@@ -8376,6 +8427,23 @@ async def _reserve_issue_serials(
         if len(serials) != len(set(serials)):
             raise ValidationError(f"{item.code}: serial numbers must be unique")
         mode = _unit_mode(item)
+        if (mode == UNIT_MODE_CODE and issue.direction == IssueDirection.OUT.value
+                and await _issue_container_packages(db, line.item_id)
+                and await _unit_codes_required(db, item)):
+            # Issued in a container (2026-10-26): the line names BOXES — one code per
+            # box. The codes it names (scanned, picked, an old per-unit label, or the
+            # screen's echo) are held first; the rest are chosen by `plan_boxes`.
+            boxed = await box_codes.hold_line(
+                db, issue, line, named=serials,
+                claimed_prefixes=_CLAIMED_REMARK_PREFIXES)
+            if boxed is not None:
+                setattr(line, "serial_numbers", boxed["codes"])
+                setattr(line, "unit_keys", boxed["codes"])
+                setattr(line, "unit_mode", mode)
+                continue
+            # A lot with no boxes yet (old stock the conversion has not reached):
+            # the per-unit path below, its codes re-derived on every save.
+            serials = []
         noun = _UNIT_NOUN[mode]
         issued = _d(line.issued_qty)
         if mode == UNIT_MODE_SERIAL and issued != issued.to_integral_value():
@@ -8498,6 +8566,51 @@ async def _reserve_issue_serials(
             await _auto_fill_codes(db, issue, line, marker=marker, mode=mode)
 
 
+async def _issue_container_packages(db: AsyncSession, item_id: int) -> set[int]:
+    """The container types (`mst_packaging` ids) an item is ISSUED in — empty when it
+    is issued loose (2026-10-24)."""
+    from app.shared.masters import packs as master_packs
+    mapped = (await master_packs.usage_map(db, [item_id])).get(int(item_id), {})
+    return {int(pid) for pid, usages in mapped.items() if pid and "ISSUE" in usages}
+
+
+async def _container_codes(db: AsyncSession, rows, mode: str,
+                           packages: set[int]) -> list[str]:
+    """The identifiers a line's units are named by when the item is issued in a
+    container (2026-10-24): the code of the ISSUE container each unit sits in — one
+    box, one code — and a unit's own code only where it sits in no such container
+    (loose stock). Lots coded per unit before the item was mapped keep their unit
+    rows, which still move at posting; the document simply names the box."""
+    from app.shared.models.master import ItemPackaging
+    hus: dict[int, m.HandlingUnit] = {}
+    frontier = {r.handling_unit_id for r in rows if r.handling_unit_id}
+    while frontier:
+        found = (await db.execute(select(m.HandlingUnit).where(
+            m.HandlingUnit.id.in_(frontier)))).scalars().all()
+        for hu in found:
+            hus[hu.id] = hu
+        frontier = {hu.parent_id for hu in found if hu.parent_id and hu.parent_id not in hus}
+    rungs = {hu.item_packaging_id for hu in hus.values() if hu.item_packaging_id}
+    package_of = dict((await db.execute(
+        select(ItemPackaging.id, ItemPackaging.package_id)
+        .where(ItemPackaging.id.in_(rungs)))).all()) if rungs else {}
+    codes: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        hu = hus.get(row.handling_unit_id)
+        while hu is not None and package_of.get(hu.item_packaging_id) not in packages:
+            hu = hus.get(hu.parent_id)
+        if hu is not None:
+            key = hu.hu_code
+        else:
+            keys = _unit_keys(row, mode)
+            key = keys[0] if keys else row.serial_number
+        if key and key not in seen:
+            seen.add(key)
+            codes.append(key)
+    return codes
+
+
 async def _auto_fill_codes(
     db: AsyncSession, issue: m.MaterialIssue, line, *, marker: str, mode: str,
 ) -> None:
@@ -8523,15 +8636,43 @@ async def _auto_fill_codes(
     await wh_packing.reserve_named_packs(
         db, warehouse_id=issue.warehouse_id, line=line, marker=marker,
         claimed_prefixes=_CLAIMED_REMARK_PREFIXES)
-    rows = await _claim_units(
-        db,
-        item_id=line.item_id,
-        warehouse_id=issue.warehouse_id,
-        qty=wanted,
-        marker=marker,
-        batch_id=line.batch_id if line.batch_id and line.batch_id != m.NO_BATCH else None,
-        bin_id=line.bin_id if line.bin_id and line.bin_id != m.NO_BIN else None,
-    )
+    batch_id = line.batch_id if line.batch_id and line.batch_id != m.NO_BATCH else None
+    bin_id = line.bin_id if line.bin_id and line.bin_id != m.NO_BIN else None
+    # Everything this line holds, WHEREVER the unit row says it stands (2026-10-24).
+    # A named pack's units are taken whole even when some of their rows carry no
+    # location; `_claim_units` counts only its own batch and bay, so it read those as
+    # missing and topped the line up again — 80 codes held for a line of 50.
+    own = (await db.execute(select(m.SerialNumber).where(
+        m.SerialNumber.item_id == line.item_id,
+        m.SerialNumber.warehouse_id == issue.warehouse_id,
+        m.SerialNumber.status == SerialStatus.AVAILABLE.value,
+        m.SerialNumber.is_active.is_(True),
+        m.SerialNumber.remarks == marker).with_for_update())).scalars().all()
+    in_scope = [row for row in own
+                if (not batch_id or row.batch_id == batch_id)
+                and (not bin_id or row.bin_id == bin_id)]
+    outside = len(own) - len(in_scope)
+    if len(own) > wanted:
+        # Keep the container holding most of them, so the pick stays in as few
+        # packs as it can; the rest go back on the shelf.
+        weight: dict = {}
+        for row in own:
+            weight[row.handling_unit_id] = weight.get(row.handling_unit_id, 0) + 1
+        ordered = sorted(own, key=lambda r: (r.handling_unit_id is None,
+                                             -weight[r.handling_unit_id],
+                                             r.handling_unit_id or 0, r.id))
+        await _set_unit_fields(db, [row.id for row in ordered[wanted:]], remarks=None)
+        rows = ordered[:wanted]
+    else:
+        rows = [row for row in own if row not in in_scope] + await _claim_units(
+            db,
+            item_id=line.item_id,
+            warehouse_id=issue.warehouse_id,
+            qty=wanted - outside,
+            marker=marker,
+            batch_id=batch_id,
+            bin_id=bin_id,
+        )
     setattr(line, "serial_numbers", [row.serial_number for row in rows])
     setattr(line, "unit_keys", [
         keys[0] for keys in (_unit_keys(row, mode) for row in rows) if keys])
@@ -8953,6 +9094,17 @@ async def _assert_units_obtainable(db: AsyncSession, issue: m.MaterialIssue) -> 
         item = await _item_snapshot(db, line.item_id)
         if not await _unit_codes_required(db, item, config=code_config):
             continue
+        # Issued in boxes (2026-10-26): the line's boxes must cover it, in the
+        # container the master names today. The unit rows inside are history.
+        # Only asset / consumable-coded items are issued by the box; a serial or IMEI
+        # line names the maker's numbers whatever it is packed in.
+        problem = (await box_codes.check_line(db, issue, line)
+                   if _unit_mode(item) == UNIT_MODE_CODE else None)
+        if problem:
+            short.append(problem)
+            continue
+        if await box_codes.has_boxes(db, issue.id, line.id):
+            continue
         # A lot with no recorded units is issued by quantity (2026-10-23).
         if not await _lot_has_units(db, item_id=line.item_id,
                                     warehouse_id=issue.warehouse_id,
@@ -9060,6 +9212,27 @@ async def _decorate_issue_serials(
         setattr(line, "unit_keys", [
             keys[0] for keys in (_unit_keys(row, mode) for row in line_rows) if keys
         ])
+        setattr(line, "codes_needed", None)
+        setattr(line, "box_codes", None)
+        setattr(line, "container_note", None)
+        setattr(line, "issue_in_boxes", False)
+        if mode == UNIT_MODE_CODE and issue.direction == IssueDirection.OUT.value:
+            view = await box_codes.line_view(db, issue, line)
+            if view is not None:
+                # Issued in a container (2026-10-26): the line names its BOXES.
+                setattr(line, "issue_in_boxes", True)
+                setattr(line, "container_note", view["container_note"])
+                if view["codes"]:
+                    setattr(line, "unit_keys", view["codes"])
+                    setattr(line, "codes_needed", view["codes_needed"])
+                    setattr(line, "box_codes", view["boxes"])
+                else:
+                    # No box held: an old lot not converted yet, named per unit's box.
+                    packages = await _issue_container_packages(db, line.item_id)
+                    codes = await _container_codes(db, line_rows, mode, packages)
+                    setattr(line, "unit_keys", codes)
+                    if len(line_rows) >= int(_d(line.issued_qty)) and codes:
+                        setattr(line, "codes_needed", len(codes))
     return issue
 
 
@@ -10204,6 +10377,26 @@ async def _assert_issue_sources(db: AsyncSession, issue: m.MaterialIssue,
             remaining -= tier_take
 
 
+async def _held_combinations(db: AsyncSession, indent_item_ids) -> dict[int, set]:
+    """Per indent line, the brand / variant / model its reservations stand on —
+    active or already consumed — read off the stock rows they sit on."""
+    from app.modules.inventory.models import Reservation, Stock
+    ids = {int(i) for i in indent_item_ids if i}
+    out: dict[int, set] = {}
+    if not ids:
+        return out
+    for line_id, b, v, m_ in (await db.execute(
+            select(Reservation.ref_line_id, Stock.brand_id, Stock.variant_id, Stock.model_id)
+            .join(Stock, Stock.id == Reservation.stock_id)
+            .where(Reservation.ref_type == InventoryRefType.RESERVATION.value,
+                   Reservation.ref_line_id.in_(ids),
+                   Reservation.status.in_((ReservationStatus.ACTIVE.value,
+                                           ReservationStatus.CONSUMED.value)))
+            .distinct())).all():
+        out.setdefault(int(line_id), set()).add(_combo3(b, v, m_))
+    return out
+
+
 async def _issue_line_combinations(db: AsyncSession,
                                    lines: list[s.IssueItemWrite]) -> list[dict]:
     """Which brand / variant / model each issue line takes (2026-10-23).
@@ -10218,10 +10411,28 @@ async def _issue_line_combinations(db: AsyncSession,
     ids = {int(line.indent_item_id) for line in lines if line.indent_item_id}
     asked = {row.id: row for row in (await db.execute(
         select(IndentItem).where(IndentItem.id.in_(ids)))).scalars().all()} if ids else {}
+    held = await _held_combinations(db, ids)
     out = []
     for index, line in enumerate(lines, start=1):
         source = asked.get(int(line.indent_item_id or 0))
-        if source is not None and source.brand_id:
+        named = (int(getattr(line, "brand_id", 0) or 0), int(getattr(line, "variant_id", 0) or 0),
+                 int(getattr(line, "model_id", 0) or 0))
+        holds = held.get(int(line.indent_item_id or 0), set())
+        asked3 = (_combo3(source.brand_id, source.variant_id, source.model_id)
+                  if source is not None else None)
+        if source is not None and source.brand_id and named[0] and named in holds:
+            # The allocation gave ANOTHER brand than the indent named (a recorded
+            # substitution, 2026-10-24): the issue takes what was reserved.
+            combo = await combinations.resolve(db, line.item_id, line, label=f"Line {index}")
+        elif (source is not None and source.brand_id and len(holds) == 1
+                and asked3 not in holds):
+            # Everything held for the line is ONE other combination — a substitution
+            # the desk recorded, possibly onto stock with no brand: issue that.
+            only = next(iter(holds))
+            combo = (dict(combinations.NONE) if not only[0] else await combinations.resolve(
+                db, line.item_id, {"brand_id": only[0], "variant_id": only[1],
+                                   "model_id": only[2]}, label=f"Line {index}"))
+        elif source is not None and source.brand_id:
             combo = combinations.carry(source)
         elif getattr(line, "brand_id", None):
             combo = await combinations.resolve(
@@ -13019,6 +13230,10 @@ async def post_issue(db: AsyncSession, issue_id: int, user) -> m.MaterialIssue:
                 model_id=line.model_id or 0,
             )
 
+    if outward:
+        # Whole boxes leave under their codes; part of a box leaves as a new part
+        # box with a new code, and the shelf box keeps its own (2026-10-26).
+        await box_codes.settle_on_post(db, issue, user)
     await _mark_serials(db, issue, outward)
     if outward:
         # The packs follow the units out (2026-10-08): emptied packs are consumed, a
@@ -13349,6 +13564,13 @@ async def _claim_issue_units(
             continue
         item = await _item_snapshot(db, line.item_id)
         mode = _unit_mode(item)
+        if await box_codes.has_boxes(db, issue.id, line.id):
+            # Issued in boxes (2026-10-26): what left is the boxes; the ledger names
+            # them, and nothing is topped up from loose stock beside them.
+            boxes = await box_codes.line_boxes(db, issue.id, line.id)
+            if boxes:
+                claimed[line.id] = [box.hu_code for box in boxes]
+            continue
         rows = await _claim_units(
             db,
             item_id=line.item_id,
@@ -13505,6 +13727,8 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
         # follows the kind, so an asset line is not told it is missing "serials".
         if (await _unit_codes_required(db, item, config=code_config)
                 and len(rows) != wanted
+                # Issued in boxes: the boxes are what was checked (2026-10-26).
+                and not await box_codes.has_boxes(db, issue.id, line.id)
                 # A lot with no recorded units is issued by quantity (2026-10-23).
                 and (rows or await _lot_has_units(
                     db, item_id=line.item_id, warehouse_id=issue.warehouse_id,
@@ -13632,6 +13856,7 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
                                        by_name: str | None, remarks: str | None,
                                        user, *,
                                        received_by_item: dict[int, Decimal] | None = None,
+                                       box_received: dict | None = None,
                                        ) -> None:
     """Sign the issue off and carry the signature onto what it was attached to.
 
@@ -13674,6 +13899,9 @@ async def _apply_issue_acknowledgement(db: AsyncSession, issue: m.MaterialIssue,
                 got = max(ZERO, min(_d(line.quantity), budget.get(line.item_id, ZERO)))
                 budget[line.item_id] = budget.get(line.item_id, ZERO) - got
                 line.delivered_qty = got
+        # A package row records what arrived in THAT package (2026-10-26).
+        box_codes.apply_package_receipts(
+            _lines_for_issue(dispatch, issue.id, grouped=grouped), box_received)
         others_open = grouped and bool(await db.scalar(
             select(func.count(m.MaterialIssue.id)).where(
                 m.MaterialIssue.id.in_([issue_id for issue_id in carried
@@ -13755,7 +13983,8 @@ def _stamp_confirmed_delivery(dispatch: m.Dispatch,
 async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
                                       user, *, condition: str | None = None,
                                       remarks: str | None = None,
-                                      fully_received: bool = False) -> list[str]:
+                                      fully_received: bool = False,
+                                     box_received: dict | None = None) -> list[str]:
     """Sign off every open issue serving this indent that the raiser has now confirmed.
 
     The warehouse used to click Acknowledge a second time after the requester had
@@ -13795,7 +14024,8 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         # confirmed everything it carried is settled — the rest keep it open.
         if not await _receiver_confirmed(db, issue):
             continue
-        await _apply_issue_acknowledgement(db, issue, _name(user), None, user)
+        await _apply_issue_acknowledgement(db, issue, _name(user), None, user,
+                                           box_received=box_received)
         signed.append(issue.issue_no)
         settled.add(issue.id)
 
@@ -13831,6 +14061,7 @@ async def auto_acknowledge_for_indent(db: AsyncSession, indent_id: int,
         # The credit is a running total over the WHOLE consignment, so on a grouped one
         # its ceiling is what has been confirmed across every issue it carries — this
         # issue's caps alone would hold back units another issue already had credited.
+        box_codes.apply_package_receipts(dispatch.items, box_received or None)
         await credit_arrival(db, dispatch, user,
                              cap_by_item=(await _dispatch_confirmation_caps(db, carried)
                                           if grouped else caps))
@@ -14310,12 +14541,35 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
 
     line_packs = await wh_packing.issue_line_packs(
         db, {line.id: _d(line.issued_qty) - _d(line.returned_qty) for line in lines})
+    # Issued in PACKAGES (2026-10-26): each carton lists the packages it holds, and
+    # the site checks them package by package — never one code per piece.
+    in_carton: dict[tuple, list[dict]] = defaultdict(list)
+    carton_ids = {row["package_id"] for rows in packages_by_item.values() for row in rows}
+    if carton_ids:
+        for package_id, item_id, code, qty, got, status in (await db.execute(
+                select(m.DispatchItem.package_id, m.DispatchItem.item_id,
+                       m.DispatchItem.box_code, m.DispatchItem.quantity,
+                       m.DispatchItem.delivered_qty, m.Dispatch.status)
+                .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
+                .where(m.DispatchItem.package_id.in_(carton_ids),
+                       m.DispatchItem.box_code.isnot(None))
+                .order_by(m.DispatchItem.id))).all():
+            in_carton[(package_id, item_id)].append({
+                "code": code, "quantity": float(_d(qty)),
+                # What arrived in it, once the consignment is signed for (2026-10-26).
+                "received": (float(_d(got)) if status == DispatchStatus.ACKNOWLEDGED.value
+                             else None)})
+    package_lines = {line.id for line in lines
+                     if await box_codes.has_boxes(db, issue.id, line.id)}
     out_lines = []
     for line in lines:
         sent = _d(line.issued_qty) - _d(line.returned_qty)
         item = item_rows.get(line.item_id)
+        if line.id in package_lines:
+            serials[line.id] = []
         out_lines.append({
             "indent_item_id": line.id,
+            "item_id": line.item_id,
             "item_code": line.item_code, "item_name": line.item_name,
             "uom_code": line.uom_code,
             **combinations.carry(line),
@@ -14330,7 +14584,8 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
             "serial_numbers": serials.get(line.id, []),
             "on_order_quantity": 0.0,
             "package_quantities": [
-                {**pack, "quantity": min(pack["quantity"], float(sent))}
+                {**pack, "quantity": min(pack["quantity"], float(sent)),
+                 "box_codes": in_carton.get((pack["package_id"], line.item_id), [])}
                 for pack in packages_by_item.get(line.item_id, [])],
             **line_packs.get(line.id, {}),
             "pending_with": None,
@@ -14395,7 +14650,8 @@ async def delete_direct_issue_attachment(db: AsyncSession, attachment_id: int, u
 async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
                                    lines: dict[int, Decimal], user, *,
                                    condition: str | None = None,
-                                   remarks: str | None = None) -> dict:
+                                   remarks: str | None = None,
+                                   package_receipts: dict[int, dict] | None = None) -> dict:
     """The recipient of a direct issue confirms what reached them.
 
     Held to the indent receipt's proof rules: a consignment photo and a photo of every
@@ -14443,10 +14699,30 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
         sent = _d(line.issued_qty) - _d(line.returned_qty)
         if line.id not in lines and sent > 0:
             short.append(f"{line.item_name or line.item_code} 0 of {sent:g}")
+    # Packages that came short or missing (2026-10-26), against what each carried.
+    package_notes: list[str] = []
+    for line_id, by_code in (package_receipts or {}).items():
+        if not by_code or line_id not in by_id:
+            continue
+        sent_in = {box.hu_code: box_codes.held(box)
+                   for box in await box_codes.line_boxes(db, issue.id, line_id)}
+        label = by_id[line_id].item_code or by_id[line_id].item_name
+        for code, got in by_code.items():
+            if code not in sent_in:
+                raise ValidationError(f"{label}: {code} is not a package sent on this line")
+            got = _d(got)
+            if got < 0 or got > sent_in[code]:
+                raise ValidationError(
+                    f"{label}: {code} carried {shared_packing.fmt(sent_in[code])}; "
+                    f"{shared_packing.fmt(got)} cannot have arrived in it")
+            package_notes.append(f"{code} missing" if got == 0 else
+                                 f"{code}: {shared_packing.fmt(got)} of "
+                                 f"{shared_packing.fmt(sent_in[code])} arrived")
     ack_condition = ind._delivery_condition(condition, remarks)
     note = "; ".join(filter(None, [
         f"Condition {ack_condition}" if ack_condition != ind.ACK_CONDITION_GOOD else None,
         f"Short: {', '.join(short)}" if short else None,
+        f"Packages: {'; '.join(package_notes)}" if package_notes else None,
         (remarks or "").strip() or None,
     ])) or None
 
@@ -14454,8 +14730,11 @@ async def acknowledge_direct_issue(db: AsyncSession, issue_id: int,
     for line_id, got in lines.items():
         received_by_item[by_id[line_id].item_id] += _d(got)
     before_status = issue.status
+    box_received = {code: _d(got) for by_code in (package_receipts or {}).values()
+                    for code, got in (by_code or {}).items()}
     await _apply_issue_acknowledgement(db, issue, _name(user), note, user,
-                                       received_by_item=received_by_item)
+                                       received_by_item=received_by_item,
+                                       box_received=box_received)
     await write_audit(db, entity="out_issues", entity_id=issue.id, entity_no=issue.issue_no,
                       action=AuditAction.UPDATE, actor=user,
                       before={"status": before_status},
@@ -14654,7 +14933,9 @@ async def _issue_available_qty_and_serials(
                         passed_list = serials_data
                     else:
                         passed_list = []
-                    for s in passed_list:
+                    # A box code stands for the units inside it (2026-10-26).
+                    for s in await box_codes.expand_box_codes(
+                            db, list(passed_list), item_id=line.item_id):
                         accepted_serials.add(s.lower())
                 else:
                     for s_key, s_row in issued_serials.items():
@@ -14739,6 +15020,15 @@ async def _apply_consignment_packages(
                 for value in (row.serial_number, row.imei, row.asset_code,
                               row.consumable_code) if value}
     packed_by_line: dict[int, Decimal] = {}
+    # Issued in PACKAGES (2026-10-26): what each package carries after QC, per issue
+    # line, and which carton already holds it — a package goes wholly into one carton.
+    packages_by_line: dict[int, dict[str, Decimal]] = {}
+    for source_issue in issues:
+        for line in source_issue.items:
+            after_qc = await box_codes.packages_after_qc(db, source_issue, line)
+            if after_qc:
+                packages_by_line[line.id] = after_qc
+    carton_of_package: dict[str, str] = {}
 
     existing_barcode_stmt = select(m.DispatchPackage.barcode).join(m.Dispatch).where(
         m.DispatchPackage.barcode.isnot(None),
@@ -14823,7 +15113,30 @@ async def _apply_consignment_packages(
             if len(normalized_serials) != len(set(normalized_serials)):
                 raise ValidationError(f"{package_no}: duplicate serials for {item.code}")
 
-            is_serialized = item.is_serial_tracked or bool(serials)
+            # A line issued in packages names the PACKAGES this carton holds — whole
+            # ones, each in exactly one carton, adding up to what the carton carries.
+            box_map = packages_by_line.get(item_data.issue_item_id or 0)
+            if box_map:
+                if not serials:
+                    raise ValidationError(
+                        f"{package_no}: {item.code} — pick which packages go in this carton")
+                stray = [code for code in serials if code not in box_map]
+                if stray:
+                    raise ValidationError(
+                        f"{package_no}: {', '.join(stray[:5])} is not a package of "
+                        f"{item.code} on this issue line (or was rejected at QC)")
+                for code in serials:
+                    if code in carton_of_package:
+                        raise ValidationError(
+                            f"{code} is already in {carton_of_package[code]} — a package "
+                            "goes wholly into one carton")
+                    carton_of_package[code] = package_no
+                carried = sum((box_map[code] for code in serials), ZERO)
+                if carried != qty:
+                    raise ValidationError(
+                        f"{package_no}: the packages picked for {item.code} carry {carried}, "
+                        f"but the carton says {qty}")
+            is_serialized = (item.is_serial_tracked or bool(serials)) and not box_map
             if is_serialized:
                 if qty != qty.to_integral_value():
                     raise ValidationError(f"{package_no}: {item.code} serial quantity must be whole")
@@ -14849,7 +15162,7 @@ async def _apply_consignment_packages(
                         f"{item.code} {where}: packed {packed_by_line[issue_line.id]} but "
                         f"only {line_cap} went out from there on {source_issue.issue_no}")
                 own = unit_names_by_line.get(issue_line.id)
-                if own and serials:
+                if own and serials and not box_map:
                     stray = [value for value in serials if value.lower() not in own]
                     if stray:
                         raise ValidationError(
@@ -14859,10 +15172,14 @@ async def _apply_consignment_packages(
             # The packs THIS carton holds of the line — its own share, never the
             # whole line's packs repeated in every carton (2026-10-22).
             try:
-                packed = await wh_packing.package_line_packs(
-                    db, item=item, issue_line=issue_line, qty=qty,
-                    hierarchy_id=getattr(item_data, "pack_hierarchy_id", None),
-                    entries=getattr(item_data, "pack_breakdown", None))
+                # A line in packages is held as exactly the packages picked into the
+                # carton (2026-10-26); anything else is the packer's own breakdown.
+                packed = (await box_codes.carton_packs(db, serials, box_map, item.uom_code)
+                          if box_map else
+                          await wh_packing.package_line_packs(
+                              db, item=item, issue_line=issue_line, qty=qty,
+                              hierarchy_id=getattr(item_data, "pack_hierarchy_id", None),
+                              entries=getattr(item_data, "pack_breakdown", None)))
             except ValidationError as exc:
                 raise ValidationError(f"{package_no}: {item.code} — {exc}") from exc
             if packed:
@@ -14934,6 +15251,31 @@ async def _apply_consignment_packages(
                         delivered_qty=ZERO,
                         rate=rate or None,
                         amount=rate if rate else None,
+                        remarks=item_data.remarks,
+                    ))
+                    line_no += 1
+            elif box_map:
+                # One row per package, carrying what that package carries.
+                for code in serials:
+                    part = box_map[code]
+                    dispatch.items.append(m.DispatchItem(
+                        line_no=line_no, package_id=package.id,
+                        issue_id=source_issue.id, issue_no=source_issue.issue_no,
+                        issue_item_id=issue_line.id if issue_line else None,
+                        bin_code=issue_line.bin_code if issue_line else None,
+                        **(combinations.carry(issue_line) if issue_line
+                           else dict(combinations.NONE)),
+                        mr_id=source_mr_id, mr_no=source_mr_no,
+                        indent_id=item_data.indent_id or source_issue.indent_id,
+                        indent_no=source_issue.indent_no,
+                        item_id=item.id, item_code=item.code, item_name=item.name,
+                        uom_code=item.uom_code, batch_id=batch_id,
+                        batch_no=batch.batch_no if batch else None,
+                        mfg_date=batch.mfg_date if batch else None,
+                        expiry_date=batch.expiry_date if batch else None,
+                        serial_no=None, imei_no=None, box_code=code,
+                        quantity=part, delivered_qty=ZERO,
+                        rate=rate or None, amount=(part * rate) if rate else None,
                         remarks=item_data.remarks,
                     ))
                     line_no += 1
@@ -22794,7 +23136,19 @@ async def list_serials(db: AsyncSession, params: PageParams, *, status: str | No
             m.SerialNumber.consumable_code.ilike(like)))
 
     page = await paginate(db, stmt.order_by(m.SerialNumber.id.desc()), params)
+    hu_of = {row.id: row.handling_unit_id for row in page["items"]}
     page["items"] = await _decorate_serials(db, page["items"])
+    # The PACKAGE each unit sits in (2026-10-26), so a lot reads as packages with
+    # their codes inside them. One query for the page.
+    hu_ids = {v for v in hu_of.values() if v}
+    packs = {hu.id: hu for hu in (await db.execute(select(m.HandlingUnit).where(
+        m.HandlingUnit.id.in_(hu_ids)))).scalars().all()} if hu_ids else {}
+    for row in page["items"]:
+        hu = packs.get(hu_of.get(row["id"]))
+        if hu is not None and hu.status in box_codes.LIVE:
+            row["package_code"] = hu.hu_code
+            row["package_name"] = hu.pack_name
+            row["package_holds"] = float(wh_packing.held(hu))
     return page
 
 
@@ -23088,20 +23442,21 @@ def _dispatch_destination(dispatch: m.Dispatch) -> str | None:
             or dispatch.project_name or dispatch.delivery_address)
 
 
-_PUBLIC_LABEL_TOKEN = re.compile(r"^([dp])(\d+)\.([A-Za-z0-9_-]{22})$")
+_PUBLIC_LABEL_TOKEN = re.compile(r"^([dphu])(\d+)\.([A-Za-z0-9_-]{22})$")
 
 
 def public_label_token(kind: str, row_id: int) -> str:
     """A short, non-enumerable capability for one printed label.
 
-    ``d`` identifies a whole consignment and ``p`` one package. The identifier is
+    ``d`` identifies a whole consignment and ``p`` one package; ``h`` a stock pack
+    (a carton or a box on the shelf) and ``u`` one coded unit (2026-10-27). The identifier is
     visible, but changing it invalidates the HMAC, so knowing one label never grants
     access to the next database row. Tokens deliberately do not expire: a physical
     shipping label must remain useful for the life of the consignment. Rotating the
     deployment SECRET_KEY revokes every old label when that is explicitly required.
     """
-    if kind not in {"d", "p"} or row_id < 1:
-        raise ValueError("Public label tokens require kind d/p and a positive id")
+    if kind not in {"d", "p", "h", "u"} or row_id < 1:
+        raise ValueError("Public label tokens require kind d/p/h/u and a positive id")
     message = f"warehouse-public-label:v1:{kind}:{row_id}".encode()
     digest = hmac.new(settings.SECRET_KEY.encode(), message, hashlib.sha256).digest()[:16]
     signature = base64.urlsafe_b64encode(digest).decode().rstrip("=")
@@ -23272,6 +23627,15 @@ async def public_label_scan(db: AsyncSession, token: str) -> s.ScanResult:
         # never becomes an oracle for database identifiers.
         raise NotFoundError("This consignment label is not valid")
     kind, row_id = parsed
+    if kind in {"h", "u"}:
+        # A stock pack or a unit label (2026-10-27): live, read-only, and never the
+        # employee-only parts (who holds it, the unit codes inside).
+        row = await db.get(m.HandlingUnit if kind == "h" else m.SerialNumber, row_id)
+        if row is None:
+            raise NotFoundError("This label is not valid")
+        built = (await box_codes.scan_pack(db, row, public=True) if kind == "h"
+                 else await box_codes.scan_unit(db, row, public=True))
+        return s.ScanResult(**built)
     if kind == "d":
         dispatch = await db.get(m.Dispatch, row_id)
         if not dispatch:
@@ -23333,12 +23697,18 @@ async def scan(db: AsyncSession, code: str) -> s.ScanResult:
         return s.ScanResult(kind="ISSUE", id=issue.id, doc_no=issue.issue_no,
                             deep_link=f"/warehouse/transactions/material-issues/{issue.id}")
 
+    # A carton, a box or a strip on the shelf (2026-10-27): what it is, where it is
+    # now and what is inside it, read live.
+    pack = await db.scalar(select(m.HandlingUnit).where(m.HandlingUnit.hu_code == value))
+    if pack:
+        return s.ScanResult(**await box_codes.scan_pack(db, pack))
+
     serial = await db.scalar(select(m.SerialNumber).where(
         or_(m.SerialNumber.serial_number == value, m.SerialNumber.asset_code == value,
-            m.SerialNumber.consumable_code == value)))
+            m.SerialNumber.consumable_code == value, m.SerialNumber.imei == value))
+        .order_by(m.SerialNumber.is_active.desc(), m.SerialNumber.id.desc()).limit(1))
     if serial:
-        return s.ScanResult(kind="SERIAL", id=serial.id, doc_no=serial.serial_number,
-                            deep_link="/warehouse/stock-segregation")
+        return s.ScanResult(**await box_codes.scan_unit(db, serial))
 
     bin_row = await db.scalar(select(Bin).where(Bin.code == value))
     if bin_row:
@@ -23684,6 +24054,28 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             "packed_at": row[15],
         })
     await _package_rows_packed(db, packages_by_line, by="indent_item")
+    # The PACKAGES each carton holds of a line issued in packages (2026-10-26) — the
+    # site checks them carton by carton.
+    carton_ids = {row["package_id"] for rows in packages_by_line.values() for row in rows}
+    if carton_ids:
+        item_of_line = {item.id: item.item_id for indent in indents for item in indent.items}
+        in_carton: dict[tuple, list[dict]] = defaultdict(list)
+        for package_id, item_id, code, qty, got, status in (await db.execute(
+                select(m.DispatchItem.package_id, m.DispatchItem.item_id,
+                       m.DispatchItem.box_code, m.DispatchItem.quantity,
+                       m.DispatchItem.delivered_qty, m.Dispatch.status)
+                .join(m.Dispatch, m.Dispatch.id == m.DispatchItem.dispatch_id)
+                .where(m.DispatchItem.package_id.in_(carton_ids),
+                       m.DispatchItem.box_code.isnot(None))
+                .order_by(m.DispatchItem.id))).all():
+            in_carton[(package_id, item_id)].append({
+                "code": code, "quantity": float(_d(qty)),
+                # What arrived in it, once the consignment is signed for (2026-10-26).
+                "received": (float(_d(got)) if status == DispatchStatus.ACKNOWLEDGED.value
+                             else None)})
+        for line_id, rows in packages_by_line.items():
+            for row in rows:
+                row["box_codes"] = in_carton.get((row["package_id"], item_of_line.get(line_id)), [])
 
     # ------------------------------------------------------------------
     # Which physical units left for each (indent, item)
@@ -23827,6 +24219,49 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
 
     shipments = await _shipments_by_indent(db, indent_ids)
 
+    # What was actually ISSUED against each line, by brand / variant / model
+    # (2026-10-26) — off the posted issue lines, so a brand the desk substituted, or
+    # stock with no brand recorded, reads as what arrived rather than as what the
+    # indent asked for.
+    issued_combos: dict[int, list[dict]] = {}
+    line_ids = [item.id for indent in indents for item in indent.items]
+    if line_ids:
+        for row in (await db.execute(
+                select(m.MaterialIssueLine.indent_item_id, m.MaterialIssueLine.brand_id,
+                       m.MaterialIssueLine.variant_id, m.MaterialIssueLine.model_id,
+                       m.MaterialIssueLine.brand_name, m.MaterialIssueLine.variant_name,
+                       m.MaterialIssueLine.model_name,
+                       func.sum(m.MaterialIssueLine.issued_qty))
+                .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+                .where(m.MaterialIssueLine.indent_item_id.in_(line_ids),
+                       m.MaterialIssue.is_stock_posted.is_(True),
+                       m.MaterialIssue.direction == IssueDirection.OUT.value)
+                .group_by(m.MaterialIssueLine.indent_item_id, m.MaterialIssueLine.brand_id,
+                          m.MaterialIssueLine.variant_id, m.MaterialIssueLine.model_id,
+                          m.MaterialIssueLine.brand_name, m.MaterialIssueLine.variant_name,
+                          m.MaterialIssueLine.model_name))).all():
+            line_id, b, v, mo, bn, vn, mn, qty = row
+            issued_combos.setdefault(int(line_id), []).append({
+                "brand_id": int(b or 0), "variant_id": int(v or 0), "model_id": int(mo or 0),
+                "brand_name": bn, "variant_name": vn, "model_name": mn,
+                "no_brand": not int(b or 0), "quantity": float(qty or 0)})
+
+    # Issued in BOXES (2026-10-26): the boxes each indent line went out in — the
+    # receiving site checks boxes, never one code per piece.
+    boxes_by_line: dict[int, list[dict]] = {}
+    if line_ids:
+        for issue_id, issue_line_id, indent_line_id in (await db.execute(
+                select(m.MaterialIssue.id, m.MaterialIssueLine.id,
+                       m.MaterialIssueLine.indent_item_id)
+                .join(m.MaterialIssue, m.MaterialIssue.id == m.MaterialIssueLine.issue_id)
+                .where(m.MaterialIssueLine.indent_item_id.in_(line_ids),
+                       m.MaterialIssue.is_stock_posted.is_(True),
+                       m.MaterialIssue.direction == IssueDirection.OUT.value))).all():
+            for box in await box_codes.line_boxes(db, issue_id, issue_line_id):
+                boxes_by_line.setdefault(int(indent_line_id), []).append({
+                    "code": box.hu_code, "pack_name": box.pack_name,
+                    "quantity": float(box_codes.held(box))})
+
     out = []
     for indent in indents:
         lines = []
@@ -23837,13 +24272,21 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
             dispatched = dispatched_by_line.get(item.id, ZERO)
             on_order = on_order_by_line.get(item.id, ZERO)
             line_serials = serials_by_indent_item.get((indent.id, item.item_id), [])
+            line_boxes = boxes_by_line.get(item.id, [])
+            if line_boxes:
+                line_serials = []
             lines.append({
                 "indent_item_id": item.id,
+                "item_id": item.item_id,
                 "item_code": item.item_code,
                 "item_name": item.item_name,
                 "uom_code": item.uom_code,
                 # What the indent asked for — a brand / variant / model, or Any.
                 **combinations.carry(item),
+                # And what was actually issued, per brand (2026-10-26).
+                "issued_combinations": issued_combos.get(item.id, []),
+                # Issued in boxes: the box codes, each with what it carried.
+                "box_codes": line_boxes,
                 "approved_quantity": float(approved),
                 "issued_quantity": float(issued),
                 "dispatched_quantity": float(dispatched),
@@ -26087,9 +26530,27 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         for item in qc.items:
             qc_accepted[item.issue_item_id] = item.accepted_qty
             if item.serial_numbers:
-                qc_serials[item.issue_item_id] = item.serial_numbers
+                data = item.serial_numbers
+                accepted = (data.get("accepted", []) if isinstance(data, dict)
+                            else data if isinstance(data, list) else [])
+                # A box code stands for the units inside it (2026-10-26); a box with
+                # no unit rows travels by quantity.
+                qc_serials[item.issue_item_id] = await box_codes.expand_box_codes(
+                    db, list(accepted), item_id=item.item_id)
+
+    # Issued in BOXES (2026-10-26): such a line is packed by quantity and its boxes
+    # are named on it — never asked for one unit code per piece, which a box of old
+    # stock may not even have.
+    box_lines: dict[int, list[dict]] = {}
+    for issue_line in issue.items:
+        after_qc = await box_codes.packages_after_qc(db, issue, issue_line)
+        if after_qc or await box_codes.has_boxes(db, issue.id, issue_line.id):
+            box_lines[issue_line.id] = [{"code": code, "quantity": float(qty)}
+                                        for code, qty in after_qc.items()]
 
     def _get_accepted_serials(line) -> list[str]:
+        if line.id in box_lines:
+            return []
         if line.id in qc_serials:
             s_data = qc_serials[line.id]
             if isinstance(s_data, dict):
@@ -26104,6 +26565,14 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
     # The issue line's packs, cut to what this consignment takes of it (2026-10-22).
     line_packs = await wh_packing.issue_line_packs(
         db, {line.id: _d(qc_accepted.get(line.id, line.issued_qty)) for line in issue.items})
+    # A line in packages is described as its packages (2026-10-26).
+    for issue_line in issue.items:
+        if box_lines.get(issue_line.id):
+            carries = {row["code"]: _d(row["quantity"]) for row in box_lines[issue_line.id]}
+            packs = await box_codes.carton_packs(db, list(carries), carries, issue_line.uom_code)
+            if packs:
+                line_packs[issue_line.id] = {"pack_breakdown": packs["pack_breakdown"],
+                                             "pack_text": packs["pack_text"]}
 
     return {
         "issue_id": issue.id,
@@ -26149,7 +26618,9 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 # SERIAL / IMEI / ASSET / CONSUMABLE / NONE: what the codes on this
                 # row are, so the packing screen names them and knows which it may
                 # choose itself (asset and consumable codes) and which it may not.
-                "tracking_type": getattr(line, "tracking_type", None),
+                "tracking_type": (TrackingType.NONE.value if line.id in box_lines
+                                  else getattr(line, "tracking_type", None)),
+                "box_codes": box_lines.get(line.id, []),
                 "requires_qc": bool(getattr(line, "requires_qc", False)),
                 # Snapshotted on the issue line at creation, so the packer sees what
                 # is actually in the carton rather than a blank the receiving point
@@ -26158,7 +26629,7 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
                 "expiry_date": line.expiry_date,
                 "is_serial_tracked": (
                     bool(item_by_id[line.item_id].is_serial_tracked)
-                    if line.item_id in item_by_id else False
+                    if line.item_id in item_by_id and line.id not in box_lines else False
                 ) or bool(_get_accepted_serials(line)),
                 "is_imei_tracked": (
                     bool(item_by_id[line.item_id].is_imei_tracked)
@@ -27319,6 +27790,9 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
     # knew about, so an asset- or lot-coded item went through outward QC with no way
     # to say WHICH units passed.
     units_by_line: dict[int, set[str]] = {}
+    # Issued in BOXES (2026-10-26): the box codes each issue line sent, and what each
+    # box carried of it — a box line is inspected by its boxes, not by unit rows.
+    boxes_by_line: dict[int, dict[str, Decimal]] = {}
     if inspection.issue_id:
         issue = await get_issue(db, inspection.issue_id)
         for line_id, rows in (await _issue_units_by_line(db, issue)).items():
@@ -27326,6 +27800,11 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                 value for row in rows
                 for value in (row.serial_number, row.imei, row.asset_code,
                               row.consumable_code) if value}
+        for issue_line in issue.items:
+            boxes = await box_codes.line_boxes(db, issue.id, issue_line.id)
+            if boxes:
+                boxes_by_line[issue_line.id] = {box.hu_code: box_codes.held(box)
+                                                for box in boxes}
     decimals = await uom_rules.decimals_by_code(
         db, [(await _item_snapshot(db, line.item_id)).uom_code for line in lines])
 
@@ -27394,7 +27873,42 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
                     f"{inspected - whole} with a reason.")
 
         sent = units_by_line.get(line.issue_item_id or 0, set())
-        if sent:
+        boxes = boxes_by_line.get(line.issue_item_id or 0)
+        pack_rejections: dict[str, float] = {}
+        if boxes:
+            # Inspected by the PACKAGE (2026-10-26). Every unit rejected is said to
+            # have come out of a named package: a package rejected whole is left out
+            # of the accepted codes, and units rejected out of a package that is
+            # otherwise kept are recorded against it (`pack_rejections`). So what is
+            # accepted is exactly what the kept packages carry, less those units.
+            stray = [value for value in serials if value not in boxes]
+            if stray:
+                raise ValidationError(
+                    f"{label}: {', '.join(stray[:5])} is not a package this issue line sent")
+            if not serials and accepted >= sum(boxes.values(), ZERO):
+                serials = list(boxes)
+            for code, qty in (line.pack_rejections or {}).items():
+                if _d(qty) <= ZERO:
+                    continue
+                if code not in serials:
+                    raise ValidationError(
+                        f"{label}: units are rejected out of {code}, which is not kept — "
+                        "reject the package whole instead")
+                if _d(qty) >= boxes[code]:
+                    raise ValidationError(
+                        f"{label}: all {boxes[code]} of {code} are rejected — reject the "
+                        "package whole (untick it) instead")
+                pack_rejections[code] = float(_d(qty))
+            kept = (sum((boxes[code] for code in serials), ZERO)
+                    - sum((_d(q) for q in pack_rejections.values()), ZERO))
+            if kept != accepted:
+                raise ValidationError(
+                    f"{label}: the packages kept carry {kept} after what was rejected "
+                    f"out of them, but {accepted} is accepted. Say which packages the "
+                    f"{inspected - accepted} rejected came from")
+            if accepted <= ZERO:
+                serials = []
+        elif sent:
             stray = [value for value in serials if value not in sent]
             if stray:
                 raise ValidationError(
@@ -27426,6 +27940,7 @@ async def _apply_outbound_inspection_lines(db: AsyncSession, inspection: m.Outbo
             parameters=[p.model_dump() for p in line.parameters] if line.parameters else None,
             result=result, defect_type=reason, remarks=line.remarks,
             serial_numbers={"accepted": serials} if serials else None,
+            pack_rejections=pack_rejections or None,
         ))
     _outbound_inspection_totals(inspection)
 

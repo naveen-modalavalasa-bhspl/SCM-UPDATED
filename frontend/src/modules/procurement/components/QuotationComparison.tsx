@@ -33,6 +33,9 @@ const COL = "min-w-[210px] w-[210px]";
 
 /** The item column is pinned. It carries its own background or the scrolling cells
  *  show through it. */
+/** An RFQ line: the item and which line of the RFQ it is. */
+type LineRef = { item_id: number; rfq_item_id: number };
+
 const PINNED = "sticky left-0 z-10 bg-content1 min-w-[220px] w-[220px]";
 
 function Cell({ cell }: { cell: ComparisonCell }) {
@@ -50,6 +53,14 @@ function Cell({ cell }: { cell: ComparisonCell }) {
       <div className="text-right text-sm font-semibold text-ink">
         {money(cell.line_total)}
       </div>
+      {/* The brand THIS supplier quoted — amber when it is not what was asked. */}
+      {cell.combination && (
+        <div className={`mt-1 text-right text-[11px] font-semibold ${
+          cell.brand_changed ? "text-warn" : "text-brand"}`}
+             title={cell.brand_changed ? "Not the brand the RFQ asked for" : "Brand quoted"}>
+          {cell.combination}{cell.brand_changed ? " · changed" : ""}
+        </div>
+      )}
       <div className="mt-1.5 space-y-0.5 border-t border-line pt-1.5">
         <div className="flex justify-between gap-2 text-[11px] text-muted">
           <span>Qty</span>
@@ -136,7 +147,7 @@ export function QuotationComparison({
    * bookkeeping, and a re-share begins with only the quantities that remain ordered. */
   liveAllocatedQuantities?: Record<number, Record<string, number>>;
   onAward: (quotationIds: number[]) => void;
-  onAwardSplit?: (allocations: { item_id: number; vendor_id: number; quantity: number }[]) => void;
+  onAwardSplit?: (allocations: { item_id: number; rfq_item_id?: number; vendor_id: number; quantity: number }[]) => void;
   onCreatePo: (quotationId: number) => void;
   onOpenPo: (poId: number) => void;
 }) {
@@ -161,7 +172,9 @@ export function QuotationComparison({
   const [linesExpanded, setLinesExpanded] = useState(isAnyAwarded);
   const [split, setSplit] = useState<Record<string, string>>({});
   const [splitting, setSplitting] = useState(false);
-  const splitKey = (itemId: number, vendorId: number) => `${itemId}:${vendorId}`;
+  // Keyed by RFQ LINE (2026-10-26): one item asked in two brands is two lines, each
+  // awarded on its own — keying by item added them together.
+  const splitKey = (rfqItemId: number, vendorId: number) => `${rfqItemId}:${vendorId}`;
   // A column is a QUOTATION; a split is per VENDOR. A supplier who revised their offer
   // holds two columns that share one split key, so adding the columns up counted their
   // share twice — the allocated line read double what was typed and items went red as
@@ -220,22 +233,28 @@ export function QuotationComparison({
   const formatQuantity = (value: number) => Number(value).toLocaleString(undefined, {
     maximumFractionDigits: 3,
   });
-  const liveAllocation = (itemId: number, vendorId: number) => {
-    const reported = liveAllocatedQuantities[vendorId]?.[String(itemId)];
-    if (reported != null) return Number(reported);
+  /** One RFQ line's quantity in an award / PO / allocation map: keyed `L<line>` since
+   *  2026-10-26, by item id before. */
+  const lineQty = (map: Record<string, number> | null | undefined, row: LineRef) =>
+    Number(map?.[`L${row.rfq_item_id}`] ?? map?.[String(row.item_id)] ?? 0);
+  const liveAllocation = (row: LineRef, vendorId: number) => {
+    const map = liveAllocatedQuantities[vendorId];
+    if (map && (map[`L${row.rfq_item_id}`] != null || map[String(row.item_id)] != null)) {
+      return lineQty(map, row);
+    }
     // The RFQ read normally supplies `liveAllocatedQuantities`.  The PO references
     // are an intentional fallback: if an older/stale response omits that derived map,
     // a visible previous PO must still not be shown as "Allocated 0".
     return purchaseOrders.reduce((sum, po) => (
       po.vendor_id === vendorId
-        ? sum + Number(po.item_quantities?.[String(itemId)] ?? 0)
+        ? sum + lineQty(po.item_quantities, row)
         : sum
     ), 0);
   };
   /** What the buyer is adding now. This is deliberately separate from the live PO
    * quantity: a re-share is an increment, never an edit to a sent PO. */
-  const additionalAward = (itemId: number, vendorId: number) => {
-    const value = Number(split[splitKey(itemId, vendorId)] ?? 0);
+  const additionalAward = (row: LineRef, vendorId: number) => {
+    const value = Number(split[splitKey(row.rfq_item_id, vendorId)] ?? 0);
     // `min=0` is only a browser affordance; a pasted negative value must not turn
     // an "additional" award into an attempt to reduce a live PO allocation.
     return Number.isFinite(value) && value > 0 ? value : 0;
@@ -411,14 +430,19 @@ export function QuotationComparison({
                   <div className="mt-1 text-xs text-body">
                     {row.quantity} {row.uom_code ?? ""}
                   </div>
+                  {row.requested_combination && (
+                    <div className="mt-1 inline-flex rounded-full bg-brand/10 px-2 py-0.5 text-[10px] font-semibold text-brand">
+                      Asked: {row.requested_combination}
+                    </div>
+                  )}
                   {(isAnyAwarded || splitting) && (() => {
                     // Allocation is historical PO state. It must never be calculated
                     // from an editable re-share box: clearing a draft value must not
                     // make a quantity that is already on a PO look unallocated.
                     const allocated = splitVendorIds.reduce((sum, vendorId) =>
-                      sum + liveAllocation(row.item_id, vendorId), 0);
+                      sum + liveAllocation(row, vendorId), 0);
                     const added = splitVendorIds.reduce((sum, vendorId) =>
-                      sum + additionalAward(row.item_id, vendorId), 0);
+                      sum + additionalAward(row, vendorId), 0);
                     const afterThisAward = allocated + added;
                     const over = afterThisAward > Number(row.quantity);
                     return (
@@ -442,7 +466,7 @@ export function QuotationComparison({
                   // link does not tell the buyer which quantity was already sent.
                   const earlierPos = purchaseOrders.filter((po) =>
                     po.quotation_id === total.quotation_id
-                    && Number(po.item_quantities?.[String(row.item_id)] ?? 0) > 0,
+                    && lineQty(po.item_quantities, row) > 0,
                   );
                   return (
                     <td key={total.quotation_id} className={`${COL} border-t border-line p-2`}>
@@ -452,12 +476,10 @@ export function QuotationComparison({
                       {cell && isAnyAwarded && (
                         <div className="mt-2 space-y-1 text-right text-[11px] font-semibold text-muted">
                           <div>
-                            Allocated {formatQuantity(liveAllocation(row.item_id, total.vendor_id))}
+                            Allocated {formatQuantity(liveAllocation(row, total.vendor_id))}
                           </div>
                           {earlierPos.map((po) => {
-                            const quantity = Number(
-                              po.item_quantities?.[String(row.item_id)] ?? 0,
-                            );
+                            const quantity = lineQty(po.item_quantities, row);
                             return (
                               <button
                                 key={po.id}
@@ -479,11 +501,11 @@ export function QuotationComparison({
                           </div>
                           <input
                             type="number" min="0" step="0.001"
-                            value={split[splitKey(row.item_id, total.vendor_id)] ?? ""}
+                            value={split[splitKey(row.rfq_item_id, total.vendor_id)] ?? ""}
                             aria-label={`Quantity for ${total.vendor_name ?? "supplier"} on ${row.item_name ?? row.item_id}`}
                             onChange={(e) => setSplit((current) => ({
                               ...current,
-                              [splitKey(row.item_id, total.vendor_id)]: e.target.value,
+                              [splitKey(row.rfq_item_id, total.vendor_id)]: e.target.value,
                             }))}
                             className="min-h-9 w-full rounded-md border border-line bg-content1 px-2 text-right text-sm text-ink outline-none focus:border-brand"
                           />
@@ -547,12 +569,12 @@ export function QuotationComparison({
                           if (quotingVendorIds.length === 1) {
                             const singleVendorId = quotingVendorIds[0];
                             const totalAllocatedOnItem = splitVendorIds.reduce(
-                              (sum, vId) => sum + liveAllocation(row.item_id, vId),
+                              (sum, vId) => sum + liveAllocation(row, vId),
                               0,
                             );
                             const unallocatedQty = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
                             if (unallocatedQty > 0) {
-                              initialSplit[splitKey(row.item_id, singleVendorId)] = String(unallocatedQty);
+                              initialSplit[splitKey(row.rfq_item_id, singleVendorId)] = String(unallocatedQty);
                             }
                           }
                         });
@@ -574,13 +596,13 @@ export function QuotationComparison({
                     // it stays protected, then add the buyer's new number on top.
                     const allocations = (comparison.items ?? []).flatMap((item) =>
                       splitVendorIds.map((vendorId) => {
-                        const quantity = liveAllocation(item.item_id, vendorId)
-                          + additionalAward(item.item_id, vendorId);
+                        const quantity = liveAllocation(item, vendorId)
+                          + additionalAward(item, vendorId);
                         return quantity > 0
-                          ? { item_id: item.item_id, vendor_id: vendorId, quantity }
+                          ? { item_id: item.item_id, rfq_item_id: item.rfq_item_id, vendor_id: vendorId, quantity }
                           : null;
                       }).filter((row): row is {
-                        item_id: number; vendor_id: number; quantity: number;
+                        item_id: number; rfq_item_id: number; vendor_id: number; quantity: number;
                       } => row !== null),
                     );
                     const hasAdditionalQuantity = Object.entries(split).some(([, value]) =>
@@ -588,8 +610,8 @@ export function QuotationComparison({
                     // Search may hide rows, but it must not hide an over-allocation
                     // check for a value already in the draft split.
                     const over = (comparison.items ?? []).filter((row) => splitVendorIds.reduce((sum, vendorId) =>
-                      sum + liveAllocation(row.item_id, vendorId)
-                        + additionalAward(row.item_id, vendorId), 0)
+                      sum + liveAllocation(row, vendorId)
+                        + additionalAward(row, vendorId), 0)
                       > Number(row.quantity));
                     return (
                       <div className="flex flex-wrap items-center gap-2">
@@ -645,21 +667,21 @@ export function QuotationComparison({
                   const cell = row.cells.find((c) => c.quotation_id === total.quotation_id);
                   if (!cell) return;
                   const wonQty = awardedMap != null
-                    ? Number(awardedMap[String(row.item_id)] ?? 0)
+                    ? lineQty(awardedMap, row)
                     : (won ? Number(cell.quantity) : 0);
                   const orderedQty = pos.reduce(
-                    (sum, po) => sum + Number(po.item_quantities?.[String(row.item_id)] ?? 0),
+                    (sum, po) => sum + lineQty(po.item_quantities, row),
                     0,
                   );
                   const remAwarded = wonQty - orderedQty;
                   if (remAwarded > 0.001) remainingAwardedQty += remAwarded;
 
                   const totalAllocatedOnItem = splitVendorIds.reduce(
-                    (sum, vId) => sum + liveAllocation(row.item_id, vId),
+                    (sum, vId) => sum + liveAllocation(row, vId),
                     0,
                   );
                   const unallocatedOnRfq = Math.max(0, Number(row.quantity) - totalAllocatedOnItem);
-                  const vendorAlreadyWon = liveAllocation(row.item_id, total.vendor_id);
+                  const vendorAlreadyWon = liveAllocation(row, total.vendor_id);
                   const vendorMaxQuota = Number(cell.quantity);
                   const vendorCanTakeMore = Math.max(0, vendorMaxQuota - vendorAlreadyWon);
                   const claimable = Math.min(unallocatedOnRfq, vendorCanTakeMore);
@@ -675,19 +697,19 @@ export function QuotationComparison({
                   }
                   const autoAllocations = (comparison.items ?? []).flatMap((row) =>
                     splitVendorIds.map((vendorId) => {
-                      const currentAlloc = liveAllocation(row.item_id, vendorId);
+                      const currentAlloc = liveAllocation(row, vendorId);
                       if (vendorId === total.vendor_id) {
                         const cell = row.cells.find((c) => c.quotation_id === total.quotation_id);
                         const cellQty = Number(cell?.quantity ?? 0);
-                        const totalAlloc = splitVendorIds.reduce((sum, vId) => sum + liveAllocation(row.item_id, vId), 0);
+                        const totalAlloc = splitVendorIds.reduce((sum, vId) => sum + liveAllocation(row, vId), 0);
                         const unallocatedOnRfq = Math.max(0, Number(row.quantity) - totalAlloc);
                         const vendorCanTake = Math.max(0, cellQty - currentAlloc);
                         const added = Math.min(unallocatedOnRfq, vendorCanTake);
                         const newQty = currentAlloc + added;
-                        return newQty > 0 ? { item_id: row.item_id, vendor_id: vendorId, quantity: newQty } : null;
+                        return newQty > 0 ? { item_id: row.item_id, rfq_item_id: row.rfq_item_id, vendor_id: vendorId, quantity: newQty } : null;
                       }
-                      return currentAlloc > 0 ? { item_id: row.item_id, vendor_id: vendorId, quantity: currentAlloc } : null;
-                    }).filter((r): r is { item_id: number; vendor_id: number; quantity: number } => r !== null),
+                      return currentAlloc > 0 ? { item_id: row.item_id, rfq_item_id: row.rfq_item_id, vendor_id: vendorId, quantity: currentAlloc } : null;
+                    }).filter((r): r is { item_id: number; rfq_item_id: number; vendor_id: number; quantity: number } => r !== null),
                   );
 
                   if (autoAllocations.length > 0) {

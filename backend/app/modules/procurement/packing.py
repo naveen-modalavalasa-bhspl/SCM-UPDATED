@@ -71,6 +71,27 @@ async def purchase_breakdown(db: AsyncSession, ladder, item_id: int, qty) -> lis
             else packing.greedy(ladder, qty))
 
 
+async def purchase_rescale(db: AsyncSession, ladder, item_id: int, entries, qty) -> list[dict]:
+    """`packing.rescale`, kept inside the item's Purchase containers (2026-10-27): a
+    trimmed line is re-said in containers it may be bought in, never in a bigger
+    rung of the ladder the item is not bought in. Nothing mapped: `rescale`."""
+    allowed = await packs.usage_levels(db, item_id, ladder, "PURCHASE")
+    if not allowed:
+        return packing.rescale(ladder, entries, qty)
+    top = max((int(e.get("level") or 0) for e in entries), default=ladder.top)
+    capped = [lv for lv in allowed if lv <= top]
+    return packing.greedy_in(ladder, qty, capped if any(capped) else allowed)
+
+
+async def _default_entries(db: AsyncSession, item_id: int, hierarchy_id, qty) -> list[dict] | None:
+    """How a line with a hierarchy but no breakdown is described: in the item's
+    Purchase containers. None when the ladder has no packs at all."""
+    ladder = await packs.ladder(db, item_id, hierarchy_id)
+    if ladder.top == 0 or packing.dec(qty or 0) <= packing.ZERO:
+        return None
+    return await purchase_breakdown(db, ladder, item_id, qty)
+
+
 async def stamp_line(db: AsyncSession, row, *, hierarchy_id, entries) -> None:
     """Freeze what a client said about one line's packing onto it.
 
@@ -84,11 +105,16 @@ async def stamp_line(db: AsyncSession, row, *, hierarchy_id, entries) -> None:
         return
     await assert_purchase_packs(db, item_id=row.item_id, hierarchy_id=hierarchy_id,
                                 entries=entries, label=getattr(row, "item_code", "") or "")
+    # A hierarchy with no breakdown is said in the item's Purchase containers — the
+    # ladder's biggest pack may be one it is not bought in (2026-10-27).
+    stated = bool(entries)
+    if not stated:
+        entries = await _default_entries(db, row.item_id, hierarchy_id, row.quantity)
     # The order says how packs are to be MADE, so a part pack under its level's
-    # minimum is refused here (2026-10-11).
+    # minimum is refused here (2026-10-11) — when the buyer stated it.
     hid, out = await packs.snapshot(db, item_id=row.item_id, hierarchy_id=hierarchy_id,
                                     entries=entries, base_qty=row.quantity,
-                                    enforce_min=True)
+                                    enforce_min=stated)
     row.pack_hierarchy_id, row.pack_breakdown = hid, out or None
 
 
@@ -116,7 +142,8 @@ async def sync_po_packing(db: AsyncSession, po_id: int) -> None:
             if ladder is None:
                 row.pack_hierarchy_id, row.pack_breakdown = None, None
             else:
-                out = packing.rescale(ladder, row.pack_breakdown, row.quantity)
+                out = await purchase_rescale(db, ladder, row.item_id,
+                                             row.pack_breakdown, row.quantity)
                 for e in out:
                     e["hierarchy"] = ladder.hierarchy_name
                 row.pack_breakdown = out
@@ -167,8 +194,12 @@ async def stamp_despatch_line(db: AsyncSession, row: DespatchNoteItem, po_line: 
                                         entries=entries)
         row.despatched_qty = packing.base_of(out)
     else:
-        hid, out = await packs.snapshot(db, item_id=row.item_id, hierarchy_id=chosen,
-                                        entries=None, base_qty=row.despatched_qty)
+        # Described in the item's Purchase containers, never in a rung of the
+        # ladder it is not bought in (2026-10-27).
+        hid, out = await packs.snapshot(
+            db, item_id=row.item_id, hierarchy_id=chosen,
+            entries=await _default_entries(db, row.item_id, chosen, row.despatched_qty),
+            base_qty=row.despatched_qty)
     row.pack_hierarchy_id, row.pack_breakdown = hid, out or None
 
     changed = bool(ordered_hid and hid and hid != ordered_hid)
@@ -272,7 +303,7 @@ async def decide_pack_change(db: AsyncSession, po_id: int, line_id: int, *,
 
     if accept and po_line is not None:
         ladder = await packs.ladder(db, po_line.item_id, row.pack_hierarchy_id)
-        out = packing.greedy(ladder, po_line.quantity)
+        out = await purchase_breakdown(db, ladder, po_line.item_id, po_line.quantity)
         for e in out:
             e["hierarchy"] = ladder.hierarchy_name
         po_line.pack_hierarchy_id, po_line.pack_breakdown = ladder.hierarchy_id, out

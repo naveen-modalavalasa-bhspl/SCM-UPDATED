@@ -791,6 +791,28 @@ async def switch_item_combination(
         db, item_id, combination_id, data.is_active, user)
 
 
+class _CombinationPick(BaseModel):
+    brand_id: int
+    variant_id: int | None = None
+    model_id: int | None = None
+
+
+@_tracking.post("/api/items/{item_id}/combinations")
+async def add_item_combination(
+        item_id: int, data: _CombinationPick, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    """Map exactly the brand / variant / model picked (2026-10-26)."""
+    return {"items": await combinations.add_combination(
+        db, item_id, data.brand_id, data.variant_id, data.model_id, user)}
+
+
+@_tracking.delete("/api/items/{item_id}/combinations/{combination_id}")
+async def remove_item_combination(
+        item_id: int, combination_id: int, db: AsyncSession = Depends(get_db),
+        user=Depends(require_permission(perms.MASTER_ITEM_MANAGE))):
+    return {"items": await combinations.remove_combination(db, item_id, combination_id, user)}
+
+
 @_tracking.post("/api/items/{item_id}/brands")
 async def map_item_brands_route(
         item_id: int, data: _ItemBrandsIn, db: AsyncSession = Depends(get_db),

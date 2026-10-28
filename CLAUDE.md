@@ -701,6 +701,99 @@ held by a document has its inner packs closed (codes retired, reason recorded) a
 re-split at the new level; held lots are counted and left alone. Items issued loose
 keep one code per base unit, exactly as before.
 
+### The code tree: carton, box AND unit each carry a code (2026-10-27)
+
+REVERSES the 2026-10-23 "codes follow the ISSUE container / no per-unit code" rule.
+For a unit-tracked item (serial, IMEI, or asset / consumable code):
+
+- **Putaway** (`packing.shelve`, `_units_tracked`) splits every Storage pack all the way
+  down to level 1 — carton → its boxes → their strips — each its own
+  `whs_handling_units` row and code, and `_place_unit_codes` mints a code for EVERY base
+  unit (the `issues_in_containers` skip is gone). Units link to the innermost packs.
+  Issue-level packs still get the item-format `…-BOX` code; the others `PK-…`. A label is
+  queued for every pack made. Other items split only to their Issue container, as before.
+- **`box_codes.needs_rebox` accepts the tree**: a pack below the Issue level INSIDE a box
+  of that level is correct. Narrow it back and every issue save re-boxes the lot and
+  throws the tree away (`test_code_tree.py`).
+- **Masters rule** (`packs._assert_issue_within_storage`, mirrored on Container Usage):
+  per hierarchy, every Issue level ≤ the SMALLEST Storage level.
+- **Putaway screen**: "Received as" is now **Stored as** (the shelf packs); with Storage
+  mapped the editor offers only those levels (`onlyLevels`), and space is measured on
+  the Storage rung; with none mapped the screen WARNS (`storage_defined`) and never
+  offers to define it — that is a master.
+- **Scanning**: `scan()` resolves a pack code (`box_codes.scan_pack`) and a unit code
+  (`scan_unit`) to live details — item, location, packs/units inside, batch, expiry,
+  brand / variant / model, holder. Public label tokens gained kinds `h` (pack) and `u`
+  (unit); a label's QR opens `/c/<token>` (read-only, no holder, no unit codes).
+- **Labels** (`_label_rows`): parent first, children indented, each with `qr_token`; the
+  sticker prints a Code128 barcode of the code AND the live-details QR.
+- **Material Issue** (`PackagePickerModal`, replaces `BoxCodesModal`): the cartons at the
+  pick's batch and location, "take N boxes" per carton (part-opened cartons first),
+  codes auto-selected and swappable; a second Issue level nests (strips out of a box not
+  taken whole). `box_sources` serves `parent_*`, `level`, every Issue level, and with
+  `with_units` the serials inside — so a SERIAL/IMEI line of such an item picks packages
+  first, then its unique numbers ONE BY ONE, by hand (scanned or tapped) — the
+  packages only narrow the list, nothing is ever auto-selected for a serial or IMEI
+  (still the per-unit serial path on the server).
+  `hold_line` accepts a named code at ANY Issue level and never names a pack inside one
+  already named.
+- **Silent unit codes**: `hold_line` stamps the units inside the boxes with the line's
+  marker; `_mark_serials` flips them, `_land_units` moves them, `land_packages` re-seats
+  them in the same boxes at the destination. QC / consignment / acknowledgement still
+  work by package (box lines are detected before any unit expansion); the codes surface
+  again in the destination's stock balance.
+
+Existing box-only stock is NOT converted (decided 2026-10-27); lots coded the old way
+keep issuing by box with no unit rows.
+
+### An item issued in a container is issued by the BOX (2026-10-26)
+
+`warehouse/box_codes.py`. When Container Usage maps an ISSUE container, the issue line
+names BOXES — one code per box (`whs_handling_units.hu_code`, item-format `…-BOX`) —
+never one per base unit. A box is held by an issue line through
+`whs_handling_units.held_by` (the same `Reserved for issue X line Y` marker a unit
+carries) and `held_qty` (how much of it the line takes, NULL = all); migration
+`c3e5a7b9d1f4`.
+
+- **Save** (`hold_line`, from `_reserve_issue_serials`): named codes first (scanned,
+  picked in `BoxCodesModal`, or the screen's echo; an OLD per-unit code finds its box),
+  then an exact fill, whole boxes fullest first, then the smallest box covering the
+  rest. The unit rows inside are stamped too, so posting moves the history with them.
+  A code of this item that is no longer a box here (old container, consumed) is
+  re-made, never refused. `codes_needed` = boxes; `issue_in_boxes`, `box_codes`,
+  `container_note` are served per line.
+- **Post** (`settle_on_post`, before `_mark_serials`): a whole box is CONSUMED under
+  its code; PART of a box leaves as a NEW part box with a new code (label queued) and
+  the shelf box KEEPS its code, holding less. A box line is never topped up with loose
+  units (`_claim_issue_units`) and is exempt from the per-unit count checks.
+- **Old stock** (per-unit codes from before the mapping): `scripts.setup_container_usage
+  --apply` re-boxes every lot (`rebox_lot`): whole boxes, then ONE part box for the
+  remainder; unit codes stay on their unit rows inside the box as hidden history.
+  Checked per lot (stock, unit count, boxes ≤ stock), rolled back on any difference;
+  lots held by an open issue are skipped and listed. Units linked to a box at another
+  point are detached first.
+- **Issue container changed later**: `packing.recode_item` re-boxes every lot no open
+  ISSUE holds (an allocation's reserved quantity is no reason to wait); a lot an issue
+  holds is re-cut when that issue is next saved (`ensure_issue_level`, refused while a
+  DIFFERENT issue holds it), and an issue still holding old-container boxes may not
+  submit or post (`check_line`).
+- **Putaway**: `shelve` codes the issue-level boxes in item format and boxes the loose
+  remainder as a part box.
+- **Labels**: every new box code is queued in `whs_box_labels` (PUTAWAY, CONVERTED,
+  RECODED, PART_BOX) and printed from Inventory › Labels & Printing › Box labels.
+- **Downstream, by the PACKAGE** (migration `d5f7b9c1e3a6`). Outward QC: a package is
+  kept or rejected whole, and units rejected out of a kept one are recorded against it
+  (`whs_inspection_items.pack_rejections`); accepted = what the kept packages carry
+  less those units, EXACTLY. `box_codes.packages_after_qc` is what each package
+  carries on. Consignment: whole packages per carton, named in the row's
+  `serial_numbers`, one `out_dispatch_items` row per package (`box_code`, quantity);
+  a package in two cartons is refused; carton packs come from the packages
+  (`carton_packs`). Acknowledgement: each carton lists its packages; the site marks
+  them arrived / missing / short (`AcknowledgeLineIn.package_receipts`, code -> what
+  arrived), validated against the line's packages and written onto the receipt
+  remarks and audit. Screens: `PackageCheckModal` (shared, QC + receipt), the
+  consignment "Pick packages" picker, and the issue's package-count Issue qty.
+
 ### Part packs: the size is a ceiling, not a rule (2026-10-11)
 
 A level's size is the STANDARD — the most one pack holds. A carton of 600 may really

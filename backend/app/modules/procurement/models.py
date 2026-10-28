@@ -365,6 +365,9 @@ class RFQ(Base):
     awarded_vendor_name = Column(String(200), nullable=True)   # snapshot
     terms = Column(Text, nullable=True)
     current_approver_name = Column(String(200), nullable=True)
+    # Does the buyer ask the suppliers to quote freight? Off, the portal hides the
+    # field and a quote's freight is saved as 0 (2026-10-27).
+    freight_required = Column(Boolean, nullable=False, default=False, server_default="0")
 
     # ── Freeze Prices (2026-09-26) ───────────────────────────────────────── #
     # The lock a buyer closes BEFORE comparing and awarding, and the gate every

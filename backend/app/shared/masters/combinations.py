@@ -4,12 +4,13 @@ One item is bought, stocked and issued as several distinct things — Gloves by 
 in the Nitrile variant, model M-100 is not Gloves by Brand B. Each is a COMBINATION,
 and every transaction line names one; a different combination is a different row.
 
-The combinations are DERIVED, never typed: the brands mapped to the item
-(`mst_brand_item_mappings`, plus the item's own older single `brand_id` so items
-mapped before the mapping screen existed are not lost), and under each brand its
-active variants and, under each variant, its active models. A level a brand does not
-have is 0. `mst_item_combinations` records only that a combination exists and whether
-it is ON for the item; switching one OFF is refused while stock of it is held.
+The combinations are PICKED, never expanded (2026-10-26): mapping a brand gives the
+item that brand alone; a variant, and then a model, are added only when somebody picks
+them (`add_combination`) — a brand with three variants does not give the item three
+combinations nobody chose. A brand mapped with nothing picked under it is its brand
+row. A level not picked is 0. `mst_item_combinations` records each combination and
+whether it is ON for the item; switching one OFF, or removing it, is refused while
+stock of it is held.
 
 Stock is read off `stk_balance` by raw SQL: shared may not import a module (rule 5).
 """
@@ -92,22 +93,117 @@ async def sync_item(db: AsyncSession, item_id: int) -> list[ItemCombination]:
     item = await db.get(Item, item_id)
     if item is None:
         raise NotFoundError("Item not found")
-    wanted = await _derive(db, await _brand_ids(db, item))
-    existing = {(r.brand_id, r.variant_id, r.model_id): r for r in (await db.execute(
-        select(ItemCombination).where(ItemCombination.item_id == item_id))).scalars().all()}
-    rows: list[ItemCombination] = []
-    for w in wanted:
-        key = (w["brand_id"], w["variant_id"], w["model_id"])
-        row = existing.get(key)
-        if row is None:
-            row = ItemCombination(item_id=item_id, is_active=True, **w)
+    brand_ids = await _brand_ids(db, item)
+    brands = {b.id: b for b in (await db.execute(select(Brand).where(
+        Brand.id.in_(brand_ids or [0]), Brand.is_active.is_(True)))).scalars().all()}
+    existing = (await db.execute(select(ItemCombination).where(
+        ItemCombination.item_id == item_id).order_by(ItemCombination.id))).scalars().all()
+    # Only what was picked (2026-10-26): a mapped brand with nothing picked under it
+    # is its brand row; nothing is ever expanded into a brand's variants or models.
+    for brand_id, brand in brands.items():
+        if not any(r.brand_id == brand_id for r in existing):
+            row = ItemCombination(item_id=item_id, is_active=True, brand_id=brand_id,
+                                  brand_name=brand.name, variant_id=0, variant_name=None,
+                                  model_id=0, model_name=None)
             db.add(row)
-        else:
-            row.brand_name, row.variant_name, row.model_name = (
-                w["brand_name"], w["variant_name"], w["model_name"])
-        rows.append(row)
+            existing.append(row)
+    rows = [r for r in existing if r.brand_id in brands]
+    await _refresh_names(db, rows, brands)
     await db.flush()
+    rows.sort(key=lambda r: (r.brand_name or "", r.variant_name or "", r.model_name or ""))
     return rows
+
+
+async def _refresh_names(db: AsyncSession, rows, brands: dict) -> None:
+    variant_ids = {r.variant_id for r in rows if r.variant_id}
+    model_ids = {r.model_id for r in rows if r.model_id}
+    variants = dict((await db.execute(select(BrandVariant.id, BrandVariant.name).where(
+        BrandVariant.id.in_(variant_ids or {0})))).all())
+    models = dict((await db.execute(select(BrandModel.id, BrandModel.name).where(
+        BrandModel.id.in_(model_ids or {0})))).all())
+    for row in rows:
+        row.brand_name = getattr(brands.get(row.brand_id), "name", row.brand_name)
+        if row.variant_id:
+            row.variant_name = variants.get(row.variant_id, row.variant_name)
+        if row.model_id:
+            row.model_name = models.get(row.model_id, row.model_name)
+
+
+async def add_combination(db: AsyncSession, item_id: int, brand_id: int,
+                          variant_id: int | None, model_id: int | None, user) -> list[dict]:
+    """Map EXACTLY what was picked (2026-10-26): a brand; a brand and a variant; or a
+    brand, a variant and a model — never further. The variant must be the brand's and
+    the model the variant's. Picking deeper replaces the brand's bare row when nothing
+    of it is in stock, so the item reads as what was chosen."""
+    brand = await db.get(Brand, brand_id)
+    if brand is None or not brand.is_active:
+        raise ValidationError("Pick an active brand.")
+    variant = await db.get(BrandVariant, variant_id) if variant_id else None
+    if variant_id and (variant is None or variant.brand_id != brand_id):
+        raise ValidationError(f"That variant is not one of {brand.name}'s.")
+    model = await db.get(BrandModel, model_id) if model_id else None
+    if model_id and (model is None or not variant or model.variant_id != variant.id):
+        raise ValidationError("Pick the variant first — that model is not under it.")
+    from app.shared.masters.defs import BrandItemMappingIn, save_brand_item_mapping
+    await save_brand_item_mapping(
+        db, BrandItemMappingIn(brand_ids=[brand_id], item_ids=[item_id]), user)
+    await ensure_combination(db, item_id, brand, variant, model)
+    from app.platform.settings.service import write_audit
+    label = " · ".join(p for p in (brand.name, getattr(variant, "name", None),
+                                   getattr(model, "name", None)) if p)
+    await write_audit(db, entity="mst_item_combinations", entity_id=item_id,
+                      entity_no=label, action=AuditAction.CREATE, actor=user,
+                      summary=f"Combination {label} mapped to the item")
+    await db.commit()
+    return await item_combinations(db, item_id)
+
+
+async def ensure_combination(db: AsyncSession, item_id: int, brand, variant=None,
+                             model=None) -> bool:
+    """Put exactly this brand / variant / model on the item (2026-10-26) — ON if it
+    was there. A variant (or model) picked replaces the brand's bare row while nothing
+    of it is in stock. Returns whether a row was created. Commits nothing."""
+    key = (brand.id, int(getattr(variant, "id", 0) or 0), int(getattr(model, "id", 0) or 0))
+    rows = (await db.execute(select(ItemCombination).where(
+        ItemCombination.item_id == item_id,
+        ItemCombination.brand_id == brand.id))).scalars().all()
+    found = next((r for r in rows if (r.brand_id, r.variant_id or 0, r.model_id or 0) == key), None)
+    if found is None:
+        db.add(ItemCombination(
+            item_id=item_id, is_active=True, brand_id=brand.id, brand_name=brand.name,
+            variant_id=key[1], variant_name=getattr(variant, "name", None),
+            model_id=key[2], model_name=getattr(model, "name", None)))
+    else:
+        found.is_active = True
+    if key[1]:
+        stock = await stock_by_combination(db, [item_id])
+        for bare in rows:
+            if (not bare.variant_id and not bare.model_id
+                    and not stock.get((item_id, brand.id, 0, 0))):
+                await db.delete(bare)
+    await db.flush()
+    return found is None
+
+
+async def remove_combination(db: AsyncSession, item_id: int, combination_id: int,
+                             user) -> list[dict]:
+    """Take one combination off the item — refused while any of it is in stock. The
+    brand stays mapped; with nothing left under it, it reads as the bare brand."""
+    row = await db.get(ItemCombination, combination_id)
+    if row is None or row.item_id != item_id:
+        raise NotFoundError("That combination is not on this item.")
+    held = (await stock_by_combination(db, [item_id])).get(
+        (item_id, row.brand_id, row.variant_id or 0, row.model_id or 0), 0.0)
+    label = combination_out(row)["label"]
+    if held > 0:
+        raise ValidationError(f"{label} still has {held:g} in stock — it cannot be removed.")
+    await db.delete(row)
+    from app.platform.settings.service import write_audit
+    await write_audit(db, entity="mst_item_combinations", entity_id=item_id,
+                      entity_no=label, action=AuditAction.DELETE, actor=user,
+                      summary=f"Combination {label} removed from the item")
+    await db.commit()
+    return await item_combinations(db, item_id)
 
 
 _STOCK_HAS_COMBINATION: bool | None = None

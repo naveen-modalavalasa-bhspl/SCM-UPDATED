@@ -378,6 +378,10 @@ class AllocationDecisionIn(CombinationIn):
     warehouse_id: int | None = None
     project_id: int = 0
     remarks: str | None = None
+    #: Why another brand than the indent asked for (2026-10-24). Optional.
+    substitution_reason: str | None = Field(default=None, max_length=300)
+    #: Give stock with no brand recorded (2026-10-24) — untagged rows only.
+    no_brand: bool = False
 
 
 class AllocationIn(BaseModel):
@@ -473,6 +477,10 @@ class AllocationItemOut(CombinationOut):
     warehouse_id: int | None = None
     warehouse_name: str | None = None
     remarks: str | None = None
+    #: The brand the indent asked for, when another was given — and why.
+    substituted_from: str | None = None
+    substitution_reason: str | None = None
+    no_brand: bool = False
 
 
 class AllocationListRow(BaseModel):

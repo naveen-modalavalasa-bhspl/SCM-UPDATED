@@ -272,7 +272,7 @@ export const rfqApi = {
     api.post<RFQ>(`/api/rfqs/${id}/award`, { quotation_ids, comments, generate_pos }).then((r) => r.data),
   awardSplit: (
     id: number,
-    allocations: { item_id: number; vendor_id: number; quantity: number }[],
+    allocations: { item_id: number; rfq_item_id?: number; vendor_id: number; quantity: number }[],
     comments = "",
     generate_pos = true,
   ) => api.post<RFQ>(`/api/rfqs/${id}/award`, { allocations, comments, generate_pos }).then((r) => r.data),
@@ -305,6 +305,7 @@ export const rfqApi = {
     lines: {
       quotation_item_id: number; proposed_quantity: number;
       proposed_rate: number; proposed_discount_percent: number; note?: string;
+      brand_id?: number | null; variant_id?: number | null; model_id?: number | null;
     }[];
   }) =>
     api.post<QuoteChangeRequest>(`/api/rfqs/quotations/${quoteId}/change-requests`, body)

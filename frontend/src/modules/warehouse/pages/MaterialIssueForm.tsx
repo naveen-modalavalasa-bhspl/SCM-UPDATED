@@ -1,5 +1,5 @@
 import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
-import { usePackOptions } from "@/shared/packing";
+import { ladderFor, usageLevels, usePackOptions } from "@/shared/packing";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -44,7 +44,8 @@ import type {
 } from "../types";
 import { usePointLabel } from "../usePointLabel";
 import { TONE_APPROVE, TONE_BLUE, TONE_REJECT, TONE_SUBMIT } from "@/shared/components/tones";
-import { comboKeyOf, sourcesFor } from "../issueSplits";
+import { codesNeeded, comboKeyOf, sourcesFor } from "../issueSplits";
+import { PackagePickerModal } from "../components/PackagePickerModal";
 
 /**
  * Raise, approve and post a material issue.
@@ -390,6 +391,11 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
         // serialized item, the IMEI for a handset, the asset/consumable code
         // otherwise. The backend resolves any of the three back to the same unit.
         serial_numbers: parseCodes(l.unit_keys ?? l.serial_numbers) ?? [],
+        codes_needed: l.codes_needed ?? null,
+        codes_needed_at: num(l.issued_qty),
+        issue_in_boxes: !!l.issue_in_boxes,
+        container_note: l.container_note ?? null,
+        box_codes: l.box_codes ?? null,
       })),
     });
   }, [doc]);
@@ -775,6 +781,16 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
   const codesLocked = locked && (unitsHidden || !(awaitingIssue && doc?.can_swap_codes));
   // Pack hierarchies of every item on the issue, in one call (2026-10-08).
   const packOptions = usePackOptions(form.items.map((line) => line.item_id));
+  /** Is this line's item issued in a container (2026-10-27)? A serial or IMEI line of
+   *  such an item picks its packages first, then its numbers inside them. */
+  const hasIssueContainer = (line?: { item_id?: number | null; brand_id?: number | null } | null) => {
+    if (!line?.item_id) return false;
+    const ladder = ladderFor(packOptions.data?.[Number(line.item_id)], line.brand_id ?? null);
+    return !!ladder && (usageLevels(ladder, "ISSUE") ?? []).some((lv) => lv > 0);
+  };
+  /** Serial / IMEI lines: packages first; "one by one" falls back to the code screen. */
+  const [unitsOneByOne, setUnitsOneByOne] = useState(false);
+  useEffect(() => { if (serialLine === null) setUnitsOneByOne(false); }, [serialLine]);
   const payload = (): IssueWrite => ({
     ...form,
     // `normalizeSplits` first: the splits of one ask share its requested quantity
@@ -1925,10 +1941,56 @@ export default function MaterialIssueForm({ direction = "OUT", basePath }: {
       {/* Naming the units is a SCREEN, not a dialog — see CodeAssignmentScreen. It
         * owns its own paged query, so the whole pool is reachable however large the
         * bay is, and the selection it hands back spans every page it was made on. */}
+      {/* An item issued in a container names BOXES (2026-10-26). */}
+      {/* An item issued in a container is picked PACKAGE FIRST (2026-10-27): the
+        * cartons, how many boxes out of each, codes chosen and swappable. Serial and
+        * IMEI lines of such an item use the same flow and end on their numbers. */}
+      {(() => {
+        const line = serialLine === null ? null : form.items[serialLine];
+        const unitsMode = !!line && !line.issue_in_boxes
+          && (activeTracking === "SERIAL" || activeTracking === "IMEI")
+          && hasIssueContainer(line) && !unitsOneByOne;
+        const label = (() => {
+          if (serialLine === null) return "";
+          const saved = savedLine(serialLine);
+          const name = saved?.item_name ?? line?.item_name ?? `Line ${serialLine + 1}`;
+          const code = saved?.item_code ?? line?.item_code ?? null;
+          return code ? `${code} — ${name}` : name;
+        })();
+        return (
+          <PackagePickerModal
+            open={serialLine !== null && (!!line?.issue_in_boxes || unitsMode)}
+            mode={line?.issue_in_boxes ? "boxes" : "units"}
+            unitNoun={activeTracking === "IMEI" ? "IMEI" : "serial"}
+            onClose={() => setSerialLine(null)}
+            onPickIndividually={() => setUnitsOneByOne(true)}
+            itemLabel={label}
+            warehouseId={form.warehouse_id}
+            itemId={activeSerialLine?.item_id}
+            batchId={sourceId(activeSerialLine?.batch_id)}
+            binId={isBinManaged ? sourceId(activeSerialLine?.bin_id) : undefined}
+            issueId={editing ? Number(id) : undefined}
+            quantity={serialLine === null ? 0 : num(line?.issued_qty)}
+            initial={serialLine === null ? [] : line?.serial_numbers ?? []}
+            uom={serialLine === null ? null : savedLine(serialLine)?.uom_code ?? null}
+            readOnly={line?.issue_in_boxes ? codesLocked : serialsLocked}
+            onSave={(codes) => {
+              if (serialLine === null) return;
+              patchLine(serialLine, { serial_numbers: codes });
+              const lineId = savedLine(serialLine)?.id;
+              if (locked && lineId) saveSerials.mutate({ id: lineId, serial_numbers: codes });
+            }}
+          />
+        );
+      })()}
+
       <CodeAssignmentScreen
-        open={serialLine !== null}
+        open={serialLine !== null && !form.items[serialLine]?.issue_in_boxes
+          && !((activeTracking === "SERIAL" || activeTracking === "IMEI")
+               && hasIssueContainer(form.items[serialLine]) && !unitsOneByOne)}
         onClose={() => setSerialLine(null)}
-        quantity={serialLine === null ? 0 : num(form.items[serialLine]?.issued_qty)}
+        // One per unit — or one per box for an item issued in a container (2026-10-24).
+        quantity={serialLine === null ? 0 : codesNeeded(form.items[serialLine] ?? {})}
         initial={serialLine === null ? [] : form.items[serialLine]?.serial_numbers ?? []}
         trackingType={activeTracking}
         trackingMeta={trackingMeta(activeTracking)}

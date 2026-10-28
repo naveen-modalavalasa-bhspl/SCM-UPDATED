@@ -153,6 +153,11 @@ export function BrandItemMappingPanel() {
   const [brandQuery, setBrandQuery] = useState("");
   const [itemQuery, setItemQuery] = useState("");
   const [brands, setBrands] = useState<Set<number>>(new Set());
+  // A brand's variant, or a variant's model, picked to map exactly that deep (2026-10-26).
+  const [variantPicks, setVariantPicks] = useState<Set<number>>(new Set());
+  const [modelPicks, setModelPicks] = useState<Set<number>>(new Set());
+  const [openBrands, setOpenBrands] = useState<Set<number>>(new Set());
+  const [openVariants, setOpenVariants] = useState<Set<number>>(new Set());
   const [items, setItems] = useState<Set<number>>(new Set());
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState<{ tone: "ok" | "bad"; text: string } | null>(null);
@@ -212,7 +217,17 @@ export function BrandItemMappingPanel() {
     || (tree.itemsOf.get(c.id) ?? []).some(itemMatches)
     || (tree.children.get(c.id) ?? []).some(catVisible);
   const bq = norm(brandQuery);
-  const brandVisible = (b: Brand) => !bq || norm(`${b.code} ${b.name}`).includes(bq);
+  const variantsOf = (brandId: number) => (data?.variants ?? []).filter((v) => v.brand_id === brandId);
+  const modelsOf = (variantId: number) => (data?.models ?? []).filter((m) => m.variant_id === variantId);
+  // A search finds a brand by its own name or by any variant or model under it.
+  const brandVisible = (b: Brand) => !bq || norm(`${b.code} ${b.name}`).includes(bq)
+    || variantsOf(b.id).some((v) => norm(v.name).includes(bq)
+      || modelsOf(v.id).some((m) => norm(m.name).includes(bq)));
+  const toggleIn = (id: number, set: Set<number>, put: (s: Set<number>) => void) => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    put(next);
+  };
 
   const stateOf = (ids: number[], chosen: Set<number>) => {
     const hit = ids.filter((id) => chosen.has(id)).length;
@@ -251,10 +266,20 @@ export function BrandItemMappingPanel() {
         (tree.children.get(c.id) ?? []).forEach(walk);
       };
       (tree.children.get(null) ?? []).forEach(walk);
+      const variantById = new Map((data?.variants ?? []).map((v) => [v.id, v]));
+      const modelById = new Map((data?.models ?? []).map((m) => [m.id, m]));
       return mastersApi.brandItemMapping.save({
         brand_ids: [...brands],
         item_ids: [...items].filter((id) => !covered.has(id)),
         category_ids: categoryIds,
+        // Exactly as deep as picked: a variant, or a variant's model.
+        combinations: [
+          ...[...variantPicks].map((id) => ({ brand_id: variantById.get(id)!.brand_id, variant_id: id })),
+          ...[...modelPicks].map((id) => {
+            const variant = variantById.get(modelById.get(id)!.variant_id)!;
+            return { brand_id: variant.brand_id, variant_id: variant.id, model_id: id };
+          }),
+        ],
       });
     },
     onSuccess: (r) => {
@@ -264,14 +289,16 @@ export function BrandItemMappingPanel() {
           + `${r.created} new mapping${r.created === 1 ? "" : "s"}, ${r.updated} updated.`,
       });
       setBrands(new Set()); setItems(new Set());
+      setVariantPicks(new Set()); setModelPicks(new Set());
       void qc.invalidateQueries({ queryKey: ["masters", "brand-item-mapping-sources"] });
       void qc.invalidateQueries({ queryKey: ["masters", "brand-item-mapping"] });
     },
     onError: (e: Error) => setNotice({ tone: "bad", text: e.message }),
   });
 
-  const combos = brands.size * items.size;
-  const ready = brands.size > 0 && items.size > 0;
+  const picks = brands.size + variantPicks.size + modelPicks.size;
+  const combos = picks * items.size;
+  const ready = picks > 0 && items.size > 0;
 
   const renderCategory = (c: Category, depth: number): React.ReactNode => {
     if (!catVisible(c)) return null;
@@ -387,32 +414,81 @@ export function BrandItemMappingPanel() {
           <div className="space-y-2 p-4">
             <SearchBox value={brandQuery} onChange={setBrandQuery} placeholder="Search brands" />
             <div className="max-h-[32rem] overflow-auto space-y-0.5">
-              {(data?.brands ?? []).filter(brandVisible).map((b) => (
-                <Row key={b.id} depth={0}>
-                  <Tick state={brands.has(b.id) ? "all" : "none"} label={`Select ${b.name}`}
-                        onChange={() => flip([b.id], brands, setBrands)} />
-                  <span className="min-w-0 flex-1 text-sm">
-                    <span className="mono">{b.code}</span>{" "}
-                    <span className="text-muted">{b.name}</span>
-                    {b.manufacturer_names.length > 0 && (
-                      <span className="ml-2 text-xs text-muted">
-                        · {b.manufacturer_names.join(", ")}
+              {(data?.brands ?? []).filter(brandVisible).map((b) => {
+                const vs = variantsOf(b.id);
+                const open = openBrands.has(b.id) || (!!bq && vs.length > 0);
+                const deeper = vs.filter((v) => variantPicks.has(v.id)
+                  || modelsOf(v.id).some((m) => modelPicks.has(m.id))).length;
+                return (
+                  <div key={b.id}>
+                    <Row depth={0} open={open}
+                         onToggleOpen={vs.length ? () => toggleIn(b.id, openBrands, setOpenBrands) : undefined}>
+                      <Tick state={brands.has(b.id) ? "all" : "none"} label={`Select ${b.name} alone`}
+                            onChange={() => flip([b.id], brands, setBrands)} />
+                      <span className="min-w-0 flex-1 text-sm">
+                        <span className="mono">{b.code}</span>{" "}
+                        <span className="text-muted">{b.name}</span>
+                        {b.manufacturer_names.length > 0 && (
+                          <span className="ml-2 text-xs text-muted">
+                            · {b.manufacturer_names.join(", ")}
+                          </span>
+                        )}
+                        {vs.length > 0 && (
+                          <span className="ml-2 rounded-full bg-content2 px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+                            {vs.length} variant{vs.length === 1 ? "" : "s"}{deeper ? ` · ${deeper} picked` : ""}
+                          </span>
+                        )}
                       </span>
-                    )}
-                  </span>
-                </Row>
-              ))}
+                    </Row>
+                    {open && vs.map((v) => {
+                      const ms = modelsOf(v.id);
+                      const vOpen = openVariants.has(v.id) || (!!bq && ms.length > 0);
+                      return (
+                        <div key={v.id}>
+                          <Row depth={1} open={vOpen}
+                               onToggleOpen={ms.length ? () => toggleIn(v.id, openVariants, setOpenVariants) : undefined}>
+                            <Tick state={variantPicks.has(v.id) ? "all" : "none"}
+                                  label={`Select ${b.name} · ${v.name}`}
+                                  onChange={() => toggleIn(v.id, variantPicks, setVariantPicks)} />
+                            <span className="min-w-0 flex-1 text-sm">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">Variant</span>{" "}
+                              <span className="text-ink">{v.name}</span>
+                            </span>
+                          </Row>
+                          {vOpen && ms.map((mo) => (
+                            <Row key={mo.id} depth={2}>
+                              <Tick state={modelPicks.has(mo.id) ? "all" : "none"}
+                                    label={`Select ${b.name} · ${v.name} · ${mo.name}`}
+                                    onChange={() => toggleIn(mo.id, modelPicks, setModelPicks)} />
+                              <span className="min-w-0 flex-1 text-sm">
+                                <span className="text-[11px] font-semibold uppercase tracking-wide text-muted">Model</span>{" "}
+                                <span className="text-ink">{mo.name}</span>
+                              </span>
+                            </Row>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
               {sources.isLoading && <p className="py-4 text-sm text-muted">Loading…</p>}
             </div>
 
             {/* Summary */}
-            {(brands.size > 0 || items.size > 0) && (
+            {(picks > 0 || items.size > 0) && (
               <div className="mt-3 border-t border-line pt-3">
                 <div className="flex gap-6">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-wide text-muted">Brands</div>
                     <div className="text-2xl font-semibold">{brands.size}</div>
                   </div>
+                  {(variantPicks.size > 0 || modelPicks.size > 0) && (
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide text-muted">Variants · Models</div>
+                      <div className="text-2xl font-semibold">{variantPicks.size} · {modelPicks.size}</div>
+                    </div>
+                  )}
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-wide text-muted">Items</div>
                     <div className="text-2xl font-semibold">{items.size}</div>
@@ -422,7 +498,8 @@ export function BrandItemMappingPanel() {
                   {combos.toLocaleString()} COMBINATION{combos === 1 ? "" : "S"}
                 </span>
                 <p className="mt-2 text-xs text-muted">
-                  Ticking a category maps every item under it.
+                  Ticking a category maps every item under it. A brand ticked alone maps
+                  the brand only; a variant or model ticked maps exactly that deep.
                 </p>
               </div>
             )}

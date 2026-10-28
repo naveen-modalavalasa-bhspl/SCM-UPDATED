@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, ShoppingCart, Trash2 } from "lucide-react";
+import { Plus, Repeat2, ShoppingCart, Trash2 } from "lucide-react";
 import { Can, PageHeader, Button, Card, Field, Input, Select } from "@/shared/components";
 import { createAllocation, createMaterialRequest, getAllocationProposal } from "../api";
 // A LIP or an MDP is a distribution rung, never the default shelf — see
@@ -14,19 +14,47 @@ import type { AllocationDecision, AllocationProposalLine } from "../types";
 import { TONE_SUBMIT } from "@/shared/components/tones";
 import { TONE_MINT } from "@/shared/components/tones";
 import {
-  CombinationPicker, CombinationTag, combinationKey, inStockOptions, type CombinationValue,
+  CombinationPicker, CombinationTag, combinationKey, combinationLabel, inStockOptions,
+  type CombinationValue,
 } from "@/shared/combination";
 
 /** One "give this much, out of this warehouse" row. A line can carry several. An Any
  *  line also says which brand / variant / model the row gives (2026-10-23). */
-type Split = { qty: string; wh: string; combo?: CombinationValue };
+type Split = { qty: string; wh: string; combo?: CombinationValue; reason?: string };
 
-/** A line whose indent named its combination: the points' figures are already that
- *  combination's, and nothing is picked here. */
+/** A line whose indent named its combination. The desk may still give ANOTHER brand
+ *  in stock (2026-10-24) — recorded on the allocation as a brand change. */
 const named = (line: AllocationProposalLine) => !!line.brand_id;
 
+/** The combination the indent asked for, as a picker value. */
+const askedFor = (line: AllocationProposalLine): CombinationValue | undefined => named(line) ? {
+  brand_id: line.brand_id, variant_id: line.variant_id || null, model_id: line.model_id || null,
+  brand_name: line.brand_name ?? null, variant_name: line.variant_name ?? null,
+  model_name: line.model_name ?? null, combination_any: false,
+} : undefined;
+
+/** Does this row give another brand than the indent named? */
+const isSubstitute = (line: AllocationProposalLine, combo?: CombinationValue) =>
+  named(line) && !!(combo?.brand_id || combo?.no_brand)
+  && combinationKey(combo) !== combinationKey(askedFor(line));
+
+/** A pick that names something — a brand, or stock with no brand recorded. */
+const picked = (combo?: CombinationValue) => !!(combo?.brand_id || combo?.no_brand);
+
+/** Other brands of a named line, free at any point — "Other brands in stock". */
+const otherBrandsFree = (line: AllocationProposalLine) => !named(line) ? 0
+  : line.warehouses.flatMap((w) => w.combinations ?? [])
+      .filter((c) => !c.no_brand && combinationKey(c) !== combinationKey(askedFor(line)))
+      .reduce((sum, c) => sum + c.available_qty, 0);
+
+/** Free stock with NO brand recorded, at any point (2026-10-24) — booked in before
+ *  brands were, so it can serve any line, recorded as a brand change. */
+const noBrandFree = (line: AllocationProposalLine) =>
+  line.warehouses.flatMap((w) => w.combinations ?? [])
+    .filter((c) => c.no_brand).reduce((sum, c) => sum + c.available_qty, 0);
+
 /** What a point holds of each combination, as picker options with quantities. */
-const combosAt = (line: AllocationProposalLine, wh: string) => named(line) ? [] : inStockOptions(
+const combosAt = (line: AllocationProposalLine, wh: string) => inStockOptions(
   line.item_id,
   (line.warehouses.find((w) => String(w.warehouse_id) === wh)?.combinations ?? [])
     .map((c) => ({ ...c, qty: c.available_qty })));
@@ -75,9 +103,12 @@ export function AllocationPage() {
         .filter((w) => !isChainPoint(w) && w.available_qty > 0)
         .sort((a, b) => b.available_qty - a.available_qty)[0];
       const wh = best ? String(best.warehouse_id) : "";
-      const top = combosAt(line, wh)[0];
+      // A named line opens on what the indent asked for; an Any line on the
+      // combination the point holds most of.
+      const top = named(line) ? askedFor(line) : combosAt(line, wh)[0];
       const suggested = Math.min(line.requested_qty,
-                                 top ? top.stock_qty ?? 0 : best?.available_qty ?? 0);
+                                 !named(line) && top ? (top as { stock_qty?: number }).stock_qty ?? 0
+                                   : best?.available_qty ?? 0);
       seed[line.indent_item_id] = [{ qty: String(suggested), wh, combo: top }];
     }
     setDecisions(seed);
@@ -92,7 +123,7 @@ export function AllocationPage() {
   const shelfAt = (line: AllocationProposalLine, warehouseId: string,
                    combo?: CombinationValue) => {
     const point = line.warehouses.find((w) => String(w.warehouse_id) === warehouseId);
-    if (combo?.brand_id) {
+    if (picked(combo) && !(named(line) && !isSubstitute(line, combo))) {
       return combosAt(line, warehouseId)
         .find((o) => combinationKey(o) === combinationKey(combo))?.stock_qty ?? 0;
     }
@@ -201,11 +232,14 @@ export function AllocationPage() {
           requested_qty: i === 0 ? line.requested_qty : 0,
           quantity: Number(s.qty || 0),
           warehouse_id: s.wh ? Number(s.wh) : null,
-          // An Any line's pick settles it; a named line's is the server's to state.
-          ...(!named(line) && s.combo?.brand_id ? {
-            brand_id: s.combo.brand_id, variant_id: s.combo.variant_id ?? null,
-            model_id: s.combo.model_id ?? null,
+          // An Any line's pick settles it; a named line sends a pick only when it is
+          // ANOTHER brand, with why — the server records the change (2026-10-24).
+          ...((!named(line) || isSubstitute(line, s.combo)) && picked(s.combo) ? {
+            brand_id: s.combo?.brand_id || null, variant_id: s.combo?.variant_id ?? null,
+            model_id: s.combo?.model_id ?? null, no_brand: !s.combo?.brand_id,
           } : {}),
+          ...(isSubstitute(line, s.combo) && s.reason?.trim()
+            ? { substitution_reason: s.reason.trim() } : {}),
         })),
       );
       return createAllocation(id, payload, remarks || undefined);
@@ -306,7 +340,20 @@ export function AllocationPage() {
                 <div>
                   <span className="mono text-xs text-muted">{line.item_code}</span>
                   <h3 className="font-semibold text-ink">{line.item_name}</h3>
-                  <CombinationTag value={line} className="mt-1" />
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <CombinationTag value={line} />
+                    {otherBrandsFree(line) > 0 && (
+                      <span className="rounded-full bg-info-bg px-2 py-0.5 text-[11px] font-semibold text-info">
+                        Other brands in stock · {otherBrandsFree(line)} {line.uom_code}
+                      </span>
+                    )}
+                    {noBrandFree(line) > 0 && (
+                      <span className="rounded-full bg-content2 px-2 py-0.5 text-[11px] font-semibold text-ink-700 ring-1 ring-line"
+                            title="Stock booked in before brands were recorded. Pick it as “No brand”.">
+                        No brand recorded · {noBrandFree(line)} {line.uom_code}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="text-sm text-muted">
                   {/* Not "asked": the backend already subtracts what an approved or
@@ -345,7 +392,8 @@ export function AllocationPage() {
               ) : (
                 <div className="space-y-2">
                   {splits.map((s, i) => (
-                    <div key={i} className="flex items-end gap-2">
+                    <div key={i} className="space-y-2">
+                    <div className="flex items-end gap-2">
                       {/* Both controls sit in a <Field> so their labels share a
                           baseline — Select's own label floats inside the box and
                           would sit a row below the Input's. */}
@@ -362,7 +410,7 @@ export function AllocationPage() {
                             onChange={(v) => {
                               const next = [...splits];
                               // A new point starts on the combination it holds most of.
-                              const combo = combosAt(line, v)[0];
+                              const combo = named(line) ? askedFor(line) : combosAt(line, v)[0];
                               next[i] = { ...next[i], wh: v, combo };
                               set(line.indent_item_id, i,
                                   { wh: v, combo, qty: clampQty(line, next, i, next[i].qty) });
@@ -413,6 +461,23 @@ export function AllocationPage() {
                           <Trash2 size={14} />
                         </Button>
                       )}
+                    </div>
+                    {isSubstitute(line, s.combo) && (
+                      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-warning">
+                          <Repeat2 size={14} aria-hidden />
+                          Brand changed from {combinationLabel(askedFor(line))} to {combinationLabel(s.combo)}
+                        </span>
+                        <input
+                          value={s.reason ?? ""}
+                          maxLength={300}
+                          onChange={(e) => set(line.indent_item_id, i, { reason: e.target.value })}
+                          placeholder="Reason (optional)"
+                          aria-label="Reason for the brand change"
+                          className="h-9 min-w-[12rem] flex-1 rounded-lg border border-line bg-content1 px-3 text-sm outline-none focus:border-brand"
+                        />
+                      </div>
+                    )}
                     </div>
                   ))}
                   {/* Off once every point holding this item is already on a row —

@@ -180,7 +180,7 @@ export function PriceComparePage() {
   });
 
   const awardSplit = useMutation({
-    mutationFn: (allocations: { item_id: number; vendor_id: number; quantity: number }[]) =>
+    mutationFn: (allocations: { item_id: number; rfq_item_id?: number; vendor_id: number; quantity: number }[]) =>
       rfqApi.awardSplit(rfqId, allocations),
     onSuccess: () => {
       refresh();

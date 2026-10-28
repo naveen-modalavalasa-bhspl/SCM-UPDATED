@@ -594,6 +594,8 @@ class RFQCreate(BaseModel):
     # None means "use the default" — see shared/evaluation.method_of. Validated in the
     # service against the shared catalogue, never against a list kept here.
     evaluation_method: str | None = None
+    # Ask the suppliers to quote freight. Off, the portal shows no Freight field.
+    freight_required: bool = False
     vendor_ids: Annotated[list[int], BatchIds] = []
     vendor_allocations: list[RFQVendorAllocationIn] = Field(
         default_factory=list, max_length=MAX_DOCUMENT_LINES * 20)
@@ -631,6 +633,7 @@ class RFQUpdate(BaseModel):
     department_id: int | None = None
     company_name: str | None = None
     evaluation_method: str | None = None
+    freight_required: bool | None = None
     vendor_ids: Annotated[list[int], BatchIds] | None = None
     vendor_allocations: list[RFQVendorAllocationIn] | None = None
     lines: Annotated[list[RFQLineIn], DocumentLines] | None = None
@@ -735,6 +738,7 @@ class RFQOut(RFQListRow):
     project_name: str | None = None
     terms: str | None = None
     evaluation_method: str | None = None
+    freight_required: bool = False
     awarded_vendor_id: int | None = None
     created_by_name: str | None = None
     # The purchase order this award became. Not stored on pro_rfqs — the PO points
@@ -944,6 +948,16 @@ class QuoteItemOut(CombinationOut):
     # what was requested.
     requested_quantity: float | None = None
     required_date: date | None = None
+    # What the BUYER asked for on the RFQ (2026-10-26), and whether this offer is
+    # another brand / variant / model.
+    requested_brand_id: int = 0
+    requested_brand_name: str | None = None
+    requested_variant_id: int = 0
+    requested_variant_name: str | None = None
+    requested_model_id: int = 0
+    requested_model_name: str | None = None
+    requested_any: bool = False
+    brand_changed: bool = False
 
 
 class QuoteListRow(BaseModel):
@@ -1000,6 +1014,10 @@ class QuoteChangeLineIn(BaseModel):
     proposed_rate: float = Field(ge=0)
     proposed_discount_percent: float = Field(ge=0, le=100, default=0)
     note: str | None = None
+    #: Another brand / variant / model asked for (2026-10-26); unset = keep it.
+    brand_id: int | None = None
+    variant_id: int | None = None
+    model_id: int | None = None
 
 
 class QuoteChangeRequestIn(BaseModel):
@@ -1040,6 +1058,15 @@ class QuoteChangeLineOut(BaseModel):
     proposed_rate: float
     proposed_discount_percent: float
     note: str | None = None
+    # The brand as quoted and as proposed (2026-10-26).
+    current_brand_id: int = 0
+    current_variant_id: int = 0
+    current_model_id: int = 0
+    current_combination: str | None = None
+    proposed_brand_id: int | None = None
+    proposed_variant_id: int | None = None
+    proposed_model_id: int | None = None
+    proposed_combination: str | None = None
 
 
 class QuoteChangeRequestOut(BaseModel):
@@ -1078,6 +1105,9 @@ class QuoteCommentOut(BaseModel):
 class RFQAwardAllocationIn(BaseModel):
     """One supplier's share of one RFQ item, decided against submitted prices."""
     item_id: int
+    #: The RFQ LINE (2026-10-26) — one item asked in two brands is two lines, each
+    #: awarded on its own. Absent from older clients: then the item's only line.
+    rfq_item_id: int | None = None
     vendor_id: int
     quantity: float = Field(gt=0)
 

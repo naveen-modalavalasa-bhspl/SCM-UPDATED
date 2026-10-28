@@ -79,6 +79,67 @@ function CopyDownload({ values, filename, disabled }: {
  *  The list is scanned by eye or taken away as a file; nobody scrolls to unit 7,000. */
 const CHIPS_DRAWN = 300;
 
+/** The codes of a lot under the PACKAGE each sits in (2026-10-26): one card per
+ *  package — its code, what it holds — with its units' codes inside, and the units no
+ *  package holds listed as loose. */
+function PackageGroups({ units, stem }: { units: UnitRow[]; stem: string }) {
+  const byPack = new Map<string, { name: string; holds: number | null; codes: string[] }>();
+  const loose: string[] = [];
+  for (const u of units) {
+    const code = u.asset_code || u.consumable_code || u.serial_number;
+    if (!code) continue;
+    if (!u.package_code) { loose.push(code); continue; }
+    const group = byPack.get(u.package_code)
+      ?? { name: u.package_name ?? "Package", holds: u.package_holds ?? null, codes: [] };
+    group.codes.push(code);
+    byPack.set(u.package_code, group);
+  }
+  const [open, setOpen] = useState<string | null>(null);
+  if (!byPack.size) return null;
+  const all = [...byPack.entries()].flatMap(([pack, g]) => g.codes.map((c) => `${pack},${c}`));
+  return (
+    <div className="rounded-lg border border-line/70 p-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">
+          Packages · {byPack.size}{loose.length ? ` · ${loose.length} loose` : ""}
+        </span>
+        <CopyDownload values={["Package,Code", ...all]} filename={`${stem}-packages.csv`} />
+      </div>
+      <ul className="max-h-64 space-y-1 overflow-y-auto">
+        {[...byPack.entries()].map(([pack, g]) => {
+          const on = open === pack;
+          return (
+            <li key={pack} className="rounded-md border border-line/60 bg-content1">
+              <button type="button" onClick={() => setOpen(on ? null : pack)}
+                      className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left">
+                <span className="min-w-0">
+                  <span className="block truncate font-mono text-[11px] font-semibold text-ink" title={pack}>{pack}</span>
+                  <span className="text-[10px] text-muted">
+                    {g.name}{g.holds != null ? ` · holds ${g.holds}` : ""} · {g.codes.length} code{g.codes.length === 1 ? "" : "s"}
+                  </span>
+                </span>
+                <span className="text-[10px] font-semibold text-brand">{on ? "Hide" : "Show codes"}</span>
+              </button>
+              {on && (
+                <div className="flex flex-wrap gap-1 border-t border-line/60 px-2 py-1.5">
+                  {g.codes.map((c) => (
+                    <span key={c} className="select-all rounded bg-content2 px-2 py-0.5 font-mono text-[11px] text-body">{c}</span>
+                  ))}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {loose.length > 0 && (
+        <div className="mt-1.5">
+          <Group title="Loose (in no package)" values={loose} filename={`${stem}-loose.csv`} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Group({ title, values, filename }: {
   title: string; values: string[]; filename: string;
 }) {
@@ -325,7 +386,11 @@ export function UnitsPanel({
       </div>
       <Group title="Serial numbers" values={serials} filename={`${stem}-serials.csv`} />
       <Group title="IMEI numbers" values={imeis} filename={`${stem}-imei.csv`} />
-      <Group title="Asset / consumable codes" values={codes} filename={`${stem}-codes.csv`} />
+      {units.some((u) => u.package_code) ? (
+        <PackageGroups units={units} stem={stem} />
+      ) : (
+        <Group title="Asset / consumable codes" values={codes} filename={`${stem}-codes.csv`} />
+      )}
     </div>
   );
 }

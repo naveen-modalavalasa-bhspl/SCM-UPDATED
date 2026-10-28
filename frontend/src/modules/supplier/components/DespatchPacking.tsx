@@ -6,7 +6,7 @@ import { Modal, ModalContent, ModalHeader, ModalBody, ModalFooter } from "@herou
 import { Field, Textarea, useToast } from "@/shared/components";
 import {
   type PackEntry, type PackHierarchy, PackBreakdownEditor, PackHierarchyPicker,
-  PackChips, baseOf, greedyWithPart, num, fmtQty,
+  PackChips, baseOf, greedyWithPartFor, laddersForUsage, num, fmtQty,
 } from "@/shared/packing";
 
 export interface DespatchPackingProps {
@@ -44,7 +44,7 @@ export interface DespatchPackingProps {
  * distribution, part packs, and buyer justification when departing from ordered packages.
  */
 export function DespatchPacking({
-  hierarchies,
+  hierarchies: allHierarchies,
   orderedId,
   hierarchyId,
   breakdown,
@@ -61,6 +61,9 @@ export function DespatchPacking({
   onChange,
 }: DespatchPackingProps) {
   const toast = useToast();
+  // Only ladders carrying one of the item's Purchase containers (2026-10-27) — plus
+  // the order's own and the one this line names, so neither vanishes from the picker.
+  const hierarchies = laddersForUsage(allHierarchies, "PURCHASE", hierarchyId, orderedId);
   const currentHierarchy = hierarchies.find((h) => h.hierarchy_id === hierarchyId)
     ?? hierarchies.find((h) => h.hierarchy_id === orderedId)
     ?? hierarchies[0];
@@ -85,7 +88,7 @@ export function DespatchPacking({
     if (breakdown?.length && hierarchyId === activeHid) {
       setDraftPacks(breakdown);
     } else if (activeH && currentTarget > 0) {
-      setDraftPacks(greedyWithPart(activeH, currentTarget));
+      setDraftPacks(greedyWithPartFor(activeH, currentTarget, "PURCHASE"));
     } else {
       setDraftPacks(null);
     }
@@ -133,7 +136,7 @@ export function DespatchPacking({
             const next = hierarchies.find((h) => h.hierarchy_id === id);
             if (!next) return;
             const target = sent > 0 ? sent : owed;
-            const packs = greedyWithPart(next, target);
+            const packs = greedyWithPartFor(next, target, "PURCHASE");
             onChange({
               pack_hierarchy_id: id,
               pack_breakdown: packs,
@@ -294,7 +297,7 @@ export function DespatchPacking({
                     const next = hierarchies.find((h) => h.hierarchy_id === id);
                     if (!next) return;
                     setDraftHierarchyId(id);
-                    setDraftPacks(greedyWithPart(next, currentTarget));
+                    setDraftPacks(greedyWithPartFor(next, currentTarget, "PURCHASE"));
                   }}
                 />
               </div>
@@ -311,7 +314,7 @@ export function DespatchPacking({
                   {!draftMatches && (
                     <button
                       type="button"
-                      onClick={() => setDraftPacks(greedyWithPart(activeDraftHierarchy, currentTarget))}
+                      onClick={() => setDraftPacks(greedyWithPartFor(activeDraftHierarchy, currentTarget, "PURCHASE"))}
                       className="inline-flex items-center gap-1 text-[11px] font-semibold text-brand hover:underline"
                     >
                       <Sparkles size={12} /> Auto-fill {fmtQty(currentTarget)} {uom ?? "units"}

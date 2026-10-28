@@ -51,7 +51,13 @@ export default function PublicConsignmentScanPage() {
 
 function PublicLabel({ result, refreshing }: { result: ScanResult; refreshing: boolean }) {
   const meta = cleanMeta(result);
-  const isPackage = result.kind.toUpperCase() === "PACKAGE";
+  const kind = result.kind.toUpperCase();
+  // A stock pack (a carton or a box on the shelf) or one coded unit (2026-10-27):
+  // what it is, where it is now and what is inside it.
+  if (kind === "PACK" || kind === "UNIT") {
+    return <StockLabel result={result} meta={meta} refreshing={refreshing} />;
+  }
+  const isPackage = kind === "PACKAGE";
   const status = result.status ?? valueOf(meta, "Status");
   const from = valueOf(meta, "From");
   const destination = valueOf(meta, "Destination");
@@ -165,6 +171,101 @@ function PublicLabel({ result, refreshing }: { result: ScanResult; refreshing: b
 
         <footer className="px-5 py-6 text-center text-[10px] leading-relaxed text-muted">
           Current read-only shipping information from SCM Logistics.<br />
+          This page does not provide access to the SCM application.
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+/** The live page behind a carton, box or unit label. Facts first, in the order the
+ *  floor asked for them — item, where it is, what is inside, batch, brand — then the
+ *  packs inside it, each scannable on its own label. */
+function StockLabel({ result, meta, refreshing }: { result: ScanResult; meta: PublicMeta; refreshing: boolean }) {
+  const isPack = result.kind.toUpperCase() === "PACK";
+  const location = valueOf(meta, "Location");
+  const facts = meta.filter(([key]) => !["location", "item code"].includes(key.toLowerCase()));
+  const packages = result.packages ?? [];
+  return (
+    <main className="min-h-screen bg-content2 text-ink">
+      <div className="mx-auto w-full max-w-xl px-4 py-5 sm:py-8">
+        <header className="mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <span className="grid h-10 w-10 place-items-center rounded-xl bg-content1 shadow-sm ring-1 ring-line">
+              <img src={scmMark} alt="SCM" className="h-7 w-7 object-contain" />
+            </span>
+            <div>
+              <div className="font-display text-sm font-bold leading-tight">SCM Inventory</div>
+              <div className="text-[10px] text-muted">Live label details</div>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-ok-bg px-2.5 py-1 text-[10px] font-semibold text-ok">
+            {refreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+            {refreshing ? "Updating" : "Read only"}
+          </span>
+        </header>
+
+        <section className="overflow-hidden rounded-3xl border border-brand/20 bg-content1 shadow-sm">
+          <div className="bg-gradient-to-br from-brand-050 via-content1 to-content1 px-5 py-5 sm:px-6">
+            <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-brand">
+              {isPack ? (result.subtitle?.split(" · ")[0] ?? "Pack") : "Unit"}
+            </div>
+            <h1 className="mt-1 break-words font-display text-xl font-bold leading-tight text-ink sm:text-2xl">
+              {result.title || result.doc_no}
+            </h1>
+            <p className="mt-1 break-all font-mono text-xs font-semibold text-brand">
+              {valueOf(meta, "Item code")} · {result.doc_no}
+            </p>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <span className="rounded-full bg-brand px-3 py-1 text-[11px] font-bold text-white">
+                {humanStatus(result.status ?? undefined)}
+              </span>
+              {isPack && (result.package_count ?? 0) > 0 && (
+                <span className="rounded-full bg-content2 px-3 py-1 text-[11px] font-semibold text-body">
+                  {result.package_count} {result.package_count === 1 ? "package" : "packages"} inside
+                </span>
+              )}
+              {isPack && result.total_qty != null && (
+                <span className="rounded-full bg-content2 px-3 py-1 text-[11px] font-semibold text-body">
+                  Holds {fmtQty(result.total_qty)}
+                </span>
+              )}
+            </div>
+          </div>
+          {location && (
+            <div className="border-t border-line px-5 py-4 sm:px-6">
+              <Place icon={MapPin} label="Where it is now" value={location} strong />
+            </div>
+          )}
+          {facts.length > 0 && (
+            <dl className="grid grid-cols-2 gap-2 border-t border-line bg-content2/50 px-5 py-4 sm:grid-cols-3 sm:px-6">
+              {facts.map(([key, value]) => <Fact key={key} label={key} value={value} />)}
+            </dl>
+          )}
+        </section>
+
+        {packages.length > 0 && (
+          <section className="mt-4 rounded-3xl border border-line bg-content1 p-5 shadow-sm sm:p-6">
+            <SectionHeading icon={Package} title="Inside"
+              note={`${packages.length} ${packages.length === 1 ? "package" : "packages"}`} />
+            <ul className="mt-3 space-y-2">
+              {packages.map((pkg) => (
+                <li key={pkg.id} className="flex items-center justify-between gap-3 rounded-2xl border border-line bg-content2/60 px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold capitalize text-ink">{pkg.package_type ?? "Pack"}</div>
+                    <div className="break-all font-mono text-[10px] font-semibold text-brand">{pkg.package_no}</div>
+                  </div>
+                  <span className="shrink-0 rounded-lg bg-content1 px-2.5 py-1 text-xs font-bold tabular shadow-sm ring-1 ring-line">
+                    {fmtQty(pkg.quantity)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <footer className="px-5 py-6 text-center text-[10px] leading-relaxed text-muted">
+          Current read-only stock information from SCM.<br />
           This page does not provide access to the SCM application.
         </footer>
       </div>

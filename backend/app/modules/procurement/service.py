@@ -793,20 +793,24 @@ async def create_po_from_quotation(db: AsyncSession, quotation_id: int,
             f"{quote.quotation_no} already became {live_orders[0].po_no}")
 
     if share:
-        already_ordered: dict[int, Decimal] = {}
+        # Per RFQ LINE (2026-10-26), traced through the winning quotation line; an
+        # award saved before keeps reading by item.
+        prior_keys = await _po_line_keys(db, [po.id for po in live_orders])
+        already_ordered: dict[str, Decimal] = {}
         for prior_po in live_orders:
             for prior_line in prior_po.items:
-                already_ordered[prior_line.item_id] = (
-                    already_ordered.get(prior_line.item_id, Decimal("0"))
-                    + _d(prior_line.quantity))
+                key = prior_keys.get(prior_line.id, str(prior_line.item_id))
+                already_ordered[key] = already_ordered.get(key, Decimal("0")) + _d(prior_line.quantity)
         kept = []
         for line in lines:
-            won = _d(share.get(str(line.item_id), 0))
+            line_key = _line_key(line.rfq_item_id) if line.rfq_item_id else str(line.item_id)
+            key = line_key if line_key in share else str(line.item_id)
+            won = _d(share.get(key, 0))
             # The saved award says how many this supplier may receive in total.
             # Existing live POs have already consumed part of it, so this PO contains
             # only the positive balance.  This is why a 6-unit PO followed by a
             # re-award of 10 produces a second 4-unit PO rather than duplicating 10.
-            balance = won - already_ordered.get(line.item_id, Decimal("0"))
+            balance = won - already_ordered.get(key, Decimal("0"))
             if balance <= 0:
                 continue
             # The award endpoint already rejects a share above the submitted offer.
@@ -3419,6 +3423,7 @@ async def create_rfq(db: AsyncSession, data: RFQCreate, user) -> RFQ:
         terms=data.terms or (getattr(source, "remarks", None) if source else None),
         evaluation_method=(data.evaluation_method.upper()
                            if data.evaluation_method else None),
+        freight_required=bool(data.freight_required),
         status=RFQStatus.DRAFT.value,
         created_by_id=user.id,
         created_by_name=user.full_name,
@@ -3636,14 +3641,17 @@ async def _attach_rfq_context(db: AsyncSession, rfq: RFQ) -> None:
     # comparison screen needs to say *which* earlier PO carried (say) six batteries,
     # before the buyer enters the new total award.  A header-only reference cannot
     # explain why the next PO will contain only the remaining quantity.
+    # Keyed by RFQ LINE (2026-10-26) — two brands of one item are two lines.
+    line_keys = await _po_line_keys(db, [row.id for row in po_rows])
     po_item_rows = (await db.execute(
-        select(POItem.po_id, POItem.item_id, func.sum(POItem.quantity))
+        select(POItem.id, POItem.po_id, POItem.item_id, POItem.quantity)
         .where(POItem.po_id.in_([row.id for row in po_rows]))
-        .group_by(POItem.po_id, POItem.item_id)
     )).all() if po_rows else []
     quantities_by_po: dict[int, dict[str, float]] = {}
-    for po_id, item_id, quantity in po_item_rows:
-        quantities_by_po.setdefault(po_id, {})[str(item_id)] = float(_d(quantity))
+    for line_id, po_id, item_id, quantity in po_item_rows:
+        key = line_keys.get(line_id, str(item_id))
+        bucket = quantities_by_po.setdefault(po_id, {})
+        bucket[key] = bucket.get(key, 0.0) + float(_d(quantity))
     rfq.purchase_orders = [SimpleNamespace(
         id=row.id, po_no=row.po_no, status=row.status,
         quotation_id=row.quotation_id, vendor_id=row.vendor_id,
@@ -3657,16 +3665,17 @@ async def _attach_rfq_context(db: AsyncSession, rfq: RFQ) -> None:
     # the audit record of who was originally awarded it.  Reading live PO lines also
     # keeps this figure correct if an approver trims a pending order's quantity.
     live_rows = (await db.execute(
-        select(PurchaseOrder.vendor_id, POItem.item_id, func.sum(POItem.quantity))
+        select(PurchaseOrder.vendor_id, POItem.id, POItem.item_id, POItem.quantity)
         .select_from(PurchaseOrder)
         .join(POItem, POItem.po_id == PurchaseOrder.id)
         .where(PurchaseOrder.rfq_id == rfq.id,
                PurchaseOrder.status.notin_(_DEAD_PO_STATUSES))
-        .group_by(PurchaseOrder.vendor_id, POItem.item_id)
     )).all()
     live_by_vendor: dict[int, dict[str, float]] = {}
-    for vendor_id, item_id, quantity in live_rows:
-        live_by_vendor.setdefault(vendor_id, {})[str(item_id)] = float(_d(quantity))
+    for vendor_id, line_id, item_id, quantity in live_rows:
+        key = line_keys.get(line_id, str(item_id))
+        bucket = live_by_vendor.setdefault(vendor_id, {})
+        bucket[key] = bucket.get(key, 0.0) + float(_d(quantity))
     for invitation in rfq.vendors:
         invitation.live_allocated_quantities = live_by_vendor.get(invitation.vendor_id) or None
 
@@ -3786,6 +3795,8 @@ async def update_rfq(db: AsyncSession, rfq_id: int, data: RFQUpdate, user) -> RF
             raise ValidationError(
                 f"{data.evaluation_method!r} is not an evaluation method")
         rfq.evaluation_method = data.evaluation_method.upper()
+    if data.freight_required is not None:
+        rfq.freight_required = data.freight_required
     # Read before the loop overwrites it, for the reason `_place_names` gives about
     # grandfathering: 9 live RFQs sit on an LIP address they were raised with.
     kept_warehouse_id = rfq.warehouse_id
@@ -4518,6 +4529,8 @@ def _quote_snapshot(quote: Quotation) -> dict:
             "discount_percent": float(_d(line.discount_percent)),
             "tax_percent": float(_d(line.tax_percent)),
             "amount": float(_d(line.amount)),
+            # The brand quoted (2026-10-26) — a change request may move it.
+            **combinations.carry(line),
         } for line in quote.items],
     }
 
@@ -4563,10 +4576,17 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
         raise ValidationError("Say why the supplier is being asked to change prices")
 
     by_id = {line.id: line for line in quote.items}
+    proposed_combo: dict[int, dict] = {}
     for incoming in data.lines:
         if incoming.quotation_item_id not in by_id:
             raise ValidationError(
                 f"Line {incoming.quotation_item_id} is not on this quotation")
+        # Another brand / variant / model asked for (2026-10-26), checked against the
+        # item's ON combinations — the supplier may take it, or counter it.
+        if incoming.brand_id:
+            line = by_id[incoming.quotation_item_id]
+            proposed_combo[incoming.quotation_item_id] = await combinations.resolve(
+                db, line.item_id, incoming, label=line.item_code or line.item_name or "")
 
     cr = QuoteChangeRequest(
         quotation_id=quote.id, rfq_id=rfq.id,
@@ -4579,6 +4599,7 @@ async def propose_quote_change(db: AsyncSession, quotation_id: int,
             "proposed_rate": float(_d(line.proposed_rate)),
             "proposed_discount_percent": float(_d(line.proposed_discount_percent)),
             "note": line.note,
+            **_proposed_combo_fields(proposed_combo.get(line.quotation_item_id)),
         } for line in data.lines],
         snapshot_before=_quote_snapshot(quote),
         proposed_by_id=getattr(user, "id", None),
@@ -4623,6 +4644,28 @@ async def withdraw_quote_change(db: AsyncSession, quotation_id: int, cr_id: int,
     return cr
 
 
+def _proposed_combo_fields(combo: dict | None) -> dict:
+    """A proposed brand / variant / model as a change-request line stores it."""
+    if not combo:
+        return {}
+    return {"proposed_brand_id": combo["brand_id"], "proposed_brand_name": combo["brand_name"],
+            "proposed_variant_id": combo["variant_id"],
+            "proposed_variant_name": combo["variant_name"],
+            "proposed_model_id": combo["model_id"], "proposed_model_name": combo["model_name"]}
+
+
+def _apply_proposed_combo(line, proposed: dict) -> None:
+    if not proposed.get("proposed_brand_id"):
+        return
+    line.brand_id = proposed["proposed_brand_id"]
+    line.brand_name = proposed.get("proposed_brand_name")
+    line.variant_id = proposed.get("proposed_variant_id") or 0
+    line.variant_name = proposed.get("proposed_variant_name")
+    line.model_id = proposed.get("proposed_model_id") or 0
+    line.model_name = proposed.get("proposed_model_name")
+    line.combination_any = False
+
+
 def _apply_proposed_lines(quote: Quotation, cr: QuoteChangeRequest) -> None:
     """Write the accepted proposal onto the quotation and re-derive every total
     through `_quote_totals` — the same arithmetic that priced the original offer.
@@ -4637,6 +4680,7 @@ def _apply_proposed_lines(quote: Quotation, cr: QuoteChangeRequest) -> None:
         line.rate = _d(proposed.get("proposed_rate", line.rate))
         line.discount_percent = _d(proposed.get("proposed_discount_percent",
                                                 line.discount_percent))
+        _apply_proposed_combo(line, proposed)
     _quote_totals(quote)
 
 
@@ -4666,12 +4710,20 @@ async def accept_quote_change(db: AsyncSession, vendor_id: int, cr_id: int,
 
     if counter_lines:
         parsed_counter = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in counter_lines]
-        cr.supplier_counter_lines = parsed_counter
         by_id = {line.id: line for line in quote.items}
+        # The supplier may answer with another brand again (2026-10-26).
+        for item_data in parsed_counter:
+            line = by_id.get(item_data.get("quotation_item_id"))
+            if line is not None and item_data.get("brand_id"):
+                item_data.update(_proposed_combo_fields(await combinations.resolve(
+                    db, line.item_id, item_data,
+                    label=line.item_code or line.item_name or "")))
+        cr.supplier_counter_lines = parsed_counter
         for item_data in parsed_counter:
             line = by_id.get(item_data.get("quotation_item_id"))
             if line is None:
                 continue
+            _apply_proposed_combo(line, item_data)
             if "proposed_quantity" in item_data:
                 line.quantity = _d(item_data["proposed_quantity"])
             if "proposed_rate" in item_data:
@@ -4767,6 +4819,16 @@ def _cr_out_lines(cr: QuoteChangeRequest) -> list[dict]:
             "current_rate": row.get("rate", 0),
             "current_discount_percent": row.get("discount_percent", 0),
             "current_amount": row.get("amount", 0),
+            # The brand as quoted, and as proposed (2026-10-26).
+            "current_brand_id": row.get("brand_id") or 0,
+            "current_variant_id": row.get("variant_id") or 0,
+            "current_model_id": row.get("model_id") or 0,
+            "current_combination": _combo_label(SimpleNamespace(**{
+                k: row.get(k) for k in ("brand_name", "variant_name", "model_name")})) or None,
+            "proposed_combination": _combo_label(SimpleNamespace(
+                brand_name=proposed.get("proposed_brand_name"),
+                variant_name=proposed.get("proposed_variant_name"),
+                model_name=proposed.get("proposed_model_name"))) or None,
         })
     return out
 
@@ -5006,8 +5068,15 @@ def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
             )
             if line is None or not _d(line.rate):
                 continue
+            offered = (int(line.brand_id or 0), int(line.variant_id or 0),
+                       int(line.model_id or 0))
             cells.append({"quotation_id": quote.id, "vendor_id": quote.vendor_id,
-                          "vendor_name": quote.vendor_name, **_line_breakup(line)})
+                          "vendor_name": quote.vendor_name, **_line_breakup(line),
+                          # The brand quoted, and whether it is not what was asked.
+                          "combination": _combo_label(line) or None,
+                          "brand_changed": bool(item.brand_id) and offered != (
+                              int(item.brand_id or 0), int(item.variant_id or 0),
+                              int(item.model_id or 0))})
         def _unit_cost(c):
             return c["line_total"] / c["quantity"] if c["quantity"] else c["line_total"]
 
@@ -5022,6 +5091,9 @@ def _comparison_grid(rfq: RFQ, quotes) -> list[dict]:
             "uom_code": item.uom_code,
             "quantity": float(_d(item.quantity)),
             "required_date": item.required_date,
+            # What the RFQ asked for — a brand / variant / model, or Any.
+            "requested_combination": (_combo_label(item) or
+                                      ("Any brand" if item.combination_any else None)),
             "best_quotation_id": best["quotation_id"] if best else None,
             "cells": cells,
         })
@@ -5166,6 +5238,55 @@ async def comparison(db: AsyncSession, rfq_id: int, user,
     }
 
 
+def shared_fmt(value) -> str:
+    """150, not 150.000 — quantities in a sentence."""
+    text = f"{_d(value):f}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _line_key(rfq_item_id) -> str:
+    """The award key of one RFQ LINE (2026-10-26). Shares used to be keyed by item id,
+    which added two brands of one item together; older awards still read that way."""
+    return f"L{rfq_item_id}"
+
+
+def _line_label(line) -> str:
+    """"HP LaserJet Toner 85A (HP · Victus · 15)" — never "item 13"."""
+    name = getattr(line, "item_name", None) or getattr(line, "item_code", None) \
+        or f"item {getattr(line, 'item_id', '')}"
+    combo = _combo_label(line)
+    return f"{name} ({combo})" if combo else name
+
+
+def _combo3_of(row) -> tuple:
+    return (int(row.item_id), int(row.brand_id or 0), int(row.variant_id or 0),
+            int(row.model_id or 0))
+
+
+async def _po_line_keys(db: AsyncSession, po_ids: list[int]) -> dict[int, str]:
+    """Each PO line's RFQ-line award key, traced through the quotation line that won
+    it (same item, same brand / variant / model). A PO line with no such match keeps
+    the older item-id key."""
+    if not po_ids:
+        return {}
+    pos = {po.id: po for po in (await db.execute(
+        select(PurchaseOrder).options(selectinload(PurchaseOrder.items))
+        .where(PurchaseOrder.id.in_(po_ids)))).scalars().all()}
+    quote_ids = {po.quotation_id for po in pos.values() if po.quotation_id}
+    by_quote: dict[int, dict[tuple, int]] = {}
+    for qline in (await db.execute(select(QuotationItem).where(
+            QuotationItem.quotation_id.in_(quote_ids or {0})))).scalars().all():
+        if qline.rfq_item_id:
+            by_quote.setdefault(qline.quotation_id, {})[_combo3_of(qline)] = qline.rfq_item_id
+    out: dict[int, str] = {}
+    for po in pos.values():
+        lines = by_quote.get(po.quotation_id, {})
+        for line in po.items:
+            rfq_item_id = lines.get(_combo3_of(line))
+            out[line.id] = _line_key(rfq_item_id) if rfq_item_id else str(line.item_id)
+    return out
+
+
 def _same_share(before, after) -> bool:
     """Do two awarded-quantity maps say the same thing?
 
@@ -5194,11 +5315,12 @@ async def _live_po_awards(db: AsyncSession, rfq_id: int) -> tuple[
     )).scalars().all())
     quantities: dict[int, dict[str, Decimal]] = {}
     po_nos: dict[int, str] = {}
+    keys = await _po_line_keys(db, [po.id for po in rows])
     for po in rows:
         po_nos.setdefault(po.vendor_id, po.po_no)
         vendor_quantities = quantities.setdefault(po.vendor_id, {})
         for line in po.items:
-            key = str(line.item_id)
+            key = keys.get(line.id, str(line.item_id))
             vendor_quantities[key] = (
                 vendor_quantities.get(key, Decimal("0")) + _d(line.quantity))
     return quantities, po_nos
@@ -5217,6 +5339,7 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
     locked_quantities = locked_quantities or {}
     locked_po_nos = locked_po_nos or {}
     rfq_quantities = {line.item_id: _d(line.quantity) for line in rfq.items}
+    rfq_lines = {line.id: line for line in rfq.items}
     invited_rows = list((await db.execute(
         select(RFQVendor).where(RFQVendor.rfq_id == rfq.id)
     )).scalars().all())
@@ -5230,12 +5353,21 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
     }
 
     shares: dict[int, dict[str, float]] = {}
-    totals: dict[int, Decimal] = {}
+    totals: dict[str, Decimal] = {}
+    line_of_key: dict[str, object] = {}
     for allocation in allocations:
         item_id, vendor_id = allocation.item_id, allocation.vendor_id
         quantity = _d(allocation.quantity)
-        if item_id not in rfq_quantities:
-            raise ValidationError(f"Item {item_id} is not on {rfq.rfq_no}")
+        # The RFQ LINE this share is for (2026-10-26): named, or the item's only line.
+        rfq_line = rfq_lines.get(allocation.rfq_item_id) if allocation.rfq_item_id else None
+        if rfq_line is None:
+            same_item = [line for line in rfq.items if line.item_id == item_id]
+            rfq_line = same_item[0] if len(same_item) == 1 else None
+        if rfq_line is None or rfq_line.item_id != item_id:
+            raise ValidationError(
+                f"Item {item_id} is not on {rfq.rfq_no}" if item_id not in rfq_quantities
+                else f"{rfq.rfq_no} asks for this item in more than one brand — say "
+                     "which line the award is for")
         invitation = invited.get(vendor_id)
         if invitation is None:
             raise ValidationError(f"Vendor {vendor_id} was not invited to {rfq.rfq_no}")
@@ -5244,26 +5376,33 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
             raise ValidationError(
                 f"{invitation.vendor_name or f'Vendor {vendor_id}'} has not "
                 "submitted a quotation")
-        quote_line = next((line for line in quote.items if line.item_id == item_id), None)
+        quote_line = next((line for line in quote.items
+                           if line.rfq_item_id == rfq_line.id), None) or next(
+            (line for line in quote.items
+             if not line.rfq_item_id and line.item_id == item_id), None)
+        label = _line_label(rfq_line)
         if quote_line is None or _d(quote_line.quantity) <= 0:
             raise ValidationError(
-                f"{quote.vendor_name or vendor_id} did not quote item {item_id}")
+                f"{quote.vendor_name or vendor_id} did not quote {label}")
 
         vendor_shares = shares.setdefault(vendor_id, {})
-        key = str(item_id)
+        key = _line_key(rfq_line.id)
+        line_of_key[key] = rfq_line
         combined = _d(vendor_shares.get(key, 0)) + quantity
         if combined > _d(quote_line.quantity):
             raise ValidationError(
-                f"{quote.vendor_name or vendor_id} quoted {_d(quote_line.quantity)} "
-                f"of item {item_id}, but {combined} was awarded")
+                f"{quote.vendor_name or vendor_id} quoted "
+                f"{shared_fmt(_d(quote_line.quantity))} of {label}, but "
+                f"{shared_fmt(combined)} was awarded")
         vendor_shares[key] = float(combined)
-        totals[item_id] = totals.get(item_id, Decimal("0")) + quantity
+        totals[key] = totals.get(key, Decimal("0")) + quantity
 
-    for item_id, total in totals.items():
-        if total > rfq_quantities[item_id]:
+    for key, total in totals.items():
+        line = line_of_key[key]
+        if total > _d(line.quantity):
             raise ValidationError(
-                f"{total} allocated for item {item_id}, but the RFQ quantity is "
-                f"{rfq_quantities[item_id]}")
+                f"{shared_fmt(total)} allocated for {_line_label(line)}, but the RFQ "
+                f"quantity is {shared_fmt(_d(line.quantity))}")
 
     for invitation in invited_rows:
         fresh = shares.get(invitation.vendor_id)
@@ -5276,9 +5415,12 @@ async def _split_award_winners(db: AsyncSession, rfq: RFQ, allocations,
             fresh_quantity = _d((fresh or {}).get(item_id, 0))
             if fresh_quantity < ordered_quantity:
                 po_no = locked_po_nos.get(invitation.vendor_id, "a live purchase order")
+                held = (rfq_lines.get(int(item_id[1:])) if str(item_id).startswith("L")
+                        else next((l for l in rfq.items if str(l.item_id) == str(item_id)), None))
                 raise ValidationError(
                     f"{invitation.vendor_name or f'Vendor {invitation.vendor_id}'} "
-                    f"already has {ordered_quantity} of item {item_id} on {po_no}. "
+                    f"already has {shared_fmt(ordered_quantity)} of "
+                    f"{_line_label(held) if held else f'item {item_id}'} on {po_no}. "
                     "Keep at least that quantity, or cancel/reject the PO first.")
         invitation.awarded_quantities = fresh
     winning_quotes = [submitted[vendor_id] for vendor_id in shares]
@@ -5784,6 +5926,27 @@ async def vendor_get_quotation(db: AsyncSession, vendor_id: int,
     return quote
 
 
+def _combo_label(row) -> str:
+    return " · ".join(p for p in (getattr(row, "brand_name", None),
+                                  getattr(row, "variant_name", None),
+                                  getattr(row, "model_name", None)) if p)
+
+
+def _attach_requested_combo(line, source) -> None:
+    """The RFQ line's combination on a quotation line, and whether it was changed."""
+    asked = combinations.carry(source) if source is not None else dict(combinations.NONE)
+    line.requested_brand_id = asked["brand_id"]
+    line.requested_brand_name = asked["brand_name"]
+    line.requested_variant_id = asked["variant_id"]
+    line.requested_variant_name = asked["variant_name"]
+    line.requested_model_id = asked["model_id"]
+    line.requested_model_name = asked["model_name"]
+    line.requested_any = bool(asked["combination_any"])
+    offered = (int(line.brand_id or 0), int(line.variant_id or 0), int(line.model_id or 0))
+    named = (asked["brand_id"], asked["variant_id"], asked["model_id"])
+    line.brand_changed = bool(named[0]) and offered != named
+
+
 async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, dict]:
     """Tell the quote form which tax applies and how much of it is allowed.
 
@@ -5817,6 +5980,10 @@ async def _attach_tax_context(db: AsyncSession, quote: Quotation) -> dict[int, d
         if quote.status == QuotationStatus.DRAFT.value and (quote.revision_count or 0) == 0:
             line.quantity = req_qty
         line.required_date = source.required_date if source else None
+        # What the BUYER asked for (2026-10-26) — the RFQ line's brand / variant /
+        # model, or Any — and whether this offer changed it. Read here so the buyer's
+        # page, the supplier's portal and the compare sheet all say the same thing.
+        _attach_requested_combo(line, source)
         limits = ceilings.get(line.item_id)
         line.hsn_code = limits["hsn_code"] if limits else None
         # No HSN means no ceiling — the field stays open rather than closing to zero.
@@ -5911,7 +6078,8 @@ async def vendor_submit_quotation(db: AsyncSession, vendor_id: int, rfq_id: int,
     quote.expected_delivery_date = data.expected_delivery_date
     quote.payment_terms = data.payment_terms
     quote.delivery_days = data.delivery_days
-    quote.freight_amount = _d(data.freight_amount)
+    # Freight only where the buyer asked for it; otherwise nothing a client sends lands.
+    quote.freight_amount = _d(data.freight_amount) if rfq.freight_required else _d(0)
     quote.discount_amount = _d(data.discount_amount)
     quote.remarks = data.remarks
     _quote_totals(quote)

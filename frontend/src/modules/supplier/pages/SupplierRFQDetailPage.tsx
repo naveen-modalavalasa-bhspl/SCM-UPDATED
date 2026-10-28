@@ -13,7 +13,8 @@ import { QuotationChat } from "@/modules/procurement/components/QuotationChat";
 import { QuotePriceTrail } from "@/modules/procurement/components/QuotePriceTrail";
 import type { QuoteChangeRequest, QuoteOtpSent, QuoteSubmit } from "@/modules/procurement/types";
 import {
-  CombinationPicker, SUPPLIER_COMBINATIONS, comboFrom, comboPayload, useCombinationOptions,
+  CombinationPicker, SUPPLIER_COMBINATIONS, askedLabel, combinationKey, combinationLabel,
+  comboFrom, comboPayload, useCombinationOptions,
   type CombinationValue,
 } from "@/shared/combination";
 
@@ -25,6 +26,9 @@ interface QuoteLine {
   item_id: number;
   /** The brand / variant / model offered — the buyer's ask, or another (2026-10-23). */
   combo?: CombinationValue;
+  /** What the buyer asked for on the RFQ — the warning compares against it. */
+  asked?: CombinationValue;
+  askedLabel?: string;
   item_name: string;
   item_code: string;
   uom_code: string;
@@ -72,6 +76,8 @@ export function SupplierRFQDetailPage() {
     queryKey: ["supplier-rfq", id],
     queryFn: () => supplierApi.rfq(rfqId),
   });
+  // The buyer's switch on the RFQ: no freight field unless they asked for it.
+  const freightAsked = Boolean(rfq?.freight_required);
 
   const { data: quote, isLoading } = useQuery({
     queryKey: ["supplier-quote", id],
@@ -108,6 +114,12 @@ export function SupplierRFQDetailPage() {
       rfq_item_id: item.rfq_item_id ?? 0,
       item_id: Number(item.item_id),
       combo: comboFrom(item),
+      asked: item.requested_brand_id ? {
+        brand_id: item.requested_brand_id, variant_id: item.requested_variant_id || null,
+        model_id: item.requested_model_id || null, brand_name: item.requested_brand_name ?? null,
+        variant_name: item.requested_variant_name ?? null, model_name: item.requested_model_name ?? null,
+      } : undefined,
+      askedLabel: askedLabel(item),
       item_name: item.item_name ?? `Item ${item.item_id}`,
       item_code: item.item_code ?? "—",
       uom_code: item.uom_code ?? "",
@@ -168,9 +180,9 @@ export function SupplierRFQDetailPage() {
       tax += (net * taxRate(line)) / 100;
     }
     const sub = sumNet - Number(header.discount_amount || 0);
-    const grand = sub + tax + Number(header.freight_amount || 0);
+    const grand = sub + tax + (freightAsked ? Number(header.freight_amount || 0) : 0);
     return { sub, tax, grand };
-  }, [lines, interstate, header.freight_amount, header.discount_amount]);
+  }, [lines, interstate, header.freight_amount, header.discount_amount, freightAsked]);
 
   const save = useMutation({
     mutationFn: () => {
@@ -180,7 +192,7 @@ export function SupplierRFQDetailPage() {
         valid_till: header.valid_till || null,
         expected_delivery_date: header.expected_delivery_date || null,
         payment_terms: header.payment_terms || null,
-        freight_amount: Number(header.freight_amount || 0),
+        freight_amount: freightAsked ? Number(header.freight_amount || 0) : 0,
         discount_amount: Number(header.discount_amount || 0),
         remarks: header.remarks || null,
         // Always the HSN's notified rate (SCM_0062) — the server re-derives and
@@ -248,6 +260,8 @@ export function SupplierRFQDetailPage() {
   const [decide, setDecide] = useState<"ACCEPT" | "DECLINE" | null>(null);
   const [counterMode, setCounterMode] = useState(false);
   const [counterEdits, setCounterEdits] = useState<Record<number, { qty: string; rate: string; discount: string }>>({});
+  // The brand the supplier answers with (2026-10-26) — the buyer's ask by default.
+  const [counterCombos, setCounterCombos] = useState<Record<number, CombinationValue | undefined>>({});
 
   useEffect(() => {
     if (openCr) {
@@ -394,6 +408,41 @@ export function SupplierRFQDetailPage() {
                         {line.item_name ?? `Item ${line.item_id}`}
                         <span className="ml-2 text-muted">Original: Qty {line.current_quantity} @ ₹{line.current_rate} | Buyer Asked: Qty {line.proposed_quantity} @ ₹{line.proposed_rate}</span>
                       </div>
+                      {(line.proposed_combination || line.current_combination) && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className="text-muted">Brand quoted: <b className="text-ink">{line.current_combination ?? "—"}</b></span>
+                          {line.proposed_combination && (
+                            <span className="rounded-md bg-brand/10 px-2 py-0.5 font-semibold text-brand">
+                              Buyer asks for {line.proposed_combination}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {!!line.item_id && !!comboOptions.data?.[String(line.item_id)]?.length && (() => {
+                        const current: CombinationValue | undefined = line.current_brand_id ? {
+                          brand_id: line.current_brand_id, variant_id: line.current_variant_id || null,
+                          model_id: line.current_model_id || null } : undefined;
+                        const asked: CombinationValue | undefined = line.proposed_brand_id ? {
+                          brand_id: line.proposed_brand_id, variant_id: line.proposed_variant_id || null,
+                          model_id: line.proposed_model_id || null } : undefined;
+                        const value = counterCombos[line.quotation_item_id] ?? asked ?? current;
+                        return (
+                          <div className="mt-2 max-w-md">
+                            <label className="block text-[11px] text-muted">Counter brand · variant · model</label>
+                            <CombinationPicker
+                              options={comboOptions.data?.[String(line.item_id)]}
+                              value={value}
+                              ariaLabel={`Brand to counter with on ${line.item_name ?? "this line"}`}
+                              onChange={(combo) => setCounterCombos({ ...counterCombos, [line.quotation_item_id]: combo })}
+                            />
+                            {asked && value?.brand_id && combinationKey(value) !== combinationKey(asked) && (
+                              <div className="mt-1 rounded-md border border-warn/40 bg-warn-bg px-2 py-1 text-[11px] text-warn">
+                                ⚠ Not the {line.proposed_combination} the buyer asked for — they will see the change.
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div>
                           <label className="block text-[11px] text-muted">Counter Quantity</label>
@@ -453,11 +502,17 @@ export function SupplierRFQDetailPage() {
                   onClick={() => {
                     const counterLinesPayload = openCr.lines.map((l) => {
                       const ed = counterEdits[l.quotation_item_id];
+                      // The brand answered with: picked, else the buyer's ask, else kept.
+                      const combo = counterCombos[l.quotation_item_id]
+                        ?? (l.proposed_brand_id ? { brand_id: l.proposed_brand_id,
+                          variant_id: l.proposed_variant_id || null, model_id: l.proposed_model_id || null }
+                          : undefined);
                       return {
                         quotation_item_id: l.quotation_item_id,
                         proposed_quantity: Number(ed?.qty ?? l.proposed_quantity),
                         proposed_rate: Number(ed?.rate ?? l.proposed_rate),
                         proposed_discount_percent: Number(ed?.discount ?? l.proposed_discount_percent),
+                        ...comboPayload(combo),
                       };
                     });
                     answerCr.mutate({
@@ -506,6 +561,36 @@ export function SupplierRFQDetailPage() {
                       </span>
                       {line.note && <span className="text-muted">Note: {line.note}</span>}
                     </div>
+                    {/* The brand (2026-10-26): what the RFQ asked for, what is quoted,
+                        and — when this request names one — the brand asked for now. */}
+                    {(() => {
+                      const quoted = quote?.items.find((i) => i.id === line.quotation_item_id);
+                      const rfqAsked = askedLabel(quoted);
+                      const current = line.current_combination ?? (combinationLabel(quoted) || null);
+                      if (!rfqAsked && !current && !line.proposed_combination) return null;
+                      const changing = !!line.proposed_combination && line.proposed_combination !== current;
+                      return (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                          {rfqAsked && (
+                            <span className="text-muted">
+                              RFQ asked: <b className="text-ink">{rfqAsked}</b>
+                            </span>
+                          )}
+                          <span className="text-muted">
+                            Brand: {changing
+                              ? <><span className="line-through">{current ?? "—"}</span>{" "}
+                                  <b className="text-brand">{line.proposed_combination}</b>
+                                  <span className="ml-1 rounded bg-brand/10 px-1.5 py-0.5 text-[10px] font-semibold text-brand">buyer asks</span></>
+                              : <b className={quoted?.brand_changed ? "text-warn" : "text-ink"}>{current ?? "—"}</b>}
+                          </span>
+                          {!changing && quoted?.brand_changed && (
+                            <span className="rounded bg-warn-bg px-1.5 py-0.5 text-[10px] font-semibold text-warn">
+                              differs from the RFQ
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}
@@ -670,6 +755,22 @@ export function SupplierRFQDetailPage() {
                         onChange={(combo) => set(index, { combo })}
                       />
                     </Field>
+                    {line.askedLabel && (
+                      <p className="mt-1 text-[11px] text-muted">Buyer asked for <b className="text-ink">{line.askedLabel}</b></p>
+                    )}
+                    {/* Another brand than the buyer asked for (2026-10-26): allowed, and
+                        said out loud — the buyer sees the change on every screen. */}
+                    {line.asked?.brand_id && line.combo?.brand_id
+                      && combinationKey(line.combo) !== combinationKey(line.asked) && (
+                      <div className="mt-2 flex items-start gap-2 rounded-lg border border-warn/40 bg-warn-bg px-3 py-2 text-xs text-warn">
+                        <span aria-hidden>⚠</span>
+                        <span>
+                          <b>You are quoting {combinationLabel(line.combo)}</b>, not the {line.askedLabel} the
+                          buyer asked for. The buyer will see this as a brand change, and may ask you to quote
+                          the requested brand instead.
+                        </span>
+                      </div>
+                    )}
                   </div>
                 )}
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
@@ -747,12 +848,15 @@ export function SupplierRFQDetailPage() {
             />
           </Field>
 
-          <Field label="Freight">
-            <Input
-              type="number" min="0" step="0.01" value={header.freight_amount} disabled={!open}
-              onChange={(e) => setHeader({ ...header, freight_amount: e.target.value })}
-            />
-          </Field>
+          {/* Only when the buyer asked for freight on this RFQ. */}
+          {freightAsked && (
+            <Field label="Freight" hint="The buyer asked for freight on this RFQ">
+              <Input
+                type="number" min="0" step="0.01" value={header.freight_amount} disabled={!open}
+                onChange={(e) => setHeader({ ...header, freight_amount: e.target.value })}
+              />
+            </Field>
+          )}
           <Field label="Overall discount (amount)" hint="A flat amount off the total, not a percentage">
             <Input
               type="number" min="0" step="0.01" value={header.discount_amount} disabled={!open}

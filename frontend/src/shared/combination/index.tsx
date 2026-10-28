@@ -17,16 +17,20 @@ export interface Combination {
   variant_name?: string | null;
   model_id?: number | null;
   model_name?: string | null;
+  /** Stock booked in before brands were recorded — "No brand", never "any" (2026-10-24). */
+  no_brand?: boolean | null;
 }
 
 /** "Brand · Variant · Model", only the parts that are named; "" for none. */
 export function combinationLabel(c?: Combination | null): string {
   if (!c) return "";
+  if (c.no_brand && !c.brand_id) return "No brand";
   return [c.brand_name, c.variant_name, c.model_name].filter(Boolean).join(" · ");
 }
 
 /** A stable key for "same combination" — rows are split on it. */
 export function combinationKey(c?: Combination | null): string {
+  if (c?.no_brand && !c.brand_id) return "none";
   return `${c?.brand_id || 0}-${c?.variant_id || 0}-${c?.model_id || 0}`;
 }
 
@@ -38,6 +42,14 @@ export function CombinationTag({ value, className = "" }: {
     return (
       <span className={`inline-flex items-center gap-1 rounded-full bg-content2 px-2 py-0.5 text-[11px] font-semibold text-muted ring-1 ring-line ${className}`}>
         <Tag className="h-3 w-3" aria-hidden /> Any brand
+      </span>
+    );
+  }
+  if (value?.no_brand && !value.brand_id) {
+    return (
+      <span className={`inline-flex items-center gap-1 rounded-full bg-content2 px-2 py-0.5 text-[11px] font-semibold text-muted ring-1 ring-dashed ring-line ${className}`}
+            title="Stock booked in before brands were recorded">
+        <Tag className="h-3 w-3" aria-hidden /> No brand
       </span>
     );
   }
@@ -93,6 +105,38 @@ export function useCombinationOptions(itemIds: number[],
   });
 }
 
+/** "Calpol · 650", or "Any brand", or "" — what an RFQ line asked for (2026-10-26). */
+export function askedLabel(row?: {
+  requested_brand_name?: string | null; requested_variant_name?: string | null;
+  requested_model_name?: string | null; requested_any?: boolean;
+} | null): string {
+  if (!row) return "";
+  const named = [row.requested_brand_name, row.requested_variant_name, row.requested_model_name]
+    .filter(Boolean).join(" · ");
+  return named || (row.requested_any ? "Any brand" : "");
+}
+
+/** The buyer's ask beside the supplier's offer: shown only when they differ — an
+ *  amber "Asked for Calpol" under the quoted brand (2026-10-26). */
+export function AskedVsQuoted({ value, className = "" }: {
+  value: Combination & {
+    requested_brand_name?: string | null; requested_variant_name?: string | null;
+    requested_model_name?: string | null; requested_any?: boolean; brand_changed?: boolean;
+  };
+  className?: string;
+}) {
+  return (
+    <div className={className}>
+      <CombinationTag value={value} />
+      {value.brand_changed && (
+        <div className="mt-1 inline-flex flex-wrap items-center gap-1 rounded-md bg-warn-bg px-2 py-0.5 text-[11px] font-semibold text-warn">
+          Brand changed · buyer asked for {askedLabel(value)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The value a line sends for a picked option. */
 export function pickCombination(option: CombinationOption | null, any = false): CombinationValue {
   if (any) {
@@ -103,7 +147,7 @@ export function pickCombination(option: CombinationOption | null, any = false): 
     brand_id: option?.brand_id ?? null, variant_id: option?.variant_id ?? null,
     model_id: option?.model_id ?? null, brand_name: option?.brand_name ?? null,
     variant_name: option?.variant_name ?? null, model_name: option?.model_name ?? null,
-    combination_any: false,
+    combination_any: false, no_brand: !!option?.no_brand && !option?.brand_id,
   };
 }
 
@@ -133,6 +177,8 @@ export function CombinationPicker({ options, value, onChange, allowAny = false,
   }
   if (!options?.length) return null;
   const current = value?.combination_any ? ANY
+    : value?.no_brand && !value.brand_id
+      ? String(options.find((o) => o.no_brand && !o.brand_id)?.id ?? "")
     : value?.brand_id ? String(options.find((o) =>
         (o.brand_id || 0) === (value.brand_id || 0)
         && (o.variant_id || 0) === (value.variant_id || 0)
@@ -169,15 +215,17 @@ export function inStockOptions(itemId: number,
                                rows: (Combination & { qty: number })[]): CombinationOption[] {
   const by = new Map<string, CombinationOption>();
   for (const row of rows) {
-    if (!row.brand_id || row.qty <= 0) continue;
+    const untagged = !row.brand_id && !!row.no_brand;
+    if ((!row.brand_id && !untagged) || row.qty <= 0) continue;
     const key = combinationKey(row);
     const seen = by.get(key);
     if (seen) seen.stock_qty = (seen.stock_qty ?? 0) + row.qty;
     else by.set(key, {
       id: by.size + 1, item_id: itemId, label: combinationLabel(row), is_active: true,
       brand_id: row.brand_id, variant_id: row.variant_id || null, model_id: row.model_id || null,
-      brand_name: row.brand_name ?? null, variant_name: row.variant_name ?? null,
-      model_name: row.model_name ?? null, stock_qty: row.qty,
+      brand_name: untagged ? "No brand" : row.brand_name ?? null,
+      variant_name: row.variant_name ?? null,
+      model_name: row.model_name ?? null, stock_qty: row.qty, no_brand: untagged,
     });
   }
   return [...by.values()].sort((a, b) => (b.stock_qty ?? 0) - (a.stock_qty ?? 0));

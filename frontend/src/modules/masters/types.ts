@@ -115,6 +115,9 @@ export interface MasterBrandItemMapping {
 /** Sources for the Brand Item Mapping panel — analogous to VendorMappingSources. */
 export interface BrandItemMappingSources {
   brands: { id: number; code: string; name: string; manufacturer_names: string[] }[];
+  /** Each brand's variants and each variant's models (2026-10-26). */
+  variants?: { id: number; brand_id: number; code: string; name: string }[];
+  models?: { id: number; variant_id: number; code: string; name: string }[];
   categories: { id: number; code: string; name: string; level: number | null;
                 parent_id: number | null; path: string | null }[];
   items: { id: number; code: string; name: string; category_id: number }[];

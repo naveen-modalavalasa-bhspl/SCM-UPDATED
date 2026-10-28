@@ -123,11 +123,12 @@ UNAPPROVED_ALLOCATION_STATUSES = (
 
 
 def combo_key(line) -> tuple[int, int, int] | None:
-    """A line's brand / variant / model, or None where it names none (2026-10-23)."""
+    """A line's brand / variant / model, or None where it names none (2026-10-23).
+    A line giving stock with NO brand recorded is (0, 0, 0): untagged rows only."""
     get = (line.get if isinstance(line, dict) else (lambda k, d=None: getattr(line, k, d)))
     brand = int(get("brand_id") or 0)
     if not brand:
-        return None
+        return (0, 0, 0) if get("no_brand") else None
     return (brand, int(get("variant_id") or 0), int(get("model_id") or 0))
 
 
@@ -135,7 +136,8 @@ def combo_dict(line) -> dict | None:
     """The same, in the shape `allocation.reserve` takes."""
     key = combo_key(line)
     return (None if key is None
-            else {"brand_id": key[0], "variant_id": key[1], "model_id": key[2]})
+            else {"brand_id": key[0], "variant_id": key[1], "model_id": key[2],
+                  "no_brand": not key[0]})
 
 
 def free_for(on_shelf: dict, pledged: dict, item_id: int, warehouse_id: int,
@@ -294,10 +296,15 @@ async def propose(db: AsyncSession, indent_id: int, lines: list[dict],
                  "available_qty": float(free_for(shelf, pledged, line["item_id"],
                                                  warehouse_id, (b, v, m)))}
                 for (_i, w, b, v, m) in sorted(shelf)
-                if w == warehouse_id and b
+                if w == warehouse_id
                 and free_for(shelf, pledged, line["item_id"], warehouse_id, (b, v, m)) > 0
             ]
             await combinations.fill_names(db, entry["combinations"])
+            # Stock booked in before brands were recorded is offered as its own choice,
+            # "No brand" (2026-10-24) — never hidden, and never passed off as a brand.
+            for combo in entry["combinations"]:
+                if not combo["brand_id"]:
+                    combo.update(no_brand=True, brand_name="No brand")
 
         # Lots set aside for THIS line's project are free to it, and to nobody else.
         # Added after the netting: a pledge is against the shared pool, never a hold.
@@ -623,6 +630,9 @@ async def line_availability(db: AsyncSession, allocation_id: int) -> list[dict]:
             "item_name": line.item_name,
             "uom_code": line.uom_code,
             **combinations.carry(line),
+            "no_brand": bool(line.no_brand),
+            "substituted_from": line.substituted_from,
+            "substitution_reason": line.substitution_reason,
             "warehouse_id": line.warehouse_id,
             "warehouse_name": line.warehouse_name,
             "requested_qty": float(_d(line.requested_qty)),
@@ -842,6 +852,9 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
             project_id=d.get("project_id") or NO_PROJECT,
             remarks=d.get("remarks"),
             **combinations.carry(d),
+            substituted_from=d.get("substituted_from"),
+            substitution_reason=(d.get("substitution_reason") or "").strip()[:300] or None,
+            no_brand=bool(d.get("no_brand")),
         ))
     await db.flush()
 
@@ -886,8 +899,17 @@ async def create(db: AsyncSession, indent_id: int, indent_no: str,
         db, entity="inv_allocations", entity_id=alloc.id,
         entity_no=alloc.allocation_no, action=AuditAction.CREATE, actor=user,
         after={"status": alloc.status, "indent_no": indent_no,
-               "lines": len(decisions)},
-        summary=f"Stock allocation proposed for {indent_no}",
+               "lines": len(decisions),
+               "brand_changes": [
+                   f"{d.get('item_name') or d['item_id']}: {d['substituted_from']} -> "
+                   + (" · ".join(p for p in (d.get("brand_name"), d.get("variant_name"),
+                                              d.get("model_name")) if p) or "No brand")
+                   + (f" ({d['substitution_reason']})" if d.get("substitution_reason") else "")
+                   for d in decisions if d.get("substituted_from")]},
+        summary=f"Stock allocation proposed for {indent_no}"
+                + (" — brand changed on "
+                   f"{sum(1 for d in decisions if d.get('substituted_from'))} line(s)"
+                   if any(d.get("substituted_from") for d in decisions) else ""),
     )
     await db.commit()
     await db.refresh(alloc)

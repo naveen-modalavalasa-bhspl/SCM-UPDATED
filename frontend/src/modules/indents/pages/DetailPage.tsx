@@ -3,7 +3,7 @@ import { CombinationTag } from "@/shared/combination";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Send, Trash2,
+  ArrowLeft, ChevronRight, FileText, Loader2, Pencil, RefreshCw, Repeat2, Send, Trash2,
 } from "lucide-react";
 import {
   CardBody, Skeleton,
@@ -31,6 +31,7 @@ import { displayUom, splitDeliveryOffice } from "../displayFormat";
 import type { Indent } from "../types";
 import { TONE_MINT, TONE_RED, TONE_YELLOW } from "../buttonTones";
 import { TONE_SUBMIT } from "@/shared/components/tones";
+import { PackChips, packsIn, usePackOptions } from "@/shared/packing";
 
 function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
@@ -115,6 +116,8 @@ export function IndentDetailPage() {
     refetchOnWindowFocus: true,
   });
 
+  // Each line's Indent containers (2026-10-23), said under its quantity.
+  const packOptions = usePackOptions((indent?.items ?? []).map((it) => it.item_id));
   const isRaiser = Boolean(indent && indent.requested_by_id === me?.employee.id);
   const { data: shipments } = useQuery({
     queryKey: indentKeys.shipments(accountScope, indentId),
@@ -421,8 +424,35 @@ export function IndentDetailPage() {
                       {it.combination_any
                         ? <div className="mt-1 text-[11px] font-semibold text-muted">Any brand</div>
                         : <CombinationTag value={it} className="mt-1" />}
+                      {(it.brand_changes ?? []).map((change, n) => (
+                        <div key={n} className="mt-1.5 flex max-w-md items-start gap-1.5 rounded-lg border border-warning/30 bg-warning/5 px-2.5 py-1.5 text-[11px]">
+                          <Repeat2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden />
+                          <span className="text-ink-700">
+                            <b className="font-semibold text-warning">
+                              Allocated as {change.given} instead of {change.asked_for}
+                            </b>
+                            {" "}· {change.quantity} {displayUom(it.uom_code)}
+                            {change.reason && <> — {change.reason}</>}
+                            {change.allocation_no && (
+                              <span className="block text-muted">{change.allocation_no}</span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
                     </TableCell>
-                    <TableCell className="text-right tabular font-semibold">{it.quantity}</TableCell>
+                    <TableCell className="text-right tabular font-semibold">
+                      {it.quantity}
+                      {(() => {
+                        const packs = packsIn(packOptions.data?.[it.item_id], Number(it.quantity),
+                                              "INDENT", it.brand_id);
+                        return packs ? (
+                          <div className="mt-1 flex justify-end">
+                            <PackChips entries={packs} uom={it.uom_code} showHierarchy={false}
+                                       showTotal={false} muted />
+                          </div>
+                        ) : null;
+                      })()}
+                    </TableCell>
                     <TableCell className="text-right text-muted">{displayUom(it.uom_code) || "—"}</TableCell>
                   </TableRow>
                 )}

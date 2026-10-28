@@ -559,6 +559,13 @@ async def tag_single_brand_items(db, schema: Schema, report: dict) -> None:
     items = [dict(r._mapping) for r in await _rows(
         db, "SELECT id, code, name, brand_id FROM mst_items WHERE is_active = 1 "
             "AND brand_id IS NOT NULL ORDER BY id")]
+    # An item with no old brand whose mapping names exactly ONE brand is just as
+    # certain: that brand is the only thing its untagged stock can be.
+    items += [{**dict(r._mapping), "brand_id": int(r._mapping["only_brand"])} for r in await _rows(
+        db, "SELECT i.id, i.code, i.name, MIN(m.brand_id) AS only_brand FROM mst_items i "
+            "JOIN mst_brand_item_mappings m ON m.item_id = i.id AND m.is_active = 1 "
+            "WHERE i.is_active = 1 AND i.brand_id IS NULL "
+            "GROUP BY i.id, i.code, i.name HAVING COUNT(DISTINCT m.brand_id) = 1 ORDER BY i.id")]
     brands = await brand_names(db, {i["brand_id"] for i in items})
     for item in items:
         log: list[str] = []

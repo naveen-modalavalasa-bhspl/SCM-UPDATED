@@ -831,6 +831,20 @@ class HandlingUnitStatus(str, Enum):
 
 
 #: A pack that is still on the shelf.
+class BoxLabelStatus(str, Enum):
+    """`whs_box_labels.status` (2026-10-26): waiting to be printed, or printed."""
+    QUEUED = "QUEUED"
+    PRINTED = "PRINTED"
+
+
+class BoxLabelReason(str, Enum):
+    """Why a box code was made and queued for a label (2026-10-26)."""
+    PUTAWAY = "PUTAWAY"        # boxed at putaway
+    CONVERTED = "CONVERTED"    # old per-piece stock grouped into boxes by the script
+    RECODED = "RECODED"        # the item's Issue container changed
+    PART_BOX = "PART_BOX"      # the part of a box that left on an issue
+
+
 LIVE_HANDLING_UNIT_STATUSES = (HandlingUnitStatus.SEALED.value,
                                HandlingUnitStatus.INSIDE.value)
 

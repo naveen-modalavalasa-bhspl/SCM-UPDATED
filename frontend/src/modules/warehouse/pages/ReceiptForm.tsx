@@ -1,13 +1,16 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import {
+  Button, Can, ConfirmModal, ErrorBanner, Field, Input, PackageCheckModal, PageHeader, Select, StatusPill,
+} from "@/shared/components";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, CheckCircle2, FileText, ScanLine, Send } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Boxes, CheckCircle2, FileText, ScanLine, Send } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { DateInput, LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { ReceiptLinePacking } from "../components/ReceiptLinePacking";
 import {
-  type PackEntry, PackQty, baseOf, greedy, hierarchyOf, packable, shrinkWithin, usePackOptions,
+  type PackEntry, PackQty, baseOf, checkFrom, checkSummary, expandPacks, greedy, hierarchyOf,
+  packable, shrinkWithin, splitByCheck, usePackOptions,
 } from "@/shared/packing";
 import { Lookup } from "../components/Lookup";
 import { AttachmentsPanel } from "../components/AttachmentsPanel";
@@ -204,6 +207,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   /** The line whose Serial / IMEI popup is open — it opens on every line of that item. */
   const [codesLine, setCodesLine] = useState<number | null>(null);
+  /** The line whose packs are being checked one by one (2026-10-27). */
+  const [packCheckLine, setPackCheckLine] = useState<number | null>(null);
   const [confirming, setConfirming] = useState<"submit" | "complete" | null>(null);
 
   /** Loading a saved receipt back into the editable shape. */
@@ -612,9 +617,30 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     if (line.declared_pack_breakdown?.length) {
       return shrinkWithin(line.declared_pack_breakdown, Math.min(qty, baseOf(line.declared_pack_breakdown)));
     }
-    const h = packable(packOptions.data?.[line.item_id])
-      .find((x) => x.hierarchy_id === line.pack_hierarchy_id);
+    const h = packingOf(line);
     return h ? greedy(h, qty) : undefined;
+  };
+  /** The hierarchy a line counts in: its own, else — a direct line nobody has packed
+   *  yet (2026-10-27) — the item's default, which is the one the server describes it
+   *  in on save anyway. Saying so on screen is what puts the packs, and the pack-by-pack
+   *  check, on a direct inward before the first save rather than after it. */
+  const packingOf = (line: ReceiptItemWrite) => {
+    const options = packable(packOptions.data?.[line.item_id]);
+    return options.find((x) => x.hierarchy_id === line.pack_hierarchy_id)
+      ?? (line.pack_hierarchy_id || line.declared_pack_breakdown?.length
+        ? undefined : options.find((x) => x.is_default) ?? options[0]);
+  };
+  /**
+   * The packs a line is checked AGAINST, pack by pack (2026-10-27): the supplier's
+   * despatch note when there is one — fixed, and what the server holds the count to —
+   * else the packs the line held when the check was first opened, so a carton marked
+   * missing stays on the list to be marked back. Null for a line with no packs.
+   */
+  const referencePacks = (line: ReceiptItemWrite): PackEntry[] | null => {
+    const ref = line.declared_pack_breakdown?.length ? line.declared_pack_breakdown
+      : line.expected_pack_breakdown?.length ? line.expected_pack_breakdown
+      : line.pack_breakdown;
+    return ref?.some((e) => e.level > 0 && num(e.qty) > 0) ? ref : null;
   };
   /** The name of the packing a line is in — "Box of 20" — or null for none. */
   const packName = (line: ReceiptItemWrite): string | null =>
@@ -900,9 +926,11 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
    * What is wrong with each line, said on the line BEFORE Save — the same two rules
    * the save enforces, so the press never gets as far as the server's refusal:
    *
-   * - a DUPLICATE: the same item, batch AND packing as an earlier line of this Inward
-   *   (`_apply_receipt_lines`). One batch sent in two pack hierarchies is two lines
-   *   (2026-10-21) — two despatch-note lines, two ladders of packs on the shelf;
+   * - a DUPLICATE: the same item, batch, packing AND brand / variant / model as an
+   *   earlier line of this Inward (`_apply_receipt_lines`). One batch sent in two pack
+   *   hierarchies is two lines (2026-10-21), and so is one item arriving as two
+   *   combinations (2026-10-27) — an LG and an HP toner are different goods on the
+   *   shelf even when the batch number on both cartons reads the same;
    * - an order line ALREADY RECEIVED, or taken past what it still owes
    *   (`_assert_po_fulfilment`). A line added by hand for an item the order names is
    *   checked against that item's PO line exactly as the server ties it.
@@ -913,7 +941,8 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
     const first = new Map<string, number>();
     form.items.forEach((l, i) => {
       if (!l.item_id) return;
-      const key = `${l.item_id}|${(l.batch_no ?? "").trim().toLowerCase()}|${l.pack_hierarchy_id ?? 0}`;
+      const key = [l.item_id, (l.batch_no ?? "").trim().toLowerCase(), l.pack_hierarchy_id ?? 0,
+                   l.brand_id || 0, l.variant_id || 0, l.model_id || 0].join("|");
       const earlier = first.get(key);
       if (earlier === undefined) first.set(key, i);
       else {
@@ -921,14 +950,17 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
         const itemLabel = l.item_code ? `${l.item_code}` : "This item";
         const batch = l.batch_no?.trim() ? `batch ${l.batch_no.trim()}` : "no batch";
         const packing = packName(l);
-        const same = `${batch}${packing ? `, ${packing}` : ""}`;
+        const combo = [l.brand_name, l.variant_name, l.model_name].filter(Boolean).join(" / ");
+        const same = [batch, combo, packing].filter(Boolean).join(", ");
         problems.set(
           i,
           isGrn
             ? `Same goods as line ${earlier + 1} (${itemLabel}, ${same}). Combine the quantity `
-              + `onto line ${earlier + 1}, or give this line a different batch number.`
+              + `onto line ${earlier + 1}, or give this line a different batch, brand, variant `
+              + `or model.`
             : `Same goods as line ${earlier + 1} (${itemLabel}, ${same}). Combine the quantity `
-              + `onto line ${earlier + 1}, or remove this line.`,
+              + `onto line ${earlier + 1}, remove this line, or pick the brand, variant and model `
+              + `that actually arrived.`,
         );
       }
     });
@@ -1143,6 +1175,10 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
               <CombinationPicker
                 options={comboOptions.data?.[String(l.item_id)]}
                 value={comboFrom(l)}
+                // Off a despatch-note line the server books the supplier's stated
+                // combination whatever is sent, so the screen must not offer a change
+                // the save would quietly undo.
+                locked={locked || !!l.despatch_note_item_id}
                 ariaLabel={`Brand, variant and model for line ${i + 1}`}
                 onChange={(combo) => patchLine(i, combo)}
               />
@@ -1178,8 +1214,18 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
             invalid={(touched && blankQty(l.received_qty)) || overDeclared(l)}
             onChange={(v) => {
               const packs = blankQty(v) ? undefined : packsFor(l, num(v));
+              const hid = l.pack_hierarchy_id ?? packingOf(l)?.hierarchy_id ?? null;
+              // Off no despatch note, the packs the line held before a LOWER count
+              // stay the reference for "Check packages" (the cartons that did not come
+              // are still listed); a higher count is a new reference of its own.
+              const before = l.declared_pack_breakdown?.length ? null
+                : l.expected_pack_breakdown?.length ? l.expected_pack_breakdown : l.pack_breakdown;
+              const keepRef = !!before?.length && num(v) <= baseOf(before);
               patchLine(i, { received_qty: v, accepted_qty: v,
-                             ...(packs !== undefined ? { pack_breakdown: packs } : {}) });
+                             ...(packs !== undefined
+                               ? { pack_breakdown: packs, pack_hierarchy_id: hid,
+                                   expected_pack_breakdown: keepRef ? before : null }
+                               : {}) });
             }}
           />
           {overDeclared(l) && (
@@ -1195,6 +1241,25 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
                      hierarchies={packable(packOptions.data?.[Number(l.item_id)])}
                      itemId={Number(l.item_id) || null} align="right" />
           )}
+          {/* Pack by pack (2026-10-27): which cartons arrived and which came short —
+              the received quantity and the counted packs follow from it. */}
+          {(() => {
+            const ref = referencePacks(l);
+            if (!ref) return null;
+            const packs = expandPacks(ref);
+            const check = checkFrom(packs, l.pack_breakdown);
+            const short = splitByCheck(packs, check).lostQty > 0;
+            return (
+              <button type="button" onClick={() => setPackCheckLine(i)}
+                      title={locked ? "View which packs arrived" : "Mark packs missing or short"}
+                      className={`ml-auto flex min-h-9 w-full items-center justify-end gap-1.5 rounded-lg border px-2 text-[11px] font-semibold transition-colors ${
+                        short ? "border-warn/40 bg-warn/10 text-warn hover:bg-warn/15"
+                          : "border-line text-brand hover:border-brand hover:bg-brand-050"}`}>
+                <Boxes className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span className="truncate">{checkSummary(packs, check, "short")}</span>
+              </button>
+            );
+          })()}
         </div>
       ),
     },
@@ -1807,6 +1872,37 @@ export default function ReceiptForm({ mode }: { mode: "GATE_ENTRY" | "PURCHASE" 
           its submission raised. Only on a saved document: an unsaved one has no trail. */}
       {doc && <ReceiptLinkedDocuments receipt={doc} />}
 
+      {packCheckLine !== null && form.items[packCheckLine] && (() => {
+        const line = form.items[packCheckLine];
+        const ref = referencePacks(line) ?? [];
+        const packs = expandPacks(ref);
+        const index = packCheckLine;
+        const tracked = line.is_serial_tracked || line.is_imei_tracked;
+        return (
+          <PackageCheckModal
+            open
+            mode="receipt"
+            readOnly={locked}
+            packName={packs.find((p) => p.level > 0)?.entry.name ?? "pack"}
+            uom={savedLine(index)?.uom_code ?? line.uom_code}
+            itemLabel={[line.item_code ?? savedLine(index)?.item_code, line.item_name ?? savedLine(index)?.item_name,
+                        line.batch_no ? `batch ${line.batch_no}` : null,
+                        line.declared_pack_breakdown?.length ? "as the despatch note declares" : null]
+              .filter(Boolean).join(" · ")
+              + (tracked ? " — serials / IMEIs are matched to the new count separately" : "")}
+            packages={packs}
+            value={checkFrom(packs, line.pack_breakdown)}
+            onClose={() => setPackCheckLine(null)}
+            onSave={(check) => {
+              const { kept, keptQty } = splitByCheck(packs, check);
+              patchLine(index, {
+                pack_breakdown: kept, received_qty: keptQty as never, accepted_qty: keptQty as never,
+                expected_pack_breakdown: line.declared_pack_breakdown?.length ? null : ref,
+              });
+            }}
+          />
+        );
+      })()}
       {codesLine !== null && form.items[codesLine] && (() => {
         const opened = form.items[codesLine];
         // Every line of the same item: one batch in two packings, or two batches, is

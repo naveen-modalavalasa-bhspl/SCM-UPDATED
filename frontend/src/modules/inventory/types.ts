@@ -228,6 +228,10 @@ export interface SerialSummaryRow {
 
 /** One physical unit: GET /api/warehouse/serials (list) and .../serials/lookup (one). */
 export interface UnitRow {
+  /** The package (box / strip) the unit sits in, if any (2026-10-26). */
+  package_code?: string | null;
+  package_name?: string | null;
+  package_holds?: number | null;
   id: number;
   item_id: number;
   item_code: string | null;
@@ -805,6 +809,11 @@ export interface AllocationLineAvailability extends CombinationValue {
 }
 
 export interface AllocationItem extends CombinationValue {
+  /** The brand the indent asked for, when another was given (2026-10-24). */
+  substituted_from?: string | null;
+  substitution_reason?: string | null;
+  /** Given out of stock with no brand recorded (2026-10-24). */
+  no_brand?: boolean;
   id: number;
   indent_item_id: number;
   item_id: number;
@@ -1400,4 +1409,38 @@ export interface StockEditPage<T> {
   total: number;
   page: number;
   size: number;
+}
+
+/** A queued (or printed) label for one box code — `/api/warehouse/box-labels`
+ *  (2026-10-26). Every box code made for an item issued in a container lands here. */
+export interface BoxLabelRow {
+  id: number;
+  hu_code: string;
+  item_code?: string | null;
+  item_name?: string | null;
+  warehouse_name?: string | null;
+  bin_code?: string | null;
+  batch_no?: string | null;
+  pack_name?: string | null;
+  content_qty: number | string;
+  pack_size: number | string;
+  uom_code?: string | null;
+  reason: "PUTAWAY" | "CONVERTED" | "RECODED" | "PART_BOX";
+  source_no?: string | null;
+  status: "QUEUED" | "PRINTED";
+  printed_at?: string | null;
+  printed_by_name?: string | null;
+  created_at?: string | null;
+  /** Where it sits in the carton → box tree, and what its sticker prints (2026-10-27). */
+  parent_code?: string | null;
+  depth?: number;
+  root_id?: number | null;
+  level?: number | null;
+  packs_inside?: string | null;
+  expiry_date?: string | null;
+  brand_name?: string | null;
+  variant_name?: string | null;
+  model_name?: string | null;
+  /** Signed: the QR opens live, read-only details at /c/<token> on any phone. */
+  qr_token?: string | null;
 }

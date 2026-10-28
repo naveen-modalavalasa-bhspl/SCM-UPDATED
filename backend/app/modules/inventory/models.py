@@ -9,7 +9,7 @@ Inventory is the base module — it imports nothing from app.modules — so ever
 module can call move_stock() without inverting the import chain.
 """
 from sqlalchemy import (
-    JSON, BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
+    JSON, BigInteger, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric,
     String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
@@ -312,6 +312,13 @@ class AllocationItem(CombinationMixin, Base):
     warehouse_name = Column(String(200), nullable=True)
     project_id = Column(BigInteger, nullable=False, default=NO_PROJECT)
     remarks = Column(String(500), nullable=True)
+    # A brand given in place of the one the indent named (2026-10-24): what it asked
+    # for ("Calpol"), and why. NULL = the line gives what was asked.
+    substituted_from = Column(String(300), nullable=True)
+    substitution_reason = Column(String(300), nullable=True)
+    # The desk gave stock with NO brand recorded (booked in before brands were) —
+    # brand 0 here then means "untagged only", never "any" (2026-10-24).
+    no_brand = Column(Boolean, nullable=False, default=False, server_default="0")
 
     allocation = relationship("Allocation", back_populates="items")
 

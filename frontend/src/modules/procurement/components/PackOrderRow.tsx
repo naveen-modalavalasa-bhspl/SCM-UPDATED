@@ -2,7 +2,7 @@ import { Package, X } from "lucide-react";
 import { Field, Select } from "@/shared/components";
 import {
   type PackEntry, type PackHierarchy, PackChips, PackHierarchyPicker, fmtQty,
-  greedyWithPart, levelsFor, num,
+  greedyWithPart, greedyWithPartFor, laddersForUsage, levelsFor, num,
 } from "@/shared/packing";
 
 /** The levels a PO may be packed in: the item's Purchase containers (2026-10-23), or
@@ -21,13 +21,17 @@ const openingLevel = (h: PackHierarchy) => Math.max(...purchaseLevels(h), 0) || 
  *  and the remainder as ONE part pack of it (2026-10-11) — "1,000 NOS in Carton of
  *  600 = 1 Carton + 1 Carton (400 of 600)". The quantity is never changed by it. */
 export function packFor(h: PackHierarchy, level: number, qty: number): PackEntry[] {
-  return qty > 0 ? greedyWithPart(h, qty, level) : [];
+  if (!(qty > 0)) return [];
+  // A level that is not one of the item's Purchase containers is never packed in
+  // (2026-10-27): the line is said in those containers instead.
+  return purchaseLevels(h).includes(level)
+    ? greedyWithPart(h, qty, level) : greedyWithPartFor(h, qty, "PURCHASE");
 }
 
 /** The level a breakdown is described in: its biggest pack. */
 export function levelOf(h: PackHierarchy | undefined, breakdown?: PackEntry[] | null): number {
   const top = Math.max(0, ...(breakdown ?? []).filter((e) => e.level > 0).map((e) => e.level));
-  return top || (h ? h.levels.length - 1 : 1);
+  return top || (h ? openingLevel(h) : 1);
 }
 
 /**
@@ -42,7 +46,7 @@ export function levelOf(h: PackHierarchy | undefined, breakdown?: PackEntry[] | 
  * Off ("Order loose") the line is a plain quantity, and the server still describes it
  * in the item's default hierarchy so the supplier is told something sensible.
  */
-export function PackOrderRow({ hierarchies, hierarchyId, breakdown, quantity, uom, disabled,
+export function PackOrderRow({ hierarchies: allHierarchies, hierarchyId, breakdown, quantity, uom, disabled,
                                onChange }: {
   hierarchies: PackHierarchy[];
   hierarchyId?: number | null;
@@ -54,6 +58,9 @@ export function PackOrderRow({ hierarchies, hierarchyId, breakdown, quantity, uo
   onChange: (patch: { pack_hierarchy_id: number | null;
                       pack_breakdown: PackEntry[] | null }) => void;
 }) {
+  // A ladder with none of the item's Purchase containers is no way to buy it
+  // (2026-10-27); the one the line already names always stays.
+  const hierarchies = laddersForUsage(allHierarchies, "PURCHASE", hierarchyId);
   const hierarchy = hierarchies.find((h) => h.hierarchy_id === hierarchyId);
   const qty = num(quantity);
   const levelNo = levelOf(hierarchy, breakdown);

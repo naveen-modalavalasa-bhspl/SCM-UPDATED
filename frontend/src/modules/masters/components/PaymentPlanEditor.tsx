@@ -391,12 +391,12 @@ export function PaymentPlanPreview({
             <span className="w-[4.75rem] shrink-0 rounded-md px-1.5 py-1 text-center font-mono text-[11px] font-bold text-white"
                   style={{ background: color }}>{p.code}</span>
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-sm font-medium text-ink">
+              <span className="block text-sm font-medium text-ink [overflow-wrap:anywhere]">
                 {p.stage.label}{p.of > 1 ? ` — instalment ${p.n} of ${p.of}` : ""}
               </span>
               <span className="block text-xs text-muted">{whenText(p)}</span>
             </span>
-            <span className="text-right tabular-nums">
+            <span className="shrink-0 text-right tabular-nums">
               <span className="block text-sm font-semibold text-ink">
                 {amount > 0 ? rupees((amount * p.orderPct) / 100) : `${p.orderPct}%`}
               </span>

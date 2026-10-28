@@ -1128,13 +1128,42 @@ async def _attach_office_sac(db: AsyncSession, indent: Indent) -> Indent:
     return indent
 
 
+async def _attach_brand_changes(db: AsyncSession, indent: Indent) -> Indent:
+    """Per indent line, every allocation that gave ANOTHER brand than it asked for
+    (2026-10-24) — what was given, how much, and why — so the requester reads the
+    change on their own indent. Rejected and cancelled allocations gave nothing."""
+    ids = [line.id for line in (indent.items or [])]
+    rows = (await db.execute(
+        select(AllocationItem, Allocation.allocation_no)
+        .join(Allocation, Allocation.id == AllocationItem.allocation_id)
+        .where(AllocationItem.indent_item_id.in_(ids or [0]),
+               AllocationItem.substituted_from.isnot(None),
+               AllocationItem.quantity > 0,
+               Allocation.status.notin_((AllocationStatus.REJECTED.value,
+                                         AllocationStatus.CANCELLED.value)))
+        .order_by(AllocationItem.id))).all()
+    by_line: dict[int, list[dict]] = {}
+    for item, allocation_no in rows:
+        by_line.setdefault(item.indent_item_id, []).append({
+            "asked_for": item.substituted_from,
+            "given": " · ".join(p for p in (item.brand_name, item.variant_name,
+                                             item.model_name) if p) or "No brand",
+            "quantity": float(item.quantity or 0),
+            "reason": item.substitution_reason,
+            "allocation_no": allocation_no,
+        })
+    for line in indent.items or []:
+        setattr(line, "brand_changes", by_line.get(line.id, []))
+    return indent
+
+
 async def get_indent(db: AsyncSession, indent_id: int, user=None) -> Indent:
     if user is not None:
         # RBAC-scoped: `_assert_can_view_indent` decides whether this user may see the
         # indent at all, and the SAC rides on the indent it returns — an indent nobody
         # is allowed to read never reaches `_attach_office_sac`.
         indent = await _assert_can_view_indent(db, indent_id, user)
-        return await _attach_capabilities(db, indent, user)
+        return await _attach_brand_changes(db, await _attach_capabilities(db, indent, user))
     indent = (await db.execute(
         select(Indent).options(selectinload(Indent.items)).where(Indent.id == indent_id)
     )).scalar_one_or_none()
@@ -1821,10 +1850,42 @@ def _delivery_condition(condition: str | None, remarks: str | None) -> str:
     return value
 
 
+async def _package_receipt_notes(db: AsyncSession, indent,
+                                 receipts: dict[int, dict]) -> list[str]:
+    """"…450-STRIP: 3 of 10 arrived", "…454-STRIP missing" — per package that came
+    short, refused for a code that is not a package this indent line was issued in."""
+    from app.modules.warehouse import models as wm
+    from app.modules.warehouse import box_codes
+    from app.shared import packing
+    notes: list[str] = []
+    for line_id, by_code in receipts.items():
+        if not by_code:
+            continue
+        sent: dict[str, Decimal] = {}
+        for issue_id, issue_line_id in (await db.execute(
+                select(wm.MaterialIssueLine.issue_id, wm.MaterialIssueLine.id)
+                .where(wm.MaterialIssueLine.indent_item_id == line_id))).all():
+            for box in await box_codes.line_boxes(db, issue_id, issue_line_id):
+                sent[box.hu_code] = box_codes.held(box)
+        label = next((i.item_code for i in indent.items if i.id == line_id), str(line_id))
+        for code, got in by_code.items():
+            if code not in sent:
+                raise ValidationError(f"{label}: {code} is not a package sent on this line")
+            got = _d(got)
+            if got < 0 or got > sent[code]:
+                raise ValidationError(
+                    f"{label}: {code} carried {packing.fmt(sent[code])}; "
+                    f"{packing.fmt(got)} cannot have arrived in it")
+            notes.append(f"{code} missing" if got == 0
+                         else f"{code}: {packing.fmt(got)} of {packing.fmt(sent[code])} arrived")
+    return notes
+
+
 async def acknowledge_receipt(db: AsyncSession, indent_id: int,
                               lines: dict[int, Decimal], user, *,
                               condition: str | None = None,
-                              remarks: str | None = None) -> Indent:
+                              remarks: str | None = None,
+                              package_receipts: dict[int, dict] | None = None) -> Indent:
     """The requester confirms what physically reached them.
 
     This is the only thing that closes an indent. The warehouse issuing and dispatching
@@ -1906,6 +1967,11 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
 
     indent.status = _fulfilment_status(indent.items)
 
+    # Packages that came short or missing (2026-10-26): checked against the packages
+    # the line was issued in, and written onto the receipt so the claim reads WHICH.
+    package_notes = await _package_receipt_notes(db, indent, package_receipts or {})
+    if package_notes:
+        remarks = " · ".join(p for p in ((remarks or "").strip(), "; ".join(package_notes)) if p)
     ack_condition = _delivery_condition(condition, remarks)
 
     # Imported here, not at module load: warehouse sits after indents in the import
@@ -1918,6 +1984,9 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
     # transaction as the receipt that made them settleable.
     signed = await warehouse_service.auto_acknowledge_for_indent(
         db, indent.id, user, condition=ack_condition, remarks=remarks,
+        # What arrived in each package that came short or missing (2026-10-26).
+        box_received={code: Decimal(str(got)) for by_code in (package_receipts or {}).values()
+                      for code, got in (by_code or {}).items()},
         # Whether anything is still owed on this indent, which decides how far back the
         # receipt is allowed to reach into the outward legs. A partial receipt settles
         # only what has actually left; a complete one may also settle a leg still
@@ -1931,6 +2000,7 @@ async def acknowledge_receipt(db: AsyncSession, indent_id: int,
         before=before,
         after={"status": indent.status,
                **({"acknowledged_issues": ", ".join(signed)} if signed else {}),
+               **({"package_receipts": "; ".join(package_notes)} if package_notes else {}),
                **{str(i.id): float(_d(i.received_quantity)) for i in indent.items}},
     )
     await db.commit()
@@ -6149,11 +6219,37 @@ async def _decide_combinations(db: AsyncSession, indent: Indent,
     lines = {line.id: line for line in indent.items}
     for d in decisions:
         line = lines.get(d.get("indent_item_id"))
+        no_brand = bool(d.get("no_brand")) and not int(d.get("brand_id") or 0)
+        d["no_brand"] = no_brand
         if line is not None and line.brand_id:
-            d.update(combinations.carry(line))
+            asked = combinations.carry(line)
+            chosen = (int(d.get("brand_id") or 0), int(d.get("variant_id") or 0),
+                      int(d.get("model_id") or 0))
+            if no_brand:
+                # Stock booked in before brands were recorded (2026-10-24): which
+                # brand it is cannot be known, so it is given AS no brand — and
+                # recorded as a change from what the indent asked for.
+                d.update(combinations.NONE)
+                d["substituted_from"] = " · ".join(
+                    p for p in (asked["brand_name"], asked["variant_name"],
+                                asked["model_name"]) if p) or "the brand asked for"
+            elif chosen[0] and chosen != (asked["brand_id"], asked["variant_id"],
+                                        asked["model_id"]):
+                # ANOTHER brand than the indent named (2026-10-24): allowed, checked
+                # against the item's combinations, and recorded on the line with what
+                # was asked for — so the change is never silent.
+                d.update(await combinations.resolve(
+                    db, d["item_id"], d, label=d.get("item_name") or ""))
+                d["substituted_from"] = " · ".join(
+                    p for p in (asked["brand_name"], asked["variant_name"],
+                                asked["model_name"]) if p) or "the brand asked for"
+            else:
+                d.update(asked)
         elif d.get("brand_id"):
             d.update(await combinations.resolve(
                 db, d["item_id"], d, label=d.get("item_name") or ""))
+        elif no_brand:
+            d.update(combinations.NONE)
         else:
             d.update({**combinations.NONE,
                       "combination_any": bool(line is not None and line.combination_any)})

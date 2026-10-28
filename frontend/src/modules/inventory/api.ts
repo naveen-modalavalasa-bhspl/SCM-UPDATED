@@ -20,6 +20,7 @@ import type {
   MRClaims,
   MovementRow,
   Page,
+  BoxLabelRow,
   ReplenishmentRule,
   StockBalanceFilter,
   StockBalanceItem,
@@ -887,3 +888,16 @@ export const approveStockEdit = (id: number, remarks?: string) =>
   api.post<StockEdit>(`/api/warehouse/stock-edits/${id}/approve`, { remarks }).then((r) => r.data);
 export const rejectStockEdit = (id: number, remarks?: string) =>
   api.post<StockEdit>(`/api/warehouse/stock-edits/${id}/reject`, { remarks }).then((r) => r.data);
+
+/** The print queue of new box codes (Labels & Printing > Box labels, 2026-10-26). */
+export const listBoxLabels = (params: { status?: string; warehouse_id?: string; search?: string;
+                                        page?: number; size?: number }) =>
+  api.get<Page<BoxLabelRow>>("/api/warehouse/box-labels", {
+    params: clean({ status: params.status || undefined,
+                    warehouse_id: params.warehouse_id || undefined,
+                    search: params.search?.trim() || undefined,
+                    page: params.page ?? 1, size: params.size ?? 200 }),
+  }).then((r) => r.data);
+
+export const markBoxLabelsPrinted = (ids: number[]) =>
+  api.post<{ printed: number }>("/api/warehouse/box-labels/printed", { ids }).then((r) => r.data);
