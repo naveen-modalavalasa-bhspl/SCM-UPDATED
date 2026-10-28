@@ -7,7 +7,7 @@ import {
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, ScanLine } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ScanLine } from "lucide-react";
 import { Button, Can, Card, ConfirmModal, ErrorBanner, Field, Input, PageHeader, StatusPill } from "@/shared/components";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LocationPicker } from "../components/LocationPicker";
@@ -253,15 +253,21 @@ export default function PutawayForm() {
         <MetaRow label="Batch" value={task.batch_no} />
         <MetaRow label={task.is_asset ? "Warranty" : "Expiry"} value={fmtDate(task.expiry_date)} />
         <MetaRow label="Quantity" value={<span className="tabular">{fmtQty(task.qty)} {task.uom_code ?? ""}</span>} />
+        {/* What will stand on the shelf (2026-10-27): the Storage containers when the
+            item has them, else the packs chosen below. It used to read "Received as"
+            and show the rung the space check measures in — neither what arrived nor
+            what is stored. */}
         <MetaRow
-          label="Received as"
+          label="Stored as"
           value={
-            task.package_name
-              ? <span className="tabular">
-                  {fmtCount(task.handling_units)} × {task.package_name}
-                  {task.pack_base_qty ? ` (${fmtCount(task.pack_base_qty)} ${task.uom_code ?? "units"} each)` : ""}
-                </span>
-              : "No pack configured"
+            hierarchy && shelfPacks?.length
+              ? <PackChips entries={shelfPacks} uom={task.uom_code} showHierarchy={false} />
+              : task.package_name
+                ? <span className="tabular">
+                    {fmtCount(task.handling_units)} × {task.package_name}
+                    {task.pack_base_qty ? ` (${fmtCount(task.pack_base_qty)} ${task.uom_code ?? "units"} each)` : ""}
+                  </span>
+                : "No pack configured"
           }
         />
         <MetaRow
@@ -368,6 +374,19 @@ export default function PutawayForm() {
             * levels the storekeeper chooses — a carton opened into its boxes, loose strips
             * boxed. Every pack becomes a row; for a code-tracked item each is named with
             * its own code, and that level is the smallest it can ever be split into. */}
+          {/* No Storage container mapped (2026-10-27): said, never defined here — the
+              mapping is a master, kept on Masters › Packaging › Container Usage. */}
+          {hierarchy && task.storage_defined === false && task.status !== "completed" && (
+            <div className="mt-4 flex items-start gap-3 rounded-xl border border-warn/40 bg-warn-bg/60 px-3 py-2.5">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warn" aria-hidden />
+              <div className="min-w-0 text-xs leading-relaxed text-ink">
+                <b className="font-semibold">No storage container is defined for {task.item_code ?? "this item"}.</b>{" "}
+                It can still be put away in the packs below, but the shelf will not follow a
+                rule. Ask an admin to set its Storage (and Issue) containers in{" "}
+                <span className="font-semibold">Masters › Packaging › Container Usage</span>.
+              </div>
+            </div>
+          )}
           {hierarchy && (
             <div className="mt-4 space-y-2 rounded-xl border border-line p-3">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -392,7 +411,15 @@ export default function PutawayForm() {
                 * smaller packs, or left loose. */}
               <PackBreakdownEditor hierarchy={hierarchy} value={shelfPacks} target={qty}
                                    uom={task.uom_code} onChange={setShelfPacks} enforceMin
+                                   onlyLevels={task.packing_fixed && task.storage_levels?.length
+                                     ? task.storage_levels : undefined}
+                                   allowLoose={!task.packing_fixed || !!task.storage_levels?.includes(0)}
                                    readOnly={!!task.packing_fixed} allowAutoFill={!task.packing_fixed} />
+              {task.packing_fixed && (
+                <p className="text-[11px] text-muted">
+                  Stored only in this item's Storage containers — the split between them is worked out for you.
+                </p>
+              )}
             </div>
           )}
 

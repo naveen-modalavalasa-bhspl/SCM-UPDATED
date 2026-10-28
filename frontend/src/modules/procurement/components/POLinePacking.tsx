@@ -6,7 +6,7 @@ import {
 import { Modal, ModalContent, ModalHeader, ModalBody, ModalFooter } from "@heroui/react";
 import { Can, ErrorBanner, useToast } from "@/shared/components";
 import {
-  PackBreakdownEditor, PackChips, PackHierarchyPicker, baseOf, fmtQty, greedy, packable,
+  PackBreakdownEditor, PackChips, PackHierarchyPicker, baseOf, fmtQty, greedyFor, laddersForUsage, packable,
   toPayload, usePackOptions, type PackEntry, type PackHierarchy,
 } from "@/shared/packing";
 import { Button } from "./ActionButton";
@@ -55,7 +55,10 @@ export function POLinePacking({ poId, poStatus, vendorStatus, line, showChips = 
   const qc = useQueryClient();
   const toast = useToast();
   const options = usePackOptions([line.item_id]);
-  const hierarchies = packable(options.data?.[line.item_id]);
+  // Only the ladders that carry one of the item's Purchase containers (2026-10-27),
+  // plus whichever one the line already names.
+  const hierarchies = laddersForUsage(packable(options.data?.[line.item_id]), "PURCHASE",
+                                      line.pack_hierarchy_id);
   const [open, setOpen] = useState(false);
   const [hierarchyId, setHierarchyId] = useState<number | null>(null);
   const [packs, setPacks] = useState<PackEntry[] | null>(null);
@@ -77,7 +80,7 @@ export function POLinePacking({ poId, poStatus, vendorStatus, line, showChips = 
       ?? hierarchies[0];
     setHierarchyId(current?.hierarchy_id ?? null);
     setPacks(line.pack_breakdown?.length && current?.hierarchy_id === line.pack_hierarchy_id
-      ? line.pack_breakdown : current ? greedy(current, Number(line.quantity)) : null);
+      ? line.pack_breakdown : current ? greedyFor(current, Number(line.quantity), "PURCHASE") : null);
     setOpen(true);
   };
 
@@ -172,7 +175,7 @@ export function POLinePacking({ poId, poStatus, vendorStatus, line, showChips = 
                     const next = hierarchies.find((h) => h.hierarchy_id === id);
                     if (!next) return;
                     setHierarchyId(id);
-                    setPacks(greedy(next, ordered));
+                    setPacks(greedyFor(next, ordered, "PURCHASE"));
                   }}
                 />
               </div>

@@ -1,11 +1,12 @@
 import { useState, type KeyboardEvent, type WheelEvent } from "react";
 import { PackageSearch, Plus, Trash2 } from "lucide-react";
-import { Field, Input } from "@/shared/components";
+import { Field, Input, Select } from "@/shared/components";
 import { ItemCombobox } from "@/modules/indents/components/ItemCombobox";
 import type { MyStockRow, ReturnLineWrite } from "../types";
 import {
   CombinationPicker, combinationKey, inStockOptions, pickCombination, type CombinationValue,
 } from "@/shared/combination";
+import { fmtQty, ladderFor, levelsFor, packable, usePackOptions } from "@/shared/packing";
 
 /**
  * The LINE ITEMS card — the same Item / Qty / delete row the indent form uses, and the
@@ -116,6 +117,9 @@ export function ReturnLinesEditor({
   const patch = (index: number, changes: Partial<ReturnLineWrite>) =>
     onChange(lines.map((line, at) => (at === index ? { ...line, ...changes } : line)));
 
+  // Each item's ladders, for the Issue containers a return may be typed in.
+  const packOptions = usePackOptions(lines.map((line) => line.item_id).filter(Boolean));
+
   /** The brand / variant / model the raiser holds of an item, with quantities. */
   const combosOf = (itemId: number) => inStockOptions(itemId, stock
     .filter((row) => row.item_id === itemId)
@@ -224,6 +228,45 @@ export function ReturnLinesEditor({
                     />
                   </div>
                 )}
+                {(() => {
+                  // Typed in an Issue container (2026-10-23): a site returns what it was
+                  // issued — strips, boxes — and the line still saves base units.
+                  const ladder = line.item_id
+                    ? ladderFor(packable(packOptions.data?.[line.item_id]), line.brand_id) : undefined;
+                  const levels = ladder ? levelsFor(ladder, "ISSUE").filter((lv) => lv.level > 0) : [];
+                  if (!ladder || !levels.length || ladder.unmapped_usages?.includes("ISSUE")) return null;
+                  const level = levels.find((lv) => lv.level === line.packLevel) ?? levels[0];
+                  const count = line.packLevel === level.level ? line.packCount ?? "" : "";
+                  return (
+                    <div className="mt-2 grid grid-cols-[minmax(0,1fr)_110px] items-end gap-2">
+                      <Field label="Return in">
+                        <Select
+                          value={level.level}
+                          ariaLabel={`Return container for line ${index + 1}`}
+                          isDisabled={disabled}
+                          options={levels.map((lv) => ({
+                            value: lv.level, label: `${lv.name} · ${fmtQty(lv.size)} ${holding?.uom ?? ""}`.trim(),
+                          }))}
+                          onChange={(v) => patch(index, { packLevel: Number(v), packCount: "" })}
+                        />
+                      </Field>
+                      <Field label={`No. of ${level.name}`}>
+                        <Input
+                          type="number" min="0" step="1" className={NO_SPINNER}
+                          value={String(count)} disabled={disabled}
+                          aria-label={`Number of ${level.name}`}
+                          {...NO_SILENT_STEPPING}
+                          onChange={(event) => {
+                            const n = event.target.value === ""
+                              ? "" : Math.max(0, Math.floor(Number(event.target.value)));
+                            patch(index, { packLevel: level.level, packCount: n,
+                                           quantity: n === "" ? "" : String(n * level.size) });
+                          }}
+                        />
+                      </Field>
+                    </div>
+                  );
+                })()}
                 {duplicate || warnedAt === index ? (
                   <p className="mt-1 text-xs text-bad">
                     That item is already on another line — change the quantity there

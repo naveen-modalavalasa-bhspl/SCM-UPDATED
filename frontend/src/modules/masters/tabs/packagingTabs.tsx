@@ -171,6 +171,27 @@ export function ContainerUsageTab() {
         ? list.filter((u) => u !== usage) : [...list, usage] };
     });
 
+  /** Why this container cannot be an ISSUE container right now, or null (2026-10-27):
+   *  it is bigger than the smallest container the same hierarchy is STORED in. The
+   *  server refuses the save on the same rule; this says so on the tick. */
+  const issueTooBig = (row: ContainerUsageRow): string | null => {
+    if (row.is_loose) return null;
+    for (const use of row.used_in) {
+      const storage = (view.data?.containers ?? [])
+        .filter((c) => (draft[c.package_id] ?? []).includes("STORAGE"))
+        .flatMap((c) => c.used_in.filter((u) => u.hierarchy_id === use.hierarchy_id)
+          .map((u) => ({ level: u.level, name: c.name })));
+      if (!storage.length) continue;
+      const smallest = storage.reduce((a, b) => (b.level < a.level ? b : a));
+      if (use.level > smallest.level) {
+        return `Bigger than ${smallest.name}, the smallest storage container in ${use.hierarchy}`;
+      }
+    }
+    return null;
+  };
+  const issueProblems = (view.data?.containers ?? [])
+    .filter((c) => (draft[c.package_id] ?? []).includes("ISSUE") && issueTooBig(c));
+
   const openLadder = (hierarchyId: number | null) => {
     const found = (ladders.data?.[Number(itemId)] ?? []).find((h) => h.hierarchy_id === hierarchyId);
     if (found) setLadder(found);
@@ -224,14 +245,18 @@ export function ContainerUsageTab() {
                     </td>
                     {USAGES.map((u) => {
                       const on = (draft[row.package_id] ?? []).includes(u);
+                      const blocked = u === "ISSUE" ? issueTooBig(row) : null;
                       return (
                         <td key={u} className="px-2 py-3 text-center">
                           {canEdit ? (
                             <button type="button" role="checkbox" aria-checked={on}
                                     aria-label={`${row.name}: ${USAGE_LABEL[u]}`}
+                                    title={blocked ?? undefined}
+                                    disabled={!!blocked && !on}
                                     onClick={() => toggle(row, u)}
-                                    className={`mx-auto grid h-9 w-9 place-items-center rounded-lg border transition-colors ${
-                                      on ? "border-brand bg-brand text-white"
+                                    className={`mx-auto grid h-9 w-9 place-items-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                                      on && blocked ? "border-bad bg-bad text-white"
+                                        : on ? "border-brand bg-brand text-white"
                                         : "border-line bg-content1 hover:border-brand"}`}>
                               {on && <Check className="h-4 w-4" />}
                             </button>
@@ -244,6 +269,12 @@ export function ContainerUsageTab() {
               </tbody>
             </table>
           </div>
+          {issueProblems.length > 0 && (
+            <div className="border-t border-bad/30 bg-bad/5 px-3 py-2.5 text-xs font-medium text-bad">
+              {issueProblems.map((c) => `${c.name}: ${issueTooBig(c)}`).join(" · ")} — an item is
+              issued in its storage container or a smaller one. Untick it to save.
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-content2/40 px-3 py-3">
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               {unmapped.length ? (
@@ -260,7 +291,7 @@ export function ContainerUsageTab() {
               )}
             </div>
             <Can do="master.packaging.manage">
-              <Button onClick={() => save.mutate()} disabled={!dirty || save.isPending}>
+              <Button onClick={() => save.mutate()} disabled={!dirty || save.isPending || issueProblems.length > 0}>
                 <Save size={14} /> {save.isPending ? "Saving…" : "Save"}
               </Button>
             </Can>

@@ -172,6 +172,40 @@ async def issues_in_containers(db: AsyncSession, item_id: int) -> bool:
     return any("ISSUE" in usages for package_id, usages in mapped.items() if package_id)
 
 
+async def describe_in(db: AsyncSession, rows: list[dict], usage: str) -> list[str | None]:
+    """Each row's quantity said in the item's containers of `usage` (2026-10-23):
+    `rows` carry item_id, brand_id and qty; the answer is "15 Strip" or None where the
+    item has no container mapped for that usage (then a screen shows the quantity
+    alone). The ladder is the row's brand's, else the "all brands" one, else the
+    item's default. Two queries for the whole list."""
+    ids = {int(r["item_id"]) for r in rows if r.get("item_id")}
+    found = await ladders(db, ids)
+    usages = await usage_map(db, ids)
+    brand_of = dict((await db.execute(
+        select(PackHierarchy.id, PackHierarchy.brand_id)
+        .where(PackHierarchy.item_id.in_(ids)))).all()) if ids else {}
+    out: list[str | None] = []
+    for row in rows:
+        item_id = int(row.get("item_id") or 0)
+        mapped = usages.get(item_id, {})
+        candidates = found.get(item_id) or []
+        if not item_id or not candidates or not any(usage in v for v in mapped.values()):
+            out.append(None)
+            continue
+        brand = int(row.get("brand_id") or 0)
+        ladder_row = (next((l for l in candidates if brand and brand_of.get(l.hierarchy_id) == brand), None)
+                      or next((l for l in candidates if not brand_of.get(l.hierarchy_id)), None)
+                      or candidates[0])
+        levels = [lv.level for lv in ladder_row.levels if usage in level_usages(lv, mapped)]
+        qty = packing.dec(row.get("qty") or 0)
+        if not levels or qty <= 0:
+            out.append(None)
+            continue
+        out.append(packing.describe(packing.greedy_in(ladder_row, qty, levels),
+                                    ladder_row.base_uom, with_total=False))
+    return out
+
+
 async def container_usage(db: AsyncSession, item_id: int) -> dict:
     """Masters › Packaging › Container Usage: every container type used in ANY ladder
     of the item, once, with the ladders it sits in and the usages ticked for it."""
@@ -210,6 +244,38 @@ async def container_usage(db: AsyncSession, item_id: int) -> dict:
             "unmapped": [u for u in USAGES if not any(u in v for v in usages.values())]}
 
 
+def _assert_issue_within_storage(current: dict, wanted: set[tuple[int, str]]) -> None:
+    """An item is never ISSUED in a container bigger than the one it is STORED in
+    (2026-10-27): a box can be cut out of a carton on the shelf, a carton cannot be
+    made out of boxes at the issue desk. Per hierarchy, every Issue level must sit at
+    or below the SMALLEST Storage level, so every pack on the shelf can be broken down
+    to it. A hierarchy with no Storage container mapped constrains nothing."""
+    storage = {p for p, u in wanted if u == "STORAGE"}
+    issue = {p for p, u in wanted if u == "ISSUE"}
+    if not storage or not issue:
+        return
+    by_ladder: dict[int | None, dict] = {}
+    for c in current["containers"]:
+        for use in c.get("used_in") or []:
+            row = by_ladder.setdefault(use["hierarchy_id"], {"name": use["hierarchy"],
+                                                             "storage": [], "issue": []})
+            if c["package_id"] in storage:
+                row["storage"].append((use["level"], c["name"]))
+            if c["package_id"] in issue:
+                row["issue"].append((use["level"], c["name"]))
+    for row in by_ladder.values():
+        if not row["storage"] or not row["issue"]:
+            continue
+        smallest = min(row["storage"])
+        too_big = sorted(n for lv, n in row["issue"] if lv > smallest[0])
+        if too_big:
+            raise ValidationError(
+                f"{', '.join(too_big)} cannot be an Issue container in {row['name']}: it "
+                f"is bigger than {smallest[1]}, the smallest container it is stored in. "
+                "Issue in the storage container or a smaller one, so every pack on the "
+                "shelf can be broken down to it.")
+
+
 async def save_container_usage(db: AsyncSession, item_id: int, rows: list[dict]) -> dict:
     """Replace the item's usage mapping. Every container named must be one of the
     item's own (loose, or in one of its ladders); an unknown usage is refused."""
@@ -226,6 +292,7 @@ async def save_container_usage(db: AsyncSession, item_id: int, rows: list[dict])
             if usage not in USAGES:
                 raise ValidationError(f"Unknown usage {usage}")
             wanted.add((package_id, usage))
+    _assert_issue_within_storage(current, wanted)
     have = {(int(p or 0), u): i for i, p, u in (await db.execute(
         select(ItemContainerUsage.id, ItemContainerUsage.package_id,
                ItemContainerUsage.usage)

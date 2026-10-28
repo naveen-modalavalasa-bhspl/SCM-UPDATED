@@ -5,14 +5,16 @@ import {
   AlertTriangle, ArrowRight, Barcode, Boxes, Building2, CalendarClock,
   Camera, Check, CheckCircle2, ChevronDown, Circle, ExternalLink, Eye, FileText, Hash,
   Lock, MapPin, Package, Phone, Plus, Receipt, RectangleHorizontal, Ruler, ScanBarcode,
-  Send, Signature, Snowflake, Trash2, Truck, UserRound, Weight,
+  PackageCheck as PackageCheckIcon, Send, Signature, Snowflake, Trash2, Truck, UserRound, Weight,
 } from "lucide-react";
 import { tripProgressText, tripStopLabel } from "../components/tripLeg";
 import {
   Button, Card, EmptyState, ErrorBanner, Input, PageHeader, SharedAttachmentViewer,
 } from "@/shared/components";
 import { alerts } from "@/modules/alerts";
-import { PackQty, baseOf, shrinkWithin, type PackEntry } from "@/shared/packing";
+import {
+  PackChips, PackQty, baseOf, packsIn, shrinkWithin, usePackOptions, type PackEntry,
+} from "@/shared/packing";
 import { SerialNumbersModal } from "@/modules/warehouse/components/SerialNumbersModal";
 import { TrackingBadge, useTrackingMeta } from "@/modules/warehouse/components/TrackingBadge";
 import type { TrackingType } from "@/modules/warehouse/types";
@@ -26,7 +28,8 @@ import {
   BILL, PHOTO, STAGE, STAGE_HINT, TRACKING, dayStamp, lineStage, neededBy, onOrder, qty,
   receivable, shortDate,
 } from "../components/acknowledgementParts";
-import { CombinationTag } from "@/shared/combination";
+import { CombinationTag, combinationKey, combinationLabel } from "@/shared/combination";
+import { PackageCheckModal, type PackageCheck } from "@/shared/components";
 
 /**
  * One indent's delivery, walked the way the delivery itself happens.
@@ -240,6 +243,8 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
   const stopKey = params.get("stop") ?? "";
   const [serialTarget, setSerialTarget] = useState<ReceiptPackageLine | null>(null);
   const [pickedSerials, setPickedSerials] = useState<Record<string, string[]>>({});
+  // Packages checked carton by carton, for lines issued in packages (2026-10-26).
+  const [packChecks, setPackChecks] = useState<Record<string, PackageCheck>>({});
   const [viewing, setViewing] = useState<
     { files: ReceiptAttachment[]; index: number } | null>(null);
 
@@ -274,7 +279,7 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
     mutationFn: () =>
       server.acknowledge(
         row.indent_id,
-        acknowledgementPayload(row.lines, received),
+        acknowledgementPayload(row.lines, received, packChecks),
       ),
     onMutate: () => (kind === "indent"
       ? cancelIndentReceiptReads(qc, accountScope, row.indent_id) : undefined),
@@ -578,6 +583,8 @@ function AcknowledgementDetail({ row, kind, onDone, accountScope, qc }: {
           photos={photosFor(stop)}
           received={received}
           pickedSerials={pickedSerials}
+          packChecks={packChecks}
+          onPackCheck={(key, check) => setPackChecks((current) => ({ ...current, [key]: check }))}
           photosOf={(line) => photosOf(line, stop.pack?.key ?? "")}
           onUpload={uploadFile(stop.scope)}
           // The item's own shot, filed against the LINE and the carton it was taken
@@ -687,6 +694,8 @@ type ReceiptPackageLine = AcknowledgementLine & {
   package_quantity?: number | null;
   /** What the packer put in this package of the line (2026-10-22). */
   package_pack_breakdown?: PackEntry[] | null;
+  /** The PACKAGES (codes) this carton holds of a line issued in packages (2026-10-26). */
+  package_box_codes?: { code: string; quantity: number; received?: number | null }[] | null;
 };
 
 interface ReceiptPackage {
@@ -871,6 +880,7 @@ function receiptPackageLine(
     package_no: part.package_no,
     package_quantity: packageQuantity,
     package_pack_breakdown: part.pack_breakdown ?? null,
+    package_box_codes: part.box_codes?.length ? part.box_codes : null,
     serial_numbers: packageSerials.length > 0 ? packageSerials : line.serial_numbers,
   };
 }
@@ -963,6 +973,7 @@ function initialReceivedByReceiptLine(lines: AcknowledgementLine[]) {
 function acknowledgementPayload(
   lines: AcknowledgementLine[],
   received: Record<string, string>,
+  checks: Record<string, PackageCheck> = {},
 ) {
   return lines
     .map((line) => {
@@ -971,9 +982,22 @@ function acknowledgementPayload(
         ? parts.reduce((sum, part) =>
           sum + receivedNumber(received[packageLineKey(line, part)]), 0)
         : receivedNumber(received[fallbackLineKey(line)]);
+      // Packages that came short or missing, by code (2026-10-26).
+      const packageReceipts: Record<string, number> = {};
+      parts.forEach((part) => {
+        const check = checks[packageLineKey(line, part)];
+        if (!check) return;
+        (part.box_codes ?? []).forEach((pkg) => {
+          if (!check.kept.includes(pkg.code)) packageReceipts[pkg.code] = 0;
+          else if ((check.partial[pkg.code] ?? 0) > 0) {
+            packageReceipts[pkg.code] = Number(pkg.quantity) - check.partial[pkg.code];
+          }
+        });
+      });
       return {
         indent_item_id: line.indent_item_id,
         received_quantity: Math.min(total, receivable(line)),
+        ...(Object.keys(packageReceipts).length ? { package_receipts: packageReceipts } : {}),
       };
     })
     .filter((line) => line.received_quantity > 0);
@@ -1997,8 +2021,8 @@ function Handling({ icon: Icon, tone, label }: {
  * ------------------------------------------------------------------------ */
 
 function PackageStop({
-  pack, tasks, position, total, photos, received, pickedSerials, photosOf,
-  onUpload, onUploadItem, onChange, onPickSerials, ...photoProps
+  pack, tasks, position, total, photos, received, pickedSerials, packChecks, onPackCheck,
+  photosOf, onUpload, onUploadItem, onChange, onPickSerials, ...photoProps
 }: {
   pack: ReceiptPackage;
   tasks: StepTask[];
@@ -2007,6 +2031,8 @@ function PackageStop({
   photos: ReceiptAttachment[];
   received: Record<string, string>;
   pickedSerials: Record<string, string[]>;
+  packChecks: Record<string, PackageCheck>;
+  onPackCheck: (receiptKey: string, check: PackageCheck) => void;
   /** This item's own photos, taken while THIS package was open. */
   photosOf: (line: ReceiptPackageLine) => ReceiptAttachment[];
   onUpload: (file: File, base: string) => void;
@@ -2036,6 +2062,8 @@ function PackageStop({
               onChange={(value) => onChange(line.receipt_key, value)}
               selectedSerials={pickedSerials[line.receipt_key] ?? []}
               onPickSerials={() => onPickSerials(line)}
+              packCheck={packChecks[line.receipt_key]}
+              onPackCheck={(check) => onPackCheck(line.receipt_key, check)}
               photos={photosOf(line)}
               onUploadPhoto={(file) => onUploadItem(line, file)}
               {...photoProps}
@@ -2159,14 +2187,16 @@ function PackageIdentityCard({ pack }: { pack: ReceiptPackage }) {
  * eleven can be scanned for the one that is not.
  */
 function PackageLineRow({
-  line, value, onChange, selectedSerials, onPickSerials, photos, onUploadPhoto,
-  ...photoProps
+  line, value, onChange, selectedSerials, onPickSerials, packCheck, onPackCheck, photos,
+  onUploadPhoto, ...photoProps
 }: {
   line: ReceiptPackageLine;
   value: string;
   onChange: (value: string) => void;
   selectedSerials: string[];
   onPickSerials: () => void;
+  packCheck?: PackageCheck;
+  onPackCheck: (check: PackageCheck) => void;
   /** This line's own pictures, taken in this package. */
   photos: ReceiptAttachment[];
   onUploadPhoto: (file: File) => void;
@@ -2184,6 +2214,24 @@ function PackageLineRow({
   const label = line.item_name ?? line.item_code ?? "item";
   const finished = max > 0 && current > 0 && photos.length > 0
     && (serials.length === 0 || serialComplete);
+  // A line issued in PACKAGES (2026-10-26): counted package by package.
+  const packs = line.package_box_codes ?? [];
+  const [checking, setChecking] = useState(false);
+  // Signed for already: each package says what arrived in it (2026-10-26).
+  const signedOff = packs.length > 0 && packs.every((p) => p.received != null);
+  const check: PackageCheck = packCheck ?? (signedOff
+    ? { kept: packs.filter((p) => Number(p.received) > 0).map((p) => p.code),
+        partial: Object.fromEntries(packs
+          .filter((p) => Number(p.received) > 0 && Number(p.received) < Number(p.quantity))
+          .map((p) => [p.code, Number(p.quantity) - Number(p.received)])) }
+    : { kept: packs.map((p) => p.code), partial: {} });
+  const arrivedQty = packs.reduce((sum, p) => sum + Number(p.received ?? 0), 0);
+  const packName = (line.package_pack_breakdown ?? line.pack_breakdown)
+    ?.find((e) => Number(e.level) > 0)?.name ?? "package";
+  const packWord = (n: number) => {
+    const name = packName.toLowerCase();
+    return `${n} ${n === 1 ? name : /(x|s|ch|sh)$/.test(name) ? `${name}es` : `${name}s`}`;
+  };
 
   return (
     <li className={`rounded-2xl border bg-content1 p-4 transition-colors ${
@@ -2198,7 +2246,7 @@ function PackageLineRow({
                 {line.item_name ?? line.item_code}
               </div>
               <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
-              <CombinationTag value={line} className="mt-1" />
+              <ReceivedCombination line={line} />
               {/* The packs this package holds of it, as the packer left them — codes
                   stay per unit (2026-10-22). Older consignments fall back to the
                   line's packs cut to this package's quantity. */}
@@ -2210,13 +2258,38 @@ function PackageLineRow({
           </div>
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted">
             <span>Sent <b className="font-semibold tabular-nums text-body">{qty(max)}</b></span>
+            <ConsumptionPacks line={line} quantity={max} />
             <span>Approved <b className="font-semibold tabular-nums text-body">{qty(line.approved_quantity)}</b></span>
             {Number(line.received_quantity ?? 0) > 0 && (
               <span>Received before <b className="font-semibold tabular-nums text-body">{qty(line.received_quantity)}</b></span>
             )}
           </div>
         </div>
-        {max > 0 ? (
+        {signedOff ? (
+          // Signed for: what arrived, package by package (2026-10-26).
+          <div className="flex flex-col items-end gap-0.5 text-right">
+            <span className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold ${
+              arrivedQty < max ? "bg-warn/10 text-warn" : "bg-ok/10 text-ok"}`}>
+              <PackageCheckIcon className="h-4 w-4" />
+              {qty(arrivedQty)} of {qty(max)} {line.uom_code ?? ""} received
+            </span>
+            <span className="text-[11px] text-muted">
+              {check.kept.length}/{packWord(packs.length)} arrived
+              {packs.length - check.kept.length > 0 && ` · ${packs.length - check.kept.length} missing`}
+            </span>
+          </div>
+        ) : max > 0 && packs.length > 0 ? (
+          // Counted by the PACKAGE: the base quantity follows from what is checked.
+          <div className="flex flex-col items-end gap-1">
+            <Button variant={check.kept.length === packs.length && !Object.keys(check.partial).length
+                      ? "soft" : "subtle"}
+                    onClick={() => setChecking(true)}>
+              <PackageCheckIcon className="h-4 w-4" />
+              {check.kept.length}/{packWord(packs.length)} arrived
+            </Button>
+            <span className="text-[11px] text-muted">{qty(current)} of {qty(max)} {line.uom_code ?? ""} received</span>
+          </div>
+        ) : max > 0 ? (
           <QuantityStepper value={value} max={max} onChange={onChange} label={label} />
         ) : (
           <span className="text-xs text-muted">
@@ -2245,7 +2318,7 @@ function PackageLineRow({
         </p>
       )}
 
-      {(max > 0 || serials.length > 0) && (
+      {(max > 0 || serials.length > 0 || packs.length > 0) && (
         <div className="mt-3.5 space-y-2.5 border-t border-line pt-3.5">
           {max > 0 && (
             <ItemProofStrip
@@ -2255,6 +2328,58 @@ function PackageLineRow({
               {...photoProps}
             />
           )}
+          {packs.length > 0 && (
+            // This carton's packages, each as it arrived (2026-10-26).
+            <div className="rounded-xl border border-line bg-content2/50 p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-sm font-semibold text-ink">
+                  Packages in this carton
+                  <span className="ml-2 text-xs font-normal text-muted">{packWord(packs.length)}</span>
+                </span>
+                {!signedOff && (
+                  <button type="button" onClick={() => setChecking(true)}
+                          className="text-xs font-semibold text-brand hover:underline">
+                    Check packages
+                  </button>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {packs.map((pkg) => {
+                  const kept = check.kept.includes(pkg.code);
+                  const shortIn = check.partial[pkg.code] ?? 0;
+                  return (
+                    <span key={pkg.code}
+                          className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] ${
+                            !kept ? "border-bad/30 bg-bad/5" : shortIn ? "border-warn/40 bg-warn/5"
+                              : "border-line bg-content1"}`}>
+                      <span className="mono font-semibold text-ink">{pkg.code}</span>
+                      <span className={!kept ? "font-semibold text-bad" : shortIn ? "font-semibold text-warn" : "text-muted"}>
+                        {!kept ? "missing" : shortIn
+                          ? `${qty(Number(pkg.quantity) - shortIn)} of ${qty(pkg.quantity)}`
+                          : `${qty(pkg.quantity)} ${line.uom_code ?? ""}`}
+                      </span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <PackageCheckModal
+            open={checking}
+            onClose={() => setChecking(false)}
+            mode="receipt"
+            packages={packs.map((p) => ({ code: p.code, carries: Number(p.quantity) }))}
+            value={check}
+            packName={packName}
+            uom={line.uom_code}
+            itemLabel={`${line.item_code ?? ""} — ${line.item_name ?? ""}`}
+            onSave={(next) => {
+              onPackCheck(next);
+              const lost = packs.reduce((sum, p) => sum + (next.kept.includes(p.code)
+                ? Math.min(next.partial[p.code] ?? 0, Number(p.quantity)) : Number(p.quantity)), 0);
+              onChange(String(Math.max(0, max - lost)));
+            }}
+          />
           {serials.length > 0 && (
             <SerialPanel
               heading={(tracking ?? TRACKING.SERIAL).heading}
@@ -2804,6 +2929,36 @@ function InProcessPanel({ lines }: { lines: AcknowledgementLine[] }) {
 
 /** A line's packs cut to the quantity being shown — the line was sent as one set of
  *  packs and may arrive split over several cartons (2026-10-22). */
+/**
+ * The brand that ARRIVED, not the one the indent asked for (2026-10-26). The desk may
+ * give another brand, or stock with no brand recorded; the issue lines say which, and
+ * the indent's own brand is shown underneath as "Asked for" whenever they differ.
+ */
+function ReceivedCombination({ line }: { line: AcknowledgementLine }) {
+  const issued = line.issued_combinations ?? [];
+  const differs = issued.length > 0 && (line.combination_any
+    || issued.some((c) => combinationKey(c) !== combinationKey(line)));
+  if (!differs) return <CombinationTag value={line} className="mt-1" />;
+  const asked = line.combination_any ? "Any brand" : combinationLabel(line) || "no brand";
+  return (
+    <div className="mt-1 space-y-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {issued.map((c) => (
+          <span key={combinationKey(c)} className="inline-flex items-center gap-1">
+            <CombinationTag value={c} />
+            {issued.length > 1 && (
+              <span className="text-[11px] text-muted">× {c.quantity}</span>
+            )}
+          </span>
+        ))}
+      </div>
+      {!line.combination_any && (
+        <div className="text-[11px] font-medium text-warn">Asked for {asked}</div>
+      )}
+    </div>
+  );
+}
+
 function packsFor(packs: PackEntry[] | null | undefined, qty: number): PackEntry[] | null {
   if (!packs?.length || qty <= 0) return null;
   return Math.abs(baseOf(packs) - qty) < 1e-6 ? packs : shrinkWithin(packs, qty);
@@ -2820,7 +2975,7 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
           {line.item_name ?? line.item_code}
         </div>
         <div className="mt-0.5 font-mono text-[11px] text-muted">{line.item_code}</div>
-        <CombinationTag value={line} className="mt-1" />
+        <ReceivedCombination line={line} />
         {packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0)) && (
           <PackQty entries={packsFor(line.pack_breakdown, Number(line.dispatched_quantity ?? 0))}
                    qty={line.dispatched_quantity} uom={line.uom_code} className="mt-1.5" />
@@ -2833,6 +2988,9 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
             <> &middot; <b className="font-semibold tabular-nums text-warn">{qty(ordered)}</b> on order</>
           )}
           {" "}&middot; {qty(line.dispatched_quantity)} sent &middot; {qty(line.received_quantity)} received
+        </div>
+        <div className="mt-1 text-xs">
+          <ConsumptionPacks line={line} quantity={Number(line.received_quantity ?? 0)} />
         </div>
       </div>
       <div className="min-w-0 shrink-0 sm:max-w-[240px] sm:text-right">
@@ -2847,5 +3005,19 @@ function InProcessLine({ line }: { line: AcknowledgementLine }) {
         </div>
       </div>
     </li>
+  );
+}
+
+
+/** What a quantity comes to in the item's CONSUMPTION containers (2026-10-23) —
+ *  "Use in 15 Strip". Nothing when the item has none mapped. */
+function ConsumptionPacks({ line, quantity }: { line: AcknowledgementLine; quantity: number }) {
+  const options = usePackOptions(line.item_id ? [line.item_id] : []);
+  const packs = packsIn(options.data?.[line.item_id ?? 0], quantity, "CONSUMPTION", line.brand_id);
+  if (!packs) return null;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      Use in <PackChips entries={packs} uom={line.uom_code} showHierarchy={false} showTotal={false} />
+    </span>
   );
 }

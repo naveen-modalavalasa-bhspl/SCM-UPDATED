@@ -88,6 +88,9 @@ class LedgerSpec:
     date_col: str              # the column the from/to date range applies to
     order_col: str             # default sort, always descending
     key_cols: list[str] = field(default_factory=list)  # what makes a row unique
+    #: Fills columns the database cannot compute (2026-10-23) — `await fn(db, rows)`
+    #: on each page and on every export, mutating the row dicts in place.
+    decorate: Callable | None = None
 
     # --- Data scope -------------------------------------------------------- #
     # Which column of THIS ledger the login's rung is applied to. A ledger is a
@@ -508,7 +511,22 @@ def _stock_source() -> Select:
         ).label("expiry_bucket"),
         Stock.last_movement_at.label("last_movement_at"),
         Stock.updated_at.label("updated_at"),
+        Stock.item_id.label("item_id"),
+        Stock.brand_id.label("brand_id"),
+        # Filled by `_storage_packs` after the query: the database cannot do the
+        # pack arithmetic, but the column must exist in the source like every other.
+        cast(null(), String(300)).label("storage_packs"),
     ), Stock)
+
+
+async def _storage_packs(db, rows: list[dict]) -> None:
+    """The quantity on hand said in the item's Storage containers."""
+    from app.shared.masters import packs
+    said = await packs.describe_in(
+        db, [{"item_id": r.get("item_id"), "brand_id": r.get("brand_id"),
+              "qty": r.get("total_qty")} for r in rows], "STORAGE")
+    for row, text in zip(rows, said):
+        row["storage_packs"] = text
 
 
 STOCK = LedgerSpec(
@@ -527,6 +545,7 @@ STOCK = LedgerSpec(
         Col("batch_no", "Batch", narrow=True),
         Col("project", "Project", narrow=True),
         Col("total_qty", "Total", "qty"),
+        Col("storage_packs", "In storage containers"),
         Col("available_qty", "Available", "qty"),
         Col("reserved_qty", "Reserved", "qty"),
         Col("transit_qty", "In transit", "qty", narrow=True),
@@ -555,6 +574,7 @@ STOCK = LedgerSpec(
     order_col="updated_at",
     key_cols=["id"],
     scope_warehouse_name_col="warehouse",
+    decorate=_storage_packs,
 )
 
 
@@ -891,6 +911,16 @@ APPROVAL_SLA = LedgerSpec(
 _CB, _CV, _CM = aliased(Brand), aliased(BrandVariant), aliased(BrandModel)
 
 
+async def _consumption_packs(db, rows: list[dict]) -> None:
+    """What stayed out, said in the item's Consumption containers."""
+    from app.shared.masters import packs
+    said = await packs.describe_in(
+        db, [{"item_id": r.get("item_id"), "brand_id": r.get("brand_id"),
+              "qty": r.get("net_qty")} for r in rows], "CONSUMPTION")
+    for row, text in zip(rows, said):
+        row["consumption_packs"] = text
+
+
 def _consumption_source() -> Select:
     net_qty = MaterialIssueLine.issued_qty - func.coalesce(
         MaterialIssueLine.returned_qty, 0)
@@ -900,6 +930,10 @@ def _consumption_source() -> Select:
             func.date_format(MaterialIssue.issue_date, "%Y-%m").label("month"),
             MaterialIssueLine.item_code.label("item_code"),
             MaterialIssueLine.item_name.label("item_name"),
+            MaterialIssueLine.item_id.label("item_id"),
+            MaterialIssueLine.brand_id.label("brand_id"),
+            # Filled by `_consumption_packs` after the query.
+            cast(null(), String(300)).label("consumption_packs"),
             func.nullif(func.concat_ws(" · ", _CB.name, _CV.name, _CM.name), ""
                         ).label("combination"),
             MaterialIssueLine.uom_code.label("uom"),
@@ -947,6 +981,7 @@ CONSUMPTION = LedgerSpec(
         Col("item_name", "Item"),
         COMBINATION_COL,
         Col("net_qty", "Net qty", "qty"),
+        Col("consumption_packs", "In consumption containers"),
         Col("uom", "UoM", narrow=True),
         Col("issued_qty", "Issued", "qty", narrow=True),
         Col("returned_qty", "Returned", "qty", narrow=True),
@@ -979,6 +1014,7 @@ CONSUMPTION = LedgerSpec(
     order_col="doc_date",
     key_cols=["id"],
     scope_warehouse_name_col="warehouse",
+    decorate=_consumption_packs,
 )
 
 

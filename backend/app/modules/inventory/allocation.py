@@ -26,7 +26,10 @@ ZERO = Decimal("0")
 
 def matches_combination(stock, combination: dict | None) -> bool:
     """Does a balance row hold the brand / variant / model a line names (2026-10-23)?
-    No combination named — None, or brand 0 — matches every row."""
+    No combination named — None, or brand 0 — matches every row; `no_brand` matches
+    only rows with no brand recorded (stock booked in before brands were)."""
+    if combination and combination.get("no_brand"):
+        return not int(stock.brand_id or 0)
     if not combination or not int(combination.get("brand_id") or 0):
         return True
     return ((int(stock.brand_id or 0), int(stock.variant_id or 0), int(stock.model_id or 0))

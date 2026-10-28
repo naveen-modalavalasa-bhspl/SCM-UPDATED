@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Switch } from "@heroui/react";
-import { Layers, Plus, Tag, X } from "lucide-react";
+import { ChevronRight, Layers, Plus, Tag, Trash2, X } from "lucide-react";
 import { Button, Can, ErrorBanner, Select } from "@/shared/components";
 import { useAuth } from "@/shared/auth/AuthContext";
 import { mastersApi } from "../api";
@@ -10,10 +10,11 @@ import type { MasterItemCombination } from "../types";
 /**
  * An item's brands and the combinations they make (2026-10-23).
  *
- * Brands are mapped here — on a new item too, held until its first save. Every
- * brand's variants and models then make the item's COMBINATIONS, one row each, and
- * each can be switched off for this item; never while any of it is in stock. A
- * document offers only the combinations that are on.
+ * Brands are mapped here — on a new item too, held until its first save. The item's
+ * COMBINATIONS are exactly what is picked (2026-10-26): a brand alone, a brand and a
+ * variant, or a brand, a variant and a model — a brand's other variants and models are
+ * never added on their own. Each can be switched off or removed for this item; never
+ * while any of it is in stock. A document offers only the combinations that are on.
  */
 export function ItemBrandsPanel({ itemId, draft, onDraft }: {
   /** The saved item; absent while a new item is being written. */
@@ -25,11 +26,23 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
   const qc = useQueryClient();
   const canManage = useAuth().can("master.item.manage");
   const [pick, setPick] = useState("");
+  const [variantPick, setVariantPick] = useState("");
+  const [modelPick, setModelPick] = useState("");
   const [error, setError] = useState<unknown>(null);
 
   const brands = useQuery({
     queryKey: ["masters", "brands", "all"],
     queryFn: () => mastersApi.brands.list({ size: 500 }).then((r) => r.items.filter((b) => b.is_active)),
+  });
+  const variants = useQuery({
+    queryKey: ["masters", "brand-variants", "all"],
+    queryFn: () => mastersApi.brandVariants.list({ size: 500 }).then((r) => r.items.filter((v) => v.is_active)),
+    enabled: !!itemId,
+  });
+  const models = useQuery({
+    queryKey: ["masters", "brand-models", "all"],
+    queryFn: () => mastersApi.brandModels.list({ size: 500 }).then((r) => r.items.filter((m) => m.is_active)),
+    enabled: !!itemId,
   });
   const combos = useQuery({
     queryKey: ["masters", "item-combinations", itemId],
@@ -41,9 +54,20 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
     qc.invalidateQueries({ queryKey: ["masters", "items"] });
     setError(null);
   };
+  const reset = () => { setPick(""); setVariantPick(""); setModelPick(""); };
+  // Exactly what was picked — brand, brand + variant, or brand + variant + model.
   const map = useMutation({
-    mutationFn: (brandId: number) => mastersApi.itemCombinations.mapBrands(itemId!, [brandId]),
-    onSuccess: (rows) => { set(rows); setPick(""); },
+    mutationFn: () => mastersApi.itemCombinations.add(itemId!, {
+      brand_id: Number(pick),
+      variant_id: variantPick ? Number(variantPick) : null,
+      model_id: modelPick ? Number(modelPick) : null,
+    }),
+    onSuccess: (rows) => { set(rows); reset(); },
+    onError: setError,
+  });
+  const removeRow = useMutation({
+    mutationFn: (id: number) => mastersApi.itemCombinations.remove(itemId!, id),
+    onSuccess: set,
     onError: setError,
   });
   const unmap = useMutation({
@@ -69,18 +93,33 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
   }, [itemId, draft, combos.data, brands.data]);
   const stockOf = (brandId: number) => (combos.data ?? [])
     .filter((r) => r.brand_id === brandId).reduce((sum, r) => sum + r.stock_qty, 0);
+  // A saved item may take more of a brand it already has (a variant, a model); a new
+  // item's draft holds brands only, so a mapped brand is not offered twice there.
   const options = (brands.data ?? [])
-    .filter((b) => !mapped.some((m) => m.id === b.id))
+    .filter((b) => itemId || !mapped.some((m) => m.id === b.id))
     .map((b) => ({ value: b.id, label: b.code ? `${b.name} · ${b.code}` : b.name }));
+  const variantOptions = (variants.data ?? [])
+    .filter((v) => pick && v.brand_id === Number(pick))
+    .map((v) => ({ value: v.id, label: v.name }));
+  const modelOptions = (models.data ?? [])
+    .filter((m) => variantPick && m.variant_id === Number(variantPick))
+    .map((m) => ({ value: m.id, label: m.name }));
+  const pickedLabel = [
+    brands.data?.find((b) => b.id === Number(pick))?.name,
+    variants.data?.find((v) => v.id === Number(variantPick))?.name,
+    models.data?.find((m) => m.id === Number(modelPick))?.name,
+  ].filter(Boolean).join(" · ");
+  const already = (combos.data ?? []).some((r) => r.brand_id === Number(pick)
+    && (r.variant_id ?? 0) === Number(variantPick || 0) && (r.model_id ?? 0) === Number(modelPick || 0));
   const add = () => {
     const id = Number(pick);
     if (!id) return;
-    if (itemId) map.mutate(id);
-    else { onDraft([...draft, id]); setPick(""); }
+    if (itemId) map.mutate();
+    else { onDraft([...draft, id]); reset(); }
   };
   const rows = combos.data ?? [];
   const on = rows.filter((r) => r.is_active).length;
-  const busy = map.isPending || unmap.isPending || toggle.isPending;
+  const busy = map.isPending || unmap.isPending || toggle.isPending || removeRow.isPending;
 
   return (
     <div className="space-y-4">
@@ -111,14 +150,33 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
           })}
         </div>
         <Can do="master.item.manage">
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="min-w-[16rem] flex-1">
-              <Select value={pick} ariaLabel="Brand to add" placeholder="Pick a brand"
-                      options={options} onChange={setPick} />
+          <div className="space-y-2">
+            {/* Brand, then — only if wanted — its variant, then that variant's model.
+                What is picked is exactly what is mapped (2026-10-26). */}
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)_auto] sm:items-center">
+              <Select value={pick} ariaLabel="Brand" placeholder="Pick a brand"
+                      options={options}
+                      onChange={(v) => { setPick(String(v ?? "")); setVariantPick(""); setModelPick(""); }} />
+              <ChevronRight className="hidden h-4 w-4 text-muted sm:block" aria-hidden />
+              <Select value={variantPick} ariaLabel="Variant (optional)"
+                      placeholder={!itemId ? "Variant — after saving" : !pick ? "Variant" : variantOptions.length ? "Variant (optional)" : "No variants"}
+                      options={variantOptions} isDisabled={!itemId || !pick || !variantOptions.length}
+                      onChange={(v) => { setVariantPick(String(v ?? "")); setModelPick(""); }} />
+              <ChevronRight className="hidden h-4 w-4 text-muted sm:block" aria-hidden />
+              <Select value={modelPick} ariaLabel="Model (optional)"
+                      placeholder={!variantPick ? "Model" : modelOptions.length ? "Model (optional)" : "No models"}
+                      options={modelOptions} isDisabled={!itemId || !variantPick || !modelOptions.length}
+                      onChange={(v) => setModelPick(String(v ?? ""))} />
+              <Button variant="soft" onClick={add} disabled={!pick || busy || already}>
+                <Plus className="h-4 w-4" /> Add
+              </Button>
             </div>
-            <Button variant="soft" onClick={add} disabled={!pick || busy}>
-              <Plus className="h-4 w-4" /> Add brand
-            </Button>
+            {pick && (
+              <p className={`text-xs ${already ? "text-warn" : "text-muted"}`}>
+                {already ? `${pickedLabel} is already on this item.`
+                  : <>Maps <b className="text-ink">{pickedLabel}</b>{!variantPick ? " — the brand alone" : !modelPick ? " — the brand and this variant" : ""}.</>}
+              </p>
+            )}
           </div>
         </Can>
       </section>
@@ -150,6 +208,7 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
                   <th className="px-4 py-2">Model</th>
                   <th className="px-4 py-2 text-right">In stock</th>
                   <th className="px-4 py-2 text-right">Active</th>
+                  {canManage && <th className="w-12 px-2 py-2" aria-label="Remove" />}
                 </tr>
               </thead>
               <tbody>
@@ -174,6 +233,17 @@ export function ItemBrandsPanel({ itemId, draft, onDraft }: {
                           )}
                         </div>
                       </td>
+                      {canManage && (
+                        <td className="px-2 py-2.5 text-right">
+                          <button type="button" disabled={busy || r.stock_qty > 0}
+                                  onClick={() => removeRow.mutate(r.id)}
+                                  title={r.stock_qty > 0 ? "In stock — cannot be removed" : `Remove ${r.label}`}
+                                  aria-label={`Remove ${r.label}`}
+                                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-bad/10 hover:text-bad disabled:cursor-not-allowed disabled:opacity-40">
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}

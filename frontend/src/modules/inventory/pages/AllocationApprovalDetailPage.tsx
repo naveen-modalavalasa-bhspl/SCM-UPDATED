@@ -160,6 +160,8 @@ export function AllocationApprovalDetailPage() {
       void alerts.success(approve ? "allocation.approved" : "allocation.rejected");
       qc.invalidateQueries({ queryKey: ["inventory"] });
       qc.invalidateQueries({ queryKey: ["fulfillment-queue"] });
+      // Approval drafts the material issue — a list already open must show it.
+      qc.invalidateQueries({ queryKey: ["wh-issues-OUT"] });
       goBack();
     },
     onError: (err: Error) => {
@@ -256,6 +258,14 @@ export function AllocationApprovalDetailPage() {
                         <td className="p-3">
                           <div className="font-medium text-ink">{item.item_name}</div>
                           <CombinationTag value={item} className="mt-1" />
+                          {item.substituted_from && (
+                            <div className="mt-1 inline-flex flex-wrap items-center gap-1 rounded-md bg-warning/10 px-2 py-0.5 text-[11px] font-semibold text-warning">
+                              {item.no_brand ? "Given as No brand" : "Brand changed"} · asked for {item.substituted_from}
+                              {item.substitution_reason && (
+                                <span className="font-normal text-ink-700">— {item.substitution_reason}</span>
+                              )}
+                            </div>
+                          )}
                           <div className="text-xs text-muted">{item.item_code}</div>
                         </td>
                         <td className="p-3">

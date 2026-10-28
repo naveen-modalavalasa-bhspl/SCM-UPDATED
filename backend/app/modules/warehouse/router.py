@@ -36,6 +36,7 @@ from app.modules.warehouse import project_holds
 from app.modules.warehouse import stock_edits
 from app.modules.warehouse import stock_report
 from app.modules.warehouse import trips
+from app.modules.warehouse import box_codes
 from app.modules.warehouse import packing as wh_packing
 from app.platform.rbac.permissions import (
     STOCK_EDIT_APPROVE, STOCK_EDIT_CREATE, STOCK_EDIT_VIEW,
@@ -638,6 +639,35 @@ async def post_issues_batch(body: s.IssueBatchIn, db: AsyncSession = Depends(get
 
 # Above /issues/{issue_id} for the same reason "cycles" is: FastAPI matches in
 # declaration order and neither of these is an int.
+
+@router.get("/issues/box-sources", response_model=list[s.BoxSourceRead])
+async def issue_box_sources(warehouse_id: int, item_id: int, batch_id: int | None = None,
+                            bin_id: int | None = None, issue_id: int | None = None,
+                            with_units: bool = False,
+                            db: AsyncSession = Depends(get_db),
+                            user=Depends(require_permission(ISSUE_VIEW))):
+    """Every box of an item an issue line could name here (2026-10-26)."""
+    return await box_codes.box_sources(db, warehouse_id=warehouse_id, item_id=item_id,
+                                       batch_id=batch_id, bin_id=bin_id, issue_id=issue_id,
+                                       with_units=with_units)
+
+
+@router.get("/box-labels", response_model=Page[s.BoxLabelRead])
+async def list_box_labels(status: str | None = None, warehouse_id: int | None = None,
+                          search: str | None = None, params: PageParams = Depends(),
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(require_permission(STOCK_VIEW))):
+    """The print queue of new box codes (2026-10-26)."""
+    return await box_codes.list_labels(db, status=status, warehouse_id=warehouse_id,
+                                       search=search, page=params.page, size=params.size)
+
+
+@router.post("/box-labels/printed")
+async def mark_box_labels_printed(body: s.BoxLabelPrintedIn,
+                                  db: AsyncSession = Depends(get_db),
+                                  user=Depends(require_permission(STOCK_VIEW))):
+    return await box_codes.mark_printed(db, body.ids, user)
+
 
 @router.get("/issues/stock-sources", response_model=list[s.IssueStockSource])
 async def issue_stock_sources(warehouse_id: int, item_ids: str,
@@ -1546,7 +1576,9 @@ async def acknowledge_direct_issue(issue_id: int, body: IndentAcknowledgeIn,
         INDENT_ACKNOWLEDGE, STOCK_TRANSFER_RECEIVE, service.anywhere_in_reach))):
     lines = {line.indent_item_id: Decimal(str(line.received_quantity)) for line in body.lines}
     return await service.acknowledge_direct_issue(
-        db, issue_id, lines, user, condition=body.condition, remarks=body.remarks)
+        db, issue_id, lines, user, condition=body.condition, remarks=body.remarks,
+        package_receipts={line.indent_item_id: line.package_receipts or {}
+                          for line in body.lines})
 
 
 @router.get("/acknowledgements/direct-issues/{issue_id:int}/attachments",

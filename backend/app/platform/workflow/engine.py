@@ -774,6 +774,15 @@ async def _start_ladder(db, wf, stages, doc_type: str, doc_id: int, context: dic
 async def start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict],
                                context: dict, user,
                                project_id: int | None = None) -> Instance:
+    """`_start_resolved_chain`, then forward past the raiser's own steps (2026-10-26)."""
+    instance = await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
+                                           project_id)
+    return await _auto_advance(db, instance, context or {})
+
+
+async def _start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict],
+                                context: dict, user,
+                                project_id: int | None = None) -> Instance:
     """Open an instance on a chain the caller has already worked out.
 
     Used where the approvers do not come from a configured workflow at all — the
@@ -820,12 +829,52 @@ async def start_resolved_chain(db, doc_type: str, doc_id: int, chain: list[dict]
 
 async def _start_resolved(db, doc_type: str, doc_id: int, chain: list[dict],
                           context: dict, user, project_id: int | None) -> Instance:
-    return await start_resolved_chain(db, doc_type, doc_id, chain, context, user,
-                                      project_id)
+    return await _start_resolved_chain(db, doc_type, doc_id, chain, context, user,
+                                       project_id)
+
+
+#: The trail's words for a step approved because its approver raised the document.
+AUTO_RAISER_COMMENT = ("Auto-approved: the person who raised this document is the "
+                       "approver at this step")
+
+
+async def _auto_advance(db, instance: Instance | None, context: dict) -> Instance | None:
+    """Approve, as the raiser, every step the raiser is an approver of — and move on
+    (2026-10-26).
+
+    A document whose approver is the person who raised it used to stop dead: the
+    engine refused the raiser ("Requester cannot approve their own document") and
+    nobody else was asked. Now the raiser's step is approved for them, with a trail
+    row that says so, and the document moves FORWARD to the next approver — or is
+    approved outright when that was the only (or last) step. Only ever forward: this
+    runs after a submit and after an approval, never after a return, and an approval
+    only moves to a later step. Bounded by the steps there are.
+    """
+    if instance is None:
+        return instance
+    for _ in range(MAX_AUTO_STEPS):
+        if (instance.status != InstanceStatus.IN_PROGRESS.value
+                or not instance.started_by_id):
+            return instance
+        pending = set((await db.execute(select(Pending.approver_id).where(
+            Pending.instance_id == instance.id,
+            Pending.stage_sequence == instance.current_sequence))).scalars().all())
+        if instance.started_by_id not in pending:
+            return instance
+        raiser = await hcm_service.get_employee(db, instance.started_by_id)
+        if raiser is None:
+            return instance
+        instance = await _act(db, instance.doc_type, instance.doc_id,
+                              ApprovalAction.APPROVED.value, raiser,
+                              AUTO_RAISER_COMMENT, context, auto=True)
+    return instance
+
+
+MAX_AUTO_STEPS = 25
 
 
 async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
-                      context: dict, final: bool = False) -> Instance:
+                      context: dict, final: bool = False, auto: bool = False) -> Instance:
     chain = instance.resolved_chain or []
     link = _link(instance)
     if link is None:
@@ -837,10 +886,13 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
             Pending.stage_sequence == instance.current_sequence,
         )
     )).scalars().all()
-    if instance.started_by_id and instance.started_by_id == user.id:
-        raise PermissionError_("Requester cannot approve their own document")
-
     pending_approver_ids = {row.approver_id for row in pending}
+    # The raiser may sign only a step they ARE an approver of (2026-10-26) — that step
+    # is approved for them automatically (`_auto_advance`); never as an override of
+    # somebody else's step.
+    if (instance.started_by_id and instance.started_by_id == user.id
+            and user.id not in pending_approver_ids):
+        raise PermissionError_("Requester cannot approve their own document")
     is_admin = await is_workflow_admin(db, user)
     is_admin_override = False
     if user.id not in pending_approver_ids:
@@ -869,7 +921,7 @@ async def _act_ladder(db, instance: Instance, action: str, user, comments: str,
     # fallback exists to prevent.
     active_position_id = getattr(user, "active_position_id", None)
     allowed_positions = ladder.allowed_position_ids(link)
-    if not is_admin_override and (allowed_positions
+    if not is_admin_override and not auto and (allowed_positions
             and user.id in link.get("approver_ids", [])
             and active_position_id not in allowed_positions):
         raise PermissionError_("Switch to the approval position before acting")
@@ -1182,6 +1234,13 @@ async def resubmit_correction(
 # ---------------- public API (the only five) ----------------
 
 async def start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance:
+    """Open the approval, then move forward past every step the raiser holds
+    (2026-10-26) — see `_auto_advance`."""
+    instance = await _start(db, doc_type, doc_id, context, user)
+    return await _auto_advance(db, instance, context or {})
+
+
+async def _start(db, doc_type: str, doc_id: int, context: dict, user) -> Instance:
     context = context or {}
     requester_position_id = (context.get("requester_position_id")
                              or getattr(user, "active_position_id", None))
@@ -1308,6 +1367,18 @@ async def preview_chain(db, doc_type: str, context: dict, user) -> list[dict] | 
 
 async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str = "",
               context: dict | None = None, final: bool = False) -> Instance:
+    """Approve / reject / return, then move forward past every step the raiser holds
+    (2026-10-26) — see `_auto_advance`. A return never auto-advances: it went back on
+    purpose, and the raiser's own step must not bounce it straight forward again."""
+    instance = await _act(db, doc_type, doc_id, action, user, comments, context, final)
+    if _normalize_action(action) == ApprovalAction.APPROVED.value:
+        instance = await _auto_advance(db, instance, context or {})
+    return instance
+
+
+async def _act(db, doc_type: str, doc_id: int, action: str, user, comments: str = "",
+               context: dict | None = None, final: bool = False,
+               auto: bool = False) -> Instance:
     instance = await _load_instance(db, doc_type, doc_id)
     if instance is None or instance.status != InstanceStatus.IN_PROGRESS.value:
         raise ValidationError(ALREADY_DECIDED)
@@ -1315,7 +1386,8 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
     action = _normalize_action(action)
     context = context or {}
     if instance.resolved_chain:
-        return await _act_ladder(db, instance, action, user, comments, context, final)
+        return await _act_ladder(db, instance, action, user, comments, context, final,
+                                 auto=auto)
     stage = await _get_stage(db, instance.workflow_id, instance.current_sequence)
     pending = (await db.execute(
         select(Pending).where(
@@ -1338,7 +1410,9 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
         ] if employee is not None
     ]
     approver_ids = {a.id for a in approvers}
-    if instance.started_by_id and instance.started_by_id == user.id:
+    # The raiser may sign only a step they ARE an approver of (2026-10-26).
+    if (instance.started_by_id and instance.started_by_id == user.id
+            and user.id not in pending_ids):
         raise PermissionError_("Requester cannot approve their own document")
 
     is_admin = await is_workflow_admin(db, user)
@@ -1366,7 +1440,7 @@ async def act(db, doc_type: str, doc_id: int, action: str, user, comments: str =
     # precisely BECAUSE the configured position produced nobody, so requiring them to
     # hold that position would lock the document again, which is what the fallback
     # exists to prevent. Authority is still enforced: user.id must be in pending_ids.
-    if not is_admin_override:
+    if not is_admin_override and not auto:
         if await _stage_used_fallback(db, instance, stage):
             pass
         elif stage.approver_type == ApproverType.POSITION.value:

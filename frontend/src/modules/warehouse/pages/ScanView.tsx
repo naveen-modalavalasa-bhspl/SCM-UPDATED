@@ -112,7 +112,8 @@ export default function ScanView() {
             <div className="flex flex-wrap items-center gap-3">
               <span className="inline-flex items-center gap-2 rounded-lg border border-line bg-content1 px-3 py-2 text-sm font-semibold text-ink">
                 {data.kind === "PACKAGE" ? <Package className="h-4 w-4 text-brand" /> : <QrCode className="h-4 w-4 text-brand" />}
-                {data.kind === "DISPATCH" ? "CONSIGNMENT" : data.kind}
+                {data.kind === "DISPATCH" ? "CONSIGNMENT" : data.kind === "PACK"
+                  ? (data.subtitle?.split(" · ")[0] ?? "Pack").toUpperCase() : data.kind}
               </span>
               {data.status ? <StatusPill status={data.status} /> : null}
               <span className="rounded-lg bg-content2 px-3 py-2 text-xs text-body">
@@ -134,7 +135,10 @@ export default function ScanView() {
           </Section>
 
           {packages.length > 0 && (
-            <Section title="Packages" hint="What this consignment is made of. Scan a package label for its contents.">
+            <Section title={data.kind === "PACK" ? "Inside" : "Packages"}
+                     hint={data.kind === "PACK"
+                       ? "The packs inside this one, each with its own label. Scan one for its contents."
+                       : "What this consignment is made of. Scan a package label for its contents."}>
               <div className="overflow-x-auto rounded-lg border border-line">
                 <table className="min-w-[640px] w-full text-sm">
                   <thead className="bg-content2 text-left text-[11px] uppercase text-muted">

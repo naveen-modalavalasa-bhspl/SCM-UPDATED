@@ -292,6 +292,12 @@ class InspectionItem(CombinationMixin, Base):
     remarks = Column(String(500), nullable=True)
     serial_numbers = Column(JSON, nullable=True)
     imei_numbers = Column(JSON, nullable=True)
+    # By the PACK (2026-10-27): of the packs the GRN counted, the ones QC kept (a kept
+    # pack with units taken out of it is a part pack here) and the ones it rejected
+    # (whole packs, plus the units taken out of kept ones, loose). Snapshotted entries;
+    # NULL when the line was decided by quantity alone. Putaway shelves the accepted.
+    accepted_pack_breakdown = Column(JSON, nullable=True)
+    rejected_pack_breakdown = Column(JSON, nullable=True)
 
     inspection = relationship("Inspection", back_populates="items")
 
@@ -715,6 +721,9 @@ class DispatchItem(CombinationMixin, Base):
     expiry_date = Column(Date, nullable=True)
     serial_no = Column(String(100), nullable=True)
     imei_no = Column(String(50), nullable=True)
+    # The package (box / strip) this row carries, for an item issued in packages
+    # (2026-10-26): one row per package, `quantity` what it carries.
+    box_code = Column(String(120), index=True, nullable=True)
 
     quantity = Column(QTY, nullable=False, default=0)
     delivered_qty = Column(QTY, nullable=False, default=0)
@@ -1294,6 +1303,11 @@ class HandlingUnit(Base):
     closed_reason = Column(String(300), nullable=True)
     closed_by_name = Column(String(200), nullable=True)
     closed_at = Column(DateTime, nullable=True)
+    # An issue line holding this box (2026-10-26) — the same "Reserved for issue X
+    # line Y" marker a unit carries — and how much of it the line takes when that is
+    # less than the whole box. After posting: "Issued by issue X line Y".
+    held_by = Column(String(120), index=True, nullable=True)
+    held_qty = Column(QTY, nullable=True)
     created_by_id = soft_fk()
     created_at = created_at_col()
     updated_at = updated_at_col()
@@ -1302,6 +1316,40 @@ class HandlingUnit(Base):
         Index("ix_whs_hu_stock_key", "item_id", "warehouse_id", "bin_id", "batch_id",
               "status"),
     )
+
+
+class BoxLabel(Base):
+    """`whs_box_labels` — the print queue of new box codes (2026-10-26).
+
+    Every box code the system makes for an item issued in a container lands here —
+    at putaway, from the old-stock conversion, from a re-code after the Issue
+    container changed, and the part box cut at the issue desk — so a sticker is
+    printed for it from Inventory > Labels & Printing > Box labels. Snapshotted: a
+    label reads what the box was when it was made.
+    """
+    __tablename__ = "whs_box_labels"
+
+    id = pk()
+    handling_unit_id = Column(BigInteger, index=True, nullable=False)
+    hu_code = Column(String(120), nullable=False)
+    item_id = Column(BigInteger, index=True, nullable=False)
+    item_code = Column(String(100), nullable=True)
+    item_name = Column(String(300), nullable=True)
+    warehouse_id = Column(BigInteger, index=True, nullable=False)
+    warehouse_name = Column(String(300), nullable=True)
+    bin_code = Column(String(120), nullable=True)
+    batch_no = Column(String(120), nullable=True)
+    pack_name = Column(String(200), nullable=True)
+    content_qty = Column(QTY, nullable=False)
+    pack_size = Column(QTY, nullable=False)
+    uom_code = Column(String(30), nullable=True)
+    # PUTAWAY, CONVERTED, RECODED, PART_BOX
+    reason = Column(String(30), nullable=False)
+    source_no = Column(String(60), nullable=True)
+    status = Column(String(20), index=True, nullable=False, default="QUEUED")
+    printed_at = Column(DateTime, nullable=True)
+    printed_by_name = Column(String(200), nullable=True)
+    created_at = created_at_col()
 
 
 # A location and a bin are the same row in the same table (`whs_warehouse_locations`);
@@ -1411,6 +1459,10 @@ class OutboundInspectionItem(CombinationMixin, Base):
     rejection_reason = synonym("defect_type")
     remarks = Column(String(500), nullable=True)
     serial_numbers = Column(JSON, nullable=True)
+    # A line issued in packages (2026-10-26): units rejected out of each package that
+    # was otherwise kept, {code: qty}. A package rejected whole is not in the
+    # accepted codes at all.
+    pack_rejections = Column(JSON, nullable=True)
 
     inspection = relationship("OutboundInspection", back_populates="items")
 

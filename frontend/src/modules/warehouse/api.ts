@@ -1,6 +1,8 @@
 import { api } from "@/shared/api/client";
 import type { PackEntryIn } from "@/shared/packing";
 import type {
+  BoxLabel,
+  BoxSource,
   UnlocatedStockStatus,
   IssueDestinationOption,
   IssueEmployeeOption,
@@ -479,6 +481,23 @@ export const issueUnitSupply = (
   post<UnitSupply[]>(`${BASE}/issues/unit-supply`, {
     warehouse_id, picks, issue_id, direction,
   });
+
+/** Every box of an item an issue line could name at one batch and location
+ *  (2026-10-26) — fullest first, and who holds each. */
+export const issueBoxSources = (params: {
+  warehouse_id: number; item_id: number; batch_id?: number | null;
+  bin_id?: number | null; issue_id?: number | null;
+  /** Also the serials / IMEIs / codes inside each box (2026-10-27). */
+  with_units?: boolean;
+}) => get<BoxSource[]>(`${BASE}/issues/box-sources`, params);
+
+/** The print queue of new box codes (Labels & Printing > Box labels). */
+export const listBoxLabels = (params: {
+  status?: string; warehouse_id?: number | string; search?: string; page?: number; size?: number;
+}) => get<Page<BoxLabel>>(`${BASE}/box-labels`, params);
+
+export const markBoxLabelsPrinted = (ids: number[]) =>
+  post<{ printed: number }>(`${BASE}/box-labels/printed`, { ids });
 
 export interface UnitSupplyPick {
   item_id: number;

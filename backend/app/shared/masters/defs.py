@@ -1521,8 +1521,16 @@ async def save_vendor_mapping(db: AsyncSession, data: VendorMappingIn, user) -> 
 # The mapping screen picks brands on one side, categories or items on the other,
 # and saves every combination in one press. Manufacturers ride along from each
 # brand's own mst_brand_manufacturers rows, so they are stored nowhere here.
+class _ComboPickIn(BaseModel):
+    brand_id: int
+    variant_id: int | None = None
+    model_id: int | None = None
+
+
 class BrandItemMappingIn(BaseModel):
-    brand_ids: list[int] = Field(min_length=1, max_length=500)
+    brand_ids: list[int] = Field(default_factory=list, max_length=500)
+    #: A brand's VARIANT or MODEL picked (2026-10-26): mapped exactly that deep.
+    combinations: list[_ComboPickIn] = Field(default_factory=list, max_length=500)
     item_ids: list[int] = Field(default_factory=list, max_length=1000)
     # A category stands for every active item under it, at any depth.
     category_ids: list[int] = Field(default_factory=list, max_length=500)
@@ -1566,7 +1574,17 @@ async def brand_item_mapping_sources(db: AsyncSession) -> dict:
             pairs.append(key)
     # Per-brand manufacturer names off the eagerly-loaded Brand.manufacturers
     # relationship (selectin, so no lazy load on this async session).
+    variants = (await db.execute(select(BrandVariant).where(
+        BrandVariant.is_active.is_(True)).order_by(BrandVariant.name))).scalars().all()
+    models = (await db.execute(select(BrandModel).where(
+        BrandModel.is_active.is_(True)).order_by(BrandModel.name))).scalars().all()
     return {
+        # Each brand's variants and each variant's models (2026-10-26): the screen
+        # maps a brand alone, or as deep as somebody picks.
+        "variants": [{"id": v.id, "brand_id": v.brand_id, "code": v.code, "name": v.name}
+                     for v in variants],
+        "models": [{"id": mo.id, "variant_id": mo.variant_id, "code": mo.code,
+                    "name": mo.name} for mo in models],
         "brands": [{"id": b.id, "code": b.code, "name": b.name,
                     "manufacturer_names": [bm.manufacturer_name or ""
                                            for bm in (b.manufacturers or [])
@@ -1589,9 +1607,12 @@ async def save_brand_item_mapping(db: AsyncSession, data: BrandItemMappingIn,
     them. An inactive row is restored rather than duplicated — the unique
     constraint on (item_id, brand_id) would refuse a fresh insert.
     """
+    wanted_brands = set(data.brand_ids) | {c.brand_id for c in data.combinations}
+    if not wanted_brands:
+        raise ValidationError("Brands: pick at least one brand, variant or model.")
     brand_rows = (await db.execute(select(Brand).where(
-        Brand.id.in_(data.brand_ids)))).scalars().all()
-    if len(brand_rows) != len(set(data.brand_ids)):
+        Brand.id.in_(wanted_brands)))).scalars().all()
+    if len(brand_rows) != len(wanted_brands):
         raise ValidationError(
             "Brands: one of them no longer exists. Refresh and pick again.")
 
@@ -1639,6 +1660,22 @@ async def save_brand_item_mapping(db: AsyncSession, data: BrandItemMappingIn,
                 row.brand_code, row.brand_name = brand.code, brand.name
                 updated += 1
             # A row already active is left alone (idempotent).
+
+    # Variants and models picked: exactly that deep on every item (2026-10-26).
+    if data.combinations:
+        from app.shared.masters import combinations as item_combos
+        brand_by_id = {b.id: b for b in brand_rows}
+        for pick in data.combinations:
+            variant = await db.get(BrandVariant, pick.variant_id) if pick.variant_id else None
+            model = await db.get(BrandModel, pick.model_id) if pick.model_id else None
+            if pick.variant_id and (variant is None or variant.brand_id != pick.brand_id):
+                raise ValidationError("A variant picked is not that brand's — refresh and pick again.")
+            if pick.model_id and (model is None or not variant or model.variant_id != variant.id):
+                raise ValidationError("A model picked is not under its variant — refresh and pick again.")
+            for item in items.values():
+                if await item_combos.ensure_combination(
+                        db, item.id, brand_by_id[pick.brand_id], variant, model):
+                    created += 1
 
     from app.platform.settings.service import write_audit
     await write_audit(

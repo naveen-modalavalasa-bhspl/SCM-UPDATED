@@ -4,10 +4,10 @@ import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Checkbox } from "@heroui/react";
+import { Checkbox, Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/react";
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
-import { AlertCircle, ArrowLeft, CheckCheck, CheckCircle2, ClipboardCheck, Download, Layers, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, XCircle } from "lucide-react";
+import { AlertCircle, ArrowLeft, Box, CheckCheck, CheckCircle2, ClipboardCheck, Download, Layers, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, XCircle } from "lucide-react";
 import { Button, Can, ErrorBanner, Field, Input, Select } from "@/shared/components";
 import { ConsignmentIdentityCard, type ConsignmentIssue } from "../components/ConsignmentIdentityCard";
 import { PrintPortal } from "../components/LabelPrint";
@@ -113,6 +113,16 @@ const autoCoded = (line: IssueDispatchSourceItem) =>
   line.tracking_type === "ASSET" || line.tracking_type === "CONSUMABLE";
 
 const packageQty = (line: Pick<ConsignmentPackageItemWrite, "quantity">) => num(line.quantity);
+
+/** A line issued in PACKAGES (2026-10-26): cartons hold whole packages, picked by code. */
+const isPackLine = (line?: Pick<IssueDispatchSourceItem, "box_codes"> | null) =>
+  (line?.box_codes?.length ?? 0) > 0;
+/** "1 strip" / "5 strips" — in the line's own package name. */
+const packLabel = (line: IssueDispatchSourceItem, count: number) => {
+  const name = (line.pack_breakdown?.find((e) => Number(e.level) > 0)?.name ?? "package").toLowerCase();
+  const plural = /(x|s|ch|sh)$/.test(name) ? `${name}es` : `${name}s`;
+  return `${count} ${count === 1 ? name : plural}`;
+};
 
 const destinationOf = (doc?: Dispatch | null, source?: IssueDispatchSource | null) =>
   source?.destination_office_name
@@ -405,6 +415,11 @@ export default function ConsignmentForm() {
   const [source, setSource] = useState<IssueDispatchSource | null>(null);
   const [packages, setPackages] = useState<PackageDraft[]>([newPackage(0)]);
   const [serialTarget, setSerialTarget] = useState<SerialTarget>(null);
+  // The box codes of a line issued in boxes (2026-10-26) — read-only.
+  const [boxCodesOf, setBoxCodesOf] = useState<IssueDispatchSourceItem | null>(null);
+  // Picking which packages go into a carton (2026-10-26).
+  const [packPick, setPackPick] = useState<{ packageIndex: number; line: IssueDispatchSourceItem } | null>(null);
+  const [packPicked, setPackPicked] = useState<string[]>([]);
 
   const { data: doc, isLoading } = useQuery({
     queryKey: ["wh-consignment", id],
@@ -467,7 +482,7 @@ export default function ConsignmentForm() {
             is_serial_tracked: !!line.serial_no || !!existing?.is_serial_tracked,
             serial_numbers: [
               ...(existing?.serial_numbers ?? []),
-              ...(line.serial_no ? [line.serial_no] : []),
+              ...(line.serial_no ? [line.serial_no] : line.box_code ? [line.box_code] : []),
             ],
             quantity: num(existing?.quantity) + num(line.quantity),
             rate: line.rate ?? existing?.rate ?? null,
@@ -529,6 +544,11 @@ export default function ConsignmentForm() {
         serial_numbers: [
           ...(existing?.serial_numbers ?? []),
           ...(line.serial_no ? [line.serial_no] : []),
+        ],
+        // A row per package (2026-10-26): the line's packages, back off its rows.
+        box_codes: [
+          ...(existing?.box_codes ?? []),
+          ...(line.box_code ? [{ code: line.box_code, quantity: num(line.quantity) }] : []),
         ],
         quantity: num(existing?.quantity) + num(line.quantity),
         rate: line.rate ?? existing?.rate ?? null,
@@ -825,6 +845,13 @@ export default function ConsignmentForm() {
       if (sourceLine && (allocation.get(lineKey(line)) ?? 0) > sourceLine.issued) {
         errors.push(`${itemLabel(sourceLine.line)} is packed above issued quantity.`);
       }
+      if (sourceLine && isPackLine(sourceLine.line) && qty > 0) {
+        const carries = new Map((sourceLine.line.box_codes ?? []).map((p) => [p.code, num(p.quantity)]));
+        const picked = (line.serial_numbers ?? []).reduce((sum, code) => sum + (carries.get(code) ?? 0), 0);
+        if (!(line.serial_numbers?.length) || Math.abs(picked - qty) > 1e-6) {
+          errors.push(`${itemLabel(sourceLine.line)}: pick which packages go in this carton.`);
+        }
+      }
       if (line.is_serial_tracked && (line.serial_numbers?.length ?? 0) !== qty) {
         const noun = sourceLine ? codeNoun(sourceLine.line) : "serials";
         errors.push(`${sourceLine ? itemLabel(sourceLine.line) : line.item_code ?? line.item_id} needs ${fmtQty(qty)} ${noun} selected.`);
@@ -935,6 +962,25 @@ export default function ConsignmentForm() {
     return (sourceLine.serial_numbers ?? []).filter((code) => !used.has(code.toLowerCase()));
   };
 
+  /** The packages of a line no OTHER carton holds yet (2026-10-26). */
+  const freePackages = (
+    rows: PackageDraft[], packageIndex: number, sourceLine: IssueDispatchSourceItem,
+  ) => {
+    const used = new Set<string>();
+    rows.forEach((pkg, index) => pkg.items.forEach((line) => {
+      if (index === packageIndex || lineKey(line) !== lineKey(sourceLine)) return;
+      line.serial_numbers?.forEach((code) => used.add(code));
+    }));
+    return (sourceLine.box_codes ?? []).filter((p) => !used.has(p.code));
+  };
+  /** Which carton holds a package, by code. */
+  const cartonOfPackage = useMemo(() => {
+    const out = new Map<string, string>();
+    packages.forEach((pkg) => pkg.items.forEach((line) => line.serial_numbers?.forEach(
+      (code) => out.set(code, pkg.package_no || "another carton"))));
+    return out;
+  }, [packages]);
+
   /**
    * Select all: put everything still unpacked into this package, codes included.
    *
@@ -953,6 +999,17 @@ export default function ConsignmentForm() {
     });
     const target = rows[packageIndex];
     const items = (source?.items ?? []).flatMap((line) => {
+      if (isPackLine(line)) {
+        // Whole packages: every one no other carton holds.
+        const free = freePackages(rows, packageIndex, line);
+        if (!free.length) return [];
+        const existing = target.items.find((row) => lineKey(row) === lineKey(line));
+        return [toPackageLine(line, existing, {
+          quantity: free.reduce((sum, p) => sum + num(p.quantity), 0),
+          serial_numbers: free.map((p) => p.code),
+          is_serial_tracked: false,
+        })];
+      }
       const qty = Math.max(0, num(line.quantity) - (elsewhere.get(lineKey(line)) ?? 0));
       if (qty <= 0) return [];
       const existing = target.items.find((row) => lineKey(row) === lineKey(line));
@@ -1673,7 +1730,12 @@ export default function ConsignmentForm() {
                                        itemId={line.item_id} align="right" />
                             </td>
                             <td className={`px-3 py-2.5 text-right font-semibold tabular ${outstanding === 0 ? "text-ok" : "text-ink"}`}>
-                              {fmtQty(outstanding)}
+                              {isPackLine(line) ? (
+                                <>
+                                  {packLabel(line, (line.box_codes ?? []).filter((p) => !cartonOfPackage.has(p.code)).length)}
+                                  <div className="text-[11px] font-normal text-muted">{fmtQty(outstanding)} {line.uom_code ?? ""}</div>
+                                </>
+                              ) : fmtQty(outstanding)}
                             </td>
                             {!inLogistics && (
                               <td className={`px-3 py-2 text-right tabular ${complete ? "text-ok" : "text-body"}`}>
@@ -1681,6 +1743,22 @@ export default function ConsignmentForm() {
                               </td>
                             )}
                             <td className="px-3 py-2 text-right">
+                              {isPackLine(line) ? (
+                                // Whole packages, picked by code (2026-10-26).
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <Button variant={(current?.serial_numbers?.length ?? 0) > 0 ? "soft" : "subtle"}
+                                          disabled={pkgLocked}
+                                          onClick={() => {
+                                            setPackPicked(current?.serial_numbers ?? []);
+                                            setPackPick({ packageIndex, line });
+                                          }}>
+                                    <Box className="h-4 w-4" />
+                                    {(current?.serial_numbers?.length ?? 0) > 0
+                                      ? packLabel(line, current!.serial_numbers!.length) : "Pick packages"}
+                                  </Button>
+                                  <span className="text-[11px] text-muted">{fmtQty(thisQty)} {line.uom_code ?? ""}</span>
+                                </div>
+                              ) : (<>
                               <Input
                                 className={`text-right ${needsQty ? "ring-1 ring-warn/50" : ""}`}
                                 type="number"
@@ -1743,6 +1821,7 @@ export default function ConsignmentForm() {
                                   />
                                 </div>
                               )}
+                              </>)}
                             </td>
                             <td className="px-3 py-2">
                               {line.is_serial_tracked ? (
@@ -1753,6 +1832,18 @@ export default function ConsignmentForm() {
                                   ) : thisQty > 0 ? (
                                     <span className="text-warn">{current?.serial_numbers?.length ?? 0}/{thisQty} {codeNoun(line)}</span>
                                   ) : "Set qty first"}
+                                </Button>
+                              ) : isPackLine(line) ? (
+                                // The packages ARE the codes: this carton's, listed.
+                                <Button variant="ghost" disabled={!(current?.serial_numbers?.length)}
+                                        onClick={() => setBoxCodesOf({
+                                          ...line,
+                                          box_codes: (line.box_codes ?? []).filter(
+                                            (p) => current?.serial_numbers?.includes(p.code)),
+                                        })}
+                                        title="The package codes in this carton">
+                                  <Box className="h-4 w-4 text-brand" />
+                                  {(current?.serial_numbers?.length ?? 0)} code{(current?.serial_numbers?.length ?? 0) === 1 ? "" : "s"}
                                 </Button>
                               ) : (
                                 <span className="text-xs text-muted">—</span>
@@ -1820,6 +1911,116 @@ export default function ConsignmentForm() {
         </>
       )}
 
+      <Modal isOpen={!!boxCodesOf} onOpenChange={(open) => { if (!open) setBoxCodesOf(null); }}
+             size="md" scrollBehavior="inside">
+        <ModalContent>
+          <ModalHeader className="flex flex-col gap-1">
+            <span className="flex items-center gap-2 text-base font-semibold text-ink">
+              <Box className="h-4 w-4 text-brand" aria-hidden /> Box codes
+            </span>
+            <span className="text-xs font-normal text-muted">
+              {boxCodesOf ? `${boxCodesOf.item_code ?? ""} — ${boxCodesOf.item_name ?? ""}` : ""}
+            </span>
+          </ModalHeader>
+          <ModalBody className="pb-6">
+            <p className="rounded-lg bg-content2 px-3 py-2 text-xs text-ink-700">
+              This item travels in packages — these are the ones in this carton, each with
+              what it carries after outward QC.
+            </p>
+            <ol className="mt-1 divide-y divide-line/70 overflow-hidden rounded-xl border border-line">
+              {(boxCodesOf?.box_codes ?? []).map((pkg, i) => (
+                <li key={pkg.code} className="flex items-center gap-3 px-3 py-2.5">
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-brand/10 text-[11px] font-bold text-brand">
+                    {i + 1}
+                  </span>
+                  <span className="mono min-w-0 flex-1 truncate text-[13px] font-semibold text-ink" title={pkg.code}>{pkg.code}</span>
+                  <span className="text-[11px] text-muted">{fmtQty(num(pkg.quantity))} {boxCodesOf?.uom_code ?? ""}</span>
+                </li>
+              ))}
+            </ol>
+          </ModalBody>
+        </ModalContent>
+      </Modal>
+
+      <Modal isOpen={!!packPick} onOpenChange={(open) => { if (!open) setPackPick(null); }}
+             size="xl" scrollBehavior="inside">
+        <ModalContent>
+          <ModalHeader className="flex flex-col gap-1">
+            <span className="flex items-center gap-2 text-base font-semibold text-ink">
+              <Box className="h-4 w-4 text-brand" aria-hidden /> Packages in this carton
+            </span>
+            <span className="text-xs font-normal text-muted">
+              {packPick ? `${packPick.line.item_code ?? ""} — ${packPick.line.item_name ?? ""}` : ""}
+            </span>
+          </ModalHeader>
+          <ModalBody className="gap-3 pb-6">
+            {packPick && (() => {
+              const line = packPick.line;
+              const carton = packages[packPick.packageIndex]?.package_no ?? "";
+              const all = line.box_codes ?? [];
+              const total = packPicked.reduce((sum, code) =>
+                sum + num(all.find((p) => p.code === code)?.quantity), 0);
+              const free = all.filter((p) => !cartonOfPackage.has(p.code)
+                || cartonOfPackage.get(p.code) === carton);
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-content2/50 px-3 py-2.5 text-sm">
+                    <span><b className="text-ink">{packLabel(line, packPicked.length)}</b> · {fmtQty(total)} {line.uom_code ?? ""}</span>
+                    <span className="flex gap-3 text-xs font-medium">
+                      <button type="button" className="text-brand hover:underline"
+                              onClick={() => setPackPicked(free.map((p) => p.code))}>Select all free</button>
+                      <button type="button" className="text-muted hover:underline"
+                              onClick={() => setPackPicked([])}>Clear</button>
+                    </span>
+                  </div>
+                  <ul className="grid gap-2 sm:grid-cols-2">
+                    {all.map((pkg) => {
+                      const on = packPicked.includes(pkg.code);
+                      const elsewhere = cartonOfPackage.get(pkg.code);
+                      const taken = !!elsewhere && elsewhere !== carton;
+                      return (
+                        <li key={pkg.code}>
+                          <button type="button" disabled={taken}
+                                  onClick={() => setPackPicked((now) => on
+                                    ? now.filter((c) => c !== pkg.code) : [...now, pkg.code])}
+                                  className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors ${
+                                    on ? "border-brand bg-brand/[0.06]"
+                                      : taken ? "cursor-not-allowed border-line bg-content2/40 opacity-60"
+                                      : "border-line bg-content1 hover:border-brand/60"}`}>
+                            <span className={`grid h-5 w-5 shrink-0 place-items-center rounded border ${
+                              on ? "border-brand bg-brand text-white" : "border-line"}`}>
+                              {on && <CheckCircle2 className="h-3.5 w-3.5" />}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="mono block truncate text-[13px] font-semibold text-ink" title={pkg.code}>{pkg.code}</span>
+                              <span className="text-[11px] text-muted">
+                                carries {fmtQty(num(pkg.quantity))} {line.uom_code ?? ""}
+                                {taken && <> · <b className="text-warn">in {elsewhere}</b></>}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <div className="flex justify-end gap-2">
+                    <Button variant="ghost" onClick={() => setPackPick(null)}>Cancel</Button>
+                    <Button onClick={() => {
+                      patchPackageLine(packPick.packageIndex, line, {
+                        quantity: total, serial_numbers: packPicked, is_serial_tracked: false,
+                      }, true);
+                      setPackPick(null);
+                    }}>
+                      <CheckCircle2 className="h-4 w-4" /> Put in {carton || "carton"}
+                    </Button>
+                  </div>
+                </>
+              );
+            })()}
+          </ModalBody>
+        </ModalContent>
+      </Modal>
+
       <SerialNumbersModal
         isOpen={!!serialTarget}
         onClose={() => setSerialTarget(null)}
@@ -1871,6 +2072,10 @@ function BatchPlace({ line }: { line: IssueDispatchSourceItem }) {
 /** Whether this row went through outward QC or out without needing it. Only on a
  *  fresh packing source — a saved consignment's rows are rebuilt from its own lines. */
 function QcTag({ line }: { line: IssueDispatchSourceItem }) {
+  return <QcState line={line} />;
+}
+
+function QcState({ line }: { line: IssueDispatchSourceItem }) {
   return line.requires_qc ? (
     <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ok">
       <CheckCircle2 className="h-3 w-3" aria-hidden /> QC accepted

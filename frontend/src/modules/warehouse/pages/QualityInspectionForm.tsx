@@ -1,9 +1,14 @@
-import { Button, Can, ConfirmModal, ErrorBanner, Field, Input, PageHeader, Select, StatusPill } from "@/shared/components";
+import {
+  Button, Can, ConfirmModal, ErrorBanner, Field, Input, PackageCheckModal, PageHeader, Select, StatusPill,
+} from "@/shared/components";
+import {
+  type PackEntry, baseOf, checkFrom, checkSummary, expandPacks, shrinkWithin, splitByCheck,
+} from "@/shared/packing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Chip } from "@heroui/react";
-import { ArrowLeft, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
+import { ArrowLeft, Boxes, FileText, Plus, ScanLine, Trash2 } from "lucide-react";
 import { MetaCard, MetaRow, Section } from "../components/DocumentMeta";
 import { LinesEditor, QtyInput, TextInput, type LineColumn } from "../components/LinesEditor";
 import { Lookup } from "../components/Lookup";
@@ -100,6 +105,8 @@ export default function QualityInspectionForm({
   const [paramsFor, setParamsFor] = useState<number | null>(null);
   const [serialsFor, setSerialsFor] = useState<number | null>(null);
   const [paramsForImeis, setParamsForImeis] = useState<number | null>(null);
+  /** The line whose packs are being inspected one by one (2026-10-27). */
+  const [packsFor, setPacksFor] = useState<number | null>(null);
 
   /* The inspector is whoever is standing at the bench. Left at "pick one" it was a
    * list of every active employee in HCM with the person actually inspecting somewhere
@@ -148,6 +155,8 @@ export default function QualityInspectionForm({
         // "nothing rejected", where [] would mean "every unit rejected".
         serial_numbers: parseCodes(l.serial_numbers),
         imei_numbers: parseCodes(l.imei_numbers),
+        accepted_pack_breakdown: l.accepted_pack_breakdown ?? null,
+        rejected_pack_breakdown: l.rejected_pack_breakdown ?? null,
       })),
     });
   }, [doc]);
@@ -181,13 +190,17 @@ export default function QualityInspectionForm({
   const delivery = grn ?? pulled;
 
   const deliveryMeta = useMemo(() => {
-    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[] }>();
+    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[], is_imei_tracked?: boolean, imeis: string[], packs: PackEntry[] | null, uom?: string | null }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
         is_serial_tracked: line.is_serial_tracked,
         serials: parseCodes(line.serial_numbers) ?? [],
         is_imei_tracked: line.is_imei_tracked,
         imeis: parseCodes(line.imei_numbers) ?? [],
+        // What the GRN COUNTED, in packs — what QC keeps or rejects pack by pack.
+        packs: line.pack_breakdown?.some((e) => e.level > 0 && num(e.qty) > 0)
+          ? line.pack_breakdown : null,
+        uom: line.uom_code,
       });
     }
     return byLine;
@@ -215,6 +228,26 @@ export default function QualityInspectionForm({
     if (!receiptItemId) return null;
     const meta = deliveryMeta.get(receiptItemId);
     return meta?.serials?.length ? meta.serials : null;
+  };
+
+  /** The packs the GRN counted for a line, when QC can decide it pack by pack: the
+   *  whole delivery is being inspected (a part inspection judges units, not packs). */
+  const receivedPacks = (index: number | null): PackEntry[] | null => {
+    if (index === null) return null;
+    const line = form.items[index];
+    const meta = line?.receipt_item_id ? deliveryMeta.get(line.receipt_item_id) : undefined;
+    if (!meta?.packs) return null;
+    return Math.abs(baseOf(meta.packs) - num(line.inspected_qty)) < 1e-6 ? meta.packs : null;
+  };
+  /** A line's pack verdict as the modal reads it: what was decided, else the accepted
+   *  quantity cut down out of the counted packs (how a typed number reads). */
+  const packCheckOf = (index: number) => {
+    const ref = receivedPacks(index) ?? [];
+    const packs = expandPacks(ref);
+    const line = form.items[index];
+    const kept = line.accepted_pack_breakdown
+      ?? shrinkWithin(ref, Math.min(num(line.accepted_qty), baseOf(ref)));
+    return { packs, check: checkFrom(packs, kept) };
   };
 
   /** The GRN IMEIs behind an inspection line. */
@@ -317,10 +350,17 @@ export default function QualityInspectionForm({
           rejected = Math.max(inspected - accepted, 0);
         }
 
+        // A pack verdict that no longer adds up — the number was typed, or the serials
+        // picked a different count — is dropped rather than sent: the server refuses
+        // packs that disagree with the quantity, and the typed number is the newer word.
+        const packsAgree = !next.accepted_pack_breakdown
+          || (Math.abs(baseOf(next.accepted_pack_breakdown) - accepted) < 1e-6
+              && Math.abs(accepted + baseOf(next.rejected_pack_breakdown) - inspected) < 1e-6);
         return {
           ...next,
           accepted_qty: accepted,
           rejected_qty: rejected,
+          ...(packsAgree ? {} : { accepted_pack_breakdown: null, rejected_pack_breakdown: null }),
           // An explicitly chosen result wins; otherwise it follows the split.
           result: patch.result ?? deriveResult(inspected, accepted),
         };
@@ -482,16 +522,38 @@ export default function QualityInspectionForm({
       key: "accepted",
       header: "Accepted",
       numeric: true,
-      width: "w-28",
-      render: (l, i) => (
-        <QtyInput
-          ariaLabel={`Accepted quantity, line ${i + 1}`}
-          value={l.accepted_qty}
-          max={num(l.inspected_qty)}
-          disabled={locked}
-          onChange={(v) => patchLine(i, { accepted_qty: v })}
-        />
-      ),
+      width: "min-w-[9rem] w-36",
+      render: (l, i) => {
+        const ref = receivedPacks(i);
+        const verdict = ref ? packCheckOf(i) : null;
+        const lost = verdict ? splitByCheck(verdict.packs, verdict.check).lostQty : 0;
+        return (
+          <div className="space-y-1">
+            <QtyInput
+              ariaLabel={`Accepted quantity, line ${i + 1}`}
+              value={l.accepted_qty}
+              max={num(l.inspected_qty)}
+              disabled={locked}
+              onChange={(v) => patchLine(i, { accepted_qty: v })}
+            />
+            {/* Pack by pack (2026-10-27): reject a carton whole, or a few units out of
+                one that is kept — the accepted quantity follows. */}
+            {verdict && (
+              <button type="button" onClick={() => setPacksFor(i)}
+                      title={locked ? "View which packs were kept" : "Keep or reject each pack"}
+                      className={`flex min-h-9 w-full items-center justify-end gap-1.5 rounded-lg border px-2 text-[11px] font-semibold transition-colors ${
+                        lost > 0 ? "border-bad/30 bg-bad/5 text-bad hover:bg-bad/10"
+                          : "border-line text-brand hover:border-brand hover:bg-brand-050"}`}>
+                <Boxes className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                <span className="truncate">
+                  {checkSummary(verdict.packs, verdict.check, "rejected")}
+                  {!l.accepted_pack_breakdown && lost > 0 && " · check packs"}
+                </span>
+              </button>
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "rejected",
@@ -871,6 +933,36 @@ export default function QualityInspectionForm({
         }}
       />
 
+      {packsFor !== null && form.items[packsFor] && (() => {
+        const index = packsFor;
+        const line = form.items[index];
+        const { packs, check } = packCheckOf(index);
+        const tracked = isSerialTracked(index) || isImeiTracked(index);
+        const saved = savedLine(index);
+        return (
+          <PackageCheckModal
+            open
+            mode="qc"
+            readOnly={locked}
+            packName={packs.find((p) => p.level > 0)?.entry.name ?? "pack"}
+            uom={saved?.uom_code ?? deliveryMeta.get(line.receipt_item_id ?? 0)?.uom}
+            itemLabel={[saved?.item_code ?? line.item_code, saved?.item_name ?? line.item_name,
+                        line.batch_no ? `batch ${line.batch_no}` : null].filter(Boolean).join(" · ")
+              + (tracked ? " — then pick the accepted serials / IMEIs to match" : "")}
+            packages={packs}
+            value={check}
+            onClose={() => setPacksFor(null)}
+            onSave={(next) => {
+              const { kept, lost, keptQty } = splitByCheck(packs, next);
+              patchLine(index, {
+                accepted_qty: keptQty,
+                accepted_pack_breakdown: kept,
+                rejected_pack_breakdown: lost.length ? lost : null,
+              });
+            }}
+          />
+        );
+      })()}
       <SerialNumbersModal
         isOpen={serialsFor !== null}
         onClose={() => setSerialsFor(null)}

@@ -342,9 +342,10 @@ async def acknowledge(indent_id: int, body: AcknowledgeIn,
         perms.INDENT_ACKNOWLEDGE, perms.STOCK_TRANSFER_RECEIVE, service.str_in_reach))):
     lines = {line.indent_item_id: Decimal(str(line.received_quantity))
              for line in body.lines}
-    return await service.acknowledge_receipt(db, indent_id, lines, user,
-                                             condition=body.condition,
-                                             remarks=body.remarks)
+    return await service.acknowledge_receipt(
+        db, indent_id, lines, user, condition=body.condition, remarks=body.remarks,
+        package_receipts={line.indent_item_id: line.package_receipts or {}
+                          for line in body.lines})
 
 
 @indent_router.get("/{indent_id}/receipt-attachments", response_model=list[AttachmentRead])

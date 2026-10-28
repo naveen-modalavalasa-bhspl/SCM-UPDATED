@@ -549,6 +549,8 @@ export interface RFQ extends RFQListRow {
   consolidation_no?: string | null;
   /** How the quotes are ranked. Null means the backend default. */
   evaluation_method?: string | null;
+  /** The buyer asks suppliers to quote freight. Off, the portal shows no Freight field. */
+  freight_required?: boolean;
   warehouse_id?: number | null;
   warehouse_name?: string | null;
   project_id?: number | null;
@@ -593,6 +595,7 @@ export interface RFQCreate {
   requisition_id?: number | null;
   consolidation_id?: number | null;
   evaluation_method?: string | null;
+  freight_required?: boolean;
   warehouse_id?: number | null;
   project_id?: number | null;
   /** Typed only on an RFQ raised cold — a requisition's own values win otherwise. */
@@ -631,6 +634,16 @@ export interface RFQInvite {
 /* -------------------------------------------------------------------- Quotation */
 
 export interface QuoteItem extends CombinationValue {
+  /** What the BUYER asked for on the RFQ (2026-10-26), and whether this offer is
+   *  another brand / variant / model. */
+  requested_brand_id?: number;
+  requested_brand_name?: string | null;
+  requested_variant_id?: number;
+  requested_variant_name?: string | null;
+  requested_model_id?: number;
+  requested_model_name?: string | null;
+  requested_any?: boolean;
+  brand_changed?: boolean;
   id: number;
   line_no: number;
   rfq_item_id?: number | null;
@@ -716,6 +729,15 @@ export interface QuoteChangeLine {
   proposed_rate: number;
   proposed_discount_percent: number;
   note?: string | null;
+  /** The brand as quoted and as proposed (2026-10-26). */
+  current_brand_id?: number;
+  current_variant_id?: number;
+  current_model_id?: number;
+  current_combination?: string | null;
+  proposed_brand_id?: number | null;
+  proposed_variant_id?: number | null;
+  proposed_model_id?: number | null;
+  proposed_combination?: string | null;
 }
 
 /** A Change Request: the buyer's ask on a supplier's quotation. Status words the
@@ -811,6 +833,9 @@ export interface QuoteSubmit {
 /** One vendor's offer on one RFQ line, split the way a buyer reads it. The backend
  *  computes it from the same lines the ranking read — never re-derive it here. */
 export interface ComparisonCell {
+  /** The brand quoted, and whether it is not what the RFQ asked for (2026-10-26). */
+  combination?: string | null;
+  brand_changed?: boolean;
   quotation_id: number;
   vendor_id: number;
   vendor_name?: string | null;
@@ -828,6 +853,8 @@ export interface ComparisonCell {
 }
 
 export interface ComparisonRow {
+  /** What the RFQ asked for — a brand / variant / model, or "Any brand". */
+  requested_combination?: string | null;
   rfq_item_id: number;
   item_id: number;
   item_code?: string | null;

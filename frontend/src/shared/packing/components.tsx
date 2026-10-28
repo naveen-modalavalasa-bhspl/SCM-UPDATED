@@ -5,7 +5,7 @@ import {
 import { Modal, ModalContent, ModalHeader, ModalBody, ModalFooter } from "@heroui/react";
 import {
   type PackEntry, type PackHierarchy, LOOSE, baseOf, describe, entriesFrom, fmtQty,
-  fullCountsOf, greedy, greedyWithPart, heldOf, hierarchyOf, isPartial, matchState, num,
+  fullCountsOf, greedyFor, greedyWithPartFor, heldOf, hierarchyOf, isPartial, matchState, num,
   packWarnings, partEntry, USAGE_LABEL, levelsFor, type ContainerUsage,
 } from "./packing";
 import { usePackOptions } from "./api";
@@ -604,9 +604,13 @@ export function PackBreakdownEditor({
           const lockedOut = lv.level < minLevel;
           const cap = limits?.[lv.level];
           const disabled = readOnly || lockedOut;
+          // A level on the line that is not one of the usage's containers stays on
+          // screen so it can be taken off — and says why the save will refuse it.
+          const stray = !!usageLevels && !usageLevels.includes(lv.level) && qty > 0;
           return (
             <div key={lv.level}
-                 className={`rounded-xl border p-2.5 ${qty > 0
+                 className={`rounded-xl border p-2.5 ${stray
+                   ? "border-danger/60 bg-danger/5" : qty > 0
                    ? "border-brand/50 bg-brand-050/60" : "border-line bg-content1"} ${
                    lockedOut ? "opacity-60" : ""}`}>
               <div className="flex items-center justify-between gap-1">
@@ -619,6 +623,12 @@ export function PackBreakdownEditor({
                 {lv.level === 0 ? "outside any pack" : `1 = ${fmtQty(lv.size)} ${unit}`}
                 {lv.level > 0 && num(lv.min_fill) > 0 && ` · min ${fmtQty(lv.min_fill)}`}
               </div>
+              {stray && usage && (
+                <div className="mb-2 flex items-start gap-1 text-[11px] font-semibold leading-4 text-danger">
+                  <AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden />
+                  Not a {USAGE_LABEL[usage].toLowerCase()} container — set it to 0
+                </div>
+              )}
               {readOnly ? (
                 <div className="text-lg font-bold text-ink tabular">{fmtQty(qty)}</div>
               ) : (
@@ -741,13 +751,13 @@ export function PackBreakdownEditor({
             && !limits && (
             <>
               <button type="button"
-                      onClick={() => onChange(greedy(hierarchy, num(target)))}
+                      onClick={() => onChange(greedyFor(hierarchy, num(target), usage))}
                       className="inline-flex min-h-9 items-center gap-1 rounded-md border border-current px-2 text-xs font-semibold">
                 <Wand2 size={12} aria-hidden /> Fill with whole packs
               </button>
               {allowPartial && (
                 <button type="button"
-                        onClick={() => onChange(greedyWithPart(hierarchy, num(target)))}
+                        onClick={() => onChange(greedyWithPartFor(hierarchy, num(target), usage))}
                         className="inline-flex min-h-9 items-center gap-1 rounded-md border border-current px-2 text-xs font-semibold">
                   <Package size={12} aria-hidden /> Remainder as a part pack
                 </button>

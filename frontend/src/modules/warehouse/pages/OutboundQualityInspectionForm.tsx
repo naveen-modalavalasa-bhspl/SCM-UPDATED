@@ -16,6 +16,7 @@ import {
   updateOutboundInspection, warehouseOptions,
 } from "../api";
 import { fmtQty, num, percent, today } from "../format";
+import { PackageCheckModal } from "@/shared/components";
 import { PackQty, baseOf, shrinkWithin } from "@/shared/packing";
 import { resolveAcceptedUnits, unitsForAccepted, unitsStillToReject } from "../qcUnits";
 import { alerts } from "@/modules/alerts";
@@ -130,6 +131,7 @@ export default function OutboundQualityInspectionForm({
         // Left null when the line carries no decision yet — the picker reads that as
         // "nothing rejected", where [] would mean "every unit rejected".
         serial_numbers: parseCodes(l.serial_numbers),
+        pack_rejections: (l as { pack_rejections?: Record<string, number> | null }).pack_rejections ?? null,
       })),
     });
   }, [doc]);
@@ -198,15 +200,51 @@ export default function OutboundQualityInspectionForm({
   };
 
   const deliveryMeta = useMemo(() => {
-    const byLine = new Map<number, { is_serial_tracked?: boolean, serials: string[] }>();
+    const byLine = new Map<number, {
+      is_serial_tracked?: boolean, serials: string[], boxes: Map<string, number> | null,
+      packName: string,
+    }>();
     for (const line of delivery?.items ?? []) {
       byLine.set(line.id, {
         is_serial_tracked: line.is_serial_tracked || line.is_imei_tracked,
         serials: parseCodes(line.unit_keys?.length ? line.unit_keys : line.serial_numbers) ?? [],
+        // Issued in BOXES (2026-10-26): each box code and what it carried of the line.
+        boxes: line.issue_in_boxes && line.box_codes?.length
+          ? new Map(line.box_codes.map((b) => [b.code, Number(b.take) || 0])) : null,
+        packName: (line.box_codes?.[0]?.pack_name ?? "box").toLowerCase(),
       });
     }
     return byLine;
   }, [delivery]);
+
+  /** The boxes a line issued in boxes sent, code -> what each carried; null otherwise. */
+  const boxesOf = (index: number | null) => {
+    if (index === null) return null;
+    const id = form.items[index]?.issue_item_id;
+    return id ? deliveryMeta.get(id)?.boxes ?? null : null;
+  };
+  /** "1 strip" / "11 strips" — a package count in the issue container's name. */
+  const packCount = (index: number, count: number) => {
+    const id = form.items[index]?.issue_item_id;
+    const name = (id && deliveryMeta.get(id)?.packName) || "box";
+    const plural = /(x|s|ch|sh)$/.test(name) ? `${name}es` : `${name}s`;
+    return `${count} ${count === 1 ? name : plural}`;
+  };
+  /** The packages of a package line, in the issue's order, with what each carries. */
+  const packagesOf = (index: number) => {
+    const boxes = boxesOf(index);
+    return boxes ? [...boxes.entries()].map(([code, carries]) => ({ code, carries })) : [];
+  };
+  /** Rejected base units placed in packages: whole packages left out, plus units
+   *  rejected out of kept ones (2026-10-26). */
+  const placedRejected = (index: number) => {
+    const boxes = boxesOf(index);
+    if (!boxes) return 0;
+    const kept = resolvedSerials(index);
+    const partial = form.items[index]?.pack_rejections ?? {};
+    return [...boxes.entries()].reduce((sum, [code, carries]) => sum + (kept.includes(code)
+      ? Math.min(Number(partial[code] ?? 0), carries) : carries), 0);
+  };
 
   const isSerialTracked = (index: number | null) => {
     if (index === null) return false;
@@ -236,6 +274,12 @@ export default function OutboundQualityInspectionForm({
   const resolvedSerials = (index: number): string[] => {
     const line = form.items[index];
     if (!line) return [];
+    const boxes = boxesOf(index);
+    if (boxes) {
+      // Untouched means every box kept; a stored choice keeps only the boxes sent.
+      const stored = (line.serial_numbers ?? []).filter((code) => boxes.has(code));
+      return stored.length || num(line.accepted_qty) <= 0 ? stored : [...boxes.keys()];
+    }
     return resolveAcceptedUnits(
       line.serial_numbers, availableSerials(index), num(line.accepted_qty));
   };
@@ -281,6 +325,9 @@ export default function OutboundQualityInspectionForm({
 
   /** The line's units after its accepted quantity moves — see `unitsForAccepted`. */
   const keepUnitsInStep = (line: InspectionItemWrite, accepted: number) => {
+    // A box line keeps its boxes when the accepted quantity comes down: some units
+    // rejected inside a kept box is normal (2026-10-26).
+    if (line.issue_item_id && deliveryMeta.get(line.issue_item_id)?.boxes) return line.serial_numbers;
     const offered = unitsOfLine(line);
     return offered
       ? unitsForAccepted(line.serial_numbers, offered, num(line.accepted_qty), accepted)
@@ -288,7 +335,7 @@ export default function OutboundQualityInspectionForm({
   };
 
   /** How many more units the inspector still has to tick as rejected on a line. */
-  const unitsToReject = (index: number) => availableSerials(index)
+  const unitsToReject = (index: number) => availableSerials(index) && !boxesOf(index)
     ? unitsStillToReject(resolvedSerials(index).length, num(form.items[index]?.accepted_qty))
     : 0;
 
@@ -357,6 +404,16 @@ export default function OutboundQualityInspectionForm({
       const available = availableSerials(index);
       if (!available && !isSerialTracked(index)) continue;
       const label = `Line ${index + 1} (${line.item_code ?? line.item_name ?? "item"})`;
+      if (boxesOf(index)) {
+        // Issued in boxes: the kept boxes must hold what is accepted (2026-10-26).
+        // Every rejected unit is placed in a package (2026-10-26).
+        if (Math.abs(placedRejected(index) - num(line.rejected_qty)) > 1e-6) {
+          throw new Error(`${label}: ${num(line.rejected_qty)} rejected, but `
+            + `${placedRejected(index)} is placed in packages. Open Accepted units and say which `
+            + "packages it came out of.");
+        }
+        continue;
+      }
       const required = Math.floor(num(line.accepted_qty));
       if (num(line.accepted_qty) !== required) {
         const rest = num(line.inspected_qty) - required;
@@ -485,7 +542,13 @@ export default function OutboundQualityInspectionForm({
       header: "Inspected",
       numeric: true,
       width: "w-28",
-      render: (l, i) => (
+      render: (l, i) => boxesOf(i) ? (
+        // Issued in packages (2026-10-26): every package sent is inspected.
+        <div className="text-sm">
+          <div className="font-semibold text-ink">{packCount(i, boxesOf(i)!.size)}</div>
+          <div className="text-[11px] text-muted">{fmtQty(num(l.inspected_qty))} base</div>
+        </div>
+      ) : (
         <QtyInput
           ariaLabel={`Inspected quantity, line ${i + 1}`}
           value={l.inspected_qty}
@@ -499,7 +562,14 @@ export default function OutboundQualityInspectionForm({
       header: "Accepted",
       numeric: true,
       width: "w-28",
-      render: (l, i) => (
+      render: (l, i) => boxesOf(i) ? (
+        // Worked out, never typed: what the kept packages carry, less what was
+        // rejected out of them (2026-10-26).
+        <div className="text-sm">
+          <div className="font-semibold text-ink">{fmtQty(num(l.accepted_qty))}</div>
+          <div className="text-[11px] text-muted">in {packCount(i, resolvedSerials(i).length)}</div>
+        </div>
+      ) : (
         <QtyInput
           ariaLabel={`Accepted quantity, line ${i + 1}`}
           value={l.accepted_qty}
@@ -514,7 +584,28 @@ export default function OutboundQualityInspectionForm({
       header: "Rejected",
       numeric: true,
       width: "w-28",
-      render: (l, i) => (
+      render: (l, i) => boxesOf(i) ? (
+        // Rejected in BASE units; every one of them is then placed in a package.
+        <div>
+          <QtyInput
+            ariaLabel={`Rejected quantity, line ${i + 1}`}
+            value={l.rejected_qty}
+            max={num(l.inspected_qty)}
+            disabled={locked}
+            onChange={(v) => patchLine(i, { rejected_qty: v })}
+          />
+          {num(l.rejected_qty) > 0 && (
+            Math.abs(placedRejected(i) - num(l.rejected_qty)) > 1e-6 ? (
+              <button type="button" onClick={() => setSerialsFor(i)} disabled={locked}
+                      className="mt-0.5 text-[11px] font-semibold text-warn underline">
+                {fmtQty(placedRejected(i))} of {fmtQty(num(l.rejected_qty))} placed — say which packs
+              </button>
+            ) : (
+              <div className="mt-0.5 text-[11px] text-ok">All placed in packs</div>
+            )
+          )}
+        </div>
+      ) : (
         <QtyInput
           ariaLabel={`Rejected quantity, line ${i + 1}`}
           value={l.rejected_qty}
@@ -568,6 +659,30 @@ export default function OutboundQualityInspectionForm({
         // as all accepted rather than as zero. `resolvedSerials` additionally repairs
         // pre-seed rows (nothing stored, whole set accepted) back to the offered set.
         const accepted = resolvedSerials(index).length;
+        const boxes = boxesOf(index);
+        if (boxes) {
+          const whole = boxes.size - accepted;
+          const partial = Object.values(form.items[index]?.pack_rejections ?? {})
+            .filter((n) => Number(n) > 0).length;
+          const placed = Math.abs(placedRejected(index) - num(form.items[index]?.rejected_qty)) < 1e-6;
+          return (
+            <div>
+              <Button variant="ghost" onClick={() => setSerialsFor(index)}
+                      title={locked ? "View the packages" : "Say which packages were rejected"}>
+                {placed && !whole && !partial ? <CheckCircle2 className="h-4 w-4 text-ok" />
+                  : <ScanLine className={`h-4 w-4 ${placed ? "text-ok" : "text-warn"}`} />}
+                {accepted}/{boxes.size} kept
+              </Button>
+              {(whole > 0 || partial > 0) && (
+                <div className="mt-0.5 text-[11px] text-muted">
+                  {whole > 0 && <span className="text-bad">{packCount(index, whole)} rejected</span>}
+                  {whole > 0 && partial > 0 && " · "}
+                  {partial > 0 && <span className="text-warn">{partial} part-rejected</span>}
+                </div>
+              )}
+            </div>
+          );
+        }
         const toPick = unitsToReject(index);
         if (toPick > 0 && !locked) {
           return (
@@ -850,10 +965,36 @@ export default function OutboundQualityInspectionForm({
         <AttachmentsPanel entityType="OUTBOUND_INSPECTION" entityId={doc?.id} category="QC" readOnly={locked} />
       </Section>
 
-      <SerialNumbersModal
-        isOpen={serialsFor !== null}
+      <PackageCheckModal
+        open={serialsFor !== null && !!boxesOf(serialsFor)}
         onClose={() => setSerialsFor(null)}
-        quantity={serialsFor === null ? 0 : num(form.items[serialsFor]?.accepted_qty)}
+        mode="qc"
+        packages={serialsFor === null ? [] : packagesOf(serialsFor)}
+        value={{
+          kept: serialsFor === null ? [] : resolvedSerials(serialsFor),
+          partial: (serialsFor === null ? null : form.items[serialsFor]?.pack_rejections) ?? {},
+        }}
+        target={serialsFor === null ? undefined : num(form.items[serialsFor]?.rejected_qty)}
+        packName={serialsFor === null ? "package"
+          : deliveryMeta.get(form.items[serialsFor]?.issue_item_id ?? 0)?.packName ?? "package"}
+        uom={serialsFor === null ? null : savedLine(serialsFor)?.uom_code ?? null}
+        itemLabel={serialsFor === null ? ""
+          : `${form.items[serialsFor]?.item_code ?? ""} — ${form.items[serialsFor]?.item_name ?? ""}`}
+        readOnly={locked}
+        onSave={({ kept, partial }) => {
+          if (serialsFor === null) return;
+          const boxes = boxesOf(serialsFor)!;
+          const lost = [...boxes.entries()].reduce((sum, [code, carries]) => sum + (kept.includes(code)
+            ? Math.min(partial[code] ?? 0, carries) : carries), 0);
+          patchLine(serialsFor, { serial_numbers: kept, pack_rejections: partial, rejected_qty: lost });
+        }}
+      />
+
+      <SerialNumbersModal
+        isOpen={serialsFor !== null && !boxesOf(serialsFor)}
+        onClose={() => setSerialsFor(null)}
+        quantity={serialsFor === null ? 0 : boxesOf(serialsFor)
+          ? resolvedSerials(serialsFor).length : num(form.items[serialsFor]?.accepted_qty)}
         initial={serialsFor === null ? null : resolvedSerials(serialsFor)}
         available={availableSerials(serialsFor)}
         enforceCount
@@ -867,6 +1008,17 @@ export default function OutboundQualityInspectionForm({
           // The units kept are the quantity accepted — one serial is one unit, so
           // letting the inspector type a different number could only disagree with it.
           if (serialsFor !== null) {
+            const boxes = boxesOf(serialsFor);
+            if (boxes) {
+              // A box unticked is rejected whole: the accepted quantity drops to what
+              // the kept boxes hold, never rises above what was accepted.
+              // The packages kept ARE the accepted quantity (2026-10-26).
+              patchLine(serialsFor, {
+                serial_numbers: accepted,
+                accepted_qty: accepted.reduce((sum, code) => sum + (boxes.get(code) ?? 0), 0),
+              });
+              return;
+            }
             patchLine(serialsFor, {
               serial_numbers: accepted,
               ...(availableSerials(serialsFor) ? { accepted_qty: accepted.length } : {}),

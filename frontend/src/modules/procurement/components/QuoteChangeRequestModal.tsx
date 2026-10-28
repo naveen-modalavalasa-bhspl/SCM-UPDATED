@@ -6,6 +6,10 @@ import { ErrorBanner, NoticeChip, Textarea, useToast } from "@/shared/components
 import { Button } from "./ActionButton";
 import { rfqApi } from "../api";
 import type { Quotation, QuoteItem } from "../types";
+import {
+  CombinationPicker, askedLabel, combinationKey, combinationLabel, comboFrom, comboPayload,
+  useCombinationOptions, type CombinationValue,
+} from "@/shared/combination";
 
 const money = (n: number) =>
   `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -20,6 +24,9 @@ interface DraftLine {
   discount_percent: string;
   note: string;
   included: boolean;
+  /** The brand / variant / model asked of the supplier — the quoted one unless
+   *  the buyer picks another (2026-10-26). */
+  combo?: CombinationValue;
 }
 
 /**
@@ -54,7 +61,11 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
       discount_percent: String(item.discount_percent ?? 0),
       note: "",
       included: false,
+      combo: comboFrom(item),
     })));
+  const comboOptions = useCombinationOptions(quote.items.map((item) => item.item_id));
+  const comboChanged = (d: DraftLine) =>
+    !!d.combo?.brand_id && combinationKey(d.combo) !== combinationKey(comboFrom(d.item));
 
   const touched = drafts.filter((d) => d.included);
 
@@ -89,6 +100,7 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
         proposed_rate: Number(d.rate || 0),
         proposed_discount_percent: Number(d.discount_percent || 0),
         note: d.note || undefined,
+        ...(comboChanged(d) ? comboPayload(d.combo) : {}),
       })),
     }),
     onSuccess: (cr) => {
@@ -104,7 +116,8 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
   const changed = (d: DraftLine) =>
     Number(d.quantity) !== Number(d.item.quantity)
     || Number(d.rate) !== Number(d.item.rate)
-    || Number(d.discount_percent) !== Number(d.item.discount_percent ?? 0);
+    || Number(d.discount_percent) !== Number(d.item.discount_percent ?? 0)
+    || comboChanged(d);
 
   // Any included line with a rate increase blocks the send.
   const hasRateViolation = touched.some(rateIncreased);
@@ -231,6 +244,28 @@ export function QuoteChangeRequestModal({ quote, onClose }: {
 
                       {d.included && (
                         <>
+                          {/* The brand (2026-10-26): what was asked, what was quoted,
+                              and — if the buyer wants another — what to ask for now. */}
+                          {!!comboOptions.data?.[String(d.item.item_id)]?.length && (
+                            <div className="mt-2.5 rounded-md border border-line/70 bg-content1 p-2">
+                              <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] uppercase tracking-wide text-muted">
+                                <span>Brand</span>
+                                {askedLabel(d.item) && <span className="normal-case">RFQ asked: <b className="text-ink">{askedLabel(d.item)}</b></span>}
+                                <span className="normal-case">Quoted: <b className={d.item.brand_changed ? "text-warn" : "text-ink"}>{combinationLabel(d.item) || "—"}</b></span>
+                              </div>
+                              <CombinationPicker
+                                options={comboOptions.data?.[String(d.item.item_id)]}
+                                value={d.combo}
+                                ariaLabel={`Brand to ask for on ${d.item.item_name ?? "this line"}`}
+                                onChange={(combo) => update(d.quotation_item_id, { combo })}
+                              />
+                              {comboChanged(d) && (
+                                <div className="mt-1 text-[11px] font-semibold text-brand">
+                                  Asking for {combinationLabel(d.combo)} instead of {combinationLabel(d.item)}
+                                </div>
+                              )}
+                            </div>
+                          )}
                           {/* Inputs row */}
                           <div className="mt-2.5 grid grid-cols-3 gap-2">
                             <label className="text-[10px] uppercase tracking-wide text-muted">

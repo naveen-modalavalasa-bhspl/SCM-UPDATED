@@ -260,6 +260,13 @@ export const mastersApi = {
     switch: (itemId: number, id: number, isActive: boolean) =>
       api.put<MasterItemCombination>(`/api/items/${itemId}/combinations/${id}`,
                                      { is_active: isActive }).then((r) => r.data),
+    /** Map EXACTLY the brand / variant / model picked (2026-10-26). */
+    add: (itemId: number, pick: { brand_id: number; variant_id?: number | null; model_id?: number | null }) =>
+      api.post<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/combinations`, pick)
+        .then((r) => r.data.items),
+    remove: (itemId: number, id: number) =>
+      api.delete<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/combinations/${id}`)
+        .then((r) => r.data.items),
     mapBrands: (itemId: number, brandIds: number[]) =>
       api.post<{ items: MasterItemCombination[] }>(`/api/items/${itemId}/brands`,
                                                    { brand_ids: brandIds })
@@ -278,7 +285,8 @@ export const mastersApi = {
     sources: () => api.get<BrandItemMappingSources>("/api/brand-item-mapping/sources")
       .then((r) => r.data),
     /** Bulk-create/restore brand ↔ item pairings. */
-    save: (body: { brand_ids: number[]; item_ids: number[]; category_ids: number[] }) =>
+    save: (body: { brand_ids: number[]; item_ids: number[]; category_ids: number[];
+                   combinations?: { brand_id: number; variant_id?: number | null; model_id?: number | null }[] }) =>
       api.post<{ created: number; updated: number; brands: number; items: number }>(
         "/api/brand-item-mapping", body,
       ).then((r) => r.data),

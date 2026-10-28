@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Switch } from "@heroui/react";
+import { Truck } from "lucide-react";
 import { Card, ErrorBanner, Field, FormActions, Input, Textarea, PageHeader, Select, useToast } from "@/shared/components";
 import { Button } from "../components/ActionButton";
 import { api } from "@/shared/api/client";
@@ -40,6 +42,8 @@ export function RFQFormPage() {
   // Empty means "use the default" — the backend decides what that is, so the form
   // never has to carry a copy of it.
   const [evaluationMethod, setEvaluationMethod] = useState("");
+  // Off: the suppliers are not asked for freight, and the portal shows no field for it.
+  const [freightRequired, setFreightRequired] = useState(false);
   // Carried from the source document where there is one, and typed where there is not:
   // an RFQ raised cold still has to say who is buying, for where, on whose budget and
   // on whose paper. Same four fields the requisition form asks for.
@@ -112,6 +116,7 @@ export function RFQFormPage() {
     setDueDate(existing.due_date ?? "");
     setTerms(existing.terms ?? "");
     setEvaluationMethod(existing.evaluation_method ?? "");
+    setFreightRequired(Boolean(existing.freight_required));
     setOrg({
       departmentId: existing.department_id ?? "",
       warehouseId: existing.warehouse_id ?? "",
@@ -215,6 +220,7 @@ export function RFQFormPage() {
         due_date: dueDate || null,
         terms: terms || null,
         evaluation_method: evaluationMethod || null,
+        freight_required: freightRequired,
         warehouse_id: org.warehouseId === "" ? null : org.warehouseId,
         project_id: org.projectId === "" ? null : org.projectId,
         department_id: org.departmentId === "" ? null : org.departmentId,
@@ -374,6 +380,26 @@ export function RFQFormPage() {
             />
           </Field>
         </div>
+
+        {/* Whether the suppliers quote freight. Off, their portal shows no field for it
+          * and any freight sent is saved as 0. */}
+        <label className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-xl border px-4 py-3 transition-colors ${
+          freightRequired ? "border-brand/50 bg-brand-050/40" : "border-line bg-content1"}`}>
+          <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
+            freightRequired ? "bg-brand text-white" : "bg-content2 text-muted"}`}>
+            <Truck className="h-4 w-4" aria-hidden />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold text-ink">Ask suppliers to quote freight</span>
+            <span className="block text-xs text-muted">
+              {freightRequired
+                ? "Suppliers will see a Freight field on their quotation."
+                : "Off — suppliers quote without freight; the Freight field is hidden on their portal."}
+            </span>
+          </span>
+          <Switch isSelected={freightRequired} onValueChange={setFreightRequired}
+                  aria-label="Ask suppliers to quote freight" />
+        </label>
 
         <div>
           <h2 className="mb-3 text-sm font-semibold text-ink">

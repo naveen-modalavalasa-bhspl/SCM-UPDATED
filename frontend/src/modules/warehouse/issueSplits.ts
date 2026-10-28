@@ -59,6 +59,17 @@ const src = (value: number | null | undefined): number | null => (value ? value 
 export const sourceKey = (batchId?: number | null, binId?: number | null): string =>
   `${src(batchId) ?? 0}:${src(binId) ?? 0}`;
 
+/** How many identifiers a pick must name (2026-10-24): one per unit, except an item
+ *  issued in a container, which names one code per box — served as `codes_needed` for
+ *  the quantity it was served for, and dropped the moment that quantity changes. */
+export function codesNeeded(line: { issued_qty?: number | string | null;
+                                    codes_needed?: number | null;
+                                    codes_needed_at?: number | null }): number {
+  const issued = Math.trunc(Number(line.issued_qty ?? 0) || 0);
+  return line.codes_needed != null && line.codes_needed_at === issued
+    ? line.codes_needed : issued;
+}
+
 export interface IssueSplit {
   /** Where this split sits in the flat `form.items` array. */
   index: number;
@@ -66,6 +77,8 @@ export interface IssueSplit {
   issued: number;
   /** How many identifiers the storekeeper has named on it. */
   codes: number;
+  /** How many it must name: one per unit, or one per container (`codesNeeded`). */
+  need: number;
 
   /* --- what the shelf holds here. Three numbers, not one, because they answer
    * three different questions and collapsing them is what made a correct document
@@ -138,6 +151,8 @@ export interface IssueGroup {
   requested: number;
   issued: number;
   codes: number;
+  /** Identifiers the picks must name, summed — see `codesNeeded`. */
+  need: number;
   /** Still to allocate against the ask. Never negative: over-issue is its own error. */
   remaining: number;
   /** Sources this group has not drawn on yet, oldest first. */
@@ -225,6 +240,7 @@ export function groupIssueLines(
         requested: 0,
         issued: 0,
         codes: 0,
+        need: 0,
         remaining: 0,
         spare: [],
         warehouseTotal: null,
@@ -252,11 +268,13 @@ export function groupIssueLines(
     const issued = num(line.issued_qty);
     const codes = line.serial_numbers?.length ?? 0;
     const unread = sources.length === 0;
+    const need = codesNeeded(line);
     group.splits.push({
       index,
       line,
       issued,
       codes,
+      need,
       drawable: unread ? null : num(match?.drawable_qty),
       available: unread ? null : num(match?.available_qty),
       ownReserved: unread ? null : num(match?.own_reserved_qty),
@@ -278,6 +296,7 @@ export function groupIssueLines(
     group.issued += issued;
     if (line.indent_item_id) group.direct = false;
     group.codes += codes;
+    group.need += need;
     // A group's identity comes from whichever of its lines the backend has already
     // described. A freshly added split carries no `tracking_type` yet and must not
     // drag the badge back to a guess.
@@ -859,7 +878,7 @@ export function splitProblems(
         });
       }
       if (requireUnits && group.pickable && group.trackingType !== "NONE") {
-        const need = Math.trunc(split.issued);
+        const need = split.need;
         const gap = need - split.codes;
         if (gap > 0) {
           problems.push({

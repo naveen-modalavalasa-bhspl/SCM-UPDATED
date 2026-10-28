@@ -1075,6 +1075,10 @@ class InspectionItemWrite(BaseModel):
     remarks: str | None = None
     serial_numbers: Annotated[list[str], SerialList] | None = None
     imei_numbers: Annotated[list[str], SerialList] | None = None
+    # Decided by the PACK (2026-10-27): which of the GRN's counted packs were kept and
+    # which rejected. Both or neither; they must add up to what was inspected.
+    accepted_pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
+    rejected_pack_breakdown: Annotated[list[PackEntryIn], PACK_ENTRIES] | None = None
 
 
 class InspectionWrite(BaseModel):
@@ -1118,6 +1122,8 @@ class InspectionItemRead(CombinationOut, _Read):
     remarks: str | None = None
     serial_numbers: list[str] | None = None
     imei_numbers: list[str] | None = None
+    accepted_pack_breakdown: list[dict] | None = None
+    rejected_pack_breakdown: list[dict] | None = None
 
 
 class InspectionRead(_Read):
@@ -1158,6 +1164,9 @@ class OutboundInspectionItemWrite(BaseModel):
     rejection_reason: str | None = None
     remarks: str | None = None
     serial_numbers: dict[str, list[str]] | list[str] | None = None
+    #: Issued in packages (2026-10-26): units rejected out of each KEPT package,
+    #: {code: qty}. A package rejected whole is simply left out of the accepted codes.
+    pack_rejections: dict[str, float] | None = None
 
 class OutboundInspectionWrite(BaseModel):
     inspection_date: date
@@ -1192,6 +1201,7 @@ class OutboundInspectionItemRead(CombinationOut, _Read):
     # proof, 32 occurrences in sys_app_logs). A read model must be able to render what
     # the column actually holds; the WRITE side still takes strings and is unchanged.
     serial_numbers: dict[str, list[str]] | list[str] | list[dict] | None = None
+    pack_rejections: dict[str, float] | None = None
     # The packs this quantity travels in, read off the issue line (2026-10-22).
     pack_breakdown: list[dict] | None = None
     pack_text: str | None = None
@@ -1235,6 +1245,8 @@ class PutawayRead(CombinationOut, _Read):
     only ids — it is a work queue, not a document."""
     id: int
     putaway_no: str | None = None
+    # Is a Storage container mapped for the item (2026-10-27)? Not: the screen warns.
+    storage_defined: bool = False
     grn_id: int | None = None
     grn_no: str | None = None
     grn_item_id: int | None = None
@@ -1770,6 +1782,16 @@ class IssueItemRead(CombinationOut, _Read):
     tracking_type: str | None = None
     # The reserved units, stated in that same currency.
     unit_keys: list[str] | None = None
+    #: How many identifiers the line must name (2026-10-24). One per unit, except for
+    #: an item issued in a container: one per container (a box), whatever the lot's
+    #: older per-unit codes say. None = one per unit.
+    codes_needed: int | None = None
+    #: Issued in a container (2026-10-26): the line names boxes; each box it holds
+    #: (code, how much of it the line takes, what it holds, part or whole) and — when
+    #: the Issue container changed after they were held — the sentence that says so.
+    issue_in_boxes: bool = False
+    box_codes: list[dict] | None = None
+    container_note: str | None = None
     # Whether this item has identified units in stock at all, so a bulk consumable
     # line does not offer a picker with nothing in it.
     has_units: bool = False
@@ -1870,6 +1892,70 @@ class IssueStockSourceFetchIn(BaseModel):
     project_id: int | None = None
     #: The issue being edited, so its own picks are not counted as pinned by "another" (and a direct issue's own hold is stock it may draw).
     issue_id: int | None = None
+
+
+class BoxSourceRead(BaseModel):
+    """One box an issue line could name (2026-10-26): its code, what it holds, and
+    who holds it — this issue, another one, or nobody."""
+    id: int
+    code: str
+    pack_name: str | None = None
+    holds: float
+    size: float
+    part: bool = False
+    batch_no: str | None = None
+    bin_code: str | None = None
+    held_by_this_issue: bool = False
+    held_by: str | None = None
+    # The pack it sits in — the carton the picker groups it under (2026-10-27) — its
+    # own level, and on request the serials / IMEIs / codes inside it.
+    level: int | None = None
+    parent_id: int | None = None
+    parent_code: str | None = None
+    parent_pack_name: str | None = None
+    parent_holds: float | None = None
+    parent_size: float | None = None
+    units: list[str] | None = None
+
+
+class BoxLabelRead(_Read):
+    """A queued (or printed) label for one box code (2026-10-26)."""
+    id: int
+    handling_unit_id: int
+    hu_code: str
+    item_id: int
+    item_code: str | None = None
+    item_name: str | None = None
+    warehouse_id: int
+    warehouse_name: str | None = None
+    bin_code: str | None = None
+    batch_no: str | None = None
+    pack_name: str | None = None
+    content_qty: Decimal
+    pack_size: Decimal
+    uom_code: str | None = None
+    reason: str
+    source_no: str | None = None
+    status: str
+    printed_at: datetime | None = None
+    printed_by_name: str | None = None
+    created_at: datetime | None = None
+    # Where the label sits in the carton → box tree, and what its sticker prints
+    # (2026-10-27). `qr_token` opens live, read-only details on any phone.
+    parent_code: str | None = None
+    depth: int = 0
+    root_id: int | None = None
+    level: int | None = None
+    packs_inside: str | None = None
+    expiry_date: date | None = None
+    brand_name: str | None = None
+    variant_name: str | None = None
+    model_name: str | None = None
+    qr_token: str | None = None
+
+
+class BoxLabelPrintedIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=MAX_BATCH_IDS)
 
 
 class IssueStockSource(CombinationOut, _Read):
@@ -2195,6 +2281,8 @@ class DispatchItemRead(CombinationOut, _Read):
     dispatch_id: int
     line_no: int
     package_id: int | None = None
+    # The package (box / strip) this row carries, for an item issued in packages.
+    box_code: str | None = None
     issue_id: int | None = None
     issue_no: str | None = None
     issue_item_id: int | None = None
@@ -3907,6 +3995,10 @@ class SerialRead(_Read):
     item_code: str | None = None
     item_name: str | None = None
     is_asset: bool = False
+    #: The package (box / strip) the unit sits in, if any (2026-10-26).
+    package_code: str | None = None
+    package_name: str | None = None
+    package_holds: float | None = None
     serial_number: str
     imei: str | None = None
     batch_id: int | None = None
@@ -4132,6 +4224,10 @@ class IssueDispatchSourceItem(DispatchItemWrite):
     # serial -> IMEI, so the packing screen shows the handset's number beside the
     # unit it belongs to rather than making the receiving point retype it.
     imei_by_serial: dict[str, str] = {}
+    # Issued in PACKAGES (2026-10-26): each package the line sends on and what it
+    # carries after outward QC — {code, quantity}. A carton names which of them it
+    # holds (in `serial_numbers`); no unit code per piece is asked for.
+    box_codes: list[dict] = []
     # The packs this quantity travels in, read off the issue line (2026-10-22).
     pack_breakdown: list[dict] | None = None
     pack_text: str | None = None

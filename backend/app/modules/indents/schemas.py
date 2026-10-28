@@ -76,8 +76,19 @@ class CorrectionOwnerOut(BaseModel):
     position_id: int | None = None
 
 
+class BrandChangeOut(BaseModel):
+    """An allocation that gave another brand than the indent line asked for."""
+    asked_for: str | None = None
+    given: str | None = None
+    quantity: float = 0
+    reason: str | None = None
+    allocation_no: str | None = None
+
+
 class IndentItemOut(CombinationOut):
     model_config = ConfigDict(from_attributes=True)
+    #: Brand changes made at the Fulfilment Desk (2026-10-24), read on the detail.
+    brand_changes: list[BrandChangeOut] = Field(default_factory=list)
     id: int
     item_id: int
     item_code: str | None = None
@@ -260,6 +271,9 @@ class AcknowledgeLineIn(BaseModel):
     # What arrived in THIS delivery, not the running total. The service adds it to what
     # was already acknowledged, so the caller never has to know the previous figure.
     received_quantity: float = Field(gt=0)
+    #: A line issued in PACKAGES (2026-10-26): how much arrived in each package that
+    #: came SHORT or MISSING (0), by code. Packages not named arrived whole.
+    package_receipts: dict[str, float] | None = None
 
 
 class AcknowledgeIn(BaseModel):
@@ -305,16 +319,25 @@ class AcknowledgementPackageQuantityRow(BaseModel):
     #: The packs THIS package holds of the line, as the packer left them (2026-10-22).
     pack_breakdown: list[dict] | None = None
     pack_text: str | None = None
+    #: The packages this carton holds of a line issued in packages, {code, quantity}.
+    box_codes: list[dict] = Field(default_factory=list)
 
 
 class AcknowledgementLineRow(CombinationOut):
     """One indent line on the "what is owed to me" screen."""
     indent_item_id: int
+    item_id: int | None = None
     item_code: str | None = None
     item_name: str | None = None
     uom_code: str | None = None
     approved_quantity: float
     issued_quantity: float
+    #: What was actually ISSUED against the line, per brand / variant / model
+    #: (2026-10-26): a substituted brand, or stock with no brand recorded.
+    issued_combinations: list[dict] = Field(default_factory=list)
+    #: Issued in BOXES (2026-10-26): {code, pack_name, quantity} per box. The site
+    #: checks these boxes; no code per piece is asked for.
+    box_codes: list[dict] = Field(default_factory=list)
     dispatched_quantity: float
     received_quantity: float
     is_serial_tracked: bool = False

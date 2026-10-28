@@ -16,7 +16,7 @@ import { QuotePriceTrail } from "../components/QuotePriceTrail";
 import { QuoteChangeRequestModal } from "../components/QuoteChangeRequestModal";
 import { money } from "./RequisitionListPage";
 import type { PriceTrailVersion } from "../types";
-import { CombinationTag } from "@/shared/combination";
+import { AskedVsQuoted } from "@/shared/combination";
 
 const GST_LABEL = (region?: string | null) =>
   region === "INTRA" ? "CGST + SGST (intra-state)" : "IGST (inter-state)";
@@ -285,7 +285,7 @@ export function QuotationDetailPage() {
                         <div className="font-mono text-[11px] text-muted">
                           {item.item_code ?? "—"}
                         </div>
-                        <CombinationTag value={item} className="mt-1" />
+                        <AskedVsQuoted value={item} className="mt-1" />
                       </td>
                       <td className="py-2.5 pr-3 text-right font-mono">{item.quantity}</td>
                       <td className="py-2.5 pr-3 text-right font-mono">{money(item.rate)}</td>

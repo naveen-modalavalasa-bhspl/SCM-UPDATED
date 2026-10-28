@@ -335,6 +335,52 @@ export function usageLevels(h: PackHierarchy, usage: ContainerUsage): number[] |
   return levelsFor(h, usage).map((lv) => lv.level);
 }
 
+/** The levels a usage may be packed in, capped at `level` when one is named (and that
+ *  cap leaves a container standing), or null when nothing is mapped for the usage. */
+function usageCap(h: PackHierarchy, usage: ContainerUsage | undefined,
+                  level?: number): number[] | null {
+  const levels = usage ? usageLevels(h, usage) : null;
+  if (!levels) return null;
+  const capped = level != null ? levels.filter((lv) => lv <= level) : levels;
+  return capped.some((lv) => lv > 0) ? capped : levels;
+}
+
+const named = (h: PackHierarchy, entries: PackEntry[]) =>
+  entries.map((e) => ({ ...e, hierarchy: h.name }));
+
+/** `greedyWithPart`, but ONLY in the containers mapped for `usage` (2026-10-27): an
+ *  item bought in cartons is never pre-filled in boxes because a box sits higher on
+ *  its ladder. Two or more containers of the usage: biggest whole packs first, then
+ *  the next, the remainder one part pack of the smallest — the server's
+ *  `purchase_breakdown`. Nothing mapped: exactly `greedyWithPart`. */
+export function greedyWithPartFor(h: PackHierarchy, base: number, usage?: ContainerUsage,
+                                  level?: number): PackEntry[] {
+  const levels = usageCap(h, usage, level);
+  return levels ? named(h, greedyIn(h, base, levels)) : greedyWithPart(h, base, level);
+}
+
+/** `greedy` in a usage's containers — same rule as `greedyWithPartFor`. */
+export function greedyFor(h: PackHierarchy, base: number, usage?: ContainerUsage,
+                          maxLevel?: number): PackEntry[] {
+  const levels = usageCap(h, usage, maxLevel);
+  return levels ? named(h, greedyIn(h, base, levels)) : greedy(h, base, maxLevel);
+}
+
+/** Can this ladder carry the usage at all? A ladder holding none of the item's
+ *  Purchase containers is no way to buy it. Nothing mapped: every ladder can. */
+export function servesUsage(h: PackHierarchy, usage: ContainerUsage): boolean {
+  const levels = usageLevels(h, usage);
+  return !levels || levels.length > 0;
+}
+
+/** The ladders to offer for a usage — those that serve it, plus `keep` (the one a
+ *  line already names) so a saved choice never disappears from its own picker. */
+export function laddersForUsage(list: PackHierarchy[], usage: ContainerUsage,
+                                ...keep: (number | null | undefined)[]): PackHierarchy[] {
+  const out = list.filter((h) => servesUsage(h, usage) || keep.includes(h.hierarchy_id));
+  return out.length ? out : list;
+}
+
 /** May a pick be re-packed at the issue counter? Only where the item is STORED in
  *  other containers than it is ISSUED in (2026-10-23); nothing mapped: as before. */
 export function canRepackAtIssue(h: PackHierarchy): boolean {
@@ -342,4 +388,23 @@ export function canRepackAtIssue(h: PackHierarchy): boolean {
   if (!issue) return true;
   const storage = usageLevels(h, "STORAGE");
   return !storage || storage.slice().sort().join() !== issue.slice().sort().join();
+}
+
+/** The ladder a line reads: its brand's own, else an "all brands" one, else any. */
+export function ladderFor(list: PackHierarchy[] | undefined,
+                          brandId?: number | null): PackHierarchy | undefined {
+  const all = list ?? [];
+  return (brandId ? all.find((h) => h.brand_id === brandId) : undefined)
+    ?? all.find((h) => !h.brand_id) ?? all[0];
+}
+
+/** A quantity said in a usage's containers (2026-10-23) — "2 Box", or null when the
+ *  item has no container mapped for that usage (the quantity alone then says it). */
+export function packsIn(list: PackHierarchy[] | undefined, qty: number,
+                        usage: ContainerUsage, brandId?: number | null): PackEntry[] | null {
+  const ladder = ladderFor(list, brandId);
+  if (!ladder || !(qty > 0)) return null;
+  const levels = usageLevels(ladder, usage);
+  if (!levels || !levels.some((lv) => lv > 0)) return null;
+  return greedyIn(ladder, qty, levels).map((e) => ({ ...e, hierarchy: ladder.name }));
 }

@@ -469,11 +469,11 @@ function ItemRow(props: ItemProps) {
   const tracked = group.pickable && group.trackingType !== "NONE";
   const short = round(group.requested - group.issued);
   const over = short < 0;
-  const codesDone = !tracked || group.codes === Math.trunc(group.issued);
+  const codesDone = !tracked || group.codes === group.need;
   const settled = !over && short === 0 && codesDone && group.issued > 0;
   // Positive: still to scan. Negative: more named than the picks now take — lowering
   // a quantity after scanning leaves too MANY, and "-2 to assign" is not a sentence.
-  const unassigned = Math.trunc(group.issued) - group.codes;
+  const unassigned = group.need - group.codes;
   const askEditable = !locked && !!group.itemId && !group.splits[0]?.line.indent_item_id;
   const spareQty = group.spare.reduce((sum, row) => sum + num(row.drawable_qty), 0);
   // The next place worth walking to: earliest expiry, but never an expired lot.
@@ -892,7 +892,18 @@ function PickRow(props: PickProps) {
     .filter((other) => sourceKey(other.line.batch_id, null)
       === sourceKey(line.batch_id, null))
     .reduce((sum, other) => sum + other.issued, 0));
-  const need = Math.trunc(split.issued);
+  const need = split.need;
+  // A pick issued in PACKAGES (2026-10-26): the package size off the boxes it holds,
+  // and how many it holds — or, before a save, how many the quantity comes to.
+  const boxes = line.issue_in_boxes ? line.box_codes ?? [] : [];
+  const packSize = boxes.length ? Math.max(...boxes.map((b) => num(b.size))) : 0;
+  const packsHeld = boxes.length && Math.abs(boxes.reduce((s, b) => s + num(b.take), 0)
+    - num(line.issued_qty)) < 1e-6
+    ? boxes.length : packSize ? Math.ceil(num(line.issued_qty) / packSize) : 0;
+  const packWord = (n: number) => {
+    const name = (boxes[0]?.pack_name ?? "package").toLowerCase();
+    return `${n} ${n === 1 ? name : /(x|s|ch|sh)$/.test(name) ? `${name}es` : `${name}s`}`;
+  };
   const tracked = group.pickable && group.trackingType !== "NONE";
   // Asset and consumable codes are the system's own labels: the server assigns them,
   // oldest first from THIS pick's batch and location, on every save — so they are on
@@ -1110,6 +1121,35 @@ function PickRow(props: PickProps) {
           * storekeeper correcting a quantity used to be sent back into the picker to
           * unpick four codes by hand before he could save. */}
         <div>
+          {packSize > 0 ? (
+            <>
+              {/* Issued in PACKAGES (2026-10-26): the count is in packages, the base
+                * under it. The last package may be a part one — the ask is honoured
+                * exactly, never rounded up to a whole package. */}
+              <CellLabel>Issue qty ({packWord(2).split(" ")[1]})</CellLabel>
+              <QtyInput
+                ariaLabel={`Packages to issue from pick ${position + 1}`}
+                value={packsHeld}
+                disabled={locked}
+                invalid={overDrawn}
+                onChange={(value) => {
+                  const want = Math.max(0, Math.floor(num(value)));
+                  const ask = num(line.requested_qty);
+                  const base = ask > 0 ? Math.min(want * packSize, ask) : want * packSize;
+                  onPatch(split.index, {
+                    issued_qty: base,
+                    serial_numbers: [],
+                    ...(line.pack_breakdown?.length && baseOf(line.pack_breakdown) !== base
+                      ? { pack_breakdown: null } : {}),
+                  });
+                }}
+              />
+              <div className="mt-0.5 text-[11px] text-muted">
+                {fmtQty(num(line.issued_qty))} base
+              </div>
+            </>
+          ) : (
+            <>
           <CellLabel>Issue qty</CellLabel>
           <QtyInput
             ariaLabel={`Issue quantity from pick ${position + 1}`}
@@ -1127,6 +1167,8 @@ function PickRow(props: PickProps) {
                 ? { pack_breakdown: null } : {}),
             })}
           />
+            </>
+          )}
         </div>
 
         {/* --- identifiers ---
@@ -1136,7 +1178,7 @@ function PickRow(props: PickProps) {
           * storekeeper has actually named. A quantity is not an identity — stock put
           * away before the item was coded has the first and not the second. */}
         <div className="min-w-0">
-          <CellLabel>{unitMeta?.label ?? "Identifiers"}</CellLabel>
+          <CellLabel>{line.issue_in_boxes ? "Box codes" : unitMeta?.label ?? "Identifiers"}</CellLabel>
           {!tracked ? (
             <span className="inline-block text-[11px] text-muted lg:pt-2.5">Not tracked</span>
           ) : hidden ? (
@@ -1170,8 +1212,31 @@ function PickRow(props: PickProps) {
                 * scanned is the storekeeper's own progress. Stock put away before the
                 * item was coded has quantity and no identity, so a pick can be sound
                 * on the first and impossible on the second. */}
+              {/* Issued in a container (2026-10-26): the line names its boxes. */}
+              {line.issue_in_boxes && !needsSource && (line.serial_numbers?.length ?? 0) > 0 && (
+                <div className="mt-1 flex max-w-[15rem] flex-wrap gap-1">
+                  {(line.serial_numbers ?? []).slice(0, 2).map((code) => (
+                    <span key={code} title={code}
+                          className="mono max-w-[13rem] truncate rounded-md bg-brand/[0.07] px-1.5 py-0.5 text-[10px] font-semibold text-brand">
+                      {code}
+                    </span>
+                  ))}
+                  {(line.serial_numbers?.length ?? 0) > 2 && (
+                    <span className="rounded-md bg-content2 px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+                      +{(line.serial_numbers?.length ?? 0) - 2}
+                    </span>
+                  )}
+                </div>
+              )}
+              {line.container_note && (
+                <div className="mt-1 max-w-[15rem] rounded-md bg-warn-bg px-2 py-1 text-[10px] font-medium leading-snug text-warn">
+                  {line.container_note}
+                </div>
+              )}
               <div className="mt-0.5 text-[10px] leading-tight text-muted">
-                {needsSource ? (
+                {line.issue_in_boxes && !needsSource ? (
+                  need > 0 ? `${need} ${need === 1 ? "box" : "boxes"} for this pick` : null
+                ) : needsSource ? (
                   "Name the source first"
                 ) : unitsHere === null || unitsHere === undefined ? (
                   "…"

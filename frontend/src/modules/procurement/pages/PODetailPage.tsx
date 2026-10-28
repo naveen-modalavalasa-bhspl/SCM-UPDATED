@@ -5,7 +5,7 @@ import { PackQty } from "@/shared/packing";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Check, ChevronDown, ChevronRight, Copy, FilePen, Printer, Send, Undo2, X,
-  ShoppingCart, Package, Building2, Calendar, Coins, MapPin, FileText, ShieldCheck, History, Sparkles, TrendingDown, Save,
+  ShoppingCart, Package, Building2, Calendar, Coins, ShieldCheck, History, Sparkles, TrendingDown, Save,
 } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Can, Card, Field, Input, StatusPill, useToast } from "@/shared/components";
@@ -18,6 +18,7 @@ import { ApprovalTrail } from "../components/ApprovalTrail";
 import { POPaymentsPanel } from "../components/POPaymentsPanel";
 import { POApprovalChat } from "../components/POApprovalChat";
 import { POCorrectionForm } from "../components/POCorrectionForm";
+import { POAddressesTerms } from "../components/POAddressesTerms";
 import { blankPOHeader, POHeaderFields, poHeaderFrom, poHeaderPayload, type POHeaderValue } from "../components/POHeaderFields";
 import { LinePicker, type DraftLine } from "../components/LinePicker";
 import { alerts } from "@/modules/alerts";
@@ -677,51 +678,8 @@ export function PODetailPage() {
         </div>
       </div>
 
-      {/* ── Addresses — rose block ────────────────────────────────── */}
-      <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 via-pink-50 to-white shadow-sm">
-        <div className="h-1 w-full bg-gradient-to-r from-rose-400 via-pink-400 to-rose-500" />
-        <div className="p-4 sm:p-5">
-          <div className="mb-3 flex items-center gap-2 text-rose-700">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-500 text-white"><MapPin className="h-4 w-4"/></div>
-            <h2 className="text-sm font-extrabold uppercase tracking-widest">Addresses</h2>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            {[
-              { label: "Billing address", text: po.data.billing_address },
-              { label: "Shipping address", text: po.data.shipping_address },
-            ].map((f) => (
-              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-rose-100">
-                <div className="text-[11px] font-bold uppercase tracking-widest text-rose-700/70">{f.label}</div>
-                <div className="mt-1 whitespace-pre-line text-sm font-medium text-ink">{f.text || "—"}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* ── Terms — violet block ──────────────────────────────────── */}
-      <div className="overflow-hidden rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-purple-50 to-white shadow-sm">
-        <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-purple-500 to-fuchsia-500" />
-        <div className="p-4 sm:p-5">
-          <div className="mb-3 flex items-center gap-2 text-violet-700">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-600 text-white"><FileText className="h-4 w-4"/></div>
-            <h2 className="text-sm font-extrabold uppercase tracking-widest">Terms & conditions</h2>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {[
-              { label: "Payment terms", text: po.data.payment_terms },
-              { label: "Delivery terms", text: po.data.delivery_terms },
-              { label: "Material terms", text: po.data.material_terms },
-              { label: "Logistics terms", text: po.data.logistics_terms },
-            ].map((f) => (
-              <div key={f.label} className="rounded-xl bg-white p-3 ring-1 ring-violet-100">
-                <div className="text-[11px] font-bold uppercase tracking-widest text-violet-700/70">{f.label}</div>
-                <div className="mt-1 whitespace-pre-line text-sm font-medium text-ink">{f.text || "—"}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
+      {/* Addresses and terms — filled in right here while the order is a draft. */}
+      <POAddressesTerms po={po.data} editable={isDraft && can("po.edit")} onSaved={refresh} />
 
       </>)}
 
