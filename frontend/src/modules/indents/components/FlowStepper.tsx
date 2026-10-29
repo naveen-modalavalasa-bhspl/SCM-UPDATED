@@ -55,7 +55,7 @@ function isHalted(state: StepState) {
   return HALTED_STATES.includes(state);
 }
 
-export const PENDING_PHASE_CAPTIONS: Record<string, string> = {
+export const CURRENT_PHASE_CAPTIONS: Record<string, string> = {
   draft: "Draft",
   submitted: "Awaiting submission",
   approvals: "Awaiting approval",
@@ -65,14 +65,19 @@ export const PENDING_PHASE_CAPTIONS: Record<string, string> = {
   acknowledgement: "Awaiting acknowledgement",
 };
 
+export const PENDING_PHASE_CAPTIONS: Record<string, string> = {};
+
 function statusCaption(state: StepState, phaseKey?: string) {
-  if (state === "pending" && phaseKey && PENDING_PHASE_CAPTIONS[phaseKey]) {
-    return PENDING_PHASE_CAPTIONS[phaseKey];
+  if (state === "pending") {
+    return "";
+  }
+  if (state === "current" && phaseKey && CURRENT_PHASE_CAPTIONS[phaseKey]) {
+    return CURRENT_PHASE_CAPTIONS[phaseKey];
   }
   const captions: Record<StepState, string> = {
     completed: "Completed",
     current: "Current",
-    pending: "Pending",
+    pending: "",
     rejected: "Rejected",
     returned: "Returned for correction",
     cancelled: "Cancelled",

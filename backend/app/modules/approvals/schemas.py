@@ -196,6 +196,7 @@ class ApprovalIndentOut(BaseModel):
     required_date: date | None = None
     created_at: datetime
     items: list[ApprovalIndentLineOut]
+    excluded_items: list[ApprovalIndentLineOut] = []
 
     @field_serializer("created_at", when_used="json")
     def serialize_datetime(self, value: datetime):

@@ -263,22 +263,24 @@ export function IndentApprovalReviewPage({ indentId: suppliedIndentId }: { inden
     enabled: Number.isFinite(indentId) && indentId > 0,
   });
 
-  // Keep the raiser's original request visible. Earlier approvals and stock serving
-  // only reduce the current rung's cap, so the audit meaning is never rewritten.
+  // Active items to review: lines already cut to zero or excluded by an earlier
+  // approver are dropped and not forwarded to this level for approval.
   const reviewItems = useMemo(() => {
     const remainderByLine = new Map(
       (availability.data?.items ?? []).map((line) => [line.line_id, line.remainder]),
     );
-    return (indent.data?.items ?? []).map((line) => {
-      const remainder = remainderByLine.get(line.id);
-      if (remainder === undefined) return line;
-      const outstanding = Math.max(0, Number(remainder));
-      return {
-        ...line,
-        approved_quantity: Math.min(line.approved_quantity, outstanding),
-        max_quantity: Math.min(line.max_quantity, outstanding),
-      };
-    });
+    return (indent.data?.items ?? [])
+      .filter((line) => !line.is_excluded && approvalCeiling(line) > 0)
+      .map((line) => {
+        const remainder = remainderByLine.get(line.id);
+        if (remainder === undefined) return line;
+        const outstanding = Math.max(0, Number(remainder));
+        return {
+          ...line,
+          approved_quantity: Math.min(line.approved_quantity, outstanding),
+          max_quantity: Math.min(line.max_quantity, outstanding),
+        };
+      });
   }, [availability.data, indent.data]);
 
   useEffect(() => {

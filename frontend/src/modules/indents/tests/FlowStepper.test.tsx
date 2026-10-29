@@ -122,10 +122,10 @@ describe("FlowStepper", () => {
       "DraftCompleted",
       "SubmittedCompleted",
       "ApprovalsCustom Controller Review",
-      "4AllocationAwaiting allocation",
-      "5WarehousePending warehouse",
-      "6In-TransitIn transit",
-      "7AcknowledgementAwaiting acknowledgement",
+      "4Allocation",
+      "5Warehouse",
+      "6In-Transit",
+      "7Acknowledgement",
     ]);
     expect(screen.getByLabelText("Approvals, current: Custom Controller Review")).toBeInTheDocument();
   });

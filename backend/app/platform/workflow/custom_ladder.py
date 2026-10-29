@@ -390,7 +390,8 @@ async def resolve_fixed_chain(db: AsyncSession, stages: list[Stage],
         # mixed ladder keeps the order the admin built.
         if stage.position_role_id is not None:
             climbed = await ladder.resolve_chain(
-                db, [stage], requester_position_id, requester_id, context or {}, policy)
+                db, [stage], requester_position_id, requester_id, context or {}, policy,
+                allow_offline=False)
             for rung in climbed:
                 chain.append({**rung, "sequence": len(chain) + 1})
             continue

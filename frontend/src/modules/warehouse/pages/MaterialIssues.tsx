@@ -144,9 +144,18 @@ export default function MaterialIssues({
       header: "With",
       hideOnNarrow: true,
       render: (r) => (
-        <span className="text-sm text-muted">
-          {r.currently_with ?? "—"}
-        </span>
+        <div className="text-sm">
+          {r.currently_with ? (
+            <span className="text-muted">{r.currently_with}</span>
+          ) : r.issued_by_name ? (
+            <div>
+              <span className="text-ink font-medium">{r.issued_by_name}</span>
+              <div className="text-[10px] text-muted font-normal">Issued by</div>
+            </div>
+          ) : (
+            <span className="text-muted">—</span>
+          )}
+        </div>
       ),
     },
     {

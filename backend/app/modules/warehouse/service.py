@@ -10608,15 +10608,23 @@ async def list_issues(db: AsyncSession, params: PageParams, *, direction: str | 
             owner_col=m.MaterialIssue.created_by_id,
             project_col=m.MaterialIssue.project_id,
         ))
-        # A floor in-charge is given the pieces of work addressed to their floors and
-        # nothing else — not the generic parents, which belong to the warehouse
-        # manager and would only be documents they cannot act on. Everybody else is
-        # unrestricted (`floor_scope_ids` answers None), so the manager still sees the
-        # parents, the children and the unsplit issues together.
+        # A floor in-charge sees issues addressed to their assigned floors,
+        # issues they created or submitted themselves, and unsplit issues containing
+        # items drawn from their floors.
         floors = await floor_scope_ids(db, user)
         if floors is not None:
-            stmt = stmt.where(m.MaterialIssue.floor_location_id.in_(floors)
-                              if floors else false())
+            if not floors:
+                stmt = stmt.where(false())
+            else:
+                has_items_in_floors = select(1).select_from(m.MaterialIssueLine).where(
+                    m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+                    m.MaterialIssueLine.bin_id.in_(floors),
+                ).exists()
+                stmt = stmt.where(or_(
+                    m.MaterialIssue.floor_location_id.in_(floors),
+                    m.MaterialIssue.created_by_id == user.id,
+                    and_(m.MaterialIssue.floor_location_id.is_(None), has_items_in_floors),
+                ))
     if direction:
         stmt = stmt.where(m.MaterialIssue.direction == direction)
     if status:
