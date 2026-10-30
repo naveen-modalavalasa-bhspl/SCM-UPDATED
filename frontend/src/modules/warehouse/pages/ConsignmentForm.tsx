@@ -8,7 +8,7 @@ import { Checkbox, Modal, ModalBody, ModalContent, ModalHeader } from "@heroui/r
 import Barcode from "react-barcode";
 import { QRCodeSVG } from "qrcode.react";
 import { AlertCircle, ArrowLeft, Box, CheckCheck, CheckCircle2, ClipboardCheck, Download, Layers, Lock, MapPin, Package, PackagePlus, Printer, QrCode, ScanLine, Trash2, Truck, Unlock, XCircle } from "lucide-react";
-import { Button, Can, ErrorBanner, Field, Input, Select } from "@/shared/components";
+import { Button, Can, ErrorBanner, Field, Input, Select, packGroups, packMix, shortPackCode } from "@/shared/components";
 import { ConsignmentIdentityCard, type ConsignmentIssue } from "../components/ConsignmentIdentityCard";
 import { PrintPortal } from "../components/LabelPrint";
 import { Lookup } from "../components/Lookup";
@@ -23,7 +23,10 @@ import {
   issueOptions,
   updateConsignment,
   allWarehouseOptions,
+  consignmentTransferContext,
+  issueTransferContext,
 } from "../api";
+import { TransferContextStrip } from "../components/TransferContextStrip";
 import { fmtMoney, fmtQty, num, today } from "../format";
 import type {
   ConsignmentPackageItemWrite,
@@ -683,6 +686,25 @@ export default function ConsignmentForm() {
 
   /** What the multiple-issue list shows: one row per issue, read off the packing source
    *  the server accepted — so the list and the lines below can never disagree. */
+  // What this consignment inherits from its issue (2026-10-29): STR / STO number,
+  // destination, department, project, issued-to, SAC, vehicle — shown locked.
+  const contextIssueId = form.issue_id || 0;
+  const { data: transferContext } = useQuery({
+    queryKey: ["consignment-transfer-context", doc?.id ?? null, contextIssueId],
+    queryFn: () => (doc?.id ? consignmentTransferContext(doc.id) : issueTransferContext(contextIssueId)),
+    enabled: !!doc?.id || contextIssueId > 0,
+    retry: false,
+  });
+  // A transfer goes where its STR / STO was approved to: the consignment cannot be
+  // re-addressed on the way. A plain indent or direct issue may still be forwarded.
+  const lockedDestination = !!transferContext?.destination_warehouse_id
+    && (transferContext.kind === "STR" || transferContext.kind === "STO");
+  useEffect(() => {
+    if (!lockedDestination || editing) return;
+    setForm((f) => (f.to_warehouse_id ? f
+      : { ...f, to_warehouse_id: transferContext!.destination_warehouse_id ?? null }));
+  }, [lockedDestination, editing, transferContext]);
+
   const selectedIssues: SelectedIssue[] = useMemo(() => {
     const ids = source?.issue_ids ?? [];
     return ids.map((issueId, index) => {
@@ -1277,6 +1299,8 @@ export default function ConsignmentForm() {
         />
       )}
 
+      {transferContext && <TransferContextStrip context={transferContext} />}
+
       {/* The issue came out of the point that raised the indent, so there is no
           journey to record. Saying nothing left a blank destination on screen, a
           consignment that could be dispatched, and a storekeeper with no consignment
@@ -1352,9 +1376,18 @@ export default function ConsignmentForm() {
                 this box offered the whole network or only the points this login
                 holds — and a destination is by definition somebody else's. */}
             <Lookup name="warehouses-destination" load={destinationOptions}
-                    value={form.to_warehouse_id ?? ""} isDisabled={locked}
+                    value={form.to_warehouse_id ?? ""} isDisabled={locked || lockedDestination}
                     onChange={pickDestination}
+                    fallback={lockedDestination && transferContext?.destination_warehouse_id
+                      ? [{ id: transferContext.destination_warehouse_id,
+                           name: transferContext.destination_warehouse_name ?? "" }]
+                      : undefined}
                     placeholder="Auto from the indent" />
+            {lockedDestination && (
+              <span className="mt-1 inline-flex items-center gap-1 text-xs text-muted">
+                <Lock className="h-3 w-3" aria-hidden /> Locked to the {transferContext!.kind}'s destination
+              </span>
+            )}
           </Field>
           {!inLogistics && (
             <Field label="Destination">
@@ -1973,36 +2006,77 @@ export default function ConsignmentForm() {
                               onClick={() => setPackPicked([])}>Clear</button>
                     </span>
                   </div>
-                  <ul className="grid gap-2 sm:grid-cols-2">
-                    {all.map((pkg) => {
-                      const on = packPicked.includes(pkg.code);
-                      const elsewhere = cartonOfPackage.get(pkg.code);
-                      const taken = !!elsewhere && elsewhere !== carton;
+                  {/* Grouped by the carton (and opened box) each package came out of
+                      (2026-10-28), so one carton's packages go in together with one
+                      press. A package already in another carton is never moved by it. */}
+                  <div className="space-y-3">
+                    {packGroups(all).map(([where, group]) => {
+                      const open = group.filter((p) => {
+                        const elsewhere = cartonOfPackage.get(p.code);
+                        return !elsewhere || elsewhere === carton;
+                      });
+                      const inHere = group.filter((p) => packPicked.includes(p.code)).length;
+                      const skipped = group.length - open.length;
                       return (
-                        <li key={pkg.code}>
-                          <button type="button" disabled={taken}
-                                  onClick={() => setPackPicked((now) => on
-                                    ? now.filter((c) => c !== pkg.code) : [...now, pkg.code])}
-                                  className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors ${
-                                    on ? "border-brand bg-brand/[0.06]"
-                                      : taken ? "cursor-not-allowed border-line bg-content2/40 opacity-60"
-                                      : "border-line bg-content1 hover:border-brand/60"}`}>
-                            <span className={`grid h-5 w-5 shrink-0 place-items-center rounded border ${
-                              on ? "border-brand bg-brand text-white" : "border-line"}`}>
-                              {on && <CheckCircle2 className="h-3.5 w-3.5" />}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="mono block truncate text-[13px] font-semibold text-ink" title={pkg.code}>{pkg.code}</span>
-                              <span className="text-[11px] text-muted">
-                                carries {fmtQty(num(pkg.quantity))} {line.uom_code ?? ""}
-                                {taken && <> · <b className="text-warn">in {elsewhere}</b></>}
+                        <section key={where || "-"} className={where ? "rounded-2xl border border-line bg-content2/30 p-2.5" : ""}>
+                          {where && (
+                            <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm font-semibold capitalize text-ink">{where}</span>
+                                <span className="text-[11px] text-muted">
+                                  {packMix(group, "package")} · {inHere} in {carton || "this carton"}
+                                  {skipped > 0 && <> · {skipped} already packed elsewhere</>}
+                                </span>
                               </span>
-                            </span>
-                          </button>
-                        </li>
+                              <button type="button" disabled={!open.length || inHere === open.length}
+                                      onClick={() => setPackPicked((now) => [...new Set([...now, ...open.map((p) => p.code)])])}
+                                      className="min-h-9 rounded-lg px-2 text-xs font-semibold text-brand hover:bg-brand/10 disabled:opacity-40">
+                                Put all {open.length} here
+                              </button>
+                              <button type="button" disabled={!inHere}
+                                      onClick={() => setPackPicked((now) => now.filter((c) => !group.some((p) => p.code === c)))}
+                                      className="min-h-9 rounded-lg px-2 text-xs font-semibold text-muted hover:bg-content2 disabled:opacity-40">
+                                Clear
+                              </button>
+                            </div>
+                          )}
+                          <ul className="grid gap-2 sm:grid-cols-2">
+                            {group.map((pkg) => {
+                              const on = packPicked.includes(pkg.code);
+                              const elsewhere = cartonOfPackage.get(pkg.code);
+                              const taken = !!elsewhere && elsewhere !== carton;
+                              return (
+                                <li key={pkg.code}>
+                                  <button type="button" disabled={taken} title={pkg.code}
+                                          onClick={() => setPackPicked((now) => on
+                                            ? now.filter((c) => c !== pkg.code) : [...now, pkg.code])}
+                                          className={`flex min-h-11 w-full items-center gap-3 rounded-xl border p-3 text-left transition-colors ${
+                                            on ? "border-brand bg-brand/[0.06]"
+                                              : taken ? "cursor-not-allowed border-line bg-content2/40 opacity-60"
+                                              : "border-line bg-content1 hover:border-brand/60"}`}>
+                                    <span className={`grid h-5 w-5 shrink-0 place-items-center rounded border ${
+                                      on ? "border-brand bg-brand text-white" : "border-line"}`}>
+                                      {on && <CheckCircle2 className="h-3.5 w-3.5" />}
+                                    </span>
+                                    <span className="min-w-0 flex-1">
+                                      <span className="block truncate text-[13px] font-semibold text-ink">
+                                        {pkg.name && <span className="capitalize">{pkg.name.toLowerCase()} </span>}
+                                        <span className="mono">{pkg.name ? shortPackCode(pkg.code) : pkg.code}</span>
+                                      </span>
+                                      <span className="text-[11px] text-muted">
+                                        carries {fmtQty(num(pkg.quantity))} {line.uom_code ?? ""}
+                                        {taken && <> · <b className="text-warn">in {elsewhere}</b></>}
+                                      </span>
+                                    </span>
+                                  </button>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </section>
                       );
                     })}
-                  </ul>
+                  </div>
                   <div className="flex justify-end gap-2">
                     <Button variant="ghost" onClick={() => setPackPick(null)}>Cancel</Button>
                     <Button onClick={() => {

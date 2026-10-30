@@ -7791,6 +7791,9 @@ async def _record_sto_for_str_issue(db: AsyncSession, issue: m.MaterialIssue,
     db.add(order)
     await db.flush()
     issue.remarks = " · ".join(filter(None, (issue.remarks, f"STO {order.sto_no}")))
+    if destination is not None and not getattr(issue, "destination_warehouse_id", None):
+        issue.destination_warehouse_id = destination.id
+        issue.destination_warehouse_name = destination.name
 
 
 async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
@@ -7817,6 +7820,9 @@ async def draft_issue_for_sto(db: AsyncSession, sto, user) -> None:
         project_id=project_id,
         department_id=getattr(raiser, "department_id", None),
         remarks=f"STO {sto.sto_no} to {sto.to_warehouse_name}",
+        # The order names where the goods go; the issue carries it from the first save
+        # so the consignment and the receiving side read it without asking (2026-10-29).
+        destination_warehouse_id=sto.to_warehouse_id,
         items=[s.IssueItemWrite(item_id=line.item_id, requested_qty=_d(line.requested_qty),
                                 brand_id=line.brand_id or None,
                                 variant_id=line.variant_id or None,
@@ -10646,6 +10652,30 @@ async def _decorate_indent_types(db: AsyncSession, issues: list) -> None:
     )).all()) if ids else {}
     for issue in issues:
         setattr(issue, "indent_type", types.get(issue.indent_id))
+    # The Stock Transfer Order each issue executes (2026-10-29): a direct STO names it
+    # on `inv_sto.issue_id`, and so does the order an STR's allocation produced. The
+    # screen shows the number and freezes the destination on it.
+    from app.modules.inventory.models import STO_KIND_TRANSFER, StockTransferOrder
+    issue_ids = {i.id for i in issues if getattr(i, "id", None)}
+    orders = {row.issue_id: row for row in (await db.execute(
+        select(StockTransferOrder.id, StockTransferOrder.sto_no, StockTransferOrder.status,
+               StockTransferOrder.issue_id, StockTransferOrder.str_id,
+               StockTransferOrder.str_no,
+               StockTransferOrder.from_warehouse_name,
+               StockTransferOrder.to_warehouse_id, StockTransferOrder.to_warehouse_name)
+        .where(StockTransferOrder.issue_id.in_(issue_ids),
+               StockTransferOrder.doc_kind == STO_KIND_TRANSFER)
+    )).all()} if issue_ids else {}
+    for issue in issues:
+        order = orders.get(issue.id)
+        setattr(issue, "sto_id", order.id if order else None)
+        setattr(issue, "sto_no", order.sto_no if order else None)
+        setattr(issue, "sto_status", order.status if order else None)
+        setattr(issue, "sto_kind", None if order is None else ("STR" if order.str_id else "DIRECT"))
+        setattr(issue, "sto_str_no", order.str_no if order else None)
+        setattr(issue, "sto_from_warehouse_name", order.from_warehouse_name if order else None)
+        setattr(issue, "sto_to_warehouse_id", order.to_warehouse_id if order else None)
+        setattr(issue, "sto_to_warehouse_name", order.to_warehouse_name if order else None)
 
 
 async def _decorate_can_approve(db: AsyncSession, doc, doc_type: str, user):
@@ -11691,9 +11721,18 @@ async def update_issue(db: AsyncSession, issue_id: int, data: s.IssueWrite, user
     # The same rule as on create. An STO's own issue is exempt: the transfer order is
     # its request, and names the destination itself.
     from app.modules.inventory.models import StockTransferOrder
-    from_sto = await db.scalar(select(StockTransferOrder.id).where(
-        StockTransferOrder.issue_id == issue.id).limit(1))
+    sto_row = (await db.execute(select(
+        StockTransferOrder.id, StockTransferOrder.to_warehouse_id,
+        StockTransferOrder.from_warehouse_id).where(
+        StockTransferOrder.issue_id == issue.id).limit(1))).first()
+    from_sto = sto_row.id if sto_row else None
     _assert_direct_issue_parties(data, for_sto=bool(from_sto))
+    # FROZEN on the order (2026-10-29): the STO was approved for one destination, and
+    # an issue re-pointing it would deliver somewhere nobody signed for. The screen
+    # locks the field; this is what makes the lock true. An order whose destination
+    # stood in for an unresolvable requester (to == from) names no real point.
+    if sto_row and sto_row.to_warehouse_id != sto_row.from_warehouse_id:
+        data = data.model_copy(update={"destination_warehouse_id": sto_row.to_warehouse_id})
 
     before = {"total_qty": str(issue.total_qty)}
     wh = await _warehouse(db, data.warehouse_id)
@@ -13760,6 +13799,16 @@ async def _mark_serials(db: AsyncSession, issue: m.MaterialIssue, outward: bool)
                 f"{line.item_code or line.item_id}: {wanted} {noun} are required, "
                 f"but {len(rows)} are reserved for this issue"
             )
+        if (outward and len(rows) < wanted and await box_codes.has_boxes(db, issue.id, line.id)
+                and await _lot_has_units(db, item_id=line.item_id,
+                                         warehouse_id=issue.warehouse_id,
+                                         batch_id=line.batch_id, bin_id=line.bin_id)):
+            # Boxes are what was checked, so this is not refused — but a lot holding
+            # codes that ships boxes with fewer codes inside than they carry leaves
+            # codes behind at the source, and that must never be silent again.
+            logger.warning("issue %s line %s ships %s in boxes with only %s unit codes "
+                           "inside; the rest stay at warehouse %s",
+                           issue.issue_no, line.id, wanted, len(rows), issue.warehouse_id)
         # The flip is the same two columns for every unit on the line, so it is one
         # statement per chunk rather than one per unit. This is the path a 10,000-unit
         # issue actually posts through.
@@ -14333,8 +14382,14 @@ _DISPATCH_NOT_LEFT = (DispatchStatus.DRAFT.value, DispatchStatus.PENDING_APPROVA
                       DispatchStatus.APPROVED.value, DispatchStatus.PACKED.value)
 
 
-def _direct_issue_for(user, points: set[int]):
+def _direct_issue_for(user, points: set[int], *, sto: bool = False):
     """A posted outward issue raised against no indent that THIS login receives.
+
+    `sto=True` asks the same question of the OTHER half (2026-10-29): the issues that
+    execute a direct Stock Transfer Order, received on Inventory > Stock Transfer >
+    Acknowledgements. Those are also the destination point's when the goods were
+    handed over without a consignment: the order names the point, so its holder is
+    the receiver whether or not a carton ever left on a truck.
 
     An indent-linked issue is confirmed by the indent's raiser on the indent's own
     acknowledgement. A direct issue has no raiser, so it is the RECEIVER's (SCM_0013):
@@ -14363,9 +14418,27 @@ def _direct_issue_for(user, points: set[int]):
     from app.modules.inventory.models import StockTransferOrder
     sto_issues = (select(StockTransferOrder.issue_id)
                   .where(StockTransferOrder.issue_id.is_not(None)))
-    return and_(m.MaterialIssue.indent_id.is_(None),
-                m.MaterialIssue.direction == IssueDirection.OUT.value,
-                m.MaterialIssue.is_stock_posted.is_(True),
+    common = (m.MaterialIssue.indent_id.is_(None),
+              m.MaterialIssue.direction == IssueDirection.OUT.value,
+              m.MaterialIssue.is_stock_posted.is_(True))
+    if sto:
+        # The order's own issue, or a floor piece of it.
+        of_sto = or_(m.MaterialIssue.id.in_(sto_issues),
+                     m.MaterialIssue.parent_issue_id.in_(sto_issues))
+        if points:
+            addressed = (select(StockTransferOrder.id)
+                         .where(or_(StockTransferOrder.issue_id == m.MaterialIssue.id,
+                                    StockTransferOrder.issue_id
+                                    == m.MaterialIssue.parent_issue_id),
+                                StockTransferOrder.to_warehouse_id.in_(points)))
+            receivers.append(and_(
+                addressed.correlate(m.MaterialIssue).exists(),
+                ~not_left.correlate(m.MaterialIssue).exists(),
+                or_(m.MaterialIssue.qc_status.is_(None),
+                    m.MaterialIssue.qc_status.in_(
+                        (*CONSIGNABLE_QC, QcStatus.NOT_REQUIRED.value)))))
+        return and_(*common, of_sto, or_(*receivers))
+    return and_(*common,
                 # An STO's issue (or a floor piece of one) is received on the Stock
                 # Transfer screen, not here.
                 m.MaterialIssue.id.notin_(sto_issues),
@@ -14409,6 +14482,76 @@ async def direct_issues_for_recipient(db: AsyncSession, user, *, search: str | N
                    "issued_qty": line.issued_qty}
                   for line in issue.items if _d(line.issued_qty) > 0],
     } for issue in issues]
+
+
+async def stock_transfer_issues_for_receiver(
+    db: AsyncSession, user, *, search: str | None = None, only_actionable: bool = False,
+) -> list[dict]:
+    """Direct STOs arriving at a point this login holds (2026-10-29).
+
+    The receiving half of a direct Stock Transfer Order: the destination storekeeper
+    sees the shipment the moment it leaves the gate (or is handed over) and signs it on
+    Inventory > Stock Transfer > Acknowledgements. Signing runs the direct-issue
+    receipt (`acknowledge_direct_issue`), whose `credit_arrival` books it onto the
+    destination shelf. STR transfers are listed beside these from the indent side.
+    """
+    from app.modules.inventory.models import StockTransferOrder
+
+    statuses = _DIRECT_ACK_OPEN if only_actionable else (
+        *_DIRECT_ACK_OPEN, IssueStatus.ACKNOWLEDGED.value)
+    stmt = (select(m.MaterialIssue).options(selectinload(m.MaterialIssue.items))
+            .where(_direct_issue_for(user, await _own_points(db, user), sto=True),
+                   m.MaterialIssue.status.in_(statuses)))
+    if search and search.strip():
+        like = f"%{search.strip()}%"
+        sto_match = (select(StockTransferOrder.id)
+                     .where(or_(StockTransferOrder.issue_id == m.MaterialIssue.id,
+                                StockTransferOrder.issue_id == m.MaterialIssue.parent_issue_id),
+                            StockTransferOrder.sto_no.ilike(like)))
+        stmt = stmt.where(or_(
+            m.MaterialIssue.issue_no.ilike(like),
+            m.MaterialIssue.warehouse_name.ilike(like),
+            sto_match.correlate(m.MaterialIssue).exists(),
+            select(m.MaterialIssueLine.id).where(
+                m.MaterialIssueLine.issue_id == m.MaterialIssue.id,
+                or_(m.MaterialIssueLine.item_code.ilike(like),
+                    m.MaterialIssueLine.item_name.ilike(like)),
+            ).correlate(m.MaterialIssue).exists(),
+        ))
+    issues = (await db.execute(stmt.order_by(m.MaterialIssue.id.desc()).limit(200))).scalars().all()
+    wanted = ({i.id for i in issues}
+              | {i.parent_issue_id for i in issues if i.parent_issue_id}) or {0}
+    order_of = {row.issue_id: row for row in (await db.execute(
+        select(StockTransferOrder.issue_id, StockTransferOrder.id, StockTransferOrder.sto_no,
+               StockTransferOrder.from_warehouse_name, StockTransferOrder.to_warehouse_name)
+        .where(StockTransferOrder.issue_id.in_(wanted))
+    )).all()}
+    consignments = await _consignments_of_issues(db, [issue.id for issue in issues])
+    rows = []
+    for issue in issues:
+        order = order_of.get(issue.id) or order_of.get(issue.parent_issue_id)
+        rows.append({
+            "consignments": consignments.get(issue.id, []),
+            "issue_id": issue.id, "issue_no": issue.issue_no, "issue_date": issue.issue_date,
+            "status": issue.status, "warehouse_name": issue.warehouse_name,
+            "department_name": issue.department_name, "project_name": issue.project_name,
+            "issued_by_name": issue.issued_by_name or issue.created_by_name,
+            "total_qty": issue.total_qty,
+            "acknowledged_by_name": issue.acknowledged_by_name,
+            "acknowledged_at": issue.acknowledged_at,
+            "can_acknowledge": issue.status in _DIRECT_ACK_OPEN,
+            "lines": [{"item_code": line.item_code, "item_name": line.item_name,
+                       "uom_code": line.uom_code, "batch_no": line.batch_no,
+                       "issued_qty": line.issued_qty}
+                      for line in issue.items if _d(line.issued_qty) > 0],
+            "sto_id": order.id if order else None,
+            "sto_no": order.sto_no if order else None,
+            "from_warehouse_name": (order.from_warehouse_name if order
+                                    else issue.warehouse_name),
+            "to_warehouse_name": (order.to_warehouse_name if order
+                                  else issue.destination_warehouse_name),
+        })
+    return rows
 
 
 async def _consignments_of_issues(db: AsyncSession,
@@ -14463,9 +14606,11 @@ async def _direct_issue_of(db: AsyncSession, issue_id: int, user, *,
     # The SAME predicate the list uses, so a row on the list always opens, and hiding
     # the row is never the control (rule 6): the receiving point, or the issued-to
     # person once nothing is waiting at the gate.
+    points = await _own_points(db, user)
     if not await db.scalar(select(func.count()).select_from(m.MaterialIssue).where(
             m.MaterialIssue.id == issue.id,
-            _direct_issue_for(user, await _own_points(db, user)))):
+            or_(_direct_issue_for(user, points),
+                _direct_issue_for(user, points, sto=True)))):
         raise PermissionError_(
             f"{issue.issue_no} is signed for by the point it was dispatched to, or by "
             f"{issue.issued_to_name or 'the person it was issued to'}")
@@ -14581,6 +14726,9 @@ async def direct_issue_receipt(db: AsyncSession, issue_id: int, user) -> dict:
                 # What arrived in it, once the consignment is signed for (2026-10-26).
                 "received": (float(_d(got)) if status == DispatchStatus.ACKNOWLEDGED.value
                              else None)})
+        # Carton › box, and the strips inside each (2026-10-28): the site checks a
+        # delivery the way it was packed, and may mark one strip of a box short.
+        await box_codes.decorate_packs(db, [r for rows in in_carton.values() for r in rows])
     package_lines = {line.id for line in lines
                      if await box_codes.has_boxes(db, issue.id, line.id)}
     out_lines = []
@@ -15508,6 +15656,10 @@ async def get_dispatch(db: AsyncSession, dispatch_id: int, user=None) -> m.Dispa
     # signed for, and answering this costs three queries — too much for a 50-row board.
     setattr(dispatch, "can_forward", await can_forward_dispatch(db, dispatch))
     setattr(dispatch, "line_packs", await _dispatch_line_packs(db, dispatch))
+    # Carton › box for every package code it carries (2026-10-28), so the packing list
+    # that travels with the truck says what the stickers say.
+    ctx = await box_codes.pack_context(db, [row.box_code for row in dispatch.items if row.box_code])
+    setattr(dispatch, "box_paths", {code: c["path"] for code, c in ctx.items()})
     setattr(dispatch, "public_scan_token", public_label_token("d", dispatch.id))
     for package in dispatch.packages:
         setattr(package, "public_scan_token", public_label_token("p", package.id))
@@ -24095,6 +24247,9 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 # What arrived in it, once the consignment is signed for (2026-10-26).
                 "received": (float(_d(got)) if status == DispatchStatus.ACKNOWLEDGED.value
                              else None)})
+        # Carton › box, and the strips inside each (2026-10-28): the site checks a
+        # delivery the way it was packed, and may mark one strip of a box short.
+        await box_codes.decorate_packs(db, [r for rows in in_carton.values() for r in rows])
         for line_id, rows in packages_by_line.items():
             for row in rows:
                 row["box_codes"] = in_carton.get((row["package_id"], item_of_line.get(line_id)), [])
@@ -24283,6 +24438,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
                 boxes_by_line.setdefault(int(indent_line_id), []).append({
                     "code": box.hu_code, "pack_name": box.pack_name,
                     "quantity": float(box_codes.held(box))})
+        await box_codes.decorate_packs(db, [r for rows in boxes_by_line.values() for r in rows])
 
     out = []
     for indent in indents:
@@ -24338,6 +24494,7 @@ async def _delivery_rows(db: AsyncSession, indents: list) -> list[dict]:
         out.append({
             "indent_id": indent.id,
             "indent_no": indent.indent_no,
+            "indent_type": indent.indent_type,
             "indent_date": indent.indent_date,
             "required_date": indent.required_date,
             "status": indent.status,
@@ -24462,11 +24619,20 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
     # A NULL `position_id` stays visible. Those are indents raised before the column
     # was written, they belong to no hat, and dropping them would take a requester's
     # own delivery off the only screen that confirms it.
+    from app.modules.indents.service import own_shelf_points, str_addressed_to
+
     position_id = getattr(user, "active_position_id", None)
+    mine = Indent.requested_by_id == getattr(user, "id", 0)
+    if position_id is not None:
+        mine = and_(mine, or_(Indent.position_id == position_id,
+                              Indent.position_id.is_(None)))
+    # The raiser, or (for an STR) whoever holds the shelf it is bound for: the
+    # receiving storekeeper sees an incoming transfer the moment it leaves the gate
+    # (2026-10-29). Same predicate the sign-off checks (`indents._receives_str`).
     stmt = (
         select(Indent)
         .options(selectinload(Indent.items))
-        .where(Indent.requested_by_id == getattr(user, "id", 0),
+        .where(or_(mine, str_addressed_to(await own_shelf_points(db, user))),
                Indent.status.in_(visible_statuses),
                # Only what logistics has taken out of the gate. An indent whose stock
                # is merely set aside, still being bought or issued but not yet on a
@@ -24478,9 +24644,6 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
                       m.Dispatch.status.in_(_ON_THE_ROAD))
                .correlate(Indent).exists())
     )
-    if position_id is not None:
-        stmt = stmt.where(or_(Indent.position_id == position_id,
-                              Indent.position_id.is_(None)))
     if status:
         stmt = stmt.where(Indent.status == status)
     # Reached through `stock.transfer.receive` alone: stock transfer requests only.
@@ -24504,6 +24667,27 @@ async def acknowledgements_for_requester(db: AsyncSession, user, *, search: str 
     indents = list((await db.execute(stmt.order_by(Indent.id.desc()))).scalars().all())
 
     rows = await _delivery_rows(db, indents)
+    # The route each STR travels, off the orders serving it (2026-10-29): Stock
+    # Transfer > Acknowledgements names the STO and "source -> destination" per card.
+    str_ids = [i.id for i in indents if i.indent_type == _STR_INDENT_TYPE]
+    if str_ids:
+        from app.modules.inventory.models import StockTransferOrder
+        routes: dict[int, list] = defaultdict(list)
+        for order in (await db.execute(
+            select(StockTransferOrder.str_id, StockTransferOrder.sto_no,
+                   StockTransferOrder.from_warehouse_name,
+                   StockTransferOrder.to_warehouse_name)
+            .where(StockTransferOrder.str_id.in_(str_ids))
+            .order_by(StockTransferOrder.id)
+        )).all():
+            routes[order.str_id].append(order)
+        for row in rows:
+            orders = routes.get(row["indent_id"], [])
+            row["sto_nos"] = [o.sto_no for o in orders]
+            row["from_warehouse_names"] = list(dict.fromkeys(
+                o.from_warehouse_name for o in orders if o.from_warehouse_name))
+            row["to_warehouse_name"] = next(
+                (o.to_warehouse_name for o in orders if o.to_warehouse_name), None)
     if only_actionable:
         rows = [row for row in rows if row["can_acknowledge"]]
     return rows
@@ -25867,6 +26051,123 @@ async def indent_options(
     return items
 
 
+async def issue_transfer_context(db: AsyncSession, issue_id: int) -> dict:
+    """Everything a consignment, a dispatch and an in-person handover inherit from the
+    issue behind them (2026-10-29), so nobody re-types it: what it serves (STR / STO /
+    indent / direct) and its number, where it goes, the department and project, who
+    it is issued to with their code and phone, the SAC and the vehicle.
+
+    Read, never stored: the issue is the one place these were decided, and a copy on
+    the consignment would be a second answer the day the issue is corrected.
+    """
+    from app.modules.indents.models import Indent
+    from app.platform.hcm.models import HcmEmployee
+
+    issue = await db.get(m.MaterialIssue, issue_id)
+    if issue is None:
+        raise NotFoundError(f"Material issue {issue_id} not found")
+    await _decorate_indent_types(db, [issue])
+    indent = await db.get(Indent, issue.indent_id) if issue.indent_id else None
+    person = await db.get(HcmEmployee, issue.issued_to_id) if issue.issued_to_id else None
+    office_id, office_name = await _issue_destination(db, issue)
+    sac = await _office_sac(db, office_id)
+    point = await _requesting_point(db, issue)
+    sto_no = getattr(issue, "sto_no", None)
+    indent_type = getattr(issue, "indent_type", None)
+    kind = ("STR" if indent_type == _STR_INDENT_TYPE else "INDENT") if issue.indent_id         else ("STO" if sto_no else "DIRECT")
+    return {
+        "issue_id": issue.id, "issue_no": issue.issue_no,
+        "kind": kind,
+        "reference_no": (issue.indent_no if kind in ("STR", "INDENT") else sto_no),
+        "str_no": issue.indent_no if kind == "STR" else getattr(issue, "sto_str_no", None),
+        "sto_no": sto_no,
+        "indent_no": issue.indent_no if kind == "INDENT" else None,
+        "from_warehouse_name": issue.warehouse_name,
+        "destination_warehouse_id": getattr(point, "id", None)
+            or getattr(issue, "sto_to_warehouse_id", None),
+        "destination_warehouse_name": getattr(point, "name", None)
+            or getattr(issue, "sto_to_warehouse_name", None),
+        "destination_office_name": office_name,
+        "sac": sac,
+        "department_name": issue.department_name
+            or getattr(indent, "department_name", None),
+        "project_name": issue.project_name or getattr(indent, "project_name", None),
+        "issued_to_id": issue.issued_to_id,
+        "issued_to_name": issue.issued_to_name or getattr(person, "full_name", None),
+        "issued_to_code": getattr(person, "emp_code", None),
+        "issued_to_phone": getattr(person, "mobile", None),
+        "vehicle_number": issue.vehicle_number,
+    }
+
+
+async def consignment_transfer_context(db: AsyncSession, dispatch_id: int) -> dict | None:
+    """The transfer context of a consignment: its issue's, read through the first
+    issue it carries. None for a consignment that carries no material issue."""
+    dispatch = await db.get(m.Dispatch, dispatch_id)
+    if dispatch is None:
+        raise NotFoundError(f"Consignment {dispatch_id} not found")
+    issue_id = await db.scalar(
+            select(m.DispatchSource.issue_id)
+            .where(m.DispatchSource.dispatch_id == dispatch_id,
+                   m.DispatchSource.issue_id.is_not(None))
+            .order_by(m.DispatchSource.id).limit(1))
+    if not issue_id and dispatch.ref_id and dispatch.ref_type in SINGLE_ISSUE_REF_TYPES:
+        issue_id = dispatch.ref_id
+    if not issue_id:
+        return None
+    context = await issue_transfer_context(db, issue_id)
+    # The consignment's own vehicle wins: it is what the gate pass will name.
+    context["vehicle_number"] = dispatch.vehicle_number or context["vehicle_number"]
+    return context
+
+
+async def sto_issue_options(
+    db: AsyncSession, search: str | None = None, warehouse_id: int | None = None,
+) -> list[dict]:
+    """Approved Stock Transfer Orders leaving this point, each with the issue that
+    executes it (2026-10-29).
+
+    An approved direct STO already HAS its issue — `draft_issue_for_sto` wrote it on
+    approval — so the issue form's STO picker never drafts a second one: picking an
+    order opens the issue it already has. Offered while that issue is still open;
+    posted or cancelled, there is nothing left to issue against it.
+    """
+    from app.modules.inventory.enums import STOStatus
+    from app.modules.inventory.models import STO_KIND_TRANSFER, StockTransferOrder
+
+    stmt = (
+        select(StockTransferOrder, m.MaterialIssue.status.label("issue_status"))
+        .outerjoin(m.MaterialIssue, m.MaterialIssue.id == StockTransferOrder.issue_id)
+        .where(StockTransferOrder.doc_kind == STO_KIND_TRANSFER,
+               StockTransferOrder.status == STOStatus.APPROVED.value,
+               or_(StockTransferOrder.issue_id.is_(None),
+                   m.MaterialIssue.is_stock_posted.is_(False)),
+               or_(m.MaterialIssue.status.is_(None),
+                   m.MaterialIssue.status != IssueStatus.CANCELLED.value))
+    )
+    if warehouse_id is not None:
+        stmt = stmt.where(StockTransferOrder.from_warehouse_id == warehouse_id)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(or_(StockTransferOrder.sto_no.ilike(like),
+                              StockTransferOrder.to_warehouse_name.ilike(like),
+                              StockTransferOrder.str_no.ilike(like)))
+    rows = (await db.execute(
+        stmt.order_by(StockTransferOrder.id.desc()).limit(LOOKUP_LIMIT))).all()
+    return [{
+        "id": order.id, "sto_no": order.sto_no,
+        "kind": "STR" if order.str_id else "DIRECT", "str_no": order.str_no,
+        "from_warehouse_id": order.from_warehouse_id,
+        "from_warehouse_name": order.from_warehouse_name,
+        "to_warehouse_id": order.to_warehouse_id,
+        "to_warehouse_name": order.to_warehouse_name,
+        "issue_id": order.issue_id, "issue_no": order.issue_no,
+        "issue_status": issue_status,
+        "item_count": len(order.items or []),
+        "requested_qty": float(sum((_d(i.requested_qty) for i in order.items or []), ZERO)),
+    } for order, issue_status in rows]
+
+
 async def indent_issue_source(
     db: AsyncSession, indent_id: int, warehouse_id: int,
 ) -> dict:
@@ -26570,6 +26871,9 @@ async def issue_dispatch_source(db: AsyncSession, issue_id: int) -> dict:
         if after_qc or await box_codes.has_boxes(db, issue.id, issue_line.id):
             box_lines[issue_line.id] = [{"code": code, "quantity": float(qty)}
                                         for code, qty in after_qc.items()]
+            # The carton and box each package came out of (2026-10-28), so the packer
+            # can put one carton's packages together.
+            await box_codes.decorate_packs(db, box_lines[issue_line.id], inner=False)
 
     def _get_accepted_serials(line) -> list[str]:
         if line.id in box_lines:

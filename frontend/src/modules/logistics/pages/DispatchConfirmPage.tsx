@@ -35,6 +35,7 @@ import type {
   TransportMode, TransportRequest,
 } from "../transportTypes";
 import { TripRouteStrip } from "../components/TripStops";
+import { TransferContextStrip } from "@/modules/warehouse";
 import { legDestination } from "../components/manifestView";
 
 const BLANK = {
@@ -683,6 +684,14 @@ export function DispatchConfirmPage() {
     queryFn: () => consignmentApi.get(id),
     enabled: id > 0 && !isLeg,
   });
+  // STR / STO number, destination, department, project and the person it is issued
+  // to — read off the issue behind the consignment, never retyped (2026-10-29).
+  const { data: transferContext } = useQuery({
+    queryKey: ["lgs-consignment-transfer-context", consignmentId],
+    queryFn: () => consignmentApi.transferContext(id),
+    enabled: id > 0 && !isLeg,
+    retry: false,
+  });
   // Dispatching the same consignment twice raises a second transport request for one
   // physical load. Ask first, and offer the one that exists.
   const { data: links } = useQuery({
@@ -742,6 +751,26 @@ export function DispatchConfirmPage() {
   // driver it travels with. The question is the same one both times — is this one of
   // ours, and what number identifies them — so it is asked once, here.
   const asksPerson = needs("handed_over_by_name") || needs("vehicle_number");
+  // An in-person hand-over is usually collected by the person the goods are issued
+  // to, so their name, employee code and phone come in from the issue (2026-10-29) —
+  // only into EMPTY boxes, and only until somebody types: the person who actually
+  // turns up on the day is the desk's to record.
+  const prefilledHandover = useRef<string | null>(null);
+  useEffect(() => {
+    if (!needs("handed_over_by_name") || !transferContext?.issued_to_name) return;
+    const key = `${mode}:${transferContext.issue_id}`;
+    if (prefilledHandover.current === key) return;
+    prefilledHandover.current = key;
+    setHandoverPerson("EMPLOYEE");
+    setForm((f) => ({
+      ...f,
+      handed_over_by_name: f.handed_over_by_name || transferContext.issued_to_name || "",
+      handed_over_employee_id: f.handed_over_employee_id || transferContext.issued_to_code || "",
+      handed_over_phone: f.handed_over_phone
+        || sanitizePhone(transferContext.issued_to_phone ?? ""),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, rule, transferContext]);
   // `carriers` is undefined while it loads; only an empty ARRAY means the register is
   // actually empty, so the pointer to Settings never flashes on a slow connection.
   const noPartners = Array.isArray(carriers) && carriers.length === 0;
@@ -1335,6 +1364,8 @@ export function DispatchConfirmPage() {
           tell a slow request from a leg it cannot see. */}
       <ErrorBanner error={legError} />
 
+      {transferContext && <TransferContextStrip context={transferContext} />}
+
       {/* The form and the rail. Below `xl` the rail stacks under the form, which puts
           the load, the choice and the press at the end of the page, where a phone
           expects them. */}
@@ -1828,6 +1859,13 @@ export function DispatchConfirmPage() {
                       title="Who takes custody"
                       hint="A name alone identifies nobody"
                     />
+                    {transferContext?.issued_to_name && (
+                      <p className="col-span-full -mt-1 inline-flex items-center gap-1.5 rounded-lg bg-info-bg px-3 py-2 text-xs text-info">
+                        <IdCard className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                        Filled from {transferContext.issue_no}: issued to {transferContext.issued_to_name}.
+                        Change it if somebody else collects.
+                      </p>
+                    )}
                     {personChoice("Who hands it over")}
 
                     <Field label="Handed over by"

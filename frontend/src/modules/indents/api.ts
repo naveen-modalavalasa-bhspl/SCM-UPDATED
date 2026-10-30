@@ -5,7 +5,7 @@ import { useAuth } from "@/shared/auth/AuthContext";
 import type { CompanyProfile } from "./companyProfile";
 import type { Paginated, Option } from "@/shared/types";
 import type {
-  Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck,
+  Acknowledgement, AcknowledgeLine, ActivityRow, DirectIssueAck, StockTransferAck,
   BomChoice, BomChoiceItem, FulfilmentStep, Indent, IndentCreate, IndentListRow, IndentJourney,
   IndentNotification, IndentStats, IndentUpdate, RaiserTracking, ReceiptAttachment,
 } from "./types";
@@ -282,6 +282,11 @@ export const indentApi = {
   /** Direct (no-indent) material issues handed to me, to confirm I got them. */
   myDirectIssues: (params: { search?: string; only_actionable?: boolean } = {}) =>
     api.get<DirectIssueAck[]>("/api/warehouse/acknowledgements/direct-issues", { params })
+      .then((r) => r.data),
+
+  /** Direct STOs arriving at a point I hold (2026-10-29). */
+  myStockTransferAcks: (params: { search?: string; only_actionable?: boolean } = {}) =>
+    api.get<StockTransferAck[]>("/api/warehouse/acknowledgements/stock-transfers", { params })
       .then((r) => r.data),
 
   /** One direct issue in the indent acknowledgement's own shape, so the same

@@ -1,8 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useReactToPrint } from "react-to-print";
-import { QRCodeSVG } from "qrcode.react";
-import Barcode from "react-barcode";
+import { LabelSticker } from "@/modules/warehouse/components/LabelSticker";
 import { Box, Check, CheckCheck, ChevronRight, Layers, Printer } from "lucide-react";
 import { Button, Card, useToast } from "@/shared/components";
 import { FilterBar, FilterSelect } from "./FilterBar";
@@ -238,44 +237,20 @@ export function BoxLabelsPanel({ size, dim, pageStyle }: {
               {selected.map((r) => {
                 const part = num(r.content_qty) < num(r.pack_size);
                 const combo = comboOf(r);
-                const small = dim.w <= 50;
+                // The one sticker drawing, shared with the issue / receipt labels: a QR that
+                // opens this pack's live details, and a Code128 of the code for a scanner gun.
                 return (
-                  <div key={r.id}
-                       className="label flex flex-col overflow-hidden rounded border border-line bg-white p-1.5 text-black"
-                       style={{ width: `${dim.w}mm`, height: `${dim.h}mm` }}>
-                    <div className="flex min-h-0 flex-1 gap-1.5">
-                      {/* The QR opens this pack's live details on any phone. */}
-                      <QRCodeSVG value={qrUrl(r)} size={dim.bar * 2.4} level="M"
-                                 className="block h-full max-h-full w-auto shrink-0" />
-                      <div className="min-w-0 flex-1 leading-tight">
-                        <div className={`truncate font-bold ${small ? "text-[6.5px]" : "text-[8px]"}`}>{r.item_name}</div>
-                        <div className={`mt-0.5 space-y-[1px] ${small ? "text-[5px]" : "text-[6px]"}`}>
-                          {[
-                            ["Item", r.item_code],
-                            [r.pack_name ?? "Pack", `${qty(r.content_qty)}${part ? ` of ${qty(r.pack_size)}` : ""} ${r.uom_code ?? ""}`],
-                            ["Holds", r.packs_inside],
-                            ["Batch", r.batch_no],
-                            ["Expiry", r.expiry_date],
-                            ["Brand", combo || null],
-                            ["In", r.parent_code],
-                          ].map(([label, value]) => (value ? (
-                            <div key={label} className="flex gap-1 leading-none">
-                              <span className="shrink-0 font-semibold uppercase">{label}</span>
-                              <span className="truncate font-mono">{value}</span>
-                            </div>
-                          ) : null))}
-                        </div>
-                      </div>
-                    </div>
-                    {/* Code128 of the code itself, for a scanner gun, scaled to the label. */}
-                    <div className="mt-0.5 flex h-[22%] w-full items-center justify-center overflow-hidden [&_svg]:h-full [&_svg]:max-w-full">
-                      <Barcode value={r.hu_code} format="CODE128" width={1} height={40} margin={0}
-                               displayValue={false} background="#ffffff" />
-                    </div>
-                    <div className="w-full truncate text-center font-mono text-[7px] font-bold leading-none">
-                      {r.hu_code}
-                    </div>
-                  </div>
+                  <LabelSticker key={r.id} className="label" code={r.hu_code} qrValue={qrUrl(r)}
+                                title={r.item_name} w={dim.w} h={dim.h}
+                                rows={[
+                                  ["Item", r.item_code],
+                                  [r.pack_name ?? "Pack", `${qty(r.content_qty)}${part ? ` of ${qty(r.pack_size)}` : ""} ${r.uom_code ?? ""}`],
+                                  ["Holds", r.packs_inside],
+                                  ["Batch", r.batch_no],
+                                  ["Expiry", r.expiry_date],
+                                  ["Brand", combo || null],
+                                  ["In", r.parent_code],
+                                ]} />
                 );
               })}
             </div>

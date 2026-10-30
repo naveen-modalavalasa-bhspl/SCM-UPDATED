@@ -31,6 +31,9 @@ async def fire_mr_approved(db, mr, user) -> None:
     committed by the time this runs, so the only thing an exception here can achieve is
     turning a successful approval into a 500 for the person who pressed it.
     """
+    # Read before any hook runs: after a rollback the row is expired, and touching it
+    # lazy-loads outside the async context — the very 500 this guard exists to stop.
+    mr_no = getattr(mr, "mr_no", None)
     for hook in ON_MR_APPROVED:
         try:
             await hook(db, mr, user)
@@ -38,7 +41,7 @@ async def fire_mr_approved(db, mr, user) -> None:
             await db.rollback()
             logger.exception(
                 "post-approval hook %s failed for material request %s",
-                getattr(hook, "__name__", hook), getattr(mr, "mr_no", None))
+                getattr(hook, "__name__", hook), mr_no)
 
 
 #: Called once a Stock Transfer Order reaches APPROVED, after the approval is
@@ -50,6 +53,7 @@ ON_STO_APPROVED: list[Callable[..., Awaitable[None]]] = []
 async def fire_sto_approved(db, sto, user) -> None:
     """Same contract as `fire_mr_approved`: a failing consequence never fails the
     signature that caused it."""
+    sto_no = getattr(sto, "sto_no", None)   # see fire_mr_approved
     for hook in ON_STO_APPROVED:
         try:
             await hook(db, sto, user)
@@ -57,7 +61,7 @@ async def fire_sto_approved(db, sto, user) -> None:
             await db.rollback()
             logger.exception(
                 "post-approval hook %s failed for stock transfer %s",
-                getattr(hook, "__name__", hook), getattr(sto, "sto_no", None))
+                getattr(hook, "__name__", hook), sto_no)
 
 
 #: Called for every stock movement INTO a warehouse that means goods arrived there —

@@ -10,6 +10,7 @@ import { IndentModuleHeader } from "../components/IndentModuleHeader";
 import { IndentSummaryStatusBadge } from "../components/IndentSummaryStatusBadge";
 import { INDENT_LIST_TYPES, INDENT_STATUS } from "../constants";
 import { indentApi } from "../api";
+import { ackDetailPath, isTransferRow } from "../ackPaths";
 import type { Acknowledgement } from "../types";
 import {
   displayStatus, summarise, trackingHandle,
@@ -71,7 +72,9 @@ export default function AcknowledgementsPage({ indentTypes = INDENT_LIST_TYPES, 
   const rows = acknowledgements.data ?? [];
   // One destination, whichever of the three ways in was used — the row, the desktop
   // button or the phone card.
-  const open = (row: Acknowledgement) => nav(`/indents/acknowledgements/${row.indent_id}`);
+  // An STR is received on Stock Transfer, never here (2026-10-29).
+  const open = (row: Acknowledgement) => nav(ackDetailPath(
+    row.indent_id, isTransferRow(row) || (indentTypes.length === 1 && indentTypes[0] === "STR")));
   // What the pill would leave on screen. The endpoint returns the whole list rather
   // than a page, so counting the loaded rows is the true number; with the filter
   // already on, the server has narrowed it and every row here is one of them.

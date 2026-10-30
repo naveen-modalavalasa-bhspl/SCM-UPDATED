@@ -729,6 +729,34 @@ export const getNearExpiryAlerts = (days = 90) =>
 export const createSTO = (data: any) =>
   api.post("/api/stock/sto", data).then((r) => r.data);
 
+/** Where a direct STO from this point may go — same level, same parent, in scope.
+ *  The exact set the save accepts (`create_sto`). */
+export interface StoDestination {
+  id: number;
+  code?: string | null;
+  name: string;
+  warehouse_type?: string | null;
+  tier_label: string;
+  parent_id?: number | null;
+  parent_name?: string | null;
+  /** False when the reporting tree names no parent for it (offered, flagged). */
+  parent_known: boolean;
+}
+
+export interface StoDestinations {
+  from_warehouse_id: number;
+  from_warehouse_name: string;
+  tier_label: string;
+  parent_id?: number | null;
+  parent_name?: string | null;
+  items: StoDestination[];
+}
+
+export const getStoDestinations = (fromWarehouseId: number) =>
+  api.get<StoDestinations>("/api/stock/sto/destinations", {
+    params: { from_warehouse_id: fromWarehouseId },
+  }).then((r) => r.data);
+
 export const listSTOs = (params?: {
   status?: string; page?: number; size?: number; kind?: string; search?: string;
   str_id?: number; origin?: string; from_warehouse_id?: number; to_warehouse_id?: number;

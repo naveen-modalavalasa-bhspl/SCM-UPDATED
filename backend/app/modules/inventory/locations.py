@@ -558,6 +558,57 @@ POINT_LABEL = {
 }
 
 
+async def parent_points(db: AsyncSession, warehouse_ids: set[int]) -> dict[int, int | None]:
+    """The point each stocking point sits UNDER, read off the reporting tree.
+
+    `whs_warehouses` carries no parent: the chain is the org's. A point's parent is
+    the nearest point of a HIGHER tier held by an ancestor (`parent_position_id`) of
+    any position tagged to it — an LIP's MDP is the one its holder's OE holds. None
+    when the climb finds nothing (a top-level warehouse, or a holder HCM gives no
+    manager), which callers read as "parent unknown", never as "no siblings".
+    """
+    if not warehouse_ids:
+        return {}
+    tags = (await db.execute(
+        select(PositionLocation.position_id, PositionLocation.warehouse_id)
+        .where(PositionLocation.is_active == 1)
+    )).all()
+    held_by: dict[int, list[int]] = {}
+    points_of: dict[int, list[int]] = {}
+    for position_id, warehouse_id in tags:
+        held_by.setdefault(warehouse_id, []).append(position_id)
+        points_of.setdefault(position_id, []).append(warehouse_id)
+    types = {row.id: row.warehouse_type for row in (await db.execute(
+        select(Warehouse.id, Warehouse.warehouse_type)
+        .where(Warehouse.id.in_({w for ws in points_of.values() for w in ws} | warehouse_ids))
+    )).all()}
+    parent_of = dict((await db.execute(
+        select(HcmPosition.id, HcmPosition.parent_position_id)
+        .where(HcmPosition.is_active.is_(True))
+    )).all())
+
+    out: dict[int, int | None] = {}
+    for warehouse_id in warehouse_ids:
+        tier = tier_of(types.get(warehouse_id))
+        found: int | None = None
+        for holder in sorted(held_by.get(warehouse_id, [])):
+            seen: set[int] = set()
+            position = parent_of.get(holder)
+            while position is not None and position not in seen and found is None:
+                seen.add(position)
+                above = sorted(w for w in points_of.get(position, [])
+                               if tier_of(types.get(w)) < tier)
+                if above:
+                    # The rung directly above first: an LIP's parent is its MDP even
+                    # when the same manager also holds a main warehouse.
+                    found = max(above, key=lambda w: (tier_of(types.get(w)), -w))
+                position = parent_of.get(position)
+            if found is not None:
+                break
+        out[warehouse_id] = found
+    return out
+
+
 async def describe_point(db: AsyncSession, warehouse_id: int | None) -> dict:
     """Name and screen label for one stocking point. Falls back to "Warehouse"."""
     if warehouse_id is None:

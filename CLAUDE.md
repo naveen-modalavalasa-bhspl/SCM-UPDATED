@@ -172,6 +172,37 @@ check; and `create_mr_from_shortfall` deduplicates per indent **line**, not per 
 — per indent was enough while a shortage was raised once, and rounds of serving mean a
 later shortage on the same indent is a different shortage that was being dropped.
 
+### Stock transfers: siblings, a frozen destination, one receiving desk (2026-10-29)
+
+- **A direct STO goes between SIBLINGS.** `whs_warehouses` has no parent column; a
+  point's parent is READ off the reporting tree (`locations.parent_points`: the nearest
+  higher-tier point held by an ancestor of any holder). `create_sto` refuses two points
+  whose parents are both known and differ; an unknown parent is a gap in HCM, never a
+  refusal. `GET /api/stock/sto/destinations` serves exactly that set to the form.
+- **An STO's issue goes where the order was approved to.** `draft_issue_for_sto`
+  carries `to_warehouse_id` onto the issue, `_record_sto_for_str_issue` does the same
+  for an STR's order, and `update_issue` overwrites the client's destination with the
+  order's — the screen's lock (`LockedDestination`) is only the visible half. Issues
+  are served `sto_id/sto_no/sto_kind/sto_to_warehouse_*` (`_decorate_indent_types`).
+  The issue form's four tiles (STR / STO / Indent / Direct, `IssueTypeTiles`) are
+  presentation over the two backend `IssueType`s. Picking an STO on a NEW issue opens
+  the issue it already has (`/options/stos`) — never a second draft.
+- **Transfer context is read, never copied.** `issue_transfer_context` /
+  `consignment_transfer_context` serve STR/STO no, destination, department, project,
+  issued-to (code, phone), SAC, vehicle to the consignment form, the Dispatch confirm
+  screen (`TransferContextStrip`) and the in-person handover prefill (empty boxes only).
+- **Every transfer is received on Inventory > Stock Transfer > Acknowledgements**
+  (`TransferAcknowledgements`, `ackPaths.ts`), at `/inventory/transfers/acknowledgements/*`
+  — the same `AcknowledgementDetailPage`, mounted twice; an STR opened at the old
+  `/indents/...` address redirects. Direct STOs come from
+  `/acknowledgements/stock-transfers` (`_direct_issue_for(sto=True)`, which also admits
+  the holder of the order's destination for a hand-over) and are signed through the
+  direct-issue receipt, whose `credit_arrival` books the destination shelf. An STR is
+  signable by its raiser OR whoever holds the shelf its STO is bound for
+  (`indents._receives_str`, used by acknowledge, attach, remove and — on a miss only —
+  `_assert_can_view_indent`). Do NOT put that point lookup into `_indent_visibility`:
+  every indent read would pay two queries for it.
+
 ### An order is received ONCE, and what it still owes is READ (2026-09-08)
 
 BHS/104/2026-27/PO0013 was received in full by REC0031 and then, the next day, in full
@@ -745,6 +776,103 @@ For a unit-tracked item (serial, IMEI, or asset / consumable code):
 
 Existing box-only stock is NOT converted (decided 2026-10-27); lots coded the old way
 keep issuing by box with no unit rows.
+
+### The package picker answers in a sentence; labels print per DOCUMENT (2026-10-28)
+
+**Picker** (`PackagePickerModal`, rules in `warehouse/packPick.ts`, pure and tested):
+it opens on a SUGGESTED pick (`suggestPick`: carton by carton, opened cartons first,
+whole packs while they fit, the remainder out of ONE box — its strips when the item
+has a second Issue level, part-opened boxes first) and states it in one sentence
+(`pickSentence`, "Take 4 boxes + 5 strips from carton …0572"). Each carton is a grid
+of box tiles, each tile a bar of its strips. What fails silently if undone: **`rollUp`
+turns every strip of a box back into the box** — without it a carton read "0" while
+its boxes had been emptied strip by strip. Serial / IMEI lines are two steps
+(packages, then numbers) and the numbers are still NEVER auto-selected. The issue
+line cell says the held mix in pack names (`heldMix`), and its packages count is
+only editable as packages while every held pack is the same one — a mix of boxes and
+strips is edited in base units (counting 45 strips as "45 boxes" and multiplying an
+edit by the box size was the defect).
+
+**Labels for a document** (`warehouse/issue_labels.py`, `DocLabelsDialog`):
+`GET /issues/{id}/labels` — refused until `is_stock_posted` (part packs get codes AT
+posting) — serves every pack the line issued (`line_boxes` plus consignment
+`box_code`s, since landing clears the issue stamp), parent first with everything
+inside each, the part pack cut at posting flagged `new_here`, and every asset /
+consumable code. **Never a serial or an IMEI** (decided 2026-10-28: the maker's label
+is on the goods). `GET /dispatches/{id}/received-labels` serves only rows with
+`delivered_qty > 0` — what the site acknowledged, at what arrived. `…/printed` writes
+an audit row and ticks any queued Box label it covered. Doors: the issue page (header
+button + a banner right after posting), Labels & Printing › Issue labels, and the
+acknowledgement page per consignment. The dialog picks whole document or chosen
+items, package levels, codes, Barcode/QR/both, Code128/39, thermal-roll and A4
+presets or a custom size, fields, text size and copies; settings and named presets
+are per USER in the browser (`docLabels.ts`) — no table, by decision. `LabelSticker`
+is the one sticker drawing, used by Box labels too.
+
+**Mixed Issue levels stay** (decided 2026-10-28): a line may hold 4 box codes + 5 strip
+codes; codes are NOT forced to the smallest level. What changed is how they are SHOWN:
+
+- `box_codes.pack_context` / `decorate_packs` serve each package's `path` (outermost
+  first) and `inner` (packs still inside it — live ones, or for a pack that left, the
+  ones closed at the SAME moment; a strip taken out earlier is not inside). Wired into
+  `line_view` (issue line `box_codes`), the consignment source, both acknowledgement
+  builders, `box_sources` (`path`) and the dispatch detail (`box_paths`).
+- Outward QC and the receiving site (`PackageCheckModal`) draw the packages as
+  carton › box › strip, keep/reject (arrived/missing) a whole group in one press (a
+  receipt group asks to confirm), and check a kept box STRIP BY STRIP — those roll up
+  into the box's own figure (`innerLost`), so the server contract is unchanged; every
+  strip gone rejects the box whole. The consignment "Pick packages" groups the same
+  way ("Put all N here" skips packages already in another carton). The packing-list
+  print lists each carton's rows with their codes under carton › box.
+- The issue picker is a drill-down (`buildTree` from `path`): top packs first, each
+  level a sheet over the last inside ONE dialog, one history entry per level so the
+  phone's back button closes one level (every entry is taken back off on close). Any
+  Issue level can be ticked; a non-Issue pack only opens ("Take everything inside").
+  Serial / IMEI lines get the units as the last level, still never auto-selected.
+- Labels carry `path`; a carton (and an opened box) is printed once per document as a
+  parent label on top (`context`, "Include parent labels", on by default). A part pack
+  cut at posting is parented to the pack the shelf box sits in, so its label has a path.
+- Empty shells: `boxes_at` never offers a pack holding 0, and `settle_on_post` closes
+  every live pack of the item that holds nothing (`_close_empty_shells`).
+
+### Unit codes travel INSIDE their packs, at every level (2026-10-28)
+
+NA/104/2026-27/STO0002 (LIP→LIP, raised from an STR) delivered two strips with no
+codes: every code at the source pointed at a box still standing at the central
+warehouse, and everything that moves a pack moves only the units LINKED to it — so the
+strips left, the codes stayed "available" at the source (more codes than stock), and
+the receiving LIP got none. One code path serves LIP→LIP, MDP→MDP and WH→WH, for an
+STR-driven issue and a direct STO alike, so it was every transfer of an item issued in
+a container.
+
+- `box_codes.seat_stray_units` seats a unit linked to a pack NOT standing at its own
+  point (and a loose unit beyond what lies loose in its lot) into the live packs of its
+  lot that hold fewer units than their contents, innermost first. Run by `hold_line`
+  (before the boxes are held), `rebox_lot` (before boxes are cut) and `land_packages`
+  (with `loosen_rest`). A unit a document reserved is never moved.
+- **A box issued WHOLE keeps its tree** (`settle_on_post` restores `parent_id` after
+  `_consume`, which clears it): its carton is its path, its strips stay linked to it.
+  Closed packs are never counted as content — every reader of `parent_id` filters LIVE.
+  Without this the 2026-10-28 grouping and strip checks only ever saw PART packs.
+- **A package that arrives whole lands with what left inside it** (`_land_inside`:
+  packs closed at the same `closed_at`, re-opened INSIDE at the destination, same
+  codes). One that arrives short lands as one pack holding what arrived.
+- `unlocated.place` moves the live packs at bin 0 with the stock and units — a transfer
+  landing at a bin-managed warehouse otherwise left its boxes at no location.
+- `hold_line`'s "not claimed by another document" test ANDs the prefixes (it ORed
+  negations, which let any claimed unit through).
+- A box line posting with fewer unit codes than it carries, on a lot that has codes, is
+  logged (`_mark_serials`) — never silent again.
+- A direct STO asking for more than the source has free is refused when raised and
+  when approved (`inventory._assert_sto_stock`); it used to be approved and then
+  strand at "To issue" because the issue draft failed inside the swallowed hook. The
+  hook runners read the document number BEFORE running (a rollback expires the row and
+  reading it after raised MissingGreenlet — a 500 for the approver).
+
+History: `scripts.reseat_unit_codes` (preview; `--apply`) seats stray codes in place,
+fills packages that landed short from the sender's codes BEYOND its stock (never one
+still on its shelf), and lists lots still over. Tests: `warehouse/tests/
+test_codes_travel.py` (LIP/MDP/WH, DB), `inventory/tests/test_sto_stock_check.py`.
 
 ### An item issued in a container is issued by the BOX (2026-10-26)
 
